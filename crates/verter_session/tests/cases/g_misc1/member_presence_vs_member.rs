@@ -20,8 +20,6 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_eval::TypeDeclKind;
 use verter_semantic::facts::{
     compute_member_presence_hash, compute_semantic_hash, FactKey, MemberKind, SymbolSpace,
     UnresolvedLens,
@@ -29,55 +27,32 @@ use verter_semantic::facts::{
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedName;
 use verter_session::project_type_store::IndexedReady;
-use verter_session::resolver_core::shallow_file_state::{ExportTarget, ShallowFileState};
+use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
-    )
+) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
 }
 
-/// Build a `Foo` interface from a member list `[(name, body)]` through
-/// the env-seeded construction path (synthetic header inventory +
-/// seeded declaration-body memo).
-fn build_foo(members: Vec<(&str, TypeExpr)>) -> Arc<IndexedReady> {
-    let body = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: members
-            .iter()
-            .map(|(name, ty)| {
-                ObjectMember::Property(ObjectProperty::synthetic_public(
-                    (*name).to_string(),
-                    ty.clone(),
-                    false,
-                    false,
-                ))
-            })
-            .collect(),
-    }));
-    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
-    env.add_type(verter_semantic::analysis::type_eval::TypeDeclInfo {
-        name: "Foo".to_string(),
-        declaration_id: 0,
-        kind: TypeDeclKind::Interface,
-        type_parameters: Vec::new(),
-        body,
-    });
-    let mut exports = FxHashMap::default();
-    exports.insert(
-        "Foo".to_string(),
-        ExportTarget::Local {
-            symbol_name: "Foo".to_string(),
-        },
-    );
-    let mut shallow = ShallowFileState::from_analysis([0u8; 16], empty_external(), Some(&env));
-    shallow.exports = exports;
+/// Build a `Foo` interface from a member list `[(name, type-text)]`
+/// through the production-shaped service-backed construction path: the
+/// authored members become the declaration's DIRECT member-header facts
+/// through the real header walk; the member value types are body content
+/// the header inventory never stores (they lower lazily on demand).
+fn build_foo(members: Vec<(&str, &str)>) -> Arc<IndexedReady> {
+    let mut source = String::from("export interface Foo {\n");
+    for (name, ty) in &members {
+        source.push_str(&format!("  {name}: {ty};\n"));
+    }
+    source.push_str("}\n");
+    let shallow =
+        ShallowFileState::service_backed_for_test_with_hash("/foo.ts", &source, [0u8; 16]);
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
-        Arc::new(shallow),
-        Arc::from(""),
-        Arc::from(""),
+        shallow,
+        Arc::from(source.as_str()),
+        Arc::from(source.as_str()),
         empty_external(),
     ))
 }
@@ -219,11 +194,7 @@ fn phase1_emission_produces_member_presence_for_every_member() {
     // Verify the emitter populates `MemberPresence` for every
     // member in the shallow inventory. Required for downstream
     // path-precise consumers to observe presence facts.
-    let indexed = build_foo(vec![
-        ("a", TypeExpr::Primitive(PrimitiveName::Number)),
-        ("b", TypeExpr::Primitive(PrimitiveName::String)),
-        ("c", TypeExpr::Primitive(PrimitiveName::Boolean)),
-    ]);
+    let indexed = build_foo(vec![("a", "number"), ("b", "string"), ("c", "boolean")]);
     let emission = emit_parse_facts(&indexed);
     for name in &["a", "b", "c"] {
         let key = FactKey::MemberPresence {

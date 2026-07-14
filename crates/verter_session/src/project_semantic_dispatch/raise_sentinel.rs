@@ -2,8 +2,8 @@
 //!
 //! The shared `shape_engine::fold_node` materialisation algebra emits a small
 //! fixed set of `TypeExpr::Unknown { raw }` sentinel strings when dispatch cannot
-//! materialise a node (an unrepresentable surface, an alias cycle, a Vue
-//! macro placeholder, a budget-exceeded carrier, …). Two classification
+//! materialise a node (an unrepresentable surface, an alias cycle, a
+//! budget-exceeded carrier, …). Two classification
 //! surfaces share this owner — one RAW, one TYPED — and there is no
 //! raise-to-`TypeExpr`-then-classify round-trip on the typed path:
 //! - The `TypeExpr`-domain recogniser
@@ -24,8 +24,8 @@
 //!
 //! The set is the EXACT spelling `dispatch_route_expr_is_materialized`
 //! historically inlined: the three [`SEMANTIC_MISS`] / [`SEMANTIC_OBJECT_SURFACE`]
-//! / [`SEMANTIC_SURFACE_MEMBER`] consts, the four exact strings
-//! (`semanticAliasCycle`, `semanticFunction`, `VueMacroElements`,
+//! / [`SEMANTIC_SURFACE_MEMBER`] consts, the three exact strings
+//! (`semanticAliasCycle`, `semanticFunction`,
 //! `projectedOpenSurface`), and the five prefixes (`materialize:`,
 //! `unsupportedIntrinsic(`, the [`BUDGET_EXCEEDED_SENTINEL_PREFIX`],
 //! `unstableState(`, `aliasCycle(`). Everything else — including the
@@ -67,7 +67,6 @@ pub(crate) fn raw_is_unmaterialized_sentinel(raw: &str) -> bool {
             | SEMANTIC_SURFACE_MEMBER
             | "semanticAliasCycle"
             | "semanticFunction"
-            | "VueMacroElements"
             | "projectedOpenSurface"
     );
     let is_prefix_sentinel = raw.starts_with("materialize:")
@@ -113,8 +112,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_unmaterialized_sentin
         | QueryError::AliasCycle { .. }
         | QueryError::RaiseAliasCycle
         | QueryError::UnrepresentableSurface
-        | QueryError::UnrepresentableSurfaceMember
-        | QueryError::VueMacroElementsPlaceholder => true,
+        | QueryError::UnrepresentableSurfaceMember => true,
         // Deliberately NOT in the recogniser set ⇒ MATERIALISED:
         // `<raise miss>` (RaiseMiss) and `semanticTypeParamCycle`
         // (TypeParamCycle) are carrier-arg / cycle placeholders the legacy
@@ -134,7 +132,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_unmaterialized_sentin
         // wrapper, and the recogniser set has NO `declPlaceholder(` exact spelling
         // or prefix (only `materialize:` / `unsupportedIntrinsic(` /
         // `budgetExceeded(` / `unstableState(` / `aliasCycle(` prefixes plus the
-        // seven exact sentinels), so the wrapper is provably unrecognised for
+        // six exact sentinels), so the wrapper is provably unrecognised for
         // EVERY name. Return `false` directly — delegating would only allocate the
         // wrapper string to re-derive this constant answer. Mirrors the direct
         // `DeclPlaceholder { .. } => false` arm in
@@ -206,8 +204,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_semantic_miss_sentine
         | QueryError::TypeParamCycle
         | QueryError::RaiseMiss
         | QueryError::UnrepresentableSurface
-        | QueryError::UnrepresentableSurfaceMember
-        | QueryError::VueMacroElementsPlaceholder => false,
+        | QueryError::UnrepresentableSurfaceMember => false,
     }
 }
 
@@ -234,8 +231,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_object_surface_sentin
         | QueryError::RaiseAliasCycle
         | QueryError::TypeParamCycle
         | QueryError::RaiseMiss
-        | QueryError::UnrepresentableSurfaceMember
-        | QueryError::VueMacroElementsPlaceholder => false,
+        | QueryError::UnrepresentableSurfaceMember => false,
     }
 }
 
@@ -291,7 +287,6 @@ mod tests {
             QueryError::RaiseMiss,
             QueryError::UnrepresentableSurface,
             QueryError::UnrepresentableSurfaceMember,
-            QueryError::VueMacroElementsPlaceholder,
         ]
     }
 
@@ -301,8 +296,8 @@ mod tests {
     /// / `DeclPlaceholder { .. } => false`, so it DISAGREED with the raw
     /// recogniser for these (the recogniser scores the raised spelling); after
     /// the text-bearing arms delegate, agreement holds by construction. Both an
-    /// exact-sentinel payload (`semanticMiss` / `semanticObjectSurface` /
-    /// `VueMacroElements`) and a prefix-sentinel payload (`budgetExceeded(x)`)
+    /// exact-sentinel payload (`semanticMiss` / `semanticObjectSurface`)
+    /// and a prefix-sentinel payload (`budgetExceeded(x)`)
     /// are covered, plus a benign free-text payload that genuinely is NOT a
     /// sentinel (so the loop is not vacuously all-true), plus a `DeclPlaceholder`
     /// whose NAME embeds a sentinel string — proving the wrapper prefix
@@ -312,7 +307,6 @@ mod tests {
             QueryError::Other(Arc::from("semanticMiss")),
             QueryError::Other(Arc::from("semanticObjectSurface")),
             QueryError::Other(Arc::from("budgetExceeded(x)")),
-            QueryError::Other(Arc::from("VueMacroElements")),
             QueryError::Other(Arc::from("genuinely free text")),
             QueryError::DeclPlaceholder {
                 canonical_id: Arc::from("/w/p.ts"),

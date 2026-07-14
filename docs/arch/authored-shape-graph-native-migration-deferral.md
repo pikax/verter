@@ -37,9 +37,10 @@ implementation effort:
   cleanly achievable at the current crate layout.
 
 **GLOBAL `.body` / `.type_annotation` field scanning is REJECTED as a confinement proof** for this reason. The
-genuine structural close — private owner-layer body storage plus `HotPrepared*` / `HotTypeRef` semantic
-access and an explicit `AuthoredDeclBody` / authored-shape surface with no raw escape to graph-backed
-consumers — is a dedicated follow-up, recorded as part of this debt row's closure criterion below.
+genuine structural close — private owner-layer body storage plus graph-native `HotTypeRef` semantic
+access (handles minted on demand at the dispatch boundary; the bundle-stored `HotPrepared*` mirror was
+superseded and deleted) and an explicit `AuthoredDeclBody` / authored-shape surface with no raw escape
+to graph-backed consumers — is a dedicated follow-up, recorded as part of this debt row's closure criterion below.
 
 ## The three deferred reader classes
 
@@ -52,8 +53,11 @@ to the hot accessor would require materialising the handle BACK to a `TypeExpr` 
 syntax (the forbidden `HotTypeRef → TypeExpr → semantic decision` reverse bridge), or a dedicated
 graph-native classifier that does not yet exist.
 
-- `class_heritage_bases` (`project_semantic_dispatch/build.rs`) — needs the authored heritage `extends` /
-  `implements` refs of a class declaration body.
+- ~~`class_heritage_bases` (`project_semantic_dispatch/build.rs`)~~ — CLOSED: the heritage candidates are
+  now producer-minted content-free `HeritageBaseFact`s (`collect_heritage_base_facts` at lazy decl-body
+  lowering, copied onto `PreparedTypeDecl.heritage_bases`); the dispatch reader resolves each fact's head
+  through `name_resolution` and derefs + lowers only the demanded `TypeArgLocator` argument positions —
+  the "heritage-as-explicit-metadata" migration named below, landed for this reader.
 - The three closedness / key-domain classifiers (`project_semantic_dispatch/raise.rs`):
   `userland_instantiation_body_is_closed_object`, `prepared_decl_body_is_closed_unguarded`,
   `prepared_instantiation_key_domain_is_closed` — bounded typed-IR closedness/key-domain classifiers that
@@ -68,9 +72,9 @@ graph-native classifier that does not yet exist.
   `TypeExpr`-keyed `OwnerCollectionDb`, which a handle-derived value must never populate, so it stays
   `TypeExpr` (the residual inventory classifies it AuthoredShape per that reason).
 
-**Future graph-native migration** = heritage-as-explicit-metadata (the authored heritage refs surfaced as a
-typed, addressable metadata facet rather than recovered from the body `TypeExpr`) + a dedicated
-closedness/key-domain GRAPH-NATIVE classifier (over `SemanticNodeData`, mirroring the established
+**Future graph-native migration** = heritage-as-explicit-metadata (LANDED for the class Static composer:
+the producer-minted `HeritageBaseFact` facet above) + a dedicated closedness/key-domain GRAPH-NATIVE
+classifier (over `SemanticNodeData`, mirroring the established
 `exactness::node_root_should_stay_symbolic` graph-native-vs-`TypeExpr`-arm equivalence pattern). This is a
 SEPARATE design with its own guarded surface — NOT the bounded `decl_body_hot_ref` accessor plumbing.
 
@@ -150,3 +154,105 @@ graph-backed-pending classes empty and this file is deleted.
 readers are PERMANENT split-carrier compat (a body is read as authored `TypeExpr` for syntax + as a
 `HotTypeRef` for graph reduction, by design) vs eventual full graph-native migration. The CTO owns that
 determination at the Slice-4-end confirm; this row only records the deferral.
+
+## Fail-closed deferral rows (fact+locator prepared-surface cutover)
+
+Four explicit six-field debt rows recorded at the fact+locator prepared-surface cutover
+(`LoweredValueDecl` narrowed facts + lowering-time value-body fingerprint + the prepared fact DTO rewiring).
+Rows 1, 2 and 4 are structurally fail-closed TODAY (the named surfaces do not compile); row 3 records a
+PRE-EXISTING, byte-parity-preserved admission this cutover does not change. Each closes on its named
+condition — none is a silently-open regression introduced by this cutover.
+
+### Row 1 — eval_env macro-payload-locator closure (13 compile errors, deferred cutover)
+
+- **Item**: the 13 `host_manage/eval_env.rs` compile errors (lines ~920–1163): the macro-payload-locator
+  closure consumes types the adjacent block owns (`FastShallowFieldExpr` /
+  `should_preserve_shallow_field_expr` / `ExpandedNormalizedExpr.expr` — the ChatMessages fast-path
+  defense), whose fact+locator flip has not landed yet.
+- **Why it can't build now**: that surface is owned by the adjacent Stage-10 block (B6); a local fix here
+  would either delete the ChatMessages fast-path defense or redesign a surface outside this cutover's lane.
+- **Owning future block**: B6.
+- **Temporary behavior**: `eval_env.rs` does not compile at those lines — structurally fail-closed (no
+  runtime path can execute a wrong macro-payload lowering while the closure does not build).
+- **Fail-closed guard**: the compile failure itself (the `cargo check -p verter_session` B6-boundary error
+  cluster); there is no bypass path.
+- **Close condition**: B6 lands the macro-payload fact+locator surface; the closure compiles and the
+  Stage-10 gate re-greens end-to-end.
+
+### Row 2 — `JsdocTypedefBody` not yet matched by the `LowerLocator` dispatch (pre-existing §78 obligation)
+
+- **Item**: the `LowerLocator` dispatch (`project_semantic_dispatch/locator_shape.rs` anchor matches at
+  ~:1071/:1188 and `locator_identity.rs` key-safety/anchor matches at ~:458/:586) does not yet match
+  `AuthoredBodyLocator::JsdocTypedefBody` (E0004 non-exhaustive).
+- **Why it can't build now**: PRE-EXISTING — byte-identical in the pre-cutover baseline; the variant was
+  added by an earlier B3 slice (`7b84e5038`). Landing the dispatch arms is the §78 B6 obligation
+  ("`lower_locator` deref for EVERY new locator arm + the assembly deref-test completeness gate"), out of
+  this cutover's lane.
+- **Owning future block**: B6 / assembly.
+- **Temporary behavior**: the located-body path is FAIL-CLOSED w.r.t. the arm —
+  `lower_located_body_with_provenance` (`project_semantic_dispatch/build.rs`) handles the
+  `JsdocTypedefBody` anchor and degrades ANY `lower_locator` error/recursive outcome to
+  `opaque(QueryError::Miss)` (never a panic, never a fabricated body), and the deref worker
+  (`decl_body_memo/locator_deref.rs`) fully handles the arm with typed fail-closed errors
+  (canonical-coherence gate, `TypeParamBound` misplacement rejection, lease-only re-derivation misses).
+- **Fail-closed guard**: the E0004 compile failure (structural: no runtime can route the arm while the
+  dispatch match is incomplete) + the located-body Miss degradation above once it compiles.
+- **Close condition**: B6 lands the `LowerLocator` `JsdocTypedefBody` arms plus the assembly deref-test
+  completeness gate (§78); until then the located-body path fails closed to a miss.
+
+### Row 3 — value-body fingerprint `budget_exceeded` dropped at the shared parse-domain admission
+
+- **Item**: the shared parse-domain body-fact admission (`fact_emission.rs`,
+  `LazyBodyFactSource::compute` → `let semantic_hash = outcome.hash;`) drops the `HashOutcome`
+  `budget_exceeded` bit at `Fact` construction — the value-space mirror of the Wave-1-tracked
+  non-Stage-10 follow-up ("`HashOutcome.budget_exceeded` dropped @ fact_emission — IDENTICAL at legacy;
+  assess NonCacheable forcing separately", Wave-1 integration-confirm §182/§258).
+- **Why it can't change now**: byte-parity-locked — the admission line is pre-existing and byte-identical
+  to the type-side/legacy path (this cutover's diff does not touch it); changing it is a behavior change
+  owned by the separate assessment.
+- **Owning future block**: the separate NonCacheable-forcing assessment (the Wave-1 §182/§258
+  carry-forward).
+- **Temporary behavior**: `budget_exceeded` is set honestly by TWO DISTINCT producer mechanisms. (1)
+  Depth-cap: the shared hash encoder (`enter_frame`, `verter_semantic` `facts/hashing.rs`) sets the bit
+  at `MAX_HASH_DEPTH` exceedance for type AND value bodies alike (the value walk shares the encoder via
+  `value_body_fingerprint`) — a real deep annotation on the demand-lowered file memo reaches the rail
+  with the bit set, exactly as a deep type body always has. (2) Transient-less fold: session code
+  (`lowered_value_decl_from_group`, `decl_body_memo.rs`) forces the bit on a seeded/ambient VALUE fold
+  built without its fingerprint-relevant transients — VALUE-only, NOT symmetric with the type side: the
+  type-side transient-less non-enum fold fails loudly (`lowered_type_decl_from_group`'s assert/expect)
+  instead of setting the bit. Both mechanisms' bit is stored honestly on the memo fact
+  (`ValueBodyHashFact`) and flows to the same admission, which drops it at `Fact` construction — this
+  cutover's diff does not touch that line (for the depth-cap case the flow is byte-identical to the
+  type side and to legacy, `7f98c985d`). No confinement or no-poison property is claimed here — the
+  admission disposition of a `budget_exceeded` body fact is exactly what the §182/§258 follow-up
+  assesses.
+- **Fail-closed guard**: none at the admission itself (the bit-drop is pre-existing shared behavior, not
+  a hole this cutover opened or could fence without the owned behavior change); the honest-bit producer
+  semantics are fenced by
+  `lowered_value_decl_copies_narrowed_facts_and_fingerprints_at_lowering_time` (the file memo's
+  transient-retained fingerprinting) and `seeded_annotated_value_cell_degrades_its_fingerprint_honestly`
+  (the honest degraded bit on a transient-less fold), both in `decl_body_memo_tests.rs`.
+- **Close condition**: the NonCacheable-forcing assessment lands and resolves the admission bit-drop for
+  BOTH symbol spaces (type + value) in one shared decision.
+
+### Row 4 — vue/svelte default-synth `LoweredValueDecl` constructors not yet on the fact shape (B6-owned synth surface)
+
+- **Item**: the component-default synth constructors (`resolver_core/vue_default_synth.rs` ~:134,
+  `resolver_core/svelte_default_synth.rs` ~:103) still build the OLD `LoweredValueDecl` shape
+  (`type_annotation: None`, `TypeExpr`-carrying signature fields, no `enum_member_names` / `body_hash`);
+  the fact+locator shape flip adds ~5 constructor errors per file (E0308 `ValueTypeAnnotationFact`,
+  E0308 `Arc<[FunctionParamFact]>` / `Arc<[NarrowTypeParam]>`, E0560 no `return_type` on
+  `FunctionSignatureFact`, E0063 missing `body_hash` + `enum_member_names`).
+- **Why it can't build now**: the synthesized default's fact shape — its annotation classification,
+  signature facts (locator-positioned parameters/return), object shape, and value-body fingerprint — is
+  B6 synth logic on the B6-owned "svelte+vue synth" surface, which was ALREADY baseline-broken
+  pre-cutover (7 error lines); a minimal all-absent construction here would FABRICATE the synthesized
+  default's shape (a forbidden gate-passing stub), not implement it.
+- **Owning future block**: B6.
+- **Temporary behavior**: the constructors do not compile — structurally fail-closed until B6 lands (no
+  runtime path can serve a fabricated synthesized component default while the constructors do not
+  build).
+- **Fail-closed guard**: the compile failure itself (the `cargo check -p verter_session` B6-boundary
+  error cluster over the two synth files); there is no bypass path.
+- **Close condition**: B6 lands the synth constructors on the fact shape (the synthesized default's
+  annotation / signature / object-shape / fingerprint facts) and the Stage-10 gate re-greens end-to-end.

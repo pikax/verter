@@ -1,7 +1,10 @@
 //! Build an [`EvalEnv`] from an OXC program AST.
 //!
-//! Walks top-level declarations and populates the type and value
-//! symbol tables so the evaluator can resolve references.
+//! Walks top-level declarations, lowers each to its TRANSIENT typed-IR parts,
+//! and populates the type and value symbol tables with the content-free
+//! facts + locators minted from those parts (the transient typed IR is
+//! discarded; bodies are lowered again on demand through the shared
+//! resolver's body service).
 
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
@@ -11,21 +14,35 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
+use crate::analysis::fact_projection::value_type_annotation_fact;
 use crate::analysis::type_eval::*;
 use oxc_ast::ast::{
-    Argument, ArrowFunctionExpression, BinaryOperator, BindingPattern, CallExpression, Class,
-    ClassElement, Declaration, ExportDefaultDeclarationKind, Expression, FormalParameters,
-    Function, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, Program, Statement,
-    TSAccessibility, TSEnumDeclaration, TSGlobalDeclaration, TSInterfaceDeclaration, TSModuleBlock,
-    TSModuleDeclaration, TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature,
-    TSTypeAliasDeclaration, TSTypeParameterDeclaration, UnaryOperator, VariableDeclarationKind,
-    VariableDeclarator,
+    ArrowFunctionExpression, BinaryOperator, BindingPattern, Class, ClassElement, Declaration,
+    ExportDefaultDeclarationKind, Expression, FormalParameters, Function, MethodDefinitionKind,
+    ObjectExpression, ObjectPropertyKind, Program, Statement, TSAccessibility, TSEnumDeclaration,
+    TSInterfaceDeclaration, TSModuleBlock, TSModuleDeclaration, TSModuleDeclarationBody,
+    TSModuleDeclarationName, TSSignature, TSTypeAliasDeclaration, TSTypeParameterDeclaration,
+    UnaryOperator, VariableDeclarationKind, VariableDeclarator,
 };
 use oxc_span::GetSpan;
+use verter_type_expr::facts::{
+    ClosedTypeFact, EnumMemberEntry, EnumMemberFact, EnumMemberNamesFact, EnumPrimitiveDomain,
+    EnumScalar, FunctionParamFact, FunctionSignatureFact, IndexSignatureFact, KeyTypeShape,
+    LeafTypeFact, MemberHeaderFact, NarrowTypeParam, ObjectMemberFact, ObjectMethodFact,
+    ObjectPropertyFact, ObjectShapeFact, SemanticTypeSource, TypeParamDeclFact,
+};
+use verter_type_expr::locators::{
+    AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
+    TypeParamBoundPosition,
+};
+use verter_type_expr::span_origins::{
+    DeclContributorAnchor, FunctionParamSelector, FunctionParamSpanOrigin, FunctionSpansOrigin,
+    IndexSignatureSpansOrigin, MemberSpansOrigin, SourceSynthetic,
+};
 use verter_type_expr::{
-    FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans, MemberSpans,
-    MemberVisibility, MethodSignature, ObjectExpr, ObjectMember, PrimitiveName, TypeExpr,
-    TypeExprScope, TypeParam, ValueRef,
+    FunctionExpr, FunctionParam, FunctionSpans, IndexSignature, IndexSignatureSpans, LiteralValue,
+    MemberSpans, MemberVisibility, MethodSignature, ObjectExpr, ObjectMember, PrimitiveName,
+    TypeExpr, TypeParam, ValueRef,
 };
 use verter_type_expr_oxc::{lower_ts_type, property_key_name};
 
@@ -102,19 +119,160 @@ fn log_expand_stage_start(log: &ExpandStageLog<'_>) {
     });
 }
 
-/// Build an evaluation environment from an OXC program AST.
+/// Producer context for one whole-file eval-env lowering walk.
 ///
-/// Extracts:
-/// - Type aliases → `TypeDeclInfo`
-/// - Interfaces → `TypeDeclInfo`
-/// - Classes → `TypeDeclInfo` (body from constructor/public members)
-/// - Functions → `ValueDeclInfo` with function signatures
-/// - Variable declarations → `ValueDeclInfo` with type annotations / object shapes
-pub fn build_eval_env(program: &Program<'_>, source: &str) -> EvalEnv {
+/// Carries the PRODUCING canonical id — the anchor canonical every
+/// producer-emitted authored locator / span-origin fact names
+/// (`AuthoredAnchor.canonical_id`). Locators/origins are minted ONLY where the
+/// OXC nodes are in scope (this walk); a pre-lowered consumer cannot recover
+/// them. Callers building a whole-file environment supply the file's canonical
+/// id; test fixtures supply a deterministic fixture canonical.
+#[derive(Debug, Clone)]
+pub struct BuildEvalEnvContext {
+    /// Canonical id of the file whose parse this walk lowers.
+    pub canonical_id: Arc<str>,
+}
+
+impl BuildEvalEnvContext {
+    /// Context anchored at `canonical_id`.
+    pub fn new(canonical_id: impl Into<Arc<str>>) -> Self {
+        Self {
+            canonical_id: canonical_id.into(),
+        }
+    }
+}
+
+/// Per-statement producer context: the whole-walk build context plus this
+/// statement's PRODUCER-EMITTED contributor index (the `program.body` ordinal —
+/// the `DeclContributorAnchor` ordinal authored span-origin minting anchors
+/// to). Selective per-statement lowering passes the statement's ORIGINAL
+/// top-level index (recorded by the header index's `contributors` locators),
+/// never a renumbered position.
+#[derive(Debug, Clone, Copy)]
+pub struct StatementLowerCtx<'a> {
+    /// The whole-walk build context (the anchor canonical).
+    pub build: &'a BuildEvalEnvContext,
+    /// This statement's `program.body` ordinal.
+    pub contributor_index: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Transient lowered declaration parts
+// ---------------------------------------------------------------------------
+
+/// TRANSIENT lowered parts of one TYPE declaration: the fully-lowered typed-IR
+/// view the producer builds, derives facts and locators from, and DISCARDS.
+/// Returned by the shared statement lowering so in-crate lowering tests can
+/// characterize the lowering semantics the fact minting consumes. Never stored
+/// on [`EvalEnv`] or any cache.
+#[derive(Debug, Clone)]
+pub struct LoweredTypeDeclParts {
+    pub name: String,
+    pub kind: TypeDeclKind,
+    /// Lowered type-parameter headers (constraint/default typed IR included).
+    pub type_parameters: Vec<TypeParam>,
+    /// The fully-lowered declaration body.
+    pub body: TypeExpr,
+}
+
+/// Where a transient signature's authored function node lives, relative to its
+/// owning declaration statement — drives the minted [`FunctionSpansOrigin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoweredSignatureOrigin {
+    /// The declaration statement's body IS the function (a `function` decl, an
+    /// arrow / function-expression initializer).
+    DeclBody,
+    /// A member of the produced object shape at this ordinal (a class
+    /// constructor / static method in the `typeof C` constructor shape).
+    ShapeMember { ordinal: u32 },
+    /// Genuinely synthesized — no authored function node (a class with no
+    /// declared constructor).
+    Synthetic,
+}
+
+/// TRANSIENT lowered parts of one function/method signature: the typed-IR
+/// parameter / return / type-parameter forms JSDoc enrichment and inference
+/// operate on. The stored form is the minted [`FunctionSignatureFact`].
+#[derive(Debug, Clone)]
+pub struct LoweredSignatureParts {
+    pub parameters: Vec<FunctionParam>,
+    pub return_type: Option<TypeExpr>,
+    pub type_parameters: Vec<TypeParam>,
+    /// Whether this signature is backed by an implementation body (vs. a
+    /// bodiless overload / ambient declaration). Projection-time overload
+    /// visibility reads the stored fact's copy of this flag.
+    pub has_implementation_body: bool,
+    /// Whether the function carried an explicit AUTHORED TS return annotation
+    /// (`(): T`). Only an authored return position mints a `FunctionReturn`
+    /// body locator — an inferred / JSDoc-filled return has no authored
+    /// `TSType` node to address and is recovered whole-signature on demand.
+    pub has_authored_return: bool,
+    /// Span-recovery origin of the authored function node.
+    pub origin: LoweredSignatureOrigin,
+}
+
+/// TRANSIENT lowered parts of one VALUE declaration.
+#[derive(Debug, Clone)]
+pub struct LoweredValueDeclParts {
+    pub name: String,
+    pub kind: ValueDeclKind,
+    /// The lowered annotation typed IR: the authored TS annotation, the JSDoc
+    /// `@type` payload, or the initializer-inferred type (in that precedence).
+    pub type_annotation: Option<TypeExpr>,
+    /// Whether [`type_annotation`](Self::type_annotation) is an AUTHORED
+    /// annotation (TS annotation or JSDoc `@type`) vs initializer-inferred.
+    /// Drives the minted annotation SOURCE: an authored annotation is its
+    /// decl-body locator; an inferred one is carried as a closed leaf fact
+    /// when trivially closed, else recovered by demand.
+    pub annotation_is_authored: bool,
+    /// Lowered function signatures (source order within this declaration).
+    pub signatures: Vec<LoweredSignatureParts>,
+    /// Lowered object shape (const object initializer / class constructor
+    /// shape).
+    pub object_shape: Option<ObjectExpr>,
+    /// Ordered enum member inventory (`Some` exactly for an enum decl).
+    pub enum_members: Option<Vec<(String, EnumMemberValue)>>,
+    /// Enum member-NAME inventory fact (`Some` exactly for an enum decl).
+    pub enum_member_names: Option<EnumMemberNamesFact>,
+}
+
+/// The TRANSIENT lowered parts one top-level statement contributes, routed to
+/// their target inventory scope. Registration order within each vector is the
+/// statement's own declaration order.
+#[derive(Debug, Clone, Default)]
+pub struct LoweredStatementParts {
+    pub type_decls: Vec<LoweredTypeDeclParts>,
+    pub value_decls: Vec<LoweredValueDeclParts>,
+    pub aug_type_decls: Vec<(AugmentationScopeKind, LoweredTypeDeclParts)>,
+    pub aug_value_decls: Vec<(AugmentationScopeKind, LoweredValueDeclParts)>,
+    /// `export default class C` / `export default interface I` — after
+    /// registration, mirror the declared-name type symbol under the `default`
+    /// export name (see [`alias_default_export_type_symbol`]).
+    pub alias_default_type_to: Option<String>,
+}
+
+/// Build an inventory environment from an OXC program AST.
+///
+/// Lowers each statement's declarations to TRANSIENT typed-IR parts, mints the
+/// content-free facts + locators the inventory stores, and discards the
+/// transient forms:
+/// - Type aliases / interfaces / classes → [`TypeDeclInfo`] (body slot +
+///   header facts)
+/// - Functions / variables / enums → [`ValueDeclInfo`] (annotation /
+///   signature / shape / enum facts)
+pub fn build_eval_env(program: &Program<'_>, source: &str, ctx: &BuildEvalEnvContext) -> EvalEnv {
     let mut env = EvalEnv::new();
 
-    for stmt in &program.body {
-        lower_top_level_statement(stmt, source, &mut env);
+    for (contributor_index, stmt) in program.body.iter().enumerate() {
+        lower_top_level_statement(
+            stmt,
+            StatementLowerCtx {
+                build: ctx,
+                contributor_index: u32::try_from(contributor_index).unwrap_or(u32::MAX),
+            },
+            source,
+            &mut env,
+        );
     }
 
     // JSDoc `@typedef {T} Name` declarations are first-class REGULAR types: a
@@ -124,7 +282,7 @@ pub fn build_eval_env(program: &Program<'_>, source: &str) -> EvalEnv {
     // or bare `Alias` reference resolves through the shared dispatch with no
     // JSDoc-specific path. This runs AFTER the statement walk so a real TS
     // declaration of the same name always wins (TS-decl precedence).
-    register_jsdoc_typedefs(&program.comments, source, &mut env);
+    register_jsdoc_typedefs(&program.comments, source, ctx, &mut env);
 
     env
 }
@@ -139,66 +297,143 @@ pub fn build_eval_env(program: &Program<'_>, source: &str) -> EvalEnv {
 /// comments); whole-env builds run [`build_eval_env`], selective demands
 /// register a demanded typedef through
 /// [`lower_jsdoc_typedef_named`].
-pub fn lower_top_level_statement(stmt: &Statement<'_>, source: &str, env: &mut EvalEnv) {
+///
+/// `ctx` is the producer-emitted anchor context (producing canonical +
+/// contributor index) the minted authored locators / span origins anchor to.
+pub fn lower_top_level_statement(
+    stmt: &Statement<'_>,
+    ctx: StatementLowerCtx<'_>,
+    source: &str,
+    env: &mut EvalEnv,
+) {
+    let parts = lower_statement_parts(stmt, source);
+    register_statement_parts(parts, ctx, env);
+}
+
+/// Lower ONE top-level statement to its TRANSIENT declaration parts, without
+/// registering anything. The single dispatch both the production registration
+/// walk and the in-crate lowering tests consume — one lowering path, no fork.
+pub fn lower_statement_parts(stmt: &Statement<'_>, source: &str) -> LoweredStatementParts {
+    let mut out = LoweredStatementParts::default();
+    collect_statement_parts(stmt, source, &mut out);
+    out
+}
+
+/// Mint the stored facts/locators from TRANSIENT statement parts and register
+/// them on `env`, discarding the transient typed IR.
+///
+/// Public alongside [`lower_statement_parts`] so a demand-time producer can
+/// SPLIT the two steps — retain the transient lowered bodies it needs for
+/// fact-production (the decl-body content fingerprint) between lowering and
+/// registration — without forking the lowering path. The retained transients
+/// remain fact-production intermediates; only the minted facts/locators are
+/// registered.
+pub fn register_statement_parts(
+    parts: LoweredStatementParts,
+    ctx: StatementLowerCtx<'_>,
+    env: &mut EvalEnv,
+) {
+    let LoweredStatementParts {
+        type_decls,
+        value_decls,
+        aug_type_decls,
+        aug_value_decls,
+        alias_default_type_to,
+    } = parts;
+    for parts in type_decls {
+        env.add_type(mint_type_decl(&parts, &ctx.build.canonical_id));
+    }
+    for parts in value_decls {
+        env.add_value(mint_value_decl(&parts, &ctx.build.canonical_id, ctx));
+    }
+    for (scope, parts) in aug_type_decls {
+        env.add_augmentation_type(scope, mint_type_decl(&parts, &ctx.build.canonical_id));
+    }
+    for (scope, parts) in aug_value_decls {
+        env.add_augmentation_value(scope, mint_value_decl(&parts, &ctx.build.canonical_id, ctx));
+    }
+    if let Some(name) = alias_default_type_to {
+        alias_default_export_type_symbol(env, &name);
+    }
+}
+
+fn collect_statement_parts(stmt: &Statement<'_>, source: &str, out: &mut LoweredStatementParts) {
     match stmt {
         Statement::TSTypeAliasDeclaration(decl) => {
-            extract_type_alias(decl, source, env);
+            out.type_decls.push(lower_named_type_alias_parts(
+                decl,
+                source,
+                decl.id.name.to_string(),
+            ));
         }
         Statement::TSInterfaceDeclaration(decl) => {
-            extract_interface(decl, source, env);
+            out.type_decls.push(lower_named_interface_parts(
+                decl,
+                source,
+                decl.id.name.to_string(),
+            ));
         }
         Statement::TSModuleDeclaration(module) => {
-            extract_module_declaration(module, source, env, None);
+            collect_module_declaration(module, source, out, None);
         }
         Statement::TSGlobalDeclaration(global) => {
-            extract_global_declaration(global, source, env);
+            collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
         }
         Statement::ClassDeclaration(decl) => {
-            extract_class(decl, source, env);
+            collect_class(decl, source, out);
         }
         Statement::TSEnumDeclaration(decl) => {
-            extract_enum(decl, env);
+            collect_enum(decl, out);
         }
         Statement::FunctionDeclaration(func) => {
-            extract_function(func, source, env);
+            if let Some(parts) = lower_function_parts(func, source) {
+                out.value_decls.push(parts);
+            }
         }
         Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                extract_variable(decl, var_decl.kind, source, env, None);
+                if let Some(parts) = lower_variable_parts(decl, var_decl.kind, source, None) {
+                    out.value_decls.push(parts);
+                }
             }
         }
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
-                extract_from_declaration(decl, source, env);
+                collect_from_declaration(decl, source, out);
             }
         }
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                extract_function(func, source, env);
+                if let Some(parts) = lower_function_parts(func, source) {
+                    out.value_decls.push(parts);
+                }
             }
             ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
-                extract_class(cls, source, env);
+                collect_class(cls, source, out);
                 // `export default class Props { … }` exports the class under
                 // the `default` export name (the named identifier is NOT a
                 // separate export — see ShallowFileState's default-export
-                // contract), but `extract_class` keys the instance shape under
-                // the declared name `Props`. A barrel that reaches this file
-                // resolves the `(canonical, "default")` route, so the class
-                // body must also be reachable under `default`. Alias the
-                // declared-name type symbol into a `default` entry (same body,
-                // same params) so the prepared-decl lookup at the resolved
-                // default route hydrates the class.
-                if let Some(name) = class_or_function_default_name(&cls.id) {
-                    alias_default_export_type_symbol(env, &name);
-                }
+                // contract), but the class lowering keys the instance shape
+                // under the declared name `Props`. A barrel that reaches this
+                // file resolves the `(canonical, "default")` route, so the
+                // class body must also be reachable under `default`. Alias the
+                // declared-name type symbol into a `default` entry (same body
+                // slot, same params) so the prepared-decl lookup at the
+                // resolved default route hydrates the class.
+                out.alias_default_type_to = class_or_function_default_name(&cls.id);
             }
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(iface) => {
-                extract_interface(iface, source, env);
-                alias_default_export_type_symbol(env, iface.id.name.as_str());
+                out.type_decls.push(lower_named_interface_parts(
+                    iface,
+                    source,
+                    iface.id.name.to_string(),
+                ));
+                out.alias_default_type_to = Some(iface.id.name.to_string());
             }
             other => {
                 if let Some(expr) = other.as_expression() {
-                    extract_default_expression(expr, source, env);
+                    out.value_decls
+                        .push(lower_default_expression_parts(expr, source));
                 }
             }
         },
@@ -209,7 +444,11 @@ pub fn lower_top_level_statement(stmt: &Statement<'_>, source: &str, env: &mut E
 /// Register the JSDoc `@typedef {T} Name` declaration named `name` into
 /// `env`, applying the same TS-decl precedence as the whole-env walk: a
 /// name a TS declaration already claimed in `env` is skipped. Returns
-/// `true` when a typedef body was registered.
+/// the registered typedef's TRANSIENT lowered body (`None` when nothing
+/// registered) so the demanding producer can derive body-sensitive facts
+/// (dependency roots, the decl-body content fingerprint) from the same
+/// lowering that registered the facts — a fact-production intermediate,
+/// never a persisted body.
 ///
 /// The selective counterpart to the whole-env typedef registration inside
 /// [`build_eval_env`] — a demanded symbol that exists only as a `@typedef`
@@ -218,73 +457,91 @@ pub fn lower_jsdoc_typedef_named(
     comments: &[oxc_ast::Comment],
     source: &str,
     name: &str,
+    ctx: &BuildEvalEnvContext,
     env: &mut EvalEnv,
-) -> bool {
+) -> Option<TypeExpr> {
     if env.type_symbols.contains_key(name) {
-        return false;
+        return None;
     }
     for typedef in crate::analysis::jsdoc::collect_jsdoc_typedefs(comments, source) {
         if typedef.name != name {
             continue;
         }
-        env.add_type(TypeDeclInfo {
+        let parts = LoweredTypeDeclParts {
             name: typedef.name,
-            declaration_id: 0,
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
             body: typedef.body,
-        });
-        return true;
+        };
+        env.add_type(mint_type_decl(&parts, &ctx.canonical_id));
+        return Some(parts.body);
     }
-    false
+    None
 }
 
 /// Register each JSDoc `@typedef {T} Name` from the program's comments as a
 /// `TypeDeclInfo` alias, skipping any name a TS declaration already claimed
 /// (TS-decl precedence).
-fn register_jsdoc_typedefs(comments: &[oxc_ast::Comment], source: &str, env: &mut EvalEnv) {
+fn register_jsdoc_typedefs(
+    comments: &[oxc_ast::Comment],
+    source: &str,
+    ctx: &BuildEvalEnvContext,
+    env: &mut EvalEnv,
+) {
     for typedef in crate::analysis::jsdoc::collect_jsdoc_typedefs(comments, source) {
         if env.type_symbols.contains_key(&typedef.name) {
             // A real TS `type`/`interface`/`class` of this name was registered
             // during the statement walk; it is authoritative.
             continue;
         }
-        env.add_type(TypeDeclInfo {
+        let parts = LoweredTypeDeclParts {
             name: typedef.name,
-            declaration_id: 0,
             kind: TypeDeclKind::Alias,
             type_parameters: Vec::new(),
             body: typedef.body,
-        });
+        };
+        env.add_type(mint_type_decl(&parts, &ctx.canonical_id));
     }
 }
 
-fn extract_from_declaration(decl: &Declaration<'_>, source: &str, env: &mut EvalEnv) {
+fn collect_from_declaration(decl: &Declaration<'_>, source: &str, out: &mut LoweredStatementParts) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
-            extract_type_alias(alias, source, env);
+            out.type_decls.push(lower_named_type_alias_parts(
+                alias,
+                source,
+                alias.id.name.to_string(),
+            ));
         }
         Declaration::TSInterfaceDeclaration(iface) => {
-            extract_interface(iface, source, env);
+            out.type_decls.push(lower_named_interface_parts(
+                iface,
+                source,
+                iface.id.name.to_string(),
+            ));
         }
         Declaration::TSModuleDeclaration(module) => {
-            extract_module_declaration(module, source, env, None);
+            collect_module_declaration(module, source, out, None);
         }
         Declaration::TSGlobalDeclaration(global) => {
-            extract_global_declaration(global, source, env);
+            collect_augmentation_block(&global.body, source, out, AugmentationScopeKind::Global);
         }
         Declaration::ClassDeclaration(cls) => {
-            extract_class(cls, source, env);
+            collect_class(cls, source, out);
         }
         Declaration::TSEnumDeclaration(decl) => {
-            extract_enum(decl, env);
+            collect_enum(decl, out);
         }
         Declaration::FunctionDeclaration(func) => {
-            extract_function(func, source, env);
+            if let Some(parts) = lower_function_parts(func, source) {
+                out.value_decls.push(parts);
+            }
         }
         Declaration::VariableDeclaration(var_decl) => {
             for d in &var_decl.declarations {
-                extract_variable(d, var_decl.kind, source, env, None);
+                if let Some(parts) = lower_variable_parts(d, var_decl.kind, source, None) {
+                    out.value_decls.push(parts);
+                }
             }
         }
         _ => {}
@@ -292,19 +549,501 @@ fn extract_from_declaration(decl: &Declaration<'_>, source: &str, env: &mut Eval
 }
 
 // ---------------------------------------------------------------------------
+// Fact / locator minting (transient parts → stored inventory)
+// ---------------------------------------------------------------------------
+
+/// The content-free anchor of a declared symbol's authored positions.
+fn decl_anchor(canonical_id: &Arc<str>, name: &str, space: LocatorSymbolSpace) -> AuthoredAnchor {
+    AuthoredAnchor {
+        canonical_id: canonical_id.clone(),
+        symbol: Arc::from(name),
+        space,
+    }
+}
+
+/// A body slot at `anchor` with the given path.
+fn anchored_slot(anchor: &AuthoredAnchor, path: Vec<TypeBodyPathStep>) -> TypeBodySlot {
+    TypeBodySlot {
+        anchor: anchor.clone(),
+        path: path.into(),
+    }
+}
+
+/// Narrow a lowered decl-header type-parameter list to its header facts: each
+/// parameter's name + ordinal, plus the content-free locators of its AUTHORED
+/// constraint / default bound positions (`[TypeParamBound { ordinal, position }]`
+/// rooted at the declaration header — the one placement the closed path
+/// vocabulary defines for type-parameter bounds).
+fn narrow_decl_header_type_params(
+    params: &[TypeParam],
+    anchor: &AuthoredAnchor,
+) -> TypeParamDeclFact {
+    TypeParamDeclFact {
+        params: params
+            .iter()
+            .enumerate()
+            .map(|(index, param)| {
+                let ordinal = u32::try_from(index).unwrap_or(u32::MAX);
+                let bound_slot = |position: TypeParamBoundPosition| {
+                    anchored_slot(
+                        anchor,
+                        vec![TypeBodyPathStep::TypeParamBound { ordinal, position }],
+                    )
+                };
+                NarrowTypeParam {
+                    name: param.name.clone(),
+                    ordinal,
+                    constraint: param
+                        .constraint
+                        .is_some()
+                        .then(|| bound_slot(TypeParamBoundPosition::Constraint)),
+                    default: param
+                        .default
+                        .is_some()
+                        .then(|| bound_slot(TypeParamBoundPosition::Default)),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Narrow a SIGNATURE-scoped type-parameter list (a function declaration's /
+/// method's own `<T extends C>` list) to name + ordinal facts. Signature-scoped
+/// bounds live ON the signature's authored position: the closed path vocabulary
+/// addresses type-parameter bounds only on TYPE-space declaration headers
+/// (a value / method signature's bound is recovered whole-signature when the
+/// signature position is demanded), so no independent bound slot exists to
+/// mint — deliberately NOT a fabricated locator.
+pub(crate) fn narrow_signature_type_params(params: &[TypeParam]) -> Arc<[NarrowTypeParam]> {
+    params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| NarrowTypeParam {
+            name: param.name.clone(),
+            ordinal: u32::try_from(index).unwrap_or(u32::MAX),
+            // `TypeParamBound` is a type-space DECL-HEADER first-step-only
+            // position — not addressable for a signature-scoped parameter.
+            // Honest typed miss: an authored `extends` / `=` bound here is
+            // recovered whole-signature on demand, never through a fabricated
+            // slot.
+            constraint: None,
+            default: None,
+        })
+        .collect()
+}
+
+/// Mint the stored [`TypeDeclInfo`] from transient type-decl parts: the
+/// whole-body slot locator, the type-parameter header facts, and the direct
+/// member-header facts — the body typed IR is derived from and discarded.
+fn mint_type_decl(parts: &LoweredTypeDeclParts, canonical_id: &Arc<str>) -> TypeDeclInfo {
+    let anchor = decl_anchor(canonical_id, &parts.name, LocatorSymbolSpace::Type);
+    TypeDeclInfo {
+        name: parts.name.clone(),
+        declaration_id: 0,
+        kind: parts.kind,
+        type_parameters: narrow_decl_header_type_params(&parts.type_parameters, &anchor),
+        direct_member_headers: member_header_facts_from_body(&parts.body),
+        body: anchored_slot(&anchor, Vec::new()),
+    }
+}
+
+/// The annotation SOURCE for a value declaration's annotation fact:
+///
+/// - an AUTHORED annotation (TS annotation / JSDoc `@type`) → its decl-body
+///   locator (the value-space whole-decl slot addresses exactly the annotation
+///   position);
+/// - an INFERRED annotation that is a trivially-closed leaf (primitive /
+///   literal) → the closed leaf fact;
+/// - any other INFERRED annotation → `None`: no authored `TSType` node exists
+///   to address and the shape is not closed-representable, so the type is
+///   recovered by demanding the declaration (never a fabricated locator).
+fn annotation_source(
+    annotation: Option<&TypeExpr>,
+    annotation_is_authored: bool,
+    anchor: &AuthoredAnchor,
+) -> Option<SemanticTypeSource> {
+    let annotation = annotation?;
+    if annotation_is_authored {
+        return Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
+            anchored_slot(anchor, Vec::new()),
+        )));
+    }
+    let leaf = match annotation {
+        TypeExpr::Primitive(name) => LeafTypeFact::Primitive(*name),
+        TypeExpr::Literal(LiteralValue::String(value)) => {
+            LeafTypeFact::StringLiteral(value.clone())
+        }
+        TypeExpr::Literal(LiteralValue::Number(value)) => {
+            LeafTypeFact::NumberLiteral(format_enum_number(*value))
+        }
+        TypeExpr::Literal(LiteralValue::Boolean(value)) => LeafTypeFact::BooleanLiteral(*value),
+        _ => return None,
+    };
+    Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(leaf)))
+}
+
+/// The span-recovery origin of one shape member at `ordinal`, under the owning
+/// declaration's authored contributor statement.
+fn shape_member_span_origin(contributor: DeclContributorAnchor, ordinal: u32) -> MemberSpansOrigin {
+    MemberSpansOrigin::Authored {
+        anchor: contributor,
+        member_path: Arc::from(vec![ordinal]),
+    }
+}
+
+/// The [`FunctionSpansOrigin`] for a transient signature, under the owning
+/// declaration's contributor statement.
+fn signature_spans_origin(
+    origin: LoweredSignatureOrigin,
+    contributor: DeclContributorAnchor,
+) -> FunctionSpansOrigin {
+    match origin {
+        LoweredSignatureOrigin::DeclBody => FunctionSpansOrigin::AliasBody {
+            anchor: contributor,
+        },
+        LoweredSignatureOrigin::ShapeMember { ordinal } => FunctionSpansOrigin::Member {
+            anchor: contributor,
+            member_path: Arc::from(vec![ordinal]),
+        },
+        LoweredSignatureOrigin::Synthetic => FunctionSpansOrigin::Synthetic(SourceSynthetic),
+    }
+}
+
+/// Mint one [`FunctionSignatureFact`] from transient signature parts.
+///
+/// `first_step` roots every parameter / return locator at the signature's
+/// authored position (`ValueSignature { ordinal }` for a value declaration's
+/// own overload-group member; `Member { ordinal }` for an object-shape member
+/// signature). A parameter slot mints ONLY for an authored positional TS
+/// annotation — the one position the `FunctionParam` step derefs
+/// (`params.items[ordinal].type_annotation`). An UNANNOTATED parameter has no
+/// authored `TSType` to address, and a REST parameter lives past `params.items`
+/// (its annotation, if any, is recovered whole-signature); both store
+/// `ty: None` — the typed miss, never a fabricated slot. The rest span
+/// selector still carries the honest `Rest` marker.
+fn signature_fact(
+    sig: &LoweredSignatureParts,
+    anchor: &AuthoredAnchor,
+    first_step: TypeBodyPathStep,
+    contributor: DeclContributorAnchor,
+) -> FunctionSignatureFact {
+    let spans_origin = signature_spans_origin(sig.origin, contributor);
+    FunctionSignatureFact {
+        type_parameters: narrow_signature_type_params(&sig.type_parameters),
+        parameters: sig
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(index, param)| {
+                let ordinal = u32::try_from(index).unwrap_or(u32::MAX);
+                FunctionParamFact {
+                    name: param.name.clone(),
+                    optional: param.optional,
+                    rest: param.rest,
+                    has_ts_annotation: param.has_ts_annotation,
+                    ty: (!param.rest && param.has_ts_annotation).then(|| {
+                        anchored_slot(
+                            anchor,
+                            vec![first_step, TypeBodyPathStep::FunctionParam { ordinal }],
+                        )
+                    }),
+                    span_origin: FunctionParamSpanOrigin {
+                        function: spans_origin.clone(),
+                        param: if param.rest {
+                            FunctionParamSelector::Rest
+                        } else {
+                            FunctionParamSelector::Positional { ordinal }
+                        },
+                    },
+                }
+            })
+            .collect(),
+        return_ty: sig
+            .has_authored_return
+            .then(|| anchored_slot(anchor, vec![first_step, TypeBodyPathStep::FunctionReturn])),
+        has_implementation_body: sig.has_implementation_body,
+        spans_origin,
+    }
+}
+
+/// Mint one member-position [`FunctionSignatureFact`] from a transient
+/// [`FunctionExpr`] (an object-shape method / call / construct signature).
+/// `has_implementation_body` is inert at member positions (overload-group
+/// visibility is a value-space concern), so it carries the caller-known flag —
+/// `false` where the transient IR does not record one.
+fn member_signature_fact(
+    function: &FunctionExpr,
+    anchor: &AuthoredAnchor,
+    member_ordinal: u32,
+    contributor: DeclContributorAnchor,
+    has_implementation_body: bool,
+) -> FunctionSignatureFact {
+    let sig = LoweredSignatureParts {
+        parameters: function.parameters.clone(),
+        return_type: function.return_type.as_deref().cloned(),
+        type_parameters: function.type_parameters.clone(),
+        has_implementation_body,
+        // A member signature's authored return position is part of the member
+        // body; the transient `FunctionExpr` does not record whether it was
+        // authored, so no independent return locator is minted (recovered
+        // whole-member on demand).
+        has_authored_return: false,
+        origin: LoweredSignatureOrigin::ShapeMember {
+            ordinal: member_ordinal,
+        },
+    };
+    signature_fact(
+        &sig,
+        anchor,
+        TypeBodyPathStep::Member {
+            ordinal: member_ordinal,
+        },
+        contributor,
+    )
+}
+
+/// Mint the [`ObjectShapeFact`] from a transient object shape. `Member`
+/// ordinals index THIS produced shape surface in source order (raw member
+/// index — the shape is recovered by re-lowering the declaration on demand).
+fn object_shape_fact(
+    shape: &ObjectExpr,
+    anchor: &AuthoredAnchor,
+    contributor: DeclContributorAnchor,
+    declared_ctor: Option<bool>,
+) -> ObjectShapeFact {
+    let members = shape
+        .properties
+        .iter()
+        .enumerate()
+        .map(|(index, member)| {
+            let ordinal = u32::try_from(index).unwrap_or(u32::MAX);
+            match member {
+                ObjectMember::Property(prop) => ObjectMemberFact::Property(ObjectPropertyFact {
+                    name: prop.name.clone(),
+                    optional: prop.optional,
+                    readonly: prop.readonly,
+                    visibility: prop.visibility,
+                    ty: anchored_slot(
+                        anchor,
+                        vec![
+                            TypeBodyPathStep::Member { ordinal },
+                            TypeBodyPathStep::MemberValue,
+                        ],
+                    ),
+                    span_origin: shape_member_span_origin(contributor, ordinal),
+                }),
+                ObjectMember::Method(method) => ObjectMemberFact::Method(ObjectMethodFact {
+                    name: method.name.clone(),
+                    optional: method.optional,
+                    visibility: method.visibility,
+                    function: member_signature_fact(
+                        &method.function,
+                        anchor,
+                        ordinal,
+                        contributor,
+                        false,
+                    ),
+                    span_origin: shape_member_span_origin(contributor, ordinal),
+                }),
+                ObjectMember::CallSignature(function) => ObjectMemberFact::CallSignature(
+                    member_signature_fact(function, anchor, ordinal, contributor, false),
+                ),
+                ObjectMember::ConstructSignature(function) => {
+                    // A class's construct signature is authored exactly when a
+                    // constructor was declared; a synthesized default carries
+                    // the honest synthetic origin instead of a fabricated
+                    // member position.
+                    let fact = if declared_ctor == Some(false) {
+                        let sig = LoweredSignatureParts {
+                            parameters: function.parameters.clone(),
+                            return_type: function.return_type.as_deref().cloned(),
+                            type_parameters: function.type_parameters.clone(),
+                            has_implementation_body: true,
+                            has_authored_return: false,
+                            origin: LoweredSignatureOrigin::Synthetic,
+                        };
+                        signature_fact(
+                            &sig,
+                            anchor,
+                            TypeBodyPathStep::Member { ordinal },
+                            contributor,
+                        )
+                    } else {
+                        member_signature_fact(function, anchor, ordinal, contributor, true)
+                    };
+                    ObjectMemberFact::ConstructSignature(fact)
+                }
+                ObjectMember::IndexSignature(index_sig) => {
+                    ObjectMemberFact::IndexSignature(IndexSignatureFact {
+                        key_name: index_sig.key_name.clone(),
+                        key_type: match &index_sig.key_type {
+                            TypeExpr::Primitive(PrimitiveName::String) => KeyTypeShape::String,
+                            TypeExpr::Primitive(PrimitiveName::Number) => KeyTypeShape::Number,
+                            TypeExpr::Primitive(PrimitiveName::Symbol) => KeyTypeShape::Symbol,
+                            _ => KeyTypeShape::Other(anchored_slot(
+                                anchor,
+                                vec![
+                                    TypeBodyPathStep::Member { ordinal },
+                                    TypeBodyPathStep::IndexSignatureKey,
+                                ],
+                            )),
+                        },
+                        value_type: anchored_slot(
+                            anchor,
+                            vec![
+                                TypeBodyPathStep::Member { ordinal },
+                                TypeBodyPathStep::IndexSignatureValue,
+                            ],
+                        ),
+                        readonly: index_sig.readonly,
+                        span_origin: IndexSignatureSpansOrigin::Authored {
+                            anchor: contributor,
+                            member_path: Arc::from(vec![ordinal]),
+                        },
+                    })
+                }
+            }
+        })
+        .collect();
+    ObjectShapeFact { members }
+}
+
+/// Mint the stored [`ValueDeclInfo`] from transient value-decl parts. Signature
+/// locators are rooted at their LOCAL overload ordinal here; group-level
+/// rebasing happens at registration ([`EvalEnv::add_value`]).
+fn mint_value_decl(
+    parts: &LoweredValueDeclParts,
+    canonical_id: &Arc<str>,
+    ctx: StatementLowerCtx<'_>,
+) -> ValueDeclInfo {
+    let anchor = decl_anchor(canonical_id, &parts.name, LocatorSymbolSpace::Value);
+    let contributor = DeclContributorAnchor {
+        contributor_index: ctx.contributor_index,
+    };
+    let type_annotation = value_type_annotation_fact(
+        parts.type_annotation.as_ref(),
+        &parts.name,
+        canonical_id,
+        annotation_source(
+            parts.type_annotation.as_ref(),
+            parts.annotation_is_authored,
+            &anchor,
+        ),
+    );
+    let signatures = parts
+        .signatures
+        .iter()
+        .enumerate()
+        .map(|(index, sig)| {
+            let ordinal = u32::try_from(index).unwrap_or(u32::MAX);
+            signature_fact(
+                sig,
+                &anchor,
+                TypeBodyPathStep::ValueSignature { ordinal },
+                contributor,
+            )
+        })
+        .collect();
+    // A class value decl's constructor-shape ConstructSignature member is
+    // authored exactly when the class declared a constructor; the flag is
+    // derived from the transient signature's origin.
+    let declared_ctor = (parts.kind == ValueDeclKind::Class).then(|| {
+        parts
+            .signatures
+            .first()
+            .is_some_and(|sig| sig.origin != LoweredSignatureOrigin::Synthetic)
+    });
+    let object_shape = parts
+        .object_shape
+        .as_ref()
+        .map(|shape| object_shape_fact(shape, &anchor, contributor, declared_ctor));
+    let enum_members = parts.enum_members.as_ref().map(|members| EnumMemberFact {
+        members: members
+            .iter()
+            .map(|(name, value)| EnumMemberEntry {
+                name: name.clone(),
+                value: value.projected_scalar(),
+            })
+            .collect(),
+    });
+    ValueDeclInfo {
+        name: parts.name.clone(),
+        declaration_id: 0,
+        kind: parts.kind,
+        type_annotation,
+        signatures,
+        object_shape,
+        enum_members,
+        enum_member_names: parts.enum_member_names.clone(),
+    }
+}
+
+/// Exact-repr formatting of a folded numeric enum scalar / literal (Rust's
+/// minimal `f64` display: `1.0` → `"1"`, `-1.0` → `"-1"`, `0.5` → `"0.5"`).
+fn format_enum_number(value: f64) -> String {
+    format!("{value}")
+}
+
+// ---------------------------------------------------------------------------
 // Type declarations
 // ---------------------------------------------------------------------------
 
-fn extract_type_alias(decl: &TSTypeAliasDeclaration<'_>, source: &str, env: &mut EvalEnv) {
-    let name = decl.id.name.to_string();
-    env.add_type(build_named_type_alias_decl(decl, source, name));
+/// Mint the DIRECT member-header FACT inventory from a freshly-lowered decl
+/// body: its own object members, descending intersection / parenthesized arms
+/// (a heritage `Ref` arm carries no direct member and contributes nothing).
+/// First-seen dedup by name, matching the production header index's member
+/// union. This is a PRODUCER-time transform over the producing value (the body
+/// this same lowering just built) — consumers read the stored facts, never
+/// re-walk a body.
+fn member_header_facts_from_body(body: &TypeExpr) -> Arc<[MemberHeaderFact]> {
+    fn collect(body: &TypeExpr, out: &mut Vec<MemberHeaderFact>) {
+        match body {
+            TypeExpr::Object(object) => {
+                for member in &object.properties {
+                    let fact = match member {
+                        ObjectMember::Property(prop) => MemberHeaderFact {
+                            name: prop.name.clone(),
+                            is_method: false,
+                            optional: prop.optional,
+                            readonly: prop.readonly,
+                            visibility: prop.visibility,
+                        },
+                        ObjectMember::Method(method) => MemberHeaderFact {
+                            name: method.name.clone(),
+                            is_method: true,
+                            optional: method.optional,
+                            readonly: false,
+                            visibility: method.visibility,
+                        },
+                        // Call / construct / index signatures are nameless —
+                        // they are not member HEADERS.
+                        _ => continue,
+                    };
+                    if !out.iter().any(|existing| existing.name == fact.name) {
+                        out.push(fact);
+                    }
+                }
+            }
+            TypeExpr::Intersection(parts) => {
+                for part in parts.iter() {
+                    collect(part, out);
+                }
+            }
+            TypeExpr::Parenthesized(inner) => collect(inner, out),
+            _ => {}
+        }
+    }
+
+    let mut out = Vec::new();
+    collect(body, &mut out);
+    out.into()
 }
 
-fn build_named_type_alias_decl(
+fn lower_named_type_alias_parts(
     decl: &TSTypeAliasDeclaration<'_>,
     source: &str,
     name: String,
-) -> TypeDeclInfo {
+) -> LoweredTypeDeclParts {
     let type_parameters = decl
         .type_parameters
         .as_ref()
@@ -312,25 +1051,19 @@ fn build_named_type_alias_decl(
         .unwrap_or_default();
     let body = lower_ts_type(&decl.type_annotation, source);
 
-    TypeDeclInfo {
+    LoweredTypeDeclParts {
         name,
-        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters,
         body,
     }
 }
 
-fn extract_interface(decl: &TSInterfaceDeclaration<'_>, source: &str, env: &mut EvalEnv) {
-    let name = decl.id.name.to_string();
-    env.add_type(build_named_interface_decl(decl, source, name));
-}
-
-fn build_named_interface_decl(
+fn lower_named_interface_parts(
     decl: &TSInterfaceDeclaration<'_>,
     source: &str,
     name: String,
-) -> TypeDeclInfo {
+) -> LoweredTypeDeclParts {
     let type_parameters = decl
         .type_parameters
         .as_ref()
@@ -372,19 +1105,18 @@ fn build_named_interface_decl(
         body = TypeExpr::intersection(parts);
     }
 
-    TypeDeclInfo {
+    LoweredTypeDeclParts {
         name,
-        declaration_id: 0,
         kind: TypeDeclKind::Interface,
         type_parameters,
         body,
     }
 }
 
-fn extract_module_declaration(
+fn collect_module_declaration(
     decl: &TSModuleDeclaration<'_>,
     source: &str,
-    env: &mut EvalEnv,
+    out: &mut LoweredStatementParts,
     prefix: Option<&str>,
 ) {
     // `declare module "<specifier>" { ... }` — an AMBIENT MODULE AUGMENTATION,
@@ -396,10 +1128,10 @@ fn extract_module_declaration(
     // name only ever wraps a single `TSModuleBlock`, never a nested module.)
     if let TSModuleDeclarationName::StringLiteral(spec) = &decl.id {
         if let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = decl.body.as_ref() {
-            extract_augmentation_block(
+            collect_augmentation_block(
                 block,
                 source,
-                env,
+                out,
                 AugmentationScopeKind::Module(spec.value.to_string()),
             );
         }
@@ -415,11 +1147,11 @@ fn extract_module_declaration(
 
     match body {
         TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
-            extract_module_declaration(inner, source, env, Some(module_name.as_str()));
+            collect_module_declaration(inner, source, out, Some(module_name.as_str()));
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
             for stmt in &block.body {
-                extract_namespaced_statement(stmt, source, env, module_name.as_str());
+                collect_namespaced_statement(stmt, source, out, module_name.as_str());
             }
         }
     }
@@ -427,46 +1159,45 @@ fn extract_module_declaration(
 
 /// Retain the inner declarations of an ambient augmentation block
 /// (`declare module "X" { ... }` or `declare global { ... }`) into the scoped
-/// augmentation inventory under `scope`. Inner interfaces/type-aliases keep
+/// augmentation parts under `scope`. Inner interfaces/type-aliases keep
 /// their UNQUALIFIED names (an augmenter contributes `interface Config`, not
 /// `external-spec.Config`) and never enter file-scope `type_symbols`.
-fn extract_augmentation_block(
+fn collect_augmentation_block(
     block: &TSModuleBlock<'_>,
     source: &str,
-    env: &mut EvalEnv,
+    out: &mut LoweredStatementParts,
     scope: AugmentationScopeKind,
 ) {
     for stmt in &block.body {
         match stmt {
             Statement::TSInterfaceDeclaration(iface) => {
                 let name = iface.id.name.to_string();
-                env.add_augmentation_type(
+                out.aug_type_decls.push((
                     scope.clone(),
-                    build_named_interface_decl(iface, source, name),
-                );
+                    lower_named_interface_parts(iface, source, name),
+                ));
             }
             Statement::TSTypeAliasDeclaration(alias) => {
                 let name = alias.id.name.to_string();
-                env.add_augmentation_type(
+                out.aug_type_decls.push((
                     scope.clone(),
-                    build_named_type_alias_decl(alias, source, name),
-                );
+                    lower_named_type_alias_parts(alias, source, name),
+                ));
             }
             Statement::ExportNamedDeclaration(export) => {
                 if let Some(decl) = export.declaration.as_ref() {
-                    extract_augmentation_declaration(decl, source, env, &scope);
+                    collect_augmentation_declaration(decl, source, out, &scope);
                 }
             }
             // Value-space declarations (`const`/`let`/`var`, `function`,
             // `class`) augment the target module's VALUE surface. Reuse the
-            // file-scope extractors into a throwaway env so the full retained
-            // body is built exactly as for a top-level declaration, then move
-            // the produced value declarations into the augmentation value
-            // scope (never file-scope `value_symbols`).
+            // file-scope lowering so the full retained parts are built exactly
+            // as for a top-level declaration, routed into the augmentation
+            // value scope (never file-scope `value_symbols`).
             Statement::VariableDeclaration(_)
             | Statement::FunctionDeclaration(_)
             | Statement::ClassDeclaration(_) => {
-                retain_value_statement_into_augmentation(stmt, source, env, &scope);
+                collect_value_statement_into_augmentation(stmt, source, out, &scope);
             }
             // A namespace nested inside an ambient augmentation block
             // (`declare global { namespace JSX { ... } }` /
@@ -478,7 +1209,7 @@ fn extract_augmentation_block(
             // ... } }` block folds into the same ordered group and the existing
             // `MergedDecl` peer-merge stitch unions the surfaces.
             Statement::TSModuleDeclaration(module) => {
-                extract_augmentation_module_declaration(module, source, env, &scope, None);
+                collect_augmentation_module_declaration(module, source, out, &scope, None);
             }
             _ => {}
         }
@@ -486,38 +1217,38 @@ fn extract_augmentation_block(
 }
 
 /// Route a `Declaration` inside an ambient augmentation block to the correct
-/// augmentation inventory: interfaces / type-aliases to the type scope, value
-/// declarations to the value scope (via a throwaway env).
-fn extract_augmentation_declaration(
+/// augmentation parts: interfaces / type-aliases to the type scope, value
+/// declarations to the value scope.
+fn collect_augmentation_declaration(
     decl: &Declaration<'_>,
     source: &str,
-    env: &mut EvalEnv,
+    out: &mut LoweredStatementParts,
     scope: &AugmentationScopeKind,
 ) {
     match decl {
         Declaration::TSInterfaceDeclaration(iface) => {
             let name = iface.id.name.to_string();
-            env.add_augmentation_type(
+            out.aug_type_decls.push((
                 scope.clone(),
-                build_named_interface_decl(iface, source, name),
-            );
+                lower_named_interface_parts(iface, source, name),
+            ));
         }
         Declaration::TSTypeAliasDeclaration(alias) => {
             let name = alias.id.name.to_string();
-            env.add_augmentation_type(
+            out.aug_type_decls.push((
                 scope.clone(),
-                build_named_type_alias_decl(alias, source, name),
-            );
+                lower_named_type_alias_parts(alias, source, name),
+            ));
         }
         Declaration::VariableDeclaration(_)
         | Declaration::FunctionDeclaration(_)
         | Declaration::ClassDeclaration(_) => {
-            let mut tmp = EvalEnv::new();
-            extract_from_declaration(decl, source, &mut tmp);
-            move_value_symbols_into_augmentation(tmp, env, scope);
+            let mut inner = LoweredStatementParts::default();
+            collect_from_declaration(decl, source, &mut inner);
+            move_value_parts_into_augmentation(inner, out, scope);
         }
         Declaration::TSModuleDeclaration(module) => {
-            extract_augmentation_module_declaration(module, source, env, scope, None);
+            collect_augmentation_module_declaration(module, source, out, scope, None);
         }
         _ => {}
     }
@@ -526,7 +1257,7 @@ fn extract_augmentation_declaration(
 /// Retain a `namespace N { ... }` nested inside an ambient augmentation block
 /// (`declare global { namespace JSX { ... } }` /
 /// `declare module "X" { namespace N { ... } }`) into the scoped augmentation
-/// inventory. Inner interfaces / type-aliases register under their QUALIFIED
+/// parts. Inner interfaces / type-aliases register under their QUALIFIED
 /// `Ns.Member` name (`JSX.IntrinsicElements`) — a consumer references the member
 /// as `JSX.IntrinsicElements`, never a bare `IntrinsicElements` — and never
 /// enter file-scope `type_symbols`. Because [`EvalEnv::add_augmentation_type`]
@@ -535,13 +1266,13 @@ fn extract_augmentation_declaration(
 /// `TypeDeclGroup`, so the existing `MergedDecl` peer-merge stitch unions the
 /// surfaces.
 ///
-/// This is the augmentation-scope mirror of [`extract_module_declaration`]'s
+/// This is the augmentation-scope mirror of [`collect_module_declaration`]'s
 /// identifier-name branch (which routes a file-scope namespace's members to
-/// `env.add_type` under the same qualified names).
-fn extract_augmentation_module_declaration(
+/// the file-scope parts under the same qualified names).
+fn collect_augmentation_module_declaration(
     decl: &TSModuleDeclaration<'_>,
     source: &str,
-    env: &mut EvalEnv,
+    out: &mut LoweredStatementParts,
     scope: &AugmentationScopeKind,
     prefix: Option<&str>,
 ) {
@@ -556,20 +1287,20 @@ fn extract_augmentation_module_declaration(
     };
     match body {
         TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
-            extract_augmentation_module_declaration(
+            collect_augmentation_module_declaration(
                 inner,
                 source,
-                env,
+                out,
                 scope,
                 Some(namespace.as_str()),
             );
         }
         TSModuleDeclarationBody::TSModuleBlock(block) => {
             for stmt in &block.body {
-                extract_namespaced_statement_into_augmentation(
+                collect_namespaced_statement_into_augmentation(
                     stmt,
                     source,
-                    env,
+                    out,
                     namespace.as_str(),
                     scope,
                 );
@@ -578,49 +1309,49 @@ fn extract_augmentation_module_declaration(
     }
 }
 
-/// Augmentation-scope mirror of [`extract_namespaced_statement`]: register a
+/// Augmentation-scope mirror of [`collect_namespaced_statement`]: register a
 /// namespace member nested inside an ambient augmentation block under its
-/// qualified `Ns.Member` name in the augmentation inventory (never file scope).
-fn extract_namespaced_statement_into_augmentation(
+/// qualified `Ns.Member` name in the augmentation parts (never file scope).
+fn collect_namespaced_statement_into_augmentation(
     stmt: &Statement<'_>,
     source: &str,
-    env: &mut EvalEnv,
+    out: &mut LoweredStatementParts,
     namespace: &str,
     scope: &AugmentationScopeKind,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
-            env.add_augmentation_type(
+            out.aug_type_decls.push((
                 scope.clone(),
-                build_named_type_alias_decl(
+                lower_named_type_alias_parts(
                     alias,
                     source,
                     qualified_name(namespace, &alias.id.name),
                 ),
-            );
+            ));
         }
         Statement::TSInterfaceDeclaration(iface) => {
-            env.add_augmentation_type(
+            out.aug_type_decls.push((
                 scope.clone(),
-                build_named_interface_decl(
+                lower_named_interface_parts(
                     iface,
                     source,
                     qualified_name(namespace, &iface.id.name),
                 ),
-            );
+            ));
         }
         Statement::TSModuleDeclaration(module) => {
-            extract_augmentation_module_declaration(module, source, env, scope, Some(namespace));
+            collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
         }
         // Namespace VALUE indexing is EXPORT-ONLY (mirrors
-        // `extract_namespaced_statement`): a non-exported `const hidden = …` is
+        // `collect_namespaced_statement`): a non-exported `const hidden = …` is
         // private to the namespace body, so a DIRECT `VariableDeclaration` is
         // intentionally not indexed. Only the exported path registers a
         // qualified value member such as `JSX.VERSION`.
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
-                extract_namespaced_declaration_into_augmentation(
-                    decl, source, env, namespace, scope,
+                collect_namespaced_declaration_into_augmentation(
+                    decl, source, out, namespace, scope,
                 );
             }
         }
@@ -628,169 +1359,172 @@ fn extract_namespaced_statement_into_augmentation(
     }
 }
 
-/// Augmentation-scope mirror of [`extract_namespaced_declaration`]: an exported
+/// Augmentation-scope mirror of [`collect_namespaced_declaration`]: an exported
 /// namespace member nested in an ambient augmentation block registers under its
 /// qualified `Ns.Member` name (types into the type scope, values into the value
 /// scope).
-fn extract_namespaced_declaration_into_augmentation(
+fn collect_namespaced_declaration_into_augmentation(
     decl: &Declaration<'_>,
     source: &str,
-    env: &mut EvalEnv,
+    out: &mut LoweredStatementParts,
     namespace: &str,
     scope: &AugmentationScopeKind,
 ) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
-            env.add_augmentation_type(
+            out.aug_type_decls.push((
                 scope.clone(),
-                build_named_type_alias_decl(
+                lower_named_type_alias_parts(
                     alias,
                     source,
                     qualified_name(namespace, &alias.id.name),
                 ),
-            );
+            ));
         }
         Declaration::TSInterfaceDeclaration(iface) => {
-            env.add_augmentation_type(
+            out.aug_type_decls.push((
                 scope.clone(),
-                build_named_interface_decl(
+                lower_named_interface_parts(
                     iface,
                     source,
                     qualified_name(namespace, &iface.id.name),
                 ),
-            );
+            ));
         }
         Declaration::TSModuleDeclaration(module) => {
-            extract_augmentation_module_declaration(module, source, env, scope, Some(namespace));
+            collect_augmentation_module_declaration(module, source, out, scope, Some(namespace));
         }
         Declaration::VariableDeclaration(var_decl) => {
             // A namespaced value member registers under its qualified `NS.M`
-            // name into the augmentation VALUE scope (built via a throwaway env
-            // exactly as the file-scope namespaced-value path does).
-            let mut tmp = EvalEnv::new();
+            // name into the augmentation VALUE scope (lowered exactly as the
+            // file-scope namespaced-value path does).
             for declarator in &var_decl.declarations {
-                extract_variable(declarator, var_decl.kind, source, &mut tmp, Some(namespace));
+                if let Some(parts) =
+                    lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
+                {
+                    out.aug_value_decls.push((scope.clone(), parts));
+                }
             }
-            move_value_symbols_into_augmentation(tmp, env, scope);
         }
         _ => {}
     }
 }
 
-/// Reuse the file-scope extractors (via a throwaway env) to build the full
-/// retained value declaration(s) for a value-space statement, then move them
-/// into the augmentation value scope.
-fn retain_value_statement_into_augmentation(
+/// Reuse the file-scope lowering to build the full retained value parts for a
+/// value-space statement, then route them into the augmentation value scope.
+fn collect_value_statement_into_augmentation(
     stmt: &Statement<'_>,
     source: &str,
-    env: &mut EvalEnv,
+    out: &mut LoweredStatementParts,
     scope: &AugmentationScopeKind,
 ) {
-    let mut tmp = EvalEnv::new();
+    let mut inner = LoweredStatementParts::default();
     match stmt {
-        Statement::ClassDeclaration(decl) => extract_class(decl, source, &mut tmp),
-        Statement::FunctionDeclaration(func) => extract_function(func, source, &mut tmp),
+        Statement::ClassDeclaration(decl) => collect_class(decl, source, &mut inner),
+        Statement::FunctionDeclaration(func) => {
+            if let Some(parts) = lower_function_parts(func, source) {
+                inner.value_decls.push(parts);
+            }
+        }
         Statement::VariableDeclaration(var_decl) => {
             for decl in &var_decl.declarations {
-                extract_variable(decl, var_decl.kind, source, &mut tmp, None);
+                if let Some(parts) = lower_variable_parts(decl, var_decl.kind, source, None) {
+                    inner.value_decls.push(parts);
+                }
             }
         }
         _ => {}
     }
-    move_value_symbols_into_augmentation(tmp, env, scope);
+    move_value_parts_into_augmentation(inner, out, scope);
 }
 
-/// Drain the value declarations a throwaway env collected and append them to
-/// the augmentation value scope (the type side a `class` also produces is
-/// intentionally dropped — an ambient `declare module` class augments the
-/// value surface; its instance type is not stitched cross-file today).
-fn move_value_symbols_into_augmentation(
-    tmp: EvalEnv,
-    env: &mut EvalEnv,
+/// Route the VALUE parts an inner collection produced into the augmentation
+/// value scope (the type side a `class` also produces is intentionally
+/// dropped — an ambient `declare module` class augments the value surface; its
+/// instance type is not stitched cross-file today).
+fn move_value_parts_into_augmentation(
+    inner: LoweredStatementParts,
+    out: &mut LoweredStatementParts,
     scope: &AugmentationScopeKind,
 ) {
-    for (_name, group) in tmp.value_symbols {
-        for decl in group.contributors {
-            env.add_augmentation_value(scope.clone(), decl);
-        }
+    for parts in inner.value_decls {
+        out.aug_value_decls.push((scope.clone(), parts));
     }
 }
 
-/// Retain a `declare global { ... }` block's inner declarations under the
-/// global augmentation scope.
-fn extract_global_declaration(decl: &TSGlobalDeclaration<'_>, source: &str, env: &mut EvalEnv) {
-    extract_augmentation_block(&decl.body, source, env, AugmentationScopeKind::Global);
-}
-
-fn extract_namespaced_statement(
+fn collect_namespaced_statement(
     stmt: &Statement<'_>,
     source: &str,
-    env: &mut EvalEnv,
+    out: &mut LoweredStatementParts,
     namespace: &str,
 ) {
     match stmt {
         Statement::TSTypeAliasDeclaration(alias) => {
-            env.add_type(build_named_type_alias_decl(
+            out.type_decls.push(lower_named_type_alias_parts(
                 alias,
                 source,
                 qualified_name(namespace, &alias.id.name),
             ));
         }
         Statement::TSInterfaceDeclaration(iface) => {
-            env.add_type(build_named_interface_decl(
+            out.type_decls.push(lower_named_interface_parts(
                 iface,
                 source,
                 qualified_name(namespace, &iface.id.name),
             ));
         }
         Statement::TSModuleDeclaration(module) => {
-            extract_module_declaration(module, source, env, Some(namespace));
+            collect_module_declaration(module, source, out, Some(namespace));
         }
         // Namespace value indexing is EXPORT-ONLY: a non-exported
         // `namespace N { const hidden = … }` is private to the namespace body
         // (TS: `N.hidden` does not exist on `typeof N`), so a DIRECT
         // `Statement::VariableDeclaration` is intentionally NOT indexed under
         // its qualified name. Only the exported path below
-        // (`export const VERSION = …` → `extract_namespaced_declaration`)
+        // (`export const VERSION = …` → `collect_namespaced_declaration`)
         // registers a qualified value member such as `N.VERSION`.
         Statement::ExportNamedDeclaration(export) => {
             if let Some(ref decl) = export.declaration {
-                extract_namespaced_declaration(decl, source, env, namespace);
+                collect_namespaced_declaration(decl, source, out, namespace);
             }
         }
         _ => {}
     }
 }
 
-fn extract_namespaced_declaration(
+fn collect_namespaced_declaration(
     decl: &Declaration<'_>,
     source: &str,
-    env: &mut EvalEnv,
+    out: &mut LoweredStatementParts,
     namespace: &str,
 ) {
     match decl {
         Declaration::TSTypeAliasDeclaration(alias) => {
-            env.add_type(build_named_type_alias_decl(
+            out.type_decls.push(lower_named_type_alias_parts(
                 alias,
                 source,
                 qualified_name(namespace, &alias.id.name),
             ));
         }
         Declaration::TSInterfaceDeclaration(iface) => {
-            env.add_type(build_named_interface_decl(
+            out.type_decls.push(lower_named_interface_parts(
                 iface,
                 source,
                 qualified_name(namespace, &iface.id.name),
             ));
         }
         Declaration::TSModuleDeclaration(module) => {
-            extract_module_declaration(module, source, env, Some(namespace));
+            collect_module_declaration(module, source, out, Some(namespace));
         }
         // A namespaced value member (`namespace NS { export const M = … }`)
         // registers under its QUALIFIED name `NS.M` so `typeof NS.M` binds.
         Declaration::VariableDeclaration(var_decl) => {
             for declarator in &var_decl.declarations {
-                extract_variable(declarator, var_decl.kind, source, env, Some(namespace));
+                if let Some(parts) =
+                    lower_variable_parts(declarator, var_decl.kind, source, Some(namespace))
+                {
+                    out.value_decls.push(parts);
+                }
             }
         }
         _ => {}
@@ -824,9 +1558,11 @@ fn class_or_function_default_name(
 /// `export default interface Foo`) under the `default` export name. The default
 /// export route resolves to `(canonical, "default")`, so the prepared-decl
 /// lookup must find the declaration body there as well as under its declared
-/// name. The cloned [`TypeDeclInfo`] carries the SAME body / params (only the
-/// `name` key changes to `default`); it is a no-op when the declared symbol was
-/// not registered (e.g. an empty class body produced no type symbol).
+/// name. The cloned [`TypeDeclInfo`] carries the SAME body slot / params (only
+/// the `name` key changes to `default` — the body slot keeps the DECLARED
+/// symbol anchor, which is where the authored body genuinely lives); it is a
+/// no-op when the declared symbol was not registered (e.g. an empty class body
+/// produced no type symbol).
 fn alias_default_export_type_symbol(env: &mut EvalEnv, declared_name: &str) {
     if env.type_symbols.contains_key("default") {
         return;
@@ -841,6 +1577,7 @@ fn alias_default_export_type_symbol(env: &mut EvalEnv, declared_name: &str) {
         kind: decl.kind,
         type_parameters: decl.type_parameters.clone(),
         body: decl.body.clone(),
+        direct_member_headers: decl.direct_member_headers.clone(),
     };
     env.add_type(aliased);
 }
@@ -858,7 +1595,7 @@ fn visibility_from_ts_accessibility(acc: Option<TSAccessibility>) -> MemberVisib
     }
 }
 
-fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
+fn collect_class(decl: &Class<'_>, source: &str, out: &mut LoweredStatementParts) {
     let name = match &decl.id {
         Some(id) => id.name.to_string(),
         None => return,
@@ -1045,27 +1782,38 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
         _ => own_body,
     };
 
-    env.add_type(TypeDeclInfo {
+    out.type_decls.push(LoweredTypeDeclParts {
         name: name.clone(),
-        declaration_id: 0,
         kind: TypeDeclKind::Class,
         type_parameters,
         body,
     });
 
     // Also register as a value (for typeof ClassName / InstanceType)
-    let mut constructor_signature = ctor_sig.clone().unwrap_or_else(|| FunctionSignature {
+    let ctor_declared = ctor_sig.is_some();
+    let mut constructor_signature = ctor_sig.unwrap_or_else(|| LoweredSignatureParts {
         parameters: Vec::new(),
         return_type: Some(TypeExpr::named(name.clone())),
         type_parameters: Vec::new(),
         has_implementation_body: true,
+        has_authored_return: false,
+        origin: LoweredSignatureOrigin::Synthetic,
     });
     // A DECLARED constructor carries no return annotation — its construct
     // "return" IS the class instance. Backfill the instance reference so
     // `InstanceType<typeof C>` reads the instance type from the construct
-    // signature exactly as it does from the synthesized default.
+    // signature exactly as it does from the synthesized default. (The
+    // backfilled reference is transient inference, never an authored return
+    // position — `has_authored_return` stays false for constructors.)
     if constructor_signature.return_type.is_none() {
         constructor_signature.return_type = Some(TypeExpr::named(name.clone()));
+    }
+    // The declared constructor's authored function node is the construct
+    // signature at shape ordinal 0 of the produced `typeof C` constructor
+    // shape (a class with no declared constructor keeps the honest Synthetic
+    // origin instead).
+    if ctor_declared {
+        constructor_signature.origin = LoweredSignatureOrigin::ShapeMember { ordinal: 0 };
     }
     // The constructor shape is the `typeof C` constructor-object model: the
     // construct signature first, then the class's OWN static members (with
@@ -1084,14 +1832,15 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
         properties: constructor_properties,
     };
 
-    env.add_value(ValueDeclInfo {
+    out.value_decls.push(LoweredValueDeclParts {
         name,
-        declaration_id: 0,
         kind: ValueDeclKind::Class,
         type_annotation: None,
+        annotation_is_authored: false,
         signatures: vec![constructor_signature],
         object_shape: Some(constructor_shape),
         enum_members: None,
+        enum_member_names: None,
     });
 }
 
@@ -1116,29 +1865,28 @@ fn extract_class(decl: &Class<'_>, source: &str, env: &mut EvalEnv) {
 ///   other unclassifiable initializer ⇒ `unknown` — no narrower domain is
 ///   provable without constant-folding, which the literal-enum reducer
 ///   deliberately does not do.
-fn degraded_member_domain(initializer: Option<&Expression<'_>>) -> TypeExpr {
-    let number = || TypeExpr::Primitive(PrimitiveName::Number);
-    let string = || TypeExpr::Primitive(PrimitiveName::String);
-    let unknown = || TypeExpr::Primitive(PrimitiveName::Unknown);
+fn degraded_member_domain(initializer: Option<&Expression<'_>>) -> EnumPrimitiveDomain {
     let Some(expr) = initializer else {
         // A bare member is only deferred when the running auto-increment value
         // is unknown; the auto-increment series is always NUMERIC.
-        return number();
+        return EnumPrimitiveDomain::Number;
     };
     match expr {
         // A plain string or template literal (NO tag) is a string-valued
         // expression. A TAGGED template (`tag`...``) is deliberately EXCLUDED:
         // it is a call to `tag`, which can return any type, so `string` is not a
-        // sound bound — it falls to the `_ => unknown()` arm below.
-        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => string(),
-        Expression::NumericLiteral(_) => number(),
+        // sound bound — it falls to the `_ => Unknown` arm below.
+        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => {
+            EnumPrimitiveDomain::String
+        }
+        Expression::NumericLiteral(_) => EnumPrimitiveDomain::Number,
         Expression::UnaryExpression(unary) => match unary.operator {
             UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus | UnaryOperator::BitwiseNot => {
-                number()
+                EnumPrimitiveDomain::Number
             }
             // `!x` (boolean), `typeof`/`void`/`delete` — not a sound numeric or
             // string enum value; no narrower domain than `unknown` is provable.
-            _ => unknown(),
+            _ => EnumPrimitiveDomain::Unknown,
         },
         Expression::BinaryExpression(binary) => match binary.operator {
             BinaryOperator::ShiftLeft
@@ -1151,13 +1899,13 @@ fn degraded_member_domain(initializer: Option<&Expression<'_>>) -> TypeExpr {
             | BinaryOperator::Multiplication
             | BinaryOperator::Division
             | BinaryOperator::Remainder
-            | BinaryOperator::Exponential => number(),
+            | BinaryOperator::Exponential => EnumPrimitiveDomain::Number,
             // `+` is numeric add OR string concat — the soundest bound is the
             // union of both.
-            BinaryOperator::Addition => TypeExpr::union(vec![number(), string()]),
+            BinaryOperator::Addition => EnumPrimitiveDomain::NumberOrString,
             // Comparison / logical / `in` / `instanceof` produce booleans —
             // never a sound enum value.
-            _ => unknown(),
+            _ => EnumPrimitiveDomain::Unknown,
         },
         // A parenthesized wrapper carries no domain of its own — classify the
         // inner expression (`A = (1 << 2)` is still `number`).
@@ -1165,7 +1913,7 @@ fn degraded_member_domain(initializer: Option<&Expression<'_>>) -> TypeExpr {
             degraded_member_domain(Some(&paren.expression))
         }
         // Member-reference, call, identifier, anything else — unprovable here.
-        _ => unknown(),
+        _ => EnumPrimitiveDomain::Unknown,
     }
 }
 
@@ -1222,16 +1970,16 @@ fn degraded_member_domain(initializer: Option<&Expression<'_>>) -> TypeExpr {
 /// `number`; `C = 5`, `D = 6` fold. Members are folded in SOURCE order; the
 /// enum's full member set across same-name merged declarations is unioned by
 /// the `merged_enum_*` accessors.
-fn extract_enum(decl: &TSEnumDeclaration<'_>, env: &mut EvalEnv) {
+fn collect_enum(decl: &TSEnumDeclaration<'_>, out: &mut LoweredStatementParts) {
     let name = decl.id.name.to_string();
 
     // The ordered member inventory: the NAME of EVERY statically-named member
-    // plus its [`EnumMemberValue`] — `Folded` when statically foldable,
-    // `Deferred` (carrying the degraded sound domain) otherwise. See the
-    // `ValueDeclInfo::enum_members` field doc for the rail contract (the NAME
-    // set is the presence-rail authority; the `Folded` subset is the foldable
-    // rail; every member's projected type drives the type surfaces). The NAME
-    // set must equal what `index_enum` records.
+    // plus its [`EnumMemberValue`] — `Folded` (a literal [`EnumScalar`]) when
+    // statically foldable, `Deferred` (carrying the degraded sound domain)
+    // otherwise. See the `ValueDeclInfo::enum_members` field doc for the rail
+    // contract (the NAME set is the presence-rail authority; the `Folded`
+    // subset is the foldable rail; every member's projected scalar drives the
+    // type surfaces). The NAME set must equal what `index_enum` records.
     let mut members: Vec<(String, EnumMemberValue)> = Vec::new();
     // The running auto-increment value, tracked as KNOWN (`Some`) / UNKNOWN
     // (`None`). A bare member's value is `previous + 1`, so the moment a
@@ -1257,11 +2005,11 @@ fn extract_enum(decl: &TSEnumDeclaration<'_>, env: &mut EvalEnv) {
             // follows has a deferred value: record this value, mark UNKNOWN.
             Some(Expression::StringLiteral(s)) => {
                 next_auto = None;
-                EnumMemberValue::Folded(TypeExpr::string_literal(s.value.as_str()))
+                EnumMemberValue::Folded(EnumScalar::String(s.value.to_string()))
             }
             Some(Expression::NumericLiteral(n)) => {
                 next_auto = Some(n.value + 1.0);
-                EnumMemberValue::Folded(TypeExpr::number_literal(n.value))
+                EnumMemberValue::Folded(EnumScalar::Number(format_enum_number(n.value)))
             }
             // TS represents a signed numeric initializer (`A = -1`, `A = +2`)
             // as a unary expression over a numeric literal. Fold it to the
@@ -1270,11 +2018,11 @@ fn extract_enum(decl: &TSEnumDeclaration<'_>, env: &mut EvalEnv) {
                 match (unary.operator, &unary.argument) {
                     (UnaryOperator::UnaryNegation, Expression::NumericLiteral(n)) => {
                         next_auto = Some(-n.value + 1.0);
-                        EnumMemberValue::Folded(TypeExpr::number_literal(-n.value))
+                        EnumMemberValue::Folded(EnumScalar::Number(format_enum_number(-n.value)))
                     }
                     (UnaryOperator::UnaryPlus, Expression::NumericLiteral(n)) => {
                         next_auto = Some(n.value + 1.0);
-                        EnumMemberValue::Folded(TypeExpr::number_literal(n.value))
+                        EnumMemberValue::Folded(EnumScalar::Number(format_enum_number(n.value)))
                     }
                     // A non-`+`/`-` unary (`~A`, `!x`) or a unary over a
                     // non-literal argument is a computed enum expression — out
@@ -1294,7 +2042,7 @@ fn extract_enum(decl: &TSEnumDeclaration<'_>, env: &mut EvalEnv) {
                 // KNOWN running value: this bare member is `previous + 1`.
                 Some(assigned) => {
                     next_auto = Some(assigned + 1.0);
-                    EnumMemberValue::Folded(TypeExpr::number_literal(assigned))
+                    EnumMemberValue::Folded(EnumScalar::Number(format_enum_number(assigned)))
                 }
                 // UNKNOWN running value (a preceding member was unfoldable): a
                 // bare member's value depends on the previous member, which is
@@ -1326,40 +2074,52 @@ fn extract_enum(decl: &TSEnumDeclaration<'_>, env: &mut EvalEnv) {
     // Value-space: the enum binding carries the ordered member inventory —
     // each member NAME with an `EnumMemberValue` (a folded value literal, or a
     // degraded sound primitive for a value that is not statically foldable).
-    env.add_value(ValueDeclInfo {
+    // The member-NAME fact is minted from the SAME walk (one derivation
+    // point), so the presence rail and the value inventory cannot diverge.
+    let enum_member_names = EnumMemberNamesFact {
+        names: members
+            .iter()
+            .map(|(member_name, _)| member_name.clone())
+            .collect(),
+    };
+    out.value_decls.push(LoweredValueDeclParts {
         name: name.clone(),
-        declaration_id: 0,
         kind: ValueDeclKind::Enum,
         type_annotation: None,
+        annotation_is_authored: false,
         signatures: Vec::new(),
         object_shape: None,
         enum_members: Some(members),
+        enum_member_names: Some(enum_member_names),
     });
 
-    // Type-space: the enum used AS A TYPE is the union of its members' projected
-    // types (folded literals plus degraded primitive arms for unfoldable
-    // members) — but that union is DERIVED from the MERGED value members by
-    // `ValueDeclGroup::enum_type_union` (the single source of truth), because a
-    // per-declaration walk here cannot see same-name merged contributors (an
-    // eager union would be last-wins and drop earlier declarations' members).
-    // So this registers only the dual-space TYPE binding (kind `Alias` — there
-    // is no dedicated enum `TypeDeclKind`, and a union carries no nominal
-    // identity Verter models) with a NON-SERVED placeholder body; the
-    // lazily-served declaration-body memo overrides it with the derived union
-    // on demand.
-    env.add_type(TypeDeclInfo {
+    // Type-space: the enum used AS A TYPE is the union of its members'
+    // projected scalars (folded literals plus degraded primitive arms for
+    // unfoldable members) — but that union is DERIVED from the MERGED value
+    // members by `ValueDeclGroup::enum_type_union` (the single source of
+    // truth), because a per-declaration walk here cannot see same-name merged
+    // contributors (an eager union would be last-wins and drop earlier
+    // declarations' members). So this registers only the dual-space TYPE
+    // binding (kind `Alias` — there is no dedicated enum `TypeDeclKind`, and a
+    // union carries no nominal identity Verter models) whose body slot
+    // addresses the enum declaration itself; the demand-driven body service
+    // serves the derived union. The transient `never` body below exists only
+    // to derive the (empty) member-header inventory — the enum TYPE is a
+    // member union, never an object surface, so it has no direct member
+    // headers (member NAMES live on the value decl's `enum_member_names`
+    // fact).
+    out.type_decls.push(LoweredTypeDeclParts {
         name,
-        declaration_id: 0,
         kind: TypeDeclKind::Alias,
         type_parameters: Vec::new(),
         body: TypeExpr::Primitive(PrimitiveName::Never),
     });
 }
 
-fn extract_function(func: &Function<'_>, source: &str, env: &mut EvalEnv) {
+fn lower_function_parts(func: &Function<'_>, source: &str) -> Option<LoweredValueDeclParts> {
     let (name, name_offset) = match &func.id {
         Some(id) => (id.name.to_string(), id.span.start),
-        None => return,
+        None => return None,
     };
 
     let mut sig = extract_function_signature(func, source);
@@ -1376,15 +2136,16 @@ fn extract_function(func: &Function<'_>, source: &str, env: &mut EvalEnv) {
         ValueDeclKind::Function
     };
 
-    env.add_value(ValueDeclInfo {
+    Some(LoweredValueDeclParts {
         name,
-        declaration_id: 0,
         kind,
         type_annotation: None,
+        annotation_is_authored: false,
         signatures: vec![sig],
         object_shape: None,
         enum_members: None,
-    });
+        enum_member_names: None,
+    })
 }
 
 /// Backfill a function signature's parameter / return types from a leading
@@ -1396,7 +2157,7 @@ fn extract_function(func: &Function<'_>, source: &str, env: &mut EvalEnv) {
 /// [`crate::analysis::jsdoc`], stored on the same `FunctionParam.ty` /
 /// `FunctionSignature.return_type` carrier a TS annotation would populate.
 fn enrich_function_signature_with_jsdoc(
-    sig: &mut FunctionSignature,
+    sig: &mut LoweredSignatureParts,
     source: &str,
     name_offset: u32,
     has_ts_return: bool,
@@ -1412,8 +2173,8 @@ fn enrich_function_signature_with_jsdoc(
 
 /// Backfill a parameter list + return type from a leading JSDoc block, for the
 /// parameters / return that carried NO TS annotation. The shared core both
-/// [`FunctionSignature`] (function declarations / initializer signatures) and
-/// an inferred [`FunctionExpr`] `type_annotation` (an arrow / function-
+/// [`LoweredSignatureParts`] (function declarations / initializer signatures)
+/// and an inferred [`FunctionExpr`] `type_annotation` (an arrow / function-
 /// expression value's inferred type) enrich through.
 ///
 /// `has_ts_return` records whether the function had an explicit TS return
@@ -1485,13 +2246,12 @@ fn enrich_function_expr_with_jsdoc(
     function.return_type = return_type.map(Arc::new);
 }
 
-fn extract_variable(
+fn lower_variable_parts(
     decl: &VariableDeclarator<'_>,
     kind: VariableDeclarationKind,
     source: &str,
-    env: &mut EvalEnv,
     namespace: Option<&str>,
-) {
+) -> Option<LoweredValueDeclParts> {
     let (name, name_offset) = match &decl.id {
         // A namespaced value member is added under its QUALIFIED name
         // (`NS.M`), mirroring the qualified TYPE member registration, so
@@ -1504,7 +2264,7 @@ fn extract_variable(
             };
             (name, id.span.start)
         }
-        _ => return,
+        _ => return None,
     };
 
     let var_kind = match kind {
@@ -1531,6 +2291,9 @@ fn extract_variable(
     if type_annotation.is_none() {
         type_annotation = crate::analysis::jsdoc::extract_jsdoc_type_at_offset(source, name_offset);
     }
+    // Both the TS annotation and the JSDoc `@type` payload are AUTHORED
+    // annotations; anything filled by initializer inference below is not.
+    let annotation_is_authored = type_annotation.is_some();
 
     // Extract function signature from arrow functions or function expressions
     let mut function_signature = None;
@@ -1572,37 +2335,42 @@ fn extract_variable(
         }
     }
 
-    env.add_value(ValueDeclInfo {
+    Some(LoweredValueDeclParts {
         name,
-        declaration_id: 0,
         kind: var_kind,
         type_annotation,
+        annotation_is_authored,
         signatures: function_signature.into_iter().collect(),
         object_shape,
         enum_members: None,
-    });
+        enum_member_names: None,
+    })
 }
 
-fn extract_default_expression(expr: &Expression<'_>, source: &str, env: &mut EvalEnv) {
+fn lower_default_expression_parts(expr: &Expression<'_>, source: &str) -> LoweredValueDeclParts {
     let function_signature = extract_initializer_function_signature(expr, source);
     let object_shape = extract_initializer_object_shape(expr, source, MemberLiteralPolicy::Widen);
     let type_annotation = Some(lower_value_expression(expr, source));
 
-    env.add_value(ValueDeclInfo {
+    LoweredValueDeclParts {
         name: "default".to_string(),
-        declaration_id: 0,
         kind: ValueDeclKind::Const,
         type_annotation,
+        // The default-export expression's type is INFERRED from the exported
+        // value (there is no authored annotation position on an
+        // `export default <expr>`).
+        annotation_is_authored: false,
         signatures: function_signature.into_iter().collect(),
         object_shape,
         enum_members: None,
-    });
+        enum_member_names: None,
+    }
 }
 
 fn extract_initializer_function_signature(
     expr: &Expression<'_>,
     source: &str,
-) -> Option<FunctionSignature> {
+) -> Option<LoweredSignatureParts> {
     match expr {
         Expression::ArrowFunctionExpression(arrow) => Some(extract_arrow_signature(arrow, source)),
         Expression::FunctionExpression(func) => Some(extract_function_signature(func, source)),
@@ -1680,7 +2448,8 @@ fn extract_initializer_object_shape(
 // Extraction helpers
 // ---------------------------------------------------------------------------
 
-fn extract_function_signature(func: &Function<'_>, source: &str) -> FunctionSignature {
+fn extract_function_signature(func: &Function<'_>, source: &str) -> LoweredSignatureParts {
+    let has_authored_return = func.return_type.is_some();
     let parameters = lower_function_params(&func.params, source);
     let return_type = func
         .return_type
@@ -1698,15 +2467,21 @@ fn extract_function_signature(func: &Function<'_>, source: &str) -> FunctionSign
         .map(|tp| lower_type_param_decls(tp, source))
         .unwrap_or_default();
 
-    FunctionSignature {
+    LoweredSignatureParts {
         parameters,
         return_type,
         type_parameters,
         has_implementation_body: func.body.is_some(),
+        has_authored_return,
+        origin: LoweredSignatureOrigin::DeclBody,
     }
 }
 
-fn extract_arrow_signature(arrow: &ArrowFunctionExpression<'_>, source: &str) -> FunctionSignature {
+fn extract_arrow_signature(
+    arrow: &ArrowFunctionExpression<'_>,
+    source: &str,
+) -> LoweredSignatureParts {
+    let has_authored_return = arrow.return_type.is_some();
     let parameters = lower_function_params(&arrow.params, source);
     let return_type = arrow
         .return_type
@@ -1732,11 +2507,13 @@ fn extract_arrow_signature(arrow: &ArrowFunctionExpression<'_>, source: &str) ->
 
     // An arrow function always carries an implementation body (expression or
     // block form).
-    FunctionSignature {
+    LoweredSignatureParts {
         parameters,
         return_type,
         type_parameters,
         has_implementation_body: true,
+        has_authored_return,
+        origin: LoweredSignatureOrigin::DeclBody,
     }
 }
 
@@ -2705,7 +3482,7 @@ pub struct FieldExpansionContext {
 pub fn expand_macro_types_impl_with_expander<F>(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: Option<&str>,
-    binding_entries: &[(String, TypeExpr)],
+    binding_entries: &[String],
     debug_env: Option<&mut EvalEnv>,
     scope: MacroExpansionScope,
     mut expand_field_expr: F,
@@ -2713,7 +3490,7 @@ pub fn expand_macro_types_impl_with_expander<F>(
 where
     F: FnMut(
         FieldExpansionContext,
-        &TypeExpr,
+        Option<&verter_type_expr::locators::MacroPayloadLocator>,
     ) -> crate::analysis::type_expand::ExpansionResult<
         crate::analysis::type_expand::ExpandedNormalizedExpr,
     >,
@@ -2742,8 +3519,8 @@ where
         // AST node and stores the result on `AnalyzedPropField.type_expr`.
         // Consumers read the typed form authoritatively — no string parsing.
         for field in &m.prop_fields {
-            if let Some(ref typed) = field.type_expr {
-                if !typed.is_unknown() {
+            if let Some(ref payload) = field.payload {
+                {
                     let item_started = Instant::now();
                     let stage_log = ExpandStageLog {
                         macro_index,
@@ -2761,7 +3538,7 @@ where
                             std::sync::Arc::from(field.name.as_str()),
                         )]),
                     };
-                    let expanded = expand_field_expr(ctx, typed);
+                    let expanded = expand_field_expr(ctx, Some(payload));
                     log_expand_stage(
                         stage_log,
                         expanded.exactness,
@@ -2769,24 +3546,22 @@ where
                         &expanded.diagnostics,
                         debug_env.as_deref(),
                     );
-                    let shallow_type_expr = field.type_expr.clone();
-                    let shallow_type_expr_scope = field.type_expr_scope.clone();
-                    debug_assert_eq!(
-                        shallow_type_expr.is_some(),
-                        shallow_type_expr_scope.is_some(),
-                        "ExpandedField (prop) shallow_type_expr/shallow_type_expr_scope pairing violated for field `{}`",
-                        field.name
+                    let shallow_source = Some(
+                        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+                            payload.clone(),
+                        ),
                     );
                     result.props.push(ExpandedField {
                         name: field.name.clone(),
-                        r#type: expanded.value.expr,
+                        r#type: verter_type_expr::facts::SourcePosition::Present(
+                            expanded.value.expr,
+                        ),
                         raw_type: field.type_annotation.clone(),
                         optional: field.is_optional,
                         exactness: expanded.exactness,
                         execution_status: expanded.execution_status,
                         diagnostics: expanded.diagnostics,
-                        shallow_type_expr,
-                        shallow_type_expr_scope,
+                        shallow_source,
                         declared_in_macro_type_arg: field.declared_in_macro_type_arg,
                     });
                 }
@@ -2799,8 +3574,8 @@ where
 
         // Expand emit payload types via the analyzer-populated typed form.
         for field in &m.emit_fields {
-            if let Some(ref typed) = field.payload_expr {
-                if !typed.is_unknown() {
+            if let Some(ref payload) = field.payload {
+                {
                     let item_started = Instant::now();
                     let stage_log = ExpandStageLog {
                         macro_index,
@@ -2818,7 +3593,7 @@ where
                             std::sync::Arc::from(field.name.as_str()),
                         )]),
                     };
-                    let expanded = expand_field_expr(ctx, typed);
+                    let expanded = expand_field_expr(ctx, Some(payload));
                     log_expand_stage(
                         stage_log,
                         expanded.exactness,
@@ -2826,24 +3601,22 @@ where
                         &expanded.diagnostics,
                         debug_env.as_deref(),
                     );
-                    let shallow_type_expr = field.payload_expr.clone();
-                    let shallow_type_expr_scope = field.payload_expr_scope.clone();
-                    debug_assert_eq!(
-                        shallow_type_expr.is_some(),
-                        shallow_type_expr_scope.is_some(),
-                        "ExpandedField (emit) shallow_type_expr/shallow_type_expr_scope pairing violated for emit `{}`",
-                        field.name
+                    let shallow_source = Some(
+                        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+                            payload.clone(),
+                        ),
                     );
                     result.emits.push(ExpandedField {
                         name: field.name.clone(),
-                        r#type: expanded.value.expr,
+                        r#type: verter_type_expr::facts::SourcePosition::Present(
+                            expanded.value.expr,
+                        ),
                         raw_type: field.payload_type.clone(),
                         optional: false,
                         exactness: expanded.exactness,
                         execution_status: expanded.execution_status,
                         diagnostics: expanded.diagnostics,
-                        shallow_type_expr,
-                        shallow_type_expr_scope,
+                        shallow_source,
                         // `AnalyzedEmitField` is the upstream type at this
                         // layer. It carries `name`, `payload_type`, and
                         // `payload_expr` — not own-body-vs-heritage
@@ -2860,14 +3633,13 @@ where
         }
 
         // Slot binding expansion is not needed for fallthrough-only meta.
-        // Read the typed form populated by the analyzer producer in
-        // `extract_slot_bindings_from_oxc_type` (analyzer lowers the OXC
-        // `TSType<'_>` AST node into `binding_expr`).
+        // Read the authored payload position emitted by the analyzer producer
+        // in `extract_slot_bindings_from_oxc_type`.
         if scope == MacroExpansionScope::Full {
             for slot in &m.slot_fields {
                 for binding in &slot.bindings {
-                    if let Some(ref typed) = binding.binding_expr {
-                        if !typed.is_unknown() {
+                    if let Some(ref payload) = binding.payload {
+                        {
                             let item_started = Instant::now();
                             let slot_binding_target = format!("{}.{}", slot.name, binding.name);
                             let stage_log = ExpandStageLog {
@@ -2889,7 +3661,7 @@ where
                                     )),
                                 ]),
                             };
-                            let expanded = expand_field_expr(ctx, typed);
+                            let expanded = expand_field_expr(ctx, Some(payload));
                             log_expand_stage(
                                 stage_log,
                                 expanded.exactness,
@@ -2897,24 +3669,22 @@ where
                                 &expanded.diagnostics,
                                 debug_env.as_deref(),
                             );
-                            let shallow_type_expr = binding.binding_expr.clone();
-                            let shallow_type_expr_scope = binding.binding_expr_scope.clone();
-                            debug_assert_eq!(
-                                shallow_type_expr.is_some(),
-                                shallow_type_expr_scope.is_some(),
-                                "ExpandedField (slot binding) shallow_type_expr/shallow_type_expr_scope pairing violated for binding `{}`",
-                                slot_binding_target
+                            let shallow_source = Some(
+                                verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+                                    payload.clone(),
+                                ),
                             );
                             result.slot_bindings.push(ExpandedField {
                                 name: slot_binding_target,
-                                r#type: expanded.value.expr,
+                                r#type: verter_type_expr::facts::SourcePosition::Present(
+                                    expanded.value.expr,
+                                ),
                                 raw_type: binding.type_annotation.clone(),
                                 optional: false,
                                 exactness: expanded.exactness,
                                 execution_status: expanded.execution_status,
                                 diagnostics: expanded.diagnostics,
-                                shallow_type_expr,
-                                shallow_type_expr_scope,
+                                shallow_source,
                                 // SAFETY: slot bindings are positional
                                 // parameters of a slot's function signature
                                 // (not declared members of the macro T's own
@@ -2933,7 +3703,7 @@ where
 
     // Expose/value binding expansion is not needed for fallthrough-only meta.
     if scope == MacroExpansionScope::Full {
-        for (name, type_ann) in binding_entries {
+        for name in binding_entries {
             let item_started = Instant::now();
             let stage_log = ExpandStageLog {
                 macro_index: usize::MAX,
@@ -2944,20 +3714,21 @@ where
                 start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
             };
             log_expand_stage_start(&stage_log);
-            // `defineExpose` binding entries are top-level value
-            // bindings in the script-setup scope — there is no parent
-            // macro shell. The closure recognises an empty
-            // `output_path` as "no projection rewrite available; treat
-            // `parsed` as the resolution target" and falls back to
-            // legacy field-level resolution. `macro_index` carries the
-            // sentinel `usize::MAX` used elsewhere for non-macro-anchored
-            // expose entries (see binding stage label below).
+            // `defineExpose` binding entries are top-level value bindings
+            // in the script-setup scope — there is no parent macro shell and
+            // no authored macro-payload locator (the payload argument is
+            // `None`). `kind: Binding` plus the binding NAME on `output_path`
+            // tell the closure to resolve the top-level value binding by
+            // name. `macro_index` carries the sentinel `usize::MAX` used
+            // elsewhere for non-macro-anchored expose entries.
             let ctx = FieldExpansionContext {
                 kind: FieldKind::Binding,
                 macro_index: usize::MAX,
-                output_path: std::sync::Arc::from(Vec::<PathSegment>::new()),
+                output_path: std::sync::Arc::from(vec![PathSegment::Member(std::sync::Arc::from(
+                    name.as_str(),
+                ))]),
             };
-            let expanded = expand_field_expr(ctx, type_ann);
+            let expanded = expand_field_expr(ctx, None);
             log_expand_stage(
                 stage_log,
                 expanded.exactness,
@@ -2966,28 +3737,17 @@ where
                 debug_env.as_deref(),
             );
             // `defineExpose` binding entries are top-level value bindings
-            // with no analyzer-side shallow typed sidecar. The pairing
-            // invariant holds trivially with both fields `None`.
-            debug_assert_eq!(
-                Option::<TypeExpr>::None.is_some(),
-                Option::<TypeExprScope>::None.is_some(),
-                "ExpandedField (expose binding) shallow_type_expr/shallow_type_expr_scope pairing violated for binding `{}`",
-                name
-            );
-            // `defineExpose` binding entries are top-level value bindings
-            // outside any macro T (no declared/heritage distinction
-            // applies). `declared_in_macro_type_arg = false` is the
-            // structural truth.
+            // outside any macro T (no declared/heritage distinction applies,
+            // and no analyzer-side authored shallow source exists).
             result.bindings.push(ExpandedField {
                 name: name.clone(),
-                r#type: expanded.value.expr,
+                r#type: verter_type_expr::facts::SourcePosition::Present(expanded.value.expr),
                 raw_type: None,
                 optional: false,
                 exactness: expanded.exactness,
                 execution_status: expanded.execution_status,
                 diagnostics: expanded.diagnostics,
-                shallow_type_expr: None,
-                shallow_type_expr_scope: None,
+                shallow_source: None,
                 declared_in_macro_type_arg: false,
             });
         }
@@ -3022,109 +3782,16 @@ pub fn has_named_shape_surface(shape: &crate::analysis::type_expand::ExpandedObj
     !shape.properties.is_empty() || !shape.call_signatures.is_empty()
 }
 
-#[derive(Default)]
-pub struct CollectedMacroTypeParams {
-    pub define_props: Vec<TypeExpr>,
-    pub define_emits: Vec<TypeExpr>,
-    pub define_slots: Vec<TypeExpr>,
-}
-
-pub fn collect_define_macro_type_params(source: &str) -> CollectedMacroTypeParams {
-    use oxc_allocator::Allocator;
-    use oxc_parser::Parser;
-    use oxc_span::SourceType;
-
-    fn collect_call_type_param(
-        call: &CallExpression<'_>,
-        source: &str,
-        result: &mut CollectedMacroTypeParams,
-    ) {
-        let Expression::Identifier(id) = &call.callee else {
-            return;
-        };
-        let Some(type_args) = &call.type_arguments else {
-            return;
-        };
-        let Some(first) = type_args.params.first() else {
-            return;
-        };
-
-        match id.name.as_str() {
-            "defineProps" => result.define_props.push(lower_ts_type(first, source)),
-            "defineEmits" => result.define_emits.push(lower_ts_type(first, source)),
-            "defineSlots" => result.define_slots.push(lower_ts_type(first, source)),
-            _ => {}
-        }
-    }
-
-    fn walk_expr(expr: &Expression<'_>, source: &str, result: &mut CollectedMacroTypeParams) {
-        match expr {
-            Expression::CallExpression(call) => {
-                collect_call_type_param(call, source, result);
-                walk_expr(&call.callee, source, result);
-                for arg in &call.arguments {
-                    if let Argument::SpreadElement(spread) = arg {
-                        walk_expr(&spread.argument, source, result);
-                    } else if let Some(inner) = arg.as_expression() {
-                        walk_expr(inner, source, result);
-                    }
-                }
-            }
-            Expression::ParenthesizedExpression(paren) => {
-                walk_expr(&paren.expression, source, result)
-            }
-            Expression::ConditionalExpression(cond) => {
-                walk_expr(&cond.test, source, result);
-                walk_expr(&cond.consequent, source, result);
-                walk_expr(&cond.alternate, source, result);
-            }
-            Expression::SequenceExpression(seq) => {
-                for inner in &seq.expressions {
-                    walk_expr(inner, source, result);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn walk_stmt(stmt: &Statement<'_>, source: &str, result: &mut CollectedMacroTypeParams) {
-        match stmt {
-            Statement::ExpressionStatement(expr_stmt) => {
-                walk_expr(&expr_stmt.expression, source, result)
-            }
-            Statement::VariableDeclaration(var_decl) => {
-                for decl in &var_decl.declarations {
-                    if let Some(init) = &decl.init {
-                        walk_expr(init, source, result);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let allocator = Allocator::default();
-    let source_type = SourceType::ts();
-    let ret = Parser::new(&allocator, source, source_type).parse();
-    let mut result = CollectedMacroTypeParams::default();
-    for stmt in &ret.program.body {
-        walk_stmt(stmt, source, &mut result);
-    }
-    result
-}
-
-pub fn collect_define_props_type_params(source: &str) -> Vec<TypeExpr> {
-    collect_define_macro_type_params(source).define_props
-}
-
 // ---------------------------------------------------------------------------
 // Public convenience: parse source and build env
 // ---------------------------------------------------------------------------
 
-/// Parse a TypeScript source string and build an evaluation environment.
+/// Parse a TypeScript source string and build an inventory environment.
 ///
 /// This is a convenience function for tests and standalone usage.
-/// In production, use `build_eval_env` with a pre-parsed OXC program.
+/// In production, use `build_eval_env` with a pre-parsed OXC program and the
+/// producing file's real canonical id; this convenience anchors at a
+/// deterministic inline-fixture canonical.
 pub fn parse_and_build_env(source: &str) -> EvalEnv {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
@@ -3133,7 +3800,135 @@ pub fn parse_and_build_env(source: &str) -> EvalEnv {
     let allocator = Allocator::default();
     let source_type = SourceType::ts();
     let ret = Parser::new(&allocator, source, source_type).parse();
-    build_eval_env(&ret.program, source)
+    build_eval_env(
+        &ret.program,
+        source,
+        &BuildEvalEnvContext::new("inline:parse-and-build-env"),
+    )
+}
+
+/// The TRANSIENT per-file lowering view: every declaration's fully-lowered
+/// typed-IR parts, in registration order, BEFORE fact minting. Produced by the
+/// SAME statement lowering [`build_eval_env`] registers through
+/// ([`lower_statement_parts`]), so lowering tests characterize exactly the
+/// typed IR the fact minting consumes. Never stored on any cache or inventory.
+#[derive(Debug, Clone, Default)]
+pub struct LoweredFileParts {
+    pub type_decls: Vec<LoweredTypeDeclParts>,
+    pub value_decls: Vec<LoweredValueDeclParts>,
+    pub aug_type_decls: Vec<(AugmentationScopeKind, LoweredTypeDeclParts)>,
+    pub aug_value_decls: Vec<(AugmentationScopeKind, LoweredValueDeclParts)>,
+}
+
+impl LoweredFileParts {
+    /// The LAST registered file-scope type decl parts named `name` — the
+    /// last-wins representative, mirroring `TypeDeclGroup::primary`.
+    pub fn type_decl(&self, name: &str) -> Option<&LoweredTypeDeclParts> {
+        self.type_decls
+            .iter()
+            .rev()
+            .find(|parts| parts.name == name)
+    }
+
+    /// Every file-scope type contributor named `name`, in registration order.
+    pub fn type_contributors(&self, name: &str) -> Vec<&LoweredTypeDeclParts> {
+        self.type_decls
+            .iter()
+            .filter(|parts| parts.name == name)
+            .collect()
+    }
+
+    /// The LAST registered file-scope value decl parts named `name`.
+    pub fn value_decl(&self, name: &str) -> Option<&LoweredValueDeclParts> {
+        self.value_decls
+            .iter()
+            .rev()
+            .find(|parts| parts.name == name)
+    }
+
+    /// The LAST registered augmentation-scoped type decl parts under
+    /// `(scope, name)`.
+    pub fn aug_type_decl(
+        &self,
+        scope: &AugmentationScopeKind,
+        name: &str,
+    ) -> Option<&LoweredTypeDeclParts> {
+        self.aug_type_decls
+            .iter()
+            .rev()
+            .find(|(s, parts)| s == scope && parts.name == name)
+            .map(|(_, parts)| parts)
+    }
+
+    /// Every augmentation-scoped type contributor under `(scope, name)`, in
+    /// registration order.
+    pub fn aug_type_contributors(
+        &self,
+        scope: &AugmentationScopeKind,
+        name: &str,
+    ) -> Vec<&LoweredTypeDeclParts> {
+        self.aug_type_decls
+            .iter()
+            .filter(|(s, parts)| s == scope && parts.name == name)
+            .map(|(_, parts)| parts)
+            .collect()
+    }
+
+    /// The LAST registered augmentation-scoped value decl parts under
+    /// `(scope, name)`.
+    pub fn aug_value_decl(
+        &self,
+        scope: &AugmentationScopeKind,
+        name: &str,
+    ) -> Option<&LoweredValueDeclParts> {
+        self.aug_value_decls
+            .iter()
+            .rev()
+            .find(|(s, parts)| s == scope && parts.name == name)
+            .map(|(_, parts)| parts)
+    }
+}
+
+/// Parse a TypeScript source string and lower every declaration to its
+/// TRANSIENT typed-IR parts through the SAME statement arms
+/// [`parse_and_build_env`] registers through — including the JSDoc `@typedef`
+/// registration under TS-decl precedence. In-crate lowering-test support; the
+/// returned parts are the pre-fact-minting view and are never stored.
+pub fn parse_and_lower_parts(source: &str) -> LoweredFileParts {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+
+    let mut out = LoweredFileParts::default();
+    for stmt in &ret.program.body {
+        let parts = lower_statement_parts(stmt, source);
+        out.type_decls.extend(parts.type_decls);
+        out.value_decls.extend(parts.value_decls);
+        out.aug_type_decls.extend(parts.aug_type_decls);
+        out.aug_value_decls.extend(parts.aug_value_decls);
+    }
+    // JSDoc `@typedef {T} Name` registration mirrors `build_eval_env`: after
+    // the statement walk, under TS-decl precedence (a name a TS declaration
+    // already claimed is skipped).
+    for typedef in crate::analysis::jsdoc::collect_jsdoc_typedefs(&ret.program.comments, source) {
+        if out
+            .type_decls
+            .iter()
+            .any(|parts| parts.name == typedef.name)
+        {
+            continue;
+        }
+        out.type_decls.push(LoweredTypeDeclParts {
+            name: typedef.name,
+            kind: TypeDeclKind::Alias,
+            type_parameters: Vec::new(),
+            body: typedef.body,
+        });
+    }
+    out
 }
 
 /// Parse a JavaScript/TypeScript value expression into a lightweight [`TypeExpr`].

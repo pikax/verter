@@ -1,15 +1,14 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::FxHashSet;
-use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
 use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_semantic::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
 
 use crate::resolver_core::{
-    resolve_type_declaration, DeclarationMetadataResolver, FactVersionRef, ResolvedNativeProp,
-    ResolvedTypeDeclaration,
+    resolve_type_declaration, DeclarationMetadataResolver, FactVersionRef, ResolvedMacroElements,
+    ResolvedNativeProp, ResolvedTypeDeclaration,
 };
 
 mod cold_resolver;
@@ -76,25 +75,34 @@ pub struct ResolvedMacroMeta {
     pub jsdoc: Option<ResolvedJsdocBlock>,
 }
 
+/// The combined imported-macro resolution: declaration identity plus the
+/// [`ResolvedMacroElements`] payload (the legacy elements DTO AND the
+/// keep-all `native_props` rows, both projected from the same dispatch
+/// surface resolution).
 #[derive(Debug, Clone)]
 pub struct ResolvedImportedMacroSurface {
     pub declaration: ResolvedTypeDeclaration,
-    pub elements: ResolvedElements,
+    pub resolution: ResolvedMacroElements,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub struct ResolvedJsdocBlock {
     pub description: Option<String>,
     pub tags: Vec<ResolvedJsdocTag>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub struct ResolvedJsdocTag {
     pub name: String,
     pub text: Option<String>,
     pub raw_type: Option<String>,
     pub subject_name: Option<String>,
-    pub resolved_type: Option<verter_type_expr::TypeExpr>,
+    /// The SEALED resolved-type output snapshot (display + captured wire-node
+    /// graph), materialised at the producer boundary
+    /// (`host_manage::jsdoc_resolve`) — never a raw `TypeExpr`. Persisted on
+    /// the `ComponentMetaResultDb` value and re-interned into the proto graph
+    /// at conversion time.
+    pub resolved_type: Option<verter_protocol::graph::snapshot::ResolvedJsdocTypeOutput>,
 }
 
 #[derive(Debug, Clone)]
@@ -182,13 +190,44 @@ pub(crate) fn component_meta_resolved_macros(
         // promotion (the no-poison invariant).
         dtos_read.observe_partial();
         let dtos = dtos_read.dtos;
+        // The lower-crate input rows carry the session-resolved SOURCE
+        // POSITIONS alongside the analysis fields — the normalized-surface
+        // authority the extraction publishes (the flat evaluated lanes
+        // contribute metadata only).
         inputs.push(
             verter_semantic::analysis::component_meta::ResolvedMacroInput {
                 macro_index: resolved.macro_index,
-                props: dtos.prop_fields().to_vec(),
-                emits: dtos.emit_fields().to_vec(),
+                props: dtos
+                    .prop_fields()
+                    .iter()
+                    .map(
+                        |row| verter_semantic::analysis::component_meta::ResolvedPropInput {
+                            field: row.analysis.clone(),
+                            type_source: row.type_source.clone(),
+                        },
+                    )
+                    .collect(),
+                emits: dtos
+                    .emit_fields()
+                    .iter()
+                    .map(
+                        |row| verter_semantic::analysis::component_meta::ResolvedEmitInput {
+                            field: row.analysis.clone(),
+                            payload_source: row.payload_source.clone(),
+                        },
+                    )
+                    .collect(),
                 slots: dtos.slot_fields().to_vec(),
-                exposed: dtos.expose_fields().to_vec(),
+                exposed: dtos
+                    .expose_fields()
+                    .iter()
+                    .map(
+                        |row| verter_semantic::analysis::component_meta::ResolvedExposeInput {
+                            field: row.analysis.clone(),
+                            type_source: row.type_source.clone(),
+                        },
+                    )
+                    .collect(),
             },
         );
     }
@@ -245,6 +284,22 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         Vec::new()
     }
 
+    /// Whether the macro's parsed type-argument payload carries a top-level
+    /// (non-object-member) reference to `type_name` — the "direct" macro-dep
+    /// classification, decided NODE-DOMAIN off the authored payload locator
+    /// by graph-backed hosts. `None` = no parsed payload or no live graph
+    /// representation; the caller falls back to the macro's
+    /// `type_references` membership fact. The default is `None` because a
+    /// host without a semantic graph cannot classify payload shape.
+    fn macro_type_arg_has_direct_reference(
+        &self,
+        _owner_canonical: &str,
+        _mac: &AnalyzedMacro,
+        _type_name: &str,
+    ) -> Option<bool> {
+        None
+    }
+
     fn has_projectable_owner_local_macro_surface(
         &self,
         owner_canonical: &str,
@@ -284,7 +339,7 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         resolution_deps: &mut BTreeSet<String>,
         cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut FxHashSet<(String, String)>,
-    ) -> Option<ResolvedElements>;
+    ) -> Option<ResolvedMacroElements>;
 
     #[allow(clippy::too_many_arguments)]
     fn resolve_imported_macro_surface(
@@ -303,7 +358,7 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         let dep_canonical =
             self.resolve_type_dependency_canonical(owner_canonical, import_source)?;
         let declaration = self.resolve_type_declaration(dep_canonical.as_str(), exported_name);
-        let elements = self.resolve_macro_elements(
+        let resolution = self.resolve_macro_elements(
             owner_canonical,
             import_source,
             exported_name,
@@ -314,7 +369,7 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         )?;
         Some(ResolvedImportedMacroSurface {
             declaration,
-            elements,
+            resolution,
         })
     }
 

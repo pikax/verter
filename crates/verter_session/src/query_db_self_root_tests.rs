@@ -63,6 +63,7 @@ use std::sync::Arc;
 
 use verter_type_expr::TypeExpr;
 
+use crate::component_meta_caches::ComputedEntry;
 use crate::fact_signature_helpers::empty_fact_signature;
 use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
@@ -180,13 +181,15 @@ fn declaration_lookup_db_untracked_self_root_rejects_warm_entry() {
 
     // Prime attempt: a "stale" value paired with an untracked
     // self-root. A lazy validator admits this; the strict one does not.
-    let _ = db.get_or_compute(&key, ctx, || Some((decl("stale", c), planted_self_root(c))));
+    let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
+        ComputedEntry::Rooted(decl("stale", c), planted_self_root(c))
+    });
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_traced_for_test(&key, ctx, || {
             cold_ran = true;
-            Some((decl("recomputed", c), empty_fact_signature()))
+            ComputedEntry::Rooted(decl("recomputed", c), empty_fact_signature())
         })
         .expect("warm path produces a value");
 
@@ -213,8 +216,17 @@ fn imported_symbol(canonical: &str, marker: &str) -> ResolvedImportedRegistrySym
     ResolvedImportedRegistrySymbol {
         canonical_id: canonical.to_string(),
         exported_name: marker.to_string(),
-        body: TypeExpr::Unknown {
-            raw: marker.to_string(),
+        body: verter_type_expr::facts::PreparedTypeBodyFacts {
+            classification: verter_type_expr::facts::TypeBodyClass::Alias,
+            body_slot: verter_type_expr::locators::TypeBodySlot {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: Arc::from(canonical),
+                    symbol: Arc::from(marker),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                },
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            },
+            merged_contributor_slots: Arc::from(Vec::new().into_boxed_slice()),
         },
         canonical_dependencies: BTreeSet::new(),
     }
@@ -236,7 +248,7 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
     let db = host.project_type_store().imported_registry_db();
     let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
 
-    let _ = db.get_or_compute_admit(&key, ctx, || {
+    let _ = db.get_or_compute_admit_traced_for_test(&key, ctx, || {
         crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
             crate::component_meta_caches::ImportedRegistryEntry {
                 value: Some(Arc::new(imported_symbol(c, "stale"))),
@@ -248,7 +260,7 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_admit(&key, ctx, || {
+        .get_or_compute_admit_traced_for_test(&key, ctx, || {
             cold_ran = true;
             crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 crate::component_meta_caches::ImportedRegistryEntry {
@@ -293,13 +305,15 @@ fn resolvability_db_untracked_self_root_rejects_warm_entry() {
     let db = host.project_type_store().resolvable_db();
     let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
 
-    let _ = db.get_or_compute(&key, ctx, || Some((false, planted_self_root(c))));
+    let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
+        ComputedEntry::Rooted(false, planted_self_root(c))
+    });
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_traced_for_test(&key, ctx, || {
             cold_ran = true;
-            Some((true, empty_fact_signature()))
+            ComputedEntry::Rooted(true, empty_fact_signature())
         })
         .expect("warm path produces a value");
 
@@ -319,14 +333,35 @@ fn resolvability_db_untracked_self_root_rejects_warm_entry() {
 // Item 5 — OwnerCollectionDb.
 // ---------------------------------------------------------------------------
 
+/// Marker `AuthoredBodyLocator` value for `OwnerCollectionDb` tests: the
+/// marker rides the anchor SYMBOL so two publishes are distinguishable
+/// while the value stays the production content-free locator shape.
+fn owner_collection_marker_locator(
+    canonical: &str,
+    marker: &str,
+) -> verter_type_expr::locators::AuthoredBodyLocator {
+    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+        verter_type_expr::locators::TypeBodySlot {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from(canonical),
+                symbol: Arc::from(marker),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+            },
+            path: Arc::from([]),
+        },
+    )
+}
+
 /// `OwnerCollectionDb` validates the keyed owner canonical's self-root
-/// strictly. This cache is body-bearing (stores a `TypeExpr`), so
-/// strict self-root validation is the correctness floor.
+/// strictly. The stored locator is content-free, but the position it
+/// addresses is only meaningful against the owner content version the
+/// producer observed, so strict self-root validation is the
+/// correctness floor.
 ///
-/// Discriminating property: the prime attempt stores a `TypeExpr`
-/// carrying the marker `"stale"`; the recompute stores `"recomputed"`.
-/// A lazy validator admits the stale body and the warm read returns
-/// it; the strict validator rejects admission.
+/// Discriminating property: the prime attempt stores a locator carrying
+/// the marker `"stale"`; the recompute stores `"recomputed"`. A lazy
+/// validator admits the stale locator and the warm read returns it; the
+/// strict validator rejects admission.
 #[test]
 fn owner_collection_db_untracked_self_root_rejects_warm_entry() {
     let host = host_with_unrelated_file();
@@ -336,25 +371,21 @@ fn owner_collection_db_untracked_self_root_rejects_warm_entry() {
     let db = host.project_type_store().owner_collection_db();
     let key = (Arc::<str>::from(c), Arc::<str>::from("Probe"));
 
-    let _ = db.get_or_compute(&key, ctx, || {
-        Some((
-            Some(TypeExpr::Unknown {
-                raw: "stale".to_string(),
-            }),
+    let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
+        ComputedEntry::Rooted(
+            Some(owner_collection_marker_locator(c, "stale")),
             planted_self_root(c),
-        ))
+        )
     });
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_traced_for_test(&key, ctx, || {
             cold_ran = true;
-            Some((
-                Some(TypeExpr::Unknown {
-                    raw: "recomputed".to_string(),
-                }),
+            ComputedEntry::Rooted(
+                Some(owner_collection_marker_locator(c, "recomputed")),
                 empty_fact_signature(),
-            ))
+            )
         })
         .expect("warm path produces a value");
 
@@ -363,9 +394,10 @@ fn owner_collection_db_untracked_self_root_rejects_warm_entry() {
         "OwnerCollectionDb MUST NOT serve a warm entry whose self-root names an \
          untracked keyed canonical",
     );
-    assert!(
-        matches!(warm.as_deref(), Some(TypeExpr::Unknown { raw }) if raw == "recomputed"),
-        "the rejected entry must not bubble its stale body expression",
+    assert_eq!(
+        warm,
+        Some(owner_collection_marker_locator(c, "recomputed")),
+        "the rejected entry must not bubble its stale locator",
     );
 }
 
@@ -460,24 +492,23 @@ fn observe_scope(ctx: &dyn ResolverContext, scope: &str) -> MaterializeScopeObse
 /// rejects admission.
 #[test]
 fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
-    use crate::semantic_query::ProjectionMode;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let host = host_with_unrelated_file();
     let c = "/self_root_qdb/memo_never_loaded.ts";
     assert_untracked(&host, c);
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().shape_cache_db();
-    let probe_expr = Arc::new(TypeExpr::Ref {
-        name: Arc::from("Probe"),
-        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
-    });
-    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+    // The TypeExpr-start route keys its LOWERED settled node; this
+    // cache-rail fixture mints an arbitrary test node in the same
+    // member-value subject class production keys.
+    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
         Arc::<str>::from(c),
-        Arc::clone(&probe_expr),
+        SemanticNodeId(7101),
         ProjectionMode::Expanded,
     );
 
-    let _ = db.get_or_compute(&key, ctx, || {
+    let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
         Some((
             materialized("stale", empty_dep_signature()),
             planted_self_root(c),
@@ -486,7 +517,7 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_traced_for_test(&key, ctx, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -537,7 +568,7 @@ fn member_value_node_cache_db_untracked_self_root_rejects_warm_entry() {
         ProjectionMode::Expanded,
     );
 
-    let _ = db.get_or_compute(&key, ctx, || {
+    let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
         Some((
             materialized("stale", empty_dep_signature()),
             planted_self_root(c),
@@ -546,7 +577,7 @@ fn member_value_node_cache_db_untracked_self_root_rejects_warm_entry() {
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_traced_for_test(&key, ctx, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -615,7 +646,7 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
         ProjectionMode::Expanded,
     );
 
-    let _ = db.get_or_compute(&key, ctx, || {
+    let _ = db.get_or_compute_traced_for_test(&key, ctx, || {
         Some((
             materialized("stale", empty_dep_signature()),
             planted_self_root(c),
@@ -624,7 +655,7 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
 
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_traced_for_test(&key, ctx, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -675,17 +706,22 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
 ///      classified key is BYTE-EQUAL to the key the explicit
 ///      `synthetic_binding_whole` constructor builds, AND a deep entry
 ///      inserted under that carrier identity is reachable.
-///   2. A carrier-FREE expression (`Literal`) classifies to a `TypeExpr`
-///      subject — `Some(key)`.
+///   2. A carrier-FREE expression (`Literal`) classifies to the
+///      member-value subject over its LOWERED settled node — `Some(key)` —
+///      and two DIFFERENT carrier-free expressions lowering to the SAME
+///      settled node collapse onto ONE key (exact-node dedup), while
+///      distinct settled nodes key distinct entries.
 ///   3. A NESTED carrier (`Parenthesized(SyntheticSlotBinding(carrier))`)
 ///      has no sound content-free key — `None`. THIS is the discriminating
 ///      case: a top-level-only classifier (one that checks only the root
-///      node for the carrier) would build a `TypeExpr` subject and return
+///      node for the carrier) would key the nested case and return
 ///      `Some`, flipping this assertion RED.
 #[test]
 fn type_expr_whole_classifies_synthetic_carrier_confinement() {
     use crate::component_meta_caches::{ShapeCacheDb, ShapeCacheKey};
-    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext, SyntheticBindingId};
+    use crate::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, SemanticNodeId, SyntheticBindingId,
+    };
     use verter_type_expr::{
         LiteralValue, SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr,
     };
@@ -707,11 +743,12 @@ fn type_expr_whole_classifies_synthetic_carrier_confinement() {
     // `synthetic_binding_whole` constructor builds for the same carrier —
     // proving the redirect via the public derived `PartialEq` (no
     // private-field access).
-    let bare_expr = Arc::new(TypeExpr::SyntheticSlotBinding(Arc::new(carrier.clone())));
+    let bare_expr = TypeExpr::SyntheticSlotBinding(Arc::new(carrier.clone()));
     let bare_key = ShapeCacheKey::type_expr_whole_with_context(
         Arc::<str>::from(scope),
-        Arc::clone(&bare_expr),
+        &bare_expr,
         ctx_published,
+        || panic!("a BARE carrier redirects without lowering — the closure must not run"),
     )
     .expect("a BARE synthetic carrier must classify to Some (the SyntheticBinding redirect)");
     let explicit_synthetic_key = ShapeCacheKey::synthetic_binding_whole(
@@ -741,16 +778,56 @@ fn type_expr_whole_classifies_synthetic_carrier_confinement() {
         "the carrier identity redirect must return the materialised deep type",
     );
 
-    // (2) carrier-FREE expression → a `TypeExpr` subject (`Some`).
-    let free_expr = Arc::new(TypeExpr::Literal(LiteralValue::Number(42.0)));
+    // (2) carrier-FREE expression → the member-value subject over its
+    // LOWERED settled node (`Some`). Two DIFFERENT expressions lowering to
+    // the SAME settled node collapse onto ONE key — the exact-node dedup
+    // the re-lower-to-node subject exists for — while distinct settled
+    // nodes key distinct entries.
+    let free_expr = TypeExpr::Literal(LiteralValue::Number(42.0));
     let free_key = ShapeCacheKey::type_expr_whole_with_context(
         Arc::<str>::from(scope),
-        free_expr,
+        &free_expr,
         ctx_published,
+        || Some(SemanticNodeId(4242)),
     );
     assert!(
         free_key.is_some(),
-        "a carrier-FREE expression must classify to Some (a `TypeExpr` subject)",
+        "a carrier-FREE expression must classify to Some (the member-value-node subject)",
+    );
+    let sibling_expr = TypeExpr::Literal(LiteralValue::String("sibling".to_string()));
+    let sibling_same_node_key = ShapeCacheKey::type_expr_whole_with_context(
+        Arc::<str>::from(scope),
+        &sibling_expr,
+        ctx_published,
+        || Some(SemanticNodeId(4242)),
+    );
+    assert_eq!(
+        free_key, sibling_same_node_key,
+        "two carrier-free expressions lowering to the SAME settled node must collapse \
+         onto ONE ShapeCache key (exact-node dedup on the member-value subject)",
+    );
+    let distinct_node_key = ShapeCacheKey::type_expr_whole_with_context(
+        Arc::<str>::from(scope),
+        &free_expr,
+        ctx_published,
+        || Some(SemanticNodeId(4243)),
+    );
+    assert_ne!(
+        free_key, distinct_node_key,
+        "distinct settled nodes must key distinct entries (exact Eq on the node, \
+         not a fingerprint)",
+    );
+    // A lowering that cannot produce a node (no view-correct scope
+    // identity) yields NO key — cache bypass, never a forged subject.
+    assert!(
+        ShapeCacheKey::type_expr_whole_with_context(
+            Arc::<str>::from(scope),
+            &free_expr,
+            ctx_published,
+            || None,
+        )
+        .is_none(),
+        "a carrier-free expression whose lowering yields no node must key NO slot",
     );
     // And it must NOT collapse onto the synthetic-binding identity.
     assert_ne!(
@@ -761,20 +838,21 @@ fn type_expr_whole_classifies_synthetic_carrier_confinement() {
 
     // (3) NESTED carrier → no sound content-free key (`None`). The
     // discriminating case: descends past the root, so a top-level-only
-    // classifier would wrongly return `Some(TypeExpr {..})`.
-    let nested_expr = Arc::new(TypeExpr::Parenthesized(Arc::new(
-        TypeExpr::SyntheticSlotBinding(Arc::new(carrier.clone())),
-    )));
+    // classifier would wrongly key the nested case and return `Some`.
+    let nested_expr = TypeExpr::Parenthesized(Arc::new(TypeExpr::SyntheticSlotBinding(Arc::new(
+        carrier.clone(),
+    ))));
     let nested_key = ShapeCacheKey::type_expr_whole_with_context(
         Arc::<str>::from(scope),
-        nested_expr,
+        &nested_expr,
         ctx_published,
+        || panic!("a NESTED carrier keys NO slot — the lowering closure must not run"),
     );
     assert!(
         nested_key.is_none(),
         "a NESTED `TypeExpr::SyntheticSlotBinding` (under `Parenthesized`) has no \
          sound content-free cache key — the classifier MUST return None, never a \
-         `TypeExpr`-subject key that would fold the carrier's `value_node`",
+         keyed subject that would fold the carrier's `value_node`",
     );
 }
 
@@ -805,7 +883,7 @@ fn type_expr_whole_classifies_synthetic_carrier_confinement() {
 #[test]
 fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::{DepVersion, ProjectionMode};
+    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_qdb/memo_scope.ts";
@@ -821,13 +899,12 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
 
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().shape_cache_db();
-    let probe_expr = Arc::new(TypeExpr::Ref {
-        name: Arc::from("Probe"),
-        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
-    });
-    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+    // The TypeExpr-start route keys its LOWERED settled node; this
+    // cache-rail fixture mints an arbitrary test node in the same
+    // member-value subject class production keys.
+    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
         Arc::<str>::from(scope),
-        Arc::clone(&probe_expr),
+        SemanticNodeId(7102),
         ProjectionMode::Expanded,
     );
 
@@ -850,7 +927,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     );
     let primed_dep_sig = Arc::clone(&dep_sig);
     let primed = db
-        .get_or_compute(&key, ctx, move || {
+        .get_or_compute_traced_for_test(&key, ctx, move || {
             // `dep` is recorded as `DepVersion::WholeHash`, so the
             // signature builder returns `Some` and the entry is
             // admitted.
@@ -885,7 +962,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx2, || {
+        .get_or_compute_traced_for_test(&key, ctx2, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -1034,7 +1111,7 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
     let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let primed = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_traced_for_test(&key, ctx, || {
             let sig = engine_fact_signature_for_exported_type(
                 ctx,
                 owned.as_str(),
@@ -1044,7 +1121,7 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
             .into_cacheable()
             .expect("provenance-pure signature builds — observed artifact present")
             .facts;
-            Some((decl("stale", c), sig))
+            ComputedEntry::Rooted(decl("stale", c), sig)
         })
         .expect("cold publish succeeds — keyed canonical tracked");
     assert_eq!(
@@ -1058,9 +1135,9 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx2, || {
+        .get_or_compute_traced_for_test(&key, ctx2, || {
             cold_ran = true;
-            Some((decl("recomputed", c), empty_fact_signature()))
+            ComputedEntry::Rooted(decl("recomputed", c), empty_fact_signature())
         })
         .expect("warm path produces a value");
 
@@ -1101,7 +1178,7 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
     let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
-        .get_or_compute_admit(&key, ctx, || {
+        .get_or_compute_admit_traced_for_test(&key, ctx, || {
             let sig = engine_fact_signature_for_exported_type(
                 ctx,
                 owned.as_str(),
@@ -1126,7 +1203,7 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute_admit(&key, ctx2, || {
+        .get_or_compute_admit_traced_for_test(&key, ctx2, || {
             cold_ran = true;
             crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 crate::component_meta_caches::ImportedRegistryEntry {
@@ -1173,7 +1250,7 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
     let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_traced_for_test(&key, ctx, || {
             let sig = engine_fact_signature_for_exported_type(
                 ctx,
                 owned.as_str(),
@@ -1183,7 +1260,7 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
             .into_cacheable()
             .expect("provenance-pure signature builds — observed artifact present")
             .facts;
-            Some((false, sig))
+            ComputedEntry::Rooted(false, sig)
         })
         .expect("cold publish succeeds");
 
@@ -1192,9 +1269,9 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx2, || {
+        .get_or_compute_traced_for_test(&key, ctx2, || {
             cold_ran = true;
-            Some((true, empty_fact_signature()))
+            ComputedEntry::Rooted(true, empty_fact_signature())
         })
         .expect("warm path produces a value");
 
@@ -1213,11 +1290,11 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
 
 /// `OwnerCollectionDb` — producer-level self-root canary. The
 /// production producer is [`engine_fact_signature_for_exported_type`]
-/// (called by `owner_collection_expr`); this cache is body-bearing
-/// (stores a `TypeExpr`), so the self-root `FileWholeHash` is the
-/// correctness floor. An unrelated-sibling edit shifts only the
-/// self-root. Verified: neutering `self_root_fact` flips this canary
-/// RED.
+/// (called by `owner_collection_expr`); the stored locator only
+/// addresses the observed owner content version, so the self-root
+/// `FileWholeHash` is the correctness floor. An unrelated-sibling edit
+/// shifts only the self-root. Verified: neutering `self_root_fact`
+/// flips this canary RED.
 #[test]
 fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
@@ -1234,7 +1311,7 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
     let observed_keyed_hash = observed_whole_hash(ctx, c);
     let owned = c.to_string();
     let _ = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_traced_for_test(&key, ctx, || {
             let sig = engine_fact_signature_for_exported_type(
                 ctx,
                 owned.as_str(),
@@ -1244,12 +1321,7 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
             .into_cacheable()
             .expect("provenance-pure signature builds — observed artifact present")
             .facts;
-            Some((
-                Some(TypeExpr::Unknown {
-                    raw: "stale".to_string(),
-                }),
-                sig,
-            ))
+            ComputedEntry::Rooted(Some(owner_collection_marker_locator(c, "stale")), sig)
         })
         .expect("cold publish succeeds");
 
@@ -1258,14 +1330,12 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx2, || {
+        .get_or_compute_traced_for_test(&key, ctx2, || {
             cold_ran = true;
-            Some((
-                Some(TypeExpr::Unknown {
-                    raw: "recomputed".to_string(),
-                }),
+            ComputedEntry::Rooted(
+                Some(owner_collection_marker_locator(c, "recomputed")),
                 empty_fact_signature(),
-            ))
+            )
         })
         .expect("warm path produces a value");
 
@@ -1275,9 +1345,10 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
          edit to its keyed canonical — only the producer's self-root FileWholeHash \
          catches it. Reverting the self_root_fact prepend serves stale.",
     );
-    assert!(
-        matches!(warm.as_deref(), Some(TypeExpr::Unknown { raw }) if raw == "recomputed"),
-        "the rejected warm entry must not bubble its stale body expression",
+    assert_eq!(
+        warm,
+        Some(owner_collection_marker_locator(c, "recomputed")),
+        "the rejected warm entry must not bubble its stale locator",
     );
 }
 
@@ -1335,18 +1406,16 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
             .into_cacheable()
             .expect("provenance-pure signature builds — observed artifact present")
             .facts;
-            Some((
-                Some(TypeExpr::Unknown {
-                    raw: marker.to_string(),
-                }),
+            ComputedEntry::Rooted(
+                Some(owner_collection_marker_locator(owned.as_str(), marker)),
                 sig,
-            ))
+            )
         }
     };
 
     // ── Populate: cold publish admits exactly one entry (live_count 0 -> 1).
     let _ = db
-        .get_or_compute(&key, ctx, publish("first"))
+        .get_or_compute_traced_for_test(&key, ctx, publish("first"))
         .expect("cold publish succeeds");
     assert_eq!(
         db.live_count(),
@@ -1358,14 +1427,12 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
     // its cold closure must NOT run and live_count must stay 1.
     let mut reuse_cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_traced_for_test(&key, ctx, || {
             reuse_cold_ran = true;
-            Some((
-                Some(TypeExpr::Unknown {
-                    raw: "should-not-run".to_string(),
-                }),
+            ComputedEntry::Rooted(
+                Some(owner_collection_marker_locator(c, "should-not-run")),
                 empty_fact_signature(),
-            ))
+            )
         })
         .expect("warm read produces a value");
     assert!(
@@ -1378,9 +1445,10 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
         1,
         "cache-hit equivalence: a warm reuse must NOT admit a second entry (live_count stable at 1)"
     );
-    assert!(
-        matches!(warm.as_deref(), Some(TypeExpr::Unknown { raw }) if raw == "first"),
-        "the warm reuse must bubble the originally-published body, not recompute"
+    assert_eq!(
+        warm,
+        Some(owner_collection_marker_locator(c, "first")),
+        "the warm reuse must bubble the originally-published locator, not recompute"
     );
 
     // ── Invalidation: invalidate_canonical drops the owner's entry
@@ -1400,7 +1468,7 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
     let recompute_cold_ran = std::cell::Cell::new(false);
     let recompute_flag = &recompute_cold_ran;
     let recomputed = db
-        .get_or_compute(&key, ctx, {
+        .get_or_compute_traced_for_test(&key, ctx, {
             let inner = publish("second");
             move || {
                 recompute_flag.set(true);
@@ -1418,9 +1486,10 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
         1,
         "the recompute must re-admit exactly one entry (live_count back to 1)"
     );
-    assert!(
-        matches!(recomputed.as_deref(), Some(TypeExpr::Unknown { raw }) if raw == "second"),
-        "the recompute must surface the freshly-published body"
+    assert_eq!(
+        recomputed,
+        Some(owner_collection_marker_locator(c, "second")),
+        "the recompute must surface the freshly-published locator"
     );
 }
 
@@ -1448,7 +1517,7 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
 #[test]
 fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::ProjectionMode;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/self_root_e2e/memo.ts";
@@ -1458,19 +1527,18 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
     // materialisation/cold-publish time — `observe_materialize_scope`
     // pins the scope's current `IndexedReady`.
     let db = host.project_type_store().shape_cache_db();
-    let probe_expr = Arc::new(TypeExpr::Ref {
-        name: Arc::from("Probe"),
-        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
-    });
-    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+    // The TypeExpr-start route keys its LOWERED settled node; this
+    // cache-rail fixture mints an arbitrary test node in the same
+    // member-value subject class production keys.
+    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
         Arc::<str>::from(c),
-        Arc::clone(&probe_expr),
+        SemanticNodeId(7103),
         ProjectionMode::Expanded,
     );
 
     let observed_scope = observe_scope(ctx, c);
     let _ = db
-        .get_or_compute(&key, ctx, || {
+        .get_or_compute_traced_for_test(&key, ctx, || {
             // No observed dependencies — the signature builder returns
             // `Some` (no `RouteGeneration` entry) and the discriminator
             // is the scope canonical's own self-root `FileWholeHash`,
@@ -1492,7 +1560,7 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx2, || {
+        .get_or_compute_traced_for_test(&key, ctx2, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -1554,7 +1622,7 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
 #[test]
 fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() {
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::{DepVersion, ProjectionMode};
+    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_e2e/memo_rg_scope.ts";
@@ -1572,13 +1640,12 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
 
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().shape_cache_db();
-    let probe_expr = Arc::new(TypeExpr::Ref {
-        name: Arc::from("Probe"),
-        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
-    });
-    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+    // The TypeExpr-start route keys its LOWERED settled node; this
+    // cache-rail fixture mints an arbitrary test node in the same
+    // member-value subject class production keys.
+    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
         Arc::<str>::from(scope),
-        Arc::clone(&probe_expr),
+        SemanticNodeId(7104),
         ProjectionMode::Expanded,
     );
 
@@ -1619,7 +1686,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     // `get_or_compute`'s compute returns `None` and nothing is
     // admitted.
     let primed_dep_sig = Arc::clone(&dep_sig);
-    let cold_value = db.get_or_compute(&key, ctx, move || {
+    let cold_value = db.get_or_compute_traced_for_test(&key, ctx, move || {
         let export_set = observed_scope.syntactic_export_set.clone()?;
         let fact_sig = engine_fact_signature_for_materialize_memo(
             &observed_scope,
@@ -1651,7 +1718,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let value = db
-        .get_or_compute(&key, ctx2, || {
+        .get_or_compute_traced_for_test(&key, ctx2, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -1706,7 +1773,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
 #[test]
 fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_generation() {
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::{DepVersion, ProjectionMode};
+    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_e2e/memo_pg_scope.ts";
@@ -1724,13 +1791,12 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
 
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().shape_cache_db();
-    let probe_expr = Arc::new(TypeExpr::Ref {
-        name: Arc::from("Probe"),
-        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
-    });
-    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+    // The TypeExpr-start route keys its LOWERED settled node; this
+    // cache-rail fixture mints an arbitrary test node in the same
+    // member-value subject class production keys.
+    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
         Arc::<str>::from(scope),
-        Arc::clone(&probe_expr),
+        SemanticNodeId(7105),
         ProjectionMode::Expanded,
     );
 
@@ -1778,7 +1844,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     // Prime the memo with the production signature.
     let primed_dep_sig = Arc::clone(&dep_sig);
     let primed = db
-        .get_or_compute(&key, ctx, move || {
+        .get_or_compute_traced_for_test(&key, ctx, move || {
             let export_set = observed_scope.syntactic_export_set.clone()?;
             let fact_sig = engine_fact_signature_for_materialize_memo(
                 &observed_scope,
@@ -1820,7 +1886,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let warm = db
-        .get_or_compute(&key, ctx2, || {
+        .get_or_compute_traced_for_test(&key, ctx2, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -2117,7 +2183,7 @@ fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
 #[test]
 fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end() {
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::ProjectionMode;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_race/memo_scope_e2e.ts";
@@ -2131,13 +2197,12 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
 
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().shape_cache_db();
-    let probe_expr = Arc::new(TypeExpr::Ref {
-        name: Arc::from("Probe"),
-        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
-    });
-    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+    // The TypeExpr-start route keys its LOWERED settled node; this
+    // cache-rail fixture mints an arbitrary test node in the same
+    // member-value subject class production keys.
+    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
         Arc::<str>::from(scope),
-        Arc::clone(&probe_expr),
+        SemanticNodeId(7106),
         ProjectionMode::Expanded,
     );
 
@@ -2171,7 +2236,7 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
     // signature is built from the single pre-edit observation (the
     // publish site threads it in). The provenance-pure builder roots
     // the scope self-root on H1 — the observation's `whole_hash`.
-    let cold_value = db.get_or_compute(&key, ctx, move || {
+    let cold_value = db.get_or_compute_traced_for_test(&key, ctx, move || {
         let export_set = observed_scope_h1.syntactic_export_set.clone()?;
         let fact_sig = engine_fact_signature_for_materialize_memo(
             &observed_scope_h1,
@@ -2201,7 +2266,7 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let value = db
-        .get_or_compute(&key, ctx2, || {
+        .get_or_compute_traced_for_test(&key, ctx2, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -2472,13 +2537,19 @@ fn materialize_memo_db_artifact_only_scope_lowers_under_shallow_whole_hash() {
         type_arguments: Arc::from(Vec::<TypeExpr>::new()),
     };
     let mut engine = ComponentMetaQueryEngine::new(&host);
-    let _materialized =
-        crate::meta_resolve::materialize::materialize_component_meta_type_expr_until_stable_full(
-            &probe_expr,
+    let reduction_context =
+        crate::meta_resolve::materialize::type_expr_materialize_reduction_context(
+            ctx,
             scope,
+            &probe_expr,
             ProjectionMode::Navigate,
-            &mut engine,
         );
+    let _lowering = crate::meta_resolve::materialize::lower_type_expr_for_shape_subject(
+        &mut engine,
+        scope,
+        &probe_expr,
+        reduction_context,
+    );
 
     // Scan the semantic graph for the lowered `DeclRef` node naming
     // `Probe` in the scope file. Its `NodeScopeId` scope is the
@@ -3074,13 +3145,19 @@ fn materialize_memo_scope_lowering_and_signature_root_share_one_observation() {
         type_arguments: Arc::from(Vec::<TypeExpr>::new()),
     };
     let mut engine = ComponentMetaQueryEngine::new(&host);
-    let _ =
-        crate::meta_resolve::materialize::materialize_component_meta_type_expr_until_stable_full(
-            &probe_expr,
+    let reduction_context =
+        crate::meta_resolve::materialize::type_expr_materialize_reduction_context(
+            ctx,
             scope,
+            &probe_expr,
             ProjectionMode::Navigate,
-            &mut engine,
         );
+    let _lowering = crate::meta_resolve::materialize::lower_type_expr_for_shape_subject(
+        &mut engine,
+        scope,
+        &probe_expr,
+        reduction_context,
+    );
     let graph = host.project_type_store().semantic_graph();
     let lowering_scope_hash = (0..graph.node_count() as u64)
         .find_map(|i| {
@@ -3251,7 +3328,7 @@ fn observe_materialize_scope_is_overlay_view_correct() {
 #[test]
 fn observe_materialize_scope_refuses_evicted_stale_artifact() {
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::ProjectionMode;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_obs/evicted_scope.ts";
@@ -3292,17 +3369,16 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
     // The publish closure threads the `None` observation through `?`,
     // so `get_or_compute` admits nothing and a follow-up cold-recomputes.
     let db = host.project_type_store().shape_cache_db();
-    let probe_expr = Arc::new(TypeExpr::Ref {
-        name: Arc::from("Probe"),
-        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
-    });
-    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+    // The TypeExpr-start route keys its LOWERED settled node; this
+    // cache-rail fixture mints an arbitrary test node in the same
+    // member-value subject class production keys.
+    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
         Arc::<str>::from(scope),
-        Arc::clone(&probe_expr),
+        SemanticNodeId(7107),
         ProjectionMode::Expanded,
     );
     let scope_owned = scope.to_string();
-    let cold_value = db.get_or_compute(&key, ctx, move || {
+    let cold_value = db.get_or_compute_traced_for_test(&key, ctx, move || {
         // The production publish closure: a `None` observation refuses
         // shared-cache admission.
         let observed_scope = ctx.observe_materialize_scope(scope_owned.as_str())?;
@@ -3330,7 +3406,7 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
     let ctx2: &dyn ResolverContext = &host;
     let mut cold_ran = false;
     let value = db
-        .get_or_compute(&key, ctx2, || {
+        .get_or_compute_traced_for_test(&key, ctx2, || {
             cold_ran = true;
             Some((
                 materialized("recomputed", empty_dep_signature()),
@@ -3539,7 +3615,7 @@ fn observe_materialize_scope_refuses_stale_artifact_for_live_scheduler_scope() {
 #[test]
 fn materialize_memo_publish_site_degrades_on_none_scope_observation() {
     use crate::resolver_core::ComponentMetaQueryEngine;
-    use crate::semantic_query::ProjectionMode;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeData};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_obs/publish_site_none_observation.ts";
@@ -3565,42 +3641,72 @@ fn materialize_memo_publish_site_degrades_on_none_scope_observation() {
     let db = host.project_type_store().shape_cache_db();
     let entries_before = db.live_count();
 
-    // Drive the production publish path. Pre-fix the `.expect()` inside
-    // `materialize_component_meta_type_expr_until_stable_full` panics on
-    // the `None` observation; post-fix it degrades and returns a value.
+    // Drive the production publish path — the pre-peek lowering plus the
+    // node-domain stabiliser (peek → cold-reduce → admit). A publish path
+    // that `expect`s the `None` observation panics here; the degrade
+    // contract lowers under the surviving shallow-state version instead.
     let probe_expr = TypeExpr::Ref {
         name: Arc::from("Probe"),
         type_arguments: Arc::from(Vec::<TypeExpr>::new()),
     };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut engine = ComponentMetaQueryEngine::new(&host);
-        crate::meta_resolve::materialize::materialize_component_meta_type_expr_until_stable_full(
-            &probe_expr,
-            scope,
-            ProjectionMode::Navigate,
+        let reduction_context =
+            crate::meta_resolve::materialize::type_expr_materialize_reduction_context(
+                ctx,
+                scope,
+                &probe_expr,
+                ProjectionMode::Navigate,
+            );
+        let lowering = crate::meta_resolve::materialize::lower_type_expr_for_shape_subject(
             &mut engine,
+            scope,
+            &probe_expr,
+            reduction_context,
+        )?;
+        Some(
+            crate::meta_resolve::materialize::stabilize_registry_member_surface_node_with_shape_cache(
+                ctx,
+                scope,
+                lowering.lowered,
+                ProjectionMode::Navigate,
+            ),
         )
     }));
 
     // The discriminating assertion: the publish path MUST NOT panic on a
     // `None` observation.
-    let materialized = match outcome {
-        Ok(materialized) => materialized,
+    let stabilized = match outcome {
+        Ok(stabilized) => stabilized,
         Err(_) => panic!(
             "the materialize-memo publish site MUST NOT panic on a None scope \
              observation — a None observation (session tombstone, evicted/unloaded \
              scope, no recoverable artifact) is a legitimate outcome and must degrade: \
              skip shared-cache admission, still return the freshly-computed value. A \
-             pre-fix `observe_materialize_scope(scope).expect(..)` panics here.",
+             publish path that `expect`s the scope observation panics here.",
         ),
     };
 
     // The degraded path still returns a freshly-computed value.
+    let stable_node = match stabilized.unwrap_or_else(|| {
+        panic!(
+            "the degraded publish path still lowers under the scope's surviving \
+             shallow-state content version and returns a freshly-computed value",
+        )
+    }) {
+        crate::meta_resolve::materialize::RegistryMemberStabilizedValue::First { node }
+        | crate::meta_resolve::materialize::RegistryMemberStabilizedValue::Stable { node } => node,
+    };
+    let node_data = host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(stable_node)
+        .unwrap_or_else(|| panic!("the stabilised node must have live graph data"));
     assert!(
         matches!(
-            &materialized.type_expr_for_test(),
-            TypeExpr::Ref { name, .. } if name.as_ref() == "Probe"
-        ) || !matches!(&materialized.type_expr_for_test(), TypeExpr::Unknown { .. }),
+            &*node_data,
+            SemanticNodeData::DeclRef { identity } if identity.decl_name.as_ref() == "Probe"
+        ) || !matches!(&*node_data, SemanticNodeData::Opaque(_)),
         "the degraded publish path still returns a freshly-computed value to the caller",
     );
 
@@ -3663,7 +3769,7 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
         let db = host.project_type_store().imported_registry_db();
         let base_cold_ran = std::cell::Cell::new(false);
         let resolved = db
-            .get_or_compute_admit(&key, ctx, || {
+            .get_or_compute_admit_traced_for_test(&key, ctx, || {
                 base_cold_ran.set(true);
                 crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     crate::component_meta_caches::ImportedRegistryEntry {
@@ -3714,7 +3820,7 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
         let db = host.project_type_store().imported_registry_db();
         let overlay_cold_ran = std::cell::Cell::new(false);
         let resolved = db
-            .get_or_compute_admit(&key, &session_ctx, || {
+            .get_or_compute_admit_traced_for_test(&key, &session_ctx, || {
                 overlay_cold_ran.set(true);
                 crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     crate::component_meta_caches::ImportedRegistryEntry {
@@ -3809,7 +3915,7 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
     {
         let ctx: &dyn ResolverContext = host.as_ref();
         let db = host.project_type_store().imported_registry_db();
-        let _ = db.get_or_compute_admit(&key, ctx, || {
+        let _ = db.get_or_compute_admit_traced_for_test(&key, ctx, || {
             crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
@@ -3842,7 +3948,7 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
             std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
         );
         let db = host.project_type_store().imported_registry_db();
-        let _ = db.get_or_compute_admit(&key, &session_ctx, || {
+        let _ = db.get_or_compute_admit_traced_for_test(&key, &session_ctx, || {
             crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                 crate::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
@@ -4936,7 +5042,6 @@ fn in_scope_query_identity_caches_all_have_self_root_coverage() {
         "compile_cache_db",
         "derived_raw_cache_db",
         "dependency_cache_db",
-        "resolved_type_cache_db",
     ];
     let expected_in_scope: BTreeSet<&str> = inventory
         .iter()
@@ -5021,7 +5126,7 @@ fn imported_registry_peek_rejects_entry_from_superseded_generation() {
     // production producer (`registry_decl.rs`) does, and registers the
     // reverse index.
     let g_before = host.project_type_store().current_project_generation();
-    let primed = db.get_or_compute_admit(&key, ctx, || {
+    let primed = db.get_or_compute_admit_traced_for_test(&key, ctx, || {
         let validated_at_generation = host.project_type_store().current_project_generation();
         crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
             crate::component_meta_caches::ImportedRegistryEntry {
@@ -5121,7 +5226,7 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
     // Prime the cache through the production cold path — stamps
     // `validated_at_generation` and registers `key` in the per-canonical
     // reverse index.
-    let primed = db.get_or_compute_admit(&key, ctx, || {
+    let primed = db.get_or_compute_admit_traced_for_test(&key, ctx, || {
         let validated_at_generation = host.project_type_store().current_project_generation();
         crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
             crate::component_meta_caches::ImportedRegistryEntry {
@@ -5156,7 +5261,7 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
     // declined to admit on generation grounds (the project generation
     // advanced between the prime and the second admission).
     let mut cold_ran = false;
-    let _ = db.get_or_compute_admit(&key, ctx, || {
+    let _ = db.get_or_compute_admit_traced_for_test(&key, ctx, || {
         cold_ran = true;
         let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
             crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
@@ -5258,9 +5363,9 @@ fn declaration_lookup_failed_revalidation_does_not_leak_live_counter() {
     // `get_or_compute` snapshotted the generation BEFORE this closure ran,
     // so the entry is stamped with the now-superseded generation and the
     // substrate's `revalidate_after_compute` rejects the publish.
-    let outcome = db.get_or_compute(&key, ctx, || {
+    let outcome = db.get_or_compute_traced_for_test(&key, ctx, || {
         host.project_type_store().bump_project_generation();
-        Some((decl("stale", c), empty_fact_signature()))
+        ComputedEntry::Rooted(decl("stale", c), empty_fact_signature())
     });
     assert!(
         outcome.is_none(),
@@ -5300,9 +5405,9 @@ fn resolvability_failed_revalidation_does_not_leak_live_counter() {
     let counter_before = component_meta_cache_live(&host);
     let map_before = db.live_count();
 
-    let outcome = db.get_or_compute(&key, ctx, || {
+    let outcome = db.get_or_compute_traced_for_test(&key, ctx, || {
         host.project_type_store().bump_project_generation();
-        Some((true, empty_fact_signature()))
+        ComputedEntry::Rooted(true, empty_fact_signature())
     });
     assert!(
         outcome.is_none(),
@@ -5337,9 +5442,9 @@ fn owner_collection_failed_revalidation_does_not_leak_live_counter() {
     let counter_before = component_meta_cache_live(&host);
     let map_before = db.live_count();
 
-    let outcome = db.get_or_compute(&key, ctx, || {
+    let outcome = db.get_or_compute_traced_for_test(&key, ctx, || {
         host.project_type_store().bump_project_generation();
-        Some((None, empty_fact_signature()))
+        ComputedEntry::Rooted(None, empty_fact_signature())
     });
     assert!(
         outcome.is_none(),
@@ -5365,20 +5470,21 @@ fn owner_collection_failed_revalidation_does_not_leak_live_counter() {
 /// [`declaration_lookup_failed_revalidation_does_not_leak_live_counter`].
 #[test]
 fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
+    use crate::semantic_query::SemanticNodeId;
     let host = host_with_unrelated_file();
     let c = "/live_counter_qdb/materialize_memo.ts";
     let ctx: &dyn ResolverContext = &host;
     let db = host.project_type_store().shape_cache_db();
-    let key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
         Arc::<str>::from(c),
-        Arc::new(TypeExpr::Unknown { raw: String::new() }),
+        SemanticNodeId(7301),
         ProjectionMode::Shallow,
     );
 
     let counter_before = component_meta_cache_live(&host);
     let map_before = db.live_count();
 
-    let outcome = db.get_or_compute(&key, ctx, || {
+    let outcome = db.get_or_compute_traced_for_test(&key, ctx, || {
         host.project_type_store().bump_project_generation();
         Some((
             MaterializedOutputTypeExpr::from_type_expr_for_test(
@@ -5422,6 +5528,8 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
 /// equals the true total (GREEN).
 #[test]
 fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
+    use crate::semantic_query::SemanticNodeId;
+
     let host = host_with_unrelated_file();
     let ctx: &dyn ResolverContext = &host;
     let store = host.project_type_store();
@@ -5444,15 +5552,15 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
         host.project_type_store().bump_project_generation();
     };
 
-    let _ = store.declaration_db().get_or_compute(
+    let _ = store.declaration_db().get_or_compute_traced_for_test(
         &(Arc::<str>::from("/lc_total/decl.ts"), Arc::<str>::from("P")),
         ctx,
         || {
             bump();
-            Some((decl("stale", "/lc_total/decl.ts"), empty_fact_signature()))
+            ComputedEntry::Rooted(decl("stale", "/lc_total/decl.ts"), empty_fact_signature())
         },
     );
-    let _ = store.resolvable_db().get_or_compute(
+    let _ = store.resolvable_db().get_or_compute_traced_for_test(
         &(
             Arc::<str>::from("/lc_total/resolv.ts"),
             Arc::<str>::from("P"),
@@ -5460,10 +5568,10 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
         ctx,
         || {
             bump();
-            Some((true, empty_fact_signature()))
+            ComputedEntry::Rooted(true, empty_fact_signature())
         },
     );
-    let _ = store.owner_collection_db().get_or_compute(
+    let _ = store.owner_collection_db().get_or_compute_traced_for_test(
         &(
             Arc::<str>::from("/lc_total/owner.ts"),
             Arc::<str>::from("P"),
@@ -5471,13 +5579,13 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
         ctx,
         || {
             bump();
-            Some((None, empty_fact_signature()))
+            ComputedEntry::Rooted(None, empty_fact_signature())
         },
     );
-    let _ = store.shape_cache_db().get_or_compute(
-        &crate::component_meta_caches::ShapeCacheKey::type_expr_whole(
+    let _ = store.shape_cache_db().get_or_compute_traced_for_test(
+        &crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
             Arc::<str>::from("/lc_total/memo.ts"),
-            Arc::new(TypeExpr::Unknown { raw: String::new() }),
+            SemanticNodeId(7302),
             ProjectionMode::Shallow,
         ),
         ctx,
@@ -5941,7 +6049,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     // Prime the slot through member A. A self-root at the scope's real
     // current hash validates, so the entry is ADMITTED.
     let primed = db
-        .get_or_compute(&key_a, ctx, || {
+        .get_or_compute_traced_for_test(&key_a, ctx, || {
             Some((
                 materialized("alpha-shape", empty_dep_signature()),
                 self_root_at(c, scope_hash),
@@ -5962,7 +6070,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     // entry primed by member A — its cold closure must NOT run.
     let mut sibling_cold_ran = false;
     let sibling = db
-        .get_or_compute(&key_b, ctx, || {
+        .get_or_compute_traced_for_test(&key_b, ctx, || {
             sibling_cold_ran = true;
             Some((
                 materialized("beta-shape", empty_dep_signature()),
@@ -6002,7 +6110,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     );
     let mut other_cold_ran = false;
     let _ = db
-        .get_or_compute(&key_other, ctx, || {
+        .get_or_compute_traced_for_test(&key_other, ctx, || {
             other_cold_ran = true;
             Some((
                 materialized("other-shape", empty_dep_signature()),
@@ -6069,8 +6177,15 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
         projection.cursor(),
         PublishedSurfaceKind::Props,
     );
-    let _field_a =
-        surface_member_to_expanded_field(&mut engine, seam_scope, &admitted_a, None, None, None);
+    let _field_a = surface_member_to_expanded_field(
+        &mut engine,
+        seam_scope,
+        &admitted_a,
+        None,
+        None,
+        None,
+        crate::meta_resolve::projectors::output_sink::MemberValuePosition::ShallowMember,
+    );
     let after_seam_a = seam_db.live_count();
     assert_eq!(
         after_seam_a,
@@ -6088,8 +6203,15 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
         projection.cursor(),
         PublishedSurfaceKind::Props,
     );
-    let _field_b =
-        surface_member_to_expanded_field(&mut engine, seam_scope, &admitted_b, None, None, None);
+    let _field_b = surface_member_to_expanded_field(
+        &mut engine,
+        seam_scope,
+        &admitted_b,
+        None,
+        None,
+        None,
+        crate::meta_resolve::projectors::output_sink::MemberValuePosition::ShallowMember,
+    );
     assert_eq!(
         seam_db.live_count(),
         seam_baseline + 1,
@@ -6114,6 +6236,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
         None,
         None,
         None,
+        crate::meta_resolve::projectors::output_sink::MemberValuePosition::ShallowMember,
     );
     assert_eq!(
         seam_db.live_count(),
@@ -6121,6 +6244,278 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
         "PRODUCTION SEAM: a member with a DIFFERENT `.value` node must admit a \
          SECOND, disjoint entry through `surface_member_to_expanded_field` — \
          the subject does not collapse unrelated value nodes",
+    );
+}
+
+/// ITEM 3 (residual same-class close) — the SURFACE-member publication path's
+/// COLD-REDUCE admission (`surface_member_to_expanded_field` ->
+/// `member_shape_peek_or_compute` in the `output_sink` sink) must REFUSE
+/// `ShapeCacheDb` admission when the graph-native reduce consumed a FENCED
+/// (ReturnOnly, `store_published == false`) `IndexedReady` serve — the twin of the
+/// registry-member stabiliser hole
+/// (`fenced_serve_shape_cache_member_value_is_not_admitted`).
+///
+/// A fenced serve is non-cacheable but NOT partial, so the
+/// `MaterializedOutputTypeExpr` `result_is_partial()`-only admission gate cannot
+/// reject it; the nested fact tracer wrapping the cold reduce (the `RefCycleResultDb`
+/// / `app_config_no_override_proof` / `ResolvabilityDb` sibling pattern, identical to
+/// the stabiliser twin) is the only rail that does. The subject here is a `typeof`
+/// value node, which is a reducible operator (`needs_reduction == true`), so it
+/// routes through the cold-reduce admit this close protects.
+///
+/// DISCRIMINATING: `force_indexed_ready_serve_fence_for_tests` fences every
+/// `ensure_indexed_ready_serve` the reduce drives at a STABLE generation (no bump —
+/// so a `GenerationSuperseded` gate cannot mask the refusal, and the served
+/// `indexed` still reduces the shape). The unfenced control admits the shape
+/// (`live_count` grows); the fenced request must NOT (`live_count` unchanged) while
+/// the request stays `Complete` (the fenced serve routes through the fact tracer,
+/// never the request partial sticky). RED-pre (drop the cold-reduce
+/// `reduce_non_cacheable` refusal) the fenced shape LANDS in `ShapeCacheDb`.
+#[test]
+fn fenced_serve_surface_member_shape_is_not_admitted() {
+    use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
+    use crate::meta_resolve::projectors::output_sink::{
+        surface_member_to_expanded_field, MemberValuePosition,
+    };
+    use crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember;
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::resolver_core::ComponentMetaQueryEngine;
+    use crate::semantic_query::{DeclIdentity, ScopeId, SemanticNodeData, ValueRootKey};
+    use std::sync::atomic::Ordering;
+
+    // Drive the REAL surface-member seam for a `typeof <missing>` member value
+    // interned in `scope`'s graph: its reduce drives an `ensure_indexed_ready_serve`
+    // (so the fence has a serve to catch) and settles a deferred carrier that IS
+    // admitted warm (so the control is a genuine admission). Returns the post-drive
+    // ShapeCacheDb `live_count`.
+    fn drive_surface_member_seam(host: &VerterHost, scope: &str) -> usize {
+        let ctx: &dyn ResolverContext = host;
+        let value_node =
+            ctx.project_type_store()
+                .semantic_graph()
+                .intern_node(SemanticNodeData::new_typeof(
+                    ValueRootKey {
+                        scope: ScopeId {
+                            canonical_id: Arc::from(scope),
+                            local_scope: None,
+                        },
+                        name: Arc::from("definitelyMissingSeamValue"),
+                    },
+                    Arc::from(Vec::new().into_boxed_slice()),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                ));
+        let owner = DeclIdentity {
+            canonical_id: Arc::from(scope),
+            whole_hash: Default::default(),
+            decl_name: Arc::from("<sfc-script-setup>"),
+        };
+        let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
+        let member = shape_member("seamProbe", value_node);
+        let admitted = AdmittedPublishedMember::admitted_for_test(
+            owner,
+            value_node,
+            member,
+            projection.cursor(),
+            PublishedSurfaceKind::Props,
+        );
+        let mut engine = ComponentMetaQueryEngine::new(host);
+        let _ = surface_member_to_expanded_field(
+            &mut engine,
+            scope,
+            &admitted,
+            None,
+            None,
+            None,
+            MemberValuePosition::ShallowMember,
+        );
+        host.project_type_store().shape_cache_db().live_count()
+    }
+
+    // Control — an UNFENCED surface-member shape admits.
+    let control = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    let control_scope = "/fenced_surface/control.ts";
+    upsert(&control, control_scope, "export type Probe = number;\n");
+    control
+        .ensure_indexed_ready(control_scope)
+        .expect("control scope IndexedReady materialises");
+    let control_before = control.project_type_store().shape_cache_db().live_count();
+    let control_after = drive_surface_member_seam(&control, control_scope);
+    assert!(
+        control_after > control_before,
+        "fixture invariant: an unfenced surface-member shape admits through \
+         `surface_member_to_expanded_field` (otherwise the fenced assertion is vacuous)",
+    );
+
+    // Fenced — every `ensure_indexed_ready_serve` the compute drives is fenced at a
+    // STABLE generation, so the shape is derived from a served-without-publication
+    // artifact while its facts validate against the live view.
+    let fenced = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    let fenced_scope = "/fenced_surface/fenced.ts";
+    upsert(&fenced, fenced_scope, "export type Probe = number;\n");
+    fenced
+        .ensure_indexed_ready(fenced_scope)
+        .expect("fenced scope IndexedReady materialises");
+    let fenced_before = fenced.project_type_store().shape_cache_db().live_count();
+    let fenced_after = {
+        let rctx = RequestContext::new(1, Arc::from(fenced_scope), false, None);
+        let _guard = RequestContextGuard::install(rctx);
+        fenced
+            .test_force
+            .force_indexed_ready_serve_fence_for_tests
+            .store(true, Ordering::Relaxed);
+        let after = drive_surface_member_seam(&fenced, fenced_scope);
+        fenced
+            .test_force
+            .force_indexed_ready_serve_fence_for_tests
+            .store(false, Ordering::Relaxed);
+        // HARD FLOOR: a fenced serve is non-cacheable, NOT partial — the shape stays
+        // Complete; non-cacheability routes through the fact tracer, never the sticky.
+        assert!(
+            !crate::request_context::current_request_result_is_partial(),
+            "a fenced surface-member serve is non-cacheable, NOT partial — the shape stays \
+             Complete; non-cacheability routes through the fact tracer, never the partial sticky",
+        );
+        after
+    };
+    assert_eq!(
+        fenced_after, fenced_before,
+        "POISON: a fenced (non-cacheable) surface-member shape was admitted into ShapeCacheDb \
+         through `member_shape_peek_or_compute` — the nested fact tracer wrapping the cold reduce \
+         must refuse admission, else a later same-generation warm hit inherits the stale shape \
+         derived from a served-without-publication basis",
+    );
+}
+
+/// The SAME surface-member `ShapeCacheDb` admission boundary must ALSO refuse on a
+/// tracer `FactReadSetFinalise::Overflow` — the SECOND, independent non-admission
+/// condition. The admit builds its signature from the carrier's `dep_signature`,
+/// NOT from the cold-reduce tracer's finalised set, so an overflow seen only by the
+/// tracer would be dropped on the floor and a ROOTLESS entry would warm the shared
+/// cache: an observation set above `FACT_SIGNATURE_CAP` can be rooted by no
+/// signature, so a warm read could never revalidate it.
+///
+/// DISCRIMINATING: the per-host overflow knob fans `FACT_SIGNATURE_CAP + 1`
+/// synthetic observations into every installed tracer, so the member-shape compute's
+/// tracer finalises `Overflow` with NO fenced serve and NO partial — the exact state
+/// the pre-fix boundary (which read only `non_cacheable_read_observed` and discarded
+/// the finalise) ADMITTED. The unarmed control admits (`live_count` grows); the
+/// overflowed compute must NOT.
+#[test]
+fn tracer_overflow_refuses_surface_member_shape_admission() {
+    use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
+    use crate::meta_resolve::projectors::output_sink::{
+        surface_member_to_expanded_field, MemberValuePosition,
+    };
+    use crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember;
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::resolver_core::ComponentMetaQueryEngine;
+    use crate::semantic_query::{DeclIdentity, ScopeId, SemanticNodeData, ValueRootKey};
+    use std::sync::atomic::Ordering;
+
+    fn drive(host: &VerterHost, scope: &str) -> usize {
+        let ctx: &dyn ResolverContext = host;
+        let value_node =
+            ctx.project_type_store()
+                .semantic_graph()
+                .intern_node(SemanticNodeData::new_typeof(
+                    ValueRootKey {
+                        scope: ScopeId {
+                            canonical_id: Arc::from(scope),
+                            local_scope: None,
+                        },
+                        name: Arc::from("definitelyMissingOverflowValue"),
+                    },
+                    Arc::from(Vec::new().into_boxed_slice()),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                ));
+        let owner = DeclIdentity {
+            canonical_id: Arc::from(scope),
+            whole_hash: Default::default(),
+            decl_name: Arc::from("<sfc-script-setup>"),
+        };
+        let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
+        let member = shape_member("overflowProbe", value_node);
+        let admitted = AdmittedPublishedMember::admitted_for_test(
+            owner,
+            value_node,
+            member,
+            projection.cursor(),
+            PublishedSurfaceKind::Props,
+        );
+        let mut engine = ComponentMetaQueryEngine::new(host);
+        let _ = surface_member_to_expanded_field(
+            &mut engine,
+            scope,
+            &admitted,
+            None,
+            None,
+            None,
+            MemberValuePosition::ShallowMember,
+        );
+        host.project_type_store().shape_cache_db().live_count()
+    }
+
+    // Control — an unarmed surface-member shape admits.
+    let control = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    let control_scope = "/overflow_surface/control.ts";
+    upsert(&control, control_scope, "export type Probe = number;\n");
+    control
+        .ensure_indexed_ready(control_scope)
+        .expect("control scope IndexedReady materialises");
+    let control_before = control.project_type_store().shape_cache_db().live_count();
+    let control_after = drive(&control, control_scope);
+    assert!(
+        control_after > control_before,
+        "fixture invariant: an unarmed surface-member shape admits (otherwise the overflow \
+         assertion is vacuous)",
+    );
+
+    // Overflowed — the shape compute's tracer observes above the cap.
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    let scope = "/overflow_surface/overflowed.ts";
+    upsert(&host, scope, "export type Probe = number;\n");
+    host.ensure_indexed_ready(scope)
+        .expect("scope IndexedReady materialises");
+    let before = host.project_type_store().shape_cache_db().live_count();
+    let after = {
+        let rctx = RequestContext::new(1, Arc::from(scope), false, None);
+        let _guard = RequestContextGuard::install(rctx);
+        host.test_force
+            .force_fact_tracer_overflow_observations
+            .store(
+                crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+                Ordering::Relaxed,
+            );
+        let after = drive(&host, scope);
+        host.test_force
+            .force_fact_tracer_overflow_observations
+            .store(0, Ordering::Relaxed);
+        // Orthogonality: overflow is non-cacheable, NOT partial.
+        assert!(
+            !crate::request_context::current_request_result_is_partial(),
+            "a tracer overflow is non-cacheable, NOT partial — it must never raise the \
+             request partial sticky",
+        );
+        after
+    };
+    assert_eq!(
+        after, before,
+        "POISON: a signature-OVERFLOWED member-shape compute was admitted into ShapeCacheDb — \
+         an observation set above FACT_SIGNATURE_CAP can be rooted by no signature, so the \
+         entry could never be revalidated on a warm read. Overflow must refuse INDEPENDENTLY \
+         at this tracer boundary (pre-fix the `_finalise` was discarded)",
     );
 }
 
@@ -6198,7 +6593,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
     // hash for `c` is the base hash, which mismatches the overlay-rooted
     // entry → fail-closed recompute.
     let _overlay_primed = db
-        .get_or_compute(&key, &overlay_ctx, || {
+        .get_or_compute_traced_for_test(&key, &overlay_ctx, || {
             Some((
                 materialized("overlay-shape", empty_dep_signature()),
                 self_root_at(c, overlay_hash),
@@ -6215,7 +6610,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
     // returned value must be the overlay shape, proving admission + same-
     // view reuse.
     let overlay_same_view = db
-        .get_or_compute(&key, &overlay_ctx, || {
+        .get_or_compute_traced_for_test(&key, &overlay_ctx, || {
             panic!(
                 "ADMISSION/REUSE BROKEN: the overlay-primed member-value entry did \
                  NOT warm-hit on a same-overlay-view read — its cold closure ran. \
@@ -6233,7 +6628,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
 
     let mut base_cold_ran = false;
     let base_read = db
-        .get_or_compute(&key, base_ctx, || {
+        .get_or_compute_traced_for_test(&key, base_ctx, || {
             base_cold_ran = true;
             Some((
                 materialized("base-shape", empty_dep_signature()),
@@ -6265,7 +6660,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
     // slot (which would make the reverse assertion vacuous).
     let mut base_same_view_cold_ran = false;
     let base_same_view = db
-        .get_or_compute(&key, base_ctx, || {
+        .get_or_compute_traced_for_test(&key, base_ctx, || {
             base_same_view_cold_ran = true;
             Some((
                 materialized("base-shape-unexpected", empty_dep_signature()),
@@ -6292,7 +6687,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
     // hash; the overlay read reports the overlay hash → mismatch → recompute.
     let mut overlay_cold_ran = false;
     let overlay_read = db
-        .get_or_compute(&key, &overlay_ctx, || {
+        .get_or_compute_traced_for_test(&key, &overlay_ctx, || {
             overlay_cold_ran = true;
             Some((
                 materialized("overlay-shape-2", empty_dep_signature()),
@@ -6319,5 +6714,400 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
         base_hash, overlay_hash,
         "fixture invariant: base and overlay content hashes must differ for the \
          cross-view fail-closed test to discriminate",
+    );
+}
+
+/// The `member_shape_peek_or_compute` GATE-SHORT-CIRCUIT arms (package-backed
+/// root / transitive-cycle root / non-reducible shape) must REFUSE
+/// [`crate::component_meta_caches::ShapeCacheDb`] admission when the arm's own
+/// compute — the node-domain gates AND the terminal carrier raise — consumed a
+/// FENCED (ReturnOnly, `store_published == false`) `IndexedReady` serve.
+///
+/// The three arms return BEFORE the cold-reduce fact tracer, so their admission
+/// was gated only by `package_backed_fence_opt`, which is HASH-AVAILABILITY
+/// (`authoritative_current_content_hash`), NOT publication status: a fenced serve
+/// WITH an available content hash passes it. Each gate resolves the member value's
+/// carrier head through the shared carrier resolver, which drives
+/// `ensure_indexed_ready_serve` — so a fenced serve is genuinely consumed by the
+/// gate whose verdict is admitted.
+///
+/// DISCRIMINATING, per arm: `force_indexed_ready_serve_fence_for_tests` fences
+/// every `ensure_indexed_ready_serve` at a STABLE generation (no bump — so a
+/// `GenerationSuperseded` gate cannot mask the refusal, and the served `indexed`
+/// still resolves the shape). Anti-vacuity is asserted on BOTH halves: the unfenced
+/// control ADMITS (`live_count` grows — the arm is a genuine admission path), and
+/// the fenced drive genuinely OBSERVES a non-cacheable read (the tracer bit), so
+/// the entry under assertion IS fenced-derived. The fenced drive must then leave
+/// `live_count` unchanged.
+#[cfg(test)]
+mod fenced_gate_arm_admission_tests {
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+
+    use super::shape_member;
+    use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
+    use crate::meta_resolve::projectors::output_sink::{
+        surface_member_to_expanded_field, MemberValuePosition,
+    };
+    use crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::resolver_core::ComponentMetaQueryEngine;
+    use crate::semantic_query::{
+        DeclIdentity, NodeScopeId, ProjectionMode, SemanticNodeData, SemanticNodeId,
+    };
+    use crate::types::{AnalysisLevel, HostConfig};
+    use crate::{DependencyResolution, VerterHost};
+
+    /// Lower `expr` in `scope` to the settled graph node the per-member
+    /// publication seam takes as `SurfaceMember.value`.
+    fn lower(host: &VerterHost, scope: &str, expr: &TypeExpr) -> SemanticNodeId {
+        ProjectSemanticDispatch::new(host)
+            .lower_type_expr_in_scope_with_mode(scope, expr, ProjectionMode::Navigate)
+            .expect("expr must lower")
+    }
+
+    /// Drive the REAL production per-member publication seam
+    /// (`surface_member_to_expanded_field` -> `member_shape_peek_or_compute`) for
+    /// `value_node` and return the post-drive `ShapeCacheDb` `live_count`.
+    fn drive_member_seam(host: &VerterHost, scope: &str, value_node: SemanticNodeId) -> usize {
+        let owner = DeclIdentity {
+            canonical_id: Arc::from(scope),
+            whole_hash: Default::default(),
+            decl_name: Arc::from("<sfc-script-setup>"),
+        };
+        let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
+        let member = shape_member("gateProbe", value_node);
+        let admitted = AdmittedPublishedMember::admitted_for_test(
+            owner,
+            value_node,
+            member,
+            projection.cursor(),
+            PublishedSurfaceKind::Props,
+        );
+        let mut engine = ComponentMetaQueryEngine::new(host);
+        let _ = surface_member_to_expanded_field(
+            &mut engine,
+            scope,
+            &admitted,
+            None,
+            None,
+            None,
+            MemberValuePosition::ShallowMember,
+        );
+        host.project_type_store().shape_cache_db().live_count()
+    }
+
+    /// Run the arm's fixture twice — an UNFENCED control host and a FENCED host —
+    /// and assert the arm's fail-closed contract. `build` materialises the fixture
+    /// on a fresh host and returns `(scope, member_value_node)`.
+    fn assert_arm_refuses_fenced_admission<F>(arm: &str, build: F)
+    where
+        F: Fn(&VerterHost) -> (&'static str, SemanticNodeId),
+    {
+        // Control — the UNFENCED arm admits (otherwise the fenced assertion is vacuous).
+        let control = VerterHost::new_standalone(HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        });
+        let (control_scope, control_node) = build(&control);
+        let control_before = control.project_type_store().shape_cache_db().live_count();
+        let control_after = drive_member_seam(&control, control_scope, control_node);
+        assert!(
+            control_after > control_before,
+            "fixture invariant ({arm}): the UNFENCED gate arm must ADMIT its shape into \
+             ShapeCacheDb through `member_shape_peek_or_compute` — otherwise the fenced \
+             assertion below is vacuous",
+        );
+
+        // Fenced — every `ensure_indexed_ready_serve` the arm's gates + raise drive is
+        // fenced at a STABLE generation.
+        let fenced = VerterHost::new_standalone(HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        });
+        let (fenced_scope, fenced_node) = build(&fenced);
+        let fenced_before = fenced.project_type_store().shape_cache_db().live_count();
+        let rctx = RequestContext::new(1, Arc::from(fenced_scope), false, None);
+        let _guard = RequestContextGuard::install(rctx);
+        fenced
+            .test_force
+            .force_indexed_ready_serve_fence_for_tests
+            .store(true, Ordering::Relaxed);
+        let (fenced_after, read_set) =
+            fenced.with_fact_tracer(|| drive_member_seam(&fenced, fenced_scope, fenced_node));
+        fenced
+            .test_force
+            .force_indexed_ready_serve_fence_for_tests
+            .store(false, Ordering::Relaxed);
+
+        // Anti-vacuity: the arm's compute GENUINELY consumed a non-cacheable read, so
+        // the entry under assertion is fenced-derived (not an unrelated admission).
+        assert!(
+            read_set.non_cacheable_read_observed(),
+            "fixture invariant ({arm}): the fenced drive must genuinely consume a \
+             NON-CACHEABLE read (the gate resolves the member value's carrier head through \
+             `ensure_indexed_ready_serve`), else the refusal assertion below proves nothing",
+        );
+        // HARD FLOOR: a fenced serve is non-cacheable, NOT partial.
+        assert!(
+            !crate::request_context::current_request_result_is_partial(),
+            "({arm}) a fenced serve is non-cacheable, NOT partial — the shape stays \
+             Complete; non-cacheability routes through the fact tracer, never the sticky",
+        );
+        assert_eq!(
+            fenced_after, fenced_before,
+            "POISON ({arm}): a fenced (non-cacheable) gate-arm shape was ADMITTED into \
+             ShapeCacheDb through `member_shape_peek_or_compute` — the arm must refuse \
+             admission on the observed non-cacheable read, else a later same-generation \
+             warm hit inherits the stale verdict derived from a served-without-publication \
+             basis. `package_backed_fence_opt` is hash-AVAILABILITY, not publication status: \
+             a fenced serve with an available hash passes it.",
+        );
+    }
+
+    /// Arm 1 — the package-backed object-like ROOT gate.
+    #[test]
+    fn fenced_serve_package_backed_gate_member_shape_is_not_admitted() {
+        assert_arm_refuses_fenced_admission("package-backed arm", |host| {
+            const SCOPE: &str = "/src/pkg_arm.ts";
+            let _ = host
+                .upsert(crate::UpsertRequest {
+                    canonical_id: Some("/src/node_modules/pkg/index.d.ts".to_string()),
+                    input_id: "/src/node_modules/pkg/index.d.ts".to_string(),
+                    source: Arc::from("export interface VendorProps { a: string; b: number }\n"),
+                    file_language: crate::LanguageRegistry::global()
+                        .classify_static("/src/node_modules/pkg/index.d.ts")
+                        .static_resolution(),
+                    aliases: Vec::new(),
+                })
+                .expect("package file upserts");
+            super::upsert(
+                host,
+                SCOPE,
+                "import type { VendorProps } from 'pkg'\nexport type Local = { x: string }\n",
+            );
+            host.set_import_dependencies(
+                SCOPE,
+                vec![DependencyResolution {
+                    specifier: "pkg".to_string(),
+                    resolved_canonical_id: Some("/src/node_modules/pkg/index.d.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                }],
+            );
+            host.ensure_indexed_ready(SCOPE).expect("scope indexes");
+            (SCOPE, lower(host, SCOPE, &TypeExpr::named("VendorProps")))
+        });
+    }
+
+    /// Arm 2 — the transitive-cycle generic-instantiation ROOT gate.
+    #[test]
+    fn fenced_serve_cycle_gate_member_shape_is_not_admitted() {
+        assert_arm_refuses_fenced_admission("cycle arm", |host| {
+            const SCOPE: &str = "/src/cycle_arm.ts";
+            super::upsert(
+                host,
+                SCOPE,
+                "export type A<T> = B<T>\nexport type B<T> = A<T>\n",
+            );
+            host.ensure_indexed_ready(SCOPE).expect("scope indexes");
+            (
+                SCOPE,
+                lower(
+                    host,
+                    SCOPE,
+                    &TypeExpr::named_with_args(
+                        "A",
+                        vec![TypeExpr::Primitive(PrimitiveName::String)],
+                    ),
+                ),
+            )
+        });
+    }
+
+    /// Arm 3 — the NON-REDUCIBLE stable-shape gate, on the ORDINARY production
+    /// member value the macro hot mirror interns for `defineProps<{ msg: MyStr }>()`:
+    /// an unresolved `BareRef` carrier with NO type arguments and NO reducible
+    /// operator (so `classify_node_reduction_gates` clears both facts and the arm
+    /// short-circuits). The package-backed gate resolves that carrier HEAD through
+    /// the shared carrier resolver (`node_root_identity` -> `resolve_carrier_subject_node`),
+    /// which rides `ensure_indexed_ready_serve` — so this arm's own verdict compute
+    /// consumes the fenced serve it then admits under.
+    #[test]
+    fn fenced_serve_non_reducible_gate_member_shape_is_not_admitted() {
+        assert_arm_refuses_fenced_admission("non-reducible arm", |host| {
+            const SCOPE: &str = "/src/plain_arm.ts";
+            super::upsert(host, SCOPE, "export type MyStr = string\n");
+            let indexed = host.ensure_indexed_ready(SCOPE).expect("scope indexes");
+            // The unresolved carrier the hot mirror mints — NOT a pre-resolved
+            // `DeclRef` (which would carry its identity in-hand and need no head
+            // resolution, so no serve would enter the gate).
+            let node = host.project_type_store().semantic_graph().intern_node(
+                SemanticNodeData::new_bare_ref(
+                    Arc::from("MyStr"),
+                    NodeScopeId::File {
+                        canonical_id: Arc::from(SCOPE),
+                        whole_hash: indexed.whole_hash,
+                        local_scope: None,
+                    },
+                    Arc::from(Vec::new().into_boxed_slice()),
+                ),
+            );
+            (SCOPE, node)
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Post-compute revalidation rejection — the winner RE-DERIVES; it is never
+// served the value it built against a superseded read-set.
+//
+// TWO post-compute verdicts run on the single-entry funnels and they are NOT
+// the same thing:
+//
+// - the CACHEABILITY verdict (`ComputedEntry::Unrooted`, the `CacheabilityProbe`):
+//   the value IS a consistent snapshot of the view the compute ran under, it
+//   simply cannot be ROOTED (an overflowed signature, an unobservable content
+//   version, a fenced serve, a request-partial resolution). Only the WRITE is
+//   refused — the value goes back to the winner through `ReturnOnly`, so the
+//   refusal costs no second resolution.
+// - the post-compute REVALIDATION verdict (`revalidate_after_compute`): the
+//   store view MOVED under the compute — a file it read was edited, or the
+//   project generation was reset, between its first read and the publish. Its
+//   reads straddle the mutation, so the value is a consistent snapshot of NO
+//   view. It is discarded and the caller RE-DERIVES against the fresh view (the
+//   completion fence's retry-on-mid-flight-change). Serving it would hand the
+//   caller a torn value AND bubble the superseded facts into the enclosing
+//   entry's signature.
+//
+// The test pins the SECOND verdict on the FACT rail (a mid-compute content
+// edit, at a STABLE project generation so the generation gate cannot be what
+// rejects). It discriminates: a funnel that lowered the refused candidate back
+// to the winner (the `lower_unadmitted` opt-in, which these nodes decline)
+// would serve `"straddled"` instead of `None`, and the caller's re-derivation
+// would never run.
+// ---------------------------------------------------------------------------
+
+/// `DeclarationLookupDb` — a cold compute whose read-set MOVED mid-flight is
+/// REJECTED by post-compute revalidation, and the winner is NOT handed the
+/// straddling value: the funnel returns `None` so the caller re-derives against
+/// the fresh view.
+///
+/// DISCRIMINATING on three axes:
+/// - the CONTROL (the same production signature, no mid-compute edit) ADMITS
+///   and serves, so the rejection is caused by the edit and not by a fixture
+///   signature the funnel could never validate;
+/// - the project generation is STABLE across the edit, so the rejection is
+///   provably the FACT rail (a `GenerationSuperseded` gate cannot mask it);
+/// - the caller's re-derivation runs COLD and its FRESH value surfaces — the
+///   rejected entry is neither served nor published.
+#[test]
+fn declaration_lookup_straddling_compute_is_not_served_to_the_winner() {
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let ctx: &dyn ResolverContext = &host;
+    let db = host.project_type_store().declaration_db();
+
+    // CONTROL — a STABLE view: the same production signature admits and serves.
+    let stable = "/reval_qdb/stable.ts";
+    load_tracked_keyed(&host, stable);
+    let stable_key = (Arc::<str>::from(stable), Arc::<str>::from("Probe"));
+    let stable_observed = observed_whole_hash(ctx, stable);
+    let control_live_before = db.live_count();
+    let control = db
+        .get_or_compute_traced_for_test(&stable_key, ctx, || {
+            let sig =
+                engine_fact_signature_for_exported_type(ctx, stable, "Probe", stable_observed)
+                    .into_cacheable()
+                    .expect(
+                        "fixture invariant: the production signature builds for a tracked owner",
+                    )
+                    .facts;
+            ComputedEntry::Rooted(decl("control", stable), sig)
+        })
+        .expect("the control cold publish succeeds");
+    assert_eq!(
+        control.text.as_deref(),
+        Some("control"),
+        "fixture invariant: with a STABLE view the same compute shape admits and serves its \
+         value — so the rejection below is caused by the mid-compute edit alone",
+    );
+    assert!(
+        db.live_count() > control_live_before,
+        "fixture invariant: the control compute PUBLISHED — otherwise the no-publish assertion \
+         below is vacuous",
+    );
+
+    // The STRADDLING compute: the owner is edited INSIDE the closure, after the
+    // value was built and after its signature was rooted on the pre-edit
+    // content version.
+    let owner = "/reval_qdb/owner.ts";
+    load_tracked_keyed(&host, owner);
+    let key = (Arc::<str>::from(owner), Arc::<str>::from("Probe"));
+    let observed = observed_whole_hash(ctx, owner);
+    let generation_before = host.project_type_store().current_project_generation();
+    let live_before = db.live_count();
+
+    let outcome = db.get_or_compute_traced_for_test(&key, ctx, || {
+        let sig = engine_fact_signature_for_exported_type(ctx, owner, "Probe", observed)
+            .into_cacheable()
+            .expect("fixture invariant: the production signature builds for a tracked owner")
+            .facts;
+        let entry = ComputedEntry::Rooted(decl("straddled", owner), sig);
+        // The store view MOVES under the compute: the owner's content version is
+        // no longer the one the value was read from.
+        sibling_body_edit(&host, owner);
+        entry
+    });
+
+    assert_eq!(
+        host.project_type_store().current_project_generation(),
+        generation_before,
+        "fixture invariant: a content edit must NOT bump the project generation — the rejection \
+         under test is the FACT rail, and a `GenerationSuperseded` gate must not be able to mask \
+         it",
+    );
+    assert!(
+        outcome.is_none(),
+        "TORN SERVE: the funnel handed the winner the value it computed against a SUPERSEDED \
+         read-set. A `revalidate_after_compute` rejection means the store view MOVED under the \
+         compute — its reads straddle the mutation, so the value is a consistent snapshot of no \
+         view at all. It must be discarded and the caller must re-derive against the fresh view \
+         (the completion fence's retry-on-mid-flight-change). This is NOT the cacheability \
+         refusal, which keeps a consistent-but-unrootable value and returns it through \
+         `ReturnOnly`",
+    );
+    assert_eq!(
+        db.live_count(),
+        live_before,
+        "a rejected cold compute publishes NO entry",
+    );
+
+    // The caller's re-derivation: it runs COLD (nothing warm survived the
+    // rejection) and its FRESH value is what surfaces.
+    let mut rederived = false;
+    let fresh_observed = observed_whole_hash(ctx, owner);
+    let fresh = db
+        .get_or_compute_traced_for_test(&key, ctx, || {
+            rederived = true;
+            let sig = engine_fact_signature_for_exported_type(ctx, owner, "Probe", fresh_observed)
+                .into_cacheable()
+                .expect("fixture invariant: the production signature builds after the edit")
+                .facts;
+            ComputedEntry::Rooted(decl("rederived", owner), sig)
+        })
+        .expect("the re-derivation produces a value");
+    assert!(
+        rederived,
+        "the re-derivation must run COLD — the rejected entry left nothing warm behind",
+    );
+    assert_eq!(
+        fresh.text.as_deref(),
+        Some("rederived"),
+        "the caller-visible value must be the one re-derived against the FRESH view, never the \
+         straddling value the funnel refused",
     );
 }

@@ -41,7 +41,7 @@ use super::frontier_helpers::{
 use super::test_guards::assert_route_frontier_allowed;
 use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
-use verter_compiler::utils::oxc::script::type_surface::{
+use verter_parser::utils::oxc::script::type_surface::{
     imported_member_name_for_required_alias, required_import_alias_names_for_binding,
 };
 
@@ -309,7 +309,7 @@ impl VerterHost {
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
         view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
+    ) -> Option<verter_parser::utils::oxc::script::type_surface::ResolvedElements> {
         let adapter = HostFrontierAdapter {
             host: self,
             // Frontier routing is already complete before materialization starts.
@@ -352,11 +352,11 @@ impl VerterHost {
         resolution_deps: &mut std::collections::BTreeSet<String>,
         memo: &mut rustc_hash::FxHashMap<
             (String, String),
-            Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
+            Option<verter_parser::utils::oxc::script::type_surface::ResolvedElements>,
         >,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
+    ) -> Option<verter_parser::utils::oxc::script::type_surface::ResolvedElements> {
         let cache_key = (canonical_id.to_string(), exported_name.to_string());
         if let Some(cached) = memo.get(&cache_key) {
             return cached.clone();
@@ -434,12 +434,16 @@ impl VerterHost {
                 }
             }
 
-            self.resolve_external_type_from_indexed_ready_with_view(
-                canonical_id,
-                exported_name,
-                &companion_types,
-                view,
-            )
+            // The terminal element EXPANSION this materializer used to run here
+            // (the parser's structural element expander over the routed target
+            // + `companion_types`) is severed: query-time member/type authority
+            // is owned by the ONE shared dispatch (`ProjectSemanticDispatch`),
+            // and a parser-side structural expansion is a forbidden second
+            // resolver. The frontier keeps producing ROUTES + dependency facts
+            // (the companion walk above still records them); its legacy
+            // element payload is an honest miss.
+            let _ = companion_types;
+            None
         };
 
         active.remove(&cache_key);
@@ -871,65 +875,88 @@ impl VerterHost {
         participants.insert(provider_canonical.to_string());
 
         let result = (|| {
-            let state = self.route_shallow_state(provider_canonical, route_shallow_cache)?;
-
-            if let Some(target) = state.export_target(exported_name) {
-                return self.resolve_named_type_export_route_from_target(
-                    provider_canonical,
-                    target,
-                    active,
-                    participants,
-                    unresolved_edge_owners,
-                    route_shallow_cache,
-                );
-            }
-
-            let wildcard_indices = ordered_wildcard_indices_for_exported_name(
-                &state.wildcard_reexports,
-                exported_name,
-            );
-            for wildcard_index in wildcard_indices {
-                let wildcard = &state.wildcard_reexports[wildcard_index];
-                let target_canonical = if wildcard.canonical_id.is_empty() {
-                    self.resolve_route_type_edge(
-                        provider_canonical,
-                        wildcard.source_specifier.as_str(),
-                    )
-                } else {
-                    Some(wildcard.canonical_id.clone())
-                };
-                let Some(target_canonical) = target_canonical else {
-                    // The wildcard's source specifier does not resolve under
-                    // the current workspace. The Miss this may produce depends
-                    // on that unresolved edge re-resolving when the file set
-                    // changes — record the owner AND the unresolved source
-                    // specifier so the route entry roots it in the
-                    // `ImportRoute` fact rail.
-                    // Neither the owner's `FileWholeHash` nor its `Route` hash
-                    // re-resolves a known-miss specifier, so without this the
-                    // cached Miss is served stale after the target appears. The
-                    // SOURCE identity is threaded (not just the owner) so the
-                    // rooting loop can verify the produced `ImportRoute` hash
-                    // actually covers this exact wildcard source; an owner with
-                    // a route surface that does not track this source must NOT
-                    // admit a hash that silently drops it.
-                    unresolved_edge_owners.insert((
-                        provider_canonical.to_string(),
-                        wildcard.source_specifier.clone(),
-                    ));
-                    continue;
-                };
-                let child = self.resolve_named_type_export_route_uncached(
-                    target_canonical.as_str(),
-                    exported_name,
-                    active,
-                    participants,
-                    unresolved_edge_owners,
-                    route_shallow_cache,
-                )?;
-                if !child.is_miss() {
-                    return Some(child);
+            // LAYER-ORDERED wildcard walk (Build Philosophy: cross-file
+            // deepening happens one import level at a time). Every node of the
+            // CURRENT layer is checked for a DIRECT export of the name before
+            // ANY node's wildcard children are descended — a same-layer match
+            // is chosen without loading a deeper branch reachable through an
+            // earlier-declared sibling. Within a layer, nodes keep the
+            // score-then-declared wildcard order of their parent.
+            let mut visited: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+            visited.insert(provider_canonical.to_string());
+            let mut layer: Vec<String> = vec![provider_canonical.to_string()];
+            while !layer.is_empty() {
+                // Phase 1: same-layer DIRECT export surfaces, in order.
+                let mut layer_states = Vec::with_capacity(layer.len());
+                for canonical in &layer {
+                    participants.insert(canonical.clone());
+                    let state = self.route_shallow_state(canonical, route_shallow_cache)?;
+                    if let Some(target) = state.export_target(exported_name) {
+                        return self.resolve_named_type_export_route_from_target(
+                            canonical,
+                            target,
+                            active,
+                            participants,
+                            unresolved_edge_owners,
+                            route_shallow_cache,
+                        );
+                    }
+                    layer_states.push((canonical.clone(), state));
                 }
+
+                // Phase 2: build the NEXT layer from each node's wildcard
+                // edges, keeping per-node score-then-declared order.
+                let mut next_layer: Vec<String> = Vec::new();
+                for (canonical, state) in layer_states {
+                    let wildcard_indices = ordered_wildcard_indices_for_exported_name(
+                        &state.wildcard_reexports,
+                        exported_name,
+                    );
+                    for wildcard_index in wildcard_indices {
+                        let wildcard = &state.wildcard_reexports[wildcard_index];
+                        let target_canonical = if wildcard.canonical_id.is_empty() {
+                            self.resolve_route_type_edge(
+                                canonical.as_str(),
+                                wildcard.source_specifier.as_str(),
+                            )
+                        } else {
+                            Some(wildcard.canonical_id.clone())
+                        };
+                        let Some(target_canonical) = target_canonical else {
+                            // The wildcard's source specifier does not resolve
+                            // under the current workspace. The Miss this may
+                            // produce depends on that unresolved edge
+                            // re-resolving when the file set changes — record
+                            // the owner AND the unresolved source specifier so
+                            // the route entry roots it in the `ImportRoute`
+                            // fact rail.
+                            // Neither the owner's `FileWholeHash` nor its
+                            // `Route` hash re-resolves a known-miss specifier,
+                            // so without this the cached Miss is served stale
+                            // after the target appears. The SOURCE identity is
+                            // threaded (not just the owner) so the rooting
+                            // loop can verify the produced `ImportRoute` hash
+                            // actually covers this exact wildcard source; an
+                            // owner with a route surface that does not track
+                            // this source must NOT admit a hash that silently
+                            // drops it.
+                            unresolved_edge_owners
+                                .insert((canonical.clone(), wildcard.source_specifier.clone()));
+                            continue;
+                        };
+                        // A wildcard hop that lands on an ACTIVE (provider,
+                        // name) pair is a route cycle: skip the edge (the
+                        // in-flight walk already covers it), mirroring the
+                        // recursive walk's active-set Miss.
+                        if active.contains(&(target_canonical.clone(), exported_name.to_string())) {
+                            continue;
+                        }
+                        if visited.insert(target_canonical.clone()) {
+                            next_layer.push(target_canonical);
+                        }
+                    }
+                }
+                layer = next_layer;
             }
 
             Some(crate::resolver_core::RouteResult::Miss)
@@ -1033,14 +1060,16 @@ impl VerterHost {
                 // component-meta proof producer) observes NOTHING from
                 // an empty fact list — its own stamps validate against
                 // the live view while the folded route silently
-                // retargets when the wildcard target appears. Mark the
-                // request-sticky and per-cold-compute suppression rails
-                // by hand, exactly as the route-singleflight follower
-                // fallback does for an adopted unrootable route — the
-                // leader-produced unrootable route must suppress the
-                // same admissions.
-                crate::request_context::mark_request_materialization_cache_suppress();
-                crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+                // retargets when the wildcard target appears. Mark cache
+                // non-admission by hand, exactly as the route-singleflight
+                // follower fallback does for an adopted unrootable route —
+                // the leader-produced unrootable route must refuse the same
+                // admissions. This is a VALID (Complete) unrootable route,
+                // NOT a partial result — cache non-admission only, never
+                // request partiality.
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                );
                 return Some((route_result, Vec::new()));
             };
             let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
@@ -1096,13 +1125,25 @@ impl VerterHost {
         // the route's `fact_dep_signature` bubbles into any active
         // outer `with_fact_tracer` scope on the current thread (warm
         // hits + cold leader resolves + coalesced follower joins).
-        let cached_route = self
-            .resolver
-            .runtime
-            .routes
-            .get_or_resolve_route_observing_facts(route_key, view, || {
-                self.build_named_type_export_route_entry(provider, requested_name)
-            })?;
+        //
+        // The cacheability scope is the OUTERMOST bracket of the cold path: the
+        // walk inside `build_named_type_export_route_entry` rides
+        // `ensure_indexed_ready_serve` and demands decl bodies, so it can consume
+        // a fenced serve, a broken decl-body lease, or an unrootable route. The
+        // producer's own empty-facts convention covers only the fenced case; the
+        // funnel's post-compute verdict is the structural floor that covers all
+        // four — including the content-neutral ones, where the hash does not move
+        // and a warm-rooted entry would validate forever.
+        let (cached_route, _non_cacheable) =
+            crate::fact_signature_helpers::with_cacheability_scope(self, |probe| {
+                self.resolver
+                    .runtime
+                    .routes
+                    .get_or_resolve_route_observing_facts(route_key, view, probe, || {
+                        self.build_named_type_export_route_entry(provider, requested_name)
+                    })
+            });
+        let cached_route = cached_route?;
         cached_route
             .resolved()
             .map(|(defining_canonical, defining_symbol)| {

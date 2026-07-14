@@ -42,17 +42,24 @@ fn metahost() -> ComponentMetaHost {
 }
 
 /// The named prop's evaluated `TypeExpr` from a `get_component_meta`
-/// result.
-fn prop_type<'a>(
-    meta: &'a verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+/// result, demand-materialized from its published source through the
+/// ONE shared dispatch.
+fn prop_type(
+    host: &verter_session::VerterHost,
+    owner: &str,
+    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
-) -> &'a TypeExpr {
-    &meta
+) -> TypeExpr {
+    let source = meta
         .props
         .iter()
         .find(|p| p.name == name)
         .unwrap_or_else(|| panic!("missing prop `{name}`"))
-        .type_expr
+        .type_source
+        .present()
+        .unwrap_or_else(|| panic!("prop `{name}` must publish a typed source"));
+    verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
+        .unwrap_or_else(|| panic!("prop `{name}`'s published source must demand-materialize"))
 }
 
 /// BOUND PROOF — performing many distinct content edits of one owner
@@ -102,7 +109,7 @@ fn retention_bounds_component_meta_result_growth() {
         let expect_number = i % 2 == 0;
         assert_eq!(
             matches!(
-                prop_type(&meta, "value"),
+                prop_type(mh.host(), owner, &meta, "value"),
                 TypeExpr::Primitive(PrimitiveName::Number)
             ),
             expect_number,
@@ -162,7 +169,7 @@ fn eviction_of_valid_entry_recomputes_correct_result() {
     let meta_a = mh.host().get_component_meta(owner).expect("cold A");
     assert!(
         matches!(
-            prop_type(&meta_a, "value"),
+            prop_type(mh.host(), owner, &meta_a, "value"),
             TypeExpr::Primitive(PrimitiveName::Number)
         ),
         "version A `value` prop must be `number`",
@@ -195,13 +202,13 @@ fn eviction_of_valid_entry_recomputes_correct_result() {
         .expect("recompute after eviction of version A");
     assert!(
         matches!(
-            prop_type(&meta_a2, "value"),
+            prop_type(mh.host(), owner, &meta_a2, "value"),
             TypeExpr::Primitive(PrimitiveName::Number)
         ),
         "after the bounded substrate evicted version A's candidate, the \
          re-query MUST recompute the correct `number` type for version A — \
          eviction triggers a recompute, never a stale or wrong result. \
          Got {:?}",
-        prop_type(&meta_a2, "value"),
+        prop_type(mh.host(), owner, &meta_a2, "value"),
     );
 }

@@ -193,12 +193,15 @@ derived from Verter macros §model (`./.claude/skills/component-meta`):
 optional first string argument (or 'modelValue' default) and type
 from the type parameter T". Vue's documented `defineModel<T>()`
 contract additionally:
-- emits a corresponding `<model_name>` prop whose type is `T |
-  undefined` when the model is optional (default — no `{ required:
-  true }` option) and not defaulted; `required: false`,
-  `has_default: false`.
-- emits an `update:<model_name>` event whose payload tuple is
-  `[value: T | undefined]` for the same reason.
+- emits a corresponding `<model_name>` prop. The NATIVE snapshot keeps
+  the prop type BARE `T` plus the typed flags `required: false`,
+  `has_default: false` when the model is optional (default — no
+  `{ required: true }` option) and not defaulted; the `T | undefined`
+  optional-model display is a compat/Volar-interop projection derived
+  from `required` in
+  `packages/component-meta/src/compat/checker.ts`, not native truth.
+- emits an `update:<model_name>` event whose display payload tuple is
+  `[value: T | undefined]` for an optional, undefaulted model.
 
 The `SnapshotView` projection sorts every collection alphabetically by
 name, so `count` precedes `modelValue` in props/models/events. The
@@ -208,9 +211,10 @@ in `crates/verter_session/tests/correctness/deferred_fixtures_rule_correct.rs`)
 asserts byte-equality between this block and Verter's post-Phase-5j-fix
 output. Discrimination: pre-fix Verter produces
 `/*unknown*/ semanticMiss` for the model `type_expr` and the prop
-`type_signature`; post-fix Verter produces `string` / `number`
-(model `type_expr`) and `string | undefined` / `number | undefined`
-(prop `type_signature`), because the `expand_field_expr` closure
+`type_signature`; post-fix Verter produces the BARE `string` /
+`number` for BOTH the model `type_expr` and the prop
+`type_signature` (the native snapshot renders the published bare
+carrier), because the `expand_field_expr` closure
 routes `DefineModel` macros through a direct lower+raise of the
 macro's `parsed_type_argument` rather than the path-projection arm
 that always missed for primitive-leaf type arguments.
@@ -223,7 +227,7 @@ that always missed for primitive-leaf type arguments.
     "props": [
       {
         "name": "count",
-        "type_signature": "number | undefined",
+        "type_signature": "number",
         "required": false,
         "has_default": false,
         "default_signature": null,
@@ -231,7 +235,7 @@ that always missed for primitive-leaf type arguments.
       },
       {
         "name": "modelValue",
-        "type_signature": "string | undefined",
+        "type_signature": "string",
         "required": false,
         "has_default": false,
         "default_signature": null,

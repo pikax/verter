@@ -341,14 +341,6 @@ pub enum AdmissionSpec {
     /// / incomplete self-rooting) route through `ReturnOnly` without
     /// publishing.
     Singleflight,
-    /// Read-dominant key with no `execute`-side producer: the formal
-    /// [`SemanticQueryApi::execute`](crate::semantic_query::SemanticQueryApi)
-    /// entry point returns a warm node id when the identity map has an entry and
-    /// `QueryError::Miss` only WHEN UNWRITTEN — it never computes/writes a value;
-    /// writes come from a dedicated adapter side, not from `execute`. Used by
-    /// `ResolvedNamedType` (the parser's `NamedTypeCache` adapter writes; the hot
-    /// path reads through `SemanticGraphStore::get_resolved_named_type`).
-    ReadDominantNoExecute,
     /// Dedicated relation-memo path: the judgement is produced and cached by
     /// `ProjectSemanticDispatch::relate_nodes`, which memoises every outcome in
     /// the standalone `SemanticGraphStore::relation_memo` under dep-signature
@@ -367,10 +359,9 @@ pub enum AdmissionSpec {
     /// - `ResolveEnum` → the enum value/type-duality reducer.
     ///
     /// Distinct from [`RelationMemo`](Self::RelationMemo) (implies a
-    /// dedicated relation-memo producer), [`Singleflight`](Self::Singleflight)
-    /// (implies a real materialiser), and
-    /// [`ReadDominantNoExecute`](Self::ReadDominantNoExecute) (implies an
-    /// adapter writer). This variant implies NO writer at all.
+    /// dedicated relation-memo producer) and
+    /// [`Singleflight`](Self::Singleflight) (implies a real materialiser).
+    /// This variant implies NO writer at all.
     NonProducingPendingReducer,
 }
 
@@ -378,7 +369,6 @@ impl AdmissionSpec {
     fn render(self) -> &'static str {
         match self {
             AdmissionSpec::Singleflight => "Singleflight",
-            AdmissionSpec::ReadDominantNoExecute => "ReadDominantNoExecute",
             AdmissionSpec::RelationMemo => "RelationMemo",
             AdmissionSpec::NonProducingPendingReducer => "NonProducingPendingReducer",
         }
@@ -691,21 +681,6 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             allowed_demand: project_path_axes,
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
-        },
-        // ResolvedNamedType { key } — read-dominant Vue-macro artifact identity;
-        // `execute` returns Miss, writes come from the NamedTypeCache adapter.
-        // The cached value depends on the resolution of the named type's
-        // declaration graph (§2.1 tier-2: `R T L J`, no parsed-body-skeleton
-        // read at query time).
-        SemanticQueryKeySpec {
-            variant: SemanticQueryKeyTag::ResolvedNamedType,
-            lifecycle: KeyLifecycle::Live,
-            context_shape: "HostResolvedNamedTypeKey",
-            value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: EnvDimSpec::Static(env_resolve()),
-            allowed_demand: AxisMask::empty(),
-            cross_context_guard: "",
-            admission: AdmissionSpec::ReadDominantNoExecute,
         },
         // Relate { source, target, relation, policy, source_freshness,
         // inference_context, context } — full-identity relation judgement over

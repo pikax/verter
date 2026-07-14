@@ -2,7 +2,7 @@
 //!
 //! `SemanticGraphStore` carries a set of `cfg(test, debug_assertions)`
 //! barrier injection points inside `invalidate_all`, the warm-publish
-//! path, the cold-winner path, and the resolved-named-type insert path.
+//! path, and the cold-winner path.
 //! A race test arms one of these points with a [`std::sync::Barrier`],
 //! drives a concurrent operation into the resulting window, and asserts
 //! a lock-domain / ordering invariant. The arming drivers and the RAII
@@ -10,8 +10,7 @@
 //! so test scaffolding does not count against that module's size
 //! budget.
 //!
-//! Each driver returns a [`TestInvalidateAllGateGuard`] (or, for the
-//! resolved-named-type gate, a `BudgetedGateGuard`) that disarms the
+//! Each driver returns a [`TestInvalidateAllGateGuard`] that disarms the
 //! per-store injection point on drop, so a later operation on the same
 //! store cannot park on a stale barrier. Every gate is per-store, never
 //! a process-global, so a test arming one cannot perturb a concurrent

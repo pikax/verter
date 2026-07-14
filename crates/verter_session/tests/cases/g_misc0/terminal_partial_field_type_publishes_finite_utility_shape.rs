@@ -53,7 +53,7 @@ fn terminal_partial_field_type_publishes_finite_utility_shape() {
     );
 
     let (_analysis, resolved, _audit) = AuditedRequest::builder()
-        .attach_to(host)
+        .attach_to(std::sync::Arc::clone(&host))
         .resolve_component_meta("/Editor.vue")
         .expect("hermetic resolve must succeed");
 
@@ -67,10 +67,15 @@ fn terminal_partial_field_type_publishes_finite_utility_shape() {
         .find(|field| field.name == "editorOptions")
         .expect("editorOptions prop should be published");
 
-    let TypeExpr::Object(object) = &field.r#type else {
+    let field_ty = verter_session::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/Editor.vue",
+        field.r#type.present().expect("present source"),
+    )
+    .unwrap_or_else(|| panic!("`editorOptions`'s published source must demand-materialize"));
+    let TypeExpr::Object(object) = &field_ty else {
         panic!(
-            "direct terminal Partial<EditorOptions> should publish an Object, got {:?}",
-            field.r#type
+            "direct terminal Partial<EditorOptions> should resolve to an Object, got {field_ty:?}"
         );
     };
 

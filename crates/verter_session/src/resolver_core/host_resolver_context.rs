@@ -43,7 +43,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
+use verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use verter_workspace::{AmbientSymbolHit, ProjectStableKey};

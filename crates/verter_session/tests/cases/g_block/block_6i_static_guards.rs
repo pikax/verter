@@ -124,53 +124,6 @@ fn strip_comments_and_strings(src: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Guard A.1 — `collect_component_meta_registry_refs` accepts a
-//             `ProjectionCursor` parameter.
-//
-// The path-precise projection demand substrate
-// (`crates/verter_session/src/meta_resolve/projection_demand.rs`)
-// requires the registry walker to thread this cursor through its
-// recursive descent — landing the signature is the load-bearing
-// structural change. Without it, path-precision is impossible.
-// ---------------------------------------------------------------------------
-#[test]
-fn collect_component_meta_registry_refs_requires_cursor() {
-    let src =
-        read_workspace_file("crates/verter_session/src/resolver_core/component_meta_registry.rs");
-
-    // Locate the function signature.
-    let signature_idx = src
-        .find("pub(crate) fn collect_component_meta_registry_refs(")
-        .expect(
-            "guard A.1: function `collect_component_meta_registry_refs` must exist in \
-             `crates/verter_session/src/resolver_core/component_meta_registry.rs`",
-        );
-
-    // Bound the search to the signature header (between `(` and `)`).
-    let header_start = signature_idx;
-    let header_end = src[header_start..]
-        .find(") {")
-        .map(|i| header_start + i)
-        .expect("guard A.1: function signature must close with `) {`");
-    let header = &src[header_start..header_end];
-
-    assert!(
-        header.contains("ProjectionCursor"),
-        "guard A.1: `collect_component_meta_registry_refs` MUST accept a \
-         `ProjectionCursor<'_>` parameter in its signature so the \
-         path-precise registry walk threads through. Header:\n{header}",
-    );
-
-    // Soft-check: the parameter name `cursor` appears so callers can
-    // rely on a consistent forwarding name.
-    assert!(
-        header.contains("cursor: ") || header.contains("_cursor: "),
-        "guard A.1: registry walker's projection-cursor parameter should be named \
-         `cursor` (or `_cursor` if temporarily unused). Header:\n{header}",
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Guard A.2 — `projection_demand` module exists with the substrate types.
 //
 // `SurfaceProjection`, `ProjectionNode`, `KeyFilter`, `PathSegment`
@@ -260,56 +213,45 @@ fn shape_cache_db_replaces_split_caches() {
 }
 
 // ---------------------------------------------------------------------------
-// Guard B.2 — peek primitive's `Leaf` / `BareCarrier` arms admit to
-//             the universal cache.
+// Guard B.2 — `member_shape_peek_or_compute`'s gate-short-circuit arms
+//             admit to the universal cache.
 //
 // Universal-caching invariant: every successful shape compute admits,
-// regardless of how cheap the compute was. The peek primitive's
-// `Leaf` and `BareCarrier` arms in
-// `reduce_field_type_expr` and the gate-short-circuit arms in
+// regardless of how cheap the compute was. The gate-short-circuit arms in
 // `member_shape_peek_or_compute` MUST route through
-// `admit_type_expr_shape_if_possible` / `admit_member_shape_if_possible`.
+// `admit_member_shape_if_possible`. (The TypeExpr-side helper
+// `admit_type_expr_shape_if_possible` was retired together with the
+// `reduce_field_type_expr_with_mode` TypeExpr reducer when the per-field
+// reduce was reworked onto node-domain sources; the member-shape helper is
+// the sole sink-side admission path.)
 // ---------------------------------------------------------------------------
 #[test]
 fn peek_primitive_arms_admit_to_cache() {
-    // The admission helpers + the boundary-consuming functions that call them
-    // (`reduce_field_type_expr_with_mode`, `member_shape_peek_or_compute`) live
-    // in the terminal `output_sink` sink module.
+    // The admission helper + the boundary-consuming function that calls it
+    // (`member_shape_peek_or_compute`) live in the terminal `output_sink`
+    // sink module.
     let src =
         read_workspace_file("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
 
-    // The admission helpers must exist.
-    assert!(
-        src.contains("fn admit_type_expr_shape_if_possible"),
-        "guard B.2: `meta_resolve::projectors::output_sink` MUST define \
-         `admit_type_expr_shape_if_possible` — the universal-caching admission \
-         helper for the `reduce_field_type_expr` peek's `Leaf` / `BareCarrier` arms.",
-    );
+    // The admission helper must exist.
     assert!(
         src.contains("fn admit_member_shape_if_possible"),
         "guard B.2: `meta_resolve::projectors::output_sink` MUST define \
          `admit_member_shape_if_possible` — the universal-caching admission \
-         helper for `member_shape_peek_or_compute`'s gate-short-circuit + `Leaf` / \
-         `BareCarrier` arms.",
+         helper for `member_shape_peek_or_compute`'s gate-short-circuit arms.",
     );
 
-    // Every successful shape outcome must be wrapped in an admission
+    // Every successful shape outcome must be wrapped in the admission
     // helper, not returned bare. Source-text grep on the call count
-    // gives a coarse but discriminating signal.
-    let admit_type_calls = src.matches("admit_type_expr_shape_if_possible(").count();
+    // gives a coarse but discriminating signal. Exclude the definition
+    // itself from the count.
+    let admit_member_calls = src.matches("admit_member_shape_if_possible(").count()
+        - src.matches("fn admit_member_shape_if_possible(").count();
     assert!(
-        admit_type_calls >= 2,
-        "guard B.2: `admit_type_expr_shape_if_possible` MUST be called at least twice \
-         (one for the `Leaf` arm, one for the `BareCarrier` arm of `reduce_field_type_expr`'s \
-         peek). Observed call count: {admit_type_calls}.",
-    );
-    let admit_member_calls = src.matches("admit_member_shape_if_possible(").count();
-    assert!(
-        admit_member_calls >= 4,
-        "guard B.2: `admit_member_shape_if_possible` MUST be called at least four times \
-         (package-backed gate, cycle gate, non-reducible shape arm, peek `Leaf` arm, peek \
-         `BareCarrier` arm) inside `member_shape_peek_or_compute`. Observed call count: \
-         {admit_member_calls}.",
+        admit_member_calls >= 3,
+        "guard B.2: `admit_member_shape_if_possible` MUST be called at least three times \
+         (package-backed gate arm, cycle-gate arm, non-reducible stable-shape arm) inside \
+         `member_shape_peek_or_compute`. Observed call count: {admit_member_calls}.",
     );
 }
 
@@ -792,10 +734,10 @@ fn ax_projectors_descend_published_member() {
 #[test]
 fn ax_projector_uses_terminal_publication_mode() {
     // The per-member publication site `surface_member_to_expanded_field`, the
-    // sink-private per-field reducer `reduce_field_type_expr_with_mode`, and the
-    // high-level published-field driver `reduce_published_field_types` all live
-    // in the terminal `output_sink` sink module (the only module that touches
-    // the reverse-materialization boundary).
+    // sink-private node-domain per-field reducer `reduce_field_value_node`, and
+    // the high-level published-field driver `reduce_published_field_types` all
+    // live in the terminal `output_sink` sink module (the only module that
+    // touches the reverse-materialization boundary).
     let src =
         read_workspace_file("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
     let body = extract_fn_body(&src, "pub(crate) fn surface_member_to_expanded_field(");
@@ -815,19 +757,25 @@ fn ax_projector_uses_terminal_publication_mode() {
          depth leak. Use the cursor's publication mode."
     );
 
-    // The carrier-aware reducer must exist (now SINK-PRIVATE in `output_sink`)
-    // and the published-field second pass must reduce props/emits in `Navigate`
-    // carrier mode.
+    // The node-domain per-field reducer must exist (SINK-PRIVATE in
+    // `output_sink`; successor of the retired TypeExpr reducer
+    // `reduce_field_type_expr_with_mode` after the publication reduce was
+    // reworked onto node-domain sources) and the published-field second pass
+    // must reduce props/emits in `Navigate` carrier mode.
     assert!(
-        src.contains("fn reduce_field_type_expr_with_mode("),
-        "publication-mode guard: `reduce_field_type_expr_with_mode` (the \
-         carrier-aware field reducer, sink-private in `output_sink`) MUST exist."
+        src.contains("fn reduce_field_value_node("),
+        "publication-mode guard: `reduce_field_value_node` (the node-domain \
+         per-field reducer, sink-private in `output_sink`) MUST exist."
     );
     // `reduce_published_field_types` is the HIGH-LEVEL publication API on the
-    // `output_sink` sink module (it wraps the sink-private per-field reducer).
+    // `output_sink` sink's `published_finalize` CHILD module (inside the same
+    // capability mint scope; it wraps the sink-private per-field reducer).
     // The demand context owns carrier-stop; the second pass MUST still reduce
     // props/emits in `Navigate` carrier mode.
-    let second_pass = extract_fn_body(&src, "pub(crate) fn reduce_published_field_types(");
+    let finalize_src = read_workspace_file(
+        "crates/verter_session/src/meta_resolve/projectors/output_sink/published_finalize.rs",
+    );
+    let second_pass = extract_fn_body(&finalize_src, "pub(crate) fn reduce_published_field_types(");
     assert!(
         second_pass.contains("ProjectionMode::Navigate"),
         "publication-mode guard: `reduce_published_field_types` MUST reduce \
@@ -1061,13 +1009,14 @@ fn ax_hybrid_projector_layer_name_predicates_retired() {
     let reducer_src = read_workspace_file(
         "crates/verter_session/src/meta_resolve/projectors/published_reducer.rs",
     );
-    let output_sink_src =
-        read_workspace_file("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
+    let published_finalize_src = read_workspace_file(
+        "crates/verter_session/src/meta_resolve/projectors/output_sink/published_finalize.rs",
+    );
     assert!(
-        output_sink_src.contains("pub(crate) fn reduce_published_field_types("),
-        "name-predicate-retired guard: `projectors/output_sink.rs` MUST host \
-         `reduce_published_field_types` (the high-level publication API; the \
-         per-field reducer it wraps is sink-private)."
+        published_finalize_src.contains("pub(crate) fn reduce_published_field_types("),
+        "name-predicate-retired guard: `projectors/output_sink/published_finalize.rs` MUST host \
+         `reduce_published_field_types` (the high-level publication API on the sink's \
+         finalize child module; the per-field reducer it wraps is sink-private)."
     );
     assert!(
         reducer_src.contains("pub(crate) fn type_expr_contains_reducible_operator("),

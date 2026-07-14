@@ -2,13 +2,14 @@
 //! branches in `host_manage::eval_env` (`defineModel`, generic `ProjectPath`,
 //! slot-binding).
 //!
-//! This module is the AUTHORIZED owner-confined materialisation sink for the macro
+//! This module is the AUTHORIZED owner-confined publication sink for the macro
 //! field-expansion branches. It owns the MODULE-PRIVATE node-domain artifact
-//! ([`AdmittedExpansionNode`]) + the MODULE-PRIVATE materialiser
-//! ([`materialize_admitted_expansion_node`], which mints the parent's
-//! `HostManageComponentMetaOutputCap` INTERNALLY — reachable here because this is a
-//! descendant of the cap's `pub(in crate::host_manage::component_meta_methods)`
-//! mint scope), and exposes ONLY the three high-level closed-demand methods
+//! ([`AdmittedExpansionNode`]) + the MODULE-PRIVATE source projector
+//! ([`materialize_admitted_expansion_node`], which projects the resolved node's
+//! content-free SOURCE — a complete leaf fact, a complete leaf-union fact, or
+//! the caller's authored fallback — with the node-domain miss-sentinel gate
+//! replacing the former whole-raise miss), and exposes ONLY the three
+//! high-level closed-demand methods
 //! ([`expand_define_model_output`] / [`expand_generic_project_path_output`] /
 //! [`expand_slot_binding_output`]). The eval_env callers pass only closed demands
 //! (resolver ctx + owner canonical + macro index + the per-branch terminal demand)
@@ -19,7 +20,6 @@
 
 use std::sync::Arc;
 
-use super::HostManageComponentMetaOutputCap;
 use crate::types::ProjectionMode;
 
 /// A session-local node-bearing expansion result: the produced
@@ -98,29 +98,44 @@ impl AdmittedExpansionNode {
 /// Materialisation sink: the SINGLE place an [`AdmittedExpansionNode`] becomes an
 /// [`ExpandedNormalizedExpr`](verter_semantic::analysis::type_expand::ExpandedNormalizedExpr).
 ///
-/// MODULE-PRIVATE. It mints the parent's `HostManageComponentMetaOutputCap`
-/// INTERNALLY (reachable from this descendant of the cap's mint scope) to
-/// materialise the artifact's node into a sealed output carrier and unwrap it.
-/// The artifact reaching it was produced inside a sink-owned demand method from a
-/// closed demand — never passed in from a sibling module — so the cap's sealed
-/// unwrap and the input authority are BOTH owner-confined.
+/// MODULE-PRIVATE. The artifact reaching it was produced inside a sink-owned
+/// demand method from a closed demand — never passed in from a sibling module —
+/// so the input authority is owner-confined. No `TypeExpr` materialisation
+/// happens here: the published payload is the node's content-free SOURCE
+/// projection.
 ///
-/// Returns `ExpandedNormalizedExpr { expr }` (the sealed `OutputProjector`
-/// shell-raise of the node), and `None` on a whole-raise miss.
+/// Returns `ExpandedNormalizedExpr { expr }` — the node's content-free
+/// SOURCE projection: a resolved LEAF node (primitive / string / number /
+/// boolean literal) projects to its complete closed leaf fact, and a
+/// resolved UNION whose every member is a complete leaf projects to the
+/// closed leaf-union fact (the shared dispatch-owned node→closed-fact
+/// projections — the same `published_source_for_node` policy); any richer
+/// resolved shape publishes the caller's `fallback_source` (the field's
+/// authored position — the demand side re-raises it through the one engine).
+/// `None` when the resolved root is the unmaterialised-miss sentinel (the
+/// node-domain "whole-raise miss": no faithful output exists, the caller
+/// preserves symbolically instead of publishing a fabricated value).
 #[must_use]
 fn materialize_admitted_expansion_node(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     artifact: &AdmittedExpansionNode,
+    fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedNormalizedExpr> {
-    use crate::project_semantic_dispatch::output_materialization::OutputProjector;
-    // Mint the component-meta host-method output capability (constructor visible
-    // only within this authorized owner module tree) and materialise the node into
-    // a sealed carrier, then unwrap it — the sole node→`TypeExpr` materialisation
-    // for the expansion branch, performed at the sink.
-    let cap = HostManageComponentMetaOutputCap::new(dispatch);
-    let expr = cap
-        .materialize_output_type_expr(artifact.node)?
-        .into_type_expr(&cap);
+    use verter_type_expr::facts::{ClosedTypeFact, SemanticTypeSource};
+
+    if crate::project_semantic_dispatch::raise::node_raise_misses_or_root_sentinel_with_dispatch(
+        dispatch,
+        artifact.node,
+    ) {
+        return None;
+    }
+    let expr = match dispatch.node_leaf_fact(artifact.node) {
+        Some(leaf) => SemanticTypeSource::Closed(ClosedTypeFact::Leaf(leaf)),
+        None => match dispatch.node_leaf_union_fact(artifact.node) {
+            Some(leaves) => SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(leaves)),
+            None => fallback_source.clone(),
+        },
+    };
     Some(verter_semantic::analysis::type_expand::ExpandedNormalizedExpr { expr })
 }
 
@@ -211,24 +226,27 @@ pub(crate) fn expand_define_model_output(
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     owner_canonical: &str,
     macro_index: usize,
+    fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> DefineModelOutputExpansion {
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     // Read the macro arg's mode-neutral mirror handle (the ONE producer) and
-    // resolve it through the shared dispatch at `Expanded` — the model value type
-    // IS the field's type. A different DEMAND on the same handle, not a second
-    // lowering of the macro arg.
+    // resolve it through the shared dispatch at `Navigate` — publication demand
+    // is Navigate-only (a full `get_component_meta` records ZERO
+    // `Published(Expanded)` projection contexts); the model value publishes as
+    // a carrier and consumers re-resolve it on demand. A different DEMAND on
+    // the same handle, not a second lowering of the macro arg.
     let Some(base_id) = lower_macro_arg_carrier_head(
         &dispatch,
         ctx,
         owner_canonical,
         macro_index,
-        ProjectionMode::Expanded,
+        ProjectionMode::Navigate,
     ) else {
         return DefineModelOutputExpansion::CarrierMiss;
     };
     let artifact =
         AdmittedExpansionNode::new(base_id, Arc::from(Vec::new().into_boxed_slice()), false);
-    match materialize_admitted_expansion_node(&dispatch, &artifact) {
+    match materialize_admitted_expansion_node(&dispatch, &artifact, fallback_source) {
         Some(normalized) => DefineModelOutputExpansion::Materialized {
             produced_node_id: base_id,
             normalized,
@@ -255,6 +273,7 @@ pub(crate) fn expand_generic_project_path_output(
     macro_index: usize,
     carrier_lower_mode: ProjectionMode,
     terminal_path: Arc<[crate::semantic_query::PathSegment]>,
+    fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> MacroPathOutputExpansion {
     use crate::semantic_query::{
         QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
@@ -283,7 +302,7 @@ pub(crate) fn expand_generic_project_path_output(
                 Arc::from(Vec::new().into_boxed_slice()),
                 false,
             );
-            match materialize_admitted_expansion_node(&dispatch, &artifact) {
+            match materialize_admitted_expansion_node(&dispatch, &artifact, fallback_source) {
                 Some(normalized) => MacroPathOutputExpansion::Materialized {
                     produced_node_id: node_id,
                     normalized,
@@ -314,6 +333,7 @@ pub(crate) fn expand_slot_binding_output(
     carrier_lower_mode: ProjectionMode,
     slot_name: &str,
     binding_name: &str,
+    fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> MacroPathOutputExpansion {
     use crate::semantic_query::QueryResult;
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
@@ -339,7 +359,7 @@ pub(crate) fn expand_slot_binding_output(
                 slot_binding.dep_signature,
                 slot_binding.result_is_partial,
             );
-            match materialize_admitted_expansion_node(&dispatch, &artifact) {
+            match materialize_admitted_expansion_node(&dispatch, &artifact, fallback_source) {
                 Some(normalized) => MacroPathOutputExpansion::Materialized {
                     produced_node_id: terminal_id,
                     normalized,

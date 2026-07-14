@@ -1,38 +1,66 @@
-//! Unit tests for the resolution-policy pass.
+//! Publication-policy tests over content-free SOURCES.
+//!
+//! The policy rewrites `SemanticTypeSource` driver fields node-domain:
+//! fixtures upsert REAL files (declaration bodies come from the engine's
+//! authored decl-body locators, exactly the production route) or carry
+//! synthesized closed shapes, run the policy, and assert on the published
+//! SOURCE plus the semantic-graph node it raises to through the one shared
+//! dispatch — never on a materialized `TypeExpr`.
 
 use std::sync::Arc;
 
 use verter_semantic::analysis::component_meta::{
     AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags, FallthroughSurface,
-    NoFallthroughReason, PropAnalysis, PublicInstanceAnalysis, PublicInstanceCompleteness,
-    ResolvedTypeAnalysis, RootReachability, SlotAnalysis, SlotBindingAnalysis,
+    NoFallthroughReason, PropAnalysis, ResolvedTypeAnalysis, RootReachability, SlotAnalysis,
+    SlotBindingAnalysis,
 };
-use verter_type_expr::{
-    LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
+use verter_type_expr::facts::{
+    ClosedTypeFact, FactOrLocator, LeafTypeFact, ResolvedLocalShape, SemanticTypeSource,
+    SynthesizedMemberFact,
+};
+use verter_type_expr::locators::{
+    AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
 };
 
 use crate::component_meta_resolution_policy::apply_component_meta_resolution_policy;
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
 use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
-use crate::types::HostConfig;
-use crate::VerterHost;
+use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
+use crate::types::{HostConfig, UpsertRequest};
+use crate::{FileLanguage, VerterHost};
+
+// ---------------------------------------------------------------------------
+// Fixture helpers
+// ---------------------------------------------------------------------------
 
 fn empty_host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
 }
 
+fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(source),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+}
+
 fn run_policy(
+    host: &VerterHost,
     meta: &mut ComponentMetaAnalysis,
     registry: &[ResolvedTypeAnalysis],
     registry_meta: &[ResolvedTypeRegistryMeta],
 ) {
-    let host = empty_host();
-    crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+    crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         apply_component_meta_resolution_policy(
             meta,
             registry,
             registry_meta,
-            &host,
+            host,
             "/owner.vue",
             None,
             ctx,
@@ -48,17 +76,14 @@ fn run_policy(
 /// treats as role-bearing (kept symbolic per Rules 2 / 4 + the
 /// raw-restoration helpers).
 ///
-/// Tests that previously relied on the legacy
-/// `name.ends_with("Props")` nominal classifier now opt into the
-/// structural classifier by listing the participating names here.
-///
 /// Production code paths build the set from `snapshot.macros` via
 /// `build_policy_macro_role_identities` — see
 /// `apply_component_meta_resolution_policy`. The
 /// `_with_participation` entry point exists for unit tests that don't
-/// stand up host shallow state but still want to exercise §3.4
+/// stand up analyzer snapshots but still want to exercise §3.4
 /// structural classification.
 fn run_policy_with_macro_participation(
+    host: &VerterHost,
     meta: &mut ComponentMetaAnalysis,
     registry: &[ResolvedTypeAnalysis],
     registry_meta: &[ResolvedTypeRegistryMeta],
@@ -67,7 +92,6 @@ fn run_policy_with_macro_participation(
     use rustc_hash::FxHashSet;
     use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 
-    let host = empty_host();
     let mut participating: FxHashSet<ResolvedRootIdentity> = FxHashSet::default();
     for name in macro_participating_names.iter() {
         // Derive the identity the same way the policy's registry-fallback
@@ -85,12 +109,12 @@ fn run_policy_with_macro_participation(
             participating.insert(ResolvedRootIdentity::new("/owner.vue", *name));
         }
     }
-    crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+    crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         crate::component_meta_resolution_policy::apply_component_meta_resolution_policy_with_participation(
             meta,
             registry,
             registry_meta,
-            &host,
+            host,
             "/owner.vue",
             &participating,
             ctx,
@@ -130,13 +154,13 @@ fn empty_meta() -> ComponentMetaAnalysis {
     }
 }
 
-fn prop(name: &str, type_expr: TypeExpr) -> PropAnalysis {
+fn prop(name: &str, type_source: SemanticTypeSource) -> PropAnalysis {
     PropAnalysis {
         name: name.to_string(),
-        type_expr,
+        type_source: verter_type_expr::facts::SourcePosition::Present(type_source),
         type_expansion: None,
         raw_type: None,
-        raw_type_expr: None,
+        raw_type_source: None,
         required: false,
         has_default: false,
         default_value: None,
@@ -146,17 +170,46 @@ fn prop(name: &str, type_expr: TypeExpr) -> PropAnalysis {
     }
 }
 
-fn ref_zero(name: &str) -> TypeExpr {
-    TypeExpr::Ref {
-        name: Arc::from(name),
-        type_arguments: Arc::from(Vec::<TypeExpr>::new()),
-    }
+/// The shallow named-reference SOURCE (`Closed(Leaf(Ref(name)))`) — the
+/// same seed shape the production registry publishes.
+fn ref_source(name: &str) -> SemanticTypeSource {
+    SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Ref(name.to_string())))
 }
 
-fn registry_entry(name: &str, body: TypeExpr) -> ResolvedTypeAnalysis {
+/// The authored decl-body SOURCE for `(canonical, symbol)` — the same
+/// carrier the engine's `named_decl_body` route publishes.
+fn decl_body_source(canonical: &str, symbol: &str) -> SemanticTypeSource {
+    SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(TypeBodySlot {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(canonical),
+            symbol: Arc::from(symbol),
+            space: LocatorSymbolSpace::Type,
+        },
+        path: Arc::from([]),
+    }))
+}
+
+/// A synthesized closed object SOURCE with leaf-fact member values.
+fn synthesized_object(members: &[(&str, LeafTypeFact)]) -> SemanticTypeSource {
+    SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(Arc::from(
+        members
+            .iter()
+            .map(|(name, leaf)| SynthesizedMemberFact {
+                name: name.to_string(),
+                ty: FactOrLocator::Leaf(leaf.clone()),
+                optional: false,
+                span_origin: verter_type_expr::span_origins::MemberSpansOrigin::Synthetic(
+                    verter_type_expr::span_origins::SourceSynthetic,
+                ),
+            })
+            .collect::<Vec<_>>(),
+    )))
+}
+
+fn registry_entry(name: &str, type_source: SemanticTypeSource) -> ResolvedTypeAnalysis {
     ResolvedTypeAnalysis {
         name: name.to_string(),
-        type_expr: body,
+        type_source: verter_type_expr::facts::SourcePosition::Present(type_source),
         type_expansion: None,
     }
 }
@@ -176,461 +229,638 @@ fn meta_entry(name: &str, canonical_source: &str) -> ResolvedTypeRegistryMeta {
     }
 }
 
-fn object_with_property(prop_name: &str, ty: TypeExpr) -> TypeExpr {
-    TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            prop_name.to_string(),
-            ty,
-            false,
-            false,
-        ))],
-    }))
+/// Raise a published source through the one shared dispatch (owner scope)
+/// and return the node.
+fn raise(host: &VerterHost, source: &SemanticTypeSource) -> Option<SemanticNodeId> {
+    let mut out = None;
+    crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        out = dispatch
+            .raise_semantic_type_source_to_hot(
+                source,
+                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                    scope_canonical_id: "/owner.vue",
+                    context:
+                        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                            crate::semantic_query::ProjectionMode::Navigate,
+                        ),
+                    interior_failures: None,
+                },
+            )
+            .map(|hot| hot.node());
+    });
+    out
 }
+
+fn node_data(host: &VerterHost, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    let mut out = None;
+    crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        out = crate::project_semantic_dispatch::node_data_for(ctx, node);
+    });
+    out
+}
+
+/// The raised node's object member names (empty when not an object root).
+fn object_member_names(host: &VerterHost, node: SemanticNodeId) -> Vec<String> {
+    match node_data(host, node).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => surface
+            .members
+            .iter()
+            .map(|member| member.name.to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The node's reference head (name, arg count), read through the shared
+/// node-domain extractor.
+fn ref_head(host: &VerterHost, node: SemanticNodeId) -> Option<(String, usize)> {
+    let mut out = None;
+    crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        out = crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(
+            ctx, node,
+        )
+        .map(|(name, args)| (name, args.len()));
+    });
+    out
+}
+
+/// The published source is (still) the bare named-reference leaf.
+fn source_is_bare_ref(source: Option<&SemanticTypeSource>, name: &str) -> bool {
+    matches!(
+        source,
+        Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Ref(n))))
+            if n == name
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Rule 3 — project-local non-participating refs chase to the declaration body
+// ---------------------------------------------------------------------------
 
 #[test]
 fn rule3_resolves_project_local_non_props_to_object() {
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/user.ts",
+        "export type ImportedUser = { id: number };",
+    );
     let mut meta = empty_meta();
-    meta.props.push(prop("user", ref_zero("ImportedUser")));
+    meta.props.push(prop("user", ref_source("ImportedUser")));
 
-    let imported_user_body = object_with_property("id", TypeExpr::Primitive(PrimitiveName::Number));
-    let registry = vec![registry_entry("ImportedUser", imported_user_body.clone())];
-    let registry_meta = vec![meta_entry("ImportedUser", "/workspace/types.ts")];
+    let registry = vec![registry_entry("ImportedUser", ref_source("ImportedUser"))];
+    let registry_meta = vec![meta_entry("ImportedUser", "/workspace/user.ts")];
 
-    run_policy(&mut meta, &registry, &registry_meta);
+    run_policy(&host, &mut meta, &registry, &registry_meta);
 
+    // Rule 3 publishes the located declaration's authored body SOURCE; the
+    // raised node is the concrete object surface with the `id` member.
+    let published = meta.props[0].type_source.present().expect("typed prop");
+    assert!(
+        matches!(published, SemanticTypeSource::Authored(_)),
+        "Rule 3 must publish the authored declaration-body source; got {published:?}",
+    );
+    let node = raise(&host, published).expect("published source must raise");
     assert_eq!(
-        meta.props[0].type_expr, imported_user_body,
-        "Rule 3 should resolve project-local non-Props ref to its registry body"
+        object_member_names(&host, node),
+        vec!["id".to_string()],
+        "the raised body must be the object surface with the `id` member",
+    );
+    // Negative: the published source is no longer the bare seed.
+    assert!(
+        !source_is_bare_ref(meta.props[0].type_source.present(), "ImportedUser"),
+        "Rule 3 must replace the bare named-reference seed",
     );
 }
 
 #[test]
 fn rule3_resolves_project_local_alias_union_literal() {
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/types.ts",
+        "export type Status = 'idle' | 'busy';",
+    );
     let mut meta = empty_meta();
-    meta.props.push(prop("status", ref_zero("Status")));
+    meta.props.push(prop("status", ref_source("Status")));
 
-    let status_body = TypeExpr::Union(Arc::from(vec![
-        TypeExpr::Literal(LiteralValue::String("idle".to_string())),
-        TypeExpr::Literal(LiteralValue::String("busy".to_string())),
-    ]));
-    let registry = vec![registry_entry("Status", status_body.clone())];
+    let registry = vec![registry_entry("Status", ref_source("Status"))];
     let registry_meta = vec![meta_entry("Status", "/workspace/types.ts")];
 
-    run_policy(&mut meta, &registry, &registry_meta);
+    run_policy(&host, &mut meta, &registry, &registry_meta);
 
-    assert_eq!(
-        meta.props[0].type_expr, status_body,
-        "Rule 3 should resolve project-local non-Props alias to union of literals"
-    );
-}
-
-#[test]
-fn rule4_keeps_macro_participating_ref_symbolic() {
-    // §3.4 structural classifier: `AvatarProps` is macro-participating
-    // because a `defineProps<AvatarProps>()` call in the owner SFC
-    // consumes it. Rule 4 keeps the ref symbolic.
-    let mut meta = empty_meta();
-    meta.props.push(prop("avatar", ref_zero("AvatarProps")));
-
-    // Even with a registry body present, macro-participating refs
-    // stay symbolic.
-    let registry = vec![registry_entry(
-        "AvatarProps",
-        object_with_property("size", TypeExpr::Primitive(PrimitiveName::Number)),
-    )];
-    let registry_meta = vec![meta_entry("AvatarProps", "/workspace/avatar.ts")];
-
-    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &["AvatarProps"]);
-
+    let published = meta.props[0].type_source.present().expect("typed prop");
     assert!(
-        matches!(
-            &meta.props[0].type_expr,
-            TypeExpr::Ref { name, type_arguments }
-                if name.as_ref() == "AvatarProps" && type_arguments.is_empty()
-        ),
-        "Rule 4 should keep macro-participating refs symbolic; got {:?}",
-        meta.props[0].type_expr,
+        matches!(published, SemanticTypeSource::Authored(_)),
+        "Rule 3 must publish the authored declaration-body source; got {published:?}",
     );
-}
-
-/// §3.4 negative discriminator (regression-grade fixture #2):
-///
-/// `XyzProps` ends in `Props` but is NEVER consumed by any owner SFC
-/// macro. Under the legacy nominal classifier (`name.ends_with("Props")`),
-/// Rule 4 would have kept it symbolic. Under the §3.4 structural
-/// classifier, the type is NOT macro-participating, so Rule 4 does
-/// NOT fire and Rule 3 expands the type to its registry body.
-///
-/// Pre-migration assertion: published surface keeps `XyzProps` as
-/// `Ref { name: "XyzProps" }`.
-///
-/// Post-migration assertion: published surface expands to the
-/// registry's `{ value: number }` Object body.
-#[test]
-fn fixture_non_participating_props_suffix_name_gets_expanded() {
-    let mut meta = empty_meta();
-    meta.props.push(prop("xyz", ref_zero("XyzProps")));
-
-    let xyz_body = object_with_property("value", TypeExpr::Primitive(PrimitiveName::Number));
-    let registry = vec![registry_entry("XyzProps", xyz_body.clone())];
-    let registry_meta = vec![meta_entry("XyzProps", "/workspace/xyz.ts")];
-
-    // Empty participation set — XyzProps is NOT consumed by any macro.
-    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &[]);
-
-    assert_eq!(
-        meta.props[0].type_expr, xyz_body,
-        "§3.4: a *Props-suffixed type NOT consumed by any macro must be \
-         expanded by Rule 3 (the legacy nominal classifier would have \
-         kept it symbolic, which is the §3.4 violation this fixture \
-         discriminates against). got: {:?}",
-        meta.props[0].type_expr,
-    );
-
-    // Negative assertion: the type_expr must not remain a bare Ref.
-    assert!(
-        !matches!(
-            &meta.props[0].type_expr,
-            TypeExpr::Ref { name, .. } if name.as_ref() == "XyzProps"
-        ),
-        "§3.4: XyzProps must not remain symbolic when no macro consumes \
-         it; got {:?}",
-        meta.props[0].type_expr,
-    );
-}
-
-/// §3.4 positive discriminator (regression-grade fixture #1):
-///
-/// `MyButton` does NOT end in `Props` but IS consumed by a
-/// `defineProps<MyButton>()` call in the owner SFC. Under the legacy
-/// nominal classifier (`name.ends_with("Props")`), Rule 4 would NOT
-/// have fired and Rule 3 would have expanded `MyButton`. Under the
-/// §3.4 structural classifier, the type IS macro-participating, so
-/// Rule 4 keeps it symbolic.
-///
-/// Pre-migration: published surface expands to the registry body
-/// (legacy nominal classifier incorrectly drops non-Props names).
-///
-/// Post-migration: published surface contains the shallow
-/// `Ref { name: "MyButton" }`.
-#[test]
-fn fixture_macro_participating_non_props_suffix_name_stays_symbolic() {
-    let mut meta = empty_meta();
-    meta.props.push(prop("button", ref_zero("MyButton")));
-
-    let registry = vec![registry_entry(
-        "MyButton",
-        object_with_property("label", TypeExpr::Primitive(PrimitiveName::String)),
-    )];
-    let registry_meta = vec![meta_entry("MyButton", "/workspace/button.ts")];
-
-    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &["MyButton"]);
-
-    assert!(
-        matches!(
-            &meta.props[0].type_expr,
-            TypeExpr::Ref { name, type_arguments }
-                if name.as_ref() == "MyButton" && type_arguments.is_empty()
-        ),
-        "§3.4: MyButton (no Props suffix) consumed by defineProps must \
-         stay symbolic — the legacy nominal classifier would have \
-         expanded it. got: {:?}",
-        meta.props[0].type_expr,
-    );
-}
-
-/// §3.4 baseline preservation (regression-grade fixture #3):
-///
-/// `MyComponentProps` IS consumed by `defineProps<MyComponentProps>()`.
-/// Both classifiers agree: keep symbolic. This is the baseline that
-/// must not regress.
-#[test]
-fn fixture_macro_participating_props_suffix_baseline_stays_symbolic() {
-    let mut meta = empty_meta();
-    meta.props.push(prop("comp", ref_zero("MyComponentProps")));
-
-    let registry = vec![registry_entry(
-        "MyComponentProps",
-        object_with_property("size", TypeExpr::Primitive(PrimitiveName::Number)),
-    )];
-    let registry_meta = vec![meta_entry("MyComponentProps", "/workspace/my-component.ts")];
-
-    run_policy_with_macro_participation(
-        &mut meta,
-        &registry,
-        &registry_meta,
-        &["MyComponentProps"],
-    );
-
-    assert!(
-        matches!(
-            &meta.props[0].type_expr,
-            TypeExpr::Ref { name, type_arguments }
-                if name.as_ref() == "MyComponentProps" && type_arguments.is_empty()
-        ),
-        "baseline: macro-participating Props-suffixed name must stay \
-         symbolic. got: {:?}",
-        meta.props[0].type_expr,
-    );
-}
-
-#[test]
-fn rule4_keeps_array_of_macro_participating_symbolic() {
-    let mut meta = empty_meta();
-    meta.props.push(prop(
-        "actions",
-        TypeExpr::Array {
-            element: Arc::new(ref_zero("ButtonProps")),
-            readonly: false,
-        },
-    ));
-
-    let registry = vec![registry_entry(
-        "ButtonProps",
-        object_with_property("label", TypeExpr::Primitive(PrimitiveName::String)),
-    )];
-    let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
-
-    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &["ButtonProps"]);
-
-    assert!(
-        matches!(
-            &meta.props[0].type_expr,
-            TypeExpr::Array { element, .. }
-                if matches!(
-                    element.as_ref(),
-                    TypeExpr::Ref { name, type_arguments }
-                        if name.as_ref() == "ButtonProps" && type_arguments.is_empty()
-                )
-        ),
-        "Rule 4 + 5: Array<macro-participating-ref> recurses but leaves the \
-         macro-participating leaf symbolic; got {:?}",
-        meta.props[0].type_expr,
-    );
-}
-
-#[test]
-fn rule2_keeps_indexed_access_on_non_participating_symbolic() {
-    let mut meta = empty_meta();
-    let indexed = TypeExpr::IndexedAccess {
-        object: Arc::new(ref_zero("Button")),
-        index: Arc::new(TypeExpr::Literal(LiteralValue::String("ui".to_string()))),
+    let node = raise(&host, published).expect("published source must raise");
+    let arms = match node_data(&host, node).as_deref() {
+        Some(SemanticNodeData::Union(arms)) => arms.to_vec(),
+        other => panic!("published body must raise to the union of literals; got {other:?}"),
     };
-    meta.props.push(prop("ui", indexed.clone()));
-
-    run_policy(&mut meta, &[], &[]);
-
-    // Note: Button is not macro-participating — the IndexedAccess should
-    // still be recursed via Rule 5 but Button itself has no registry
-    // body, so Rule 1 doesn't fire and Rule 4 doesn't apply. Net: unchanged.
+    let mut literals: Vec<String> = arms
+        .iter()
+        .filter_map(|arm| match node_data(&host, *arm).as_deref() {
+            Some(SemanticNodeData::Literal(verter_type_expr::LiteralValue::String(text))) => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    literals.sort();
     assert_eq!(
-        meta.props[0].type_expr, indexed,
-        "IndexedAccess unchanged when no registry body and not macro-participating"
-    );
-}
-
-#[test]
-fn rule2_indexed_access_on_macro_participating_stays_symbolic() {
-    let mut meta = empty_meta();
-    // ButtonProps['ui'] — Rule 2 keeps member-path-on-macro-participating
-    // root symbolic per §3.4 structural classification.
-    let indexed = TypeExpr::IndexedAccess {
-        object: Arc::new(ref_zero("ButtonProps")),
-        index: Arc::new(TypeExpr::Literal(LiteralValue::String("ui".to_string()))),
-    };
-    meta.props.push(prop("ui", indexed.clone()));
-
-    let registry = vec![registry_entry(
-        "ButtonProps",
-        object_with_property(
-            "ui",
-            object_with_property("base", TypeExpr::Primitive(PrimitiveName::String)),
-        ),
-    )];
-    let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
-
-    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &["ButtonProps"]);
-
-    assert!(
-        matches!(&meta.props[0].type_expr, TypeExpr::IndexedAccess { object, .. }
-            if matches!(object.as_ref(), TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonProps")),
-        "Rule 2: IndexedAccess on macro-participating root stays symbolic; got {:?}",
-        meta.props[0].type_expr,
-    );
-}
-
-#[test]
-fn rule1_keeps_package_backed_refs_symbolic() {
-    let mut meta = empty_meta();
-    meta.props.push(prop("vnode", ref_zero("VNode")));
-
-    let registry = vec![registry_entry(
-        "VNode",
-        object_with_property("type", TypeExpr::Primitive(PrimitiveName::String)),
-    )];
-    let registry_meta = vec![meta_entry(
-        "VNode",
-        "/workspace/node_modules/vue/dist/vue.d.ts",
-    )];
-
-    run_policy(&mut meta, &registry, &registry_meta);
-
-    assert!(
-        matches!(
-            &meta.props[0].type_expr,
-            TypeExpr::Ref { name, .. } if name.as_ref() == "VNode"
-        ),
-        "Rule 1: package-backed Ref stays symbolic; got {:?}",
-        meta.props[0].type_expr,
+        literals,
+        vec!["busy".to_string(), "idle".to_string()],
+        "publication policy must resolve the project-local alias body to its literal union",
     );
 }
 
 #[test]
 fn rule3_does_not_fire_when_registry_body_is_just_another_ref() {
+    // AliasA → AliasB where AliasB does NOT resolve: the alias-spine
+    // descent finds no located body for AliasB, so AliasA's published
+    // source stays the bare seed (no opaque half-chased publication).
+    let host = empty_host();
+    upsert_ts(&host, "/workspace/types.ts", "export type AliasA = AliasB;");
     let mut meta = empty_meta();
-    meta.props.push(prop("a", ref_zero("AliasA")));
+    meta.props.push(prop("a", ref_source("AliasA")));
 
-    // AliasA → AliasB: Rule 3 sees AliasA's body is a Ref and refuses to
-    // chase (otherwise it would produce an opaque non-resolved Ref body).
-    let registry = vec![registry_entry("AliasA", ref_zero("AliasB"))];
+    let registry = vec![registry_entry("AliasA", ref_source("AliasA"))];
     let registry_meta = vec![meta_entry("AliasA", "/workspace/types.ts")];
 
-    run_policy(&mut meta, &registry, &registry_meta);
+    run_policy(&host, &mut meta, &registry, &registry_meta);
 
     assert!(
-        matches!(
-            &meta.props[0].type_expr,
-            TypeExpr::Ref { name, .. } if name.as_ref() == "AliasA"
-        ),
-        "Rule 3 must NOT chase a Ref-only body; got {:?}",
-        meta.props[0].type_expr,
+        source_is_bare_ref(meta.props[0].type_source.present(), "AliasA"),
+        "Rule 3 must NOT publish a half-chased alias spine; got {:?}",
+        meta.props[0].type_source,
     );
 }
 
 #[test]
-fn rule3_recurses_into_resolved_body_for_nested_imports() {
-    // Component carries `prop: Container` where Container resolves to
-    // `{ first: First }` and First resolves to `{ id: number }`. The pass
-    // should recursively apply policy to the resolved body so the nested Ref
-    // also resolves.
+fn rule3_alias_spine_descends_to_the_resolvable_body() {
+    // AliasA → AliasB → { x: 1 }: the alias-spine descent (guarded per
+    // declaration) adopts the first structurally-resolvable body on the
+    // spine.
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/types.ts",
+        "export type AliasB = { x: number };\nexport type AliasA = AliasB;",
+    );
     let mut meta = empty_meta();
-    meta.props.push(prop("data", ref_zero("Container")));
+    meta.props.push(prop("a", ref_source("AliasA")));
+
+    let registry = vec![registry_entry("AliasA", ref_source("AliasA"))];
+    let registry_meta = vec![meta_entry("AliasA", "/workspace/types.ts")];
+
+    run_policy(&host, &mut meta, &registry, &registry_meta);
+
+    let published = meta.props[0].type_source.present().expect("typed prop");
+    let node = raise(&host, published).expect("published source must raise");
+    assert_eq!(
+        object_member_names(&host, node),
+        vec!["x".to_string()],
+        "the alias spine must chase through AliasB to the object body",
+    );
+}
+
+#[test]
+fn rule3_publishes_nested_refs_shallow() {
+    // `Container = { first: First }` — Rule 3 publishes Container's body;
+    // the nested `First` member VALUE stays a shallow reference carrier
+    // (consumers re-resolve it on demand). Eagerly inlining `First`'s body
+    // into the published surface is the forbidden shape
+    // (shallow-by-default).
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/types.ts",
+        "export type First = { id: number };\nexport type Container = { first: First };",
+    );
+    let mut meta = empty_meta();
+    meta.props.push(prop("data", ref_source("Container")));
 
     let registry = vec![
-        registry_entry(
-            "Container",
-            object_with_property("first", ref_zero("First")),
-        ),
-        registry_entry(
-            "First",
-            object_with_property("id", TypeExpr::Primitive(PrimitiveName::Number)),
-        ),
+        registry_entry("Container", ref_source("Container")),
+        registry_entry("First", ref_source("First")),
     ];
     let registry_meta = vec![
         meta_entry("Container", "/workspace/types.ts"),
         meta_entry("First", "/workspace/types.ts"),
     ];
 
-    run_policy(&mut meta, &registry, &registry_meta);
+    run_policy(&host, &mut meta, &registry, &registry_meta);
 
-    // After Rule 3 + Rule 5: data.type_expr = { first: { id: number } }.
-    let expected = object_with_property(
-        "first",
-        object_with_property("id", TypeExpr::Primitive(PrimitiveName::Number)),
+    let published = meta.props[0].type_source.present().expect("typed prop");
+    let node = raise(&host, published).expect("published source must raise");
+    let member_value = match node_data(&host, node).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => {
+            assert_eq!(
+                surface
+                    .members
+                    .iter()
+                    .map(|m| m.name.to_string())
+                    .collect::<Vec<_>>(),
+                vec!["first".to_string()],
+                "Container's body must surface the `first` member",
+            );
+            surface.members[0].value
+        }
+        other => panic!("published body must raise to Container's object; got {other:?}"),
+    };
+    // Shallow-by-default: the member value is a reference carrier to
+    // `First`, NOT an eagerly-inlined object body.
+    assert!(
+        matches!(ref_head(&host, member_value), Some((ref name, _)) if name == "First"),
+        "the nested member value must stay the shallow `First` reference carrier",
     );
-    assert_eq!(
-        meta.props[0].type_expr, expected,
-        "Rule 3 should recurse into resolved bodies",
+}
+
+// ---------------------------------------------------------------------------
+// Rule 4 — macro-participating refs stay symbolic (§3.4 structural)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rule4_keeps_macro_participating_ref_symbolic() {
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/button.ts",
+        "export type ButtonProps = { size: number };",
+    );
+    let mut meta = empty_meta();
+    meta.props.push(prop("button", ref_source("ButtonProps")));
+
+    let registry = vec![registry_entry("ButtonProps", ref_source("ButtonProps"))];
+    let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
+
+    run_policy_with_macro_participation(
+        &host,
+        &mut meta,
+        &registry,
+        &registry_meta,
+        &["ButtonProps"],
+    );
+
+    assert!(
+        source_is_bare_ref(meta.props[0].type_source.present(), "ButtonProps"),
+        "Rule 4: macro-participating reference must stay the symbolic seed; got {:?}",
+        meta.props[0].type_source,
     );
 }
 
 #[test]
-fn pass_recomputes_public_instance_after_rewrite() {
+fn fixture_non_participating_props_suffix_name_gets_expanded() {
+    // §3.4: role classification is STRUCTURAL, not nominal — a name ending
+    // in "Props" that no macro consumes expands like any project-local
+    // alias. The owner SFC is a REAL upserted file whose import makes
+    // `XyzProps` resolvable in the owner scope, so the policy raise runs
+    // against production-shaped host state — a file-level scope
+    // (`local_scope: None`), exactly like a live `get_component_meta`
+    // owner. No macro consumes `XyzProps`, so the participation set stays
+    // empty and the "Props" suffix alone must not classify.
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/xyz.ts",
+        "export type XyzProps = { value: number };",
+    );
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/owner.vue".to_string(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">\n\
+                 import type { XyzProps } from '/workspace/xyz.ts';\n\
+                 const xyz: XyzProps = { value: 1 };\n\
+                 </script>\n\
+                 <template><div /></template>\n",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
     let mut meta = empty_meta();
-    meta.props.push(prop("x", ref_zero("Status")));
+    meta.props.push(prop("xyz", ref_source("XyzProps")));
 
-    let body = TypeExpr::Primitive(PrimitiveName::String);
-    let registry = vec![registry_entry("Status", body.clone())];
-    let registry_meta = vec![meta_entry("Status", "/workspace/types.ts")];
+    let registry = vec![registry_entry("XyzProps", ref_source("XyzProps"))];
+    let registry_meta = vec![meta_entry("XyzProps", "/workspace/xyz.ts")];
 
-    assert!(meta.public_instance.is_none());
-    run_policy(&mut meta, &registry, &registry_meta);
+    // Empty participation set — the "Props" suffix must NOT keep it
+    // symbolic.
+    run_policy_with_macro_participation(&host, &mut meta, &registry, &registry_meta, &[]);
 
-    let public = meta
-        .public_instance
-        .as_ref()
-        .expect("policy pass must rebuild public_instance after rewrite");
-    let x_member = public
-        .members
-        .iter()
-        .find(|m| m.name == "x")
-        .expect("x prop should be in public_instance");
-    assert_eq!(x_member.type_expr, body);
+    let published = meta.props[0].type_source.present().expect("typed prop");
+    assert!(
+        matches!(published, SemanticTypeSource::Authored(_)),
+        "a non-participating *Props name must expand (nominal suffix must not classify); got {published:?}",
+    );
+    let node = raise(&host, published).expect("published source must raise");
+    assert_eq!(
+        object_member_names(&host, node),
+        vec!["value".to_string()],
+        "the published body must be XyzProps' object surface",
+    );
+    // Negative: the published source must not remain the bare seed.
+    assert!(
+        !source_is_bare_ref(meta.props[0].type_source.present(), "XyzProps"),
+        "the bare seed must have been replaced",
+    );
+}
+
+#[test]
+fn fixture_macro_participating_non_props_suffix_name_stays_symbolic() {
+    // §3.4: a name WITHOUT the "Props" suffix that a macro consumes stays
+    // symbolic — participation, not spelling, classifies.
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/cfg.ts",
+        "export type WidgetConfig = { label: string };",
+    );
+    let mut meta = empty_meta();
+    meta.props.push(prop("cfg", ref_source("WidgetConfig")));
+
+    let registry = vec![registry_entry("WidgetConfig", ref_source("WidgetConfig"))];
+    let registry_meta = vec![meta_entry("WidgetConfig", "/workspace/cfg.ts")];
+
+    run_policy_with_macro_participation(
+        &host,
+        &mut meta,
+        &registry,
+        &registry_meta,
+        &["WidgetConfig"],
+    );
+
+    assert!(
+        source_is_bare_ref(meta.props[0].type_source.present(), "WidgetConfig"),
+        "a macro-participating non-*Props name must stay symbolic; got {:?}",
+        meta.props[0].type_source,
+    );
+}
+
+#[test]
+fn fixture_macro_participating_props_suffix_baseline_stays_symbolic() {
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/av.ts",
+        "export type AvatarProps = { url: string };",
+    );
+    let mut meta = empty_meta();
+    meta.props.push(prop("avatar", ref_source("AvatarProps")));
+
+    let registry = vec![registry_entry("AvatarProps", ref_source("AvatarProps"))];
+    let registry_meta = vec![meta_entry("AvatarProps", "/workspace/av.ts")];
+
+    run_policy_with_macro_participation(
+        &host,
+        &mut meta,
+        &registry,
+        &registry_meta,
+        &["AvatarProps"],
+    );
+
+    assert!(
+        source_is_bare_ref(meta.props[0].type_source.present(), "AvatarProps"),
+        "macro-participating *Props baseline must stay symbolic; got {:?}",
+        meta.props[0].type_source,
+    );
+}
+
+#[test]
+fn rule4_keeps_array_of_macro_participating_symbolic() {
+    // The published source is the authored `ButtonProps[]` annotation body;
+    // the array's ELEMENT is macro-participating. The policy leaves the
+    // structural root untouched (only reference-headed roots rewrite), so
+    // the symbolic composition survives.
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/button.ts",
+        "export type ButtonProps = { size: number };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/owner-annos.ts",
+        "import type { ButtonProps } from \"/workspace/button.ts\";\nexport type Actions = ButtonProps[];",
+    );
+    let mut meta = empty_meta();
+    meta.props.push(prop(
+        "actions",
+        decl_body_source("/workspace/owner-annos.ts", "Actions"),
+    ));
+
+    let registry = vec![registry_entry("ButtonProps", ref_source("ButtonProps"))];
+    let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
+
+    let before = meta.props[0].type_source.clone();
+    run_policy_with_macro_participation(
+        &host,
+        &mut meta,
+        &registry,
+        &registry_meta,
+        &["ButtonProps"],
+    );
+
+    assert_eq!(
+        meta.props[0].type_source, before,
+        "an array-of-participating composition must stay the authored source",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Rule 2 — indexed access
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rule2_keeps_indexed_access_on_non_participating_symbolic() {
+    // `Button['ui']` where Button has no located declaration: the
+    // indexed-access root keeps its source (nothing to chase, nothing
+    // rewritten).
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/routes.ts",
+        "export type Route = Button['ui'];",
+    );
+    let mut meta = empty_meta();
+    meta.props.push(prop(
+        "ui",
+        decl_body_source("/workspace/routes.ts", "Route"),
+    ));
+
+    let before = meta.props[0].type_source.clone();
+    run_policy(&host, &mut meta, &[], &[]);
+
+    assert_eq!(
+        meta.props[0].type_source, before,
+        "IndexedAccess stays unchanged when the root is not macro-participating and has no body",
+    );
+}
+
+#[test]
+fn rule2_indexed_access_on_macro_participating_stays_symbolic() {
+    // `ButtonProps['ui']` — Rule 2 keeps a member-path on a
+    // macro-participating root symbolic per §3.4 structural
+    // classification.
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/button.ts",
+        "export type ButtonProps = { ui: { base: string } };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/routes.ts",
+        "import type { ButtonProps } from \"/workspace/button.ts\";\nexport type Route = ButtonProps['ui'];",
+    );
+    let mut meta = empty_meta();
+    meta.props.push(prop(
+        "ui",
+        decl_body_source("/workspace/routes.ts", "Route"),
+    ));
+
+    let registry = vec![registry_entry("ButtonProps", ref_source("ButtonProps"))];
+    let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
+
+    let before = meta.props[0].type_source.clone();
+    run_policy_with_macro_participation(
+        &host,
+        &mut meta,
+        &registry,
+        &registry_meta,
+        &["ButtonProps"],
+    );
+
+    assert_eq!(
+        meta.props[0].type_source, before,
+        "Rule 2: IndexedAccess on macro-participating root stays symbolic",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Rule 1 — package-backed refs stay symbolic
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rule1_keeps_package_backed_refs_symbolic() {
+    let host = empty_host();
+    let mut meta = empty_meta();
+    meta.props.push(prop("vnode", ref_source("VNode")));
+
+    // The registry carries a synthesized body for VNode (so the chase
+    // WOULD fire), but the declaration's canonical source is
+    // package-backed — Rule 1 wins.
+    let registry = vec![registry_entry(
+        "VNode",
+        synthesized_object(&[(
+            "type",
+            LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::String),
+        )]),
+    )];
+    let registry_meta = vec![meta_entry(
+        "VNode",
+        "/workspace/node_modules/vue/dist/vue.d.ts",
+    )];
+
+    run_policy(&host, &mut meta, &registry, &registry_meta);
+
+    assert!(
+        source_is_bare_ref(meta.props[0].type_source.present(), "VNode"),
+        "Rule 1: package-backed reference stays symbolic; got {:?}",
+        meta.props[0].type_source,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sidecar recompute
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pass_recomputes_public_instance_after_rewrite() {
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/user.ts",
+        "export type ImportedUser = { id: number };",
+    );
+    let mut meta = empty_meta();
+    meta.props.push(prop("user", ref_source("ImportedUser")));
+
+    let registry = vec![registry_entry("ImportedUser", ref_source("ImportedUser"))];
+    let registry_meta = vec![meta_entry("ImportedUser", "/workspace/user.ts")];
+
+    run_policy(&host, &mut meta, &registry, &registry_meta);
+
+    // The rewrite fired (Rule 3), so the public-instance sidecar is
+    // repopulated.
+    assert!(
+        meta.public_instance.is_some(),
+        "a fired rewrite must repopulate the public-instance sidecar",
+    );
 }
 
 #[test]
 fn pass_does_not_touch_public_instance_when_no_rewrite() {
+    let host = empty_host();
     let mut meta = empty_meta();
-    meta.props
-        .push(prop("simple", TypeExpr::Primitive(PrimitiveName::String)));
-    // Pre-populate public_instance with a sentinel; ensure it survives.
-    meta.public_instance = Some(PublicInstanceAnalysis {
-        members: vec![],
-        completeness: PublicInstanceCompleteness::Partial,
-    });
-    let before = meta.public_instance.clone();
-    run_policy(&mut meta, &[], &[]);
-    assert_eq!(
-        format!("{:?}", meta.public_instance),
-        format!("{:?}", before),
-        "no-op policy must not rewrite public_instance"
+    meta.props.push(prop(
+        "plain",
+        SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
+            verter_type_expr::PrimitiveName::String,
+        ))),
+    ));
+
+    run_policy(&host, &mut meta, &[], &[]);
+
+    assert!(
+        meta.public_instance.is_none(),
+        "no rewrite → the sidecar stays untouched",
     );
 }
 
-// W2.4 discriminating fixtures ───────────────────────────────────────────
-//
-// Locks down the typed-IR-only contract for the two policy helpers
-// `restore_props_suffix_from_raw` and `slot_binding_should_preserve_symbolic_raw_type`.
-// Both helpers consume `Option<&TypeExpr>` (the analyzer's lowered
-// source-annotation typed form) — never the raw text.
-//
-// These tests intentionally pass `raw_type_expr: Some(...)` while
-// leaving `raw_type: None`. The combination only type-checks against
-// the typed-form signature; reverting the signature to a text-only
-// `raw_type: Option<&str>` would break compilation, so these tests
-// pin the typed-form contract at the type level.
+// ---------------------------------------------------------------------------
+// Raw-annotation restoration + slot preservation
+// ---------------------------------------------------------------------------
 
 #[test]
 fn w2_4_restore_macro_participating_from_typed_annotation_replaces_eager_object() {
-    // Resolved `type_expr` is the eagerly-expanded Object body (the
-    // evaluator inlined `ButtonProps` into `{ label: string }`); the
-    // typed source annotation is the symbolic `Array<ButtonProps>` the
-    // user wrote. Policy must restore the symbolic form because
-    // `ButtonProps` is macro-participating (§3.4 structural
-    // classification — it's consumed by `defineProps<ButtonProps[]>()`
-    // in the owner SFC).
+    // The resolved source is the eagerly-expanded object body (the
+    // evaluator inlined `ButtonProps` away); the authored annotation
+    // source is the symbolic `ButtonProps[]` the user wrote. The policy
+    // must restore the authored source because `ButtonProps` is
+    // macro-participating (§3.4 structural classification) and imported.
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/button.ts",
+        "export type ButtonProps = { label: string };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/annos.ts",
+        "import type { ButtonProps } from \"/workspace/button.ts\";\nexport type ActionsAnno = ButtonProps[];",
+    );
+
+    let eager = synthesized_object(&[(
+        "label",
+        LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::String),
+    )]);
+    let authored = decl_body_source("/workspace/annos.ts", "ActionsAnno");
+
     let mut meta = empty_meta();
-
-    let eager_array = TypeExpr::Array {
-        element: Arc::new(object_with_property(
-            "label",
-            TypeExpr::Primitive(PrimitiveName::String),
-        )),
-        readonly: false,
-    };
-    let symbolic_array = TypeExpr::Array {
-        element: Arc::new(ref_zero("ButtonProps")),
-        readonly: false,
-    };
-
     meta.props.push(PropAnalysis {
         name: "actions".to_string(),
-        type_expr: eager_array,
+        type_source: verter_type_expr::facts::SourcePosition::Present(eager),
         type_expansion: None,
         raw_type: None,
-        // `raw_type_expr` is the typed form of the user's source
-        // annotation, lowered by the analyzer's `lower_ts_type` pass.
-        raw_type_expr: Some(symbolic_array.clone()),
+        // The authored annotation source — the analyzer's payload
+        // position for the user's own `ButtonProps[]` text.
+        raw_type_source: Some(authored.clone()),
         required: false,
         has_default: false,
         default_value: None,
@@ -639,180 +869,106 @@ fn w2_4_restore_macro_participating_from_typed_annotation_replaces_eager_object(
         declared_in_macro_type_arg: false,
     });
 
-    // `ButtonProps` lives in an imported file — the policy needs
-    // canonical_source != owner_canonical to fire.
-    let registry = vec![registry_entry(
-        "ButtonProps",
-        object_with_property("label", TypeExpr::Primitive(PrimitiveName::String)),
-    )];
+    let registry = vec![registry_entry("ButtonProps", ref_source("ButtonProps"))];
     let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
 
-    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &["ButtonProps"]);
-
-    // The resolved `type_expr` was rewritten back to the symbolic
-    // `Array<ButtonProps>` — the policy walked the typed annotation
-    // directly without ever stringifying it.
-    assert_eq!(
-        meta.props[0].type_expr, symbolic_array,
-        "restore_props_suffix_from_raw should rewrite eager Array<{{label}}> back to typed Array<ButtonProps>"
+    run_policy_with_macro_participation(
+        &host,
+        &mut meta,
+        &registry,
+        &registry_meta,
+        &["ButtonProps"],
     );
-    // Negative assertion: the resolved form must not contain a literal
-    // Object body — that would mean the symbolic restore was bypassed.
-    let TypeExpr::Array { element, .. } = &meta.props[0].type_expr else {
-        panic!("expected Array; got {:?}", meta.props[0].type_expr);
+
+    assert_eq!(
+        meta.props[0].type_source.present(),
+        Some(&authored),
+        "restore_props_suffix_from_raw must publish the authored annotation source",
+    );
+    // Negative: the raised published node is the symbolic array over the
+    // `ButtonProps` reference carrier — not an inlined object body.
+    let node = raise(&host, meta.props[0].type_source.present().unwrap())
+        .expect("restored source must raise");
+    let element = match node_data(&host, node).as_deref() {
+        Some(SemanticNodeData::Array { element, .. }) => *element,
+        other => panic!("restored annotation must raise to an array; got {other:?}"),
     };
     assert!(
-        matches!(
-            element.as_ref(),
-            TypeExpr::Ref { name, type_arguments }
-                if name.as_ref() == "ButtonProps" && type_arguments.is_empty()
-        ),
-        "Array element must be the symbolic ButtonProps ref, not an inlined Object; got {:?}",
-        element,
+        matches!(ref_head(&host, element), Some((ref name, _)) if name == "ButtonProps"),
+        "the array element must be the symbolic ButtonProps reference, not an inlined object",
     );
 }
 
 #[test]
 fn w2_4_slot_binding_preserve_typed_indexed_access_via_imported_root() {
-    // Slot binding's `type_expr` was widened by the evaluator to
-    // `unknown`; the typed source annotation is the symbolic
-    // `AppProps['avatar']`. The root `AppProps` lives in an imported
-    // file and its `avatar` property type contains an imported `Avatar`
-    // ref — the policy guard's "imported root" condition holds. The
-    // typed annotation is restored verbatim.
+    // The slot binding's published source was widened by the evaluator;
+    // the authored annotation is the symbolic `AppProps['avatar']`. The
+    // root `AppProps` resolves to an imported file and its `avatar`
+    // property value contains an imported `Avatar` reference — the
+    // guard's imported-root condition holds, so the authored source is
+    // restored verbatim.
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/avatar.ts",
+        "export type Avatar = { url: string };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/app.ts",
+        "import type { Avatar } from \"/workspace/avatar.ts\";\nexport type AppProps = { avatar: Avatar };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/annos.ts",
+        "import type { AppProps } from \"/workspace/app.ts\";\nexport type AvatarAnno = AppProps['avatar'];",
+    );
+
+    let widened = SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
+        verter_type_expr::PrimitiveName::Unknown,
+    )));
+    let authored = decl_body_source("/workspace/annos.ts", "AvatarAnno");
+
     let mut meta = empty_meta();
-
-    let symbolic_indexed = TypeExpr::IndexedAccess {
-        object: Arc::new(ref_zero("AppProps")),
-        index: Arc::new(TypeExpr::Literal(LiteralValue::String(
-            "avatar".to_string(),
-        ))),
-    };
-
     meta.slots.push(SlotAnalysis {
         name: "default".to_string(),
         is_scoped: true,
         bindings: vec![SlotBindingAnalysis {
             name: "avatar".to_string(),
-            // Eagerly widened to `unknown` by the evaluator.
-            type_expr: TypeExpr::Unknown {
-                raw: "unknown".to_string(),
-            },
+            type_source: verter_type_expr::facts::SourcePosition::Present(widened.clone()),
             type_expansion: None,
             raw_type: None,
-            // The typed source annotation walks the symbolic indexed
-            // access; the post-W2.4 helper inspects this directly.
-            raw_type_expr: Some(symbolic_indexed.clone()),
+            raw_type_source: Some(authored.clone()),
         }],
         is_required: false,
         return_type: None,
-        return_expr: None,
-        return_expr_scope: None,
+        return_source: None,
+        return_source_scope: None,
         description: None,
         tags: vec![],
     });
 
-    // `AppProps.avatar: Avatar`; both `AppProps` and `Avatar` live in
-    // imported files — the guard's imported-root + imported-leaf
-    // condition holds.
     let registry = vec![
-        registry_entry(
-            "AppProps",
-            object_with_property("avatar", ref_zero("Avatar")),
-        ),
-        registry_entry(
-            "Avatar",
-            object_with_property("url", TypeExpr::Primitive(PrimitiveName::String)),
-        ),
+        registry_entry("AppProps", ref_source("AppProps")),
+        registry_entry("Avatar", ref_source("Avatar")),
     ];
     let registry_meta = vec![
         meta_entry("AppProps", "/workspace/app.ts"),
         meta_entry("Avatar", "/workspace/avatar.ts"),
     ];
 
-    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &["AppProps"]);
+    run_policy_with_macro_participation(&host, &mut meta, &registry, &registry_meta, &["AppProps"]);
 
     let binding = &meta.slots[0].bindings[0];
     assert_eq!(
-        binding.type_expr, symbolic_indexed,
-        "slot_binding_should_preserve_symbolic_raw_type should restore the symbolic IndexedAccess from raw_type_expr"
+        binding.type_source.present(),
+        Some(&authored),
+        "slot_binding_should_preserve_symbolic_raw_type must restore the authored indexed-access source",
     );
-    // Negative assertion: the binding must not stay `Unknown` — that
-    // would mean the typed-IR guard never fired.
-    assert!(
-        !matches!(&binding.type_expr, TypeExpr::Unknown { .. }),
-        "binding.type_expr must not remain Unknown after preservation; got {:?}",
-        binding.type_expr,
-    );
-}
-
-/// F2: the policy's object-member rewrite (`rewrite_object_member`, fired when a
-/// child member's type changes — e.g. a registry alias substitution) must
-/// PRESERVE the member's declared accessibility. It rebuilds an existing member
-/// via `with_visibility`, NOT `with_spans` (which would silently upgrade a
-/// non-public member to Public).
-///
-/// Scenario: a non-participating prop is an OBJECT carrying a PRIVATE member
-/// whose value is `Ref { "Inner" }`. Rule 3 expands `Inner` to its registry
-/// body, which forces `rewrite_object_member` to rebuild the private member.
-/// The rebuilt member must stay Private.
-///
-/// Discriminating: against the tree where `rewrite_object_member` uses
-/// `with_spans`, the rebuilt `secret` member is Public and the assertion FAILS.
-#[test]
-fn policy_object_member_rewrite_preserves_visibility() {
-    use verter_type_expr::{MemberSpans, MemberVisibility};
-
-    let mut meta = empty_meta();
-    // `XyzWrap` is NOT macro-participating, so Rule 3 expands it; its body is an
-    // object with a PRIVATE member `secret: Inner`.
-    meta.props.push(prop("xyz", ref_zero("XyzWrap")));
-
-    let private_member_object = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::with_visibility(
-            "secret".to_string(),
-            ref_zero("Inner"),
-            false,
-            false,
-            MemberVisibility::Private,
-            MemberSpans::default(),
-        ))],
-    }));
-    let inner_body = object_with_property("v", TypeExpr::Primitive(PrimitiveName::Number));
-    let registry = vec![
-        registry_entry("XyzWrap", private_member_object),
-        registry_entry("Inner", inner_body.clone()),
-    ];
-    let registry_meta = vec![
-        meta_entry("XyzWrap", "/workspace/xyz.ts"),
-        meta_entry("Inner", "/workspace/inner.ts"),
-    ];
-
-    // Empty participation set — both names expand.
-    run_policy_with_macro_participation(&mut meta, &registry, &registry_meta, &[]);
-
-    // The published prop is the expanded `XyzWrap` object; its `secret` member's
-    // value should be the expanded `Inner` body (the rewrite fired), AND the
-    // member must still be Private.
-    let TypeExpr::Object(obj) = &meta.props[0].type_expr else {
-        panic!(
-            "expected expanded object prop, got {:?}",
-            meta.props[0].type_expr
-        );
-    };
-    let ObjectMember::Property(secret) = &obj.properties[0] else {
-        panic!("expected `secret` property, got {:?}", obj.properties[0]);
-    };
-    assert_eq!(
-        secret.visibility,
-        MemberVisibility::Private,
-        "the policy object-member rewrite must preserve the member's Private visibility",
-    );
-    // Confirm the rewrite actually fired (the inner Ref expanded), so the test
-    // exercises the rebuild branch rather than the no-op branch.
-    assert_eq!(
-        secret.ty, inner_body,
-        "the inner `Inner` ref must have been expanded by the policy rewrite \
-         (otherwise the rebuild branch never ran)",
+    // Negative: the binding must not stay the widened leaf.
+    assert_ne!(
+        binding.type_source.present(),
+        Some(&widened),
+        "the widened published source must have been replaced",
     );
 }

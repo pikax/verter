@@ -172,7 +172,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // stale frame onto the stack.
         let taint_guard =
             crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let (result, finalise, fenced_serve_observed) =
+        let (result, finalise, non_cacheable_read_observed) =
             crate::fact_signature_helpers::install_fact_tracer(host, || {
                 // Test-only fact-injection hook. When the host's per-host
                 // `relation_force_overflow_observations` knob is non-zero, emit
@@ -222,7 +222,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // whose traced scope consumed a FENCED (ReturnOnly) serve was
         // derived from a served-without-publication artifact; return it
         // to the caller, refuse relation-memo admission.
-        if fenced_serve_observed {
+        if non_cacheable_read_observed {
             return (result, fence);
         }
         // Overflowed read-set: the judgement is returned to the caller but
@@ -415,7 +415,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )) {
             QueryResult::Value(SemanticQueryOutput {
                 value: unwrapped, ..
-            }) => self.evaluate_deferred_semantic_node_with_context(unwrapped, transit),
+            }) => self
+                .evaluate_deferred_semantic_node_with_context(unwrapped, transit)
+                .into_active_query_build_node(self),
             _ => return IdentityCarrierUnwrap::Unresolvable,
         };
         let Some(unwrapped_data) = graph.node_data(unwrapped) else {
@@ -478,26 +480,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // (`Record<U, Record<K, any>>`'s inner Record rides a carrier
         // the free relation engine cannot demand).
         let identity = match &*source_data {
+            // Package-backed declaration identities RELATE like workspace
+            // ones: the relation/conditional oracle is a sanctioned demand
+            // point (the unwrap below is a bounded ONE-LEVEL
+            // `StructuralTransit/Shallow` surface read, never a publication)
+            // — refusing the read left `A extends Record<U, Record<K, any>>`
+            // undecided for a package-provided `A` (the nuxt-ui AppConfig
+            // shape) and dropped the decided branch's contribution.
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                 canonical_id,
                 name,
                 whole_hash,
-            }) => {
-                if self.ctx.workspace_is_package_backed(canonical_id) {
-                    return None;
-                }
-                Some(DeclIdentity {
-                    canonical_id: Arc::clone(canonical_id),
-                    whole_hash: *whole_hash,
-                    decl_name: Arc::clone(name),
-                })
-            }
-            SemanticNodeData::DeclRef { identity } => {
-                if self.ctx.workspace_is_package_backed(&identity.canonical_id) {
-                    return None;
-                }
-                Some(identity.clone())
-            }
+            }) => Some(DeclIdentity {
+                canonical_id: Arc::clone(canonical_id),
+                whole_hash: *whole_hash,
+                decl_name: Arc::clone(name),
+            }),
+            SemanticNodeData::DeclRef { identity } => Some(identity.clone()),
             SemanticNodeData::Object(_) => None,
             _ => return None,
         };
@@ -526,9 +525,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.instantiate_context_for(&identity.canonical_id, transit),
                 ),
             )) {
-                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => {
-                    self.evaluate_deferred_semantic_node_with_context(id, transit)
-                }
+                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => self
+                    .evaluate_deferred_semantic_node_with_context(id, transit)
+                    .into_active_query_build_node(self),
                 _ => return Some(RelationResult::Unknown),
             },
         };
@@ -565,8 +564,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 crate::semantic_query::ProjectionMode::Navigate,
             );
-        let mut normalised =
-            self.evaluate_deferred_semantic_node_with_context(target, oracle_demand);
+        let mut normalised = self
+            .evaluate_deferred_semantic_node_with_context(target, oracle_demand)
+            .into_active_query_build_node(self);
         // Demand point (the relation/conditional oracle): a target riding
         // an `InstantiationRef` carrier — the shape carrier-preserving
         // lowering interns for `Record<U, Record<K, any>>` inside a decl
@@ -586,6 +586,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 args.iter()
                     .map(|arg| {
                         self.evaluate_deferred_semantic_node_with_context(*arg, oracle_demand)
+                            .into_active_query_build_node(self)
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
@@ -599,7 +600,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ),
                 ))
             {
-                normalised = self.evaluate_deferred_semantic_node_with_context(id, oracle_demand);
+                normalised = self
+                    .evaluate_deferred_semantic_node_with_context(id, oracle_demand)
+                    .into_active_query_build_node(self);
             }
         }
         // Second carrier shape at the same demand point: a Record-class
@@ -630,8 +633,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             {
                 let key_space = mapper.key_space;
                 let value_type = mapper.value_expr;
-                let key_type =
-                    self.evaluate_deferred_semantic_node_with_context(key_space, oracle_demand);
+                let key_type = self
+                    .evaluate_deferred_semantic_node_with_context(key_space, oracle_demand)
+                    .into_active_query_build_node(self);
                 return Some(RecordTargetShape::GenericKey {
                     key_type,
                     value_type,
@@ -998,16 +1002,11 @@ fn expand_pair(
         return;
     }
 
-    // ── Remaining opaque carriers (control / recursion sentinels) /
-    //    VueMacroElements → Unknown (not the error type; relation cannot
-    //    decide) ─────────────────────────────────────────────────────────────
-    if matches!(
-        &*source_data,
-        SemanticNodeData::Opaque(_) | SemanticNodeData::VueMacroElements(_)
-    ) || matches!(
-        &*target_data,
-        SemanticNodeData::Opaque(_) | SemanticNodeData::VueMacroElements(_)
-    ) {
+    // ── Remaining opaque carriers (control / recursion sentinels) →
+    //    Unknown (not the error type; relation cannot decide) ───────────────
+    if matches!(&*source_data, SemanticNodeData::Opaque(_))
+        || matches!(&*target_data, SemanticNodeData::Opaque(_))
+    {
         results.push(RelationResult::Unknown);
         return;
     }

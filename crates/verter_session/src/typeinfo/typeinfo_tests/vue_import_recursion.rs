@@ -15,22 +15,25 @@
 //! back-edge mechanisms keep a CIRCULAR `A.vue ↔ B.vue` import from hanging,
 //! and they bound DIFFERENTLY — do not conflate them:
 //!
-//! - **lazy bare-`Ref` / mutual route** (e.g. `defineProps<{ peer: B }>()` with a
-//!   reciprocal `E ↔ F`): each `Instantiate(.vue default)` side completes and
-//!   pops before the next is demanded, and the inner cyclic reference lowers in
-//!   `Navigate` to a shallow `DeclRef` carrier (`Ref { name: "default" }`)
-//!   instead of re-dispatching. The back-edge is a bounded SHALLOW `Object`, NOT
-//!   `RecursiveRef`. This is the common cross-file cycle shape.
-//! - **eager same-key re-entry** (`InstanceType<typeof Self>` projected
-//!   `Published(Expanded)`): the outer `Instantiate(Self, default)` frame is
-//!   STILL active when `typeof Self` re-enters the SAME `(Self, default)`
-//!   identity, so `push_instantiate_active` returns `false` and the back-edge is
-//!   `Opaque(RecursiveRef)`.
+//! - **lazy route** (the PRODUCTION shape — a mutual bare-`Ref`
+//!   `defineProps<{ peer: B }>()` with a reciprocal `E ↔ F`, an
+//!   `InstanceType<typeof Peer>` pair, or a same-file self-cycle): each
+//!   `Instantiate(.vue default)` side completes and pops before the next is
+//!   demanded, and the inner cyclic reference stays / presents as the shallow
+//!   instance-identity `DeclRef` carrier (`Ref { name: "default" }`) instead
+//!   of re-dispatching. The back-edge is a bounded SHALLOW `Object`, NOT
+//!   `RecursiveRef` — a `.vue` import cycle is a FINITE SHALLOW SURFACE
+//!   containing recursive `DeclRef` carriers, not an error.
+//! - **genuine in-flight re-entry** (the memo same-key sentinel +
+//!   `push_instantiate_active` guard): when a re-dispatch reaches an identity
+//!   whose frame is STILL on the stack — the same semantic op cannot
+//!   progress — the back-edge is `Opaque(RecursiveRef)`. The lazy production
+//!   routes above never reach it.
 //!
 //! These tests are discriminating: they exercise the chain `C → B → A`, prove
-//! both cycle shapes terminate (shallow bound for the mutual route, the active
-//! guard for the eager self-cycle), and read an imported component's `$props`
-//! through the keyed query.
+//! the cycle shapes terminate SHALLOW under the lazy design (mutual, and the
+//! same-file self-cycle), and read an imported component's `$props` through
+//! the keyed query.
 
 use std::sync::Arc;
 
@@ -666,11 +669,17 @@ defineProps<{ child: InstanceType<typeof B> }>();
 //          importing and embedding the other's instance as `peer`:
 //          - the CONCRETE first hop `A.$props.peer.$props.b` resolves to the
 //            `string` declared on B's props (one real hop into the cycle), and
-//          - the bounded back-edge `A.$props.peer.$props.peer` resolves to the
-//            recursive sentinel (`TypeExpr::RecursiveRef`) — NOT a miss, NOT a
-//            hang. Termination is by query identity (the `Instantiate(.vue
-//            default)` memo + `push_instantiate_active` guard the convergence
-//            routes `typeof`/`InstanceType` through).
+//          - the back-edge `A.$props.peer.$props.peer` is a FINITE SHALLOW
+//            SURFACE: A's instance object whose inner cyclic `peer` stays the
+//            shallow instance-identity carrier `Ref { name: "default" }` —
+//            NOT `RecursiveRef`, NOT a miss, NOT a hang. Under the lazy
+//            design each `Instantiate(.vue default)` frame completes and pops
+//            before the next side is demanded, so the SAME identity is never
+//            active at the back-edge; the terminal-surface presentation keeps
+//            the inner `InstanceType<typeof A>` member as the `.vue`-default
+//            `DeclRef` carrier the consumer re-resolves on demand.
+//            (`RecursiveRef` remains correct ONLY for genuine in-flight query
+//            re-entry — the memo sentinel / `instantiate_active` guard.)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -698,13 +707,53 @@ defineProps<{ peer: InstanceType<typeof A>; b: string }>();
         "A.$props.peer.$props.b is the string declared on B's props"
     );
 
-    // The back-edge re-enters the SAME `.vue default` identity — bounded to the
-    // recursive sentinel, never an infinite expansion. The mere completion of
-    // this call is the no-hang proof.
+    // The back-edge lands on A's instance identity — a bounded SHALLOW
+    // surface, never an infinite expansion (the mere completion of this call
+    // is the no-hang proof) and never a `RecursiveRef` (no in-flight frame is
+    // re-entered under the lazy design).
     let back_edge = project_vue_default_path(&host, A, &["$props", "peer", "$props", "peer"]);
+    let TypeExpr::Object(instance) = &back_edge else {
+        panic!("the cyclic back-edge must be A's shallow instance object, got {back_edge:?}");
+    };
+    let props = instance
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop) if prop.name == "$props" => {
+                Some(&prop.ty)
+            }
+            _ => None,
+        })
+        .expect("A's shallow instance must carry $props");
+    let TypeExpr::Object(props_obj) = props else {
+        panic!("A.$props must be an object, got {props:?}");
+    };
+    let a = props_obj
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop) if prop.name == "a" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("A.$props.a must exist");
+    assert_eq!(
+        *a,
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the concrete sibling member proves the instance shape materialised"
+    );
+    let peer = props_obj
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop) if prop.name == "peer" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("A.$props.peer must exist");
     assert!(
-        matches!(back_edge, TypeExpr::RecursiveRef { .. }),
-        "the cyclic back-edge must be the recursive sentinel, got {back_edge:?}"
+        matches!(peer, TypeExpr::Ref { name, type_arguments }
+            if name.as_ref() == "default" && type_arguments.is_empty()),
+        "the inner cyclic member must stay the shallow instance-identity \
+         Ref(\"default\") carrier, got {peer:?}"
     );
 }
 
@@ -881,40 +930,20 @@ fn typeof_construct_return_is_produced_by_instantiate_vue_default() {
 }
 
 // ---------------------------------------------------------------------------
-// (guard-1) ACTIVE-INSTANTIATION-GUARD DISCRIMINATOR — `push_instantiate_active`.
-//           A SELF-cyclic `.vue` (`Self.vue` references its OWN instance as
-//           `InstanceType<typeof Self>`) projected EAGERLY under
-//           `Published(Expanded)` is the case that ACTUALLY exercises the
-//           `push_instantiate_active` / `is_instantiate_active` guard — the
-//           mutual bare-`Ref` fixture (conv-3) does NOT (it bounds shallow via a
-//           `Navigate` `DeclRef` carrier).
-//
-//           Mechanism: dispatching `Instantiate(Self, default, Published(Expanded))`
-//           directly pushes `(Self, "default")` and lowers Self's instance shape
-//           eagerly. The `self` member `InstanceType<typeof Self>` is lowered in
-//           Expanded mode (NOT the Navigate carrier path), so `typeof Self`
-//           routes through `build_synthesized_vue_default_construct_object`,
-//           which re-issues `Instantiate(Self, default, StructuralTransit(Navigate))`.
-//           That is a DIFFERENT context key from the outer `Published(Expanded)`
-//           one, so the memo's same-key sentinel does NOT fire — instead the
-//           re-entry calls `push_instantiate_active((Self, "default"))`, finds the
-//           SAME identity already active (the outer frame has not popped), returns
-//           `false`, and short-circuits to `Opaque(RecursiveRef)`. So
-//           `$props.self` raises to `TypeExpr::RecursiveRef`.
-//
-//           DISCRIMINATING: this test FAILS (and is what proves the guard is
-//           reached) if `push_instantiate_active` is neutralized to always admit.
-//           With the guard disabled the re-entry does NOT short-circuit on the
-//           `Instantiate` same-key sentinel (the inner dispatch carries the
-//           DIFFERENT `StructuralTransit(Navigate)` context key, so that sentinel
-//           never fires). Instead the inner `TypeOf{Self/default}` re-entry hits
-//           the `TypeOf` memo's in-flight sentinel, which yields `Opaque(Miss)` —
-//           a NON-`Instantiate` sentinel, so the terminal raises to a Miss-derived
-//           shape rather than `TypeExpr::RecursiveRef`. The active-instantiation
-//           guard is therefore the ONLY path that produces the `RecursiveRef`
-//           sentinel here. Verified by temporarily returning `true` unconditionally
-//           from `push_instantiate_active` (see the report): the eager self-cycle
-//           then does NOT raise to `RecursiveRef`.
+// (guard-1) SELF-CYCLE UNDER THE LAZY DESIGN. A SELF-cyclic `.vue`
+//           (`Self.vue` references its OWN instance as
+//           `InstanceType<typeof Self>`) projected through the PRODUCTION
+//           lazy path is a FINITE SHALLOW SURFACE containing the recursive
+//           `DeclRef` carrier — the instance shape's members lower lazily, so
+//           each `Instantiate(.vue default)` frame completes and pops before
+//           the self-cyclic member is demanded, and the terminal-surface
+//           presentation keeps `$props.self` as the shallow instance-identity
+//           `Ref { name: "default" }` carrier the consumer re-resolves on
+//           demand. `RecursiveRef` remains correct ONLY for genuine in-flight
+//           query re-entry (the same semantic op cannot progress), bounded by
+//           the EXISTING memo sentinel + `push_instantiate_active` guard —
+//           which this lazy route never reaches. The mere completion of the
+//           projection is the no-hang proof.
 // ---------------------------------------------------------------------------
 
 const SELF_VUE: &str = r#"<script setup lang="ts">
@@ -923,92 +952,71 @@ defineProps<{ self: InstanceType<typeof Self>; marker: number }>();
 </script>
 "#;
 
-/// Project an EXPANDED member `path` rooted at a `Published(Expanded)`
-/// `Instantiate(.vue default)` of `canonical_id` (NOT the `Navigate` base
-/// [`project_vue_default_path`] uses). The EAGER `Published(Expanded)` base is
-/// what keeps the `(canonical, "default")` frame ACTIVE while the instance
-/// shape's members lower — the precondition for the `push_instantiate_active`
-/// guard to fire on a self-cyclic `InstanceType<typeof Self>` member.
-fn project_vue_default_path_eager(
-    host: &VerterHost,
-    canonical_id: &str,
-    path: &[&str],
-) -> TypeExpr {
-    let store_view = host.resolver_store_view_read().into_owned_view();
-    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
-    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-
-    let _whole_hash = host
-        .ensure_indexed_ready(canonical_id)
-        .expect("indexed ready")
-        .whole_hash;
-    // EAGER base: `Published(Expanded)` (NOT structural-transit/Navigate), so the
-    // body of the instance shape is lowered while `(canonical, "default")` is on
-    // the active-instantiation stack.
-    let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
-            crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-                Arc::from(canonical_id),
-                Arc::from("default"),
-            ),
-            Arc::from(Vec::new().into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
-                Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
-            ),
-        ),
-    )) {
-        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
-        QueryResult::Recursive(node) => node,
-        QueryResult::Error(e) => {
-            panic!("eager Instantiate(.vue default) base for {canonical_id} errored: {e:?}")
-        }
-    };
-    let segments: Arc<[PathSegment]> = path
-        .iter()
-        .map(|s| PathSegment::Member(Arc::from(*s)))
-        .collect::<Vec<_>>()
-        .into();
-    let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
-        base,
-        path: segments,
-        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
-    }) {
-        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
-        QueryResult::Recursive(node) => node,
-        QueryResult::Error(e) => {
-            panic!("ProjectPath {path:?} for {canonical_id} errored: {e:?}")
-        }
-    };
-    dispatch
-        .materialize_output_type_expr_for_test(terminal)
-        .unwrap_or_else(|| panic!("terminal of {path:?} for {canonical_id} must raise to TypeExpr"))
-}
-
 #[test]
-fn instance_type_self_cycle_hits_active_guard() {
+fn instance_type_self_cycle_resolves_shallow_instance() {
     const SELF: &str = "/w/Self.vue";
     let host = make_host_with_files(&[(SELF, SELF_VUE)]);
 
-    // Concrete sibling member proves the instance shape lowered (the path
-    // machinery and the eager base both work): `$props.marker` is `number`.
+    // Concrete sibling member proves the instance shape materialised (the
+    // path machinery and the lazy base both work): `$props.marker` is
+    // `number`.
     assert_eq!(
-        project_vue_default_path_eager(&host, SELF, &["$props", "marker"]),
+        project_vue_default_path(&host, SELF, &["$props", "marker"]),
         TypeExpr::Primitive(PrimitiveName::Number),
         "Self.$props.marker is the number declared alongside the self-cyclic member"
     );
 
-    // The self-cyclic member: `$props.self` is `InstanceType<typeof Self>`. Under
-    // the EAGER `Published(Expanded)` base the `(Self, default)` frame is still
-    // active when `typeof Self` re-enters the SAME identity, so
-    // `push_instantiate_active` short-circuits to the recursive sentinel. The mere
-    // completion of this call is the no-hang proof.
-    let self_member = project_vue_default_path_eager(&host, SELF, &["$props", "self"]);
+    // The self-cyclic member: `$props.self` is `InstanceType<typeof Self>` —
+    // the terminal lands on Self's own shallow instance object whose inner
+    // cyclic `self` stays the shallow instance-identity `Ref("default")`
+    // carrier. Bounded, no sentinel, no hang.
+    let self_member = project_vue_default_path(&host, SELF, &["$props", "self"]);
+    let TypeExpr::Object(instance) = &self_member else {
+        panic!(
+            "the self-cyclic member must resolve to Self's shallow instance object, \
+             got {self_member:?}"
+        );
+    };
+    let props = instance
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop) if prop.name == "$props" => {
+                Some(&prop.ty)
+            }
+            _ => None,
+        })
+        .expect("Self's shallow instance must carry $props");
+    let TypeExpr::Object(props_obj) = props else {
+        panic!("Self.$props must be an object, got {props:?}");
+    };
+    let marker = props_obj
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop) if prop.name == "marker" => {
+                Some(&prop.ty)
+            }
+            _ => None,
+        })
+        .expect("Self.$props.marker must exist");
+    assert_eq!(
+        *marker,
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the concrete sibling member proves the instance shape materialised"
+    );
+    let inner_self = props_obj
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop) if prop.name == "self" => Some(&prop.ty),
+            _ => None,
+        })
+        .expect("Self.$props.self must exist");
     assert!(
-        matches!(self_member, TypeExpr::RecursiveRef { .. }),
-        "the active-instantiation guard must bound the eager self-cycle to the \
-         recursive sentinel, got {self_member:?}"
+        matches!(inner_self, TypeExpr::Ref { name, type_arguments }
+            if name.as_ref() == "default" && type_arguments.is_empty()),
+        "the inner self-cyclic member must stay the shallow instance-identity \
+         Ref(\"default\") carrier, got {inner_self:?}"
     );
 }

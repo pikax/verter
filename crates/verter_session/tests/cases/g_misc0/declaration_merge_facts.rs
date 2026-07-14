@@ -11,69 +11,39 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_eval::TypeDeclKind;
 use verter_semantic::facts::{FactKey, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedName;
 use verter_session::project_type_store::IndexedReady;
-use verter_session::resolver_core::shallow_file_state::{ExportTarget, ShallowFileState};
-use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
+use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
-    )
+) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
 }
 
-/// Build an `IndexedReady` simulating two-part declaration merging
-/// of `interface Foo`. Multiple same-name interface parts retain their ordered
-/// contributor bodies on a [`TypeDeclBody::Merged`] carrier; a single part is
-/// a [`TypeDeclBody::Single`]. The fact emitter observes the merged member
-/// union via `body.lookup_object()`.
-fn build_with_merged_foo(parts: Vec<Vec<(&str, TypeExpr)>>) -> Arc<IndexedReady> {
-    // Env-seeded construction: appending same-name interface
-    // contributors to the env produces the ordered group whose
-    // `merged_body()` is the `TypeDeclBody::Merged` carrier — exactly
-    // what the lazy declaration-body fold serves.
-    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+/// Build an `IndexedReady` from AUTHORED same-name `interface Foo` parts
+/// (each part is a list of `(member, type-text)` pairs), constructed through
+/// the production-shaped service-backed path. The real binder groups the
+/// same-name contributors into the ordered group whose `merged_body()` is
+/// the `TypeDeclBody::Merged` carrier — exactly what the lazy
+/// declaration-body fold serves on first demand.
+fn build_with_merged_foo(parts: Vec<Vec<(&str, &str)>>) -> Arc<IndexedReady> {
+    let mut source = String::new();
     for part in &parts {
-        let body = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: part
-                .iter()
-                .map(|(n, ty)| {
-                    ObjectMember::Property(ObjectProperty::synthetic_public(
-                        (*n).to_string(),
-                        ty.clone(),
-                        false,
-                        false,
-                    ))
-                })
-                .collect(),
-        }));
-        env.add_type(verter_semantic::analysis::type_eval::TypeDeclInfo {
-            name: "Foo".to_string(),
-            declaration_id: 0,
-            kind: TypeDeclKind::Interface,
-            type_parameters: Vec::new(),
-            body,
-        });
+        source.push_str("export interface Foo {\n");
+        for (name, ty) in part {
+            source.push_str(&format!("  {name}: {ty};\n"));
+        }
+        source.push_str("}\n");
     }
-    let mut exports = FxHashMap::default();
-    exports.insert(
-        "Foo".to_string(),
-        ExportTarget::Local {
-            symbol_name: "Foo".to_string(),
-        },
-    );
-    let mut shallow = ShallowFileState::from_analysis([0u8; 16], empty_external(), Some(&env));
-    shallow.exports = exports;
+    let shallow =
+        ShallowFileState::service_backed_for_test_with_hash("/merge.ts", &source, [0u8; 16]);
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
-        Arc::new(shallow),
-        Arc::from(""),
-        Arc::from(""),
+        shallow,
+        Arc::from(source.as_str()),
+        Arc::from(source.as_str()),
         empty_external(),
     ))
 }
@@ -84,10 +54,7 @@ fn two_interface_parts_emit_one_merged_export_fact() {
     // fact. The fact emitter observes the SINGLE merged
     // `ShallowTypeSymbol` (shallow walk did the merge) and emits
     // one Export fact.
-    let indexed = build_with_merged_foo(vec![
-        vec![("a", TypeExpr::Primitive(PrimitiveName::String))],
-        vec![("b", TypeExpr::Primitive(PrimitiveName::Number))],
-    ]);
+    let indexed = build_with_merged_foo(vec![vec![("a", "string")], vec![("b", "number")]]);
     let emission = emit_parse_facts(&indexed);
     let key = FactKey::Export {
         name: InternedName::from("Foo"),
@@ -132,20 +99,14 @@ fn declaration_merge_member_reorder_produces_byte_identical_export_fact() {
     // only the property that actually holds: within-contributor member
     // order.)
     let parts_a = vec![
-        vec![
-            ("a", TypeExpr::Primitive(PrimitiveName::String)),
-            ("b", TypeExpr::Primitive(PrimitiveName::Number)),
-        ],
-        vec![("c", TypeExpr::Primitive(PrimitiveName::Boolean))],
+        vec![("a", "string"), ("b", "number")],
+        vec![("c", "boolean")],
     ];
     // Same parts, but the MEMBERS within the first contributor are
     // written in the opposite order.
     let parts_b = vec![
-        vec![
-            ("b", TypeExpr::Primitive(PrimitiveName::Number)),
-            ("a", TypeExpr::Primitive(PrimitiveName::String)),
-        ],
-        vec![("c", TypeExpr::Primitive(PrimitiveName::Boolean))],
+        vec![("b", "number"), ("a", "string")],
+        vec![("c", "boolean")],
     ];
     assert_ne!(
         parts_a, parts_b,
@@ -172,14 +133,11 @@ fn merge_with_added_part_changes_export_fact() {
     // Discrimination: adding a third interface part DOES change
     // the merged Export's semantic_hash. (The merged member set
     // grew.)
-    let two_parts = build_with_merged_foo(vec![
-        vec![("a", TypeExpr::Primitive(PrimitiveName::String))],
-        vec![("b", TypeExpr::Primitive(PrimitiveName::Number))],
-    ]);
+    let two_parts = build_with_merged_foo(vec![vec![("a", "string")], vec![("b", "number")]]);
     let three_parts = build_with_merged_foo(vec![
-        vec![("a", TypeExpr::Primitive(PrimitiveName::String))],
-        vec![("b", TypeExpr::Primitive(PrimitiveName::Number))],
-        vec![("c", TypeExpr::Primitive(PrimitiveName::Boolean))],
+        vec![("a", "string")],
+        vec![("b", "number")],
+        vec![("c", "boolean")],
     ]);
     let emission_2 = emit_parse_facts(&two_parts);
     let emission_3 = emit_parse_facts(&three_parts);

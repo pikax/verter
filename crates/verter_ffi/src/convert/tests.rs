@@ -7,10 +7,25 @@ use verter_session as host;
 
 use crate::types::*;
 
+use super::component_meta::{component_meta_parts_to_ffi, resolved_component_meta_to_ffi};
 use super::error::*;
 use super::offset::*;
 use super::string_helpers::*;
 use super::*;
+
+/// A resolution-output sidecar for converter tests: `Expanded` mode, no
+/// macros, the given registry declaration metadata + origin graph.
+fn resolution_output_with(
+    resolved_type_registry_meta: Vec<host::meta_resolve::ResolvedTypeRegistryMeta>,
+    origin_graph: Option<verter_protocol::types::OriginGraphDto>,
+) -> host::meta_resolve::ComponentMetaResolutionOutput {
+    host::meta_resolve::ComponentMetaResolutionOutput {
+        mode: host::ProjectionMode::Expanded,
+        resolved_macros: Vec::new(),
+        resolved_type_registry_meta,
+        origin_graph,
+    }
+}
 
 fn empty_analysis() -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
@@ -183,9 +198,13 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
         type_registry: vec![
             verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Props".to_string(),
-                type_expr: verter_type_expr::TypeExpr::Unknown {
-                    raw: "{ label: string }".to_string(),
-                },
+                type_source: verter_type_expr::facts::SourcePosition::Present(
+                    verter_type_expr::facts::SemanticTypeSource::Closed(
+                        verter_type_expr::facts::ClosedTypeFact::Leaf(
+                            verter_type_expr::facts::LeafTypeFact::Ref("Props".to_string()),
+                        ),
+                    ),
+                ),
                 type_expansion: None,
             },
         ],
@@ -211,13 +230,8 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
         options_api: false,
         file_path: "/src/App.vue".to_string(),
     };
-    let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
-        snapshot: host::FileAnalysisSnapshot::default(),
-        mode: host::ProjectionMode::Expanded,
-        whole_hash: [0; 16],
-        resolved_macros: Vec::new(),
-        resolved_type_registry: Vec::new(),
-        resolved_type_registry_meta: vec![host::meta_resolve::ResolvedTypeRegistryMeta {
+    let resolution = resolution_output_with(
+        vec![host::meta_resolve::ResolvedTypeRegistryMeta {
             name: "Props".to_string(),
             declaration: host::meta_resolve::ResolvedTypeDeclaration {
                 requested_name: "Props".to_string(),
@@ -229,24 +243,29 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
                 text: Some("export interface Props { label: string }".to_string()),
             },
         }],
-        evaluated_types: None,
-        fact_versions: Vec::new(),
-        compute_audit: None,
-        origin_graph: None,
-        request_id: 0,
-        surface_identities: None,
-        synthesis_diagnostics: Vec::new(),
-        completeness: host::semantic_query::ResultCompleteness::Complete,
-        synthesis_should_suppress: false,
-    };
+        None,
+    );
 
-    let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
+    let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
+        type_registry_entries: vec![verter_type_expr::TypeExpr::Unknown {
+            raw: "{ label: string }".to_string(),
+        }],
+        ..Default::default()
+    };
+    let ffi = component_meta_parts_to_ffi(analysis, Some(resolution), lanes);
     let entry = ffi
         .type_registry
         .first()
         .expect("type registry entry should be present");
 
     assert_eq!(entry.name, "Props");
+    assert_eq!(
+        entry.r#type,
+        verter_type_expr::TypeExpr::Unknown {
+            raw: "{ label: string }".to_string(),
+        },
+        "the EXPANDED lane value rides the positional registry lane 1:1",
+    );
     assert_eq!(
         entry.raw_type.as_deref(),
         Some("export interface Props { label: string }"),
@@ -263,7 +282,7 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
 }
 
 #[test]
-fn component_meta_type_registry_prefers_resolved_registry_type_expr_when_available() {
+fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
     let analysis = verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
         props: Vec::new(),
         events: Vec::new(),
@@ -272,10 +291,42 @@ fn component_meta_type_registry_prefers_resolved_registry_type_expr_when_availab
         exposed: Vec::new(),
         public_instance: None,
         sfc_blocks: None,
+        // DUPLICATE registry names around a DISTINCT middle element: a
+        // name-collapsing (map-keyed) conversion loses a row and an internal
+        // positional swap moves the sentinel types — both fail the
+        // assertions below.
         type_registry: vec![
             verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Button".to_string(),
-                type_expr: verter_type_expr::TypeExpr::named("Button"),
+                type_source: verter_type_expr::facts::SourcePosition::Present(
+                    verter_type_expr::facts::SemanticTypeSource::Closed(
+                        verter_type_expr::facts::ClosedTypeFact::Leaf(
+                            verter_type_expr::facts::LeafTypeFact::Ref("Button".to_string()),
+                        ),
+                    ),
+                ),
+                type_expansion: None,
+            },
+            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+                name: "Middle".to_string(),
+                type_source: verter_type_expr::facts::SourcePosition::Present(
+                    verter_type_expr::facts::SemanticTypeSource::Closed(
+                        verter_type_expr::facts::ClosedTypeFact::Leaf(
+                            verter_type_expr::facts::LeafTypeFact::Ref("Middle".to_string()),
+                        ),
+                    ),
+                ),
+                type_expansion: None,
+            },
+            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+                name: "Button".to_string(),
+                type_source: verter_type_expr::facts::SourcePosition::Present(
+                    verter_type_expr::facts::SemanticTypeSource::Closed(
+                        verter_type_expr::facts::ClosedTypeFact::Leaf(
+                            verter_type_expr::facts::LeafTypeFact::Ref("Button".to_string()),
+                        ),
+                    ),
+                ),
                 type_expansion: None,
             },
         ],
@@ -301,32 +352,8 @@ fn component_meta_type_registry_prefers_resolved_registry_type_expr_when_availab
         options_api: false,
         file_path: "/src/App.vue".to_string(),
     };
-    let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
-        snapshot: host::FileAnalysisSnapshot::default(),
-        mode: host::ProjectionMode::Expanded,
-        whole_hash: [0; 16],
-        resolved_macros: Vec::new(),
-        resolved_type_registry: vec![
-            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
-                name: "Button".to_string(),
-                type_expr: verter_type_expr::TypeExpr::Object(Arc::new(
-                    verter_type_expr::ObjectExpr {
-                        properties: vec![verter_type_expr::ObjectMember::Property(
-                            verter_type_expr::ObjectProperty::synthetic_public(
-                                "variants".to_string(),
-                                verter_type_expr::TypeExpr::Object(Arc::new(
-                                    verter_type_expr::ObjectExpr { properties: vec![] },
-                                )),
-                                false,
-                                false,
-                            ),
-                        )],
-                    },
-                )),
-                type_expansion: None,
-            },
-        ],
-        resolved_type_registry_meta: vec![host::meta_resolve::ResolvedTypeRegistryMeta {
+    let resolution = resolution_output_with(
+        vec![host::meta_resolve::ResolvedTypeRegistryMeta {
             name: "Button".to_string(),
             declaration: host::meta_resolve::ResolvedTypeDeclaration {
                 requested_name: "Button".to_string(),
@@ -340,31 +367,62 @@ fn component_meta_type_registry_prefers_resolved_registry_type_expr_when_availab
                 ),
             },
         }],
-        evaluated_types: None,
-        fact_versions: Vec::new(),
-        compute_audit: None,
-        origin_graph: None,
-        request_id: 0,
-        surface_identities: None,
-        synthesis_diagnostics: Vec::new(),
-        completeness: host::semantic_query::ResultCompleteness::Complete,
-        synthesis_should_suppress: false,
+        None,
+    );
+    let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
+        type_registry_entries: vec![
+            verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                properties: vec![verter_type_expr::ObjectMember::Property(
+                    verter_type_expr::ObjectProperty::synthetic_public(
+                        "variants".to_string(),
+                        verter_type_expr::TypeExpr::Object(Arc::new(
+                            verter_type_expr::ObjectExpr { properties: vec![] },
+                        )),
+                        false,
+                        false,
+                    ),
+                )],
+            })),
+            verter_type_expr::TypeExpr::named("MiddleSentinel"),
+            verter_type_expr::TypeExpr::named("Button"),
+        ],
+        ..Default::default()
     };
 
-    let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
-    let entry = ffi
-        .type_registry
-        .first()
-        .expect("type registry entry should be present");
-
+    let ffi = component_meta_parts_to_ffi(analysis, Some(resolution), lanes);
+    assert_eq!(
+        ffi.type_registry.len(),
+        3,
+        "duplicate registry names are POSITIONAL rows — never name-collapsed",
+    );
     assert!(
-        matches!(entry.r#type, verter_type_expr::TypeExpr::Object(_)),
-        "resolved registry entry should override the shallow analysis alias"
+        matches!(
+            ffi.type_registry[0].r#type,
+            verter_type_expr::TypeExpr::Object(_)
+        ),
+        "row 0 reads the positional lane value"
+    );
+    assert!(
+        matches!(
+            &ffi.type_registry[1].r#type,
+            verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "MiddleSentinel"
+        ),
+        "the DISTINCT middle row keeps its own positional value (an internal swap moves it)"
+    );
+    assert_eq!(ffi.type_registry[1].name, "Middle");
+    assert_eq!(
+        ffi.type_registry[0].raw_type.as_deref(),
+        Some("type Button = ComponentConfig<typeof theme, MissingAppConfig>"),
+        "the per-name declaration sidecar still joins the resolved metadata",
     );
     assert_eq!(
-        entry.raw_type.as_deref(),
+        ffi.type_registry[2].raw_type.as_deref(),
         Some("type Button = ComponentConfig<typeof theme, MissingAppConfig>"),
-        "resolved registry should still keep the pre-expansion source text",
+        "a duplicate-name row joins the same declaration metadata by name",
+    );
+    assert!(
+        ffi.type_registry[1].declaration.is_none(),
+        "the middle row has no resolved declaration metadata",
     );
 }
 
@@ -437,7 +495,7 @@ fn component_meta_ffi_exposes_root_info_summary() {
         file_path: "/src/App.vue".to_string(),
     };
 
-    let ffi = component_meta_analysis_to_ffi(analysis);
+    let ffi = component_meta_parts_to_ffi(analysis, None, Default::default());
     match ffi.root_info {
         FfiRootInfo {
             kind: FfiRootInfoKind::Conditional,
@@ -1750,17 +1808,9 @@ fn utf8_to_utf32_basic() {
 fn ffi_payload_contains_origin_field_when_resolved_state_has_origin_graph() {
     use verter_protocol::types::{OriginEdgeDto, OriginGraphDto, OriginNodeDto};
 
-    let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
-        snapshot: host::FileAnalysisSnapshot::default(),
-        mode: host::ProjectionMode::Expanded,
-        whole_hash: [0; 16],
-        resolved_macros: Vec::new(),
-        resolved_type_registry: Vec::new(),
-        resolved_type_registry_meta: Vec::new(),
-        evaluated_types: None,
-        fact_versions: Vec::new(),
-        compute_audit: None,
-        origin_graph: Some(OriginGraphDto {
+    let resolution = resolution_output_with(
+        Vec::new(),
+        Some(OriginGraphDto {
             nodes: vec![
                 OriginNodeDto {
                     id: 0,
@@ -1781,15 +1831,9 @@ fn ffi_payload_contains_origin_field_when_resolved_state_has_origin_graph() {
             }],
             meta_strings: Vec::new(),
         }),
-        request_id: 0,
-        surface_identities: None,
-        synthesis_diagnostics: Vec::new(),
-        completeness: host::semantic_query::ResultCompleteness::Complete,
-        synthesis_should_suppress: false,
-    };
+    );
 
-    let ffi =
-        component_meta_analysis_to_ffi_with_resolution(empty_analysis(), Some(&resolved_state));
+    let ffi = component_meta_parts_to_ffi(empty_analysis(), Some(resolution), Default::default());
     assert!(
         !ffi.origin.edges.is_empty(),
         "FfiComponentMeta.origin must contain edges when resolved state has origin graph"
@@ -1800,26 +1844,9 @@ fn ffi_payload_contains_origin_field_when_resolved_state_has_origin_graph() {
 
 #[test]
 fn ffi_origin_subgraph_is_empty_when_resolved_state_has_no_origin_graph() {
-    let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
-        snapshot: host::FileAnalysisSnapshot::default(),
-        mode: host::ProjectionMode::Expanded,
-        whole_hash: [0; 16],
-        resolved_macros: Vec::new(),
-        resolved_type_registry: Vec::new(),
-        resolved_type_registry_meta: Vec::new(),
-        evaluated_types: None,
-        fact_versions: Vec::new(),
-        compute_audit: None,
-        origin_graph: None,
-        request_id: 0,
-        surface_identities: None,
-        synthesis_diagnostics: Vec::new(),
-        completeness: host::semantic_query::ResultCompleteness::Complete,
-        synthesis_should_suppress: false,
-    };
+    let resolution = resolution_output_with(Vec::new(), None);
 
-    let ffi =
-        component_meta_analysis_to_ffi_with_resolution(empty_analysis(), Some(&resolved_state));
+    let ffi = component_meta_parts_to_ffi(empty_analysis(), Some(resolution), Default::default());
     assert!(
         ffi.origin.edges.is_empty(),
         "FfiComponentMeta.origin must be empty when no origin graph"
@@ -1830,17 +1857,9 @@ fn ffi_origin_subgraph_is_empty_when_resolved_state_has_no_origin_graph() {
 fn ffi_edge_meta_strings_deduplicated() {
     use verter_protocol::types::{OriginEdgeDto, OriginGraphDto, OriginNodeDto};
 
-    let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
-        snapshot: host::FileAnalysisSnapshot::default(),
-        mode: host::ProjectionMode::Expanded,
-        whole_hash: [0; 16],
-        resolved_macros: Vec::new(),
-        resolved_type_registry: Vec::new(),
-        resolved_type_registry_meta: Vec::new(),
-        evaluated_types: None,
-        fact_versions: Vec::new(),
-        compute_audit: None,
-        origin_graph: Some(OriginGraphDto {
+    let resolution = resolution_output_with(
+        Vec::new(),
+        Some(OriginGraphDto {
             nodes: vec![
                 OriginNodeDto {
                     id: 0,
@@ -1869,15 +1888,9 @@ fn ffi_edge_meta_strings_deduplicated() {
             ],
             meta_strings: vec!["SubstitutedParam(\"T\")".to_string()],
         }),
-        request_id: 0,
-        surface_identities: None,
-        synthesis_diagnostics: Vec::new(),
-        completeness: host::semantic_query::ResultCompleteness::Complete,
-        synthesis_should_suppress: false,
-    };
+    );
 
-    let ffi =
-        component_meta_analysis_to_ffi_with_resolution(empty_analysis(), Some(&resolved_state));
+    let ffi = component_meta_parts_to_ffi(empty_analysis(), Some(resolution), Default::default());
     assert_eq!(
         ffi.origin.meta_strings.len(),
         1,
@@ -1892,25 +1905,9 @@ fn ffi_edge_meta_strings_deduplicated() {
 
 #[test]
 fn ffi_projection_mode_wire_format() {
-    let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
-        snapshot: host::FileAnalysisSnapshot::default(),
-        mode: host::ProjectionMode::Expanded,
-        whole_hash: [0; 16],
-        resolved_macros: Vec::new(),
-        resolved_type_registry: Vec::new(),
-        resolved_type_registry_meta: Vec::new(),
-        evaluated_types: None,
-        fact_versions: Vec::new(),
-        compute_audit: None,
-        origin_graph: None,
-        request_id: 0,
-        surface_identities: None,
-        synthesis_diagnostics: Vec::new(),
-        completeness: host::semantic_query::ResultCompleteness::Complete,
-        synthesis_should_suppress: false,
-    };
+    let resolution = resolution_output_with(Vec::new(), None);
 
-    let ffi = resolved_component_meta_to_ffi(&resolved_state);
+    let ffi = resolved_component_meta_to_ffi(&resolution);
     assert_eq!(
         ffi.mode, "expanded",
         "ProjectionMode::Expanded wire format must be 'expanded'"
@@ -1921,17 +1918,9 @@ fn ffi_projection_mode_wire_format() {
 fn ffi_payload_contains_instantiate_edge_for_generic_component() {
     use verter_protocol::types::{OriginEdgeDto, OriginGraphDto, OriginNodeDto};
 
-    let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
-        snapshot: host::FileAnalysisSnapshot::default(),
-        mode: host::ProjectionMode::Expanded,
-        whole_hash: [0; 16],
-        resolved_macros: Vec::new(),
-        resolved_type_registry: Vec::new(),
-        resolved_type_registry_meta: Vec::new(),
-        evaluated_types: None,
-        fact_versions: Vec::new(),
-        compute_audit: None,
-        origin_graph: Some(OriginGraphDto {
+    let resolution = resolution_output_with(
+        Vec::new(),
+        Some(OriginGraphDto {
             nodes: vec![
                 OriginNodeDto {
                     id: 0,
@@ -1965,15 +1954,9 @@ fn ffi_payload_contains_instantiate_edge_for_generic_component() {
             ],
             meta_strings: vec!["SubstitutedParam(\"T\")".to_string()],
         }),
-        request_id: 0,
-        surface_identities: None,
-        synthesis_diagnostics: Vec::new(),
-        completeness: host::semantic_query::ResultCompleteness::Complete,
-        synthesis_should_suppress: false,
-    };
+    );
 
-    let ffi =
-        component_meta_analysis_to_ffi_with_resolution(empty_analysis(), Some(&resolved_state));
+    let ffi = component_meta_parts_to_ffi(empty_analysis(), Some(resolution), Default::default());
 
     assert_eq!(ffi.origin.nodes.len(), 3, "all 3 origin nodes survive FFI");
     assert_eq!(ffi.origin.edges.len(), 2, "both origin edges survive FFI");
@@ -2116,4 +2099,452 @@ fn ffi_seam_response_serialises_mode_fields() {
         ffi2.cache_hit,
         "a warm-hit response must serialise cache_hit == true through the FFI seam"
     );
+}
+
+/// Nested positional zip: POPULATED per-slot binding lanes (a repeated
+/// binding name across slots) and MULTI-BRANCH fallthrough prop/event lanes
+/// each land on the correct NESTED member — a flattened, name-keyed, or
+/// branch-swapped zip moves a sentinel onto the wrong row and fails the
+/// exact assertions.
+#[test]
+fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
+    use verter_semantic::analysis::component_meta as cm;
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+
+    let mut analysis = empty_analysis();
+    let binding = |name: &str| cm::SlotBindingAnalysis {
+        name: name.to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        type_expansion: None,
+        raw_type: None,
+        raw_type_source: None,
+    };
+    let slot = |name: &str, bindings: Vec<cm::SlotBindingAnalysis>| cm::SlotAnalysis {
+        name: name.to_string(),
+        is_scoped: true,
+        bindings,
+        is_required: false,
+        return_type: None,
+        return_source: None,
+        return_source_scope: None,
+        description: None,
+        tags: Vec::new(),
+    };
+    // The `row` binding name REPEATS across both slots (name-keyed zips
+    // collapse it); `default` additionally carries a second binding so the
+    // inner alignment is exercised beyond length 1.
+    analysis.slots = vec![
+        slot("default", vec![binding("row"), binding("other")]),
+        slot("second", vec![binding("row")]),
+    ];
+    let prop_entry = |name: &str| cm::FallthroughPropEntry {
+        name: name.to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        type_source_scope: None,
+        raw_type: None,
+        sources: Vec::new(),
+    };
+    let event_entry = |name: &str| cm::FallthroughEventEntry {
+        name: name.to_string(),
+        payload: verter_type_expr::facts::SourcePosition::unannotated(),
+        payload_scope: None,
+        raw_signature: None,
+        sources: Vec::new(),
+    };
+    analysis.fallthrough_surface = cm::FallthroughSurface::Branches {
+        branches: vec![
+            cm::FallthroughBranch {
+                branch_key: "0".to_string(),
+                condition_text: None,
+                props: vec![prop_entry("inherited"), prop_entry("extraA")],
+                events: vec![event_entry("changed")],
+                root_chain: Vec::new(),
+                status: cm::BranchStatus::Resolved,
+            },
+            cm::FallthroughBranch {
+                branch_key: "1".to_string(),
+                condition_text: None,
+                // The SAME row name in branch 1 (a name-keyed or flattened
+                // zip collapses / misroutes it).
+                props: vec![prop_entry("inherited")],
+                events: vec![event_entry("changed")],
+                root_chain: Vec::new(),
+                status: cm::BranchStatus::Resolved,
+            },
+        ],
+    };
+
+    let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
+        slot_bindings: vec![
+            vec![
+                TypeExpr::Primitive(PrimitiveName::String), // default.row
+                TypeExpr::Primitive(PrimitiveName::Number), // default.other
+            ],
+            vec![TypeExpr::Primitive(PrimitiveName::Boolean)], // second.row
+        ],
+        fallthrough_props: vec![
+            vec![
+                TypeExpr::Primitive(PrimitiveName::String), // b0 inherited
+                TypeExpr::Primitive(PrimitiveName::Number), // b0 extraA
+            ],
+            vec![TypeExpr::Primitive(PrimitiveName::Boolean)], // b1 inherited
+        ],
+        fallthrough_event_payloads: vec![
+            vec![TypeExpr::Primitive(PrimitiveName::Number)], // b0 changed
+            vec![TypeExpr::Primitive(PrimitiveName::String)], // b1 changed
+        ],
+        ..Default::default()
+    };
+
+    let ffi = component_meta_parts_to_ffi(analysis, None, lanes);
+
+    // Nested slot bindings: the repeated `row` name keeps EACH slot's own
+    // sentinel; `default.other` keeps the inner second position.
+    assert_eq!(ffi.slots.len(), 2);
+    assert_eq!(ffi.slots[0].name, "default");
+    assert_eq!(ffi.slots[0].bindings[0].name, "row");
+    assert_eq!(
+        ffi.slots[0].bindings[0].r#type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+    assert_eq!(ffi.slots[0].bindings[1].name, "other");
+    assert_eq!(
+        ffi.slots[0].bindings[1].r#type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+    assert_eq!(ffi.slots[1].name, "second");
+    assert_eq!(ffi.slots[1].bindings[0].name, "row");
+    assert_eq!(
+        ffi.slots[1].bindings[0].r#type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "the repeated binding name keeps ITS OWN slot's sentinel — a \
+         cross-slot collapse or flattened zip moves default.row here"
+    );
+
+    // Multi-branch fallthrough rows: each branch keeps ITS OWN sentinel for
+    // the same-named row; the second inner row stays on branch 0.
+    let FfiFallthroughSurface::Branches { branches } = ffi.fallthrough_surface else {
+        panic!("branch surface expected");
+    };
+    assert_eq!(branches.len(), 2);
+    assert_eq!(branches[0].props[0].name, "inherited");
+    assert_eq!(
+        branches[0].props[0].r#type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+    assert_eq!(branches[0].props[1].name, "extraA");
+    assert_eq!(
+        branches[0].props[1].r#type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+    assert_eq!(branches[1].props[0].name, "inherited");
+    assert_eq!(
+        branches[1].props[0].r#type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "the same-named row keeps ITS OWN branch's sentinel — a branch swap \
+         or flattened zip moves branch 0's value here"
+    );
+    assert_eq!(
+        branches[0].events[0].payload,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+    assert_eq!(
+        branches[1].events[0].payload,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "each branch's event payload lands on ITS OWN branch row"
+    );
+}
+
+/// HARD wire-boundary alignment guard: a lane/analysis length mismatch must
+/// REFUSE the conversion loudly (fail-closed) — never silently truncate via
+/// `zip`. The panic message is pinned so a debug-only assert (compiled out of
+/// release builds, where the zip truncation would ship a silently-wrong wire
+/// payload) cannot satisfy this test.
+#[test]
+fn component_meta_lane_misalignment_fails_closed_not_silent_truncation() {
+    use verter_semantic::analysis::component_meta as cm;
+
+    let mut analysis = empty_analysis();
+    // One analysis prop against the EMPTY default lanes — misaligned.
+    analysis.props = vec![cm::PropAnalysis {
+        name: "misaligned".to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        type_expansion: None,
+        raw_type: None,
+        raw_type_source: None,
+        required: true,
+        has_default: false,
+        default_value: None,
+        description: None,
+        tags: Vec::new(),
+        declared_in_macro_type_arg: true,
+    }];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        component_meta_parts_to_ffi(analysis, None, Default::default())
+    }));
+    let payload = match result {
+        Ok(_) => panic!("a misaligned props lane must refuse the conversion"),
+        Err(payload) => payload,
+    };
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+        .unwrap_or_default();
+    assert!(
+        message.contains("component-meta FFI conversion refused"),
+        "the refusal must be the HARD wire-boundary guard (active in release \
+         builds too), never a debug-only assert; got panic message: {message:?}"
+    );
+    assert!(
+        message.contains("props"),
+        "the refusal names the misaligned lane; got {message:?}"
+    );
+}
+
+/// Panic-message extraction shared by the fail-closed guard tests: run the
+/// conversion under `catch_unwind` and return the panic payload string.
+fn conversion_panic_message(convert: impl FnOnce() + std::panic::UnwindSafe) -> String {
+    let payload = std::panic::catch_unwind(convert)
+        .err()
+        .expect("a misaligned lane must refuse the conversion");
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+        .unwrap_or_default()
+}
+
+fn fallthrough_prop_entry(
+    name: &str,
+) -> verter_semantic::analysis::component_meta::FallthroughPropEntry {
+    verter_semantic::analysis::component_meta::FallthroughPropEntry {
+        name: name.to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        type_source_scope: None,
+        raw_type: None,
+        sources: Vec::new(),
+    }
+}
+
+fn fallthrough_event_entry(
+    name: &str,
+) -> verter_semantic::analysis::component_meta::FallthroughEventEntry {
+    verter_semantic::analysis::component_meta::FallthroughEventEntry {
+        name: name.to_string(),
+        payload: verter_type_expr::facts::SourcePosition::unannotated(),
+        payload_scope: None,
+        raw_signature: None,
+        sources: Vec::new(),
+    }
+}
+
+fn fallthrough_branch(
+    props: Vec<verter_semantic::analysis::component_meta::FallthroughPropEntry>,
+    events: Vec<verter_semantic::analysis::component_meta::FallthroughEventEntry>,
+) -> verter_semantic::analysis::component_meta::FallthroughBranch {
+    verter_semantic::analysis::component_meta::FallthroughBranch {
+        branch_key: "0".to_string(),
+        condition_text: None,
+        props,
+        events,
+        root_chain: Vec::new(),
+        status: verter_semantic::analysis::component_meta::BranchStatus::Resolved,
+    }
+}
+
+/// HARD fallthrough wire-boundary guard, OUTER dimension: a branch-count /
+/// lane-count mismatch must REFUSE the conversion loudly in EVERY build
+/// profile — the positional branch zip would silently truncate otherwise.
+/// The pinned message rejects a debug-only assert (compiled out of release
+/// builds, where the truncation would ship).
+#[test]
+fn fallthrough_outer_branch_lane_misalignment_fails_closed() {
+    use verter_semantic::analysis::component_meta as cm;
+    let surface = cm::FallthroughSurface::Branches {
+        branches: vec![fallthrough_branch(Vec::new(), Vec::new())],
+    };
+    // One branch against EMPTY prop lanes — outer misalignment.
+    let message = conversion_panic_message(|| {
+        let _ = fallthrough::fallthrough_surface_to_ffi(surface, Vec::new(), vec![Vec::new()]);
+    });
+    assert!(
+        message.contains("component-meta FFI conversion refused"),
+        "the refusal must be the HARD wire-boundary guard (active in release \
+         builds too), never a debug-only assert; got panic message: {message:?}"
+    );
+    assert!(
+        message.contains("fallthrough-props"),
+        "the refusal names the misaligned lane; got {message:?}"
+    );
+}
+
+/// HARD fallthrough wire-boundary guard, INNER prop dimension: a branch whose
+/// prop lane length differs from its analysis prop rows must refuse loudly —
+/// the inner prop zip would silently truncate otherwise.
+#[test]
+fn fallthrough_inner_prop_lane_misalignment_fails_closed() {
+    use verter_semantic::analysis::component_meta as cm;
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+    let surface = cm::FallthroughSurface::Branches {
+        branches: vec![fallthrough_branch(
+            vec![fallthrough_prop_entry("a"), fallthrough_prop_entry("b")],
+            vec![fallthrough_event_entry("changed")],
+        )],
+    };
+    // Two analysis props against ONE materialized prop value; events aligned.
+    let message = conversion_panic_message(|| {
+        let _ = fallthrough::fallthrough_surface_to_ffi(
+            surface,
+            vec![vec![TypeExpr::Primitive(PrimitiveName::String)]],
+            vec![vec![TypeExpr::Primitive(PrimitiveName::Number)]],
+        );
+    });
+    assert!(
+        message.contains("component-meta FFI conversion refused"),
+        "the refusal must be the HARD wire-boundary guard; got {message:?}"
+    );
+    assert!(
+        message.contains("prop"),
+        "the refusal names the inner prop lane; got {message:?}"
+    );
+}
+
+/// HARD fallthrough wire-boundary guard, INNER event dimension: a branch whose
+/// event lane length differs from its analysis event rows must refuse loudly.
+#[test]
+fn fallthrough_inner_event_lane_misalignment_fails_closed() {
+    use verter_semantic::analysis::component_meta as cm;
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+    let surface = cm::FallthroughSurface::Branches {
+        branches: vec![fallthrough_branch(
+            vec![fallthrough_prop_entry("a")],
+            vec![
+                fallthrough_event_entry("changed"),
+                fallthrough_event_entry("saved"),
+            ],
+        )],
+    };
+    // Two analysis events against ONE materialized event payload; props aligned.
+    let message = conversion_panic_message(|| {
+        let _ = fallthrough::fallthrough_surface_to_ffi(
+            surface,
+            vec![vec![TypeExpr::Primitive(PrimitiveName::String)]],
+            vec![vec![TypeExpr::Primitive(PrimitiveName::Number)]],
+        );
+    });
+    assert!(
+        message.contains("component-meta FFI conversion refused"),
+        "the refusal must be the HARD wire-boundary guard; got {message:?}"
+    );
+    assert!(
+        message.contains("event"),
+        "the refusal names the inner event lane; got {message:?}"
+    );
+}
+
+/// HARD fallthrough wire-boundary guard, `None`-surface dimension: a
+/// no-fallthrough surface must carry EMPTY lanes — nonempty lanes mean the
+/// envelope is torn (values materialized for branches that do not exist), and
+/// silently dropping them would hide the tear.
+#[test]
+fn fallthrough_none_surface_with_nonempty_lanes_fails_closed() {
+    use verter_semantic::analysis::component_meta as cm;
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+    let surface = cm::FallthroughSurface::None {
+        reason: cm::NoFallthroughReason::NoTemplate,
+    };
+    let message = conversion_panic_message(|| {
+        let _ = fallthrough::fallthrough_surface_to_ffi(
+            surface,
+            vec![vec![TypeExpr::Primitive(PrimitiveName::String)]],
+            Vec::new(),
+        );
+    });
+    assert!(
+        message.contains("component-meta FFI conversion refused"),
+        "the refusal must be the HARD wire-boundary guard; got {message:?}"
+    );
+    assert!(
+        message.contains("None"),
+        "the refusal names the None-surface empty-lane invariant; got {message:?}"
+    );
+}
+
+/// The 1:1-aligned happy path stays byte-identical through the hard guard: an
+/// aligned single-prop conversion succeeds and lands the lane value on its
+/// positional member.
+#[test]
+fn component_meta_aligned_lanes_convert_unchanged_through_the_hard_guard() {
+    use verter_semantic::analysis::component_meta as cm;
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+
+    let mut analysis = empty_analysis();
+    analysis.props = vec![cm::PropAnalysis {
+        name: "aligned".to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        type_expansion: None,
+        raw_type: None,
+        raw_type_source: None,
+        required: true,
+        has_default: false,
+        default_value: None,
+        description: None,
+        tags: Vec::new(),
+        declared_in_macro_type_arg: true,
+    }];
+    let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
+        props: vec![TypeExpr::Primitive(PrimitiveName::String)],
+        ..Default::default()
+    };
+    let ffi = component_meta_parts_to_ffi(analysis, None, lanes);
+    assert_eq!(ffi.props.len(), 1);
+    assert_eq!(ffi.props[0].name, "aligned");
+    assert_eq!(
+        ffi.props[0].r#type,
+        TypeExpr::Primitive(PrimitiveName::String)
+    );
+}
+
+/// The wire payload's RESOLUTION STATUS is typed and honest: a
+/// sidecar-less conversion (no resolution seed — the sidecar-less
+/// output-envelope surfaces, e.g. the plain WASM `getComponentMeta`
+/// lane) reports the typed
+/// `Unavailable(ResolutionProviderAbsent)` status — NEVER an
+/// exact/successful-looking silence — while a resolution-bearing conversion
+/// reports `Resolved`. The status is additive JSON (`resolutionStatus`);
+/// every pre-existing field is untouched.
+#[test]
+fn resolution_less_conversion_reports_typed_unavailable_status_never_silent_success() {
+    // Resolution-less lane: the typed unavailable status.
+    let ffi = component_meta_parts_to_ffi(empty_analysis(), None, Default::default());
+    assert_eq!(
+        ffi.resolution_status,
+        FfiComponentMetaResolutionStatus::Unavailable(
+            FfiResolutionUnavailableReason::ResolutionProviderAbsent
+        ),
+        "a resolution-less payload must carry the typed unavailable status"
+    );
+    assert!(ffi.resolution.is_none(), "no resolution sidecar fabricated");
+    let json = serde_json::to_value(&ffi).expect("serialize");
+    assert_eq!(
+        json["resolutionStatus"]["kind"], "unavailable",
+        "the wire self-describes the resolution-less lane"
+    );
+    assert_eq!(
+        json["resolutionStatus"]["reason"], "resolutionProviderAbsent",
+        "the wire carries the typed reason"
+    );
+
+    // Resolution-bearing lane: the resolved status.
+    let resolution = resolution_output_with(Vec::new(), None);
+    let ffi = component_meta_parts_to_ffi(empty_analysis(), Some(resolution), Default::default());
+    assert_eq!(
+        ffi.resolution_status,
+        FfiComponentMetaResolutionStatus::Resolved,
+        "a resolution-bearing payload reports the resolved status"
+    );
+    let json = serde_json::to_value(&ffi).expect("serialize");
+    assert_eq!(json["resolutionStatus"]["kind"], "resolved");
 }

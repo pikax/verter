@@ -174,21 +174,21 @@ impl VerterHost {
                 break;
             };
             let decl = group.primary();
-            let Some(verter_type_expr::TypeExpr::TypeOf(value_ref)) = decl.type_annotation.as_ref()
-            else {
+            // The `ValueTypeAnnotationFact` producer (verter_semantic
+            // fact_projection.rs) already encodes the single-hop + self-ref-break
+            // termination guard: `typeof_alias_target` is `Some` IFF the
+            // annotation is a single-segment `typeof x` whose target is not this
+            // declaration itself, so a multi-hop `typeof x.y` or a self-peel
+            // yields `None` here and terminates the walk. The membership check
+            // stays session-side.
+            let Some(target) = decl.type_annotation.typeof_alias_target.as_ref() else {
                 break;
             };
-            let Some(next_name) = value_ref.path.first() else {
-                break;
-            };
-            if value_ref.path.len() != 1 || *next_name == current.name {
-                break;
-            }
-            if !env.value_symbols.contains_key(next_name.as_str()) {
+            if !env.value_symbols.contains_key(target.symbol.as_ref()) {
                 break;
             }
 
-            current.name = next_name.clone();
+            current.name = target.symbol.to_string();
         }
 
         // Non-breaking readiness cross-check (debug/test only): the
@@ -256,17 +256,19 @@ impl VerterHost {
             let Some(lowered) = state.effective_value_decl(current.name.as_str()) else {
                 break;
             };
-            let Some(verter_type_expr::TypeExpr::TypeOf(value_ref)) =
-                lowered.type_annotation.as_ref()
-            else {
+            // The `ValueTypeAnnotationFact` producer (verter_semantic
+            // fact_projection.rs) already encodes the single-hop +
+            // self-ref-break termination guard: `typeof_alias_target` is
+            // `Some` IFF the annotation is a single-segment `typeof x` whose
+            // target is not this declaration itself, so a multi-hop
+            // `typeof x.y` or a self-peel yields `None` here and terminates
+            // the walk — byte-identical termination to the retired
+            // `TypeExpr::TypeOf` match. The membership check stays
+            // session-side.
+            let Some(target) = lowered.type_annotation.typeof_alias_target.as_ref() else {
                 break;
             };
-            let Some(next_name) = value_ref.path.first() else {
-                break;
-            };
-            if value_ref.path.len() != 1 || *next_name == current.name {
-                break;
-            }
+            let next_name = target.symbol.as_ref();
             // Membership via header PRESENCE — no body lowering of the
             // next symbol just to learn it exists; effective presence so a
             // `typeof $rune` hop in a rune module is seen too.
@@ -274,7 +276,7 @@ impl VerterHost {
                 break;
             }
 
-            current.name = next_name.clone();
+            current.name = next_name.to_string();
         }
 
         current
@@ -317,6 +319,7 @@ impl VerterHost {
             signatures: lowered.signatures.clone(),
             object_shape: lowered.object_shape.clone(),
             enum_members: lowered.enum_members.clone(),
+            enum_member_names: lowered.enum_member_names.clone(),
         })
     }
 
@@ -786,11 +789,17 @@ impl VerterHost {
         )
     }
 
+    /// The `defineExpose` binding-entry NAMES the macro expander emits
+    /// `FieldKind::Binding` closure invocations for: the requested binding
+    /// names that resolve to a prepared VALUE declaration carrying an
+    /// annotation fact (the same has-annotation gate the retired typed-entry
+    /// list applied — the closure resolves the binding's TYPE on demand
+    /// through the prepared surface, by name).
     fn component_meta_binding_type_entries(
         &self,
         canonical: &str,
         requested_binding_names: &rustc_hash::FxHashSet<String>,
-    ) -> Vec<(String, verter_type_expr::TypeExpr)> {
+    ) -> Vec<String> {
         if requested_binding_names.is_empty() {
             return Vec::new();
         }
@@ -799,10 +808,16 @@ impl VerterHost {
 
         requested_binding_names
             .iter()
-            .filter_map(|name| {
+            .filter(|name| {
                 self.prepared_value_decl(canonical, name)
-                    .and_then(|decl| decl.type_annotation.clone().map(|ty| (name.clone(), ty)))
+                    .is_some_and(|decl| {
+                        !matches!(
+                            decl.type_annotation.classification,
+                            verter_type_expr::facts::ValueAnnotationClass::Absent
+                        )
+                    })
             })
+            .cloned()
             .collect()
     }
 
@@ -888,26 +903,31 @@ impl VerterHost {
                         verter_semantic::analysis::type_eval_build::MacroExpansionScope::Fallthrough
                     }
                 },
-                |ctx, parsed| {
+                |ctx, payload| {
                     use crate::resolver_core::component_meta_query_engine::{
                         FastShallowFieldExpr, FastShallowFieldExprExactness,
                     };
                     use verter_semantic::analysis::type_expand::{
                         ExpandedNormalizedExpr, ExpansionResult,
                     };
+                    use verter_type_expr::facts::SemanticTypeSource;
+                    use verter_type_expr::locators::AuthoredBodyLocator;
 
+                    // The publication boundary writes the fast carrier's
+                    // content-free SOURCE; the session-side node decisions
+                    // already ran on its `hot` handle inside the producer.
                     fn fast_to_expansion(
                         fast: FastShallowFieldExpr,
                     ) -> ExpansionResult<ExpandedNormalizedExpr> {
                         match fast.exactness {
                             FastShallowFieldExprExactness::Symbolic => {
                                 ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
-                                    expr: fast.expr,
+                                    expr: fast.semantic_source,
                                 })
                             }
                             FastShallowFieldExprExactness::Concrete => {
                                 ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
-                                    expr: fast.expr,
+                                    expr: fast.semantic_source,
                                 })
                             }
                         }
@@ -926,14 +946,69 @@ impl VerterHost {
                     // pure reader of production work).
                     let mut produced_node_id: Option<crate::semantic_query::SemanticNodeId> = None;
 
-                    let expansion = if let Some(fast) =
-                        engine.try_fast_shallow_field_expr(canonical, parsed)
-                    {
-                        fast_to_expansion(fast)
-                    } else if engine.should_preserve_shallow_field_expr(canonical, parsed) {
-                        ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
-                            expr: parsed.clone(),
+                    // The field's content-free AUTHORED source: the macro
+                    // payload position when the analyzer stamped one, or —
+                    // for a top-level value binding (`FieldKind::Binding`,
+                    // no macro payload) — the value declaration's own
+                    // authored position. `None` only when neither exists;
+                    // the degraded publication is the honest Unknown leaf.
+                    let authored_field_source = || -> Option<SemanticTypeSource> {
+                        if let Some(payload) = payload {
+                            return Some(SemanticTypeSource::Authored(
+                                AuthoredBodyLocator::MacroPayload(payload.clone()),
+                            ));
+                        }
+                        if matches!(
+                            ctx.kind,
+                            verter_semantic::analysis::type_eval_build::FieldKind::Binding
+                        ) {
+                            use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
+                            if let [MacroPathSegment::Member(name)] = ctx.output_path.as_ref() {
+                                return Some(SemanticTypeSource::Authored(
+                                    AuthoredBodyLocator::DeclBody(
+                                        verter_type_expr::locators::TypeBodySlot {
+                                            anchor: verter_type_expr::locators::AuthoredAnchor {
+                                                canonical_id: std::sync::Arc::from(canonical),
+                                                symbol: std::sync::Arc::clone(name),
+                                                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                                            },
+                                            path: std::sync::Arc::from(
+                                                Vec::new().into_boxed_slice(),
+                                            ),
+                                        },
+                                    ),
+                                ));
+                            }
+                        }
+                        None
+                    };
+                    let unknown_source = || {
+                        SemanticTypeSource::Closed(verter_type_expr::facts::ClosedTypeFact::Leaf(
+                            verter_type_expr::facts::LeafTypeFact::Primitive(
+                                verter_type_expr::PrimitiveName::Unknown,
+                            ),
+                        ))
+                    };
+
+                    // Node-domain fast paths: resolve the field's value node
+                    // once (structural mirror member / authored member
+                    // position through the one dispatch) and classify it.
+                    let fast = payload
+                        .and_then(|payload| {
+                            engine
+                                .macro_field_value_node(
+                                    canonical,
+                                    ctx.macro_index,
+                                    ctx.output_path.as_ref(),
+                                )
+                                .map(|field_value| (payload, field_value))
                         })
+                        .and_then(|(payload, field_value)| {
+                            engine.try_fast_shallow_field_expr(canonical, payload, field_value)
+                        });
+
+                    let expansion = if let Some(fast) = fast {
+                        fast_to_expansion(fast)
                     } else {
                         // Dispatch-projection branch. Lower the macro's
                         // parent shell once via dispatch (using the
@@ -949,9 +1024,9 @@ impl VerterHost {
                         };
                         use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
 
-                        let preserve_parsed_symbolically = || {
+                        let preserve_authored_symbolically = || {
                             ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
-                                expr: parsed.clone(),
+                                expr: authored_field_source().unwrap_or_else(unknown_source),
                             })
                         };
 
@@ -961,62 +1036,46 @@ impl VerterHost {
                             .and_then(|m| m.parsed_type_argument.clone());
                         let macro_kind = snapshot.macros.get(ctx.macro_index).map(|m| m.kind);
 
-                        // Issue #3 — field-level fast path. When the
-                        // macro's parent shell is a named generic /
-                        // non-generic carrier and the field's parsed
-                        // expression does NOT reference any of the
-                        // parent's type parameters (modulo shadowing in
-                        // mapped types and function-type parameter
-                        // lists), the closure short-circuits to
-                        // `ExpansionResult::exact_concrete(parsed)`. The
-                        // parsed field expression is the answer; no
-                        // parent projection runs. Skipping the parent
-                        // lower means we do NOT dispatch
-                        // `Instantiate { base = <heritage>, .. }` for
-                        // any of the shell's `extends`-chain types,
-                        // which is the source of the cold-time blow-up
-                        // when the heritage points into a third-party
-                        // package (the `defineProps<ChatMessageProps>()
-                        // extends UIMessage from 'ai'` regression).
+                        // Field-level fast path. When the macro's parent
+                        // shell is a named generic / non-generic carrier and
+                        // the field's authored value does NOT reference any
+                        // of the parent's type parameters (decided in NODE
+                        // DOMAIN off the shared graph carriers), the closure
+                        // short-circuits to publishing the field's authored
+                        // SOURCE as exact-concrete. No parent projection
+                        // runs. Skipping the parent lower means we do NOT
+                        // dispatch `Instantiate { base = <heritage>, .. }`
+                        // for any of the shell's `extends`-chain types,
+                        // which is the source of the cold-time blow-up when
+                        // the heritage points into a third-party package
+                        // (the `defineProps<ChatMessageProps>() extends
+                        // UIMessage from 'ai'` regression).
                         //
-                        // The fast path is parse-local and does NOT
-                        // populate any host-cached entry — the parsed
-                        // field expression is canonical to the file's
-                        // most recent parse. The owner SFC's parse is
-                        // already cached by the scheduler; recomputing
-                        // this predicate per `getComponentMeta` call is
-                        // cheaper than an extra DB lookup. The
-                        // `defineModel<T>()` arm BELOW retains its
-                        // existing direct-lower path; the fast path
-                        // applies only when the slow `output_path`
-                        // projection branch would otherwise run.
+                        // The `defineModel<T>()` arm BELOW retains its
+                        // existing direct-lower path; the fast path applies
+                        // only when the slow `output_path` projection branch
+                        // would otherwise run.
                         //
                         // The early-exit assigns `expansion` rather than
                         // returning from the closure: the audit-gated
                         // push at the bottom of the closure must still
                         // run to keep per-FieldKind cardinality in
                         // sync with the macro emitter's field count.
-                        let fast_path_applied = if !ctx.output_path.is_empty()
+                        let fast_path_applied = !ctx.output_path.is_empty()
                             && !matches!(
                                 macro_kind,
                                 Some(verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
-                            ) {
-                            if let Some(macro_type_arg) = macro_type_arg.as_ref() {
-                                !engine.field_needs_parent_projection(
-                                    canonical,
-                                    parsed,
-                                    macro_type_arg.as_ref(),
-                                )
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
+                            )
+                            && macro_type_arg.is_some()
+                            && !engine.field_needs_parent_projection(
+                                canonical,
+                                ctx.macro_index,
+                                ctx.output_path.as_ref(),
+                            );
 
                         if fast_path_applied {
                             ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
-                                expr: parsed.clone(),
+                                expr: authored_field_source().unwrap_or_else(unknown_source),
                             })
                         } else {
                             // `defineModel<T>()` prop /
@@ -1028,13 +1087,7 @@ impl VerterHost {
                             // Dispatching `ProjectPath { base, [Member(model)],
                             // Expanded }` always misses because `T` is
                             // typically a `Primitive` / `Ref` / `Union` (no
-                            // member to navigate). The closure used to fall
-                            // through to symbolic preservation, but symbolic
-                            // preservation is gated on
-                            // `should_preserve_shallow_field_expr`, which is
-                            // false for primitive-leaf types — leaving the
-                            // dispatch arm to produce `Unknown { raw:
-                            // "semanticMiss" }`.
+                            // member to navigate).
                             //
                             // routes `DefineModel` prop / model
                             // fields through a direct lower+raise of
@@ -1056,10 +1109,22 @@ impl VerterHost {
                                     // closed demand (resolver ctx + owner
                                     // canonical + macro index) — never a raw node.
                                     use crate::host_manage::component_meta_methods::DefineModelOutputExpansion;
+                                    // The model's fallback SOURCE is its own T —
+                                    // the macro type-argument payload position.
+                                    let model_fallback = macro_type_arg
+                                        .as_ref()
+                                        .map(|locator| {
+                                            SemanticTypeSource::Authored(
+                                                AuthoredBodyLocator::MacroPayload(locator.clone()),
+                                            )
+                                        })
+                                        .or_else(authored_field_source)
+                                        .unwrap_or_else(unknown_source);
                                     match crate::host_manage::component_meta_methods::expand_define_model_output(
                                         engine.ctx(),
                                         canonical,
                                         ctx.macro_index,
+                                        &model_fallback,
                                     ) {
                                         DefineModelOutputExpansion::Materialized {
                                             produced_node_id: id,
@@ -1073,38 +1138,41 @@ impl VerterHost {
                                         DefineModelOutputExpansion::RaiseMiss {
                                             produced_node_id: id,
                                         } => {
-                                            // Lowering succeeded but raise failed —
-                                            // fall back to `parsed` (already the
-                                            // model's type). `produced_node_id` is
-                                            // still captured for audit parity.
+                                            // Lowering succeeded but the resolved
+                                            // root is unmaterialisable — fall back
+                                            // to the model's authored source (its
+                                            // own T). `produced_node_id` is still
+                                            // captured for audit parity.
                                             produced_node_id = Some(id);
                                             ExpansionResult::exact_concrete(
                                                 ExpandedNormalizedExpr {
-                                                    expr: parsed.clone(),
+                                                    expr: model_fallback.clone(),
                                                 },
                                             )
                                         }
                                         DefineModelOutputExpansion::CarrierMiss => {
-                                            // Lowering miss — fall back to `parsed`.
+                                            // Lowering miss — fall back to the
+                                            // model's authored source.
                                             ExpansionResult::exact_concrete(
                                                 ExpandedNormalizedExpr {
-                                                    expr: parsed.clone(),
+                                                    expr: model_fallback.clone(),
                                                 },
                                             )
                                         }
                                     }
                                 } else {
-                                    // No `parsed_type_argument` — fall back to
-                                    // `parsed` directly (the macro's
-                                    // `prop_fields[0].type_annotation` per
+                                    // No `parsed_type_argument` — publish the
+                                    // field's own authored source (the macro's
+                                    // `prop_fields[0]` payload per
                                     // `extract_define_model_type` IS the
                                     // macro's first type argument).
                                     ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
-                                        expr: parsed.clone(),
+                                        expr: authored_field_source()
+                                            .unwrap_or_else(unknown_source),
                                     })
                                 }
                             } else {
-                                match (ctx.output_path.is_empty(), macro_type_arg) {
+                                match (ctx.output_path.is_empty(), macro_type_arg.as_ref()) {
                                     (true, _) | (_, None) => {
                                         component_meta_trace_custom!(
                                     "macro_projection_failover",
@@ -1113,9 +1181,9 @@ impl VerterHost {
                                         ctx.macro_index, ctx.kind,
                                     ),
                                 );
-                                        preserve_parsed_symbolically()
+                                        preserve_authored_symbolically()
                                     }
-                                    (false, Some(macro_type_arg)) => {
+                                    (false, Some(_macro_type_arg)) => {
                                         // Issue #3 — selective carrier-mode demotion.
                                         // Path-precise contract (`/type-resolution`):
                                         // when the carrier is a named `Ref` (e.g.
@@ -1138,20 +1206,33 @@ impl VerterHost {
                                         // resolution to instantiate the body
                                         // correctly — keep `Expanded` for those.
                                         // This carrier-mode decision is a pure
-                                        // typed-IR predicate, computed here and
-                                        // passed to the sink as a closed scalar.
+                                        // node-domain predicate over the macro
+                                        // hot mirror's root carrier (parens are
+                                        // structurally transparent there),
+                                        // computed here and passed to the sink
+                                        // as a closed scalar.
                                         let carrier_lower_mode = {
-                                            use verter_type_expr::TypeExpr;
-                                            // Mirror the shallow_preserve helper's
-                                            // "is this a Ref carrier" check.
-                                            let stripped = {
-                                                let mut e = macro_type_arg.as_ref();
-                                                while let TypeExpr::Parenthesized(inner) = e {
-                                                    e = inner.as_ref();
-                                                }
-                                                e
-                                            };
-                                            if matches!(stripped, TypeExpr::Ref { .. }) {
+                                            let root_is_reference_carrier =
+                                                crate::structural_carrier_producer::macro_type_arg_hot_ref(
+                                                    engine.ctx(),
+                                                    canonical,
+                                                    ctx.macro_index,
+                                                )
+                                                .and_then(|handle| {
+                                                    crate::project_semantic_dispatch::node_data_for(
+                                                        engine.ctx(),
+                                                        handle.node(),
+                                                    )
+                                                })
+                                                .is_some_and(|data| {
+                                                    data.bare_ref_head().is_some()
+                                                        || matches!(
+                                                            data.as_ref(),
+                                                            crate::semantic_query::SemanticNodeData::DeclRef { .. }
+                                                                | crate::semantic_query::SemanticNodeData::InstantiationRef { .. }
+                                                        )
+                                                });
+                                            if root_is_reference_carrier {
                                                 ProjectionMode::Navigate
                                             } else {
                                                 ProjectionMode::Expanded
@@ -1200,6 +1281,9 @@ impl VerterHost {
                                                     // owner canonical + macro index +
                                                     // carrier mode + slot/binding
                                                     // names) — never a raw node.
+                                                    let field_fallback =
+                                                        authored_field_source()
+                                                            .unwrap_or_else(unknown_source);
                                                     match crate::host_manage::component_meta_methods::expand_slot_binding_output(
                                                         engine.ctx(),
                                                         canonical,
@@ -1207,6 +1291,7 @@ impl VerterHost {
                                                         carrier_lower_mode,
                                                         slot.as_ref(),
                                                         binding.as_ref(),
+                                                        &field_fallback,
                                                     ) {
                                                         MacroPathOutputExpansion::Materialized {
                                                             produced_node_id: id,
@@ -1228,7 +1313,7 @@ impl VerterHost {
                                                                     ctx.macro_index, ctx.kind,
                                                                 ),
                                                             );
-                                                            preserve_parsed_symbolically()
+                                                            preserve_authored_symbolically()
                                                         }
                                                         MacroPathOutputExpansion::ProjectionMiss => {
                                                             component_meta_trace_custom!(
@@ -1238,7 +1323,7 @@ impl VerterHost {
                                                                     ctx.macro_index, ctx.kind,
                                                                 ),
                                                             );
-                                                            preserve_parsed_symbolically()
+                                                            preserve_authored_symbolically()
                                                         }
                                                         MacroPathOutputExpansion::CarrierMiss => {
                                                             component_meta_trace_custom!(
@@ -1248,7 +1333,7 @@ impl VerterHost {
                                                                     ctx.macro_index, ctx.kind,
                                                                 ),
                                                             );
-                                                            preserve_parsed_symbolically()
+                                                            preserve_authored_symbolically()
                                                         }
                                                     }
                                                 }
@@ -1273,7 +1358,7 @@ impl VerterHost {
                                                             ctx.macro_index, ctx.kind,
                                                         ),
                                                     );
-                                                    preserve_parsed_symbolically()
+                                                    preserve_authored_symbolically()
                                                 }
                                             }
                                         } else {
@@ -1303,12 +1388,15 @@ impl VerterHost {
                                             // (resolver ctx + owner canonical + macro
                                             // index + carrier mode + the member path)
                                             // — never a raw node.
+                                            let field_fallback = authored_field_source()
+                                                .unwrap_or_else(unknown_source);
                                             match crate::host_manage::component_meta_methods::expand_generic_project_path_output(
                                                 engine.ctx(),
                                                 canonical,
                                                 ctx.macro_index,
                                                 carrier_lower_mode,
                                                 dispatch_path,
+                                                &field_fallback,
                                             ) {
                                                 MacroPathOutputExpansion::Materialized {
                                                     produced_node_id: id,
@@ -1328,7 +1416,7 @@ impl VerterHost {
                                                             ctx.macro_index, ctx.kind,
                                                         ),
                                                     );
-                                                    preserve_parsed_symbolically()
+                                                    preserve_authored_symbolically()
                                                 }
                                                 MacroPathOutputExpansion::ProjectionMiss => {
                                                     component_meta_trace_custom!(
@@ -1338,7 +1426,7 @@ impl VerterHost {
                                                             ctx.macro_index, ctx.kind,
                                                         ),
                                                     );
-                                                    preserve_parsed_symbolically()
+                                                    preserve_authored_symbolically()
                                                 }
                                                 MacroPathOutputExpansion::CarrierMiss => {
                                                     component_meta_trace_custom!(
@@ -1348,7 +1436,7 @@ impl VerterHost {
                                                             ctx.macro_index, ctx.kind,
                                                         ),
                                                     );
-                                                    preserve_parsed_symbolically()
+                                                    preserve_authored_symbolically()
                                                 }
                                             }
                                         }

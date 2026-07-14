@@ -29,9 +29,7 @@
 //! `crates/verter_session/src/component_meta_pick_omit_tests.rs`
 //! discriminate post-fix behaviour via this counter.
 
-use std::sync::Arc;
-
-use verter_type_expr::{ObjectExpr, ObjectMember, TypeExpr};
+use verter_type_expr::TypeExpr;
 
 /// Cap on the per-test counter-name interner used by
 /// [`leak_counter_name`]. The capture-token harness keys counters by
@@ -77,83 +75,6 @@ pub(crate) fn leak_counter_name(name: &str) -> &'static str {
 pub(crate) fn member_materialize_calls_counter(decl_name: &str) -> &'static str {
     let owned = format!("member_materialize_calls::{}", decl_name);
     leak_counter_name(&owned)
-}
-
-/// Selective `Pick<T, K>` expansion for a package-backed target.
-///
-/// When the target declaration's body is an Object surface, this
-/// helper materialises ONLY the members named in `key_set`. Each
-/// materialisation records `member_materialize_calls::<decl_name>`
-/// once on the active capture token.
-///
-/// Returns `Some(ObjectExpr { properties: ... })` containing only
-/// the picked members; `None` when the target body is not an Object
-/// surface (the caller falls back to the standard Pick path).
-///
-/// Workspace-owned targets MUST defer to the canonical reuse path
-///; this helper is only invoked when the caller
-/// has already established `target` is package-backed.
-pub(crate) fn selective_pick_expansion_for_package_backed(
-    target_body: &TypeExpr,
-    key_set: &[String],
-    // Used only to key the test/debug instrumentation counter below;
-    // leading underscore keeps it warning-free in release where the
-    // counter is gated out.
-    _decl_name: &str,
-) -> Option<TypeExpr> {
-    #[cfg(any(test, debug_assertions))]
-    let counter_name = member_materialize_calls_counter(_decl_name);
-    let body = peel_paren(target_body);
-    let TypeExpr::Object(object) = body else {
-        return None;
-    };
-    let mut picked_properties: Vec<ObjectMember> = Vec::with_capacity(key_set.len());
-    for member in &object.properties {
-        let name = match member {
-            ObjectMember::Property(p) => p.name.as_str(),
-            ObjectMember::Method(m) => m.name.as_str(),
-            _ => continue,
-        };
-        if key_set.iter().any(|k| k == name) {
-            // Record the member-materialize counter once per picked
-            // member. Selective expansion is O(|K|), proven by this
-            // counter's value matching the size of `key_set`. Gated to
-            // match the instrumentation module (absent in release).
-            #[cfg(any(test, debug_assertions))]
-            crate::capture_token::with_active_capture(|t| {
-                t.record_counter(counter_name, 1);
-            });
-            picked_properties.push(member.clone());
-        }
-    }
-    if picked_properties.is_empty() {
-        return None;
-    }
-    Some(TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: picked_properties,
-    })))
-}
-
-/// Symbolic `Omit<T, K>` preservation for a package-backed target.
-///
-/// Returns the input `Omit<target, key_set>` unchanged — the symbolic
-/// shape `Ref { name: "Omit", type_arguments: [target, key_set] }` is
-/// the result. No member of the target is enumerated, so the per-decl
-/// member-materialize counter MUST stay at 0 for this path.
-///
-/// Consumers that subsequently index into the symbolic Omit reduce
-/// through the existing indexed-access predicate (/ §6.3,
-/// owned by B-Bm).
-///
-/// `target` is the resolved declaration body; `target_ref` is the
-/// original `Ref { name: target_name, type_arguments: [] }` reference.
-/// `keys` is the original `Union(Literal(string), …)` shape passed as
-/// `Omit<T, K>`'s second type argument.
-pub(crate) fn symbolic_omit_for_package_backed(target_ref: TypeExpr, keys: TypeExpr) -> TypeExpr {
-    TypeExpr::Ref {
-        name: Arc::from("Omit"),
-        type_arguments: Arc::from(vec![target_ref, keys].into_boxed_slice()),
-    }
 }
 
 /// Predicate: is `body` a "non-object" (mapped/conditional/etc.)

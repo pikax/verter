@@ -22,7 +22,6 @@ mod fallthrough;
 pub mod fallthrough_override_key;
 mod fallthrough_request;
 pub mod fallthrough_resolver;
-pub mod hot_prepared;
 pub mod prepared_decl;
 pub mod resolver_runtime;
 pub mod route_demand;
@@ -33,12 +32,10 @@ pub(crate) mod surface_projector;
 mod surface_projector_tests;
 pub mod svelte_default_synth;
 pub mod symbol_resolver;
-pub mod type_expansion;
-pub mod type_expansion_host;
-pub mod type_expansion_verter;
 pub mod vue_default_synth;
 
 pub mod fact_read_set;
+mod fact_tracer_tls;
 pub mod fuses;
 pub(crate) mod host_resolver_context;
 pub mod imported_root_db;
@@ -58,7 +55,9 @@ pub(crate) use host_resolver_context::with_bare_host_ctx_for_test;
 pub(crate) use host_resolver_context::HostResolverContext;
 #[allow(unused_imports)]
 pub(crate) use request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
-pub(crate) use resolver_context::{MaterializeScopeObservation, ResolverContext};
+pub(crate) use resolver_context::{
+    MaterializeScopeObservation, RequestBoundResolverContext, ResolverContext,
+};
 pub(crate) use session_resolver_context::SessionResolverContext;
 
 pub use fuses::{FuseBudgets, FuseState, FuseTrip};
@@ -78,9 +77,9 @@ pub use component_meta::{
     ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
-// The surface-projection helpers (`projected_surface_from_semantic_node`,
-// `surface_view_to_projected_surface`, `projected_surface_to_type_expr`,
-// `projected_surface_to_expanded_shape`) are intentionally NOT re-exported from
+// The surface-projection helpers (`surface_view_from_semantic_node`,
+// `compound_root_surface_view_via_dispatch`,
+// `surface_view_to_registry_type_expr`) are intentionally NOT re-exported from
 // `resolver_core`: the raw `SemanticNodeId` / `&SurfaceView` → surface
 // projection stays confined to the query-engine subtree (in-subtree callers
 // reach them via `super::surface::`; out-of-subtree callers route through the
@@ -88,14 +87,18 @@ pub use component_meta_query_engine::ComponentMetaQueryEngine;
 // for the whole-surface candidate / the routed-surface methods).
 pub(crate) use component_meta_query_engine::{
     lower_and_project_to_expanded_node, project_class_a_published, project_class_a_terminal_node,
-    type_expr_contains_semantic_miss, AdmittedRouteProjectionNode,
+    AdmittedRouteProjectionNode,
 };
-// `type_expr_root_is_unmaterialized_sentinel` survives only as the `#[cfg(test)]`
-// parity oracle for the node-domain root-sentinel fact (production reads
+// `type_expr_contains_semantic_miss` and `type_expr_root_is_unmaterialized_sentinel`
+// survive only as the `#[cfg(test)]` parity oracles for the node-domain
+// whole-tree-miss / root-sentinel facts (production reads
+// `node_contains_semantic_miss_with_dispatch` /
 // `node_root_is_unmaterialized_sentinel_with_dispatch`); the raised-shape suite
-// imports it through this re-export.
+// imports them through these re-exports.
 #[cfg(test)]
-pub(crate) use component_meta_query_engine::type_expr_root_is_unmaterialized_sentinel;
+pub(crate) use component_meta_query_engine::{
+    type_expr_contains_semantic_miss, type_expr_root_is_unmaterialized_sentinel,
+};
 pub(crate) use component_meta_request::run_component_meta_request;
 pub use component_meta_request::ComponentMetaRequestHost;
 pub use declaration_metadata::{
@@ -126,7 +129,8 @@ pub use fallthrough::{
     merge_fallthrough_branches, push_partial_reason, resolve_fallthrough_surface,
     structural_substitute_typeof_refs, DynamicRootCandidate, FallthroughComputeHost,
     FallthroughPropOverride, FallthroughPropOverrideSet, FallthroughResolutionView,
-    FallthroughResolverHost, KnownSpreadKeys, ResolvedConsumedBindings, ResolvedFallthroughSurface,
+    FallthroughResolverHost, IntrinsicMemberTypeSource, IntrinsicSurfaceMember, KnownSpreadKeys,
+    ResolvedConsumedBindings, ResolvedFallthroughSurface,
 };
 pub use fallthrough_override_key::FallthroughOverrideIdentity;
 pub(crate) use fallthrough_request::run_fallthrough_request;
@@ -149,7 +153,7 @@ pub use shallow_file_state::{
     ShallowFileState, ShallowImportResolver, ShallowTypeSymbol, ShallowTypeView,
     ShallowValueSymbol, WildcardReexport,
 };
-pub use surface_projector::{project_macro_surfaces, ProjectedMacroSurfaces, ResolvedNativeProp};
+pub use surface_projector::{ResolvedMacroElements, ResolvedNativeProp};
 
 /// Lane-identity token for singleflight / stability-request
 /// deduplication.
@@ -3276,7 +3280,6 @@ mod tests {
     /// modelled through the real [`run_stable_request`] entry point. Every
     /// caller snapshots a view whose `compat_token` carries
     /// `session: Some(id)` — exactly what
-    /// `SessionRequestHost::snapshot_store_view` ->
     /// `HostStoreView::from_session_id` produces. The cache + cold-compute
     /// counter are shared across the request so a correct dedup collapses
     /// to ONE cold compute.

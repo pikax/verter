@@ -15,7 +15,7 @@ use crate::VerterHost;
 
 use super::{
     component_meta_trace_custom, is_raw_import_specifier_id, read_analysis_source_result_detail,
-    ExternalTypeResolutionInputs, HostNamedTypeCacheAdapter,
+    ExternalTypeResolutionInputs,
 };
 
 impl VerterHost {
@@ -430,74 +430,6 @@ impl VerterHost {
         parsed.map(Rc::new)
     }
 
-    /// Builds a fresh `ParsedTypeResolutionContext` per call.
-    ///
-    /// This per-call parse sits on the query-time OXC element-resolver
-    /// path (tracked-debt on the single-engine shrinking ledger — the
-    /// shared typed-IR dispatch is the sole sanctioned query-time
-    /// resolver); the parse routes through [`Self::parse_eval_program`]
-    /// so the parse-entry pin (`no_direct_oxc_parser_calls_outside_scheduler_path`)
-    /// keeps covering it.
-    pub(super) fn build_type_resolution_context(
-        &self,
-        canonical_id: &str,
-        whole_hash: Hash16,
-        eval_source: &Arc<str>,
-        source_type: oxc_span::SourceType,
-    ) -> Option<Rc<crate::ParsedTypeResolutionContext>> {
-        let program =
-            self.parse_eval_program(canonical_id, whole_hash, eval_source, source_type)?;
-
-        let graph = std::sync::Arc::clone(self.project_type_store.semantic_graph());
-        // Snapshot the resolved-named-type reset epoch at adapter
-        // construction. Every `insert` this adapter performs is fenced
-        // against this snapshot: if a `bump_project_generation_and_evict`
-        // moves the epoch while this build is in flight, the build's
-        // straggler inserts are rejected — see
-        // `SemanticGraphStore::insert_resolved_named_type`.
-        let named_type_generation = graph.named_type_generation();
-        // Env-scope the resolved named-type identity (R T L J) from the
-        // defining canonical's per-project env view — two resolutions of
-        // the same content under different envs must not collide.
-        let env = self.host_view_env_hashes_for(canonical_id);
-        let project_identity = self.host_view_project_identity_for(canonical_id).fold_u32();
-        let adapter: std::sync::Arc<
-            dyn verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache + Send + Sync,
-        > = std::sync::Arc::new(HostNamedTypeCacheAdapter {
-            graph,
-            canonical_id: Arc::<str>::from(canonical_id),
-            whole_hash,
-            resolve_env_hash: env.resolve_env_hash,
-            type_env_hash: env.type_env_hash,
-            lib_env_hash: env.lib_env_hash,
-            project_identity,
-            named_type_generation,
-        });
-        let type_context = Rc::new(crate::ParsedTypeResolutionContext::new(
-            program,
-            |parsed_program| {
-                let program = parsed_program.borrow_dependent();
-                let mut ctx = verter_compiler::utils::oxc::script::type_surface::build_type_context(
-                    program,
-                    parsed_program.source_bytes(),
-                    0,
-                );
-                ctx.set_trace_label(canonical_id.to_string());
-                ctx.set_named_type_cache(Some(adapter));
-                ctx
-            },
-        ));
-        component_meta_trace_custom!(
-            "build_type_resolution_context",
-            format!(
-                "owner={} bytes={} whole_hash={whole_hash:?}",
-                canonical_id,
-                eval_source.len(),
-            ),
-        );
-        Some(type_context)
-    }
-
     pub(super) fn external_type_resolution_inputs(
         &self,
         canonical_id: &str,
@@ -615,24 +547,5 @@ impl VerterHost {
             analysis_cache_hit: true,
         };
         Some(inputs)
-    }
-
-    /// Epoch-bump hook: clears the host-owned resolved-named-type
-    /// identities on the shared `SemanticGraphStore` (the only
-    /// epoch-scoped cache this hook owns — parse results live on
-    /// `IndexedReady` / the scheduler, never in thread-locals or a
-    /// separate eval-env cache).
-    pub(crate) fn clear_resolved_named_type_cache(&self) {
-        // Clear host-owned named-type cache on epoch bump. Entries live
-        // on the shared `SemanticGraphStore` under
-        // `HostResolvedNamedTypeKey` identities, scoped by
-        // `(canonical_id, whole_hash)`. Whole_hash reflects one
-        // workspace content generation, so a bumped epoch means at
-        // least one canonical's facts changed; we prefer to drop stale
-        // entries over validating each one lazily (which would require
-        // a per-canonical invalidation pass).
-        self.project_type_store
-            .semantic_graph()
-            .clear_resolved_named_types();
     }
 }

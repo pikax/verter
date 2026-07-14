@@ -32,12 +32,13 @@ use crate::resolver_core::ResolvedTypeDeclaration;
 ///
 /// A props member is `properties + index signatures` per the props-surface
 /// rule, so the resolved props surface carries both the named
-/// [`AnalyzedPropField`] vector and the surface's [`ExpandedIndexSignature`]
-/// rows (`defineProps<{ [k: string]: string }>()`).
+/// [`ResolvedPropField`] rows (each pairing its [`AnalyzedPropField`] analysis
+/// with the session-resolved member-value SOURCE) and the surface's
+/// [`ExpandedIndexSignature`] rows (`defineProps<{ [k: string]: string }>()`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PropsSurface {
-    /// Named prop fields.
-    pub fields: Vec<AnalyzedPropField>,
+    /// Named prop rows, each paired with its session-resolved value source.
+    pub fields: Vec<ResolvedPropField>,
     /// Index signatures on the props type-argument surface.
     pub index_signatures: Vec<ExpandedIndexSignature>,
     /// Prop DEFAULT values — a framework-neutral SIDECAR populated only by an
@@ -120,25 +121,105 @@ pub enum OriginHop {
 /// index signature (`defineEmits<{ [event: string]: [v: number] }>()`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EmitsSurface {
-    /// Named emit fields.
-    pub fields: Vec<AnalyzedEmitField>,
+    /// Named emit fields, each paired with its session-resolved payload
+    /// source.
+    pub fields: Vec<ResolvedEmitField>,
     /// Index signatures on the emits type-argument surface.
     pub index_signatures: Vec<ExpandedIndexSignature>,
+}
+
+/// One session-resolved emit row: the emit analysis field plus the payload's
+/// published SOURCE POSITION.
+///
+/// `payload_source` carries the content-free source a consumer re-raises
+/// through the one shared dispatch — and it is the emit payload AUTHORITY
+/// (`define_emits_shape` publishes it directly; the flat evaluated fields
+/// contribute metadata only). A LOCAL authored property event carries its
+/// exact authored macro-payload position (`Authored(MacroPayload(..))`, the
+/// analyzer-stamped locator); an INHERITED / substituted property event
+/// carries the graph-native closed/use-site source projected from its value
+/// node (a complete closed leaf / leaf-union / tuple fact, the projected
+/// member-path route, or the arg-preserving authored use-site body slot);
+/// a realized call-signature event carries the closed payload tuple built
+/// from the post-event-name parameters in the node domain — label /
+/// optionality / rest / order preserved, with leaf and leaf-union element
+/// facts (`Closed(Tuple(..))`) — when every parameter is closed-expressible,
+/// and the projected CALLABLE-PARAMS replay route
+/// ([`ProjectedTypeFact::CallableParams`](verter_type_expr::facts::ProjectedTypeFact))
+/// when any parameter is richer (a named reference / composite / nested
+/// object / array / callback / instantiated generic — the demand side
+/// replays the signature's raw parameters through the one shared dispatch).
+/// A realized emit's payload position is REQUIRED: with no stamped macro
+/// type-argument base to replay off the row carries the typed
+/// `Failed(UnrepresentableRequiredPayload)` position — output
+/// materialization fails it instead of rendering a fabricated `unknown`
+/// success.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedEmitField {
+    /// The emit analysis row (name, display payload, JSDoc, authored payload
+    /// locator).
+    pub analysis: AnalyzedEmitField,
+    /// The payload's published source position.
+    pub payload_source: verter_type_expr::facts::SourcePosition,
+}
+
+/// One session-resolved prop row: the prop analysis field plus the member
+/// VALUE's published SOURCE POSITION — the prop-type AUTHORITY
+/// (`define_props_shape` publishes it directly; the flat evaluated fields
+/// contribute metadata only). A PROVEN local authored member carries its
+/// exact authored macro-payload position (`Authored(MacroPayload(..))`, the
+/// analyzer-stamped locator — proven by the shared raised-shape equality);
+/// a member value that decides a complete closed leaf / leaf-union / tuple
+/// carries the closed fact; a resolvable reference carries its shallow
+/// symbol-reference carrier; every remaining KNOWN structural value carries
+/// the projected MEMBER-PATH replay route off the macro's stamped
+/// type-argument base
+/// ([`ProjectedTypeFact::MemberPath`](verter_type_expr::facts::ProjectedTypeFact)
+/// — replayed through the one shared dispatch on demand). A type-based
+/// macro member's value-type position is REQUIRED: a genuine miss carries
+/// the typed `Failed(UnrepresentableRequiredMemberValue)` position — output
+/// materialization fails it instead of rendering a fabricated `unknown`
+/// success. A `defineModel` synthesized prop row carries its authored
+/// type-argument position, or the PROVEN unannotated absence for an untyped
+/// `defineModel()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedPropField {
+    /// The prop analysis row (name, optionality, display annotation, JSDoc,
+    /// authored payload locator).
+    pub analysis: AnalyzedPropField,
+    /// The member value's published source position.
+    pub type_source: verter_type_expr::facts::SourcePosition,
+}
+
+/// One session-resolved expose row: the expose analysis field plus the
+/// member VALUE's published SOURCE POSITION — the exposed-type AUTHORITY
+/// for `defineExpose<T>()` type-argument surface members (the extraction
+/// layer publishes it directly; the flat evaluated lane contributes
+/// metadata only). Same source vocabulary as [`ResolvedPropField`]; expose
+/// analyzer fields never stamp an authored payload, so the sources are the
+/// closed/ref upgrades, the projected member-path replay route, or the
+/// typed failure for a genuine miss.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedExposeField {
+    /// The expose analysis row (name, JSDoc).
+    pub analysis: AnalyzedExposeField,
+    /// The member value's published source position.
+    pub type_source: verter_type_expr::facts::SourcePosition,
 }
 
 /// The resolved `defineOptions<T>()` object surface.
 ///
 /// The pass-through object surface the options projection produces — the named
-/// members of the options type argument, each carrying its resolved
-/// [`TypeExpr`].
-#[derive(Debug, Clone, Default, PartialEq)]
+/// members of the options type argument, each carrying its sealed shallow
+/// [`NamedTypeMemberOutput`] value.
+#[derive(Debug, Clone, Default, PartialEq, verter_no_typeexpr::NoTypeExpr)]
 pub struct OptionsSurface {
     /// Named members of the options object surface.
     pub members: Vec<NamedTypeMember>,
 }
 
 /// The resolved `defineExpose<T>()` object surface.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, verter_no_typeexpr::NoTypeExpr)]
 pub struct ExposeSurface {
     /// Named members of the expose object surface.
     pub members: Vec<NamedTypeMember>,
@@ -164,15 +245,72 @@ pub struct ModelBinding {
     pub prop: AnalyzedPropField,
 }
 
+/// The sealed shallow OUTPUT value of a named object-surface member — the
+/// CLOSED vocabulary the zero-dispatch wire encoder publishes for an
+/// options / expose member value. One arm per shallow-encodable shape:
+/// a primitive / literal leaf, a bare named reference (type arguments are
+/// NOT carried — expanding them would be an eager second walk), the empty
+/// object surface, and the [`Self::Opaque`] degradation for every value
+/// outside the shallow vocabulary (never a fabricated ref, never a raw
+/// `TypeExpr`). `NoTypeExpr` by derive; there is no public unwrap back to
+/// a `TypeExpr`.
+#[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
+pub enum NamedTypeMemberOutput {
+    /// A primitive leaf (`string` / `number` / …).
+    Primitive(verter_type_expr::PrimitiveName),
+    /// A literal leaf (`"solid"` / `42` / `true` / `1n`).
+    Literal(verter_type_expr::LiteralValue),
+    /// A bare named reference — the shallow-by-default escape (the consumer
+    /// re-resolves the name on demand).
+    Ref {
+        /// The referenced type name.
+        name: Arc<str>,
+    },
+    /// The empty object surface (`{}`) — the one structural shape the shallow
+    /// vocabulary encodes directly.
+    EmptyObject,
+    /// A resolved value outside the shallow output vocabulary — degraded at
+    /// CONSTRUCTION time (the producer classifies and discards its transient
+    /// raised form), encoded as a structurally-unencodable opaque on the wire.
+    Opaque,
+}
+
+impl NamedTypeMemberOutput {
+    /// Classify a producer-transient raised [`TypeExpr`] into the closed
+    /// shallow output vocabulary. The `TypeExpr` is read ONCE at the
+    /// publication boundary and discarded — it never enters the DTO.
+    ///
+    /// Mirrors the zero-dispatch wire encoder's shallow member-value rules
+    /// exactly (wire parity): primitive / literal leaves map to their arms, a
+    /// named `Ref` keeps ONLY its name (arguments are not expanded), an EMPTY
+    /// object literal maps to [`Self::EmptyObject`], and every other shape
+    /// degrades to [`Self::Opaque`].
+    pub(crate) fn classify_shallow(raised: &TypeExpr) -> Self {
+        match raised {
+            TypeExpr::Primitive(name) => Self::Primitive(*name),
+            TypeExpr::Literal(lit) => Self::Literal(lit.clone()),
+            TypeExpr::Ref { name, .. } => Self::Ref {
+                name: Arc::clone(name),
+            },
+            TypeExpr::Object(obj) if obj.properties.is_empty() => Self::EmptyObject,
+            _ => Self::Opaque,
+        }
+    }
+}
+
 /// A named member of a resolved object surface (options / expose).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
 pub struct NamedTypeMember {
     /// The member name.
     pub name: String,
     /// Whether the member is optional.
     pub is_optional: bool,
-    /// The member's resolved type, when one is available.
-    pub type_expr: Option<TypeExpr>,
+    /// The member's sealed shallow output value: `None` when no resolved type
+    /// was available at all; `Some(NamedTypeMemberOutput::Opaque)` when a
+    /// resolved value exists but lies outside the shallow output vocabulary.
+    /// The two states stay distinct on the wire (different opaque
+    /// diagnostics).
+    pub value: Option<NamedTypeMemberOutput>,
 }
 
 /// The framework-neutral macro-payload result covering all six surfaces.
@@ -193,12 +331,13 @@ pub struct MacroSurfaceDtos {
     /// The resolved expose object surface (the framework-neutral
     /// [`NamedTypeMember`] pass-through, consumed by the wire `graph_export`).
     pub expose: Option<ExposeSurface>,
-    /// The resolved expose fields in the component-meta `AnalyzedExposeField`
-    /// shape — the per-member normalize that carries the `type_expr_scope` +
-    /// JSDoc the [`ExposeSurface`] pass-through drops. Empty when no
-    /// `defineExpose` surface was resolved. The component-meta extract layer
-    /// reads these (the SFC object-literal fields union with them downstream).
-    pub exposed_fields: Vec<AnalyzedExposeField>,
+    /// The resolved expose rows in the component-meta shape — the per-member
+    /// normalize that carries the JSDoc the [`ExposeSurface`] pass-through
+    /// drops, each paired with its session-resolved member-value SOURCE.
+    /// Empty when no `defineExpose` surface was resolved. The component-meta
+    /// extract layer reads these (the SFC object-literal fields union with
+    /// them downstream).
+    pub exposed_fields: Vec<ResolvedExposeField>,
     /// The resolved model binding(s).
     pub model: Option<ModelSurface>,
 }
@@ -214,7 +353,7 @@ impl MacroSurfaceDtos {
     /// vectors so a consumer reads `prop_fields()` / `prop_index_signatures()`
     /// without unwrapping the surface.
     #[must_use]
-    pub fn prop_fields(&self) -> &[AnalyzedPropField] {
+    pub fn prop_fields(&self) -> &[ResolvedPropField] {
         self.props
             .as_ref()
             .map_or(&[], |surface| surface.fields.as_slice())
@@ -229,10 +368,10 @@ impl MacroSurfaceDtos {
             .map_or(&[], |surface| surface.index_signatures.as_slice())
     }
 
-    /// The resolved emit fields, or an empty slice when no emits surface was
-    /// resolved.
+    /// The resolved emit rows (analysis field + payload source), or an empty
+    /// slice when no emits surface was resolved.
     #[must_use]
-    pub fn emit_fields(&self) -> &[AnalyzedEmitField] {
+    pub fn emit_fields(&self) -> &[ResolvedEmitField] {
         self.emits
             .as_ref()
             .map_or(&[], |surface| surface.fields.as_slice())
@@ -259,7 +398,7 @@ impl MacroSurfaceDtos {
     /// Mirrors [`Self::prop_fields`] / [`Self::emit_fields`] / [`Self::slot_fields`]
     /// for the expose surface.
     #[must_use]
-    pub fn expose_fields(&self) -> &[AnalyzedExposeField] {
+    pub fn expose_fields(&self) -> &[ResolvedExposeField] {
         self.exposed_fields.as_slice()
     }
 
@@ -301,7 +440,7 @@ impl crate::framework::surface_store::FrameworkSurfaceDtoBundle for MacroSurface
 /// admitted into the host's `vue_surface_store` — a partial surface in the
 /// store would launder a warm complete replay on the next request (the
 /// no-poison invariant). Consumers fold `completeness` via
-/// [`crate::request_context::mark_request_materialization_cache_suppress`]
+/// [`crate::request_context::mark_request_result_partial`]
 /// (see [`Self::observe_partial`]) so the enclosing component-meta result's
 /// warm promotion is refused too.
 #[derive(Debug, Clone)]
@@ -326,7 +465,7 @@ impl MacroDtosRead {
     /// no-op when the surface is `Complete`.
     pub fn observe_partial(&self) {
         if self.completeness.is_partial() {
-            crate::request_context::mark_request_materialization_cache_suppress();
+            crate::request_context::mark_request_result_partial();
         }
     }
 }

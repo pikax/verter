@@ -94,7 +94,7 @@ fn alias_decl_body_lowers_to_a_declref_carrier_not_a_resolved_object() {
 
     for mode in [ProjectionMode::Navigate, ProjectionMode::Shallow] {
         let node = host
-            .resolve_named_symbol("/p.ts", "A", &[], Some(mode))
+            .resolve_named_symbol("/p.ts", "A", Some(mode))
             .unwrap_or_else(|| panic!("A must resolve in {mode:?}"));
         let data = node_data(&host, node);
         match data.as_ref() {
@@ -126,7 +126,7 @@ fn alias_decl_body_lowers_to_a_declref_carrier_not_a_resolved_object() {
     // genuinely resolvable, so the shallow/navigate carrier above is a
     // deliberate stop, not a resolution miss.
     let expanded = host
-        .resolve_named_symbol("/p.ts", "A", &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol("/p.ts", "A", Some(ProjectionMode::Expanded))
         .expect("A must resolve Expanded");
     assert!(
         matches!(
@@ -159,41 +159,34 @@ fn imported_alias_decl_body_lowers_to_an_import_carrier_reference() {
     upsert_ts(&host, "/m.ts", "export type G = { g: number };\n");
     upsert_ts(&host, "/p.ts", "export type A = import('./m').G;\n");
 
-    // The DeclBodyMemo stores the import-type carrier verbatim (syntactic
-    // lowering, never an eager resolution) — pin that producer-stored shape
-    // with a TYPED match on the `ImportType` carrier (specifier / qualifier /
-    // typeof_query / type_arguments), not a Debug-substring.
+    // The retained decl inventory stores the CONTENT-FREE whole-body slot
+    // (a locator at A's own anchor — never an eagerly resolved body): pin
+    // that producer-stored shape with a TYPED match on the single-body
+    // slot, not a Debug-substring. The `import("./m").G` carrier semantics
+    // are pinned below through the dispatch resolution (the DeclRef
+    // reference to G in its defining file).
     let state = host.routed_shallow_state("/p.ts").expect("shallow state");
     let lowered = state.type_decl("A").expect("A decl body lowers");
     match &lowered.body {
-        TypeDeclBody::Single(verter_type_expr::TypeExpr::ImportType {
-            specifier,
-            qualifier,
-            typeof_query,
-            type_arguments,
-        }) => {
+        TypeDeclBody::Single(slot) => {
             assert_eq!(
-                specifier.as_ref(),
-                "./m",
-                "the import-type carrier must name the `./m` specifier"
+                slot.anchor.canonical_id.as_ref(),
+                "/p.ts",
+                "the stored whole-body slot must anchor A's own defining file"
             );
             assert_eq!(
-                qualifier.iter().map(|q| q.as_ref()).collect::<Vec<_>>(),
-                vec!["G"],
-                "the import-type carrier qualifier must be the dotted `[\"G\"]` path"
+                slot.anchor.symbol.as_ref(),
+                "A",
+                "the stored whole-body slot must anchor the `A` declaration"
             );
             assert!(
-                !*typeof_query,
-                "`import(\"./m\").G` in type position is NOT a `typeof` query"
-            );
-            assert!(
-                type_arguments.is_empty(),
-                "no type arguments at the `import(\"./m\").G` site"
+                slot.path.is_empty(),
+                "the stored slot must be the WHOLE-body position (empty path)"
             );
         }
         other => panic!(
-            "the producer must store the `import(\"./m\").G` body as a \
-             `TypeDeclBody::Single(TypeExpr::ImportType {{ .. }})` carrier, got {other:?}"
+            "the producer must store the `import(\"./m\").G` body as a single \
+             content-free whole-body slot, got {other:?}"
         ),
     }
 
@@ -203,7 +196,7 @@ fn imported_alias_decl_body_lowers_to_an_import_carrier_reference() {
     // alias must too, so a broken Shallow cannot hide behind a Navigate pass.)
     for mode in [ProjectionMode::Navigate, ProjectionMode::Shallow] {
         let node = host
-            .resolve_named_symbol("/p.ts", "A", &[], Some(mode))
+            .resolve_named_symbol("/p.ts", "A", Some(mode))
             .unwrap_or_else(|| panic!("A must resolve in {mode:?}"));
         match node_data(&host, node).as_ref() {
             SemanticNodeData::DeclRef { identity } => {
@@ -247,7 +240,7 @@ fn merged_interface_decl_lowers_to_the_distinct_merged_carrier_not_intersection(
 
     for mode in [ProjectionMode::Navigate, ProjectionMode::Expanded] {
         let node = host
-            .resolve_named_symbol("/m.ts", "I", &[], Some(mode))
+            .resolve_named_symbol("/m.ts", "I", Some(mode))
             .unwrap_or_else(|| panic!("I must resolve in {mode:?}"));
         match node_data(&host, node).as_ref() {
             SemanticNodeData::MergedDecl { contributors } => {
@@ -383,7 +376,7 @@ fn barrel_imported_alias_materializes_at_the_final_defining_canonical() {
     );
 
     let node = host
-        .resolve_named_symbol("/use.ts", "A", &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol("/use.ts", "A", Some(ProjectionMode::Expanded))
         .expect("A must resolve Expanded through the barrel");
     let SemanticNodeData::Object(surface) = node_data(&host, node).as_ref().clone() else {
         panic!("A must materialise to Node's Object body through the barrel");
@@ -421,7 +414,7 @@ fn namespace_sibling_type_reference_resolves_through_dispatch() {
     );
 
     let node = host
-        .resolve_named_symbol("/nst.ts", "M.Outer", &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol("/nst.ts", "M.Outer", Some(ProjectionMode::Expanded))
         .expect("M.Outer must resolve the namespace sibling Inner");
     let projected = host
         .project_node_to_type_expr_for_test(node)
@@ -542,9 +535,19 @@ fn svelte_rune_ambient_is_visible_per_file_and_user_declarations_win() {
     let user_derived = user_host
         .dependency_value_symbol_graph_native("/u.svelte.ts", "$derived")
         .expect("user `$derived` must be visible through the graph-native reader");
-    let annotation = user_derived.type_annotation.as_ref();
+    let annotation_source = user_derived
+        .type_annotation
+        .annotation
+        .as_ref()
+        .expect("the user `$derived` must carry its authored annotation source");
+    let annotation = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &user_host,
+        "/u.svelte.ts",
+        annotation_source,
+    )
+    .unwrap_or_else(|| panic!("the user annotation source must shell-materialize"));
     assert!(
-        matches!(annotation, Some(verter_type_expr::TypeExpr::Object(shape))
+        matches!(&annotation, verter_type_expr::TypeExpr::Object(shape)
         if shape.properties.iter().any(|member| matches!(
             member,
             verter_type_expr::ObjectMember::Property(prop) if prop.name == "mine"
@@ -602,7 +605,7 @@ fn script_setup_generic_resolves_as_type_parameter_in_an_ordinary_decl_body() {
 
     for mode in [ProjectionMode::Navigate, ProjectionMode::Expanded] {
         let node = host
-            .resolve_named_symbol("/G.vue", "A", &[], Some(mode))
+            .resolve_named_symbol("/G.vue", "A", Some(mode))
             .unwrap_or_else(|| panic!("A must resolve in {mode:?}"));
         let projected = host
             .project_node_to_type_expr_for_test(node)

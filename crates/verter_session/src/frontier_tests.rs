@@ -51,31 +51,30 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
+/// Resolve one imported macro-type dep through the REAL compile-facing
+/// collector path (`collect_external_macro_types` → frontier routing +
+/// dependency tracking → the shared-dispatch element projection) and return
+/// the per-name [`ResolvedElements`] the compile parser folds.
+///
+/// This is the production per-macro-type-dep rail — the frontier walk records
+/// routes and dependency facts, and the element payload projects through the
+/// ONE shared type-resolution engine.
 fn resolve_type(
     host: &VerterHost,
     owner: &str,
     import_source: &str,
     type_name: &str,
-) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
-    let mut tracked = BTreeSet::new();
-    let mut resolution = BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = FxHashSet::default();
-    host.resolve_external_type_from_loaded_files(
-        owner,
-        import_source,
-        type_name,
-        &mut tracked,
-        &mut resolution,
-        &mut cache,
-        &mut visiting,
-        true,
-        verter_workspace::ResolveRequestKind::TypeImport,
-        true,
-        None,
-        0,
-    )
-    .expect("resolution should not error")
+) -> Option<verter_parser::utils::oxc::script::type_surface::ResolvedElements> {
+    let dep = verter_semantic::analysis::MacroTypeDep {
+        type_name: type_name.to_string(),
+        import_source: import_source.to_string(),
+        macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps,
+        macro_index: 0,
+        macro_span: verter_span::Span::default(),
+    };
+    let (resolved, _diagnostics, _tracked) =
+        host.collect_external_types_from_loaded_files_for_test(owner, &[dep], &[], None);
+    resolved.and_then(|mut map| map.remove(type_name))
 }
 
 /// CountingWorkspace â€" thin wrapper over MemoryWorkspace that counts reads.
@@ -562,6 +561,96 @@ defineProps<Props>()
         ws.read_count("/workspace/src/a-deep.ts"),
         0,
         "a deeper earlier branch must not be loaded before the same-layer sibling match is chosen",
+    );
+}
+
+/// CHARACTERIZATION of the LAYER-ORDERED named-export walk
+/// (`resolve_named_type_export_route_uncached`): a name reachable BOTH via a
+/// SHALLOW same-layer wildcard sibling AND via a DEEPER branch behind an
+/// EARLIER-DECLARED sibling resolves to the SAME-LAYER declaration, and the
+/// deeper branch's file is never loaded. Driven at the route level
+/// (`build_named_type_export_route_entry`) so the winning CANONICAL is pinned,
+/// not just resolvability.
+///
+/// Discriminating against the prior declared-order DFS: a depth-first walk
+/// descends the earlier-declared `./deep-first` wildcard fully before probing
+/// its same-layer sibling, so it (a) resolves `Target` to
+/// `/workspace/src/deep-leaf.ts` — failing the canonical assertion — and
+/// (b) reads `deep-leaf.ts` — failing the zero-read assertion.
+#[test]
+fn named_export_route_layer_order_shallow_sibling_wins_over_earlier_deep_branch() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/entry.ts",
+        "export * from './deep-first'\nexport * from './same-layer'\n",
+    );
+    ws.inject_file(
+        "/workspace/src/deep-first.ts",
+        "export * from './deep-leaf'\n",
+    );
+    ws.inject_file(
+        "/workspace/src/deep-leaf.ts",
+        "export interface Target { viaDeep: true }\n",
+    );
+    ws.inject_file(
+        "/workspace/src/same-layer.ts",
+        "export interface Target { viaShallow: true }\n",
+    );
+
+    let host = make_host_with_workspace(ws.clone());
+    set_deps(
+        &host,
+        "/workspace/src/entry.ts",
+        vec![
+            ("./deep-first", "/workspace/src/deep-first.ts"),
+            ("./same-layer", "/workspace/src/same-layer.ts"),
+        ],
+    );
+    set_dep(
+        &host,
+        "/workspace/src/deep-first.ts",
+        "./deep-leaf",
+        "/workspace/src/deep-leaf.ts",
+    );
+
+    ws.reset_reads();
+    let (route, _facts) = host
+        .build_named_type_export_route_entry("/workspace/src/entry.ts", "Target")
+        .expect("the layered walk must produce a route entry");
+
+    // The SHALLOW same-layer re-export WINS: the resolved canonical is the
+    // same-layer sibling's declaration, never the deeper declaration behind
+    // the earlier-declared sibling.
+    match &route {
+        crate::resolver_core::RouteResult::Resolved {
+            defining_canonical,
+            defining_symbol,
+        } => {
+            assert_eq!(
+                defining_canonical.as_str(),
+                "/workspace/src/same-layer.ts",
+                "the nearest same-layer re-export must win over the deeper \
+                 earlier-declared branch",
+            );
+            assert_eq!(defining_symbol.as_str(), "Target");
+        }
+        other => panic!("Target must resolve through the barrel; got {other:?}"),
+    }
+
+    // The deeper branch behind the EARLIER-declared sibling is never loaded:
+    // the same-layer direct-export probe decides the route before ANY
+    // node's wildcard children are descended.
+    assert_eq!(
+        ws.read_count("/workspace/src/deep-leaf.ts"),
+        0,
+        "the deeper branch must not be loaded when a same-layer sibling \
+         exports the name",
+    );
+    // Positive witness: the winning same-layer sibling WAS read — the zero
+    // above is a chosen shallow match, not a stalled walk.
+    assert!(
+        ws.read_count("/workspace/src/same-layer.ts") > 0,
+        "the same-layer sibling must have been probed for its direct export",
     );
 }
 
@@ -1079,31 +1168,14 @@ defineProps<Props>()
     let live_result = resolve_type(&host, "/src/Consumer.vue", "./barrel", "Props");
     assert!(live_result.is_some(), "live path should resolve Props");
 
-    // Resolve via the store-view/graph path
-    let _view = host.resolver_store_view_read().into_owned_view();
-    let mut tracked = BTreeSet::new();
-    let mut resolution = BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = FxHashSet::default();
-    let graph_result = host
-        .resolve_external_type_from_loaded_files(
-            "/src/Consumer.vue",
-            "./barrel",
-            "Props",
-            &mut tracked,
-            &mut resolution,
-            &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
-        )
-        .expect("graph path should not error");
-    assert!(graph_result.is_some(), "graph path should resolve Props");
+    // Resolve via the typeinfo shallow-surface projection — the SAME shared
+    // engine projected through the second consumer surface. The barrel routes
+    // to the declaring file, so the surface resolves at the route target.
+    let surface = host
+        .resolve_shallow_surface("/src/inner.ts", "Props")
+        .expect("shallow-surface path should resolve Props");
 
-    // Both should yield the same prop names
+    // Both projections of the one engine must expose the same prop names.
     let live_names: Vec<_> = live_result
         .as_ref()
         .unwrap()
@@ -1111,16 +1183,20 @@ defineProps<Props>()
         .iter()
         .filter_map(|p| p.key_name.clone())
         .collect();
-    let graph_names: Vec<_> = graph_result
-        .as_ref()
-        .unwrap()
-        .props
+    let surface_names: Vec<_> = surface
+        .members
         .iter()
-        .filter_map(|p| p.key_name.clone())
+        .map(|member| member.name.as_ref().to_string())
         .collect();
     assert_eq!(
-        live_names, graph_names,
-        "live and graph paths should produce identical prop names"
+        live_names, surface_names,
+        "the compile-facing projection and the typeinfo surface projection \
+         must expose identical prop names"
+    );
+    assert_eq!(
+        live_names,
+        vec!["label".to_string(), "count".to_string()],
+        "Props must resolve its concrete members through the barrel"
     );
 }
 
@@ -1614,7 +1690,7 @@ export { InternalProps as PublicProps }
 
     let _ = host.shallow_file_state("/src/types.ts");
 
-    let member_route = crate::resolver_core::RouteDemand::MemberPath(vec!["a".into()]);
+    let member_route = crate::resolver_core::RouteDemand::member_path(vec!["a".to_string()]);
     let member_required = host.required_import_names_for_exported_route(
         "/src/types.ts",
         "PublicProps",

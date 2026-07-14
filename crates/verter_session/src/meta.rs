@@ -41,9 +41,31 @@ pub enum MetaError {
     SessionClosed,
     #[error("host error: {0}")]
     Host(String),
+    /// Typed output-materialization failure (fail-closed): a PRESENT type
+    /// source the terminal output sink could not raise / shell-materialize
+    /// — never silently rendered as `Unknown`.
+    #[error("output materialization error: {0}")]
+    OutputMaterialization(#[from] crate::meta_resolve::ComponentMetaOutputError),
 }
 
-fn component_meta_expansion_budget_exceeded(
+/// One `get_component_meta_batch_payloads` result slot: `Ok(Some(bytes))`
+/// = a successful encoded payload; `Ok(None)` = EXCLUSIVELY a genuinely
+/// missing canonical; `Err(_)` = a per-id failure (budget overrun, typed
+/// output-materialization failure, per-job panic) — never collapsed onto
+/// the missing sentinel.
+pub type BatchPayloadSlot = Result<Option<Vec<u8>>, MetaError>;
+
+/// Test-only per-item completeness probe for the fixed-view payload batch
+/// path (see `MetaSession::arm_payload_completeness_probe`). `None` =
+/// disarmed (production default; recording is skipped).
+#[cfg(test)]
+static PAYLOAD_ITEM_COMPLETENESS_PROBE: std::sync::Mutex<
+    Option<rustc_hash::FxHashMap<String, (bool, bool)>>,
+> = std::sync::Mutex::new(None);
+
+mod output_api;
+
+pub(crate) fn component_meta_expansion_budget_exceeded(
     types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
 ) -> bool {
     use verter_semantic::analysis::type_expand::ExpansionStopReason;
@@ -314,7 +336,7 @@ impl MetaProject {
                 generation: 0,
             },
         );
-        let runtime = SessionRuntime::new(id, Arc::clone(self));
+        let runtime = SessionRuntime::new(Arc::clone(self));
         Ok(MetaSession {
             id,
             project: Arc::clone(self),
@@ -739,175 +761,6 @@ impl MetaSession {
         Ok(results)
     }
 
-    /// Resolve ONE encoded component-meta payload against a
-    /// caller-captured [`crate::resolver_store::BatchFixedView`] and the
-    /// shared session `view`.
-    ///
-    /// This is the single per-item body shared by the batch
-    /// ([`Self::get_component_meta_batch_payloads`]) and scalar
-    /// ([`Self::get_component_meta_payload`]) payload paths, so the two
-    /// surfaces stay byte-identical (no dual path). It performs, in order:
-    ///
-    /// 1. **Warm probe** against the fixed view's proven-current view
-    ///    (when the capture was current). A non-current capture skips the
-    ///    probe (miss to cold) — it must never validate a cache entry
-    ///    against a stale snapshot.
-    /// 2. **Cold resolve** via
-    ///    [`crate::VerterHost::resolve_component_meta_with_view_and_fixed`],
-    ///    pinning the request executor to the fixed view (the O(N)→O(1)
-    ///    win) with the FENCED promotion gate.
-    /// 3. **Extraction** under a `HostResolverContext` seeded from the
-    ///    SHARED batch cold-seed (`fixed.cold_seed()`) — not a fresh
-    ///    per-item `resolver_store_view_read()`.
-    /// 4. **Payload-write fence**: the encoded payload is
-    ///    promoted into the per-file payload cache ONLY when
-    ///    [`crate::resolver_store::BatchFixedView::payload_promotion_admissible`]
-    ///    holds (the capture was current AND no external mutation landed
-    ///    since capture). On a decline the payload is still RETURNED to the
-    ///    caller; only the cache write is dropped — so a mid-batch
-    ///    invalidation cannot admit a stale payload.
-    ///
-    /// Returns `Ok(Some(bytes))` on success, `Ok(None)` when the canonical
-    /// does not resolve to a component, and `Err(_)` on a per-id resolution
-    /// budget overrun. The scalar caller propagates `Err` (interactive);
-    /// the batch caller maps it to a `None` slot (tolerant) — both consume
-    /// the SAME body so the two surfaces stay byte-identical.
-    fn resolve_one_payload_item(
-        &self,
-        canonical_or_alias: &str,
-        view: &dyn crate::session_view::SessionView,
-        fixed: &crate::resolver_store::BatchFixedView,
-        encode_fn: impl FnOnce(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-            &crate::meta_resolve::ResolvedComponentMetaState,
-        ) -> Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, MetaError> {
-        use std::sync::atomic::Ordering::Relaxed;
-        let host = self.project.host();
-        let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
-
-        // (1) Warm probe — only against a PROVEN-CURRENT fixed view. A
-        // non-current capture (`current_view() == None`) misses to cold so
-        // it never validates a cached payload against a stale snapshot.
-        //
-        // SOUNDNESS: the fixed view's current view is ALREADY overlay-aware —
-        // `capture_batch_fixed_view` applies the session overlay ONCE at
-        // capture and shares it across every job. Validating against this
-        // shared overlaid view (rather than an un-overlaid base view) means a
-        // session that mutates a DEPENDENCY of an owner whose own whole-hash
-        // is unchanged sees the overlaid dep fact MISS, falls to the
-        // overlay-aware cold resolve, and returns the overlay surface — never
-        // false-positiving the cached BASE payload. The overlay is NOT
-        // re-applied here per job: that per-job copy-on-write was the O(N²)
-        // regression; the batch applies it once and shares it. For a base
-        // (empty-overlay) session the shared view IS the base snapshot, so
-        // validation is identical to the base — no behavior change.
-        if let Some(current_view) = fixed.current_view() {
-            if let Some(cached) =
-                host.try_get_cached_meta_payload_with_store_view(current_view, canonical.as_str())
-            {
-                host.provenance().payload_cache_hits.fetch_add(1, Relaxed);
-                return Ok(Some(cached));
-            }
-        }
-        host.provenance().payload_cache_misses.fetch_add(1, Relaxed);
-
-        // Install ONE request context (with `config.projection_op_budget`)
-        // spanning the cold resolve AND the fallthrough extract, so the
-        // projection-op budget fuse and the no-poison completeness gate are
-        // uniformly LIVE on the payload surface exactly as on the analysis
-        // surface (the Shared Optimized Codebase rule — a budget partial must
-        // be observable here, not only through the analysis entry). Held to
-        // function end so it covers step-(2) resolve AND step-(3) extract; the
-        // step-(2) inner install-if-none-active reuses this outer context. This
-        // is the SHARED body for BOTH the scalar and the batch per-job payload
-        // paths, so this single install covers both (a per-job install on a
-        // batch pool thread is correct — `RequestContext` is thread-local RAII).
-        let _payload_request_ctx_guard = host.install_request_budget_context_if_none(
-            crate::meta_resolve::next_component_meta_audit_request_id(),
-            canonical.as_str(),
-            host.config.audit_timing_capture && host.config.audit_enabled,
-        );
-
-        // (2) Cold resolve pinned to the fixed view (FENCED promotion).
-        let Some(resolved) = ({
-            let (executor_view, captured_fp) = fixed.executor_fixed_view();
-            host.resolve_component_meta_with_view_and_fixed(
-                canonical.as_str(),
-                crate::types::ProjectionMode::Expanded,
-                view,
-                Some((executor_view, captured_fp, fixed.current_view().is_some())),
-            )
-        }) else {
-            return Ok(None);
-        };
-
-        // (3) Extraction context seeded from the SHARED batch cold-seed —
-        // no fresh per-item store-view read. The cold-seed carries the
-        // capture's currentness, so a non-current seed fails nested warm
-        // probes closed.
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
-            host,
-            fixed.cold_seed(),
-            overlay,
-        );
-        let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        let crate::host_manage::ComponentMetaExtractOutcome {
-            analysis,
-            fallthrough_fact_versions,
-            completeness: extract_completeness,
-        } = crate::host_manage::extract_component_meta_from_resolved_with_facts(
-            host,
-            canonical.as_str(),
-            &resolved,
-            host_ctx_ref,
-        );
-        // ONE merged admission signal: the resolve-phase completeness merged
-        // with the whole-extract scope (macro-DTO read + fallthrough compute).
-        let final_completeness = resolved.completeness.merge(extract_completeness);
-
-        if let Some(err) =
-            component_meta_resolution_budget_error(canonical.as_str(), Some(&analysis), &resolved)
-        {
-            return Err(err);
-        }
-
-        let payload = encode_fn(analysis, &resolved);
-        host.provenance().payload_encodes.fetch_add(1, Relaxed);
-
-        // (4) Payload-write fence. Promote the encoded payload
-        // into the per-file payload cache ONLY when the fixed view is still
-        // promotable (current + not externally superseded since capture).
-        // Otherwise return the payload but do NOT warm the cache with a
-        // result computed against a now-stale snapshot.
-        let facts = fallthrough_fact_versions.unwrap_or_else(|| resolved.fact_versions.clone());
-        // Conjunctive rails: the token fence (external supersession /
-        // currentness) AND the per-result completeness rail — a partial
-        // (budget-fail-closed / carrier-stopped) payload is returned but
-        // never admitted, so a transient trip cannot warm-replay as a
-        // sticky degraded payload. The completeness rail is ONE merged signal:
-        // `final_completeness = resolved.completeness.merge(extract_completeness)`
-        // — the resolve-phase completeness merged with the WHOLE-extract scope
-        // (the pre-choke macro-DTO read + the fallthrough cold compute). The
-        // former `synthesis_should_suppress` term is SUBSUMED (it is the bool
-        // projection of `resolved.completeness`, already a merge operand).
-        if fixed.payload_promotion_admissible(host) && !final_completeness.is_partial() {
-            // Stamp from the FLIGHT-CAPTURED generation (the fixed
-            // view's captured token), never the live counter: a project
-            // bump landing between the fence above and this store must
-            // leave the payload stamped under the graph it was computed
-            // from, so the warm read's generation backstop rejects it.
-            host.store_meta_payload(
-                canonical.as_str(),
-                &facts,
-                payload.clone(),
-                fixed.captured_validation_token().project_generation,
-            );
-        }
-        Ok(Some(payload))
-    }
-
     /// Batch surface returning **encoded payload bytes** per input, for
     /// NAPI / WASM consumers that need the wire-format buffer rather
     /// than the in-process `ComponentMetaAnalysis` struct.
@@ -921,22 +774,21 @@ impl MetaSession {
     /// invoked once per non-cached id (on a `HostCpuPool` worker on native,
     /// inline on wasm).
     ///
-    /// Returns one slot per input in input order: `Some(bytes)` for a
-    /// successful payload, `None` for a missing canonical or per-id
-    /// failure. `Err(MetaError::Shutdown)` only when the project has
-    /// been shut down before dispatch.
+    /// Returns one slot per input in input order: `Ok(Some(bytes))` for a
+    /// successful payload, `Ok(None)` EXCLUSIVELY for a genuinely missing
+    /// canonical, and `Err(_)` for a per-id failure (budget overrun, typed
+    /// output-materialization failure, per-job panic) — a real failure is
+    /// NEVER collapsed onto the missing sentinel, so scalar and batch
+    /// failure semantics stay equivalent. `Err(MetaError::Shutdown)` at the
+    /// outer level only when the project has been shut down before
+    /// dispatch.
     pub fn get_component_meta_batch_payloads<F>(
         &self,
         canonical_or_aliases: &[String],
         encode_fn: F,
-    ) -> Result<Vec<Option<Vec<u8>>>, MetaError>
+    ) -> Result<Vec<BatchPayloadSlot>, MetaError>
     where
-        F: Fn(
-                verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-                &crate::meta_resolve::ResolvedComponentMetaState,
-            ) -> Vec<u8>
-            + Sync
-            + Send,
+        F: Fn(crate::meta_resolve::ComponentMetaOutput) -> Vec<u8> + Sync + Send,
     {
         use std::sync::Arc;
         self.check_alive()?;
@@ -961,13 +813,21 @@ impl MetaSession {
         // host-coordinator-pool fan-out, the once-per-non-empty-batch
         // scheduler submission accounting (the policy carries the
         // scheduler handle), and per-job panic isolation. A panicked
-        // per-id payload job converts to a missing (`None`) slot — the
-        // domain-specific conversion for this surface — without poisoning
-        // the rest of the batch.
-        let on_item_panic = |_panic: crate::host_batch_coordinator::BatchItemPanic<
+        // per-id payload job converts to a per-item `Err` slot — a real
+        // failure is never collapsed onto the missing sentinel — without
+        // poisoning the rest of the batch.
+        let on_item_panic = |panic: crate::host_batch_coordinator::BatchItemPanic<
             '_,
             verter_scheduler::stage::SchedulerJobKind,
-        >| { None::<Vec<u8>> };
+        >| {
+            let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } =
+                panic.item;
+            Err(MetaError::Host(format!(
+                "component-meta payload batch job for `{}` panicked: {}",
+                canonical_id,
+                panic.message()
+            )))
+        };
         let policy = crate::host_batch_coordinator::BatchPolicy {
             scheduler: Some(scheduler.as_ref()),
             label: "component_meta_batch_payloads",
@@ -986,17 +846,13 @@ impl MetaSession {
             let fixed = host.capture_batch_fixed_view(view);
             host.batch_coordinator().run_batch(&jobs, &policy, |job| {
                 let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } = job;
-                // A per-id budget overrun / miss becomes a `None` slot —
-                // the batch is tolerant (it does not abort on per-id
-                // failure). The shared body returns `Err` for a budget
-                // overrun; the batch maps it to the sentinel.
-                self.resolve_one_payload_item(
-                    canonical_id.as_ref(),
-                    view,
-                    &fixed,
-                    |analysis, resolved| encode_fn_ref(analysis, resolved),
-                )
-                .unwrap_or(None)
+                // Per-item `Result` slot: the batch is tolerant (it does
+                // not abort on a per-id failure) but a real failure — a
+                // budget overrun or a typed output-materialization error —
+                // stays a typed per-item `Err`, never the missing sentinel.
+                self.resolve_one_payload_item(canonical_id.as_ref(), view, &fixed, |output| {
+                    encode_fn_ref(output)
+                })
             })
         });
         Ok(results)
@@ -1057,15 +913,14 @@ impl MetaSession {
     /// batch payloads are byte-identical for the same component. It stays
     /// OFF the host batch coordinator (no `run_batch` fan-out) — the
     /// single-request path avoids the coordinator-pool latency a batch
-    /// pays. A per-id budget overrun propagates as `Err` (interactive
-    /// surface), unlike the batch which maps it to a `None` slot.
+    /// pays. A per-id failure (a budget overrun or a typed
+    /// output-materialization failure) propagates as `Err`, exactly as the
+    /// batch keeps it as a typed per-item `Err` slot — never the missing
+    /// sentinel on either surface.
     pub fn get_component_meta_payload(
         &self,
         canonical_or_alias: &str,
-        encode_fn: impl FnOnce(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-            &crate::meta_resolve::ResolvedComponentMetaState,
-        ) -> Vec<u8>,
+        encode_fn: impl FnOnce(crate::meta_resolve::ComponentMetaOutput) -> Vec<u8>,
     ) -> Result<Option<Vec<u8>>, MetaError> {
         self.check_alive()?;
         let host = self.project.host();
@@ -1089,10 +944,8 @@ impl MetaSession {
     ///
     /// Contract: the lazy fields are populated from the existing
     /// `ComponentMetaAnalysis` snapshot with **empty** `TypeHandle` query
-    /// paths — no production path populates
-    /// `OwnedTypeResolutionContext::declaration_fingerprints`, so the
-    /// surface envelope handles never carry declaration-scoped query
-    /// paths today.
+    /// paths — declaration-scoped query paths have no production
+    /// producer, so the surface envelope handles never carry them.
     pub fn get_component_meta_surface(
         &self,
         canonical_or_alias: &str,
@@ -1108,8 +961,7 @@ impl MetaSession {
     /// surface root) returns an empty Object expansion; handles with a
     /// populated query path also return an empty Object outline and
     /// round-trip the handle identity — no declaration walk runs
-    /// (`OwnedTypeResolutionContext::declaration_fingerprints` has no
-    /// production producer).
+    /// (declaration-scoped query paths have no production producer).
     pub fn get_component_meta_type_expansion(
         &self,
         handle: crate::component_meta_payload::TypeHandle,
@@ -1132,10 +984,7 @@ impl MetaSession {
     pub fn get_component_meta_payload_via_bridge(
         &self,
         canonical_or_alias: &str,
-        encode_fn: impl FnOnce(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-            &crate::meta_resolve::ResolvedComponentMetaState,
-        ) -> Vec<u8>,
+        encode_fn: impl FnOnce(crate::meta_resolve::ComponentMetaOutput) -> Vec<u8>,
     ) -> Result<Option<Vec<u8>>, MetaError> {
         use crate::component_meta_payload::{
             BridgeError, TypeExpansion, TypeHandle, MAX_BRIDGE_DEPTH,
@@ -1201,8 +1050,8 @@ impl MetaSession {
         // expansions, but the public bytes still come from the existing
         // analysis pipeline — `assemble_volar_payload` is not the encode
         // source here because the expansions carry no declaration-scoped
-        // data (`OwnedTypeResolutionContext::declaration_fingerprints`
-        // has no production producer).
+        // data (declaration-scoped query paths have no production
+        // producer).
         self.get_component_meta_payload(canonical_or_alias, encode_fn)
     }
 
@@ -1317,6 +1166,38 @@ impl MetaSession {
         f: impl FnOnce(&SessionRuntime) -> T,
     ) -> Result<T, MetaError> {
         Ok(f(&self.runtime))
+    }
+
+    /// Test-only demand probe under THIS session's overlay view: the
+    /// session-bound sibling of
+    /// [`crate::test_only::semantic_source_probe::demand_type_expr`].
+    /// Overlay-only fixtures are invisible to a bare-host (base-view)
+    /// dispatch, so assertions over a session-published source demand it
+    /// through a [`crate::resolver_core::SessionResolverContext`] bound to
+    /// the same overlay view the producing query ran under. Raise,
+    /// reduction, and materialisation all route through the ONE shared
+    /// dispatch — no second engine.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn demand_semantic_source_type_expr(
+        &self,
+        owner_canonical: &str,
+        source: &verter_type_expr::facts::SemanticTypeSource,
+    ) -> Option<verter_type_expr::TypeExpr> {
+        let host = self.project.host();
+        self.with_overlay_view(|view| {
+            let base = host
+                .resolver_store_view_read()
+                .into_owned_view()
+                .with_session_overlay(host, view);
+            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx =
+                crate::resolver_core::SessionResolverContext::new(host, view, &base, overlay);
+            crate::project_semantic_dispatch::semantic_source::demand_semantic_source_type_expr_with_ctx(
+                &ctx,
+                owner_canonical,
+                source,
+            )
+        })
     }
 
     /// Run a closure with a borrowed

@@ -32,13 +32,37 @@ defineSlots<{
 <template><div /></template>
 "#;
 
+/// Demand-materialize a slot binding's published type source through
+/// the ONE shared dispatch — the explicit consumer resolution step for
+/// a shallow-by-default publication.
+fn demand_binding_type(
+    host: &verter_session::VerterHost,
+    owner: &str,
+    binding: &verter_semantic::analysis::component_meta::SlotBindingAnalysis,
+) -> TypeExpr {
+    let source = binding.type_source.present().unwrap_or_else(|| {
+        panic!(
+            "slot binding `{}` must publish a typed source",
+            binding.name
+        )
+    });
+    verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
+        .unwrap_or_else(|| {
+            panic!(
+                "slot binding `{}`'s published source must demand-materialize",
+                binding.name
+            )
+        })
+}
+
 #[test]
 fn resolver_coverage_slot_shapes_typed_bindings_lower_to_primitive() {
     let host = build_hermetic_host_with_lib(
         &[("/c.vue", SLOTS_TYPED_VUE)],
         &[("lib.es5.d.ts", STUB_LIB_ES5)],
     );
-    let (analysis, _resolution, _record) = resolve_under_audit(host, "/c.vue");
+    let (analysis, _resolution, _record) =
+        resolve_under_audit(std::sync::Arc::clone(&host), "/c.vue");
 
     // Both slots must be present.
     let slot_names: Vec<String> = analysis.slots.iter().map(|s| s.name.clone()).collect();
@@ -62,11 +86,11 @@ fn resolver_coverage_slot_shapes_typed_bindings_lower_to_primitive() {
                 default_slot.bindings
             )
         });
+    let item_ty = demand_binding_type(&host, "/c.vue", item_binding);
     assert_eq!(
-        leaf_primitive(&item_binding.type_expr),
+        leaf_primitive(&item_ty),
         Some(PrimitiveName::String),
-        "slot `default.item` must lower to Primitive(String); got {:#?}",
-        item_binding.type_expr
+        "slot `default.item` must lower to Primitive(String); got {item_ty:#?}"
     );
 
     // Discriminating: `named` slot's `row` binding must be
@@ -82,23 +106,23 @@ fn resolver_coverage_slot_shapes_typed_bindings_lower_to_primitive() {
                 named_slot.bindings
             )
         });
+    let row_ty = demand_binding_type(&host, "/c.vue", row_binding);
     assert_eq!(
-        leaf_primitive(&row_binding.type_expr),
+        leaf_primitive(&row_ty),
         Some(PrimitiveName::Number),
-        "slot `named.row` must lower to Primitive(Number); got {:#?}",
-        row_binding.type_expr
+        "slot `named.row` must lower to Primitive(Number); got {row_ty:#?}"
     );
 
     // Negative: the `Unknown { raw: "semanticMiss" }` sentinel must
     // not appear anywhere in the slot bindings.
     for slot in &analysis.slots {
         for binding in &slot.bindings {
+            let binding_ty = demand_binding_type(&host, "/c.vue", binding);
             assert!(
-                !contains_unknown(&binding.type_expr),
-                "slot binding `{}.{}` must not contain Unknown; got {:#?}",
+                !contains_unknown(&binding_ty),
+                "slot binding `{}.{}` must not contain Unknown; got {binding_ty:#?}",
                 slot.name,
                 binding.name,
-                binding.type_expr,
             );
         }
     }

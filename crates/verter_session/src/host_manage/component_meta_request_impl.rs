@@ -4,11 +4,9 @@
 //! domain 4 + cache-key helper (domain 14) of the
 //! meta_resolve.rs split.
 //!
-//! Owns the four pieces of the request-orchestration boundary:
+//! Owns the pieces of the request-orchestration boundary:
 //!
 //! - `ComponentMetaRequestHost for VerterHost` (process-wide adapter)
-//! - `SessionRequestHost<'a>` + `ComponentMetaRequestHost` impl
-//!   (session-scoped adapter)
 //! - `pub struct CapturedComponentMetaInputs` — captured-snapshot type
 //!   used by the request executor at `component_meta_request.rs`
 //! - The `Resolved*` type aliases re-exported from `resolver_core`
@@ -63,12 +61,12 @@ pub(crate) fn request_source_performed_compute(source: RequestSource) -> bool {
 pub(crate) fn should_skip_imported_registry_seed_refresh(
     owner_canonical: &str,
     declaration: &ResolvedTypeDeclaration,
-    existing_expr: &verter_type_expr::TypeExpr,
+    existing_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> bool {
     crate::resolver_core::component_meta::imported_registry_seed_can_skip_refresh(
         owner_canonical,
         declaration,
-        existing_expr,
+        existing_source,
     )
 }
 
@@ -507,213 +505,6 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
             &result.fact_versions,
             self.view.fingerprint(),
         );
-    }
-
-    fn resolution_is_partial(&self, result: &Self::Resolution) -> bool {
-        // Read the typed completeness (the authoritative partial signal);
-        // `synthesis_should_suppress` is its bool projection.
-        result.completeness.is_partial()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SessionRequestHost — session-scoped ComponentMetaRequestHost
-// ---------------------------------------------------------------------------
-
-/// Session-scoped request host that routes reads through the session
-/// runtime and writes to the session-scoped resolved-meta cache.
-///
-/// Replaces `impl ComponentMetaRequestHost for VerterHost` for all
-/// session-scoped callers. The generic executor at
-/// `component_meta_request.rs` calls these methods on the trait object,
-/// so every axis is session-aware end to end.
-///
-/// ## Attempt-scoped overlay carrier
-///
-/// `overlay` is the request-scoped
-/// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)
-/// — built ONCE at adapter construction time and shared by every
-/// resolver call inside the request. See [`ViewBoundRequestHost`]'s
-/// doc for the full rationale.
-pub struct SessionRequestHost<'a> {
-    pub(crate) runtime: &'a crate::session_runtime::SessionRuntime,
-    pub(crate) overlay: std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
-}
-
-impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
-    type View = crate::resolver_store::HostStoreView;
-    type Mode = ProjectionMode;
-    type Resolution = ResolvedComponentMetaState;
-    type CapturedInputs = CapturedComponentMetaInputs;
-
-    fn cache_key(
-        &self,
-        canonical: &str,
-        mode: Self::Mode,
-    ) -> crate::resolver_core::ResolutionNodeKey {
-        resolved_meta_cache_key(canonical, mode)
-    }
-
-    fn snapshot_store_view(&self) -> Self::View {
-        // The session-scoped overlay-mutation machinery is retired
-        // (R17); singleflight lane identity reads the raw session id
-        // directly.
-        crate::resolver_store::HostStoreView::from_session_id(
-            self.runtime.session_id(),
-            self.runtime.host(),
-        )
-    }
-
-    fn snapshot_store_view_read(&self) -> (Self::View, bool) {
-        crate::resolver_store::HostStoreView::from_session_id_read(
-            self.runtime.session_id(),
-            self.runtime.host(),
-        )
-    }
-
-    fn current_view_supersession_fingerprint(&self) -> u64 {
-        // The session overlay identity is frozen for the request, so the
-        // BASE external-supersession fold (overlay = None at both capture
-        // points) is the precise "external mutation superseded my
-        // snapshot" oracle — env / epoch / project / identity shifts.
-        self.runtime
-            .host()
-            .current_external_supersession_fingerprint()
-    }
-
-    fn capture_component_meta_inputs(
-        &self,
-        canonical: &str,
-        _view: &Self::View,
-    ) -> Option<Self::CapturedInputs> {
-        let host = self.runtime.host();
-        let audit_enabled = host.config.audit_enabled;
-        let capture_started = audit_enabled.then(Instant::now);
-        let store_read_started = audit_enabled.then(Instant::now);
-        component_meta_trace_custom!(
-            "session_capture_component_meta_inputs",
-            format!("owner={} session={}", canonical, self.runtime.session_id()),
-        );
-        let snapshot = host.get_raw_analysis_snapshot(canonical)?;
-        let facts = host.ensure_indexed_ready_serve(canonical)?.indexed;
-        let whole_hash = facts.whole_hash;
-        let store_read_ms = store_read_started
-            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
-        let owner_eval_source = VerterHost::build_eval_script_source(
-            &facts.raw_source,
-            facts.framework_parse.as_deref(),
-        );
-        let direct_import_started = audit_enabled.then(Instant::now);
-        let direct_dependency_candidates =
-            host.cache_dependency_candidates_from_snapshot(canonical, &snapshot);
-        let direct_import_proof_ms = direct_import_started
-            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
-        let capture_inputs_ms = capture_started
-            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
-        Some(CapturedComponentMetaInputs {
-            whole_hash,
-            snapshot,
-            owner_eval_source: Some(owner_eval_source),
-            direct_dependency_candidates,
-            audit_capture_inputs_ms: capture_inputs_ms,
-            audit_store_read_ms: store_read_ms,
-            audit_direct_import_proof_ms: direct_import_proof_ms,
-        })
-    }
-
-    fn try_get_cached_component_meta(
-        &self,
-        canonical: &str,
-        mode: Self::Mode,
-        store_view: &Self::View,
-    ) -> Option<Self::Resolution> {
-        // Session-bearing hot path: thread the request-bound view
-        // through so the per-warm-hit rebuild is eliminated (per the
-        // iter3 — bypass audit top-leverage fix).
-        self.runtime
-            .try_get_cached_resolved_meta_with_store_view(store_view, canonical, mode)
-    }
-
-    fn compute_component_meta(
-        &self,
-        canonical: &str,
-        mode: Self::Mode,
-        captured: Option<&Self::CapturedInputs>,
-        store_view: Option<&Self::View>,
-        base_is_current: bool,
-    ) -> Option<Self::Resolution> {
-        // Consume the executor-snapshotted `store_view` to build the
-        // request-bound `HostResolverContext` so the cold-compute pipeline
-        // reuses it rather than rebuilding a fresh workspace snapshot.
-        // The shared overlay (`self.overlay`) lives across capture /
-        // try-get-cached / compute boundaries so canonicals promoted
-        // mid-request by `ensure_loaded` / `ensure_indexed_ready_serve` stay
-        // visible. `base_is_current` carries the snapshot's currentness so
-        // the `HostResolverContext` fails its nested warm-cache probes
-        // closed on a non-current seed.
-        let host = self.runtime.host();
-        match store_view {
-            Some(view) => {
-                if let Some(captured) = captured {
-                    return host.compute_component_meta_state_from_captured_with_view_arg(
-                        canonical,
-                        mode,
-                        captured,
-                        view,
-                        &self.overlay,
-                        base_is_current,
-                    );
-                }
-                let whole_hash = host
-                    .current_or_read_whole_hash(canonical)
-                    .unwrap_or_default();
-                host.compute_component_meta_state_with_view_arg(
-                    canonical,
-                    mode,
-                    whole_hash,
-                    view,
-                    &self.overlay,
-                    base_is_current,
-                )
-            }
-            None => {
-                // No executor-supplied view: the overlay entry does its OWN
-                // fresh base read whose currentness is INTRINSIC to the seed
-                // (`compute_component_meta_state_with_overlay`), so the
-                // executor's `base_is_current` is NOT threaded into this arm
-                // — pairing it with a fresh read is the divergence this path
-                // closed.
-                if let Some(captured) = captured {
-                    return host.compute_component_meta_state_from_captured_with_overlay(
-                        canonical,
-                        mode,
-                        captured,
-                        &self.overlay,
-                    );
-                }
-                let whole_hash = host
-                    .current_or_read_whole_hash(canonical)
-                    .unwrap_or_default();
-                host.compute_component_meta_state_with_overlay(
-                    canonical,
-                    mode,
-                    whole_hash,
-                    &self.overlay,
-                )
-            }
-        }
-    }
-
-    fn store_component_meta_result(
-        &self,
-        canonical: &str,
-        mode: Self::Mode,
-        result: &Self::Resolution,
-    ) {
-        self.runtime.store_resolved_meta(canonical, mode, result);
     }
 
     fn resolution_is_partial(&self, result: &Self::Resolution) -> bool {

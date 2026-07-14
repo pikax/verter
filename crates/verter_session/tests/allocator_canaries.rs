@@ -342,3 +342,74 @@ mod canary_warm_hit_zero_alloc {
         );
     }
 }
+
+mod canary_absolutize_already_absolute_zero_alloc {
+    //! Allocation canary for `SemanticTypeSource::absolutized_against`
+    //! over a LARGE already-absolute surface.
+    //!
+    //! The absolutization walker is copy-on-first-change: scanning an
+    //! already-absolute source performs NO clones and NO heap allocation
+    //! (the dominant case — a fallthrough source re-absolutized under a
+    //! consuming scope). The pre-fix walker eagerly cloned every member
+    //! into a fresh `Vec` before learning nothing changed, so this canary
+    //! reads a per-member allocation delta there and zero here.
+
+    use std::hint::black_box;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use verter_type_expr::facts::{
+        ClosedTypeFact, ObjectMemberFact, ObjectPropertyFact, ObjectShapeFact, SemanticTypeSource,
+    };
+    use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace, TypeBodySlot};
+    use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
+    use verter_type_expr::MemberVisibility;
+
+    use super::{alloc_serial_guard, ALLOC_COUNTER};
+
+    fn absolute_member(index: usize) -> ObjectMemberFact {
+        ObjectMemberFact::Property(ObjectPropertyFact {
+            name: format!("member{index}"),
+            optional: false,
+            readonly: false,
+            visibility: MemberVisibility::Public,
+            ty: TypeBodySlot {
+                // ALREADY-ABSOLUTE anchor: nothing to rewrite.
+                anchor: AuthoredAnchor {
+                    canonical_id: Arc::from("/already/absolute.ts"),
+                    symbol: Arc::from("Anchored"),
+                    space: LocatorSymbolSpace::Type,
+                },
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            },
+            span_origin: MemberSpansOrigin::Synthetic(SourceSynthetic),
+        })
+    }
+
+    #[test]
+    fn absolutizing_a_large_already_absolute_surface_allocates_nothing() {
+        let _serial = alloc_serial_guard();
+
+        const MEMBERS: usize = 256;
+        let members: Vec<ObjectMemberFact> = (0..MEMBERS).map(absolute_member).collect();
+        let source = SemanticTypeSource::Closed(ClosedTypeFact::Object(ObjectShapeFact {
+            members: Arc::from(members.into_boxed_slice()),
+        }));
+
+        // Warm any lazy init, then measure the walk alone.
+        let _ = black_box(source.absolutized_against("/consumer.vue"));
+        let baseline = ALLOC_COUNTER.load(Ordering::Relaxed);
+        let rewritten = source.absolutized_against("/consumer.vue");
+        let after = ALLOC_COUNTER.load(Ordering::Relaxed);
+        black_box(&rewritten);
+        assert_eq!(source, rewritten, "already-absolute input round-trips");
+        let delta = after - baseline;
+        assert_eq!(
+            delta, 0,
+            "absolutizing a {MEMBERS}-member already-absolute surface must \
+             be allocation-free (copy-on-first-change) — a walker that \
+             eagerly clones the members into a Vec before discovering \
+             nothing changed reports a per-member delta here; observed {delta}"
+        );
+    }
+}

@@ -70,7 +70,7 @@ fn prop_names_from_resolved(
     )
     .iter()
     .flat_map(|dtos| dtos.prop_fields().iter())
-    .map(|p| p.name.clone())
+    .map(|p| p.analysis.name.clone())
     .collect()
 }
 
@@ -87,7 +87,7 @@ fn emit_names_from_resolved(
     )
     .iter()
     .flat_map(|dtos| dtos.emit_fields().iter())
-    .map(|e| e.name.clone())
+    .map(|e| e.analysis.name.clone())
     .collect()
 }
 
@@ -158,16 +158,22 @@ fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authorit
         kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
         text: Some("export interface Props { label?: string }".to_string()),
     };
-    let object = verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-        properties: vec![verter_type_expr::ObjectMember::Property(
-            verter_type_expr::ObjectProperty::synthetic_public(
-                "label".to_string(),
-                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-                true,
-                false,
-            ),
-        )],
-    }));
+    let object = verter_type_expr::facts::SemanticTypeSource::Synthesized(
+        verter_type_expr::facts::ResolvedLocalShape::Object(Arc::from(vec![
+            verter_type_expr::facts::SynthesizedMemberFact {
+                name: "label".to_string(),
+                optional: true,
+                ty: verter_type_expr::facts::FactOrLocator::Leaf(
+                    verter_type_expr::facts::LeafTypeFact::Primitive(
+                        verter_type_expr::PrimitiveName::String,
+                    ),
+                ),
+                span_origin: verter_type_expr::span_origins::MemberSpansOrigin::Synthetic(
+                    verter_type_expr::span_origins::SourceSynthetic,
+                ),
+            },
+        ])),
+    );
 
     assert!(
         !should_skip_imported_registry_seed_refresh("/src/App.vue", &declaration, &object),
@@ -189,10 +195,21 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
         kind: crate::resolver_core::ResolvedDeclarationKind::TypeAlias,
         text: Some("export type Button = VariantProps<typeof config>".to_string()),
     };
-    let symbolic = verter_type_expr::TypeExpr::IndexedAccess {
-        object: Arc::new(verter_type_expr::TypeExpr::named("Button")),
-        index: Arc::new(verter_type_expr::TypeExpr::string_literal("variants")),
-    };
+    let symbolic = verter_type_expr::facts::SemanticTypeSource::Synthesized(
+        verter_type_expr::facts::ResolvedLocalShape::IndexedAccess(
+            verter_type_expr::facts::IndexedAccessFact {
+                object: verter_type_expr::locators::TypeBodySlot {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::from("/src/types.ts"),
+                        symbol: Arc::from("Button"),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                    },
+                    path: Arc::from(Vec::new().into_boxed_slice()),
+                },
+                index_path: Arc::from(vec!["variants".to_string()]),
+            },
+        ),
+    );
 
     assert!(
         !should_skip_imported_registry_seed_refresh("/src/App.vue", &declaration, &symbolic),
@@ -244,19 +261,16 @@ defineProps<Props>()
         .iter()
         .find(|entry| entry.name == "Props")
         .expect("the direct imported macro root should seed the initial registry");
-    match &props_entry.type_expr {
-        verter_type_expr::TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
+    match props_entry.type_source.present() {
+        Some(verter_type_expr::facts::SemanticTypeSource::Closed(
+            verter_type_expr::facts::ClosedTypeFact::Leaf(
+                verter_type_expr::facts::LeafTypeFact::Ref(name),
+            ),
+        )) => {
             assert_eq!(
-                name.as_ref(),
+                name.as_str(),
                 "Props",
                 "the shallow seed Ref names the root"
-            );
-            assert!(
-                type_arguments.is_empty(),
-                "the direct imported root seed carries no type arguments"
             );
         }
         other => panic!(
@@ -265,72 +279,10 @@ defineProps<Props>()
     }
     // Negative: it must NOT be an eagerly-materialised object surface.
     assert!(
-        !matches!(props_entry.type_expr, verter_type_expr::TypeExpr::Object(_)),
+        !crate::resolver_core::component_meta_registry::source_has_explicit_object_surface_fact(
+            props_entry.type_source.present().expect("present source")
+        ),
         "the seed must stay shallow — an eager object surface violates shallow-by-default"
-    );
-}
-
-#[test]
-fn materialize_component_meta_registry_structural_expr_preserves_conditional_wrapper_for_routed_branches(
-) {
-    let project = make_project();
-    project
-        .upsert_base(
-            "/src/types.ts",
-            r#"
-export interface SingleValue { current: string }
-export interface RangeValue { current: number }
-"#,
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/src/App.vue",
-            r#"<script setup lang="ts" generic="R extends boolean">
-import type { SingleValue, RangeValue } from './types'
-
-type ModelValue<R extends boolean = false> =
-  R extends true ? RangeValue['current'] : SingleValue['current']
-
-defineProps<{ modelValue?: ModelValue<R> }>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    let host = project.host();
-    let _store_view = host.resolver_store_view_read().into_owned_view();
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    let raw_body = query_engine
-        .owner_collection_expr("/src/App.vue", "ModelValue")
-        .expect("owner helper body should be available from prepared declarations");
-
-    let materialized = query_engine
-        .materialize_registry_structural_candidate("/src/App.vue", &raw_body)
-        .0;
-
-    let verter_type_expr::TypeExpr::Conditional {
-        true_type,
-        false_type,
-        ..
-    } = &materialized
-    else {
-        panic!("local routed helper should stay conditional instead of flattening the wrapper");
-    };
-
-    assert_eq!(
-        true_type,
-        &Arc::new(verter_type_expr::TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::Number,
-        )),
-        "the true branch should materialize through the routed imported member surface",
-    );
-    assert_eq!(
-        false_type,
-        &Arc::new(verter_type_expr::TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::String,
-        )),
-        "the false branch should materialize through the routed imported member surface",
     );
 }
 
@@ -394,11 +346,17 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         .find(|entry| entry.name == "ModelValue")
         .expect("local routed helper should be published into the type registry");
 
+    let model_value_type = crate::test_only::semantic_source_probe::demand_type_expr(
+        host,
+        "/src/App.vue",
+        model_value.type_source.present().expect("present source"),
+    )
+    .unwrap_or_else(|| panic!("the registry helper's published source must demand-materialize"));
     let verter_type_expr::TypeExpr::Conditional {
         true_type,
         false_type,
         ..
-    } = &model_value.type_expr
+    } = &model_value_type
     else {
         panic!("registry helper should preserve the conditional wrapper");
     };
@@ -1197,16 +1155,13 @@ defineProps<Props>()
     assert!(
         class_macro.native_props.iter().any(|prop| {
             prop.name == "hidden"
-                && prop.visibility
-                    == verter_compiler::utils::oxc::script::type_surface::ResolvedMemberVisibility::Protected
+                && prop.visibility == verter_type_expr::MemberVisibility::Protected
         }),
         "native state should preserve visibility metadata for inherited protected members"
     );
     assert!(
         class_macro.native_props.iter().any(|prop| {
-            prop.name == "secret"
-                && prop.visibility
-                    == verter_compiler::utils::oxc::script::type_surface::ResolvedMemberVisibility::Private
+            prop.name == "secret" && prop.visibility == verter_type_expr::MemberVisibility::Private
         }),
         "native state should preserve visibility metadata for private members"
     );
@@ -1288,19 +1243,15 @@ defineProps<C>()
 /// visibility) onto the published surface and a missing publication filter would
 /// leak them into props.
 ///
-/// CHARACTERIZATION on `native_props` (honest pin of CURRENT legacy behavior,
-/// NOT an aspirational assertion): native_props is populated by the SEPARATE
-/// parser-side macro analyzer (`verter_compiler` `resolve_type` →
-/// `collect_native_props`), which enumerates the referenced class surface
-/// DIRECTLY and currently records the raw class members even under a
-/// `Partial<…>` wrapper — bypassing the typed-IR keyspace chokepoints this
-/// change gates. native_props re-sources from the shared (visibility-gated)
-/// surface in B5 (roadmap); B11 deletes the legacy eager-OXC rail. Until then
-/// this test PINS the current legacy behavior (native_props keeps `b`/`c` under
-/// the wrapper, with faithful visibility) so the divergence between the gated
-/// published surface and the keep-all legacy native_props is explicit and not
-/// silently skipped. The in-scope native_props contract (direct class
-/// enumeration, keep-all with faithful visibility) is asserted by
+/// `native_props` contract: the macro-elements rail resolves the REFERENCED
+/// named type (`C`, the macro's imported type dep) through the shared
+/// dispatch and projects its keep-all one-level member surface directly —
+/// so under the `Partial<…>` wrapper native_props still records `b`/`c`
+/// with faithful visibility, deliberately UNLIKE the visibility-gated
+/// published props above. The two surfaces answer different questions: the
+/// published props are the Vue prop surface of the macro's payload type;
+/// native_props is the class-member visibility inventory of the referenced
+/// declaration. The direct-reference case is asserted by
 /// `native_props_fidelity_for_directly_declared_class_keeps_all_visibilities`.
 #[test]
 fn mapped_over_class_excludes_non_public_from_published_props() {
@@ -1347,21 +1298,19 @@ defineProps<Partial<C>>()
         "private `c` must NOT be published through Partial<C>: {prop_names:?}"
     );
 
-    // CHARACTERIZATION (honest pin of current legacy native_props behavior;
-    // see doc-comment): the parser-side eager-OXC rail enumerates the class
-    // directly, so under the `Partial<…>` wrapper native_props STILL records
-    // the non-public members `b`/`c` (keep-all, with faithful visibility),
-    // unlike the visibility-gated PUBLISHED props above. This pins the B5/B11
-    // gap explicitly rather than skipping the native_props invariant. When B5
-    // re-sources native_props from the shared surface, this characterization
-    // flips and must be updated alongside that change.
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedMemberVisibility;
+    // native_props (see doc-comment): the macro-elements rail projects the
+    // keep-all member surface of the REFERENCED named type `C` directly from
+    // the shared dispatch resolution, so under the `Partial<…>` wrapper
+    // native_props STILL records the non-public members `b`/`c` (keep-all,
+    // with faithful visibility), deliberately unlike the visibility-gated
+    // PUBLISHED props above.
+    use verter_type_expr::MemberVisibility;
     let macro_meta = state
         .resolved_macros
         .iter()
         .find(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
         .expect("resolved defineProps macro should be present");
-    let native_visibility_of = |name: &str| -> Option<ResolvedMemberVisibility> {
+    let native_visibility_of = |name: &str| -> Option<MemberVisibility> {
         macro_meta
             .native_props
             .iter()
@@ -1370,15 +1319,13 @@ defineProps<Partial<C>>()
     };
     assert_eq!(
         native_visibility_of("b"),
-        Some(ResolvedMemberVisibility::Protected),
-        "legacy native_props keeps protected `b` (with visibility) under Partial<C> \
-         until B5 re-sources native_props from the shared surface"
+        Some(MemberVisibility::Protected),
+        "keep-all native_props retains protected `b` (with visibility) under Partial<C>"
     );
     assert_eq!(
         native_visibility_of("c"),
-        Some(ResolvedMemberVisibility::Private),
-        "legacy native_props keeps private `c` (with visibility) under Partial<C> \
-         until B5 re-sources native_props from the shared surface"
+        Some(MemberVisibility::Private),
+        "keep-all native_props retains private `c` (with visibility) under Partial<C>"
     );
 }
 
@@ -1646,15 +1593,18 @@ defineProps<Partial<C>['c']>()
 /// retains EVERY instance member (public/protected/private) WITH its correct
 /// visibility — the native surface enumerates the class directly (NOT via
 /// keyof), so the keyspace gate does not touch it. The published props stay
-/// public-only.
+/// public-only. Every row publishes the wire-honest `Span::default()`: the
+/// FFI/proto row carries no declaration-file id, so declaration-site
+/// offsets would be unanchored on the wire.
 ///
 /// Discrimination: FAILS if the keyspace gate wrongly reaches the native
-/// surface (then `b`/`c` would be absent from native_props), or if the
-/// reconstruction dropped visibility (then `b`/`c` would be present but marked
-/// Public).
+/// surface (then `b`/`c` would be absent from native_props), if the
+/// projection dropped visibility (then `b`/`c` would be present but marked
+/// Public), or if unanchored declaration-site offsets were sourced back
+/// onto the rows (then the spans would be non-default).
 #[test]
 fn native_props_fidelity_for_directly_declared_class_keeps_all_visibilities() {
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedMemberVisibility;
+    use verter_type_expr::MemberVisibility;
 
     let project = make_project();
     project
@@ -1704,7 +1654,7 @@ defineProps<C>()
     );
 
     // native_props: ALL three members, each with its true visibility.
-    let visibility_of = |name: &str| -> Option<ResolvedMemberVisibility> {
+    let visibility_of = |name: &str| -> Option<MemberVisibility> {
         macro_meta
             .native_props
             .iter()
@@ -1713,18 +1663,259 @@ defineProps<C>()
     };
     assert_eq!(
         visibility_of("a"),
-        Some(ResolvedMemberVisibility::Public),
+        Some(MemberVisibility::Public),
         "native_props must keep public `a` as Public"
     );
     assert_eq!(
         visibility_of("b"),
-        Some(ResolvedMemberVisibility::Protected),
+        Some(MemberVisibility::Protected),
         "native_props must keep protected `b` as Protected"
     );
     assert_eq!(
         visibility_of("c"),
-        Some(ResolvedMemberVisibility::Private),
+        Some(MemberVisibility::Private),
         "native_props must keep private `c` as Private"
+    );
+
+    // Every row publishes the wire-honest `Span::default()` — the FFI/proto
+    // row emits only `span_start`/`span_end` with no declaration-file id,
+    // so a declaration-site byte offset would be an unanchored index into
+    // an unnamed file.
+    for name in ["a", "b", "c"] {
+        let span = macro_meta
+            .native_props
+            .iter()
+            .find(|prop| prop.name == name)
+            .map(|prop| prop.span)
+            .unwrap_or_else(|| panic!("native prop `{name}` should be present"));
+        assert_eq!(
+            span,
+            verter_span::Span::default(),
+            "native prop `{name}` must publish the wire-honest default span, \
+             never an unanchored declaration-site offset"
+        );
+    }
+}
+
+/// `native_props` FIDELITY (heritage): `defineProps<C>()` where `C` EXTENDS a
+/// base class keeps the INHERITED members — the one-level surface composes
+/// heritage through the shared dispatch, and the keep-all native rows retain
+/// every inherited visibility VERBATIM (public AND protected AND private).
+/// Every row publishes the wire-honest `Span::default()`; the inherited
+/// members' declaration site is in ANOTHER file (`/base.ts`), exactly the
+/// case where a bare offset without a declaration-file anchor would be
+/// unanchored on the wire.
+///
+/// Discrimination: FAILS if heritage-reached members are dropped from the
+/// native surface, if the inherited non-public members are
+/// visibility-filtered (protected/private absent), or if their visibility is
+/// coerced to Public.
+#[test]
+fn native_props_fidelity_keeps_inherited_class_members_with_visibility() {
+    use verter_type_expr::MemberVisibility;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/base.ts",
+            r#"
+export class Base {
+  public inherited_pub: string = ""
+  protected inherited_prot: number = 0
+  private inherited_priv: boolean = false
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+import { Base } from './base'
+
+export class C extends Base {
+  public own: string = ""
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { C } from './types'
+defineProps<C>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
+
+    let macro_meta = state
+        .resolved_macros
+        .iter()
+        .find(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .expect("resolved defineProps macro should be present");
+
+    let visibility_of = |name: &str| -> Option<MemberVisibility> {
+        macro_meta
+            .native_props
+            .iter()
+            .find(|prop| prop.name == name)
+            .map(|prop| prop.visibility)
+    };
+    assert_eq!(
+        visibility_of("own"),
+        Some(MemberVisibility::Public),
+        "native_props must keep the subclass's own public member"
+    );
+    assert_eq!(
+        visibility_of("inherited_pub"),
+        Some(MemberVisibility::Public),
+        "native_props must keep the INHERITED public member"
+    );
+    assert_eq!(
+        visibility_of("inherited_prot"),
+        Some(MemberVisibility::Protected),
+        "native_props must keep the INHERITED protected member as Protected"
+    );
+    assert_eq!(
+        visibility_of("inherited_priv"),
+        Some(MemberVisibility::Private),
+        "native_props must keep the INHERITED private member as Private"
+    );
+
+    for prop in macro_meta.native_props.iter() {
+        assert_eq!(
+            prop.span,
+            verter_span::Span::default(),
+            "native prop `{}` must publish the wire-honest default span — \
+             an inherited member's declaration site is in another file, so \
+             a bare offset would be unanchored on the wire",
+            prop.name
+        );
+    }
+}
+
+/// The EMPTY-member projection through the REAL rail: a call-signature-only
+/// imported interface projects a one-level surface with ZERO members (and a
+/// non-empty call-signature set), so the combined macro-elements projection
+/// (`macro_elements_from_surface`) runs its member loop over an empty set —
+/// `native_props` must come out EMPTY (no synthetic floor rows) while the
+/// resolution itself SUCCEEDS.
+///
+/// The state-level facts alone (macro entry present + `native_props` empty +
+/// emit published) CANNOT discriminate a genuine empty projection from a
+/// projection MISS: the cold resolver's fallback arm synthesizes the same
+/// macro entry with `native_props: Vec::new()` when the macro-elements
+/// resolution returns `None`, and the emit surfaces through the independent
+/// `vue_macro_dtos` path. The discriminator is the direct drive of the SAME
+/// macro-elements rail the cold resolver consumes
+/// (`resolve_component_meta_macro_elements` →
+/// `named_type_elements_outcome(NativeProjection::Include)`): it must return
+/// `Some` (a miss returns `None` and FAILS), with `has_call_signature` set
+/// (stamped only by the surface projection `macro_elements_from_surface`;
+/// the memberless root-classified fallback stamps `false`) — proving the
+/// projection genuinely RAN before its `native_props` emptiness is asserted.
+#[test]
+fn native_props_empty_for_call_signature_only_imported_type() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/events.ts",
+            r#"export interface Events { (e: 'change', id: number): void }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import { Events } from './events'
+defineEmits<Events>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
+
+    // The resolution genuinely ran: the emit event surfaced.
+    let emit_names = emit_names_from_resolved(project.host(), "/App.vue", &state);
+    assert!(
+        emit_names.contains(&"change".to_string()),
+        "the call-signature-only interface must genuinely resolve: {emit_names:?}"
+    );
+
+    // The macro entry exists with an EMPTY native surface: zero members
+    // project zero keep-all rows — no synthetic floor.
+    let macro_meta = state
+        .resolved_macros
+        .iter()
+        .find(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits)
+        .expect("resolved defineEmits macro should be present");
+    assert!(
+        macro_meta.native_props.is_empty(),
+        "a memberless (call-signature-only) surface must project ZERO \
+         native_props rows, got: {:?}",
+        macro_meta
+            .native_props
+            .iter()
+            .map(|prop| prop.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // DISCRIMINATOR against a projection MISS. The assertions above are
+    // satisfiable by the cold resolver's fallback arm (a `None`
+    // macro-elements resolution synthesizes the same entry with empty
+    // `native_props`, and the emit rides the independent `vue_macro_dtos`
+    // path). Drive the SAME macro-elements rail the cold resolver consumes
+    // and require the projection to have RESOLVED: a miss returns `None`
+    // and fails the expect; a memberless ROOT-CLASSIFIED (non-surface)
+    // resolution stamps `has_call_signature = false` and fails the
+    // call-signature assert. Only the genuine one-level surface projection
+    // (`macro_elements_from_surface` under `NativeProjection::Include`)
+    // produces `Some` + `has_call_signature = true` — whose member loop
+    // over the empty member set is what must yield zero native rows.
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut elements_cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let resolution = project
+        .host()
+        .resolve_component_meta_macro_elements(
+            "/App.vue",
+            "./events",
+            "Events",
+            &mut tracked_deps,
+            &mut resolution_deps,
+            &mut elements_cache,
+        )
+        .expect(
+            "the macro-elements projection must RESOLVE the call-signature-only \
+             interface, not miss — a miss is masked at the state level by the \
+             cold resolver's empty fallback arm",
+        );
+    assert!(
+        resolution.elements.has_call_signature,
+        "the resolved elements must carry the call signature, proving the \
+         one-level surface projection ran (the memberless root-classified \
+         fallback stamps has_call_signature = false)"
+    );
+    assert!(
+        resolution.native_props.is_empty(),
+        "the RESOLVED projection's member loop over the empty member set \
+         must produce ZERO native_props rows, got: {:?}",
+        resolution
+            .native_props
+            .iter()
+            .map(|prop| prop.name.as_str())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1789,8 +1980,7 @@ defineProps<Props>()
     assert!(
         interface_macro.native_props.iter().any(|prop| {
             prop.name == "hidden"
-                && prop.visibility
-                    == verter_compiler::utils::oxc::script::type_surface::ResolvedMemberVisibility::Protected
+                && prop.visibility == verter_type_expr::MemberVisibility::Protected
         }),
         "native state should retain protected inherited class members"
     );
@@ -2238,8 +2428,7 @@ defineProps<Props>()
     assert!(
         class_macro.native_props.iter().any(|prop| {
             prop.name == "hidden"
-                && prop.visibility
-                    == verter_compiler::utils::oxc::script::type_surface::ResolvedMemberVisibility::Protected
+                && prop.visibility == verter_type_expr::MemberVisibility::Protected
         }),
         "native state should preserve protected members through default-import alias barrels"
     );
@@ -2595,9 +2784,15 @@ export interface Props { a: string }
     })
     .expect("typed JSDoc payload should resolve through cached imported lookup");
 
+    let graph_json =
+        serde_json::to_value(&resolved.graph).expect("the captured type-graph snapshot serializes");
+    let root_id = graph_json["rootNodeId"]
+        .as_u64()
+        .expect("a captured snapshot always has a root node id");
+    let root_node = &graph_json["nodes"][(root_id - 1) as usize];
     assert!(
-        matches!(resolved, verter_type_expr::TypeExpr::Object(_)),
-        "typed JSDoc should resolve the imported symbol through the cached eval env, got {resolved:?}",
+        root_node.get("object").is_some(),
+        "typed JSDoc should resolve the imported symbol through the cached eval env, got {root_node:?}",
     );
     assert!(
         tracked_deps.contains("/tag-types.ts"),
@@ -3714,15 +3909,23 @@ const len = computed(() => props.text.length)
 
     // `ui` should resolve to a slot-shaped type, not `any` or `unknown`.
     let ui_prop = meta.props.iter().find(|p| p.name == "ui").unwrap();
+    let ui_type = crate::test_only::semantic_source_probe::demand_type_expr(
+        project.host(),
+        "/Shimmer.vue",
+        ui_prop
+            .type_source
+            .present()
+            .expect("ui prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("ui prop's published source must demand-materialize"));
     assert!(
         !matches!(
-            ui_prop.type_expr,
+            ui_type,
             verter_type_expr::TypeExpr::Primitive(
                 verter_type_expr::PrimitiveName::Any | verter_type_expr::PrimitiveName::Unknown,
             )
         ),
-        "ui prop should resolve to a concrete type, not any/unknown: got {:?}",
-        ui_prop.type_expr,
+        "ui prop should resolve to a concrete type, not any/unknown: got {ui_type:?}",
     );
 }
 
@@ -4251,7 +4454,7 @@ const emitB = defineEmits<Events>()
                 })
                 .emit_fields()
                 .iter()
-                .any(|emit| emit.name == "save")
+                .any(|emit| emit.analysis.name == "save")
         }),
         "each macro should materialize its imported emit payload through the shared path"
     );
@@ -5096,7 +5299,13 @@ defineSlots<Slots<T>>()
         .iter()
         .find(|entry| entry.name == "Section")
         .expect("local helper should be published into the registry");
-    let verter_type_expr::TypeExpr::Object(section_object) = &section_entry.type_expr else {
+    let section_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+        host,
+        "/src/App.vue",
+        section_entry.type_source.present().expect("present source"),
+    )
+    .unwrap_or_else(|| panic!("the local helper's published source must shell-materialize"));
+    let verter_type_expr::TypeExpr::Object(section_object) = &section_type else {
         panic!("local explicit helper should stay an object surface");
     };
     let feature_property = section_object
@@ -5312,7 +5521,7 @@ defineExpose({ exposed })
         fallthrough_props_dtos
             .prop_fields()
             .iter()
-            .any(|prop| prop.name == "label"),
+            .any(|prop| prop.analysis.name == "label"),
         "fallthrough-expanded state must still preserve the requested defineProps surface"
     );
     assert!(
@@ -5428,7 +5637,7 @@ defineEmits<Emits>()
         fallthrough_props_dtos
             .prop_fields()
             .iter()
-            .any(|prop| prop.name == "label"),
+            .any(|prop| prop.analysis.name == "label"),
         "fallthrough-expanded state must still preserve the requested defineProps surface",
     );
     assert!(
@@ -6134,7 +6343,17 @@ defineProps<TreeNode>()
         "TreeNode should be in the type registry"
     );
 
-    let type_json = serde_json::to_string(&tree_entry.unwrap().type_expr).unwrap();
+    let tree_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+        host,
+        "/src/Tree.vue",
+        tree_entry
+            .unwrap()
+            .type_source
+            .present()
+            .expect("present source"),
+    )
+    .unwrap_or_else(|| panic!("TreeNode's published source must shell-materialize"));
+    let type_json = serde_json::to_string(&tree_type).unwrap();
 
     // Assert+: Should contain a symbolic Ref("TreeNode") for the self-reference
     // (not eagerly expanded to a giant tree). The registry preserves the symbolic
@@ -7032,16 +7251,18 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
 /// Producer-chain invariant: when `defineEmits<Emits>()` consumes a local
 /// interface `Emits` that `extends ExternalEmits<T>` from a package, the
-/// `AnalyzedEmitField` produced through the typeinfo emit normalizer must carry
-/// the typed call-signature payload on `payload_expr` (`Tuple` of post-event-name
-/// params with the generic `T` substituted), and `payload_expr_scope` anchors to
-/// the call signature's DECLARING file (the package `.d.ts` where
-/// `(e, payload: T): void` is written) — the SFC-supplied generic argument lives
-/// in the typed `payload_expr` element types, not in the scope. Without the typed
-/// form, downstream consumers fall back to re-parsing the display `payload_type`
-/// text — the Typed-IR-Only Resolver Rule (CLAUDE.md) forbids that.
+/// resolved emit row produced through the typeinfo emit normalizer renders
+/// the payload display from the REALIZED call signature — the post-event-name
+/// params as a labelled tuple with the SFC-supplied generic `T` SUBSTITUTED —
+/// and publishes the honest locator-less ANALYSIS payload (`None` paired with
+/// a `None` scope: the synthesized tuple has no flat authored macro-payload
+/// position) alongside the session-resolved payload SOURCE (the closed tuple
+/// whose element carries the instantiated `string | number` leaf union).
+/// Typed payload demand re-raises the source through the one shared dispatch;
+/// the display is display-only per the Typed-IR-Only Resolver Rule
+/// (CLAUDE.md).
 #[test]
-fn resolved_macro_emits_carry_payload_expr_for_cross_file_interface_extends() {
+fn resolved_macro_emits_render_substituted_payload_for_cross_file_interface_extends() {
     let project = make_project();
     project
         .upsert_base(
@@ -7099,8 +7320,9 @@ defineEmits<Emits>()
         })
         .expect("defineEmits<Emits> should produce a resolved macro meta entry");
 
-    // The published emit surface (incl. the typed `payload_expr`) is owned by
-    // the SOLE typeinfo macro-surface authority, keyed on the macro index.
+    // The published emit surface (the payload display + honest locator-less
+    // payload) is owned by the SOLE typeinfo macro-surface authority, keyed
+    // on the macro index.
     let define_emits_dtos = host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
         owner_canonical: std::sync::Arc::from("/src/App.vue"),
         macro_index: define_emits.macro_index,
@@ -7114,71 +7336,254 @@ defineEmits<Emits>()
     let emit = define_emits_dtos
         .emit_fields()
         .iter()
-        .find(|emit| emit.name == "update:modelValue")
+        .find(|emit| emit.analysis.name == "update:modelValue")
         .unwrap_or_else(|| {
             panic!(
                 "update:modelValue emit should be present on resolved define-emits, got {:?}",
                 define_emits_dtos
                     .emit_fields()
                     .iter()
-                    .map(|emit| emit.name.as_str())
+                    .map(|emit| emit.analysis.name.as_str())
                     .collect::<Vec<_>>(),
             )
         });
 
-    let payload_expr = emit
-        .payload_expr
-        .as_ref()
-        .expect("payload_expr must be populated for cross-file interface-extends emits");
-    let payload_expr_scope = emit
-        .payload_expr_scope
-        .as_ref()
-        .expect("payload_expr_scope must be populated when payload_expr is populated");
-
-    assert_eq!(
-        payload_expr_scope.as_str(),
-        "/node_modules/reka-ui/index.d.ts",
-        "payload_expr_scope anchors to the call signature's DECLARING file (where \
-         `(e, payload: T): void` is written); the SFC-supplied generic argument \
-         (`string | number`) is encoded in the typed `payload_expr` Tuple's \
-         element types, NOT by re-anchoring the signature's scope to the SFC",
-    );
-
-    let verter_type_expr::TypeExpr::Tuple { elements, .. } = payload_expr else {
-        panic!(
-            "call-signature emit payload should lower to a Tuple, got {:?}",
-            payload_expr,
-        );
-    };
-    assert_eq!(
-        elements.len(),
-        1,
-        "(e, payload: T) tuple after skip(1) should hold a single labelled element"
-    );
-    assert_eq!(
-        elements[0].label.as_deref(),
-        Some("payload"),
-        "tuple element should preserve the payload label",
-    );
-    let verter_type_expr::TypeExpr::Union(members) = &elements[0].ty else {
-        panic!(
-            "the generic T should be substituted with the union string|number, got {:?}",
-            elements[0].ty,
-        );
-    };
+    // The payload tuple is a per-event SYNTHESIS over the realized call
+    // signature's post-event-name params — it has no flat authored
+    // macro-payload position, so the published LOCATOR is the honest `None`
+    // (the typed payload is a graph-surface demand). The display VALUE is
+    // paired with its resolution scope: the call signature's
+    // declaration-origin file (value⇔scope pairing).
     assert!(
-        members.contains(&verter_type_expr::TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::String,
-        )),
-        "payload union should contain string, got {:?}",
-        members,
+        emit.analysis.payload.is_none(),
+        "a synthesized call-signature emit payload publishes no authored locator"
     );
     assert!(
-        members.contains(&verter_type_expr::TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::Number,
+        emit.analysis.payload_expr_scope.is_some(),
+        "the emit payload display is paired with the signature's declaration-origin scope"
+    );
+    // The display payload_type is rendered from the REALIZED signature, so
+    // `[payload: string | number]` pins BOTH the single labelled
+    // post-event-name element AND the `T := string | number` substitution —
+    // an unsubstituted signature would render `[payload: T]`.
+    assert_eq!(
+        emit.analysis.payload_type.as_deref(),
+        Some("[payload: string | number]"),
+        "the emit payload display renders the substituted labelled tuple, got {:?}",
+        emit.analysis.payload_type,
+    );
+    // The session-resolved payload SOURCE mirrors the same realized params as
+    // the closed tuple whose single labelled element carries the instantiated
+    // leaf union — never a fabricated locator, never the Unknown leaf.
+    {
+        use verter_type_expr::facts::{
+            ClosedTypeFact, FactOrLocator, LeafTypeFact, SemanticTypeSource,
+        };
+        let source = emit
+            .payload_source
+            .present()
+            .expect("the realized call-signature emit publishes a closed tuple payload source");
+        let SemanticTypeSource::Closed(ClosedTypeFact::Tuple(tuple)) = source else {
+            panic!("the payload source must be the closed tuple, got {source:?}");
+        };
+        assert_eq!(tuple.elements.len(), 1);
+        assert_eq!(tuple.elements[0].label.as_deref(), Some("payload"));
+        assert_eq!(
+            tuple.elements[0].ty,
+            FactOrLocator::LeafUnion(std::sync::Arc::from(
+                vec![
+                    LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::String),
+                    LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::Number),
+                ]
+                .into_boxed_slice(),
+            )),
+            "the element must carry the ordered instantiated leaf union"
+        );
+    }
+}
+
+/// DIRECT-AUTHORED property-style emit source: `defineEmits<{ save: [id:
+/// number] }>()` — the resolved emit ROW must carry the EXACT authored
+/// macro-payload position as its published payload SOURCE
+/// (`Authored(MacroPayload(..))` addressing the analyzer-stamped field
+/// ordinal), AND the analysis row's `payload` locator itself. This is the
+/// fallback source `define_emits_shape` publishes when the evaluated-field
+/// match is absent — a source-less row there degrades to the Unknown leaf,
+/// which for an AUTHORED property event is a faithfulness hole.
+///
+/// Discriminating: with the property-style normalizer stamping
+/// `payload: None` unconditionally, both the locator and the source asserts
+/// fail RED.
+#[test]
+fn authored_property_style_emit_publishes_its_exact_macro_payload_source() {
+    use verter_type_expr::facts::SemanticTypeSource;
+    use verter_type_expr::locators::{
+        AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadPosition,
+    };
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ save: [id: number] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+
+    let dtos = host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from("/src/App.vue"),
+        macro_index: 0,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+        root_identity: host
+            .current_or_read_whole_hash("/src/App.vue")
+            .unwrap_or([0u8; 16]),
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    });
+    let emit = dtos
+        .emit_fields()
+        .iter()
+        .find(|emit| emit.analysis.name == "save")
+        .expect("the authored property event is published");
+
+    // The analysis row carries the EXACT analyzer-stamped authored payload
+    // locator (macro ordinal 0, field ordinal 0, the analyzer's
+    // producer-local `default` value anchor).
+    let locator = emit
+        .analysis
+        .payload
+        .as_ref()
+        .expect("an authored property event carries its authored payload locator");
+    assert_eq!(locator.macro_index, 0, "the defineEmits macro ordinal");
+    assert_eq!(
+        locator.payload,
+        MacroPayloadPosition::Field { field_index: 0 },
+        "the analyzer-stamped field ordinal addresses the authored payload"
+    );
+    assert_eq!(
+        locator.anchor.symbol.as_ref(),
+        "default",
+        "the analyzer's producer-local component anchor"
+    );
+    assert_eq!(locator.anchor.space, LocatorSymbolSpace::Value);
+    // Pairing invariant: a locator-bearing row carries a resolution scope.
+    assert!(
+        emit.analysis.payload_expr_scope.is_some(),
+        "payload.is_some() => payload_expr_scope.is_some()"
+    );
+
+    // The published payload SOURCE is the SAME authored position — the
+    // fallback `define_emits_shape` publishes when the evaluated-field
+    // match is withheld; never `None`, never the degraded Unknown leaf.
+    let source = emit
+        .payload_source
+        .present()
+        .expect("an authored property event publishes its authored payload source");
+    assert_eq!(
+        source,
+        &SemanticTypeSource::Authored(AuthoredBodyLocator::MacroPayload(locator.clone())),
+        "the payload source IS the authored macro-payload position"
+    );
+}
+
+/// IMPORTED / INHERITED property-style emit source: `defineEmits<ImportedEmits>()`
+/// over a cross-file `export interface ImportedEmits {{ save: [id: number] }}`
+/// — the analyzer's field-index vocabulary cannot address the payload (no
+/// local authored position), so the resolved row publishes the GRAPH-NATIVE
+/// closed source instead: the complete closed payload TUPLE projected from
+/// the member's value node (label / optionality / rest / order preserved),
+/// NOT a fabricated authored locator and NOT the degraded Unknown leaf.
+///
+/// Discriminating: with the property-style normalizer publishing no source,
+/// `payload_source` is `None` and the closed-tuple asserts fail RED.
+#[test]
+fn inherited_property_style_emit_publishes_the_graph_native_closed_source() {
+    use verter_type_expr::facts::{
+        ClosedTypeFact, FactOrLocator, LeafTypeFact, SemanticTypeSource,
+    };
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/emits.ts",
+            "export interface ImportedEmits { save: [id: number] }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ImportedEmits } from './emits'
+defineEmits<ImportedEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+
+    let dtos = host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: std::sync::Arc::from("/src/App.vue"),
+        macro_index: 0,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+        root_identity: host
+            .current_or_read_whole_hash("/src/App.vue")
+            .unwrap_or([0u8; 16]),
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    });
+    let emit = dtos
+        .emit_fields()
+        .iter()
+        .find(|emit| emit.analysis.name == "save")
+        .expect("the imported property event is published");
+
+    // No LOCAL authored position exists for a cross-file member — the
+    // analysis locator stays the honest `None` (never fabricated).
+    assert!(
+        emit.analysis.payload.is_none(),
+        "a cross-file property event has no flat authored macro-payload position"
+    );
+
+    // The published payload SOURCE is the graph-native complete closed
+    // TUPLE over the member's value node — the fallback `define_emits_shape`
+    // publishes when the evaluated-field match is withheld.
+    let source = emit
+        .payload_source
+        .present()
+        .expect("an inherited property event publishes its graph-native closed source");
+    let SemanticTypeSource::Closed(ClosedTypeFact::Tuple(tuple)) = source else {
+        panic!("the inherited payload source must be the closed tuple, got {source:?}");
+    };
+    assert!(!tuple.readonly);
+    assert_eq!(tuple.elements.len(), 1, "one authored payload element");
+    let element = &tuple.elements[0];
+    assert_eq!(
+        element.label.as_deref(),
+        Some("id"),
+        "the authored tuple label survives the node projection"
+    );
+    assert!(!element.optional);
+    assert!(!element.rest);
+    assert_eq!(
+        element.ty,
+        FactOrLocator::Leaf(LeafTypeFact::Primitive(
+            verter_type_expr::PrimitiveName::Number
         )),
-        "payload union should contain number, got {:?}",
-        members,
+        "the element carries the complete closed leaf fact"
+    );
+    // Fail-closed negatives: never a fabricated authored locator, never the
+    // degraded Unknown leaf.
+    assert!(
+        !matches!(source, SemanticTypeSource::Authored(_)),
+        "no authored locator may be fabricated for a cross-file member"
+    );
+    assert_ne!(
+        source,
+        &SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
+            verter_type_expr::PrimitiveName::Unknown,
+        ))),
+        "the inherited payload source must not degrade to the Unknown leaf"
     );
 }
 
@@ -7906,8 +8311,8 @@ mod node_predicates_tests {
             RouteDemand::Pick(keys) => {
                 assert_eq!(
                     keys,
-                    vec!["a".to_string(), "b".to_string(), "c".to_string()],
-                    "all three literal-union keys must be preserved in order"
+                    verter_type_expr::facts::RouteKeySet::new(["a", "b", "c"]),
+                    "all three literal-union keys must be preserved"
                 );
             }
             other => panic!("expected RouteDemand::Pick, got {other:?}"),
@@ -8016,7 +8421,7 @@ mod node_predicates_tests {
         assert_eq!(extraction.root_identity, foo_identity);
         match extraction.route {
             RouteDemand::MemberPath(segments) => {
-                assert_eq!(segments, vec!["c".to_string(), "full".to_string()]);
+                assert_eq!(segments.to_vec(), vec!["c".to_string(), "full".to_string()]);
             }
             other => panic!("expected RouteDemand::MemberPath, got {other:?}"),
         }
@@ -8172,9 +8577,9 @@ defineProps<{ value: A }>()
     /// L2: the cycle/fence guard derives its root identity from the
     /// utility's SOURCE type-argument, not just the outer `Ref` name.
     /// `Pick<A, 'next'>` where `A` transitively cycles (A → B(keyof C) →
-    /// C → A) must be DETECTED — pre-fix `root_decl_identity` rooted the
-    /// BFS at `__builtin__::Pick` (structurally blind to the source
-    /// chain) and missed the cycle.
+    /// C → A) must be DETECTED — a guard that roots the BFS only at
+    /// `__builtin__::Pick` is structurally blind to the source chain and
+    /// misses the cycle.
     #[test]
     fn cycle_guard_roots_at_utility_source_type_argument() {
         use verter_type_expr::TypeExpr;
@@ -8195,18 +8600,25 @@ export type C = { back: A }
         let _ = session.evaluate_types("/cycle.ts");
 
         let host = session.host();
-        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
         // `Pick<A, 'next'>` — the source argument `A` is the cyclic root.
         let pick_over_cycle = TypeExpr::named_with_args(
             "Pick",
             vec![TypeExpr::named("A"), TypeExpr::string_literal("next")],
         );
-        let detected = crate::meta_resolve::lowered_root_reaches_transitive_cycle(
-            &mut engine,
+        let node = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
+            .lower_type_expr_in_scope_with_mode(
+                "/cycle.ts",
+                &pick_over_cycle,
+                crate::semantic_query::ProjectionMode::Navigate,
+            )
+            .expect("Pick<A,'next'> must lower");
+        let detected = crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(
+            host,
             "/cycle.ts",
-            &pick_over_cycle,
-        );
+            node,
+        )
+        .0;
         assert!(
             detected,
             "Pick<A,'next'> over a cyclic source `A` must be detected via the \
@@ -8516,329 +8928,6 @@ defineProps<{ value: Foo }>()
         // pathological recursion. Either way, must not panic.
         let _ = type_node_has_package_backed_root(ctx, current, 0);
     }
-
-    /// `preserve_package_backed_symbolic_refs_node`
-    /// is the graph-native parallel-pair walker (former TypeExpr
-    /// counterpart §6.15 / N). Operates on
-    /// `SemanticNodeId` parallel pairs. Walks materialized + raw
-    /// surfaces; when a raw property's value is a package-backed
-    /// `DeclRef`/`InstantiationRef`, the corresponding materialized
-    /// member's value is overridden with the raw graph node (preserving
-    /// the symbolic Ref through materialisation).
-    #[test]
-    fn preserve_package_backed_symbolic_refs_node_overrides_pkg_member() {
-        use crate::meta_resolve::preserve_package_backed_symbolic_refs_node;
-        use crate::semantic_query::{IndexSignature, SemanticNodeData, SurfaceMember, SurfaceView};
-
-        let project = make_project();
-        let host = project.host();
-        let graph = host.project_type_store().semantic_graph();
-
-        let pkg_identity = package_decl_identity("PkgType");
-        let pkg_ref = graph.intern_node(SemanticNodeData::DeclRef {
-            identity: pkg_identity.clone(),
-        });
-        let local_identity = synthetic_decl_identity("LocalType");
-        let local_ref = graph.intern_node(SemanticNodeData::DeclRef {
-            identity: local_identity.clone(),
-        });
-        let prim_string = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
-        ));
-        let prim_number = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
-
-        // Build raw surface: { a: PkgType, b: LocalType, c: string }
-        let raw_surface = SurfaceView {
-            members: StdArc::from(
-                vec![
-                    SurfaceMember {
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        name: StdArc::from("a"),
-                        value: pkg_ref,
-                        optional: false,
-                        readonly: false,
-                        is_method: false,
-                        declared_in_macro_type_arg:
-                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                        spans: Default::default(),
-                        declaration_origin: None,
-                    },
-                    SurfaceMember {
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        name: StdArc::from("b"),
-                        value: local_ref,
-                        optional: false,
-                        readonly: false,
-                        is_method: false,
-                        declared_in_macro_type_arg:
-                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                        spans: Default::default(),
-                        declaration_origin: None,
-                    },
-                    SurfaceMember {
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        name: StdArc::from("c"),
-                        value: prim_string,
-                        optional: false,
-                        readonly: false,
-                        is_method: false,
-                        declared_in_macro_type_arg:
-                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                        spans: Default::default(),
-                        declaration_origin: None,
-                    },
-                ]
-                .into_boxed_slice(),
-            ),
-            call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-            index_signatures: StdArc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        };
-        let raw = graph.intern_node(SemanticNodeData::Object(raw_surface));
-
-        // Materialised version: { a: number, b: number, c: number } —
-        // every property has been collapsed to `number`. The expected
-        // result after preservation: a switches BACK to PkgType (the
-        // raw symbolic Ref is restored), b stays as `number` (raw was
-        // a local Ref, not package-backed), c stays as `number`.
-        let materialized_surface = SurfaceView {
-            members: StdArc::from(
-                vec![
-                    SurfaceMember {
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        name: StdArc::from("a"),
-                        value: prim_number,
-                        optional: false,
-                        readonly: false,
-                        is_method: false,
-                        declared_in_macro_type_arg:
-                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                        spans: Default::default(),
-                        declaration_origin: None,
-                    },
-                    SurfaceMember {
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        name: StdArc::from("b"),
-                        value: prim_number,
-                        optional: false,
-                        readonly: false,
-                        is_method: false,
-                        declared_in_macro_type_arg:
-                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                        spans: Default::default(),
-                        declaration_origin: None,
-                    },
-                    SurfaceMember {
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        name: StdArc::from("c"),
-                        value: prim_number,
-                        optional: false,
-                        readonly: false,
-                        is_method: false,
-                        declared_in_macro_type_arg:
-                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                        spans: Default::default(),
-                        declaration_origin: None,
-                    },
-                ]
-                .into_boxed_slice(),
-            ),
-            call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-            index_signatures: StdArc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        };
-        let materialized = graph.intern_node(SemanticNodeData::Object(materialized_surface));
-
-        let result_id = preserve_package_backed_symbolic_refs_node(host, materialized, raw, 0);
-
-        // Inspect the result surface.
-        let Some(result_data) = graph.node_data(result_id) else {
-            panic!("result must have node data");
-        };
-        let SemanticNodeData::Object(result_surface) = result_data.as_ref() else {
-            panic!("result must be an Object surface");
-        };
-        // Member a — must be the raw pkg_ref (package preservation fired).
-        let member_a = &result_surface.members[0];
-        assert_eq!(member_a.name.as_ref(), "a");
-        assert_eq!(
-            member_a.value, pkg_ref,
-            "package-backed raw Ref must be preserved into the materialised member"
-        );
-        // Member b — must remain the materialised `number` (no override).
-        let member_b = &result_surface.members[1];
-        assert_eq!(member_b.name.as_ref(), "b");
-        assert_eq!(
-            member_b.value, prim_number,
-            "local raw Ref must NOT trigger preservation; member stays materialised"
-        );
-        // Member c — must remain materialised (no Ref in raw).
-        let member_c = &result_surface.members[2];
-        assert_eq!(member_c.name.as_ref(), "c");
-        assert_eq!(
-            member_c.value, prim_number,
-            "primitive raw value must NOT trigger preservation"
-        );
-    }
-
-    /// non-Object pair: pass-through (returns
-    /// materialized unchanged). Mirrors the TypeExpr predicate's
-    /// `_ => materialized.clone()` arm.
-    #[test]
-    fn preserve_package_backed_symbolic_refs_node_passes_through_non_object() {
-        use crate::meta_resolve::preserve_package_backed_symbolic_refs_node;
-        use crate::semantic_query::SemanticNodeData;
-
-        let project = make_project();
-        let host = project.host();
-        let graph = host.project_type_store().semantic_graph();
-
-        let prim_number = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
-        let prim_string = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
-        ));
-
-        // Both primitives — non-Object. Returns materialized unchanged.
-        let result = preserve_package_backed_symbolic_refs_node(host, prim_number, prim_string, 0);
-        assert_eq!(
-            result, prim_number,
-            "non-Object pair must return materialized unchanged"
-        );
-
-        // Materialized = Object, raw = primitive. Returns materialized unchanged.
-        let obj_surface = empty_surface(vec![]);
-        let obj = graph.intern_node(SemanticNodeData::Object(obj_surface));
-        let result2 = preserve_package_backed_symbolic_refs_node(host, obj, prim_string, 0);
-        assert_eq!(
-            result2, obj,
-            "Object materialized + non-Object raw must pass through unchanged"
-        );
-    }
-
-    /// Node-domain registry structural materialisation, no-args `Ref` arm:
-    /// a package-backed `Ref { name, [] }` short-circuits (returns the input
-    /// unchanged) and carries object-surface fact `false`; a local
-    /// `Ref { name, [] }` projects to its whole surface and carries the
-    /// producing node's object-surface fact. Asserts BOTH the materialised
-    /// `TypeExpr` and the threaded object-surface fact for each branch.
-    #[test]
-    fn registry_structural_expr_handles_package_vs_local_no_args_ref() {
-        use crate::resolver_core::ComponentMetaQueryEngine;
-        use std::sync::Arc as StdArc;
-        use verter_type_expr::TypeExpr;
-
-        let project = make_project();
-        // Local interface — projects through surface.
-        project
-            .upsert_base(
-                "/local.ts",
-                "export interface LocalLeaf { x: number; y: string }",
-            )
-            .unwrap();
-        // Package-backed type — must short-circuit (stay symbolic).
-        project
-            .upsert_base(
-                "/node_modules/some-pkg/index.d.ts",
-                "export interface FromPkg { p: number }",
-            )
-            .unwrap();
-        project
-            .upsert_base(
-                "/Owner.vue",
-                r#"<script setup lang="ts">
-import type { LocalLeaf } from './local'
-import type { FromPkg } from 'some-pkg'
-defineProps<{ a: LocalLeaf; b: FromPkg }>()
-</script>
-<template><div /></template>"#,
-            )
-            .unwrap();
-        project.host().set_import_dependencies(
-            "/Owner.vue",
-            vec![
-                crate::types::DependencyResolution {
-                    specifier: "./local".to_string(),
-                    resolved_canonical_id: Some("/local.ts".to_string()),
-                    possible_canonical_ids: Vec::new(),
-                },
-                crate::types::DependencyResolution {
-                    specifier: "some-pkg".to_string(),
-                    resolved_canonical_id: Some("/node_modules/some-pkg/index.d.ts".to_string()),
-                    possible_canonical_ids: Vec::new(),
-                },
-            ],
-        );
-
-        let session = project.open_session_batch().unwrap();
-        let _ = session.evaluate_types("/Owner.vue").unwrap();
-        let host = session.host();
-        let mut engine = ComponentMetaQueryEngine::new(host);
-
-        // Package-backed `FromPkg` — short-circuits unchanged.
-        // Discriminating assertion: the result MUST be exactly the
-        // input Ref (cloned). If the refactor accidentally inverts the
-        // package check or skips it, FromPkg would be projected and
-        // fail this assertion.
-        let pkg_ref = TypeExpr::Ref {
-            name: StdArc::from("FromPkg"),
-            type_arguments: StdArc::from(Vec::new().into_boxed_slice()),
-        };
-        let (materialized_pkg, pkg_is_object) =
-            engine.materialize_registry_structural_candidate("/Owner.vue", &pkg_ref);
-        assert_eq!(
-            materialized_pkg, pkg_ref,
-            "package-backed Ref must short-circuit unchanged; \
-             refactor regression if this fails (e.g., inverted package check)"
-        );
-        assert!(
-            !pkg_is_object,
-            "a symbolic package-backed Ref carries no explicit object surface, \
-             so the threaded object-surface fact must be false — regression if \
-             the fact mis-reports a symbolic ref as an object surface"
-        );
-
-        // Local `LocalLeaf` — must NOT short-circuit to itself; must
-        // produce SOMETHING different from the input (either projected
-        // Object surface or whatever the projection returns). The key
-        // discriminator: local refs do NOT use the package short-circuit
-        // path. If the refactor accidentally treats local refs as
-        // package-backed, this assertion fails.
-        let local_ref = TypeExpr::Ref {
-            name: StdArc::from("LocalLeaf"),
-            type_arguments: StdArc::from(Vec::new().into_boxed_slice()),
-        };
-        let (materialized_local, local_is_object) =
-            engine.materialize_registry_structural_candidate("/Owner.vue", &local_ref);
-        // Local Ref should project through the whole-surface candidate; since
-        // LocalLeaf is a real interface, the candidate returns the Object
-        // surface, so materialized_local must NOT be the input Ref unchanged.
-        assert_ne!(
-            materialized_local, local_ref,
-            "local LocalLeaf with projectable interface body must NOT \
-             short-circuit unchanged — refactor regression if this fails \
-             (e.g., local refs misclassified as package-backed)"
-        );
-        assert!(
-            local_is_object,
-            "LocalLeaf projects to its interface object surface, so the threaded \
-             object-surface fact must be true — regression if the fact is dropped \
-             or forced always-false"
-        );
-    }
 }
 
 /// Overlay/base prop isolation through context-aware `vue_macro_dtos`.
@@ -8898,7 +8987,10 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
         level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
     };
     let prop_names = |dtos: &crate::typeinfo::framework_surface::MacroSurfaceDtos| -> Vec<String> {
-        dtos.prop_fields().iter().map(|p| p.name.clone()).collect()
+        dtos.prop_fields()
+            .iter()
+            .map(|p| p.analysis.name.clone())
+            .collect()
     };
 
     // Base-view read (no overlay): only the base prop `a`.
@@ -9024,7 +9116,10 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
         level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
     };
     let prop_names = |dtos: &crate::typeinfo::framework_surface::MacroSurfaceDtos| -> Vec<String> {
-        dtos.prop_fields().iter().map(|p| p.name.clone()).collect()
+        dtos.prop_fields()
+            .iter()
+            .map(|p| p.analysis.name.clone())
+            .collect()
     };
 
     // Base-view read (no overlay): only the base model prop `old`.

@@ -1508,66 +1508,6 @@ fn repeated_asks_do_not_grow_memo() {
     );
 }
 
-/// `ResolvedNamedType` dispatches through `execute` after the adapter
-/// has written the entry: reads come back as `QueryResult::Value` and
-/// carry the file's whole-hash + project generation in the dep
-/// signature. The hot path still goes direct through
-/// `get_resolved_named_type` (refcount-only) — this test exercises
-/// the formal entry point so ad-hoc callers of the shared query API
-/// see the warm entry too.
-#[test]
-fn resolved_named_type_dispatch_returns_value_after_insert() {
-    use crate::semantic_query::HostResolvedNamedTypeKey;
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-    use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
-
-    let host = host();
-    let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = host.project_type_store().semantic_graph();
-
-    let key = HostResolvedNamedTypeKey {
-        canonical_id: Arc::from("/w/a.ts"),
-        whole_hash: [7u8; 16],
-        resolve_env_hash: Default::default(),
-        type_env_hash: Default::default(),
-        lib_env_hash: Default::default(),
-        project_identity: 0,
-        inner: ResolvedNamedTypeCacheKey {
-            name: b"Foo".to_vec().into_boxed_slice(),
-            surface: None,
-            base_offset: 0,
-            from_root_body: true,
-            companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
-            type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
-        },
-    };
-    let payload = Arc::new(ResolvedElements::default());
-
-    // Miss before insert: formal entry point returns `Error(Miss)`.
-    let miss = dispatch.execute_type_node(SemanticQueryKey::ResolvedNamedType {
-        key: Arc::new(key.clone()),
-    });
-    assert!(matches!(miss, QueryResult::Error(QueryError::Miss)));
-
-    // Write via the semantic graph (adapter-side path).
-    let expected_id = graph
-        .insert_resolved_named_type(
-            key.clone(),
-            Arc::clone(&payload),
-            graph.named_type_generation(),
-        )
-        .expect("current-generation insert is accepted");
-
-    // Hit after insert: the formal entry point hands back the same
-    // interned node id.
-    let hit =
-        dispatch.execute_type_node(SemanticQueryKey::ResolvedNamedType { key: Arc::new(key) });
-    match hit {
-        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => assert_eq!(id, expected_id),
-        other => panic!("expected value after insert, got {other:?}"),
-    }
-}
-
 /// Two concurrent threads — one calling the `ProjectMember` sugar
 /// form and one calling the canonical `ProjectPath` form for the
 /// equivalent member — admission-rewrite to the same canonical key and
@@ -1714,15 +1654,6 @@ fn dispatch_host_adapter_routes_per_base_scope() {
     // regardless of the caller.
     assert_eq!(adapter.base_scope(anchor_a), scope_a);
     assert_eq!(adapter.base_scope(anchor_a), scope_a);
-
-    // Exempt nodes (VueMacroElements) route to `Global` because
-    // the sidecar has no entry for them — the fallback is `Global`
-    // so every base has a well-defined routing decision.
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-    let vue_id = graph.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
-        ResolvedElements::default(),
-    )));
-    assert_eq!(adapter.base_scope(vue_id), NodeScopeId::Global);
 
     // Trait methods route through `solver_host_for_base`. Without
     // prepared decls set up, `resolve_prepared_type_decl` returns
@@ -13368,7 +13299,7 @@ fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
 #[test]
 fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_sticky() {
     use crate::request_context::{
-        current_materialization_cache_suppress, current_request_budget, RequestContext,
+        current_request_budget, current_request_result_is_partial, RequestContext,
         RequestContextGuard,
     };
 
@@ -13408,7 +13339,7 @@ fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_
         "test setup: budget must be pre-exhausted so the KeyOf read hits the early-exit",
     );
     assert!(
-        !current_materialization_cache_suppress(),
+        !current_request_result_is_partial(),
         "test setup: the request sticky must start UNSET so the early-exit fold is the only thing \
          that can raise it",
     );
@@ -13452,7 +13383,7 @@ fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_
     // The per-request sticky MUST have been raised by the early-exit fold (it
     // started unset above).
     assert!(
-        current_materialization_cache_suppress(),
+        current_request_result_is_partial(),
         "the EARLY-EXIT MUST raise the per-request materialization-cache-suppress sticky on \
          result_is_partial — commenting out the early-exit fold leaves it unset",
     );
@@ -14816,7 +14747,6 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
             NormalizeUnion { .. } => "NormalizeUnion",
             NormalizeIntersection { .. } => "NormalizeIntersection",
             ProjectPath { .. } => "ProjectPath",
-            ResolvedNamedType { .. } => "ResolvedNamedType",
             Relate { .. } => "Relate",
             ResolveMacroPayload { .. } => "ResolveMacroPayload",
             ResolveClassSurface { .. } => "ResolveClassSurface",
@@ -15835,31 +15765,34 @@ fn memo_refuses_insertion_on_cache_suppress_true_via_pathological_input() {
     );
 }
 
-// ── Member-index overlay carries the prepared member's spans + origin.
+// ── Member-index overlay recovers the prepared member's spans + origin.
 //
 // `backfill_member_index_surface` (build.rs) APPENDS own-body members
-// from `prepared.member_index` that are not yet on the surface, and must
-// copy each `PreparedMember`'s OXC declaration-site `spans` +
-// `declaration_origin` onto the appended graph `SurfaceMember` (so a
-// macro-T own-member overlay reaches the span-rich `TypeInfoSurface`
-// instead of `MemberSpans::default()`).
+// from `prepared.member_index` that are not yet on the surface. Each
+// appended member's declaration-site spans are RECOVERED on demand from
+// the declaring file's retained parse via the member fact's
+// `span_origin` (`PreparedMemberFact` carries a content-free
+// `MemberSpansOrigin`, never verbatim `MemberSpans`), and its
+// `declaration_origin` is stamped from the fact — so a macro-T own-member
+// overlay reaches the span-rich `TypeInfoSurface` instead of
+// `MemberSpans::default()`.
 //
-// This pins that TRANSFER directly — the step the verter_semantic
-// producer proof and the `build_member` unit do NOT exercise (the former
-// proves the `PreparedMember` carries spans; the latter proves
-// `TypeInfoSurface::build` consumes a hand-built `SurfaceMember`). The
-// test is DISCRIMINATING: if the append stamps `MemberSpans::default()` /
-// `declaration_origin: None`, the `spans` equality assertion sees
-// all-`None` and the origin assertion sees `None`, both diverging from
-// the prepared NON-default values, so the test FAILS.
+// This pins that RECOVERY-and-transfer directly on a REAL declaring file
+// (the only way the span-origin can recover a real range). The test is
+// DISCRIMINATING: if the append stamps `MemberSpans::default()` /
+// `declaration_origin: None` (dropping the span-origin recovery), the
+// name-span slice below sees no `label` range and the origin assertion
+// sees `None`, both diverging from the recovered values, so the test
+// FAILS.
 #[test]
 fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
-    use verter_semantic::analysis::type_eval::TypeDeclKind;
-    use verter_semantic::analysis::type_solver::prepared::PreparedMember;
-    use verter_span::Span;
-    use verter_type_expr::{MemberSpans, PrimitiveName, TypeExpr};
-
     let host = host();
+    let origin = "/overlay_origin.ts";
+    // A real declaring file: the `label` member's authored spans are what
+    // the append path must recover through the fact's `span_origin`.
+    let source = "interface Slots {\n  label: string;\n}\n";
+    upsert_ts(&host, origin, source);
+
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
@@ -15867,44 +15800,27 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
     // so the overlay takes the APPEND path for it.
     let result = intern_object_with_members(&graph, Vec::new());
 
-    // (2) A prepared decl whose `member_index` carries ONE own-body member
-    // with NON-default spans (all three components distinct + non-empty)
-    // and a NON-empty declaration origin. The member type is a primitive,
-    // which `shallow_lower_type_expr_with_context` lowers hermetically (no
-    // host routing), keeping this a focused unit on the append transfer.
-    let expected_spans = MemberSpans {
-        declaration: Some(Span::new(100, 130)),
-        name: Some(Span::new(100, 105)),
-        type_annotation: Some(Span::new(107, 130)),
-    };
-    let expected_origin = "/overlay_origin.ts";
-
-    let mut prepared = PreparedTypeDecl::new(
-        ResolvedRootIdentity::new(expected_origin, "Slots"),
-        TypeDeclKind::Interface,
-        TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-            properties: Vec::new(),
-        })),
-    );
-    prepared.member_index.insert(
-        "label".to_string(),
-        PreparedMember {
-            ty: TypeExpr::Primitive(PrimitiveName::String),
-            optional: false,
-            readonly: false,
-            is_method: false,
-            visibility: verter_type_expr::MemberVisibility::Public,
-            spans: expected_spans,
-            declaration_origin: expected_origin.to_string(),
-        },
+    // (2) The REAL prepared decl for `Slots` — its `member_index` carries
+    // the `label` `PreparedMemberFact` with the fact's `span_origin`
+    // (recoverable only against the declaring file's retained parse).
+    let prepared = host
+        .prepared_type_decl(origin, "Slots")
+        .expect("prepared decl for the interface `Slots`");
+    assert!(
+        prepared.member_index.contains_key("label"),
+        "fixture premise: the prepared decl indexes its own-body `label` member",
     );
 
-    // (3) Minimal lowering context (mirrors the `build_instantiate` call
-    // site): no bound type params, the decl-file scope, no scope payload.
+    // (3) Lowering context mirroring the `build_instantiate` call site, at
+    // the REAL declaring-file scope (its live whole-hash) so the recovery
+    // memo resolves.
+    let whole_hash = host
+        .current_or_read_whole_hash(origin)
+        .expect("declaring file has a whole-hash");
     let env: rustc_hash::FxHashMap<String, SemanticNodeId> = rustc_hash::FxHashMap::default();
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(expected_origin),
-        whole_hash: [0u8; 16],
+        canonical_id: Arc::from(origin),
+        whole_hash,
         local_scope: None,
     };
     let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
@@ -15924,26 +15840,38 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
         context,
     );
 
-    // (4) Read back the appended member and pin spans + origin to the
-    // prepared NON-default values (NOT `MemberSpans::default()` / `None`).
+    // (4) Read back the appended member and pin the RECOVERED spans + origin
+    // to the real authored positions (NOT `MemberSpans::default()` / `None`).
     let view = require_object_surface(&graph, overlaid, "member-index overlay append");
     let appended = surface_get_member(&view, "label");
 
-    assert_eq!(
-        appended.spans, expected_spans,
-        "appended own-body member must carry the PreparedMember's OXC spans \
-         verbatim, not MemberSpans::default() — build.rs append transfer",
-    );
     assert_ne!(
         appended.spans,
-        MemberSpans::default(),
-        "guards against an append regression that stamps MemberSpans::default()",
+        verter_type_expr::MemberSpans::default(),
+        "the append must RECOVER the member's spans from the declaring file's \
+         retained parse — a regression that stamps MemberSpans::default() fails here",
+    );
+    let name_span = appended
+        .spans
+        .name
+        .expect("the recovered member carries a name span");
+    assert_eq!(
+        &source[name_span.start as usize..name_span.end as usize],
+        "label",
+        "the recovered name span must slice to the authored `label` member key \
+         (build.rs append span-origin recovery)",
+    );
+    assert!(
+        appended.spans.declaration.is_some() && appended.spans.type_annotation.is_some(),
+        "the append recovers the full member spans (declaration + type annotation), \
+         not just the name; got {:?}",
+        appended.spans,
     );
     assert_eq!(
         appended.declaration_origin.as_deref(),
-        Some(expected_origin),
-        "appended own-body member must carry the PreparedMember's declaration \
-         origin, not None — build.rs append transfer",
+        Some(origin),
+        "appended own-body member must carry the fact's declaration origin, not None \
+         — build.rs append transfer",
     );
 }
 
@@ -17365,12 +17293,7 @@ fn class_mech_host() -> VerterHost {
 
 fn resolve_class_mech(host: &VerterHost, name: &str) -> verter_type_expr::TypeExpr {
     let (outcome, _record) = host
-        .resolve_named_symbol_with_audit(
-            "/w/class_mech.ts",
-            name,
-            &[],
-            Some(ProjectionMode::Expanded),
-        )
+        .resolve_named_symbol_with_audit("/w/class_mech.ts", name, Some(ProjectionMode::Expanded))
         .into_parts();
     let node = outcome
         .ok()
@@ -18130,7 +18053,7 @@ fn reexport_class_host() -> VerterHost {
 
 fn resolve_named_in(host: &VerterHost, canonical: &str, name: &str) -> verter_type_expr::TypeExpr {
     let (outcome, _record) = host
-        .resolve_named_symbol_with_audit(canonical, name, &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol_with_audit(canonical, name, Some(ProjectionMode::Expanded))
         .into_parts();
     let node = outcome
         .ok()
@@ -19446,7 +19369,7 @@ fn nested_uppercase_keyof_merged_interface_resolves_to_transformed_keyspace() {
     );
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let k = host
-        .resolve_named_symbol("/w/f8.ts", "K", &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol("/w/f8.ts", "K", Some(ProjectionMode::Expanded))
         .expect("K resolves");
     let data = graph.node_data(k).unwrap();
     // Negative: must NOT widen to the broad `string` primitive (the fail-closed
@@ -19635,7 +19558,7 @@ fn keyof_over_merged_decl_with_conflicting_and_overload_keys_unions_keyspace() {
 #[test]
 fn evaluate_deferred_memo_does_not_publish_budget_tainted_result() {
     use crate::request_context::{
-        current_materialization_cache_suppress, RequestContext, RequestContextGuard,
+        current_request_result_is_partial, RequestContext, RequestContextGuard,
     };
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -19663,7 +19586,7 @@ fn evaluate_deferred_memo_does_not_publish_budget_tainted_result() {
     {
         let _g = RequestContextGuard::install(Arc::clone(&tight));
         let _ = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(outer, context);
-        suppress_after_tight = current_materialization_cache_suppress();
+        suppress_after_tight = current_request_result_is_partial();
     }
     // Fixture validity: the tight run MUST have tripped `BudgetExceeded` (else
     // the test characterizes nothing).
@@ -19694,7 +19617,7 @@ fn evaluate_deferred_memo_does_not_publish_budget_tainted_result() {
 #[test]
 fn roomy_request_misses_budget_tainted_evaluate_deferred_entry() {
     use crate::request_context::{
-        current_materialization_cache_suppress, RequestContext, RequestContextGuard,
+        current_request_result_is_partial, RequestContext, RequestContextGuard,
     };
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -19719,7 +19642,7 @@ fn roomy_request_misses_budget_tainted_evaluate_deferred_entry() {
     {
         let _g = RequestContextGuard::install(Arc::clone(&tight));
         let _ = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(outer, context);
-        suppress_after_tight = current_materialization_cache_suppress();
+        suppress_after_tight = current_request_result_is_partial();
     }
     assert!(
         suppress_after_tight,
@@ -19763,7 +19686,7 @@ fn roomy_request_misses_budget_tainted_evaluate_deferred_entry() {
 #[test]
 fn roomy_request_recomputes_correct_value_after_budget_truncation() {
     use crate::request_context::{
-        current_materialization_cache_suppress, RequestContext, RequestContextGuard,
+        current_request_result_is_partial, RequestContext, RequestContextGuard,
     };
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -19792,12 +19715,25 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
         None,
         1,
     );
-    let (v_tight, suppress_after_tight);
+    let (v_tight, tight_completeness, suppress_after_tight);
     {
         let _g = RequestContextGuard::install(Arc::clone(&tight));
-        v_tight = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(outer, context);
-        suppress_after_tight = current_materialization_cache_suppress();
+        (v_tight, tight_completeness) =
+            dispatch.evaluate_deferred_semantic_node_with_context_for_tests(outer, context);
+        suppress_after_tight = current_request_result_is_partial();
     }
+    // Typed-completeness discriminator: the budget-truncated tight run is
+    // `Partial` — the terminal member read tripped `BudgetExceeded` and folded
+    // its `result_is_partial` into the evaluation (the boolean bridge, lifted
+    // `PROPAGATED`). A `Complete` here would mean the truncation was erased and
+    // a confident-but-wrong classification could publish.
+    assert!(
+        matches!(
+            tight_completeness,
+            crate::semantic_query::ResultCompleteness::Partial(_)
+        ),
+        "the budget-truncated tight run must report Partial completeness, got {tight_completeness:?}"
+    );
     // Fixture validity: the tight run truncated to Opaque(Miss) AND raised the
     // suppress sticky (else the test characterizes nothing).
     assert!(
@@ -19824,11 +19760,24 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
         None,
         64,
     );
-    let v_roomy;
+    let (v_roomy, roomy_completeness);
     {
         let _g = RequestContextGuard::install(Arc::clone(&roomy));
-        v_roomy = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(outer, context);
+        (v_roomy, roomy_completeness) =
+            dispatch.evaluate_deferred_semantic_node_with_context_for_tests(outer, context);
     }
+    // Paired discriminator: the roomy recompute on the SAME `(outer, context)`
+    // runs to the real terminal member type, so it is `Complete` — the tight
+    // run's `Partial` was operational truncation, not a stable property of the
+    // input. (tight = Partial, roomy = Complete on the identical input.)
+    assert!(
+        matches!(
+            roomy_completeness,
+            crate::semantic_query::ResultCompleteness::Complete
+        ),
+        "the roomy recompute must be Complete (it reaches the real member type), got \
+         {roomy_completeness:?}"
+    );
     // Negative: must NOT warm-serve the budget-tainted Opaque(Miss).
     assert!(
         !matches!(
@@ -19854,7 +19803,7 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
 ///
 /// The admission authority for this shared memo is the evaluated entry's
 /// OWN completeness (`EvaluateDeferredOutcome.result_is_partial`), NOT the
-/// request-global `current_materialization_cache_suppress()` sticky. That
+/// request-global `current_request_result_is_partial()` sticky. That
 /// sticky is `RequestContext`-scoped: with NO request context installed
 /// (the reachable `audit Noop` path, where the audit consumer filter
 /// rejects the request kind so `evaluate_type_expression_with_audit` runs
@@ -19870,7 +19819,7 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
 /// entry-scoped gate withholds it; a request-sticky gate would not.
 #[test]
 fn evaluate_deferred_memo_withholds_partial_without_request_context() {
-    use crate::request_context::current_materialization_cache_suppress;
+    use crate::request_context::current_request_result_is_partial;
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -19909,13 +19858,14 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
 
     // NO RequestContext installed — the reachable `audit Noop` state.
-    let result = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(template, context);
+    let (result, result_completeness) =
+        dispatch.evaluate_deferred_semantic_node_with_context_for_tests(template, context);
 
     // Fixture invariant 1: with no request context the request sticky is
-    // false — so a request-sticky gate (`!current_materialization_cache_suppress()`)
+    // false — so a request-sticky gate (`!current_request_result_is_partial()`)
     // would PUBLISH. This is the exact condition that makes the hole reachable.
     assert!(
-        !current_materialization_cache_suppress(),
+        !current_request_result_is_partial(),
         "fixture invariant: no RequestContext ⇒ the request sticky must be false (the \
          request-sticky authority that would wrongly permit the publish)"
     );
@@ -19931,6 +19881,19 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
          got {:?}",
         graph.node_data(result).as_deref()
     );
+    // The typed completeness IS the entry-scoped admission authority: the
+    // over-cap keyspace surfaced through the `TemplateLiteralReduce` read's
+    // `result_is_partial` (the boolean bridge, lifted `PROPAGATED`), so the
+    // evaluated entry is `Partial` — which is exactly why the memo gate below
+    // withholds it with NO RequestContext installed.
+    assert!(
+        matches!(
+            result_completeness,
+            crate::semantic_query::ResultCompleteness::Partial(_)
+        ),
+        "the over-cap template evaluation must report Partial completeness (the \
+         admission authority the no-poison gate consults), got {result_completeness:?}"
+    );
     // No-poison: the entry-scoped gate withholds the partial regardless of the
     // (absent) request context.
     assert!(
@@ -19940,6 +19903,451 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
         "POISON: a partial deferred evaluation published into evaluate_deferred_memo with NO \
          RequestContext installed — the publish gate must use the evaluated entry's OWN \
          completeness, not the request-global suppress sticky"
+    );
+}
+
+#[test]
+fn missing_node_data_evaluates_partial_not_laundered_complete() {
+    // A node id whose `node_data` is `None` (absent arena data) must evaluate
+    // `Partial(MISSING_SEMANTIC_NODE_DATA)`, NOT `Complete`. The evaluator
+    // interns a fabricated `Opaque(Miss)` carrier when it cannot read a node's
+    // data; without the reason mark that fabricated carrier would surface
+    // `Complete` and a consumer could classify it as a settled result.
+    //
+    // DISCRIMINATING: pre-change the missing-data break left `completeness`
+    // `Complete` (only nested-read partials were folded), so both the direct
+    // and the through-Alias cases returned `Complete`. Post-change the
+    // missing-data break merges `MISSING_SEMANTIC_NODE_DATA`.
+    //
+    // NOT over-partialization: an honest `QueryError::Miss` on a resolvable
+    // read (an unresolved authored name) stays `Complete` — that path is
+    // covered by `normalize_node_for_fact_demand_unresolvable_declref_is_stable_complete`.
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let context = crate::semantic_query::ProjectionReductionContext::published(
+        crate::semantic_query::ProjectionMode::Expanded,
+    );
+
+    // A valid interned node fixes a small arena bound; an id far beyond it is
+    // guaranteed unallocated, so `node_data` returns `None`.
+    let real = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let missing = crate::semantic_query::SemanticNodeId(real.0 + 1_000_000);
+    assert!(
+        graph.node_data(missing).is_none(),
+        "FIXTURE INVALID: the seeded id must have no arena data"
+    );
+
+    // Direct missing-data entry.
+    let (_node, direct) =
+        dispatch.evaluate_deferred_semantic_node_with_context_for_tests(missing, context);
+    match direct {
+        crate::semantic_query::ResultCompleteness::Partial(reasons) => assert!(
+            reasons.contains(crate::semantic_query::PartialReasonSet::MISSING_SEMANTIC_NODE_DATA),
+            "missing arena data must carry MISSING_SEMANTIC_NODE_DATA, got {reasons:?}"
+        ),
+        crate::semantic_query::ResultCompleteness::Complete => panic!(
+            "a node id with no arena data MUST evaluate Partial(MISSING_SEMANTIC_NODE_DATA), \
+             never Complete (a fabricated Opaque(Miss) carrier laundered as a settled result)"
+        ),
+    }
+
+    // Missing target reached THROUGH an `Alias` hop: the evaluator advances
+    // `node = target`, then reads the absent target's data on the next
+    // iteration. The reason must still reach the returned outcome.
+    let aliased_missing = graph.intern_node(SemanticNodeData::Alias(missing));
+    let (_node2, through_alias) =
+        dispatch.evaluate_deferred_semantic_node_with_context_for_tests(aliased_missing, context);
+    match through_alias {
+        crate::semantic_query::ResultCompleteness::Partial(reasons) => assert!(
+            reasons.contains(crate::semantic_query::PartialReasonSet::MISSING_SEMANTIC_NODE_DATA),
+            "missing arena data reached through an Alias hop must carry \
+             MISSING_SEMANTIC_NODE_DATA, got {reasons:?}"
+        ),
+        crate::semantic_query::ResultCompleteness::Complete => panic!(
+            "a missing target reached through an Alias hop MUST evaluate \
+             Partial(MISSING_SEMANTIC_NODE_DATA), never Complete"
+        ),
+    }
+}
+
+#[test]
+fn build_enclosed_demand_partial_taints_enclosing_frame() {
+    // CORE no-poison discriminator. A structural-fact demand
+    // (`normalize_node_for_structural_fact_demand`) that SELF-detects an
+    // operational truncation returns `Partial` — and when it runs INSIDE a
+    // cold-build / relation taint frame, that partial MUST taint the frame
+    // (`result_is_partial` + `cache_suppress`) so the enclosing build REFUSES
+    // warm admission of the consumer's incomplete fallback.
+    //
+    // The demand's internal residual reads are all `Complete` here (the
+    // cycle / fuse / depth / missing stop is SELF-detected by the demand loop,
+    // never signalled by a partial `CacheRead`), so the universal
+    // read-boundary fold never fires — the demand's OWN Partial exit is the
+    // only thing that can taint the frame.
+    //
+    // DISCRIMINATING: pre-change `resolve_structural_fact_demand` returned
+    // `Partial` but NEVER folded, so the frame stayed clean and the enclosing
+    // build would warm-admit the incomplete fallback (the no-poison hole this
+    // block exists to close). Post-change every build-enclosed demand partial
+    // taints the frame. Covers cycle AND fuse AND depth AND missing-node.
+    let host = host();
+    let mut deep = String::new();
+    for i in 0..80u32 {
+        deep.push_str(&format!("export type T{i} = T{};\n", i + 1));
+    }
+    deep.push_str("export type T80 = 'leaf';\n");
+    let src = format!("export type MutA = MutB;\nexport type MutB = MutA;\n{deep}");
+    upsert_ts(&host, "/demand_types.ts", &src);
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let navigate = ProjectionReductionContext::published(ProjectionMode::Navigate);
+
+    let shallow = dispatch
+        .ctx
+        .shallow_file_state("/demand_types.ts")
+        .expect("/demand_types.ts must index");
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from("/demand_types.ts"),
+        whole_hash: shallow.whole_hash,
+        local_scope: None,
+    };
+    // CYCLE: `MutA = MutB; MutB = MutA` — the demand's `visited` set catches the
+    // residual-carrier cycle after `Complete` `ResolveDecl` reads.
+    let muta = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("MutA")),
+    });
+    // FUSE: a `T0..T80` alias chain LONGER than STRUCTURAL_FACT_DEMAND_FUSE (64)
+    // trips the step fuse after `Complete` reads.
+    let t0 = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("T0")),
+    });
+    // DEPTH: a 10_000-deep `KeyOf` chain trips the evaluator's 256 recursion
+    // ceiling (fresh node ids defeat the visited set), all inner reads clean.
+    let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let mut current = leaf;
+    for _ in 0..10_000 {
+        current = graph.intern_node(SemanticNodeData::KeyOf { base: current });
+    }
+    let deep_keyof = current;
+    // MISSING: an `Alias` to an unallocated id — the evaluator reaches absent
+    // arena data through the hop and reports MISSING_SEMANTIC_NODE_DATA.
+    let aliased_missing = graph.intern_node(SemanticNodeData::Alias(
+        crate::semantic_query::SemanticNodeId(leaf.0 + 5_000_000),
+    ));
+
+    let run = |subject: crate::semantic_query::SemanticNodeId,
+               label: &str,
+               reason: crate::semantic_query::PartialReasonSet| {
+        // Install an enclosing cold-build / relation taint frame.
+        let guard = crate::project_semantic_dispatch::BuildLocalTaintGuard::push(
+            &dispatch.build_local_taint,
+        );
+        let outcome = dispatch.normalize_node_for_structural_fact_demand(subject, navigate);
+        let frame = guard.finish();
+        match outcome {
+            StructuralFactDemandOutcome::Partial(reasons) => assert!(
+                reasons.contains(reason),
+                "{label}: the demand must be Partial({reason:?}), got Partial({reasons:?})"
+            ),
+            StructuralFactDemandOutcome::Complete(node) => panic!(
+                "{label}: the demand must be Partial, got Complete({:?})",
+                graph.node_data(node).as_deref()
+            ),
+        }
+        assert!(
+            frame.result_is_partial,
+            "{label}: a build-ENCLOSED demand partial MUST fold result_is_partial into the \
+             enclosing frame — else the truncated fallback warm-admits (no-poison hole)"
+        );
+        assert!(
+            frame.cache_suppress,
+            "{label}: the same fold MUST set cache_suppress on the enclosing frame (memo \
+             non-admission)"
+        );
+    };
+
+    run(
+        muta,
+        "cycle",
+        crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
+    );
+    run(
+        t0,
+        "fuse",
+        crate::semantic_query::PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT,
+    );
+    run(
+        deep_keyof,
+        "depth",
+        crate::semantic_query::PartialReasonSet::DEFERRED_EVALUATION_LIMIT,
+    );
+    run(
+        aliased_missing,
+        "missing",
+        crate::semantic_query::PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
+    );
+}
+
+#[test]
+fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission() {
+    // GROWING-GENERIC discriminator. A recursive generic whose every
+    // instantiation mints a FRESH node id (`type Grow<T> = Grow<[T]>` — each step
+    // wraps the arg in a new tuple, so `Grow<string>` → `Grow<[string]>` →
+    // `Grow<[[string]]>` → …, distinct `InstantiationRef` ids the `visited` set
+    // can NEVER match) DEFEATS visited-ID cycle detection. The demand primitive
+    // instantiates each residual `InstantiationRef` and re-evaluates; because the
+    // ids never repeat, the regrowth is bounded EXACTLY by the demand loop's
+    // step/work fuse (`STRUCTURAL_FACT_DEMAND_LIMIT`) — NOT the `visited`-ID guard
+    // (`SAME_PATH_RECURSION`), which would only fire if the growth had FOLDED.
+    // The outcome types `Partial` — never a fabricated concrete type, never a
+    // hang.
+    //
+    // This test proves BOTH discriminating facts codex required: (1) distinct
+    // instantiated node ids per level (fresh-node growth, below), and (2) the
+    // reason is the step fuse, NOT same-path recursion.
+    //
+    // The demand runs inside an enclosing taint frame, so the operational
+    // truncation ALSO refuses warm admission (`result_is_partial` +
+    // `cache_suppress`).
+    let host = host();
+    upsert_ts(&host, "/grow.ts", "export type Grow<T> = Grow<[T]>;\n");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let navigate = ProjectionReductionContext::published(ProjectionMode::Navigate);
+
+    let string_ref = verter_type_expr::TypeExpr::Ref {
+        name: Arc::from("string"),
+        type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+    };
+    let grow_ref = verter_type_expr::TypeExpr::Ref {
+        name: Arc::from("Grow"),
+        type_arguments: Arc::from(vec![string_ref].into_boxed_slice()),
+    };
+    let carrier = dispatch
+        .lower_type_expr_in_scope_with_context("/grow.ts", &grow_ref, navigate)
+        .expect("Grow<string> lowers to a carrier");
+    // Precondition: the raw node is genuinely an uninstantiated
+    // `InstantiationRef` carrier (the growth happens at instantiation, not in
+    // the raw node) — so the demand exercises the growing-instantiation path.
+    assert!(
+        matches!(
+            host.project_type_store()
+                .semantic_graph()
+                .node_data(carrier)
+                .as_deref(),
+            Some(SemanticNodeData::InstantiationRef { .. })
+        ),
+        "FIXTURE INVALID: Grow<string> must lower to an InstantiationRef carrier, got {:?}",
+        host.project_type_store()
+            .semantic_graph()
+            .node_data(carrier)
+            .as_deref()
+    );
+
+    // DISTINCT-NODE-ID EVIDENCE. Manually drive two instantiation levels of the
+    // SAME `Grow` decl: each mints a STRUCTURALLY-DISTINCT `InstantiationRef`
+    // (`Grow<[string]>` then `Grow<[[string]]>`), i.e. a FRESH node id per level.
+    // This is precisely what defeats the demand loop's `visited`-ID cycle
+    // detection — a same-id back-edge would be CAUGHT (`SAME_PATH_RECURSION`),
+    // but these ids never repeat, so ONLY the step fuse can bound the regrowth.
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let (base0, args0) = match graph.node_data(carrier).as_deref() {
+        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
+        other => panic!("FIXTURE INVALID: expected InstantiationRef carrier, got {other:?}"),
+    };
+    let slot0 = dispatch.type_slot_for(
+        Arc::clone(&base0.canonical_id),
+        Arc::clone(&base0.decl_name),
+    );
+    let inst_ctx = dispatch.instantiate_context_for(&base0.canonical_id, navigate);
+    let level1 = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(slot0, args0, inst_ctx.clone()),
+    )) {
+        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
+        other => panic!("Grow<string> must instantiate to its grown body, got {other:?}"),
+    };
+    let (base1, args1) = match graph.node_data(level1).as_deref() {
+        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
+        other => panic!(
+            "level-1 instantiation of Grow<string> must GROW to a fresh Grow<[string]> \
+             InstantiationRef (not terminate), got {other:?}"
+        ),
+    };
+    let slot1 = dispatch.type_slot_for(
+        Arc::clone(&base1.canonical_id),
+        Arc::clone(&base1.decl_name),
+    );
+    let level2 = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(slot1, args1, inst_ctx),
+    )) {
+        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
+        other => panic!("level-1 must instantiate to its grown body, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            graph.node_data(level2).as_deref(),
+            Some(SemanticNodeData::InstantiationRef { .. })
+        ),
+        "level-2 instantiation must GROW to a fresh Grow<[[string]]> InstantiationRef, got {:?}",
+        graph.node_data(level2).as_deref()
+    );
+    assert_ne!(
+        level1, level2,
+        "each Grow instantiation level MUST mint a DISTINCT node id (fresh-node growth) — equal \
+         ids would mean the growth folded and the visited-ID guard could catch it"
+    );
+    assert_ne!(
+        carrier, level1,
+        "the level-1 grown body is a DISTINCT node id from the Grow<string> carrier (fresh growth)"
+    );
+
+    let guard =
+        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    let outcome = dispatch.normalize_node_for_structural_fact_demand(carrier, navigate);
+    let frame = guard.finish();
+
+    let reasons = match outcome {
+        StructuralFactDemandOutcome::Partial(reasons) => reasons,
+        StructuralFactDemandOutcome::Complete(node) => panic!(
+            "a fresh-node growing generic MUST type Partial (bounded by the fuse / recursion \
+             guard), got Complete({:?})",
+            dispatch.graph().node_data(node).as_deref()
+        ),
+    };
+    // The fresh-node regrowth is bounded by the demand loop's STEP/WORK FUSE
+    // (`STRUCTURAL_FACT_DEMAND_LIMIT`), NOT by the `visited`-ID cycle guard: the
+    // ids never repeat (proven distinct above), so `SAME_PATH_RECURSION` must
+    // NOT be the reason — its presence would mean visited-ID CAUGHT the loop, the
+    // OPPOSITE of the fresh-node-growth class this test characterises.
+    assert!(
+        reasons.contains(crate::semantic_query::PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT),
+        "the growing-generic truncation MUST be bounded by the step/work fuse \
+         (STRUCTURAL_FACT_DEMAND_LIMIT) — the fresh-node-growth bound, got {reasons:?}"
+    );
+    assert!(
+        !reasons.contains(crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION),
+        "fresh-node growth defeats the visited-ID guard, so the reason MUST NOT be \
+         SAME_PATH_RECURSION (that would mean visited-ID caught it — not fresh-node growth), \
+         got {reasons:?}"
+    );
+    assert!(
+        frame.result_is_partial && frame.cache_suppress,
+        "the build-enclosed growing-generic partial MUST refuse warm admission \
+         (result_is_partial + cache_suppress on the frame)"
+    );
+
+    // SCOPE (honest): this characterises fresh-node growth at the DEMAND-PRIMITIVE
+    // layer (`normalize_node_for_structural_fact_demand`'s Instantiate loop),
+    // where the pure-recursion `Grow<T> = Grow<[T]>` grows through the top-level
+    // carrier. The union-base variant `Grow<T> = T | Grow<[T]>` terminates the
+    // demand's top-level carrier at the `Union` (Complete), so it does NOT
+    // exercise growth HERE. The CRASH-SCALE `Grow<T> = T | Grow<[[[[T]]]]>`
+    // fresh-node-growth proof over the Instantiate / projection publication path
+    // is owned by the deep-recursion crash-regression suite, not this unit test.
+}
+
+#[test]
+fn real_query_over_depth_truncated_nested_demand_refuses_warm_admission() {
+    // REAL-QUERY no-poison discriminator (supersedes a prior test that called the
+    // private keyspace enumerator directly and manually installed a
+    // `BuildLocalTaintGuard` stand-in, asserting only frame taint). Drives a REAL
+    // cold `MappedType` query `{ [K in "a" | "b"]: DeepKeyOf }` through
+    // `execute_read`: the shared cold-build helper installs the per-query taint
+    // frame (NO manual install). Its build ENUMERATES the closed `"a" | "b"` key
+    // domain, then MATERIALISES the per-key value `DeepKeyOf` through
+    // `evaluate_deferred_semantic_node_with_context(..).into_active_query_build_node`
+    // — a REAL PRODUCTION `into_active_query_build_node` caller. That deep value
+    // is a 10_000-deep `KeyOf` chain, so its deferred evaluation trips the 256
+    // recursion ceiling; the truncation folds into the query's OWN build frame and
+    // the shared cooperative memo REFUSES to admit the entry.
+    //
+    // The refusal is asserted END-TO-END on the returned `CacheRead` — its
+    // `result_is_partial` + `cache_suppress` ARE the shared memo's admission
+    // decision (`CacheRead::cache_suppress`: "the memo refuses insertion when this
+    // is true"), NOT a manually-tainted stand-in frame. A memo-absence
+    // corroboration (the depth-truncated value demand never warmed the shared
+    // `evaluate_deferred_memo`) is checked too.
+    //
+    // NOTE: a TRUNCATING key SPACE cannot reach the keyspace enumerator through a
+    // real MappedType — the L1 open-key-domain carrier-stop pre-filters a
+    // non-enumerable key domain to a shell BEFORE enumeration — so the reachable
+    // production truncation is the per-key VALUE materialisation, exercised here.
+    //
+    // DISCRIMINATING: neuter the per-key value materialisation's
+    // `into_active_query_build_node` fold (absorb the truncation into a throwaway
+    // frame) and the MappedType build frame stays clean → the returned `CacheRead`
+    // is `!result_is_partial && !cache_suppress` → the entry is admitted warm (a
+    // surface materialised off a truncated carrier), and this test FAILS.
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let mut current = leaf;
+    for _ in 0..10_000 {
+        current = graph.intern_node(SemanticNodeData::KeyOf { base: current });
+    }
+    let deep_value = current;
+
+    // Closed `"a" | "b"` key domain (enumerable — passes the L1 open-key-domain
+    // gate), so the build reaches the per-key value materialisation of the deep
+    // value below.
+    let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("a".into())));
+    let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("b".into())));
+    let key_union = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![a, b].into_boxed_slice(),
+    )));
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let mapper = crate::semantic_query::MapperKey {
+        parameter_node,
+        key_space: key_union,
+        value_expr: deep_value,
+        optionality: crate::semantic_query::OptionalityMod::Keep,
+        readonly: crate::semantic_query::ReadonlyMod::Keep,
+        name_remap: None,
+        kind: crate::semantic_query::MapperKind::Computed,
+    };
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+
+    // REAL cold query through execute_read — the cold-build helper owns the frame.
+    let read = dispatch.execute_read(SemanticQueryKey::MappedType {
+        source: key_union,
+        mapper,
+        context,
+    });
+
+    // End-to-end admission refusal on the returned CacheRead: the per-key value
+    // materialisation's depth-truncation folded into the MappedType build's OWN
+    // frame, so the cold-build helper OR-ed it into the QueryBuildOutput and the
+    // shared cooperative memo refuses the entry.
+    assert!(
+        read.result_is_partial,
+        "a REAL MappedType cold query whose per-key value materialisation is depth-truncated MUST \
+         surface result_is_partial on the returned CacheRead (the into_active_query_build_node \
+         caller folded the truncation into the query's own build frame — NOT a manually-installed \
+         stand-in frame)"
+    );
+    assert!(
+        read.cache_suppress,
+        "the shared cooperative memo MUST refuse to admit the entry (CacheRead::cache_suppress — \
+         'the memo refuses insertion when this is true'); a surface materialised off a truncated \
+         carrier must never warm the shared memo"
+    );
+
+    // Corroboration: the depth-truncated value demand is itself a partial, so it
+    // never warmed the shared deferred-evaluation memo either.
+    assert!(
+        graph
+            .evaluate_deferred_memo_get(deep_value, context)
+            .is_none(),
+        "the depth-truncated value demand must be ABSENT from evaluate_deferred_memo (a partial \
+         evaluation never warms the shared memo)"
     );
 }
 
@@ -20002,16 +20410,616 @@ fn carrier_subject_normalization_fenced_serve_suppresses_caching() {
     );
 
     // FENCED (knob ON): the prelude observes a fenced serve → cache_suppress.
-    host.carrier_normalization_force_fence_for_tests
+    host.test_force
+        .carrier_normalization_force_fence_for_tests
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let fenced_read = dispatch.execute_read(make_key());
-    host.carrier_normalization_force_fence_for_tests
+    host.test_force
+        .carrier_normalization_force_fence_for_tests
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
     assert!(
         fenced_read.cache_suppress,
         "a fenced serve observed by the traced carrier-normalization prelude MUST set          cache_suppress on the returned CacheRead (the rewrite computed from a          served-without-publication artifact must refuse warm admission). Pre-fix the untraced          normalization could not observe the fence and this read would NOT be suppressed."
     );
+}
+
+#[test]
+#[should_panic(expected = "released a Partial or cache-suppressed node")]
+fn frameless_complete_with_cache_suppress_trips_build_frame_escape_assert() {
+    // A build-scoped evaluation that stays Complete but rode a cache-suppressed
+    // nested read (a benign non-cacheable but complete result — here a fenced
+    // serve), when released FRAMELESS through the build-scoped
+    // `into_active_query_build_node` projection, MUST trip the fail-closed frame
+    // assert. The suppress signal is NOT reconstructible from the node and
+    // `fold_cache_read_rails` drops a frameless suppress at the read boundary,
+    // so releasing frameless would SILENTLY ERASE it — the build-scoped escape
+    // hatch B3 exists to close.
+    //
+    // The evaluator drives a `Mapped { source: BareRef(Foo), mapper }` shell:
+    // the `MappedType` read's subject is the `BareRef` carrier, so with the
+    // fence knob armed its carrier-normalization prelude observes a fenced serve
+    // and returns `cache_suppress = true`, `result_is_partial = false` (a
+    // Complete-but-non-cacheable read). The no-context
+    // `evaluate_deferred_semantic_node` sugar releases that outcome through the
+    // projection with NO frame installed.
+    //
+    // DISCRIMINATING: pre-change `EvaluateDeferredOutcome` did not carry
+    // `cache_suppress`, so a Complete outcome folded nothing and the assert
+    // (narrowed to Partial only) did NOT fire — the frameless suppress was
+    // laundered (no panic ⇒ this #[should_panic] test FAILS). Post-change the
+    // outcome carries `cache_suppress` and the assert fires on
+    // `Partial OR cache_suppress`, so this frameless release panics.
+    //
+    // A frameless PURE Complete (no suppress) is unaffected — proven by
+    // `mapped_type_self_roots_and_origin_edges_include_name_remap` and every
+    // other frameless evaluator unit test staying green.
+    let host = host();
+    upsert_ts(&host, "/dep.ts", "export type Foo = { a: string };\n");
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let shallow = dispatch
+        .ctx
+        .shallow_file_state("/dep.ts")
+        .expect("/dep.ts must index");
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from("/dep.ts"),
+        whole_hash: shallow.whole_hash,
+        local_scope: None,
+    };
+    // `Mapped` source is a `BareRef(Foo)` carrier — the MappedType read subject
+    // that the fence prelude observes.
+    let source = graph.intern_node_with_scope(
+        SemanticNodeData::new_bare_ref(
+            Arc::from("Foo"),
+            scope.clone(),
+            Arc::from(Vec::new().into_boxed_slice()),
+        ),
+        scope.clone(),
+    );
+    // Non-enumerable key space + K-independent computed value ⇒ the MappedType
+    // reduces to the canonical deferred `Mapped` shell (a Value, not an error),
+    // so the evaluation stays Complete while the fence sets cache_suppress.
+    let key_space = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let value_expr = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let mapper = crate::semantic_query::MapperKey {
+        parameter_node,
+        key_space,
+        value_expr,
+        optionality: crate::semantic_query::OptionalityMod::Keep,
+        readonly: crate::semantic_query::ReadonlyMod::Keep,
+        name_remap: None,
+        kind: crate::semantic_query::MapperKind::Computed,
+    };
+    let mapped = graph.intern_node(SemanticNodeData::Mapped { source, mapper });
+
+    // Arm the fence so the MappedType carrier-subject prelude observes a fenced
+    // serve → cache_suppress on the read → accumulated into the outcome.
+    host.test_force
+        .carrier_normalization_force_fence_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    // FRAMELESS release through the build-scoped sugar. Post-change this panics
+    // (the assert fires on the suppressed-Complete with no active frame).
+    let _ = dispatch.evaluate_deferred_semantic_node(mapped);
+}
+
+/// LB1 — the `evaluate_deferred_memo` publish gate must REFUSE a
+/// `Complete`-with-`cache_suppress` result. The documented
+/// `CacheRead::cache_suppress` contract is explicit: "the memo refuses
+/// insertion when this is true". A suppressed-but-Complete result (a fenced /
+/// torn-self-root / tracer-overflow / `ReturnOnly` benign non-cacheability) that
+/// slipped into the memo would be warm-reconstructed on the next demand as
+/// `complete(cached)` WITHOUT its non-cacheability — replaying a
+/// served-without-publication result and permitting an enclosing warm admission
+/// (a no-poison hole).
+///
+/// DISCRIMINATING: pre-fix the gate keyed only on `!completeness.is_partial()`,
+/// so a `Complete`-with-`cache_suppress` result PUBLISHED and the entry was
+/// warm-servable. Post-fix the gate is `!is_partial() && !cache_suppress`, so
+/// the suppressed-Complete entry is NEVER admitted (recompute on the next
+/// demand). This is strictly fail-closed — it only skips caching the rare
+/// suppressed path and CANNOT false-Partial a finite type (asserted: the outcome
+/// stays `Complete`).
+///
+/// The suppressed-Complete is produced through the SAME mechanism the B3
+/// frameless-escape test uses: a `Mapped { source: BareRef(Foo) }` shell whose
+/// `MappedType` carrier-subject prelude observes an armed fenced serve → the
+/// read is `cache_suppress = true`, `result_is_partial = false`, so the
+/// evaluated entry is `Complete` yet non-cacheable. Driven through the
+/// non-folding `_for_tests` shim (no frame ⇒ no B3 escape-assert panic).
+#[test]
+fn evaluate_deferred_memo_refuses_complete_with_cache_suppress() {
+    let host = host();
+    upsert_ts(&host, "/dep.ts", "export type Foo = { a: string };\n");
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let shallow = dispatch
+        .ctx
+        .shallow_file_state("/dep.ts")
+        .expect("/dep.ts must index");
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from("/dep.ts"),
+        whole_hash: shallow.whole_hash,
+        local_scope: None,
+    };
+    // `Mapped { source: BareRef(Foo) }` — the MappedType read subject is the
+    // carrier the fence prelude observes.
+    let source = graph.intern_node_with_scope(
+        SemanticNodeData::new_bare_ref(
+            Arc::from("Foo"),
+            scope.clone(),
+            Arc::from(Vec::new().into_boxed_slice()),
+        ),
+        scope.clone(),
+    );
+    let key_space = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let value_expr = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let mapper = crate::semantic_query::MapperKey {
+        parameter_node,
+        key_space,
+        value_expr,
+        optionality: crate::semantic_query::OptionalityMod::Keep,
+        readonly: crate::semantic_query::ReadonlyMod::Keep,
+        name_remap: None,
+        kind: crate::semantic_query::MapperKind::Computed,
+    };
+    let mapped = graph.intern_node(SemanticNodeData::Mapped { source, mapper });
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+
+    // Arm the fence so the MappedType carrier-subject prelude observes a fenced
+    // serve → the read is Complete-but-cache_suppress → the evaluated entry
+    // aggregates cache_suppress while staying Complete.
+    host.test_force
+        .carrier_normalization_force_fence_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let (_node, completeness, cache_suppress) =
+        dispatch.evaluate_deferred_outcome_for_tests(mapped, context);
+    host.test_force
+        .carrier_normalization_force_fence_for_tests
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    // Fixture invariants: the outcome is a genuine Complete-with-suppress (NOT a
+    // partial) — proving this exercises the suppress half of the gate, and that
+    // the fix does not false-Partial a finite type.
+    assert!(
+        matches!(
+            completeness,
+            crate::semantic_query::ResultCompleteness::Complete
+        ),
+        "FIXTURE INVALID: the suppressed mapped evaluation must stay Complete (the fix must not \
+         false-Partial it), got {completeness:?}"
+    );
+    assert!(
+        cache_suppress,
+        "FIXTURE INVALID: the armed fence must make the evaluated entry cache_suppress"
+    );
+
+    // No-poison: the suppressed-Complete entry must NOT be admitted into the
+    // shared `evaluate_deferred_memo`. Pre-fix (gate = `!is_partial()` only) it
+    // published and this would be `Some`; post-fix the entry is refused.
+    assert!(
+        graph.evaluate_deferred_memo_get(mapped, context).is_none(),
+        "POISON: a Complete-with-cache_suppress deferred evaluation published into \
+         evaluate_deferred_memo — the publish gate must refuse admission when cache_suppress is \
+         set (the CacheRead::cache_suppress contract: the memo refuses insertion when true), else \
+         a later warm hit reconstructs complete(cached) dropping the non-cacheability"
+    );
+}
+
+/// LB2 (coupled to LB1) — the deferred-shell evaluator's `BareRef` / `ImportType`
+/// arm must OR every nested carrier-subject read's `cache_suppress` into
+/// `EvaluateDeferredOutcome.cache_suppress`. The arm delegates to
+/// `resolve_carrier_subject_node`, which for a QUALIFIED import type performs a
+/// nested `ProjectPath` read (`resolve_import_type_head`, carrier.rs); pre-fix
+/// that read's `cache_suppress` was DROPPED (the helper returned only a node),
+/// so a suppressed nested read produced `outcome.cache_suppress = false` and
+/// would slip past LB1's publish gate — the coupled no-poison hole.
+///
+/// DISCRIMINATING: `import("./dep").Ns.Member` drives the ImportType arm through
+/// `resolve_import_type_head`'s qualified-path `ProjectPath` nested read; the
+/// build-scoped forced-fenced-serve hook makes THAT read's own build observe a
+/// fenced serve (`cache_suppress = true`). Pre-fix the arm dropped it
+/// (`outcome.cache_suppress == false`); post-fix the capturing variant's
+/// observation frame intercepts the universal read-boundary fold and the arm ORs
+/// it (`outcome.cache_suppress == true`). Composed with LB1, the suppressed
+/// entry is refused warm admission.
+///
+/// The nested `ProjectPath` read's SUBJECT is a resolved `DeclRef` (the injected
+/// head resolution), NOT a carrier, so the carrier-normalization fence knob
+/// (prelude-scoped, carrier-subject only) can NEVER reach it — the build-scoped
+/// hook is the sound way to force this exact read's suppress.
+#[test]
+fn import_type_arm_threads_nested_read_cache_suppress_into_outcome() {
+    let host = host();
+    upsert_ts(&host, "/dep.ts", "export type Ns = { Member: string };\n");
+    upsert_ts(&host, "/owner.ts", "export const x = 1;\n");
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let owner_shallow = dispatch
+        .ctx
+        .shallow_file_state("/owner.ts")
+        .expect("/owner.ts must index");
+    let owner_scope = NodeScopeId::File {
+        canonical_id: Arc::from("/owner.ts"),
+        whole_hash: owner_shallow.whole_hash,
+        local_scope: None,
+    };
+    // `import("./dep").Ns.Member` — a QUALIFIED (multi-segment) import-type
+    // carrier: the head `Ns` resolves to `/dep.ts` and the tail `.Member`
+    // projects via the nested `ProjectPath` read at `resolve_import_type_head`.
+    let import_type = graph.intern_node_with_scope(
+        SemanticNodeData::new_import_type(
+            Arc::from("./dep"),
+            Arc::from(vec![Arc::<str>::from("Ns"), Arc::<str>::from("Member")].into_boxed_slice()),
+            Arc::from(Vec::new().into_boxed_slice()),
+            false,
+        ),
+        owner_scope,
+    );
+    let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+
+    // Arm the per-host build-scoped fenced-serve knob so the nested ProjectPath
+    // read's OWN build observes a fenced serve → cache_suppress = true on that
+    // read. Per-host (not process-global), so this cannot contaminate a
+    // concurrently-running test on another host.
+    host.test_force
+        .force_fenced_serve_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let (_node, completeness, cache_suppress) =
+        dispatch.evaluate_deferred_outcome_for_tests(import_type, context);
+    host.test_force
+        .force_fenced_serve_for_tests
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    // The nested read is Complete-but-non-cacheable (a fenced serve sets
+    // cache_suppress, not result_is_partial), so the outcome stays Complete.
+    assert!(
+        matches!(
+            completeness,
+            crate::semantic_query::ResultCompleteness::Complete
+        ),
+        "the fenced nested read is Complete-but-non-cacheable, so the ImportType evaluation stays \
+         Complete, got {completeness:?}"
+    );
+    // PRIMARY LB2 assertion: the arm ORed the nested ProjectPath read's
+    // cache_suppress into the outcome. Pre-fix this was dropped (false).
+    assert!(
+        cache_suppress,
+        "the ImportType arm MUST OR the qualified-path ProjectPath nested read's cache_suppress \
+         into EvaluateDeferredOutcome.cache_suppress — pre-fix resolve_carrier_subject_node \
+         returned only a node and dropped it (outcome.cache_suppress == false), letting a \
+         suppressed carrier read slip past the memo publish gate (the coupled no-poison hole)"
+    );
+    // Composed with LB1: the suppressed entry is refused warm admission.
+    assert!(
+        graph
+            .evaluate_deferred_memo_get(import_type, context)
+            .is_none(),
+        "composed LB1+LB2 no-poison: a suppressed ImportType evaluation must not be admitted into \
+         evaluate_deferred_memo"
+    );
+}
+
+/// LB3 — the evaluator's DIRECT carrier serve must refuse `evaluate_deferred_memo`
+/// admission when it consumes a fenced (non-cacheable) serve. The headline poison
+/// hole: a scoped `BareRef` subject resolves its head through the direct
+/// `ensure_indexed_ready_serve` probe (`resolve_bare_ref_head`, carrier.rs), then
+/// Navigate/Skeleton/Shallow interns a `DeclRef` and returns with NO nested
+/// `execute_read` — so a FENCED serve on that direct probe marks ONLY the fan-out
+/// tracer, never the `CacheRead` funnel. The evaluator calls the carrier resolver
+/// DIRECTLY (not through the query-entry key normalization, which installs its own
+/// tracer), so pre-fix that direct fenced serve was invisible to the returned
+/// suppress and the publish gate ADMITTED a fenced-derived Complete result — a
+/// later warm hit replays it (cache poisoning).
+///
+/// DISCRIMINATING: arm the per-host DIRECT-serve fence knob and drive a scoped
+/// `BareRef("Foo")` subject through `evaluate_deferred_outcome_for_tests` in
+/// Navigate. Post-fix the evaluator-scoped nested tracer observes the direct
+/// fenced serve → `cache_suppress = true` while the outcome stays `Complete`, and
+/// the entry is REFUSED admission (`evaluate_deferred_memo_get` → `None`); a 2nd
+/// identical eval RECOMPUTES (still refused). Pre-fix (`_capturing_suppress`
+/// installs NO nested tracer) the direct serve is unobserved, the entry PUBLISHES,
+/// and the 2nd eval warm-hits.
+#[test]
+fn carrier_direct_serve_fence_refuses_evaluate_deferred_memo_and_recomputes() {
+    let host = host();
+    upsert_ts(&host, "/dep.ts", "export type Foo = { a: string };\n");
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let shallow = dispatch
+        .ctx
+        .shallow_file_state("/dep.ts")
+        .expect("/dep.ts must index");
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from("/dep.ts"),
+        whole_hash: shallow.whole_hash,
+        local_scope: None,
+    };
+    // A scoped `BareRef("Foo")` subject — its head resolves through the direct
+    // `ensure_indexed_ready_serve` probe the fence knob targets.
+    let bare = graph.intern_node_with_scope(
+        SemanticNodeData::new_bare_ref(
+            Arc::from("Foo"),
+            scope.clone(),
+            Arc::from(Vec::new().into_boxed_slice()),
+        ),
+        scope.clone(),
+    );
+    let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+
+    // Arm the DIRECT carrier-serve fence: the head's `resolves_to_file` probe
+    // treats the present serve as fenced and fans a non-cacheable read onto every
+    // active tracer.
+    host.test_force
+        .force_carrier_direct_serve_fence_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let (_node, completeness, cache_suppress) =
+        dispatch.evaluate_deferred_outcome_for_tests(bare, context);
+
+    // Orthogonality: the fenced-but-VALID head resolution stays Complete — the fix
+    // must NOT false-`Partial` it.
+    assert!(
+        matches!(
+            completeness,
+            crate::semantic_query::ResultCompleteness::Complete
+        ),
+        "a fenced DIRECT carrier serve is Complete-but-non-cacheable; the outcome must stay \
+         Complete, got {completeness:?}"
+    );
+    // The evaluator-scoped nested tracer observed the direct fenced serve.
+    assert!(
+        cache_suppress,
+        "the DIRECT carrier serve fence must fold into the evaluator's cache_suppress via the \
+         nested tracer — pre-fix the direct serve marked only the fan-out tracer (no nested \
+         tracer installed) so cache_suppress was false"
+    );
+    // No-poison: the fenced-derived Complete entry is REFUSED admission.
+    assert!(
+        graph.evaluate_deferred_memo_get(bare, context).is_none(),
+        "POISON: a fenced DIRECT carrier serve published into evaluate_deferred_memo — the publish \
+         gate must refuse admission when the evaluator observed the direct fenced serve, else a \
+         later warm hit replays the served-without-publication result"
+    );
+    // A 2nd identical eval RECOMPUTES (the entry never published, so still refused).
+    let (_n2, _c2, cache_suppress2) = dispatch.evaluate_deferred_outcome_for_tests(bare, context);
+    assert!(
+        cache_suppress2,
+        "the 2nd identical eval must RECOMPUTE and re-observe the fence (not warm-hit a poisoned \
+         entry)"
+    );
+    assert!(
+        graph.evaluate_deferred_memo_get(bare, context).is_none(),
+        "the fenced entry must stay ABSENT from evaluate_deferred_memo across repeated evals"
+    );
+    host.test_force
+        .force_carrier_direct_serve_fence_for_tests
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// LB3 control (NO over-suppression) — with the DIRECT-serve fence OFF, the SAME
+/// scoped `BareRef` subject serves PUBLISHED (`store_published == true`) and the
+/// evaluated entry is admitted warm, so a repeat is a memo HIT. Proves the fence
+/// assertion above discriminates the non-cacheable path from ordinary (cacheable)
+/// carrier resolution — the fix refuses ONLY the fenced serve, never a published
+/// one.
+#[test]
+fn carrier_direct_serve_unfenced_publishes_into_evaluate_deferred_memo() {
+    let host = host();
+    upsert_ts(&host, "/dep.ts", "export type Foo = { a: string };\n");
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let shallow = dispatch
+        .ctx
+        .shallow_file_state("/dep.ts")
+        .expect("/dep.ts must index");
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from("/dep.ts"),
+        whole_hash: shallow.whole_hash,
+        local_scope: None,
+    };
+    let bare = graph.intern_node_with_scope(
+        SemanticNodeData::new_bare_ref(
+            Arc::from("Foo"),
+            scope.clone(),
+            Arc::from(Vec::new().into_boxed_slice()),
+        ),
+        scope.clone(),
+    );
+    let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+
+    // Fence OFF: the direct serve is PUBLISHED (`store_published == true`); no note
+    // fires, so the evaluated entry is cacheable.
+    let (_node, completeness, cache_suppress) =
+        dispatch.evaluate_deferred_outcome_for_tests(bare, context);
+    assert!(
+        matches!(
+            completeness,
+            crate::semantic_query::ResultCompleteness::Complete
+        ),
+        "an unfenced carrier resolution is Complete, got {completeness:?}"
+    );
+    assert!(
+        !cache_suppress,
+        "an unfenced (published) direct carrier serve must NOT set cache_suppress — a false \
+         positive here would make the fenced assertion meaningless"
+    );
+    assert!(
+        graph.evaluate_deferred_memo_get(bare, context).is_some(),
+        "an unfenced Complete carrier evaluation MUST publish into evaluate_deferred_memo (a \
+         published serve is cacheable) — the fix must not blanket-suppress non-fenced serves"
+    );
+}
+
+/// LB3 control (NO over-suppression) — an honest UNRESOLVED authored name stays
+/// cacheable even with the DIRECT-serve fence ARMED. An unresolved `BareRef` never
+/// reaches the `resolves_to_file` serve probe (its resolution is `resolves_to_file
+/// == false`), so the fence injection is skipped and the evaluated identity entry
+/// PUBLISHES. Proves the nested tracer suppresses ONLY a real fenced serve, never an
+/// honest miss / stable unresolved name.
+#[test]
+fn carrier_unresolved_name_stays_cacheable_even_with_fence_armed() {
+    let host = host();
+    upsert_ts(&host, "/dep.ts", "export type Foo = { a: string };\n");
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let shallow = dispatch
+        .ctx
+        .shallow_file_state("/dep.ts")
+        .expect("/dep.ts must index");
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from("/dep.ts"),
+        whole_hash: shallow.whole_hash,
+        local_scope: None,
+    };
+    // A scoped `BareRef` naming a symbol that does NOT exist in /dep.ts — an honest
+    // unresolved authored reference.
+    let bare = graph.intern_node_with_scope(
+        SemanticNodeData::new_bare_ref(
+            Arc::from("DoesNotExist"),
+            scope.clone(),
+            Arc::from(Vec::new().into_boxed_slice()),
+        ),
+        scope.clone(),
+    );
+    let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+
+    // Fence ARMED — but an unresolved name never hits the resolved direct-serve
+    // probe, so the injection is skipped.
+    host.test_force
+        .force_carrier_direct_serve_fence_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let (_node, completeness, cache_suppress) =
+        dispatch.evaluate_deferred_outcome_for_tests(bare, context);
+    host.test_force
+        .force_carrier_direct_serve_fence_for_tests
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    assert!(
+        matches!(
+            completeness,
+            crate::semantic_query::ResultCompleteness::Complete
+        ),
+        "a stable unresolved authored name is Complete, got {completeness:?}"
+    );
+    assert!(
+        !cache_suppress,
+        "an honest unresolved name must NOT be cache-suppressed even with the fence armed — the \
+         fence suppresses ONLY a resolved direct serve, never a stable miss (no over-suppression)"
+    );
+    assert!(
+        graph.evaluate_deferred_memo_get(bare, context).is_some(),
+        "a stable unresolved authored name is cacheable — its identity entry must PUBLISH into \
+         evaluate_deferred_memo (the fix must not over-suppress honest misses)"
+    );
+}
+
+/// SF2(a) — direct-carrier matrix row: a SINGLE-segment `import("./dep").Foo`
+/// carrier resolves its head through the DIRECT `ensure_indexed_ready_serve`
+/// probe (the same direct-serve seam as a scoped `BareRef`), NOT the QUALIFIED
+/// multi-segment `ProjectPath` Rail-1 nested read that
+/// `import_type_arm_threads_nested_read_cache_suppress_into_outcome` (:20653)
+/// exercises. A FENCED serve on that direct probe must fold into the evaluator's
+/// `cache_suppress` via the nested tracer while the outcome stays Complete, and
+/// the entry is REFUSED `evaluate_deferred_memo` admission. RED-pre (evaluator
+/// nested tracer reverted) the direct fenced serve marks only the fan-out tracer
+/// so `cache_suppress` is false and the poisoned entry publishes.
+#[test]
+fn single_segment_import_type_direct_serve_fence_refuses_evaluate_deferred_memo() {
+    let host = host();
+    upsert_ts(&host, "/dep.ts", "export type Foo = { a: string };\n");
+    upsert_ts(&host, "/owner.ts", "export const x = 1;\n");
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let owner_shallow = dispatch
+        .ctx
+        .shallow_file_state("/owner.ts")
+        .expect("/owner.ts must index");
+    let owner_scope = NodeScopeId::File {
+        canonical_id: Arc::from("/owner.ts"),
+        whole_hash: owner_shallow.whole_hash,
+        local_scope: None,
+    };
+    // `import("./dep").Foo` — a SINGLE-segment import-type carrier: the head
+    // `Foo` resolves to `/dep.ts` through the DIRECT `ensure_indexed_ready_serve`
+    // probe (no `ProjectPath` tail, so NOT the Rail-1 qualified path).
+    let import_type = graph.intern_node_with_scope(
+        SemanticNodeData::new_import_type(
+            Arc::from("./dep"),
+            Arc::from(vec![Arc::<str>::from("Foo")].into_boxed_slice()),
+            Arc::from(Vec::new().into_boxed_slice()),
+            false,
+        ),
+        owner_scope,
+    );
+    let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+
+    // Arm the deterministic fenced-serve fence (reaches the import-type head's
+    // `ensure_indexed_ready_serve` at a STABLE generation — no bump).
+    host.test_force
+        .force_indexed_ready_serve_fence_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let (_node, completeness, cache_suppress) =
+        dispatch.evaluate_deferred_outcome_for_tests(import_type, context);
+
+    assert!(
+        matches!(
+            completeness,
+            crate::semantic_query::ResultCompleteness::Complete
+        ),
+        "a fenced single-segment ImportType direct serve is Complete-but-non-cacheable, got \
+         {completeness:?}"
+    );
+    assert!(
+        cache_suppress,
+        "the single-segment ImportType direct serve fence must fold into the evaluator's \
+         cache_suppress via the nested tracer (the direct head serve — NOT a Rail-1 ProjectPath \
+         nested read)"
+    );
+    assert!(
+        graph
+            .evaluate_deferred_memo_get(import_type, context)
+            .is_none(),
+        "POISON: a fenced single-segment ImportType direct serve published into \
+         evaluate_deferred_memo — the publish gate must refuse it when the evaluator observed the \
+         direct fenced serve"
+    );
+    // A 2nd identical eval RECOMPUTES (still refused).
+    let (_n2, _c2, cache_suppress2) =
+        dispatch.evaluate_deferred_outcome_for_tests(import_type, context);
+    assert!(
+        cache_suppress2,
+        "the 2nd identical eval must RECOMPUTE and re-observe the fence (not warm-hit a poisoned \
+         entry)"
+    );
+    host.test_force
+        .force_indexed_ready_serve_fence_for_tests
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The `instantiate_context_for` choke point is the SOLE production builder

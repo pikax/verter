@@ -58,6 +58,13 @@ path = "src/main.rs"
 
 [dev-dependencies]
 futures-util = "0.3.32"
+# Activates verter_session's `test-support` seam for the LSP integration
+# tests (the canonical-keyed component-meta output force-fail knob used by
+# the fail-closed wire regression). Production builds never see it.
+verter_session = { path = "../verter_session", features = ["test-support"] }
+# The wire-equivalence integration test byte-compares the ACTUAL NAPI
+# protocol encoding of the LSP route's envelope.
+verter_protocol = { path = "../verter_protocol" }
 paste = "1.0.15"
 tempfile = "3.27"
 # Used by `tests/editor_liveness_guards.rs` to AST-parse the LSP provider-sync

@@ -570,21 +570,34 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
 
     // PIN the EXACT current divergent terminal. The carrier path rehydrates from
     // the SCOPE PAYLOAD only — it has no namespace-sibling `name_resolution`
-    // injection — so the bare `Sib` MISSES: `Opaque(Miss)`. Pinning the exact
-    // `Miss` (not merely "!= NS.Sib") makes this characterization FLIP if the
+    // injection — so the bare `Sib` does NOT resolve. Under the Navigate carrier
+    // mode an unresolved head PRESERVES the scoped `BareRef` carrier (never
+    // `Opaque(Miss)`, which would destroy the authored head), so the divergent
+    // terminal is the carrier RETURNED UNCHANGED. Pinning the exact unchanged
+    // carrier (not merely "!= NS.Sib") makes this characterization FLIP if the
     // carrier-path terminal CHANGES for any reason — a regression to a different
-    // wrong declaration, a different opaque, or (the intended event) the
-    // producer flip wiring the structural lowerer's carrier-scope shape so the
-    // sibling binding resolves. Any of those forces a re-validation here.
+    // wrong declaration, an opaque, or (the intended event) the producer flip
+    // wiring the structural lowerer's carrier-scope shape so the sibling binding
+    // resolves. Any of those forces a re-validation here.
+    assert_eq!(
+        via_carrier,
+        carrier,
+        "RECORDED namespace-sibling gap: the carrier path is expected to return the \
+         `BareRef(\"Sib\")` carrier UNCHANGED (an unresolved head under the Navigate \
+         carrier mode preserves the scoped carrier) — it has no scope-payload \
+         equivalent of the eager path's per-decl `add_namespace_sibling_resolutions` \
+         injection. The terminal CHANGED, so the latent divergence must be \
+         re-validated (this is what the producer flip should trigger). Got: {:?}",
+        dispatch.graph().node_data(via_carrier).as_deref()
+    );
     match dispatch.graph().node_data(via_carrier).as_deref() {
-        Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::Miss)) => {}
+        Some(data)
+            if data
+                .bare_ref_head()
+                .is_some_and(|(n, _)| n.as_ref() == "Sib") => {}
         other => panic!(
-            "RECORDED namespace-sibling gap: the carrier path is expected to MISS \
-             (`Opaque(Miss)`) for a bare `Sib` against the file scope — it has no \
-             scope-payload equivalent of the eager path's per-decl \
-             `add_namespace_sibling_resolutions` injection. The terminal CHANGED, so the \
-             latent divergence must be re-validated (this is what the producer flip \
-             should trigger). Got: {other:?}"
+            "the preserved divergent terminal must still be the `BareRef(\"Sib\")` \
+             carrier; got {other:?}"
         ),
     }
 
@@ -1312,10 +1325,17 @@ fn carrier_head_preserves_local_scope_in_rehydrated_scope() {
 // ── B17. EAGER FOLD: an unresolvable head does NOT lower+dispatch dead args ──
 //
 // The eager `TypeExpr::Ref` arm must resolve/classify the head BEFORE lowering
-// its type-args, so an UNRESOLVABLE head does not lower+dispatch its args (which
-// loads files, marks partials, hits fuses for dead syntax). The fold regressed
-// this by lowering all args UNCONDITIONALLY at the top before calling the head
-// helper.
+// its type-args, so an UNRESOLVABLE head under an EAGER mode does not
+// lower+dispatch its args (which loads files, marks partials, hits fuses for
+// dead syntax). The fold regressed this by lowering all args UNCONDITIONALLY at
+// the top before calling the head helper.
+//
+// The eager modes (`Expanded` / `Identity`) ARE the resolving demand: a head
+// that misses there is a conclusive `Opaque(Miss)` and its args are genuinely
+// DEAD. Under the carrier modes (`Navigate` / `Shallow` / `Skeleton`) an
+// unresolved head instead PRESERVES the scoped `BareRef` carrier — whose args
+// are LIVE carrier content the demand points retry — see the Navigate
+// companion test below.
 //
 // Discriminator: `Ref { name: "Unknown", type_arguments: [Ref { ArgT }] }` in
 // /main.ts, where `ArgT` is IMPORTED from /argfile.ts. Lowering `ArgT` resolves
@@ -1348,8 +1368,9 @@ fn eager_unresolvable_ref_head_does_not_lower_dead_type_args() {
         "precondition: /argfile.ts must not be indexed before the query"
     );
 
-    // Lower `Unknown<ArgT>` through the eager arm in /main.ts. `Unknown` resolves
-    // to nothing; `ArgT` (the dead arg) imports from /argfile.ts.
+    // Lower `Unknown<ArgT>` through the eager arm in /main.ts under the EAGER
+    // `Expanded` mode. `Unknown` resolves to nothing; `ArgT` (the dead arg)
+    // imports from /argfile.ts.
     let expr = TypeExpr::Ref {
         name: Arc::from("Unknown"),
         type_arguments: Arc::from(
@@ -1360,12 +1381,12 @@ fn eager_unresolvable_ref_head_does_not_lower_dead_type_args() {
             .into_boxed_slice(),
         ),
     };
-    let resolved = eager_lower_subject(&dispatch, &expr, "/main.ts", ProjectionMode::Navigate);
+    let resolved = eager_lower_subject(&dispatch, &expr, "/main.ts", ProjectionMode::Expanded);
 
-    // The `Unknown` head is unresolvable — an honest miss.
+    // The `Unknown` head is unresolvable — the eager demand's honest miss.
     assert!(
         is_opaque(&dispatch, resolved),
-        "an unresolvable `Unknown<ArgT>` head must miss; got {:?}",
+        "an unresolvable `Unknown<ArgT>` head must miss under Expanded; got {:?}",
         dispatch.graph().node_data(resolved).as_deref()
     );
     // DISCRIMINATING: the dead `ArgT` arg must NOT have been lowered, so
@@ -1381,6 +1402,74 @@ fn eager_unresolvable_ref_head_does_not_lower_dead_type_args() {
         "the eager arm must NOT lower+dispatch the dead arg `ArgT` of an unresolvable head — \
          /argfile.ts was indexed, proving the dead arg was lowered (the pre-fix \
          unconditional-lower regression)"
+    );
+}
+
+// ── B21. NAVIGATE TRANSIT: an unresolvable head PRESERVES the BareRef carrier
+//         (name + args + scope), never `Opaque(Miss)` ────────────────────────
+//
+// The carrier-mode counterpart of B17: under `Navigate` transit an unresolved
+// authored reference must remain a scoped `BareRef` carrier — the authored
+// head's name, its (lowered, LIVE) type-argument nodes, and its scope are
+// semantic content the demand points retry (`Navigate` retries identity,
+// `Expanded` resolves + executes). Collapsing to `Opaque(Miss)` at lowering
+// destroys them (the raise-time info loss this contract forbids).
+#[test]
+fn navigate_unresolvable_ref_head_preserves_bare_ref_carrier_with_args() {
+    let host = host();
+    upsert_ts(&host, "/argfile.ts", "export type ArgT = { x: number };\n");
+    upsert_ts(
+        &host,
+        "/main.ts",
+        "import type { ArgT } from \"./argfile\";\nexport type Unused = ArgT;\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let expr = TypeExpr::Ref {
+        name: Arc::from("Unknown"),
+        type_arguments: Arc::from(
+            vec![TypeExpr::Ref {
+                name: Arc::from("ArgT"),
+                type_arguments: verter_type_expr::empty_type_args(),
+            }]
+            .into_boxed_slice(),
+        ),
+    };
+    let resolved = eager_lower_subject(&dispatch, &expr, "/main.ts", ProjectionMode::Navigate);
+
+    // The head stays a scoped BareRef carrier named `Unknown`, with the ONE
+    // applied argument lowered and preserved on the carrier.
+    let data = dispatch
+        .graph()
+        .node_data(resolved)
+        .expect("carrier node data");
+    let (name, scope) = data
+        .bare_ref_head()
+        .expect("Navigate transit must preserve the unresolved head as a BareRef carrier");
+    assert_eq!(name.as_ref(), "Unknown", "the authored head name survives");
+    match scope {
+        NodeScopeId::File { canonical_id, .. } => assert_eq!(
+            canonical_id.as_ref(),
+            "/main.ts",
+            "the carrier is scoped to the lowering file"
+        ),
+        NodeScopeId::Global => panic!("the carrier must carry the file scope, not Global"),
+    }
+    let args = data.carrier_type_args();
+    assert_eq!(args.len(), 1, "the applied argument list survives");
+    // The LIVE arg resolved through the shared head resolver: `ArgT` is a
+    // resolvable import, so the carrier's argument is its `DeclRef`
+    // identity carrier — proving the args were lowered FOR the carrier
+    // (they are retry content, not dead syntax).
+    assert!(
+        matches!(
+            dispatch.graph().node_data(args[0]).as_deref(),
+            Some(SemanticNodeData::DeclRef { identity })
+                if identity.canonical_id.as_ref() == "/argfile.ts"
+                    && identity.decl_name.as_ref() == "ArgT"
+        ),
+        "the preserved carrier's argument must be the resolved `DeclRef(ArgT)`; got {:?}",
+        dispatch.graph().node_data(args[0]).as_deref()
     );
 }
 

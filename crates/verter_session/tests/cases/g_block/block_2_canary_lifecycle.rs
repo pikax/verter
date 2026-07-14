@@ -33,17 +33,46 @@ use super::canary_harness::{
 };
 
 /// Resolve the evaluated type of a single prop from an
-/// `ExpandedComponentTypes` snapshot.
-fn evaluated_prop<'a>(
-    types: &'a verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+/// `ExpandedComponentTypes` snapshot by demand-materializing its
+/// published source through the ONE shared dispatch.
+fn evaluated_prop(
+    host: &verter_session::VerterHost,
+    owner: &str,
+    types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     name: &str,
-) -> &'a TypeExpr {
-    &types
+) -> TypeExpr {
+    let field = types
         .props
         .iter()
         .find(|f| f.name == name)
-        .unwrap_or_else(|| panic!("missing evaluated prop `{name}`"))
-        .r#type
+        .unwrap_or_else(|| panic!("missing evaluated prop `{name}`"));
+    verter_session::test_only::semantic_source_probe::demand_type_expr(
+        host,
+        owner,
+        field.r#type.present().expect("present source"),
+    )
+    .unwrap_or_else(|| panic!("evaluated prop `{name}`'s published source must demand-materialize"))
+}
+
+/// Demand-materialize the named prop's published type source through
+/// the ONE shared dispatch — the explicit consumer resolution step for
+/// a shallow-by-default publication.
+fn demand_prop_type(
+    host: &verter_session::VerterHost,
+    owner: &str,
+    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+) -> TypeExpr {
+    let source = prop
+        .type_source
+        .present()
+        .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name));
+    verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
+        .unwrap_or_else(|| {
+            panic!(
+                "prop `{}`'s published source must demand-materialize",
+                prop.name
+            )
+        })
 }
 
 /// Canary — negative-result recovery when a missing dependency
@@ -85,15 +114,12 @@ fn negative_result_recovers_when_missing_dependency_appears() {
     let initial = host
         .evaluate_types("/src/Comp.vue")
         .expect("initial evaluate_types must resolve the owner");
+    let ui_initial = evaluated_prop(&host, "/src/Comp.vue", &initial, "ui");
     assert!(
-        matches!(
-            evaluated_prop(&initial, "ui"),
-            TypeExpr::Unknown { .. } | TypeExpr::TypeOf(_)
-        ),
+        matches!(ui_initial, TypeExpr::Unknown { .. } | TypeExpr::TypeOf(_)),
         "precondition: with `./theme` missing, `ui` must be a NEGATIVE result — the \
          unresolved `typeof theme` carrier (or a miss sentinel), never a concrete \
-         object — got {:?}",
-        evaluated_prop(&initial, "ui")
+         object — got {ui_initial:?}"
     );
 
     // ADD `./theme` through `harness::upsert` — no eager cascade
@@ -111,8 +137,8 @@ fn negative_result_recovers_when_missing_dependency_appears() {
     let recovered = host
         .evaluate_types("/src/Comp.vue")
         .expect("post-add evaluate_types must resolve the owner");
-    match evaluated_prop(&recovered, "ui") {
-        TypeExpr::Object(obj) => {
+    match evaluated_prop(&host, "/src/Comp.vue", &recovered, "ui") {
+        TypeExpr::Object(ref obj) => {
             let members: Vec<&str> = obj
                 .properties
                 .iter()
@@ -178,10 +204,10 @@ fn evicted_owner_reloads_to_authoritative_state_after_dep_edit() {
         .into_iter()
         .find(|p| p.name == "a")
         .expect("cold meta must publish prop `a`");
+    let a_pre_ty = demand_prop_type(&host, "/workspace/src/Comp.vue", &a_pre);
     assert!(
-        matches!(a_pre.type_expr, TypeExpr::Primitive(PrimitiveName::Number)),
-        "precondition: cold `a` prop must be `number` — got {:?}",
-        a_pre.type_expr
+        matches!(a_pre_ty, TypeExpr::Primitive(PrimitiveName::Number)),
+        "precondition: cold `a` prop must be `number` — got {a_pre_ty:?}"
     );
 
     // Edit `types.ts` through `harness::upsert` (no eager cascade),
@@ -209,12 +235,12 @@ fn evicted_owner_reloads_to_authoritative_state_after_dep_edit() {
         .into_iter()
         .find(|p| p.name == "a")
         .expect("reloaded meta must publish prop `a`");
+    let a_post_ty = demand_prop_type(&host, "/workspace/src/Comp.vue", &a_post);
     assert!(
-        matches!(a_post.type_expr, TypeExpr::Primitive(PrimitiveName::String)),
+        matches!(a_post_ty, TypeExpr::Primitive(PrimitiveName::String)),
         "the reloaded `a` prop MUST carry the edited `string` type — an \
          evicted owner that honoured a stale whole-hash would return None \
-         or the stale `number` shape. Got {:?}",
-        a_post.type_expr
+         or the stale `number` shape. Got {a_post_ty:?}"
     );
 }
 

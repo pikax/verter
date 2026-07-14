@@ -10,11 +10,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::resolver_core::type_expansion::TypeExpansionError;
-use crate::resolver_core::type_expansion_host::{
-    ScriptLang, SfcBlockSpan, SfcStructure, SourceSnapshot, TypeExpansionHost,
-    TypeExpansionSnapshot,
-};
 #[cfg(test)]
 use crate::resolver_core::{
     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
@@ -68,6 +63,11 @@ pub enum ComponentMetaHostError {
     /// entries).
     #[error("audit record for request_id={request_id} missing — store may have evicted it")]
     AuditRecordMissing { request_id: u64 },
+    /// Typed output-materialization failure (fail-closed): a PRESENT type
+    /// source the terminal output sink could not raise / shell-materialize
+    /// — never silently rendered as `Unknown`.
+    #[error("output materialization error: {0}")]
+    OutputMaterialization(#[from] crate::meta_resolve::ComponentMetaOutputError),
 }
 impl From<crate::meta::MetaError> for ComponentMetaHostError {
     fn from(value: crate::meta::MetaError) -> Self {
@@ -75,6 +75,11 @@ impl From<crate::meta::MetaError> for ComponentMetaHostError {
             crate::meta::MetaError::Shutdown => Self::Shutdown,
             crate::meta::MetaError::SessionClosed => Self::Host("session is closed".to_string()),
             crate::meta::MetaError::Host(message) => Self::Host(message),
+            // The typed variant SURVIVES the host boundary: demoting it to a
+            // `Host(String)` would erase the failed lane / positional index /
+            // interior path a consumer needs to distinguish a fail-closed
+            // output-materialization failure from an ordinary host fault.
+            crate::meta::MetaError::OutputMaterialization(err) => Self::OutputMaterialization(err),
         }
     }
 }
@@ -370,6 +375,47 @@ impl ComponentMetaSession {
             .collect())
     }
 
+    /// Output-envelope query in this session's overlay context: the
+    /// session-owned [`crate::meta_resolve::ComponentMetaOutput`] with ALL
+    /// 11 materialized wire type lanes and no resolution sidecar (the
+    /// type lanes are fully resolved; the payload and audited entries
+    /// seed the sidecar).
+    pub fn get_component_meta_output(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<Option<crate::meta_resolve::ComponentMetaOutput>, ComponentMetaHostError> {
+        component_meta_trace_custom!("component_meta_session_output_query", canonical_or_alias);
+        self.inner
+            .get_component_meta_output(canonical_or_alias)
+            .map_err(ComponentMetaHostError::from)
+    }
+
+    /// Batch surface for [`Self::get_component_meta_output`]: one shared
+    /// overlay view, one captured fixed view threaded into every per-job
+    /// call, one host-coordinated batch submission.
+    ///
+    /// Returns one slot per input in input order; `None` is reserved
+    /// EXCLUSIVELY for a genuinely missing canonical. A real per-id failure
+    /// (budget overrun, typed output-materialization failure, per-job
+    /// panic) FAILS THE CALL with the first typed error — exactly as the
+    /// scalar [`Self::get_component_meta_output`] does (scalar ≡ batch) —
+    /// so a failure is never collapsed onto the missing sentinel.
+    pub fn get_component_meta_output_batch(
+        &self,
+        canonical_or_aliases: &[String],
+    ) -> Result<Vec<Option<crate::meta_resolve::ComponentMetaOutput>>, ComponentMetaHostError> {
+        component_meta_trace_custom!(
+            "component_meta_session_output_batch",
+            format!("batch_size={}", canonical_or_aliases.len()),
+        );
+        self.inner
+            .get_component_meta_output_batch(canonical_or_aliases)
+            .map_err(ComponentMetaHostError::from)?
+            .into_iter()
+            .map(|slot| slot.map_err(ComponentMetaHostError::from))
+            .collect()
+    }
+
     /// Get component metadata plus the resolved-state sidecar, packaged
     /// in the shared [`verter_audit::AuditedResult`] carrier alongside
     /// the per-request audit record produced by the same resolution.
@@ -395,10 +441,7 @@ impl ComponentMetaSession {
         &self,
         canonical_or_alias: &str,
     ) -> verter_audit::AuditedResult<
-        Option<(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-            crate::meta_resolve::ResolvedComponentMetaState,
-        )>,
+        Option<crate::meta_resolve::ComponentMetaOutput>,
         ComponentMetaHostError,
     > {
         let host = self.inner.host();
@@ -415,31 +458,52 @@ impl ComponentMetaSession {
             );
         }
         // Audit capture is instrumented on the host-level path — it
-        // installs the `RequestContext` TLS, stamps the resolution's
-        // `request_id`, and publishes the record into the bounded
-        // store. The session-runtime path (used by `get_component_meta`
-        // etc.) skips that setup because it resolves through an
-        // overlay-aware runtime that does not thread audit state.
-        // `ComponentMetaSession::get_component_meta_with_audit` is
-        // therefore equivalent to the base-project audit query — the
-        // same answer the `AuditedRequest` harness returns when given
-        // the same host.
-        let Some((analysis, resolution)) =
-            host.get_component_meta_with_resolution(canonical_or_alias)
-        else {
-            // No analysis behind the request: a non-fault miss rides
-            // `Ok(None)` with a cheap default-filled record.
-            return verter_audit::AuditedResult::ok(
-                None,
-                cheap_component_meta_record(
-                    canonical_or_alias,
-                    verter_audit::AuditCaptureState::FilteredNoop,
-                ),
-            );
-        };
-        let request_id = resolution.request_id;
+        // installs the `RequestContext` TLS, stamps the request id, and
+        // publishes the record into the bounded store. The output-bearing
+        // resolution entry materializes the wire envelope INSIDE the same
+        // request-bound validated view the analysis is served under, so
+        // the audit bundle's payload and record describe one snapshot.
+        // EVERY terminal of that entry carries the request id, so the
+        // error path retrieves (and drains) the SAME real record the
+        // resolution published — audited identically to success; the cheap
+        // fallback applies only when no record was produced or the bounded
+        // store evicted it.
+        let (output, request_id) =
+            match host.get_component_meta_output_with_resolution(canonical_or_alias) {
+                Ok((Some(output), request_id)) => (output, request_id),
+                Ok((None, request_id)) => {
+                    // No analysis behind the request: a non-fault miss rides
+                    // `Ok(None)`. Drain the real record when the resolution
+                    // published one; otherwise carry the cheap default.
+                    let record = host.take_audit_record(request_id).unwrap_or_else(|| {
+                        cheap_component_meta_record(
+                            canonical_or_alias,
+                            verter_audit::AuditCaptureState::FilteredNoop,
+                        )
+                    });
+                    return verter_audit::AuditedResult::ok(None, record);
+                }
+                Err((err, request_id)) => {
+                    // Typed output-materialization failure (fail-closed) —
+                    // the payload is refused, never collapsed to `Unknown`.
+                    // The resolution itself completed and published its REAL
+                    // record before materialization failed: drain and return
+                    // THAT record (never a fabricated zero-id stand-in, and
+                    // never an orphan left in the store).
+                    let record = host.take_audit_record(request_id).unwrap_or_else(|| {
+                        cheap_component_meta_record(
+                            canonical_or_alias,
+                            verter_audit::AuditCaptureState::FilteredNoop,
+                        )
+                    });
+                    return verter_audit::AuditedResult::err(
+                        ComponentMetaHostError::OutputMaterialization(err),
+                        record,
+                    );
+                }
+            };
         match host.take_audit_record(request_id) {
-            Some(record) => verter_audit::AuditedResult::ok(Some((analysis, resolution)), record),
+            Some(record) => verter_audit::AuditedResult::ok(Some(output), record),
             None => verter_audit::AuditedResult::err(
                 ComponentMetaHostError::AuditRecordMissing { request_id },
                 cheap_component_meta_record(
@@ -475,10 +539,7 @@ impl ComponentMetaSession {
     pub fn get_component_meta_payload(
         &self,
         canonical_or_alias: &str,
-        encode_fn: impl FnOnce(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-            &crate::meta_resolve::ResolvedComponentMetaState,
-        ) -> Vec<u8>,
+        encode_fn: impl FnOnce(crate::meta_resolve::ComponentMetaOutput) -> Vec<u8>,
     ) -> Result<Option<Vec<u8>>, ComponentMetaHostError> {
         self.inner
             .get_component_meta_payload(canonical_or_alias, encode_fn)
@@ -490,24 +551,28 @@ impl ComponentMetaSession {
     /// overlay view. Routes the batch through `HostBatchCoordinator` — on
     /// native it fans the N queries out on the host-owned `HostCpuPool`,
     /// on wasm it runs inline/sequentially — accounting the submission
-    /// once per non-empty batch (skipped for an empty batch). Per-id
-    /// misses / failures surface as `None` in their slot.
+    /// once per non-empty batch (skipped for an empty batch).
+    ///
+    /// Returns one slot per input in input order; `None` is reserved
+    /// EXCLUSIVELY for a genuinely missing canonical. A real per-id failure
+    /// (budget overrun, typed output-materialization failure, per-job
+    /// panic) FAILS THE CALL with the first typed error — exactly as the
+    /// scalar [`Self::get_component_meta_payload`] does (scalar ≡ batch) —
+    /// so a failure is never collapsed onto the missing sentinel.
     pub fn get_component_meta_batch_payloads<F>(
         &self,
         canonical_or_aliases: &[String],
         encode_fn: F,
     ) -> Result<Vec<Option<Vec<u8>>>, ComponentMetaHostError>
     where
-        F: Fn(
-                verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-                &crate::meta_resolve::ResolvedComponentMetaState,
-            ) -> Vec<u8>
-            + Sync
-            + Send,
+        F: Fn(crate::meta_resolve::ComponentMetaOutput) -> Vec<u8> + Sync + Send,
     {
         self.inner
             .get_component_meta_batch_payloads(canonical_or_aliases, encode_fn)
-            .map_err(ComponentMetaHostError::from)
+            .map_err(ComponentMetaHostError::from)?
+            .into_iter()
+            .map(|slot| slot.map_err(ComponentMetaHostError::from))
+            .collect()
     }
 
     /// Tier 1B selective surface API (D32 + D102). Returns the
@@ -576,101 +641,6 @@ impl ComponentMetaSession {
     /// Per-session overlay generation counter.
     pub fn overlay_generation(&self) -> u64 {
         self.inner.overlay_generation()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// VerterComponentMetaProvider implementation
-// ---------------------------------------------------------------------------
-
-impl crate::resolver_core::type_expansion_verter::VerterComponentMetaProvider
-    for ComponentMetaHost
-{
-    fn get_component_meta(
-        &self,
-        canonical_id: &str,
-    ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
-        self.host().get_component_meta(canonical_id)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// TypeExpansionHost implementation
-// ---------------------------------------------------------------------------
-
-impl TypeExpansionHost for ComponentMetaHost {
-    fn snapshot_view(
-        &self,
-        canonical_id: &str,
-    ) -> Result<TypeExpansionSnapshot, TypeExpansionError> {
-        let source = self
-            .host()
-            .get_source(canonical_id)
-            .ok_or(TypeExpansionError::SourceUnavailable)?;
-
-        let lang = if canonical_id.ends_with(".tsx") {
-            ScriptLang::Tsx
-        } else if canonical_id.ends_with(".jsx") {
-            ScriptLang::Jsx
-        } else if canonical_id.ends_with(".js")
-            || canonical_id.ends_with(".mjs")
-            || canonical_id.ends_with(".cjs")
-        {
-            ScriptLang::Js
-        } else {
-            ScriptLang::Ts
-        };
-
-        let sfc_structure = extract_sfc_structure(&source);
-
-        Ok(TypeExpansionSnapshot {
-            source: SourceSnapshot {
-                text: source.to_string(),
-                lang,
-            },
-            sfc_structure,
-            revision: self.generation(),
-        })
-    }
-}
-
-/// Extract SFC block spans from raw source text.
-fn extract_sfc_structure(source: &str) -> SfcStructure {
-    let mut script = None;
-    let mut script_setup = None;
-    let mut template = None;
-
-    let mut pos = 0;
-    let bytes = source.as_bytes();
-
-    while pos < bytes.len() {
-        if bytes[pos] != b'<' {
-            pos += 1;
-            continue;
-        }
-
-        let rest = &source[pos..];
-        if let Some(block) = try_extract_block(rest, "script setup", pos) {
-            script_setup = Some(block);
-            pos = block.content.end as usize + "</script>".len();
-        } else if let Some(block) = try_extract_block(rest, "script", pos) {
-            if script_setup.is_none() || block.content.start != script_setup.unwrap().content.start
-            {
-                script = Some(block);
-            }
-            pos = block.content.end as usize + "</script>".len();
-        } else if let Some(block) = try_extract_block(rest, "template", pos) {
-            template = Some(block);
-            pos = block.content.end as usize + "</template>".len();
-        } else {
-            pos += 1;
-        }
-    }
-
-    SfcStructure {
-        script,
-        script_setup,
-        template,
     }
 }
 
@@ -773,637 +743,10 @@ fn extract_component_meta_from_resolved_with_evaluated(
     meta
 }
 
-/// Try to extract a block's content span from `<tag ...>content</tag>`.
-fn try_extract_block(rest: &str, tag: &str, base_offset: usize) -> Option<SfcBlockSpan> {
-    let open_prefix = format!("<{}", tag);
-    if !rest.starts_with(&open_prefix) {
-        return None;
-    }
-
-    let after_tag = &rest[open_prefix.len()..];
-    if !after_tag.is_empty() {
-        let next = after_tag.as_bytes()[0];
-        if next != b' ' && next != b'>' && next != b'\n' && next != b'\r' && next != b'\t' {
-            return None;
-        }
-    }
-
-    let gt_pos = rest.find('>')?;
-    let content_start = base_offset + gt_pos + 1;
-
-    let close_tag = format!("</{}>", tag.split_whitespace().next().unwrap_or(tag));
-    let close_pos = rest.find(&close_tag)?;
-    let content_end = base_offset + close_pos;
-
-    Some(SfcBlockSpan {
-        content: verter_span::Span::new(content_start as u32, content_end as u32),
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_host() -> ComponentMetaHost {
-        // Tests use `cpu_threads = 1` to avoid CPU oversubscription
-        // when many parallel test threads each spin up their own
-        // Rayon pools.
-        ComponentMetaHost::new_standalone_with_scheduler_config(
-            crate::types::HostConfig::default(),
-            verter_scheduler::scheduler::SchedulerConfig {
-                cpu_threads: 1,
-                ..verter_scheduler::scheduler::SchedulerConfig::default()
-            },
-        )
-    }
-
-    #[test]
-    fn upsert_base_and_get_source() {
-        let host = make_host();
-        host.upsert_base("/src/Foo.vue", "<template><div/></template>")
-            .unwrap();
-        let session = host.open_session_batch().unwrap();
-        let source = session.get_effective_source("/src/Foo.vue").unwrap();
-        assert!(source.is_some());
-        assert!(source.unwrap().contains("<template>"));
-    }
-
-    #[test]
-    fn session_overlays_are_isolated() {
-        let host = make_host();
-        host.upsert_base("/src/Foo.vue", "<template><div/></template>")
-            .unwrap();
-        let session_a = host.open_session_batch().unwrap();
-        let session_b = host.open_session_batch().unwrap();
-
-        session_a
-            .upsert("/src/Foo.vue", "<template><span/></template>".to_string())
-            .unwrap();
-
-        assert_eq!(
-            session_a.get_effective_source("/src/Foo.vue").unwrap(),
-            Some("<template><span/></template>".to_string())
-        );
-        assert_eq!(
-            session_b.get_effective_source("/src/Foo.vue").unwrap(),
-            Some("<template><div/></template>".to_string())
-        );
-    }
-
-    #[test]
-    fn closing_session_reverts_its_overlays() {
-        let host = make_host();
-        host.upsert_base("/src/Foo.vue", "<template><div/></template>")
-            .unwrap();
-
-        let session_a = host.open_session_batch().unwrap();
-        session_a
-            .upsert("/src/Foo.vue", "<template><span/></template>".to_string())
-            .unwrap();
-        session_a.close();
-
-        let session_b = host.open_session_batch().unwrap();
-        assert_eq!(
-            session_b.get_effective_source("/src/Foo.vue").unwrap(),
-            Some("<template><div/></template>".to_string())
-        );
-    }
-
-    #[test]
-    fn shutdown_prevents_further_operations() {
-        let host = make_host();
-        host.shutdown();
-        assert!(host.is_shutdown());
-        assert!(host.upsert_base("/src/X.vue", "").is_err());
-    }
-
-    #[test]
-    fn get_component_meta_returns_none_for_missing() {
-        let host = make_host();
-        let session = host.open_session_batch().unwrap();
-        let result = session.get_component_meta("/nonexistent.vue").unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn get_component_meta_returns_some_for_loaded_sfc() {
-        let host = make_host();
-        host.upsert_base(
-            "/src/Button.vue",
-            "<script setup lang=\"ts\">\ndefineProps<{ msg: string }>()\n</script>\n<template><div>{{ msg }}</div></template>",
-        )
-        .unwrap();
-        let session = host.open_session_batch().unwrap();
-        let result = session.get_component_meta("/src/Button.vue").unwrap();
-        assert!(result.is_some(), "should return meta for loaded SFC");
-    }
-
-    #[test]
-    fn component_meta_with_resolution_keeps_resolved_type_registry_sidecar() {
-        let host = make_host();
-        host.upsert_base(
-            "/src/types.ts",
-            r#"type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
-  [K in keyof T['variants']]: keyof T['variants'][K]
-}
-
-type ComponentSlots<T extends { slots?: Record<string, any> }> = {
-  [K in keyof T['slots']]?: string
-}
-
-export type ComponentConfig<T extends Record<string, any>, A> = {
-  variants: ComponentVariants<T>,
-  slots: ComponentSlots<T>
-  appConfig?: A
-}"#,
-        )
-        .unwrap();
-        host.upsert_base(
-            "/src/theme.ts",
-            r#"export default {
-  variants: {
-    color: { primary: '', secondary: '' }
-  },
-  slots: {
-    base: '',
-    label: ''
-  }
-} as const"#,
-        )
-        .unwrap();
-        host.upsert_base(
-            "/src/Button.vue",
-            r#"<script lang="ts">
-import type { ComponentConfig } from './types'
-import theme from './theme'
-
-type Button = ComponentConfig<typeof theme, MissingAppConfig>
-
-export interface ButtonProps {
-  color?: Button['variants']['color']
-  ui?: Button['slots']
-}
-</script>
-<script setup lang="ts">
-defineProps<ButtonProps>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-        let session = host.open_session_batch().unwrap();
-        let (_analysis, resolved) = session
-            .get_component_meta_with_resolution("/src/Button.vue")
-            .unwrap()
-            .expect("canonical query should return meta plus resolution sidecar");
-
-        let button_entry = resolved
-            .resolved_type_registry
-            .iter()
-            .find(|entry| entry.name == "Button")
-            .expect("canonical query should keep the resolved Button registry entry");
-        let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
-            panic!(
-                "expected resolved Button helper to materialize as an object, got {:?}",
-                button_entry.type_expr
-            );
-        };
-
-        let variants_member = button_shape
-            .properties
-            .iter()
-            .find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == "variants" => {
-                    Some(&property.ty)
-                }
-                _ => None,
-            })
-            .expect("Button registry entry should keep variants");
-        let TypeExpr::Object(variants_shape) = variants_member else {
-            panic!(
-                "expected Button.variants to materialize as an object, got {:?}",
-                variants_member
-            );
-        };
-        assert!(
-            variants_shape.properties.iter().any(
-                |member| matches!(member, ObjectMember::Property(property) if property.name == "color"),
-            ),
-            "expected Button.variants to expose color, got {:?}",
-            variants_member
-        );
-    }
-
-    #[test]
-    fn overlay_queries_reapply_owner_after_overlay_only_helper_upserts() {
-        let host = make_host();
-        let session = host.open_session_batch().unwrap();
-
-        // Upsert the owner before its overlay-only helpers. Overlay application
-        // must still leave the owner query seeing the helper files.
-        session
-            .upsert(
-                "/src/Button.vue",
-                r#"<script lang="ts">
-import type { AppConfig } from './schema'
-import theme from './theme'
-import type { ComponentConfig } from './tv'
-
-type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
-
-export interface ButtonProps {
-  color?: Button['variants']['color']
-  ui?: Button['slots']
-}
-
-export interface ButtonSlots {
-  default?(props: { ui: Button['ui'] }): any
-}
-</script>
-<script setup lang="ts">
-defineProps<ButtonProps>()
-defineSlots<ButtonSlots>()
-</script>
-<template><div /></template>"#
-                    .to_string(),
-            )
-            .unwrap();
-        session
-            .upsert(
-                "/src/tv.ts",
-                r#"type ClassValue = string | number | boolean | null | undefined | ClassValue[] | { [key: string]: any }
-
-type Id<T> = {} & { [P in keyof T]: T[P] }
-
-type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
-  [K in keyof T['variants']]: keyof T['variants'][K]
-}
-
-type ComponentSlots<T extends { slots?: Record<string, any> }> = Id<{
-  [K in keyof T['slots']]?: ClassValue
-}>
-
-type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
-  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
-}>
-
-type GetComponentAppConfig<A, U extends string, K extends string>
-  = A extends Record<U, Record<K, any>> ? A[U][K] : {}
-
-type ComponentAppConfig<
-  T,
-  A extends Record<string, any>,
-  K extends string,
-  U extends string = 'ui' | 'ui.prose'
-> = A & (
-  U extends 'ui.prose'
-    ? { ui?: { prose?: { [k in K]?: Partial<T> } } }
-    : { [key in Exclude<U, 'ui.prose'>]?: { [k in K]?: Partial<T> } }
-)
-
-export type ComponentConfig<
-  T extends Record<string, any>,
-  A extends Record<string, any>,
-  K extends string,
-  U extends 'ui' | 'ui.prose' = 'ui'
-> = {
-  AppConfig: ComponentAppConfig<T, A, K, U>,
-  variants: ComponentVariants<T & GetComponentAppConfig<A, U, K>>
-  slots: ComponentSlots<T>,
-  ui: ComponentUI<T>
-}"#
-                    .to_string(),
-            )
-            .unwrap();
-        session
-            .upsert(
-                "/src/schema.ts",
-                r#"export interface AppConfig {
-  ui: {
-    button: {
-      variants: {
-        color: {
-          neutral: string
-        }
-      }
-    }
-  }
-}"#
-                .to_string(),
-            )
-            .unwrap();
-        session
-            .upsert(
-                "/src/theme.ts",
-                r#"export default {
-  variants: {
-    color: { primary: '', secondary: '' },
-    variant: { solid: '', soft: '' },
-    size: { sm: '', md: '' }
-  },
-  slots: {
-    base: '',
-    label: ''
-  }
-} as const"#
-                    .to_string(),
-            )
-            .unwrap();
-
-        let (_analysis, resolved) = session
-            .get_component_meta_with_resolution("/src/Button.vue")
-            .unwrap()
-            .expect("overlay-only helper query should return canonical meta plus resolution");
-
-        let button_entry = resolved
-            .resolved_type_registry
-            .iter()
-            .find(|entry| entry.name == "Button")
-            .expect("Button helper should be published in the resolved registry");
-        let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
-            panic!(
-                "expected Button helper to materialize as an object, got {:?}",
-                button_entry.type_expr
-            );
-        };
-        let variants_member = button_shape
-            .properties
-            .iter()
-            .find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == "variants" => {
-                    Some(&property.ty)
-                }
-                _ => None,
-            })
-            .expect("Button helper should keep variants");
-        let TypeExpr::Object(variants_shape) = variants_member else {
-            panic!(
-                "expected Button.variants to materialize as an object, got {:?}",
-                variants_member
-            );
-        };
-        let color_member = variants_shape
-            .properties
-            .iter()
-            .find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == "color" => Some(&property.ty),
-                _ => None,
-            })
-            .expect("Button.variants should keep color");
-        let TypeExpr::Union(color_variants) = color_member else {
-            panic!(
-                "expected Button.variants.color to stay a union surface, got {:?}",
-                color_member
-            );
-        };
-        assert!(
-            color_variants.contains(&TypeExpr::string_literal("primary")),
-            "expected Button.variants.color to include primary, got {:?}",
-            color_member
-        );
-        assert!(
-            color_variants.contains(&TypeExpr::string_literal("secondary")),
-            "expected Button.variants.color to include secondary, got {:?}",
-            color_member
-        );
-        assert!(
-            color_variants.contains(&TypeExpr::string_literal("neutral")),
-            "expected Button.variants.color to include neutral, got {:?}",
-            color_member
-        );
-        // The deferred arm must stay NON-POISONING: no semantic-miss
-        // sentinel may leak into the published variants surface.
-        assert!(
-            !crate::resolver_core::type_expr_contains_semantic_miss(variants_member),
-            "the GetComponentAppConfig arm must not poison the published \
-             variants surface with a semantic-miss sentinel, got {:?}",
-            variants_member
-        );
-    }
-
-    /// A wide finite import/heritage fan-out (`Props extends T0..Tn`,
-    /// every `Tn` imported from a second file) is NOT a recursive
-    /// semantic case: the native graph resolves the full `n`-member prop
-    /// surface successfully, without hang or a spurious budget error.
-    ///
-    /// The frontier step budget is pinned LOW
-    /// (`external_resolution_step_budget = Some(40)`, below the `45`-wide
-    /// import count): the cross-file frontier only performs route
-    /// discovery, so a wide heritage fan-out must not trip the step-limit
-    /// — the heritage members come from the native semantic graph. The
-    /// `props.len() == import_count` assertion discriminates: dropping the
-    /// cross-file heritage definitions makes the prop count fall short and
-    /// the test RED.
-    ///
-    /// Sized small (45 / 40-step) instead of the historical 2005/2000
-    /// corpus so the test runs in well under a second while exercising the
-    /// identical native-graph wide-heritage resolution path.
-    #[test]
-    fn component_meta_budget_errors_surface_on_new_session_api() {
-        let host = ComponentMetaHost::new_standalone_with_scheduler_config(
-            crate::types::HostConfig {
-                external_resolution_step_budget: Some(40),
-                ..crate::types::HostConfig::default()
-            },
-            verter_scheduler::scheduler::SchedulerConfig {
-                cpu_threads: 1,
-                ..verter_scheduler::scheduler::SchedulerConfig::default()
-            },
-        );
-
-        let import_count = 45usize;
-        let mut defs_source = String::new();
-        for index in 0..import_count {
-            defs_source.push_str(&format!(
-                "export interface T{index} {{ p{index}: string }}\n"
-            ));
-        }
-
-        let mut types_source = String::new();
-        types_source.push_str("import type { ");
-        for index in 0..import_count {
-            if index > 0 {
-                types_source.push_str(", ");
-            }
-            types_source.push_str(&format!("T{index}"));
-        }
-        types_source.push_str(" } from './defs'\n");
-        types_source.push_str("export interface Props extends ");
-        for index in 0..import_count {
-            if index > 0 {
-                types_source.push_str(", ");
-            }
-            types_source.push_str(&format!("T{index}"));
-        }
-        types_source.push_str(" {}\n");
-
-        host.upsert_base("/src/defs.ts", &defs_source).unwrap();
-        host.upsert_base("/src/types.ts", &types_source).unwrap();
-        host.upsert_base(
-            "/src/App.vue",
-            r#"<script setup lang="ts">
-import type { Props } from "./types"
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-        host.host().set_import_dependencies(
-            "/src/App.vue",
-            vec![crate::types::DependencyResolution {
-                specifier: "./types".to_string(),
-                resolved_canonical_id: Some("/src/types.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            }],
-        );
-        host.host().set_import_dependencies(
-            "/src/types.ts",
-            vec![crate::types::DependencyResolution {
-                specifier: "./defs".to_string(),
-                resolved_canonical_id: Some("/src/defs.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            }],
-        );
-
-        let session = host.open_session_batch().unwrap();
-        let meta = session
-            .get_component_meta("/src/App.vue")
-            .expect("large finite heritage graph should resolve successfully")
-            .expect("component meta should be present");
-
-        // All 2005 interfaces should contribute one prop each
-        assert_eq!(
-            meta.props.len(),
-            import_count,
-            "large finite heritage graph should produce all {import_count} props"
-        );
-        // Spot-check the first prop and confirm the highest-numbered prop is
-        // still present; projected surfaces are sorted lexicographically.
-        assert_eq!(meta.props[0].name, "p0");
-        assert!(
-            meta.props
-                .iter()
-                .any(|prop| prop.name == format!("p{}", import_count - 1)),
-            "large finite heritage graph should retain p{} somewhere in the deterministic lexical surface order",
-            import_count - 1
-        );
-    }
-
-    #[test]
-    fn snapshot_view_returns_source_and_structure() {
-        let host = make_host();
-        host.upsert_base(
-            "/src/Foo.vue",
-            "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template><div/></template>",
-        )
-        .unwrap();
-
-        let snapshot = host.snapshot_view("/src/Foo.vue").unwrap();
-        assert!(snapshot.source.text.contains("const x = 1"));
-        assert!(snapshot.sfc_structure.script_setup.is_some());
-        assert!(snapshot.sfc_structure.template.is_some());
-        assert!(snapshot.sfc_structure.script.is_none());
-    }
-
-    #[test]
-    fn snapshot_view_dual_script() {
-        let host = make_host();
-        host.upsert_base(
-            "/src/Bar.vue",
-            "<script lang=\"ts\">\nexport default {}\n</script>\n<script setup lang=\"ts\">\ndefineProps<{ msg: string }>()\n</script>\n<template><div/></template>",
-        )
-        .unwrap();
-
-        let snapshot = host.snapshot_view("/src/Bar.vue").unwrap();
-        assert!(
-            snapshot.sfc_structure.script.is_some(),
-            "should have companion script"
-        );
-        assert!(
-            snapshot.sfc_structure.script_setup.is_some(),
-            "should have script setup"
-        );
-        assert!(
-            snapshot.sfc_structure.template.is_some(),
-            "should have template"
-        );
-
-        let setup = snapshot.sfc_structure.script_setup.unwrap();
-        let setup_text =
-            &snapshot.source.text[setup.content.start as usize..setup.content.end as usize];
-        assert!(
-            setup_text.contains("defineProps"),
-            "setup span should contain defineProps, got: {setup_text}"
-        );
-    }
-
-    #[test]
-    fn snapshot_view_missing_file_returns_error() {
-        let host = make_host();
-        let result = host.snapshot_view("/nonexistent.vue");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn snapshot_view_revision_matches_generation() {
-        let host = make_host();
-        host.upsert_base("/src/A.vue", "<template/>").unwrap();
-        let snap = host.snapshot_view("/src/A.vue").unwrap();
-        assert_eq!(snap.revision, host.generation());
-    }
-
-    #[test]
-    fn extract_sfc_structure_handles_empty() {
-        let structure = super::extract_sfc_structure("");
-        assert!(structure.script.is_none());
-        assert!(structure.script_setup.is_none());
-        assert!(structure.template.is_none());
-    }
-
-    #[test]
-    fn extracted_external_meta_keeps_fallthrough_on_captured_store_view() {
-        let host = make_host();
-        host.upsert_base("/src/Link.vue", "<template><a /></template>")
-            .unwrap();
-        host.upsert_base(
-            "/src/Button.vue",
-            r#"<script setup lang="ts">
-import Link from './Link.vue'
-</script>
-<template><Link /></template>"#,
-        )
-        .unwrap();
-
-        let _store_view = host.host().resolver_store_view();
-        let resolved = host
-            .host()
-            .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
-            .expect("button resolved state should exist for the captured store view");
-
-        host.upsert_base("/src/Link.vue", "<script setup lang=\"ts\"></script>")
-            .unwrap();
-
-        let meta = crate::resolver_core::with_bare_host_ctx_for_test(host.host(), |ctx| {
-            extract_component_meta_from_resolved_with_evaluated(
-                host.host(),
-                ctx,
-                "/src/Button.vue",
-                &resolved,
-                resolved.evaluated_types.as_ref(),
-                true,
-            )
-        });
-
-        assert!(
-            matches!(
-                meta.fallthrough_surface,
-                verter_semantic::analysis::component_meta::FallthroughSurface::Branches { .. }
-            ),
-            "captured store views should keep child fallthrough resolution pinned to the resolved snapshot",
-        );
-    }
-}
+#[path = "component_meta_host_tests.rs"]
+mod tests;

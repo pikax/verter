@@ -152,7 +152,7 @@ fn r7_materialization_cache_key_is_content_free_canonical_subject() {
     );
     let key = MaterializationCacheKey {
         decl: slot.clone(),
-        projection_path: RouteDemand::Pick(vec!["id".to_string()]),
+        projection_path: RouteDemand::pick(vec!["id".to_string()]),
         scope_axis: MaterializationScope::TopLevel,
         projection_mode: ProjectionMode::Expanded,
         normalized_type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -166,7 +166,7 @@ fn r7_materialization_cache_key_is_content_free_canonical_subject() {
     assert_eq!(key.decl.symbol_space, SemanticSymbolSpace::Type);
     assert_eq!(
         key.projection_path,
-        RouteDemand::Pick(vec!["id".to_string()])
+        RouteDemand::pick(vec!["id".to_string()])
     );
     assert_eq!(key.scope_axis, MaterializationScope::TopLevel);
     assert_eq!(key.projection_mode, ProjectionMode::Expanded);
@@ -191,7 +191,7 @@ fn r7_materialization_cache_key_is_content_free_canonical_subject() {
     // A different projection (Pick<'id'> vs Pick<'body'>) is a DISTINCT
     // entry — path-precise, no over-share across projections.
     let mut proj_variant = key.clone();
-    proj_variant.projection_path = RouteDemand::Pick(vec!["body".to_string()]);
+    proj_variant.projection_path = RouteDemand::pick(vec!["body".to_string()]);
     assert_ne!(
         hash_of(&key),
         hash_of(&proj_variant),

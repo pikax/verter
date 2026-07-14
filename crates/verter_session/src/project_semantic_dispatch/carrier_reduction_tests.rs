@@ -156,7 +156,7 @@ fn evaluate_typeof_carrier_applies_instantiation_args() {
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     let carrier = typeof_carrier_node(&dispatch, "/m.ts", "f", &[], PrimitiveKind::String);
-    let reduced = dispatch.evaluate_deferred_semantic_node_with_context(
+    let (reduced, _) = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(
         carrier,
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
@@ -380,7 +380,7 @@ fn evaluate_typeof_carrier_with_path_projects_then_applies_args() {
         &["make"],
         PrimitiveKind::Number,
     );
-    let reduced = dispatch.evaluate_deferred_semantic_node_with_context(
+    let (reduced, _) = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(
         carrier,
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
@@ -491,7 +491,7 @@ fn typeof_carrier_arity_overflow_is_honest_miss_after_projection() {
         Arc::from(vec![a, b].into_boxed_slice()),
     ));
 
-    let reduced = dispatch.evaluate_deferred_semantic_node_with_context(
+    let (reduced, _) = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(
         carrier,
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
@@ -526,7 +526,7 @@ fn typeof_carrier_reduction_equals_eager_lowering_path() {
 
     // Carrier-aware reducer result.
     let carrier = typeof_carrier_node(&dispatch, "/m.ts", "f", &[], PrimitiveKind::String);
-    let via_reducer = dispatch.evaluate_deferred_semantic_node_with_context(
+    let (via_reducer, _) = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(
         carrier,
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
@@ -601,7 +601,7 @@ fn typeof_carrier_substitution_cycle_terminates_through_arm() {
             // `typeof y<string>` carrier over the self-referential value.
             let carrier =
                 typeof_carrier_node(&dispatch, "/cyc.ts", "y", &[], PrimitiveKind::String);
-            let reduced = dispatch.evaluate_deferred_semantic_node_with_context(
+            let (reduced, _) = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(
                 carrier,
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
             );

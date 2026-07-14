@@ -2,10 +2,9 @@
 //!
 //! A `.svelte` component has no literal `export default` — the default export is
 //! the component value the compiler produces. This module synthesises a
-//! class-shaped `default` value symbol whose construct signature returns the
-//! component's instance shape (`{ $props: Props }` plus the exported
-//! instance-script members), exactly the way
-//! [`super::vue_default_synth`] synthesises the Vue SFC's `default`.
+//! class-shaped `default` value symbol whose fabricated public instance is
+//! `{ $props: Props }` plus the exported instance-script members, exactly the
+//! way [`super::vue_default_synth`] synthesises the Vue SFC's `default`.
 //!
 //! The synthesis consumes the PARSE-DOMAIN
 //! [`SvelteScriptCandidates`](verter_semantic::analysis::framework_facts::svelte::SvelteScriptCandidates)
@@ -20,12 +19,15 @@
 use std::sync::Arc;
 
 use verter_semantic::analysis::framework_facts::svelte::SvelteScriptCandidates;
-use verter_semantic::analysis::type_eval::{FunctionSignature, ValueDeclKind};
-use verter_type_expr::{
-    FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
+use verter_type_expr::facts::{
+    FactOrLocator, LeafTypeFact, ResolvedLocalShape, SemanticTypeSource, SynthesizedLeafMember,
+    SynthesizedMemberFact,
 };
+use verter_type_expr::locators::{AuthoredBodyLocator, AuthoredTypePayloadRef};
+use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
+use verter_type_expr::PrimitiveName;
 
-use crate::decl_body_memo::LoweredValueDecl;
+use crate::decl_body_memo::{lowered_value_decl_for_synthesised_default, LoweredValueDecl};
 
 use super::vue_default_synth::{VUE_INSTANCE_PROPS_MEMBER, VUE_INSTANCE_SLOTS_MEMBER};
 
@@ -42,176 +44,165 @@ pub const SVELTE_INSTANCE_EVENTS_MEMBER: &str = "$events";
 /// EVERY `.svelte` file is a component, so this ALWAYS produces a default — a
 /// pure-markup component with no `$props()` and no exports still gets an instance
 /// whose `$props` is the empty object `{}`. The returned symbol mimics a userland
-/// `class default { ... }`: a single construct signature whose return type is the
-/// instance shape `{ $props: Props, ...exported members }`. `Props` is the
-/// `$props()` candidate type (runes mode) OR the synthesized object of legacy
-/// `export let` props OR `{}` when the component declares no props.
+/// `class default { ... }`: the fabricated instance shape
+/// (`{ $props: Props, ...exported members }`) rides the annotation FACT as a
+/// synthesized CLOSED source ([`SemanticTypeSource::Synthesized`]). `Props` is
+/// the `$props()` candidate's authored PAYLOAD LOCATOR (runes mode — lowered on
+/// demand through the one dispatch, never eagerly) OR the fabricated
+/// depth-closed object of legacy `export let` props OR the empty `{}` when the
+/// component declares no props.
 #[must_use]
 pub fn synthesise_svelte_default_value_symbol(
     candidates: &SvelteScriptCandidates,
 ) -> LoweredValueDecl {
-    let props_type = props_instance_type(candidates).unwrap_or_else(empty_object);
-    let exported = instance_export_members(candidates);
-
-    let mut members: Vec<ObjectMember> =
-        vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            VUE_INSTANCE_PROPS_MEMBER.to_string(),
-            props_type,
-            false,
-            false,
-        ))];
+    let mut members: Vec<SynthesizedMemberFact> = vec![synthetic_member(
+        VUE_INSTANCE_PROPS_MEMBER,
+        false,
+        props_instance_fact(candidates),
+    )];
 
     // The legacy dispatcher event-map member, when the component declares a
     // `createEventDispatcher<E>` (parse-domain; provenance validation is a
     // query-time concern, never synth's). The shim renders the exact handler
     // types from this map; the derived callback-prop events come from `$props`
     // at the shim, so a dispatcher-less runes component carries no `$events`
-    // member here. Shallow-by-default — the event-map ref is preserved verbatim.
-    if let Some(events_type) = candidates.dispatcher_events.clone() {
-        members.push(ObjectMember::Property(ObjectProperty::synthetic_public(
-            SVELTE_INSTANCE_EVENTS_MEMBER.to_string(),
-            events_type,
+    // member here. Shallow-by-default — the event-map payload stays its
+    // authored locator, lowered on demand.
+    if let Some(events_payload) = candidates.dispatcher_events.as_ref() {
+        members.push(synthetic_member(
+            SVELTE_INSTANCE_EVENTS_MEMBER,
             false,
-            false,
-        )));
+            payload_ref_fact(events_payload),
+        ));
     }
 
     // The snippet-typed slot members, when the component declares snippet props
-    // (parse-domain candidate member names). Each becomes a callable slot member
-    // `(bindings) => any` (the binding precision lives in the snippet `Snippet<…>`
-    // type the consumer re-resolves on demand). A component with no snippet props
-    // carries no `$slots` member; the consumer's `$slots[K]` then fails the
-    // `keyof {}` index (the correct slot-less behaviour).
+    // (parse-domain candidate member names). The fabricated `$slots` map records
+    // the exact slot KEYS so the consumer's `$slots[K]` index is name-exact (an
+    // unknown slot name FAILS the `keyof` index); each value degrades to the
+    // honest `any` leaf — the PRECISE snippet callable lives in the snippet
+    // prop's own `Snippet<…>` type on `$props`, re-resolved by the consumer on
+    // demand (shallow-by-default), and `any` stays callable and indexable. A
+    // component with no snippet props carries no `$slots` member; the
+    // consumer's `$slots[K]` then fails the `keyof {}` index (the correct
+    // slot-less behaviour).
     let slot_members = snippet_slot_members(candidates);
     if !slot_members.is_empty() {
-        members.push(ObjectMember::Property(ObjectProperty::synthetic_public(
-            VUE_INSTANCE_SLOTS_MEMBER.to_string(),
-            TypeExpr::Object(Arc::new(ObjectExpr {
-                properties: slot_members,
-            })),
+        members.push(synthetic_member(
+            VUE_INSTANCE_SLOTS_MEMBER,
             false,
-            false,
-        )));
+            FactOrLocator::LeafObject(Arc::from(slot_members.into_boxed_slice())),
+        ));
     }
 
-    members.extend(exported);
+    // The exported instance-script members (each exported binding is a member
+    // of the component instance). The member values stay bare `Ref` leaves so
+    // consumers re-resolve the binding on demand (shallow-by-default).
+    for name in &candidates.instance_exports {
+        members.push(synthetic_member(
+            name,
+            false,
+            FactOrLocator::Leaf(LeafTypeFact::Ref(name.clone())),
+        ));
+    }
 
-    let instance_shape = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: members,
-    }));
+    lowered_value_decl_for_synthesised_default(SemanticTypeSource::Synthesized(
+        ResolvedLocalShape::Object(Arc::from(members.into_boxed_slice())),
+    ))
+}
 
-    LoweredValueDecl {
-        kind: ValueDeclKind::Class,
-        type_annotation: None,
-        signatures: vec![FunctionSignature {
-            parameters: Vec::new(),
-            return_type: Some(instance_shape),
-            type_parameters: Vec::new(),
-            has_implementation_body: true,
-        }],
-        object_shape: None,
-        enum_members: None,
+/// One fabricated instance member (no authored member position exists for the
+/// synthetic member name).
+fn synthetic_member(name: &str, optional: bool, ty: FactOrLocator) -> SynthesizedMemberFact {
+    SynthesizedMemberFact {
+        name: name.to_string(),
+        optional,
+        ty,
+        span_origin: MemberSpansOrigin::Synthetic(SourceSynthetic),
+    }
+}
+
+/// Map an authored-type PAYLOAD REF onto the synthesized member vocabulary:
+/// the macro-payload locator carrier (the svelte capture's only produced
+/// arm), or the decl-body locator escape. The payload's structural hash is a
+/// candidate-slot discriminator, not member identity — content identity of
+/// the synthesized default rides the owner's `FileWholeHash` (the same
+/// convention the locator-positioned signature facts follow).
+fn payload_ref_fact(payload: &AuthoredTypePayloadRef) -> FactOrLocator {
+    match &payload.locator {
+        AuthoredBodyLocator::MacroPayload(locator) => FactOrLocator::MacroPayload(locator.clone()),
+        AuthoredBodyLocator::DeclBody(slot) => FactOrLocator::Locator(slot.clone()),
+        // The svelte capture mints macro-payload locators exclusively
+        // (`authored_type_payload_ref`); an ambient-augmentation / JSDoc-typedef
+        // payload ref has no synthesized-member carrier arm and degrades to the
+        // honest `unknown` leaf (TS's sound top type) — never a fabricated
+        // position.
+        AuthoredBodyLocator::AugmentationBody(_) | AuthoredBodyLocator::JsdocTypedefBody(_) => {
+            FactOrLocator::Leaf(LeafTypeFact::Primitive(PrimitiveName::Unknown))
+        }
     }
 }
 
 /// The snippet-typed slot members for the synthesized `$slots` instance member.
 ///
 /// Each parse-domain snippet candidate (`member_name`) becomes one slot key
-/// whose value is a callable carrier `(...args: any[]) => any`. The PRECISE
-/// binding type lives in the snippet prop's own `Snippet<[...]>` type on `$props`
-/// (the consumer re-resolves it on demand — shallow-by-default); the synth
-/// records the exact slot KEYS so the consumer's `$slots[K]` index is name-exact
-/// (an unknown slot name FAILS the `keyof` index). De-duplicated by member name.
-fn snippet_slot_members(candidates: &SvelteScriptCandidates) -> Vec<ObjectMember> {
+/// whose value is the honest `any` leaf. The PRECISE binding type lives in the
+/// snippet prop's own `Snippet<[...]>` type on `$props` (the consumer
+/// re-resolves it on demand — shallow-by-default); the synth records the exact
+/// slot KEYS so the consumer's `$slots[K]` index is name-exact (an unknown
+/// slot name FAILS the `keyof` index). De-duplicated by member name.
+fn snippet_slot_members(candidates: &SvelteScriptCandidates) -> Vec<SynthesizedLeafMember> {
     let mut seen = std::collections::HashSet::new();
     candidates
         .snippet_candidates
         .iter()
         .filter(|c| seen.insert(c.member_name.clone()))
-        .map(|c| {
-            // A callable slot carrier — the slot member is function-like so a
-            // consumer can CALL `$slots.row(bindings)`. The precise binding/return
-            // types are recovered by the consumer from the snippet prop's own
-            // `Snippet<…>` type (shallow-by-default); this carrier records the KEY.
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                c.member_name.clone(),
-                TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
-                    vec![FunctionParam::synthetic(
-                        Some("bindings".to_string()),
-                        TypeExpr::Primitive(PrimitiveName::Any),
-                        false,
-                        false,
-                    )],
-                    Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
-                    Vec::new(),
-                ))),
-                false,
-                false,
-            ))
+        .map(|c| SynthesizedLeafMember {
+            name: c.member_name.clone(),
+            optional: false,
+            ty: LeafTypeFact::Primitive(PrimitiveName::Any),
         })
         .collect()
 }
 
-/// The empty object type `{}` — the `$props` member type for a component that
-/// declares no props.
-fn empty_object() -> TypeExpr {
-    TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: Vec::new(),
-    }))
-}
-
-/// The `$props` member type for the synthesized instance: the runes `$props()`
-/// type when present, else the synthesized object of legacy `export let` props,
-/// else `None` (the caller substitutes `{}`).
-fn props_instance_type(candidates: &SvelteScriptCandidates) -> Option<TypeExpr> {
+/// The `$props` member fact for the synthesized instance: the runes `$props()`
+/// authored payload locator when present, else the fabricated depth-closed
+/// object of legacy `export let` props, else the empty object `{}`.
+fn props_instance_fact(candidates: &SvelteScriptCandidates) -> FactOrLocator {
     if let Some(props) = &candidates.props {
-        // Runes mode: the `$props()` type REF is preserved verbatim
-        // (shallow-by-default — never eagerly inlined). An un-annotated
-        // `$props()` carries no type; the props member is still synthesized as
-        // an empty object surface so `$props` exists.
-        return Some(props.props_type.clone().unwrap_or_else(empty_object));
+        // Runes mode with a depth-closed LEAF-able inline object literal: the
+        // capture recorded the leaf display members — synthesize the
+        // depth-closed leaf-object surface (member refs preserved
+        // un-inlined; the dispatch-free api projector renders it shallowly).
+        if let Some(members) = &props.props_leaf_members {
+            return FactOrLocator::LeafObject(Arc::from(members.clone().into_boxed_slice()));
+        }
+        // Runes mode: the `$props()` authored payload stays a content-free
+        // LOCATOR carrier (shallow-by-default — never eagerly inlined). An
+        // un-annotated `$props()` carries no type; the props member is still
+        // synthesized as an empty object surface so `$props` exists.
+        return match props.props_type.as_ref() {
+            Some(payload) => payload_ref_fact(payload),
+            None => FactOrLocator::LeafObject(Arc::from(Vec::new().into_boxed_slice())),
+        };
     }
     if !candidates.legacy_props.is_empty() {
-        // Legacy `export let` props: synthesize an object surface whose members
-        // are the exported props (optional when they carry a default).
-        let properties = candidates
+        // Legacy `export let` props: a fabricated depth-closed object surface
+        // whose members are the exported props (optional when they carry a
+        // default), each valued the honest `any` leaf.
+        let props: Vec<SynthesizedLeafMember> = candidates
             .legacy_props
             .iter()
-            .map(|p| {
-                ObjectMember::Property(ObjectProperty::synthetic_public(
-                    p.name.clone(),
-                    TypeExpr::Primitive(PrimitiveName::Any),
-                    // `optional`: a prop with a default value is optional.
-                    p.has_default,
-                    false,
-                ))
+            .map(|p| SynthesizedLeafMember {
+                name: p.name.clone(),
+                // `optional`: a prop with a default value is optional.
+                optional: p.has_default,
+                ty: LeafTypeFact::Primitive(PrimitiveName::Any),
             })
             .collect();
-        return Some(TypeExpr::Object(Arc::new(ObjectExpr { properties })));
+        return FactOrLocator::LeafObject(Arc::from(props.into_boxed_slice()));
     }
-    None
-}
-
-/// The exported instance-script members as instance properties (each exported
-/// binding is a member of the component instance). The member values are left
-/// as a `Ref` to the exported binding name so consumers re-resolve on demand
-/// (shallow-by-default).
-fn instance_export_members(candidates: &SvelteScriptCandidates) -> Vec<ObjectMember> {
-    candidates
-        .instance_exports
-        .iter()
-        .map(|name| {
-            ObjectMember::Property(ObjectProperty::synthetic_public(
-                name.clone(),
-                TypeExpr::Ref {
-                    name: Arc::from(name.as_str()),
-                    type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-                },
-                false,
-                false,
-            ))
-        })
-        .collect()
+    FactOrLocator::LeafObject(Arc::from(Vec::new().into_boxed_slice()))
 }
 
 #[cfg(test)]
@@ -220,21 +211,56 @@ mod tests {
     use verter_semantic::analysis::framework_facts::svelte::{
         SvelteLegacyProp, SveltePropsCandidate,
     };
+    use verter_semantic::analysis::type_eval::ValueDeclKind;
+    use verter_type_expr::locators::{
+        AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
+    };
 
-    fn instance_members(symbol: &LoweredValueDecl) -> Vec<String> {
-        let sig = symbol.signatures.first().expect("construct signature");
-        let return_type = sig.return_type.as_ref().expect("return type");
-        match return_type {
-            TypeExpr::Object(obj) => obj
-                .properties
-                .iter()
-                .filter_map(|m| match m {
-                    ObjectMember::Property(p) => Some(p.name.clone()),
-                    _ => None,
-                })
-                .collect(),
-            other => panic!("expected object instance shape, got {other:?}"),
+    fn props_payload_ref(macro_index: u32, seed: u8) -> AuthoredTypePayloadRef {
+        AuthoredTypePayloadRef {
+            locator: AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
+                anchor: AuthoredAnchor {
+                    canonical_id: Arc::from(""),
+                    symbol: Arc::from("default"),
+                    space: LocatorSymbolSpace::Value,
+                },
+                macro_index,
+                payload: MacroPayloadPosition::TypeArgument,
+            }),
+            payload_hash: [seed; 16],
         }
+    }
+
+    /// The synthesized instance members `(name, ty)` off the annotation-borne
+    /// synthesized source.
+    fn instance_members(symbol: &LoweredValueDecl) -> Vec<(String, FactOrLocator)> {
+        let source = symbol
+            .type_annotation
+            .annotation
+            .as_ref()
+            .expect("synthesised default must carry the instance annotation source");
+        let SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(members)) = source else {
+            panic!("expected a synthesized Object instance source, got {source:?}");
+        };
+        members
+            .iter()
+            .map(|m| (m.name.clone(), m.ty.clone()))
+            .collect()
+    }
+
+    fn member_names(symbol: &LoweredValueDecl) -> Vec<String> {
+        instance_members(symbol)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    fn member_ty(symbol: &LoweredValueDecl, name: &str) -> FactOrLocator {
+        instance_members(symbol)
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, ty)| ty)
+            .unwrap_or_else(|| panic!("missing instance member {name}"))
     }
 
     #[test]
@@ -245,68 +271,75 @@ mod tests {
         let candidates = SvelteScriptCandidates::default();
         let sym = synthesise_svelte_default_value_symbol(&candidates);
         assert_eq!(sym.kind, ValueDeclKind::Class);
-        assert_eq!(instance_members(&sym), vec!["$props".to_string()]);
-        let sig = sym.signatures.first().unwrap();
-        let TypeExpr::Object(obj) = sig.return_type.as_ref().unwrap() else {
-            panic!("object instance shape");
-        };
-        let ObjectMember::Property(props) = &obj.properties[0] else {
-            panic!("props member");
-        };
-        assert!(
-            matches!(&props.ty, TypeExpr::Object(o) if o.properties.is_empty()),
-            "pure-markup component's $props is the empty object, got {:?}",
-            props.ty
-        );
+        assert_eq!(member_names(&sym), vec!["$props".to_string()]);
+        match member_ty(&sym, "$props") {
+            FactOrLocator::LeafObject(members) => assert!(
+                members.is_empty(),
+                "pure-markup component's $props is the empty object, got {members:?}"
+            ),
+            other => panic!("expected the empty depth-closed object, got {other:?}"),
+        }
     }
 
     #[test]
     fn runes_props_synthesise_dollar_props_member() {
         let candidates = SvelteScriptCandidates {
             props: Some(SveltePropsCandidate {
-                props_type: Some(TypeExpr::Ref {
-                    name: Arc::from("Props"),
-                    type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-                }),
+                props_type: Some(props_payload_ref(0, 7)),
                 ..Default::default()
             }),
             ..Default::default()
         };
         let sym = synthesise_svelte_default_value_symbol(&candidates);
         assert_eq!(sym.kind, ValueDeclKind::Class);
-        assert_eq!(instance_members(&sym), vec!["$props".to_string()]);
+        assert_eq!(member_names(&sym), vec!["$props".to_string()]);
     }
 
     #[test]
-    fn props_type_ref_is_preserved_not_inlined() {
-        // Shallow-by-default: the props type REF stays a bare reference.
+    fn props_payload_stays_a_locator_carrier_not_inlined() {
+        // Shallow-by-default: the props payload stays the authored macro
+        // payload LOCATOR (lowered on demand through the one dispatch), never
+        // an eagerly materialised body.
         let candidates = SvelteScriptCandidates {
             props: Some(SveltePropsCandidate {
-                props_type: Some(TypeExpr::Ref {
-                    name: Arc::from("MyProps"),
-                    type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-                }),
+                props_type: Some(props_payload_ref(2, 9)),
                 ..Default::default()
             }),
             ..Default::default()
         };
         let sym = synthesise_svelte_default_value_symbol(&candidates);
-        let sig = sym.signatures.first().unwrap();
-        let TypeExpr::Object(obj) = sig.return_type.as_ref().unwrap() else {
-            panic!("object shape");
-        };
-        let ObjectMember::Property(props) = &obj.properties[0] else {
-            panic!("props property");
-        };
-        assert!(
-            matches!(&props.ty, TypeExpr::Ref { name, .. } if name.as_ref() == "MyProps"),
-            "the props type stays a bare Ref (shallow-by-default), got {:?}",
-            props.ty
-        );
+        match member_ty(&sym, "$props") {
+            FactOrLocator::MacroPayload(locator) => {
+                assert_eq!(locator.macro_index, 2);
+                assert!(matches!(
+                    locator.payload,
+                    MacroPayloadPosition::TypeArgument
+                ));
+            }
+            other => panic!("the props payload stays a macro-payload locator, got {other:?}"),
+        }
     }
 
     #[test]
-    fn exported_members_appear_on_the_instance() {
+    fn unannotated_props_synthesise_the_empty_object() {
+        // An un-annotated `$props()` carries no type: the `$props` member is
+        // still synthesized, as the empty object `{}`.
+        let candidates = SvelteScriptCandidates {
+            props: Some(SveltePropsCandidate {
+                props_type: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let sym = synthesise_svelte_default_value_symbol(&candidates);
+        match member_ty(&sym, "$props") {
+            FactOrLocator::LeafObject(members) => assert!(members.is_empty()),
+            other => panic!("expected the empty depth-closed object, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exported_members_appear_on_the_instance_as_ref_leaves() {
         let candidates = SvelteScriptCandidates {
             props: Some(SveltePropsCandidate {
                 props_type: None,
@@ -316,7 +349,7 @@ mod tests {
             ..Default::default()
         };
         let sym = synthesise_svelte_default_value_symbol(&candidates);
-        let mut members = instance_members(&sym);
+        let mut members = member_names(&sym);
         members.sort();
         assert_eq!(
             members,
@@ -326,6 +359,12 @@ mod tests {
                 "reset".to_string()
             ]
         );
+        // Each exported member stays a bare `Ref` leaf the consumer
+        // re-resolves on demand (shallow-by-default).
+        match member_ty(&sym, "focus") {
+            FactOrLocator::Leaf(LeafTypeFact::Ref(name)) => assert_eq!(name, "focus"),
+            other => panic!("expected a bare Ref leaf, got {other:?}"),
+        }
     }
 
     #[test]
@@ -344,28 +383,18 @@ mod tests {
             ..Default::default()
         };
         let sym = synthesise_svelte_default_value_symbol(&candidates);
-        assert_eq!(instance_members(&sym), vec!["$props".to_string()]);
-        // The synthesized $props object carries the legacy props.
-        let sig = sym.signatures.first().unwrap();
-        let TypeExpr::Object(obj) = sig.return_type.as_ref().unwrap() else {
-            panic!("object");
+        assert_eq!(member_names(&sym), vec!["$props".to_string()]);
+        // The synthesized $props object carries the legacy props; a prop with
+        // a default is optional.
+        let FactOrLocator::LeafObject(props) = member_ty(&sym, "$props") else {
+            panic!("expected the depth-closed legacy props object");
         };
-        let ObjectMember::Property(props) = &obj.properties[0] else {
-            panic!("props");
-        };
-        let TypeExpr::Object(props_obj) = &props.ty else {
-            panic!("props object, got {:?}", props.ty);
-        };
-        let prop_names: Vec<&str> = props_obj
-            .properties
+        let entries: Vec<(&str, bool)> = props
             .iter()
-            .filter_map(|m| match m {
-                ObjectMember::Property(p) => Some(p.name.as_str()),
-                _ => None,
-            })
+            .map(|m| (m.name.as_str(), m.optional))
             .collect();
-        assert!(prop_names.contains(&"name"));
-        assert!(prop_names.contains(&"count"));
+        assert!(entries.contains(&("name", false)));
+        assert!(entries.contains(&("count", true)));
     }
 
     #[test]
@@ -377,10 +406,7 @@ mod tests {
         use verter_semantic::analysis::framework_facts::svelte::SvelteSnippetImportCandidate;
         let candidates = SvelteScriptCandidates {
             props: Some(SveltePropsCandidate {
-                props_type: Some(TypeExpr::Ref {
-                    name: Arc::from("Props"),
-                    type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-                }),
+                props_type: Some(props_payload_ref(0, 3)),
                 ..Default::default()
             }),
             snippet_candidates: vec![SvelteSnippetImportCandidate {
@@ -399,16 +425,13 @@ mod tests {
     #[test]
     fn snippet_candidates_synthesise_a_slots_instance_member() {
         // F9: the parse-domain snippet candidates contribute a `$slots` instance
-        // member (an exact key map of snippet callables) — the consumer's
-        // `$slots[K]` index is name-exact. A component with NO snippet props
-        // carries NO `$slots` member.
+        // member (an exact key map) — the consumer's `$slots[K]` index is
+        // name-exact. A component with NO snippet props carries NO `$slots`
+        // member.
         use verter_semantic::analysis::framework_facts::svelte::SvelteSnippetImportCandidate;
         let with_snippet = SvelteScriptCandidates {
             props: Some(SveltePropsCandidate {
-                props_type: Some(TypeExpr::Ref {
-                    name: Arc::from("Props"),
-                    type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-                }),
+                props_type: Some(props_payload_ref(0, 5)),
                 ..Default::default()
             }),
             snippet_candidates: vec![SvelteSnippetImportCandidate {
@@ -419,10 +442,16 @@ mod tests {
             ..Default::default()
         };
         let sym = synthesise_svelte_default_value_symbol(&with_snippet);
-        assert!(
-            instance_members(&sym).contains(&"$slots".to_string()),
-            "a snippet prop synthesises a $slots member, got {:?}",
-            instance_members(&sym)
+        let FactOrLocator::LeafObject(slots) = member_ty(&sym, "$slots") else {
+            panic!(
+                "a snippet prop synthesises a $slots member, got {:?}",
+                member_names(&sym)
+            );
+        };
+        // The slot KEY inventory is exact.
+        assert_eq!(
+            slots.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["row"]
         );
 
         // No snippet candidates ⇒ no `$slots` member.
@@ -432,38 +461,34 @@ mod tests {
         };
         let sym2 = synthesise_svelte_default_value_symbol(&without_snippet);
         assert!(
-            !instance_members(&sym2).contains(&"$slots".to_string()),
+            !member_names(&sym2).contains(&"$slots".to_string()),
             "no snippet props ⇒ no $slots member, got {:?}",
-            instance_members(&sym2)
+            member_names(&sym2)
         );
     }
 
     #[test]
     fn dispatcher_events_synthesise_an_events_instance_member() {
         // F13: a legacy `createEventDispatcher<E>` (parse-domain `dispatcher_events`)
-        // contributes a `$events` instance member carrying the event-map type. A
-        // component with NO dispatcher carries NO `$events` member (the derived
-        // callback-prop events come from `$props` at the shim).
+        // contributes a `$events` instance member carrying the event-map payload
+        // locator. A component with NO dispatcher carries NO `$events` member
+        // (the derived callback-prop events come from `$props` at the shim).
         let with_dispatcher = SvelteScriptCandidates {
-            dispatcher_events: Some(TypeExpr::Ref {
-                name: Arc::from("Events"),
-                type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-            }),
+            dispatcher_events: Some(props_payload_ref(1, 11)),
             ..Default::default()
         };
         let sym = synthesise_svelte_default_value_symbol(&with_dispatcher);
-        assert!(
-            instance_members(&sym).contains(&"$events".to_string()),
-            "a dispatcher synthesises a $events member, got {:?}",
-            instance_members(&sym)
-        );
+        match member_ty(&sym, "$events") {
+            FactOrLocator::MacroPayload(locator) => assert_eq!(locator.macro_index, 1),
+            other => panic!("the $events member carries the dispatcher payload, got {other:?}"),
+        }
 
         let without = SvelteScriptCandidates::default();
         let sym2 = synthesise_svelte_default_value_symbol(&without);
         assert!(
-            !instance_members(&sym2).contains(&"$events".to_string()),
+            !member_names(&sym2).contains(&"$events".to_string()),
             "no dispatcher ⇒ no $events member, got {:?}",
-            instance_members(&sym2)
+            member_names(&sym2)
         );
     }
 }

@@ -6,31 +6,7 @@
 //! live on `ProjectTypeStore` rather than as off-store fields on
 //! `VerterHost`.
 
-use super::owned_artifacts::type_resolution_context::OwnedTypeResolutionContext;
-use super::project_type_store::{
-    OwnedArtifactKey, ProjectTypeStore, ResolvedTypeCacheDb, TypeResolutionContextDb,
-};
-use std::sync::Arc;
-
-#[test]
-fn type_resolution_context_db_present_with_accessor() {
-    // Discriminating predicate: `ProjectTypeStore` exposes a typed
-    // accessor for the new `TypeResolutionContextDb` and the DB starts
-    // empty. A regression that returns `&()` or wraps the wrong type
-    // would fail at the type level.
-    let store = ProjectTypeStore::new();
-    let db: &TypeResolutionContextDb = store.type_resolution_context_cache();
-    assert!(db.is_empty(), "a fresh store starts with an empty DB");
-    // Constructive insert + lookup roundtrip — verifies the DB is
-    // really backed by storage and not a no-op stub.
-    let key = OwnedArtifactKey::new("test.vue", [0u8; 16]);
-    db.insert(key.clone(), Arc::new(OwnedTypeResolutionContext::empty()));
-    assert_eq!(db.len(), 1, "insert must populate");
-    let recovered = db.get(&key);
-    assert!(recovered.is_some(), "lookup must hit");
-    db.clear();
-    assert!(db.is_empty(), "clear must drain");
-}
+use super::project_type_store::ProjectTypeStore;
 
 #[test]
 fn compile_cache_db_present_with_accessor() {
@@ -44,22 +20,11 @@ fn compile_cache_db_present_with_accessor() {
 }
 
 #[test]
-fn resolved_type_cache_db_present_with_accessor() {
-    let store = ProjectTypeStore::new();
-    let db: &ResolvedTypeCacheDb = store.resolved_type_cache();
-    assert!(db.is_empty());
-    db.clear();
-    assert_eq!(db.len(), 0);
-}
-
-#[test]
 fn typed_dbs_are_send_sync_static() {
     // Aggregate guard — every typed DB must be `Send + Sync +
     // 'static`. A regression that puts a borrowed lifetime on any
     // payload would fail to compile here.
     fn assert_send_sync_static<T: Send + Sync + 'static>() {}
-    assert_send_sync_static::<TypeResolutionContextDb>();
-    assert_send_sync_static::<ResolvedTypeCacheDb>();
     assert_send_sync_static::<super::project_type_store::CompileCacheDb>();
     // The whole `ProjectTypeStore` likewise — already enforced by
     // `Arc<ProjectTypeStore>` storage on `VerterHost`, but explicit
@@ -115,70 +80,6 @@ fn compile_cache_db_present_with_accessor_post_tier_1c_alpha() {
     assert!(
         host.compile_cache().is_empty(),
         "bump_project_generation_and_evict must drop rehomed compile_cache entries"
-    );
-}
-
-#[test]
-fn resolved_type_cache_db_present_with_accessor_post_tier_1c_alpha() {
-    // Discriminator: `host.resolved_type_cache()` returns the typed
-    // `ResolvedTypeCacheDb` wrapper (the parking_lot Mutex lives
-    // INSIDE the wrapper). The bounded clear-all-at-cap policy is
-    // enforced INSIDE the DB.
-    use crate::types::{
-        HostConfig, ResolvedTypeCacheEntry, ResolvedTypeCacheKey, RESOLVED_TYPE_CACHE_CAP,
-    };
-    use crate::VerterHost;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    assert!(host.resolved_type_cache().is_empty());
-
-    // Insert one entry and verify it round-trips through the wrapper.
-    let key = ResolvedTypeCacheKey {
-        dep_canonical_id: "/probe.ts".to_string(),
-        dep_source_hash: [0u8; 16],
-        type_name: "Probe".to_string(),
-        resolve_kind: verter_workspace::ResolveRequestKind::TypeImport,
-        view_fingerprint: 0,
-    };
-    host.resolved_type_cache().insert(
-        key.clone(),
-        ResolvedTypeCacheEntry {
-            resolved: None,
-            tracked_deps: Vec::new(),
-        },
-    );
-    assert_eq!(host.resolved_type_cache().len(), 1);
-    let recovered = host.resolved_type_cache().lookup(&key);
-    assert!(recovered.is_some(), "round-trip must hit");
-
-    // Bounded clear-all is enforced INSIDE the DB. Filling beyond cap
-    // triggers the clear-all path; the cap constant is the public
-    // contract surface.
-    const _: () = assert!(
-        RESOLVED_TYPE_CACHE_CAP >= 1024,
-        "RESOLVED_TYPE_CACHE_CAP must remain in the documented range"
-    );
-}
-
-#[test]
-fn type_resolution_context_db_stores_owned_arc() {
-    // Discriminator: the rehomed `TypeResolutionContextDb` stores
-    // `Arc<OwnedTypeResolutionContext>` per D18. Pointer-equality
-    // across reads proves the wrapper does not deep-clone on lookup.
-    use super::owned_artifacts::type_resolution_context::OwnedTypeResolutionContext;
-    use crate::types::HostConfig;
-    use crate::VerterHost;
-    use std::sync::Arc;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let db: &TypeResolutionContextDb = host.project_type_store().type_resolution_context_cache();
-    let key = OwnedArtifactKey::new("/probe.vue", [1u8; 16]);
-    let ctx: Arc<OwnedTypeResolutionContext> = Arc::new(OwnedTypeResolutionContext::empty());
-    db.insert(key.clone(), Arc::clone(&ctx));
-    let recovered = db.get(&key).expect("rehomed context lookup must hit");
-    assert!(
-        Arc::ptr_eq(&ctx, &recovered),
-        "TypeResolutionContextDb MUST store Arc<OwnedTypeResolutionContext> (D18)"
     );
 }
 
@@ -927,56 +828,6 @@ fn compile_cache_lives_on_project_type_store() {
     assert!(db_via_pts.is_empty(), "rehomed DB starts empty");
 }
 
-/// Rehoming-doc §3.3 test #2 — `resolved_type_cache.evict_canonical`
-/// drains entries keyed on `dep_canonical`.
-///
-/// Discriminating predicate: insert a resolved-type entry whose
-/// `dep_canonical_id == "X"`; call `evict_canonical("X")`; assert
-/// the entry is gone. Pre-rehoming, per-canonical eviction did not
-/// exist (the off-store cache only had clear-all-at-cap);
-/// post-rehoming the unified cascade drains entries keyed on the
-/// canonical.
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn resolved_type_cache_evict_canonical_drains_dep_canonical() {
-    use crate::types::{HostConfig, ResolvedTypeCacheEntry, ResolvedTypeCacheKey};
-    use crate::VerterHost;
-    use verter_workspace::ResolveRequestKind;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let dep_canonical = "/probe-evict.ts";
-    let key = ResolvedTypeCacheKey {
-        dep_canonical_id: dep_canonical.to_string(),
-        dep_source_hash: [7u8; 16],
-        type_name: "ProbeEvictType".to_string(),
-        resolve_kind: ResolveRequestKind::TypeImport,
-        view_fingerprint: 0,
-    };
-    host.resolved_type_cache().insert(
-        key.clone(),
-        ResolvedTypeCacheEntry {
-            resolved: None,
-            tracked_deps: Vec::new(),
-        },
-    );
-    assert!(
-        host.resolved_type_cache().lookup(&key).is_some(),
-        "seed: entry must be present pre-evict"
-    );
-
-    // Drain via the unified cascade.
-    host.project_type_store().evict_canonical(dep_canonical);
-
-    assert!(
-        host.resolved_type_cache().lookup(&key).is_none(),
-        "rehoming-doc §3.3 test #2: evict_canonical(\"X\") MUST \
-         drain ResolvedTypeCacheDb entries whose dep_canonical_id \
-         equals X. Pre-rehoming the off-store cache did not honour \
-         per-canonical eviction; post-rehoming this is the unified \
-         cascade contract."
-    );
-}
-
 /// Rehoming-doc §3.3 test #4 — `evict_canonical` invalidates
 /// `semantic_db` via the unified cascade.
 ///
@@ -1043,7 +894,7 @@ fn semantic_db_evict_canonical_invalidates_via_unified_cascade() {
 /// drains the rehomed caches.
 ///
 /// Discriminating predicate: populate one entry in each of the
-/// rehomed caches (compile_cache, resolved_type_cache, semantic_db —
+/// rehomed caches (compile_cache, semantic_db —
 /// the per-file `EvalEnv` lives on `IndexedReady`, so no eval-env
 /// cache participates); call `bump_project_generation_and_evict`;
 /// assert all are empty. Pre-rehoming the off-store caches each had separate
@@ -1052,13 +903,12 @@ fn semantic_db_evict_canonical_invalidates_via_unified_cascade() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn bump_project_generation_evicts_all_rehomed_caches() {
-    use crate::types::{HostConfig, ProfileState, ResolvedTypeCacheEntry, ResolvedTypeCacheKey};
+    use crate::types::{HostConfig, ProfileState};
     use crate::VerterHost;
     use verter_semantic::facts::component::ComponentSurface;
     use verter_semantic::query::Completeness;
     use verter_semantic::refs::FileRef;
     use verter_semantic::revision::RevisionMarker;
-    use verter_workspace::ResolveRequestKind;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let canonical = "/probe-bump-all-four.ts";
@@ -1070,30 +920,14 @@ fn bump_project_generation_evicts_all_rehomed_caches() {
     // 1 — compile_cache (profile-domain value type = ProfileState).
     host.compile_cache()
         .insert(canonical.to_string(), ProfileState::default());
-    // 2 — resolved_type_cache (rehomed F2).
-    let rt_key = ResolvedTypeCacheKey {
-        dep_canonical_id: canonical.to_string(),
-        dep_source_hash: [9u8; 16],
-        type_name: "ProbeBumpType".to_string(),
-        resolve_kind: ResolveRequestKind::TypeImport,
-        view_fingerprint: 0,
-    };
-    host.resolved_type_cache().insert(
-        rt_key.clone(),
-        ResolvedTypeCacheEntry {
-            resolved: None,
-            tracked_deps: Vec::new(),
-        },
-    );
-    // 3 — semantic_db (rehomed F5).
+    // 2 — semantic_db (rehomed F5).
     {
         let mut db = host.project_type_store().semantic_db();
         db.set_component_surface(canonical.to_string(), revision, ComponentSurface::default());
     }
 
-    // Sanity — all three rehomed caches populated.
+    // Sanity — both rehomed caches populated.
     assert!(host.compile_cache().get(canonical).is_some());
-    assert!(host.resolved_type_cache().lookup(&rt_key).is_some());
     {
         let db = host.project_type_store().semantic_db();
         assert_eq!(
@@ -1107,16 +941,11 @@ fn bump_project_generation_evicts_all_rehomed_caches() {
     host.project_type_store()
         .bump_project_generation_and_evict();
 
-    // All three MUST be drained.
+    // Both MUST be drained.
     assert!(
         host.compile_cache().get(canonical).is_none(),
         "rehoming-doc §3.3 test #5 row 1: compile_cache MUST be \
          drained by bump_project_generation_and_evict"
-    );
-    assert!(
-        host.resolved_type_cache().lookup(&rt_key).is_none(),
-        "rehoming-doc §3.3 test #5 row 2: resolved_type_cache MUST \
-         be drained by bump_project_generation_and_evict"
     );
     {
         let db = host.project_type_store().semantic_db();

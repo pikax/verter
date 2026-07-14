@@ -51,7 +51,7 @@ fn editing_dep_invalidates_cached_meta_payload() {
 
     // Prime — first call cold-encodes.
     let first = session
-        .get_component_meta_payload("/src/Comp.vue", |_, _| b"prime".to_vec())
+        .get_component_meta_payload("/src/Comp.vue", |_| b"prime".to_vec())
         .expect("first payload");
     assert!(first.is_some(), "Comp.vue must resolve a component meta");
     let prov = mh.host().provenance();
@@ -60,7 +60,7 @@ fn editing_dep_invalidates_cached_meta_payload() {
 
     // Warm — repeat the same canonical with unchanged inputs.
     let _second = session
-        .get_component_meta_payload("/src/Comp.vue", |_, _| b"warm".to_vec())
+        .get_component_meta_payload("/src/Comp.vue", |_| b"warm".to_vec())
         .expect("second payload");
     let hits_after_warm = prov.payload_cache_hits.load(Relaxed);
     assert!(
@@ -77,7 +77,7 @@ fn editing_dep_invalidates_cached_meta_payload() {
 
     let session2 = mh.open_session().expect("session2 opens");
     let _ = session2
-        .get_component_meta_payload("/src/Comp.vue", |_, _| b"after-edit".to_vec())
+        .get_component_meta_payload("/src/Comp.vue", |_| b"after-edit".to_vec())
         .expect("third payload");
     let misses_after_edit = prov.payload_cache_misses.load(Relaxed);
     assert!(

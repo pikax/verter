@@ -44,7 +44,7 @@ defineProps<MyReadonly<Source>>();
 fn readonly_mapped_publishes_source_member_types_unchanged() {
     let host = harness::build_hermetic_host(&[("/Readonly.vue", READONLY_VUE)]);
     let (analysis, _resolved, _audit) = AuditedRequest::builder()
-        .attach_to(host)
+        .attach_to(std::sync::Arc::clone(&host))
         .resolve_component_meta("/Readonly.vue")
         .expect("hermetic resolve must succeed");
 
@@ -87,14 +87,33 @@ fn readonly_mapped_publishes_source_member_types_unchanged() {
     //   (b) the new source-surface helper unexpectedly consuming the
     //       Identity case via the per-key substrate when the source
     //       member's value should have been used directly.
+    let demand = |prop: &verter_semantic::analysis::component_meta::PropAnalysis| -> TypeExpr {
+        let source = prop
+            .type_source
+            .present()
+            .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name));
+        verter_session::test_only::semantic_source_probe::demand_type_expr(
+            &host,
+            "/Readonly.vue",
+            source,
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "prop `{}`'s published source must demand-materialize",
+                prop.name
+            )
+        })
+    };
+    let msg_ty = demand(msg);
+    let count_ty = demand(count);
     let msg_is_string = matches!(
-        msg.type_expr,
+        msg_ty,
         TypeExpr::Primitive(PrimitiveName::String)
             | TypeExpr::Literal(LiteralValue::String(_))
             | TypeExpr::Ref { .. },
     );
     let count_is_number = matches!(
-        count.type_expr,
+        count_ty,
         TypeExpr::Primitive(PrimitiveName::Number)
             | TypeExpr::Literal(LiteralValue::Number(_))
             | TypeExpr::Ref { .. },
@@ -103,14 +122,12 @@ fn readonly_mapped_publishes_source_member_types_unchanged() {
     assert!(
         msg_is_string,
         "`MyReadonly<Source>.msg` MUST stay `string` \
-         (Identity-mapper fast path preserved). Got type_expr: {:?}",
-        msg.type_expr,
+         (Identity-mapper fast path preserved). Got type: {msg_ty:?}",
     );
     assert!(
         count_is_number,
         "`MyReadonly<Source>.count` MUST stay `number` \
-         (Identity-mapper fast path preserved). Got type_expr: {:?}",
-        count.type_expr,
+         (Identity-mapper fast path preserved). Got type: {count_ty:?}",
     );
 
     // Empty publication is the most common regression vector

@@ -43,10 +43,9 @@ use verter_semantic::analysis::decl_headers::{MemberHeader, MemberHeaderKind};
 use verter_semantic::analysis::types::hash_16;
 use verter_semantic::analysis::Hash16;
 use verter_semantic::facts::{
-    compute_member_presence_hash, compute_member_shape_hash, compute_semantic_hash, CrossDeclLens,
-    CrossDeclRef, Fact, FactKey, FactRegistry, MemberKind, SymbolSpace,
+    compute_member_presence_hash, compute_member_shape_hash, CrossDeclLens, CrossDeclRef, Fact,
+    FactKey, FactRegistry, HashOutcome, MemberKind, SymbolSpace,
 };
-use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
 use crate::decl_body_memo::{DeclBodyMemo, LoweredValueDecl};
 use crate::file_artifact_store::{
@@ -77,7 +76,12 @@ pub struct ParseFactsEmission {
 #[must_use]
 pub fn emit_parse_facts(indexed: &IndexedReady) -> ParseFactsEmission {
     let shallow = &*indexed.shallow_state;
-    let lens = Arc::new(ShallowLens::from_shallow(shallow));
+    // The ONE shared shallow lens: built once at `ShallowFileState`
+    // construction (`ShallowLens::from_shallow`) and installed on the
+    // declaration-body memo — the SAME `Arc` the lowering-time body
+    // fingerprint consults, so fact emission and the memo hash site can
+    // never diverge on reference identity.
+    let lens = shallow.decl_bodies().shallow_lens();
 
     let mut registry = FactRegistry::empty();
 
@@ -173,18 +177,20 @@ impl LazyBodyFactSource {
             }
             _ => return None,
         };
-        let body = match space {
-            // Body-fact fingerprint input for a TYPE symbol — through the named
-            // compat read on the memo (the fenced output-side body read), never
-            // a direct typed-body access.
+        let outcome = match space {
+            // Body-fact fingerprint for a TYPE symbol — the stored memo-owned
+            // fact, computed once at lazy lowering time from the transient
+            // lowered bodies through the same shared lens (the fenced
+            // output-side body-fact site), never a direct typed-body access
+            // and never a re-lowering.
             SymbolSpace::Type => self.memo.compat_type_body_hash_input(name)?,
             // No namespace-space declarations are inventoried by the
             // shallow walk — consistent absence.
             SymbolSpace::Namespace => return None,
             SymbolSpace::Value => {
                 // Keep the synthesised-value-body vs lazy-memo selection HERE,
-                // then assemble the fingerprint input through the named compat
-                // read (the fenced output-side value-body read).
+                // then read the stored fingerprint through the named compat
+                // producer (the fenced output-side value-body-fact site).
                 let lowered = match self.synthesised_value_bodies.get(name) {
                     Some(body) => Arc::clone(body),
                     None => self.memo.value_decl(name)?,
@@ -192,9 +198,8 @@ impl LazyBodyFactSource {
                 compat_value_body_hash_input(&lowered)
             }
         };
-        let outcome = compute_semantic_hash(&body, space, self.lens.as_ref());
         let semantic_hash = outcome.hash;
-        let display_hash = compute_display_hash(&body, &semantic_hash);
+        let display_hash = compute_display_hash(&semantic_hash);
         let fact = Fact {
             key: key.clone(),
             semantic_hash,
@@ -205,92 +210,20 @@ impl LazyBodyFactSource {
     }
 }
 
-/// Body hash carrier for a VALUE declaration: the type annotation if
-/// present, else a synthesised type-expression that captures the
-/// declaration kind / signature set. The structural representation MUST
-/// be distinct across edits.
+/// The body fingerprint for a VALUE declaration — the single output/compat
+/// value-body-fact site, used by the parse-time fact emitter to compute a body
+/// fingerprint and nothing else.
 ///
-/// An `enum` value decl carries no type annotation / signatures / object
-/// shape, so without the explicit member fold it would degrade to a
-/// constant `Enum::None` body — invisible to a member name / value / count
-/// edit, so a warm value-space consumer (`typeof Enum`, `Enum.Member`) would
-/// serve STALE after `Red = 0` → `Red = 1`. Fold the FOLDABLE members
-/// ([`EnumMemberValue::folded_literal`]) into a synthetic object (member NAME →
-/// value-literal) so any foldable member name, value, or count change moves the
-/// body hash. Deferred members are projected out — their degraded domain is not
-/// a value edit, and their NAME/count change is already tracked by the
-/// presence-rail (`parse_stable_hash` enum-header fold). This is the SOLE
-/// consumer of the foldable-only rail.
-fn value_body_for_hash(
-    type_annotation: Option<&TypeExpr>,
-    signatures: &[verter_semantic::analysis::type_eval::FunctionSignature],
-    kind: verter_semantic::analysis::type_eval::ValueDeclKind,
-    object_shape: Option<&ObjectExpr>,
-    enum_members: Option<
-        &[(
-            String,
-            verter_semantic::analysis::type_eval::EnumMemberValue,
-        )],
-    >,
-) -> TypeExpr {
-    use verter_semantic::analysis::type_eval::ValueDeclKind;
-    if kind == ValueDeclKind::Enum {
-        if let Some(members) = enum_members {
-            let properties = members
-                .iter()
-                .filter_map(|(name, value)| {
-                    value.folded_literal().map(|literal| {
-                        ObjectMember::Property(ObjectProperty::synthetic_public(
-                            name.clone(),
-                            literal.clone(),
-                            false,
-                            true,
-                        ))
-                    })
-                })
-                .collect();
-            return TypeExpr::Object(Arc::new(ObjectExpr { properties }));
-        }
-    }
-    match (type_annotation, signatures.first()) {
-        (Some(ty), _) => ty.clone(),
-        (None, Some(_)) => TypeExpr::Unknown {
-            raw: format!("{signatures:?}"),
-        },
-        _ => TypeExpr::Unknown {
-            raw: format!("{kind:?}::{object_shape:?}"),
-        },
-    }
-}
-
-/// The fingerprint hash INPUT for a VALUE declaration's body — the single
-/// output/compat value-body read, used by the parse-time fact emitter to
-/// compute a body fingerprint and nothing else.
-///
-/// This is deliberately NARROW and PURPOSE-NAMED (a fingerprint hash input, not
-/// a general body accessor). It takes the ALREADY-resolved [`LoweredValueDecl`]
-/// — so the caller keeps the synthesised-value-body vs lazy-memo selection — and
-/// reproduces the EXACT assembled value-body `TypeExpr` ([`value_body_for_hash`]
-/// over the decl's type annotation, signature set, kind, object shape, and enum
-/// members). The fingerprint is therefore byte-identical to the inline read.
-///
-/// It lives next to [`value_body_for_hash`] (its sole producer) rather than on
-/// `DeclBodyMemo`, because the value path's body assembly — and not just a
-/// `lookup_object` view — is owned here; the TYPE-space sibling
-/// ([`DeclBodyMemo::compat_type_body_hash_input`]) lives on the memo because the
-/// type body IS the memo's lowered carrier.
-///
-/// TEMPORARY compat surface: it exists only so the body-fact fingerprint path is
-/// fenced off from the semantic readers. It is anchored as a COMPAT site by the
-/// frozen body-reader inventory guard.
-pub(crate) fn compat_value_body_hash_input(lowered: &LoweredValueDecl) -> TypeExpr {
-    value_body_for_hash(
-        lowered.type_annotation.as_ref(),
-        &lowered.signatures,
-        lowered.kind,
-        lowered.object_shape.as_ref(),
-        lowered.enum_members.as_deref(),
-    )
+/// It takes the ALREADY-resolved [`LoweredValueDecl`] — so the caller keeps
+/// the synthesised-value-body vs lazy-memo selection — and returns the
+/// STORED memo-owned fingerprint fact
+/// ([`LoweredValueDecl::body_hash`]), which the demanded lowering computed
+/// once from the transient lowered annotation / object shape through the
+/// shared `value_body_fingerprint` producer and the shared lens — no locator
+/// deref, no query-time re-lowering (the value-space mirror of
+/// [`crate::decl_body_memo::DeclBodyMemo::compat_type_body_hash_input`]).
+pub(crate) fn compat_value_body_hash_input(lowered: &LoweredValueDecl) -> HashOutcome {
+    lowered.body_hash.to_outcome()
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -318,7 +251,11 @@ pub(crate) struct ShallowLens {
 }
 
 impl ShallowLens {
-    fn from_shallow(shallow: &ShallowFileState) -> Self {
+    /// The SOLE `ShallowLens` builder — called exactly once per
+    /// `ShallowFileState` (at construction), which installs the resulting
+    /// `Arc` on the declaration-body memo; every consumer (the lowering-time
+    /// body fingerprint, the lazy body-fact source) shares that one instance.
+    pub(crate) fn from_shallow(shallow: &ShallowFileState) -> Self {
         Self {
             locals: shallow.type_symbol_names().map(str::to_string).collect(),
             value_locals: shallow.value_symbol_names().map(str::to_string).collect(),
@@ -368,6 +305,65 @@ impl CrossDeclLens for ShallowLens {
             name: Arc::from(name),
             space,
         })
+    }
+}
+
+/// The route-fact producer's hash-free classification lens: the FULL
+/// three-field import target (specifier + imported name + resolved canonical)
+/// plus header TYPE-symbol membership, derived once from the finished
+/// `ShallowFileState` beside the fingerprint [`ShallowLens`]. A SECOND view of
+/// the same shallow tables — NOT a fingerprint-lens widening: this lens never
+/// feeds a hash, so carrying the resolve-domain canonical here leaves the R12
+/// parse-domain fingerprint grammar untouched.
+#[derive(Debug)]
+pub(crate) struct RouteLens {
+    canonical_id: Arc<str>,
+    type_symbols: FxHashSet<String>,
+    import_targets: FxHashMap<String, verter_semantic::facts::ImportRouteTarget>,
+}
+
+impl RouteLens {
+    /// Built exactly once per `ShallowFileState`, at construction, from the
+    /// FINAL routed state (same lifecycle as [`ShallowLens::from_shallow`]).
+    pub(crate) fn from_shallow(shallow: &ShallowFileState) -> Self {
+        Self {
+            canonical_id: shallow.decl_bodies().canonical_id(),
+            type_symbols: shallow.type_symbol_names().map(str::to_string).collect(),
+            import_targets:
+                shallow
+                    .import_targets
+                    .iter()
+                    .map(|(local, target)| {
+                        (
+                            local.to_string(),
+                            verter_semantic::facts::ImportRouteTarget {
+                                source_specifier: Arc::from(target.source_specifier.as_str()),
+                                imported_name: Arc::from(target.imported_name.as_str()),
+                                canonical_id:
+                                    crate::resolver_core::shallow_file_state::external_canonical(
+                                        target,
+                                    ),
+                            },
+                        )
+                    })
+                    .collect(),
+        }
+    }
+}
+
+impl verter_semantic::facts::RouteFactLens for RouteLens {
+    fn resolve_import_route(
+        &self,
+        local: &str,
+        _space: SymbolSpace,
+    ) -> Option<verter_semantic::facts::ImportRouteTarget> {
+        self.import_targets.get(local).cloned()
+    }
+    fn has_type_symbol(&self, name: &str) -> bool {
+        self.type_symbols.contains(name)
+    }
+    fn own_canonical_id(&self) -> Arc<str> {
+        Arc::clone(&self.canonical_id)
     }
 }
 
@@ -653,7 +649,7 @@ fn emit_import_refs(registry: &mut FactRegistry, shallow: &ShallowFileState) {
 /// `semantic_hash` with a stable display salt — future producers
 /// can extend this to record real JSDoc + identifier display
 /// strings on the body.
-fn compute_display_hash(_body: &TypeExpr, semantic: &Hash16) -> Hash16 {
+fn compute_display_hash(semantic: &Hash16) -> Hash16 {
     let mut buf: Vec<u8> = Vec::with_capacity(32);
     buf.extend_from_slice(b"display:");
     buf.extend_from_slice(semantic);
@@ -795,16 +791,12 @@ pub const GLOBAL_AUGMENTATION_TAG: &str = "$global";
 mod tests {
     use super::*;
 
-    /// Build the shallow state through the REAL binder (parse → eval env →
-    /// shallow inventory) and derive the augmentation facts from the typed
-    /// inventory — the same path production uses. No raw-source rescan.
+    /// Build the shallow state through the REAL construction path (parse →
+    /// header index → service-backed lazy memo) and derive the augmentation
+    /// facts from the typed inventory — the same path production uses. No
+    /// raw-source rescan.
     fn augmentations_for(src: &str) -> Vec<ModuleAugmentationFact> {
-        let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(src);
-        let analysis = Arc::new(
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
-            ),
-        );
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = crate::resolver_core::ShallowFileState::service_backed_for_test(src);
         collect_augmentations(&state)
     }
 

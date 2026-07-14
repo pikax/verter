@@ -385,7 +385,9 @@ impl VerterHost {
             #[cfg(any(test, feature = "test-support"))]
             augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
-            carrier_normalization_force_fence_for_tests: std::sync::atomic::AtomicBool::new(false),
+            test_force: crate::host_test_force::TestForceKnobs::default(),
+            #[cfg(test)]
+            macro_hot_lowering_count: std::sync::atomic::AtomicUsize::new(0),
             compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize::new(0),
             signature_overflow_at_install: std::sync::atomic::AtomicU64::new(0),
         }
@@ -883,6 +885,7 @@ impl VerterHost {
             crate::parse::carrier_eval_source_type(framework_parse.map(|fp| fp.as_ref()));
         let candidates = crate::parse::capture_synth_script_candidates(
             &active,
+            canonical_id,
             eval_source,
             module_region,
             source_type,
@@ -901,7 +904,7 @@ impl VerterHost {
     // ──────────────────────────────────────────────────────────────────
     // Rehomed off-store cache accessors.
     //
-    // The off-store fields (`compile_cache`, `resolved_type_cache`,
+    // The off-store fields (`compile_cache`,
     // `semantic_db`) live on the `ProjectTypeStore` typed-DB wrappers,
     // not on `VerterHost`. The canonical per-file `EvalEnv` is a
     // memo-owned whole-env demand product (built lazily through the
@@ -979,14 +982,6 @@ impl VerterHost {
             .get(canonical)
             .map(|d| d.evicted)
             .unwrap_or(false)
-    }
-
-    /// Reference to the rehomed resolved-type cache wrapper. Use
-    /// `host.resolved_type_cache().lookup(...)` and `.insert(...)`
-    /// (the bounded clear-all-at-cap policy lives inside the DB).
-    #[must_use]
-    pub(crate) fn resolved_type_cache(&self) -> &crate::project_type_store::ResolvedTypeCacheDb {
-        self.project_type_store.resolved_type_cache()
     }
 
     /// `MutexGuard` access to the rehomed

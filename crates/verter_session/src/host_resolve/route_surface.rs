@@ -378,9 +378,8 @@ impl VerterHost {
 
     /// Test-only driver that exercises the PRODUCTION external-macro collector
     /// ([`HostExternalMacroTypeCollector`] — the sole legacy `ResolvedElements`
-    /// caller) through a bare-host ctx, so a behavioral test can assert the
-    /// legacy path's persistent `ResolvedTypeCacheDb` admission is disabled
-    /// without reaching for the full IDE virtual-file pipeline.
+    /// caller) through a bare-host ctx, without reaching for the full IDE
+    /// virtual-file pipeline.
     #[cfg(test)]
     pub(crate) fn collect_external_types_from_loaded_files_for_test(
         &self,

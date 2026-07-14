@@ -137,7 +137,7 @@ fn extract_options_props(
                         has_default: false,
                         default_value: None,
                         type_annotation: None,
-                        type_expr: None,
+                        payload: None,
                         type_expr_scope: None,
                         description: None,
                         tags: Vec::new(),
@@ -170,7 +170,7 @@ fn extract_options_props(
                         has_default: false,
                         default_value: None,
                         type_annotation: None,
-                        type_expr: None,
+                        payload: None,
                         type_expr_scope: None,
                         description,
                         tags,
@@ -179,7 +179,6 @@ fn extract_options_props(
                     Expression::ObjectExpression(sub_obj) => {
                         let mut type_constructor = None;
                         let mut type_annotation: Option<String> = None;
-                        let mut type_expr: Option<verter_type_expr::TypeExpr> = None;
                         let mut is_required = false;
                         let mut has_default = false;
                         let mut default_value = None;
@@ -198,14 +197,11 @@ fn extract_options_props(
                                         Expression::TSAsExpression(ts_as) => {
                                             // Extract PropType<T> type argument as
                                             // (display string, lowered typed form).
-                                            if let Some((text, lowered)) =
-                                                extract_prop_type_annotation(
-                                                    &ts_as.type_annotation,
-                                                    source,
-                                                )
-                                            {
+                                            if let Some(text) = extract_prop_type_annotation(
+                                                &ts_as.type_annotation,
+                                                source,
+                                            ) {
                                                 type_annotation = Some(text);
-                                                type_expr = Some(lowered);
                                             }
                                             &ts_as.expression
                                         }
@@ -226,28 +222,11 @@ fn extract_options_props(
                             }
                         }
 
-                        // Pairing invariant: when `type_expr` is populated, the
-                        // `type_expr_scope` must also be populated. The Options
-                        // API path always parses the prop in the local SFC's
-                        // OXC arena, so the scope is the local SFC's canonical
-                        // ID. The analyzer-producer doesn't thread the file
-                        // canonical_id (the existing macros.rs analyzer
-                        // follows the same convention — see
-                        // `parsed_type_argument_scope` populated with
-                        // `TypeExprScope::new("")` at the producer site,
-                        // re-stamped to the owner canonical by downstream
-                        // projector consumers). Use the same empty-string
-                        // sentinel so the pairing invariant holds; downstream
-                        // consumers stamp the real owner canonical when they
-                        // surface the typed form.
-                        let type_expr_scope = type_expr
-                            .as_ref()
-                            .map(|_| verter_type_expr::TypeExprScope::new(""));
-                        debug_assert!(
-                            type_expr.is_some() == type_expr_scope.is_some(),
-                            "AnalyzedOptionsProp pairing invariant: type_expr.is_some() == type_expr_scope.is_some()",
-                        );
-
+                        // An Options-API `PropType<T>` annotation is not a
+                        // macro-anchored payload position, so no locator is
+                        // mintable by the flat macro-field vocabulary: the
+                        // typed channel is host-raised; the display text is
+                        // preserved on `type_annotation`.
                         Some(AnalyzedOptionsProp {
                             name,
                             span,
@@ -256,8 +235,8 @@ fn extract_options_props(
                             has_default,
                             default_value,
                             type_annotation,
-                            type_expr,
-                            type_expr_scope,
+                            payload: None,
+                            type_expr_scope: None,
                             description,
                             tags,
                         })
@@ -271,7 +250,7 @@ fn extract_options_props(
                         has_default: false,
                         default_value: None,
                         type_annotation: None,
-                        type_expr: None,
+                        payload: None,
                         type_expr_scope: None,
                         description,
                         tags,
@@ -284,7 +263,7 @@ fn extract_options_props(
                         has_default: false,
                         default_value: None,
                         type_annotation: None,
-                        type_expr: None,
+                        payload: None,
                         type_expr_scope: None,
                         description,
                         tags,
@@ -313,7 +292,7 @@ fn extract_options_emits(value: &Expression<'_>, source: &str) -> Vec<AnalyzedEm
                         payload_type: None,
                         description: None,
                         tags: Vec::new(),
-                        payload_expr: None,
+                        payload: None,
                         payload_expr_scope: None,
                     })
                 } else {
@@ -338,7 +317,7 @@ fn extract_options_emits(value: &Expression<'_>, source: &str) -> Vec<AnalyzedEm
                     payload_type,
                     description: None,
                     tags: Vec::new(),
-                    payload_expr: None,
+                    payload: None,
                     payload_expr_scope: None,
                 })
             })
@@ -616,10 +595,7 @@ fn unwrap_parens<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
 /// forced downstream consumers to wrap the raw text in `TypeExpr::Unknown
 /// { raw }`, silently masking a producer-chain gap (W2.5 follow-up debt).
 /// Lower here so the published surface carries the structured form.
-fn extract_prop_type_annotation(
-    ts_type: &TSType<'_>,
-    source: &str,
-) -> Option<(String, verter_type_expr::TypeExpr)> {
+fn extract_prop_type_annotation(ts_type: &TSType<'_>, source: &str) -> Option<String> {
     if let TSType::TSTypeReference(ref_type) = ts_type {
         let name = match &ref_type.type_name {
             TSTypeName::IdentifierReference(id) => id.name.as_str(),
@@ -631,13 +607,7 @@ fn extract_prop_type_annotation(
                     let start = first.span().start as usize;
                     let end = first.span().end as usize;
                     if end <= source.len() {
-                        let text = source[start..end].to_string();
-                        // Lower the OXC TSType<'_> directly via the
-                        // analyzer-producer lowering entry point. The
-                        // borrowed arena is dropped here; the resulting
-                        // owned TypeExpr survives.
-                        let lowered = verter_type_expr_oxc::lower_ts_type(first, source);
-                        return Some((text, lowered));
+                        return Some(source[start..end].to_string());
                     }
                 }
             }

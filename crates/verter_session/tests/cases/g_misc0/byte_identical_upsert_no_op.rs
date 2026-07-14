@@ -70,7 +70,6 @@ struct InventorySnapshot {
     compile_cache_len: usize,
     derived_raw_cache_len: usize,
     dependency_cache_len: usize,
-    resolved_type_cache_len: usize,
     store_view_epoch: u64,
 }
 
@@ -81,7 +80,6 @@ fn snapshot(host: &VerterHost) -> InventorySnapshot {
         compile_cache_len: pts.compile_cache().len(),
         derived_raw_cache_len: pts.derived_raw_cache().len(),
         dependency_cache_len: pts.dependency_cache().len(),
-        resolved_type_cache_len: pts.resolved_type_cache().len(),
         store_view_epoch: host.store_view_epoch(),
     }
 }
@@ -91,10 +89,9 @@ fn snapshot(host: &VerterHost) -> InventorySnapshot {
 /// byte-identical re-upserts.
 ///
 /// Discriminating predicate: this test runs all the upserts after taking
-/// the baseline snapshot. A fast path that called `clear()` on
-/// `resolved_type_cache_db` AND bumped
-/// `store_view_epoch` would fail it. The snapshot comparison fails if any
-/// DB shrank, any DB grew, or the epoch advanced.
+/// the baseline snapshot. A fast path that drained any inventory DB or
+/// bumped `store_view_epoch` would fail it. The snapshot comparison
+/// fails if any DB shrank, any DB grew, or the epoch advanced.
 #[test]
 fn inventory_dbs_unchanged_after_n_byte_identical_re_upserts() {
     let host = build_host_and_seed();
@@ -109,8 +106,7 @@ fn inventory_dbs_unchanged_after_n_byte_identical_re_upserts() {
         after, baseline,
         "R1: every DB on the evict_canonical inventory MUST be \
          unchanged after byte-identical re-upserts. A fast \
-         path that bumped store_view_epoch and called \
-         resolved_type_cache().clear() would \
+         path that drained a DB or bumped store_view_epoch would \
          diverge on at least one of those dimensions."
     );
 }

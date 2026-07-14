@@ -100,14 +100,11 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // zero callers and is gone.
     "is_package_backed_decl",
     // The temporary `typeexpr_root_reaches_transitive_cycle` adapter
-    // (a TypeExpr→graph-native cycle bridge) is deleted. Callers
-    // (`expr_needs_projection_rescue` + 3 sites inside
-    // `materialize_component_meta_macro_shape_member_type_expr`)
-    // call `lowered_root_reaches_transitive_cycle` — the lowered_*-named
-    // migration helper for these callers (consistent with
-    // `lowered_needs_member_route_materialization` and friends).
-    // The graph-native primitive `ref_root_reaches_transitive_cycle_node`
-    // is the canonical cycle-detection authority.
+    // (a TypeExpr→graph-native cycle bridge) is deleted. Production
+    // callers route through the node-domain front
+    // `node_root_reaches_transitive_cycle_with_fence`; the graph-native
+    // primitive `ref_root_reaches_transitive_cycle_node` is the
+    // canonical cycle-detection authority.
     "typeexpr_root_reaches_transitive_cycle",
     // Legacy parser-side slot-binding enrichment helpers superseded by
     // graph-native synthesis

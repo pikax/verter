@@ -597,12 +597,11 @@ pub(crate) fn decompose_indexed_access_chain_node(
 //
 // These wrappers return the admitted `AdmittedRouteProjectionNode` (never a
 // `TypeExpr`): the node-domain Class-A dispatch
-// (`project_expr_class_a_node_via_dispatch_threaded`) and the intrinsic
-// member fixpoint (`solve_or_project_intrinsic_member_node_until_stable`)
-// stabilise on interned `RaisedShapeKey` identity with NO per-iteration
-// materialisation, and the sole publication materialisation happens ONCE,
-// downstream, at the surface sink. Each wrapper carries the same budget guard
-// as the resolver entry it adapts.
+// (`project_expr_class_a_node_via_dispatch_threaded`) stabilises on interned
+// `RaisedShapeKey` identity with NO per-iteration materialisation, and the
+// sole publication materialisation happens ONCE, downstream, at the surface
+// sink. Each wrapper carries the same budget guard as the resolver entry it
+// adapts.
 // ===========================================================================
 
 /// Node-domain empty-terminal `Expanded` projection: returns the admitted route
@@ -630,6 +629,141 @@ pub(crate) fn project_route_surface_node_via_host_threaded<'ctx>(
         return None;
     }
     engine.dispatch_routed_expr_surface_node(scope_canonical_id, root_symbol, route)
+}
+
+// ===========================================================================
+// Arg-preserving authored use-site recovery (Q10).
+// ===========================================================================
+
+/// Recover the authored USE-SITE body slot of a surface member's VALUE for
+/// arg-preserving shallow publication: the declaring declaration's prepared
+/// member-value [`TypeBodySlot`](verter_type_expr::locators::TypeBodySlot),
+/// whose deref through the one shared dispatch replays the authored generic
+/// instantiation (`message: MessageBase<string>`) WITH its type arguments —
+/// the existing `Instantiate` query re-derives the substitution on demand.
+/// The returned slot is a content-free CARRIER: publication never executes
+/// the instantiation and never serialises a graph node.
+///
+/// Applies ONLY to an ARGUMENT-BEARING named-reference value head (a lossy
+/// argument-less `Ref` publication would destroy the substitution there);
+/// every other shape returns `None` so callers keep their existing
+/// publication source. Recovery fails CLOSED (`None`) unless ALL hold:
+///
+/// - the member records a declaring file (`declaration_origin`) — synthetic
+///   / multi-origin members (union common-members, mapped-produced) don't;
+/// - EXACTLY ONE file-scope type declaration in that file declares the
+///   member name in its OWN syntactic member headers (header-level shallow
+///   inventory — no body lowering; ambiguity fails closed);
+/// - the declaring declaration is NON-GENERIC (a generic declaring surface
+///   replays UNSUBSTITUTED — the slot would be dishonest);
+/// - the honesty verification passes: the slot raises (memoized
+///   `Navigate` structural transit — one member annotation, never a body
+///   expansion) to the SAME resolved instantiation head — equal base
+///   [`DeclIdentity`](crate::semantic_query::DeclIdentity) AND equal
+///   interned argument nodes — as the observed `value_node`. This closes
+///   the inline-shadow class (an inline-authored member colliding with a
+///   same-named declared member in the same file can never adopt the wrong
+///   slot).
+pub(crate) fn arg_preserving_member_use_site_slot(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    member_name: &str,
+    declaration_origin: Option<&str>,
+    value_node: crate::semantic_query::SemanticNodeId,
+) -> Option<verter_type_expr::locators::TypeBodySlot> {
+    // Gate: the observed value head must be an argument-bearing named
+    // reference (the class the argument-less `Ref` publication is lossy
+    // for). One bounded node-domain peek — no dispatch.
+    let observed = resolved_instantiation_head(dispatch, value_node)?;
+
+    let origin = declaration_origin?;
+    let state = dispatch.ctx.shallow_file_state(origin)?;
+    // The UNIQUE file-scope type declaration whose OWN syntactic member
+    // headers declare this member name (heritage contributes nothing to
+    // `type_member_headers`, so a heritage-reached member resolves against
+    // its true declaring contributor's file).
+    let mut declaring: Option<&str> = None;
+    for name in state.type_symbol_names() {
+        let declares_member = state
+            .type_member_headers(name)
+            .is_some_and(|headers| headers.iter().any(|h| h.name == member_name));
+        if !declares_member {
+            continue;
+        }
+        if declaring.is_some() {
+            // Two same-file declarers — ambiguous, fail closed.
+            return None;
+        }
+        declaring = Some(name);
+    }
+    let declaring = declaring?;
+    // Substitution-honesty gate: a generic declaring declaration's member
+    // slot replays UNSUBSTITUTED (`MessageBase<T>`, not the instantiated
+    // value) — fail closed.
+    if !state.symbol(declaring)?.type_param_names.is_empty() {
+        return None;
+    }
+    let prepared = dispatch.ctx.prepared_type_decl(origin, declaring)?;
+    let slot = prepared.member_index.get(member_name)?.ty.clone();
+
+    // Honesty verification: the candidate slot must raise to the SAME
+    // resolved instantiation as the observed value — equal base identity,
+    // equal interned argument nodes. One memoized Navigate-transit raise of
+    // one member annotation (never a body expansion, never an Instantiate
+    // execution).
+    let raised = dispatch.raise_authored_locator_to_hot(
+        &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
+        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+            crate::semantic_query::ProjectionMode::Navigate,
+        ),
+    )?;
+    let authored = resolved_instantiation_head(dispatch, raised.node())?;
+    (authored == observed).then_some(slot)
+}
+
+/// The alias-peeled, carrier-head-resolved INSTANTIATION identity of a node:
+/// `Some((base, args))` when the head is an argument-bearing named reference
+/// (`InstantiationRef`, or a `BareRef` / `ImportType` carrier still holding
+/// authored type arguments that head-resolves to one through the shared
+/// carrier-preserving normalization — name-to-declaration routing only,
+/// never body expansion). `None` for every other shape.
+fn resolved_instantiation_head(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    node: crate::semantic_query::SemanticNodeId,
+) -> Option<(
+    crate::semantic_query::DeclIdentity,
+    std::sync::Arc<[crate::semantic_query::SemanticNodeId]>,
+)> {
+    use crate::semantic_query::SemanticNodeData;
+
+    let mut current = node;
+    // Bounded: alias chains are short; the cap only guards pathological
+    // graph shapes.
+    for _ in 0..16 {
+        let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, current)?;
+        match &*data {
+            SemanticNodeData::Alias(inner) => current = *inner,
+            SemanticNodeData::InstantiationRef { base, args } => {
+                return (!args.is_empty()).then(|| (base.clone(), std::sync::Arc::clone(args)));
+            }
+            SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)
+                if !data.carrier_type_args().is_empty() =>
+            {
+                drop(data);
+                let resolved = dispatch.resolve_carrier_subject_node(
+                    current,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                );
+                if resolved == current {
+                    return None;
+                }
+                current = resolved;
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 #[cfg(test)]

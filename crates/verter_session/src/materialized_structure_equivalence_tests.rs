@@ -135,21 +135,21 @@ defineProps<Props>()
         .host()
         .base_eval_env_arc("/Generic.vue")
         .expect("the retained eval env for /Generic.vue must build");
-    let item_body = &item_env
+    let item_headers = &item_env
         .type_symbols
         .get("Item")
         .expect("the `<script setup>` interface `Item` must land in the retained type_symbols")
         .primary()
-        .body;
-    let TypeExpr::Object(item_shape) = item_body else {
-        panic!("the oracle `Item` retained body must be an Object, got {item_body:?}");
-    };
-    let oracle_surface = object_surface(item_shape);
+        .direct_member_headers;
+    let oracle_surface: Vec<(String, bool)> = item_headers
+        .iter()
+        .map(|header| (header.name.clone(), header.optional))
+        .collect();
     assert_eq!(
         oracle_surface,
-        vec![("id".to_string(), "Primitive(String)".to_string(), false)],
-        "the INDEPENDENT retained-inventory oracle `Item` must be exactly {{ id: string }} \
-         (non-optional); got {oracle_surface:?}"
+        vec![("id".to_string(), false)],
+        "the INDEPENDENT retained-inventory oracle `Item` must carry exactly the \
+         non-optional `id` member header; got {oracle_surface:?}"
     );
 
     // Output boundary: the materialised prop `type_expr`.
@@ -168,16 +168,23 @@ defineProps<Props>()
 
     // The materialised structure must be a NESTED `Array { element: Object }` —
     // NOT a shallow carrier. The anti-carrier arms make "materialised" earned.
+    let items_type = crate::test_only::semantic_source_probe::demand_type_expr(
+        project.host(),
+        "/Generic.vue",
+        items
+            .type_source
+            .present()
+            .expect("prop `items` must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("`items`'s published source must demand-materialize"));
     assert!(
-        !matches!(&items.type_expr, TypeExpr::Ref { .. }),
-        "the materialised `items` must NOT be a shallow bare `Ref` carrier; got {:?}",
-        items.type_expr
+        !matches!(&items_type, TypeExpr::Ref { .. }),
+        "the materialised `items` must NOT be a shallow bare `Ref` carrier; got {items_type:?}"
     );
-    let TypeExpr::Array { element, .. } = &items.type_expr else {
+    let TypeExpr::Array { element, .. } = &items_type else {
         panic!(
             "the generic-default `items?: T[]` must materialise to an Array structure, not a \
-             shallow carrier; got {:?}",
-            items.type_expr
+             shallow carrier; got {items_type:?}"
         );
     };
     assert!(
@@ -207,8 +214,18 @@ defineProps<Props>()
     // a direct read of the retained, already-lowered `EvalEnv` declaration body.
     let materialized_surface = object_surface(materialized_shape);
     assert_eq!(
-        materialized_surface, oracle_surface,
-        "the materialised array element structure must equal the retained-inventory `Item` \
-         surface; materialised={materialized_surface:?} oracle={oracle_surface:?}"
+        materialized_surface,
+        vec![("id".to_string(), "Primitive(String)".to_string(), false)],
+        "the materialised array element must be exactly {{ id: string }} (non-optional); \
+         got {materialized_surface:?}"
+    );
+    let materialized_headers: Vec<(String, bool)> = materialized_surface
+        .iter()
+        .map(|(name, _, optional)| (name.clone(), *optional))
+        .collect();
+    assert_eq!(
+        materialized_headers, oracle_surface,
+        "the materialised array element structure must agree with the retained-inventory \
+         `Item` member headers; materialised={materialized_headers:?} oracle={oracle_surface:?}"
     );
 }

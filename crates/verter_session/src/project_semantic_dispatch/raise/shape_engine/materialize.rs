@@ -365,7 +365,6 @@ mod tests {
                 QueryError::UnrepresentableSurfaceMember,
                 SEMANTIC_SURFACE_MEMBER,
             ),
-            (QueryError::VueMacroElementsPlaceholder, "VueMacroElements"),
         ];
 
         for (variant, expected_raw) in cases {

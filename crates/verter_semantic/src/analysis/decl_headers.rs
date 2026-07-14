@@ -75,8 +75,8 @@ pub struct TypeDeclHeader {
     /// order (matching the lowered group's parameter-union rule).
     pub type_params: Vec<TypeParamHeader>,
     /// Direct syntactic member headers, unioned across contributors in
-    /// first-seen order (matching `TypeDeclBody::lookup_object`'s
-    /// own-member projection: heritage members are NOT included).
+    /// first-seen order (matching `TypeDeclGroup::merged_member_header_facts`'
+    /// own-member inventory: heritage members are NOT included).
     pub member_headers: Vec<MemberHeader>,
     /// Source-order top-level statement indices of every contributing
     /// statement (deduplicated; one statement can contribute several
@@ -179,7 +179,7 @@ impl DeclHeaderIndex {
             let primary = group.primary();
             let mut type_params: Vec<TypeParamHeader> = Vec::new();
             for decl in group.contributors() {
-                for param in &decl.type_parameters {
+                for param in decl.type_parameters.params.iter() {
                     if !type_params.iter().any(|p| p.name == param.name) {
                         type_params.push(TypeParamHeader {
                             name: param.name.clone(),
@@ -190,14 +190,17 @@ impl DeclHeaderIndex {
                 }
             }
             let member_headers = group
-                .merged_body()
-                .merged_member_names()
+                .merged_member_header_facts()
                 .into_iter()
-                .map(|name| MemberHeader {
-                    name,
-                    kind: MemberHeaderKind::Property,
-                    optional: false,
-                    readonly: false,
+                .map(|fact| MemberHeader {
+                    name: fact.name,
+                    kind: if fact.is_method {
+                        MemberHeaderKind::Method
+                    } else {
+                        MemberHeaderKind::Property
+                    },
+                    optional: fact.optional,
+                    readonly: fact.readonly,
                 })
                 .collect();
             TypeDeclHeader {
@@ -218,12 +221,16 @@ impl DeclHeaderIndex {
                 .as_ref()
                 .map(|shape| {
                     shape
-                        .properties
+                        .members
                         .iter()
                         .filter_map(|member| {
                             let name = match member {
-                                verter_type_expr::ObjectMember::Property(p) => Some(p.name.clone()),
-                                verter_type_expr::ObjectMember::Method(m) => Some(m.name.clone()),
+                                verter_type_expr::facts::ObjectMemberFact::Property(p) => {
+                                    Some(p.name.clone())
+                                }
+                                verter_type_expr::facts::ObjectMemberFact::Method(m) => {
+                                    Some(m.name.clone())
+                                }
                                 _ => None,
                             }?;
                             Some(MemberHeader {
@@ -263,23 +270,25 @@ impl DeclHeaderIndex {
             // `DeclHeaderIndex` UNDER-COUNTS `enum_symbol_names()` /
             // `enum_member_names()` and the parse-stable-hash enum-header fold
             // plus the enum `MemberPresence` fact emission go wrong for seeded
-            // artifacts. The presence rail is the FULL member-NAME set —
-            // `merged_enum_member_names`, EVERY statically-named member
-            // including unfoldable-VALUE ones — which is the SUPERSET the value
-            // rail (`merged_enum_members`) filters; both resolve names via the
-            // same `static_name` helper `index_enum` uses, so the seeded mirror
-            // reconstructs `index_enum`'s exact union (a value subset would drop
-            // unfoldable-value and computed-name members). `Some` exactly when a
-            // contributor is an enum. Locators/spans stay empty like every other
-            // seeded header (a seeded index never drives selective statement
-            // lowering — its memo is pre-filled).
-            if let Some(member_names) = group.merged_enum_member_names() {
+            // artifacts. The presence rail is the FULL member-NAME set — the
+            // stored `EnumMemberNamesFact` inventory unioned across
+            // contributors (`merged_enum_member_names_fact`), EVERY
+            // statically-named member including unfoldable-VALUE ones — which
+            // is the SUPERSET the value rail (`merged_enum_members`) filters;
+            // both resolve names via the same `static_name` helper
+            // `index_enum` uses, so the seeded mirror reconstructs
+            // `index_enum`'s exact union (a value subset would drop
+            // unfoldable-value and computed-name members). `Some` exactly when
+            // a contributor is an enum. Locators/spans stay empty like every
+            // other seeded header (a seeded index never drives selective
+            // statement lowering — its memo is pre-filled).
+            if let Some(names_fact) = group.merged_enum_member_names_fact() {
                 index.enum_headers.insert(
                     name.clone(),
                     EnumDeclHeader {
                         span: Span::default(),
                         name_span: Span::default(),
-                        member_names,
+                        member_names: names_fact.names.iter().cloned().collect(),
                         contributors: Vec::new(),
                     },
                 );
@@ -1200,7 +1209,8 @@ fn upsert_type_header(
     // Last contributor wins for the representative kind/spans (matching
     // `TypeDeclGroup::primary`); params and members UNION across
     // contributors in first-seen order (matching the lowered group's
-    // parameter-union and `lookup_object`'s first-seen member rules).
+    // parameter-union and `merged_member_header_facts`' first-seen member
+    // rules).
     entry.kind = kind;
     entry.span = span;
     entry.name_span = name_span;
@@ -1244,8 +1254,8 @@ fn type_param_headers(decl: Option<&TSTypeParameterDeclaration<'_>>) -> Vec<Type
 
 /// Direct syntactic member headers of a type-alias body: a `TSTypeLiteral`
 /// contributes its named members; intersection / parenthesized arms are
-/// descended (mirroring the lowered body's `lookup_object` own-member
-/// projection). Every other body shape has no direct syntactic members.
+/// descended (mirroring the lowered inventory's own-member header facts).
+/// Every other body shape has no direct syntactic members.
 fn alias_body_member_headers(ty: &TSType<'_>) -> Vec<MemberHeader> {
     let mut out = Vec::new();
     collect_alias_member_headers(ty, &mut out);

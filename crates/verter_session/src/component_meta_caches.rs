@@ -114,22 +114,48 @@ use crate::semantic_query::ProjectionMode;
 // canonicals, the compute-time generation) lives in
 // [`crate::cache_runtime::CacheEntry`].
 
+/// The three-way outcome a single-entry cache's per-call cold-build
+/// closure reports.
+///
+/// It mirrors the runtime's own [`CacheAdmission`] vocabulary, minus the
+/// bookkeeping the node owns (the self-root set and the compute-time
+/// generation stamp). Modelling REFUSAL as a first-class arm — rather than
+/// as a `None` — is what keeps refusal orthogonal to failure: a refused
+/// admission still hands the freshly-computed value back to the winner, so
+/// no producer has to re-run its resolution to recover the value it just
+/// computed.
+enum SingleEntryOutcome<V> {
+    /// Valid AND cacheable: the value plus the path-precise fact signature
+    /// the entry is validated by.
+    Cacheable(V, Arc<[FactVersionRef]>),
+    /// Valid but NOT cacheable: publish nothing, serve the value to the
+    /// winner verbatim. Never a fabricated `Partial` — refusal is
+    /// CACHE-ONLY.
+    ReturnOnly(V, NonAdmissionReason),
+    /// The cold build itself failed to produce a value.
+    Failed,
+}
+
 /// Per-call [`ArtifactNode`] adapter for the single-entry caches.
 ///
 /// Holds borrows of the owning cache's published map, flight table, and
-/// live counter, plus the per-call cold-build closure. The closure
-/// returns `Some((value, facts, self_roots))` on success — the domain
-/// value, the path-precise fact signature, and the canonicals validated
-/// strictly as self-roots — or `None` on observable failure.
+/// live counter, plus the entry's self-root canonicals and the per-call
+/// cold-build closure. The closure returns a [`SingleEntryOutcome`]: the
+/// node stamps the compute-time generation and the self-root set onto a
+/// `Cacheable` outcome and lowers the other two arms verbatim.
 struct SingleEntryArtifactNode<'a, K, V, F>
 where
     K: Eq + std::hash::Hash + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
-    F: FnOnce() -> Option<(V, Arc<[FactVersionRef]>, Arc<[Arc<str>]>)>,
+    F: FnOnce() -> SingleEntryOutcome<V>,
 {
     entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
     inflight: &'a InflightTable<QueryFlightKey<K>>,
     live_counter: &'a AtomicU64,
+    /// The canonicals the warm-read validator checks STRICTLY. Owned by
+    /// the funnel (it derives them from the key), not by the per-call
+    /// closure.
+    self_root_canonicals: Arc<[Arc<str>]>,
     /// `FnOnce` carried in a `RefCell<Option<_>>` so the `&self`
     /// `compute` method (the `ArtifactNode` trait takes `&self`) can
     /// `take()` it exactly once on the cold winner's call.
@@ -140,7 +166,7 @@ impl<'a, K, V, F> ArtifactNode for SingleEntryArtifactNode<'a, K, V, F>
 where
     K: Eq + std::hash::Hash + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
-    F: FnOnce() -> Option<(V, Arc<[FactVersionRef]>, Arc<[Arc<str>]>)>,
+    F: FnOnce() -> SingleEntryOutcome<V>,
 {
     type Key = K;
     type Value = V;
@@ -160,13 +186,16 @@ where
             .take()
             .expect("single-entry compute is taken exactly once by the cold winner");
         match compute() {
-            Some((value, facts, self_root_canonicals)) => CacheAdmission::Cacheable {
+            SingleEntryOutcome::Cacheable(value, facts) => CacheAdmission::Cacheable {
                 value,
                 signature: ReadSetSignature::new(facts),
-                self_root_canonicals,
+                self_root_canonicals: Arc::clone(&self.self_root_canonicals),
                 validated_at_generation: cx.generation(),
             },
-            None => CacheAdmission::Failed {
+            SingleEntryOutcome::ReturnOnly(value, reason) => {
+                CacheAdmission::ReturnOnly { value, reason }
+            }
+            SingleEntryOutcome::Failed => CacheAdmission::Failed {
                 reason: NonAdmissionReason::ComputeFailed,
             },
         }
@@ -209,6 +238,106 @@ where
         // reject path, so the counter tracks live entries, not lifetime
         // inserts.
         self.live_counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// What a producer's cold build actually produced, BEFORE the cacheability
+/// verdict is applied.
+///
+/// The three arms separate the two things a `None` used to conflate:
+///
+/// - `Rooted` — a value AND a fact signature that can root it. Admissible if
+///   the probe agrees.
+/// - `Unrooted` — a value, but nothing to root it with (the signature
+///   overflowed, the keyed content version could not be observed, the value is
+///   a genuine partial). The value is CORRECT and belongs to the caller; only
+///   the WRITE is refused.
+/// - `Failed` — no value at all.
+///
+/// Collapsing `Unrooted` into `Failed` is what produced the discard-and-
+/// re-resolve shape: the funnel returned `None`, the producer could not tell
+/// "refused" from "failed", and re-ran the resolution it had just completed —
+/// paying a second compute with no guarantee the second run reproduces the
+/// first.
+pub(crate) enum ComputedEntry<V> {
+    /// Value plus the path-precise fact signature that roots it.
+    Rooted(V, Arc<[FactVersionRef]>),
+    /// Value produced, but no signature can root it. Serve it; publish nothing.
+    Unrooted(V, NonAdmissionReason),
+    /// The cold build produced no value.
+    Failed,
+}
+
+impl<V> From<Option<(V, Arc<[FactVersionRef]>)>> for ComputedEntry<V> {
+    /// Adapt the funnels whose producers hold their own copy of the computed
+    /// value (the shape caches: the value is captured before the closure and
+    /// returned verbatim on refusal, so a `None` costs no re-compute).
+    fn from(computed: Option<(V, Arc<[FactVersionRef]>)>) -> Self {
+        match computed {
+            Some((value, facts)) => ComputedEntry::Rooted(value, facts),
+            None => ComputedEntry::Failed,
+        }
+    }
+}
+
+/// Lower a producer's cold-build result into a [`SingleEntryOutcome`] by
+/// consulting the cacheability probe **after** the compute has run.
+///
+/// **The sampling point is load-bearing.** A verdict read at funnel ENTRY
+/// covers only what the producer consumed BEFORE the funnel; the compute runs
+/// LATER — inside the cold winner's closure — so a non-cacheable read taken
+/// there lands after such a check and would be published as `Cacheable`. The
+/// tracer accumulates monotonically, so a verdict read HERE, at the end of the
+/// compute, covers everything the compute consumed, provided the scope
+/// ENCLOSES the producer — which is exactly what an unforgeable
+/// [`CacheabilityProbe`](crate::fact_signature_helpers::CacheabilityProbe)
+/// guarantees.
+///
+/// A non-cacheable verdict routes the value through `ReturnOnly`: the write is
+/// refused, the freshly-computed value is still handed back to the winner. The
+/// value is never dropped, so no producer re-runs its resolution to recover
+/// what it just computed, and the result stays `Complete` — refusal never
+/// fabricates a `Partial`.
+///
+/// `UnresolvedProvenance` is the probe's refusal reason: a value derived from a
+/// fenced serve, a broken decl-body lease, an unrootable import route, or an
+/// unobservable contributor source env cannot be soundly rooted for warm
+/// admission — its fact stamps read the LIVE view while its payload came from a
+/// basis the rail cannot re-check. A producer that could not root its own value
+/// ([`ComputedEntry::Unrooted`]) reports its own typed reason and is refused
+/// regardless of the probe's verdict; either way the value survives.
+///
+/// # This is not the funnel's only post-compute verdict
+///
+/// A `Cacheable` outcome still faces the substrate's `revalidate_after_compute`
+/// before it publishes. That gate fails when the store view MOVED under the
+/// compute (a file it read was edited, or the project generation was reset,
+/// between its first read and the publish), and there the funnel returns `None`
+/// — the value is NOT handed to the winner, and the producer re-derives against
+/// the fresh view.
+///
+/// The two refusals are opposites and must not be conflated. A cacheability
+/// refusal means the value IS a consistent snapshot of the view it ran under
+/// and merely cannot be rooted, so keeping it is honest. A revalidation
+/// rejection means the value is a consistent snapshot of NO view — its reads
+/// straddle the mutation — so serving it would hand the caller a torn result
+/// and bubble the superseded facts into the enclosing entry's signature.
+/// Discarding it is the completion fence's retry-on-mid-flight-change. Pinned
+/// by `declaration_lookup_straddling_compute_is_not_served_to_the_winner`.
+fn single_entry_admission<V>(
+    probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+    computed: ComputedEntry<V>,
+) -> SingleEntryOutcome<V> {
+    match computed {
+        ComputedEntry::Rooted(value, facts) => {
+            if probe.non_cacheable() {
+                SingleEntryOutcome::ReturnOnly(value, NonAdmissionReason::UnresolvedProvenance)
+            } else {
+                SingleEntryOutcome::Cacheable(value, facts)
+            }
+        }
+        ComputedEntry::Unrooted(value, reason) => SingleEntryOutcome::ReturnOnly(value, reason),
+        ComputedEntry::Failed => SingleEntryOutcome::Failed,
     }
 }
 
@@ -519,6 +648,13 @@ impl ImportedRegistryDb {
     /// - `Failed` — the resolution itself failed; joiners surface `None`
     ///   and the next caller retries.
     ///
+    /// A `Cacheable` admission can still be REJECTED after the fact by the
+    /// substrate's `revalidate_after_compute` — the store view moved under the
+    /// compute. That rejection returns `None` (the straddling value is
+    /// deliberately discarded, never served) and the producer re-derives against
+    /// the fresh view; it is the one path on which the winner resolves twice.
+    /// See [`single_entry_admission`] for why the two refusals differ.
+    ///
     /// The store carries NO retention budget, so the publish lifecycle has
     /// no deferred budget victims and no publish fence — the per-slot
     /// candidate cap (handled inside `publish_core` under the slot guard)
@@ -532,6 +668,7 @@ impl ImportedRegistryDb {
         &self,
         key: &ImportedRegistryKey,
         ctx: &dyn ResolverContext,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
         compute: F,
     ) -> Option<ImportedRegistryValue>
     where
@@ -551,6 +688,20 @@ impl ImportedRegistryDb {
         // stamps the keyed canonical's self-root set.
         let node_compute = move || -> CacheAdmission<ImportedRegistryValue> {
             match compute() {
+                // POST-compute cacheability gate. `compute()` runs the whole
+                // route walk HERE, inside the flight, so this — not the funnel
+                // entry — is the only sampling point that covers it. The
+                // resolved value still reaches the winner through `ReturnOnly`;
+                // the candidate is not admitted. See `single_entry_admission`
+                // for the full rationale.
+                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry)
+                    if probe.non_cacheable() =>
+                {
+                    CacheAdmission::ReturnOnly {
+                        value: entry.value,
+                        reason: NonAdmissionReason::UnresolvedProvenance,
+                    }
+                }
                 crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
                     CacheAdmission::Cacheable {
                         value: entry.value,
@@ -590,6 +741,35 @@ impl ImportedRegistryDb {
             unadmitted: None,
         };
         crate::cache_runtime::query::lookup(&node, key.clone(), ctx)
+    }
+
+    /// Test-only: drive [`Self::get_or_compute`] the way a production producer
+    /// does — inside a REAL cacheability tracer scope opened around the whole
+    /// compute.
+    ///
+    /// A [`crate::fact_signature_helpers::CacheabilityProbe`] cannot be forged;
+    /// `with_cacheability_scope` is its only constructor. So this helper is not an
+    /// escape hatch around the admission contract — it IS the contract, spelled for
+    /// a test that has no surrounding producer. A test whose compute consumes a
+    /// non-cacheable read is refused admission here exactly as production is.
+    #[cfg(test)]
+    pub(crate) fn get_or_compute_admit_traced_for_test<F>(
+        &self,
+        key: &ImportedRegistryKey,
+        ctx: &dyn ResolverContext,
+        compute: F,
+    ) -> Option<ImportedRegistryValue>
+    where
+        F: FnOnce() -> crate::cache_runtime::singleflight::ComputeAdmission<
+            ImportedRegistryValue,
+            ImportedRegistryEntry,
+        >,
+    {
+        crate::fact_signature_helpers::with_cacheability_scope(
+            ctx.host_for_fact_tracer_install(),
+            |probe| self.get_or_compute_admit(key, ctx, probe, compute),
+        )
+        .0
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -752,14 +932,33 @@ impl DeclarationLookupDb {
         }
     }
 
+    /// The SOLE admission funnel for `DeclarationLookupDb`.
+    ///
+    /// `probe` is REQUIRED — see [`ShapeCacheDb::get_or_compute`] for the full
+    /// contract. The verdict is consulted AFTER `compute` returns
+    /// ([`single_entry_admission`]), so a non-cacheable read taken INSIDE the
+    /// cold build refuses the write; the computed declaration is still returned
+    /// to the winner through `ReturnOnly`.
+    ///
+    /// The closure reports a [`ComputedEntry`], not an `Option`: a declaration
+    /// this cache cannot ROOT is still a declaration the caller asked for. It
+    /// rides `ReturnOnly` back to the winner, so a CACHEABILITY refusal never
+    /// costs the second resolution a `None` would have forced.
+    ///
+    /// `None` therefore means one of exactly two things: the cold build produced
+    /// nothing ([`ComputedEntry::Failed`]), or the substrate's post-compute
+    /// revalidation rejected the entry because the store view moved under the
+    /// compute — a straddling value that must be discarded and re-derived, never
+    /// served. See [`single_entry_admission`].
     pub(crate) fn get_or_compute<F>(
         &self,
         key: &DeclarationLookupKey,
         ctx: &dyn ResolverContext,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
         compute: F,
     ) -> Option<Arc<ResolvedTypeDeclaration>>
     where
-        F: FnOnce() -> Option<(ResolvedTypeDeclaration, Arc<[FactVersionRef]>)>,
+        F: FnOnce() -> ComputedEntry<ResolvedTypeDeclaration>,
     {
         // The entry's keyed canonical is its self-root: the warm-read
         // validator validates the self-root `FileWholeHash` strictly so
@@ -771,11 +970,47 @@ impl DeclarationLookupDb {
             entries: &self.entries,
             inflight: &self.inflight,
             live_counter: &self.live_counter,
+            self_root_canonicals: self_roots,
             compute: std::cell::RefCell::new(Some(move || {
-                compute().map(|(value, facts)| (Arc::new(value), facts, Arc::clone(&self_roots)))
+                let computed = match compute() {
+                    ComputedEntry::Rooted(value, facts) => {
+                        ComputedEntry::Rooted(Arc::new(value), facts)
+                    }
+                    ComputedEntry::Unrooted(value, reason) => {
+                        ComputedEntry::Unrooted(Arc::new(value), reason)
+                    }
+                    ComputedEntry::Failed => ComputedEntry::Failed,
+                };
+                single_entry_admission(probe, computed)
             })),
         };
         lookup(&node, key.clone(), ctx)
+    }
+
+    /// Test-only: drive [`Self::get_or_compute`] the way a production producer
+    /// does — inside a REAL cacheability tracer scope opened around the whole
+    /// compute.
+    ///
+    /// A [`crate::fact_signature_helpers::CacheabilityProbe`] cannot be forged;
+    /// `with_cacheability_scope` is its only constructor. So this helper is not an
+    /// escape hatch around the admission contract — it IS the contract, spelled for
+    /// a test that has no surrounding producer. A test whose compute consumes a
+    /// non-cacheable read is refused admission here exactly as production is.
+    #[cfg(test)]
+    pub(crate) fn get_or_compute_traced_for_test<F>(
+        &self,
+        key: &DeclarationLookupKey,
+        ctx: &dyn ResolverContext,
+        compute: F,
+    ) -> Option<Arc<ResolvedTypeDeclaration>>
+    where
+        F: FnOnce() -> ComputedEntry<ResolvedTypeDeclaration>,
+    {
+        crate::fact_signature_helpers::with_cacheability_scope(
+            ctx.host_for_fact_tracer_install(),
+            |probe| self.get_or_compute(key, ctx, probe, compute),
+        )
+        .0
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -843,14 +1078,27 @@ impl ResolvabilityDb {
         }
     }
 
+    /// The SOLE admission funnel for `ResolvabilityDb`.
+    ///
+    /// `probe` is REQUIRED — see [`ShapeCacheDb::get_or_compute`] for the full
+    /// contract. The verdict is consulted AFTER `compute` returns
+    /// ([`single_entry_admission`]), so a non-cacheable read taken INSIDE the
+    /// cold build refuses the write; the computed bool is still returned to the
+    /// winner through `ReturnOnly`.
+    ///
+    /// The closure reports a [`ComputedEntry`]: a bool this cache cannot ROOT
+    /// (an overflowed signature, an unobservable keyed content version, a
+    /// request-partial resolution) still rides `ReturnOnly` back to the winner,
+    /// so the caller never re-derives a verdict it already has.
     pub(crate) fn get_or_compute<F>(
         &self,
         key: &ResolvabilityKey,
         ctx: &dyn ResolverContext,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
         compute: F,
     ) -> Option<bool>
     where
-        F: FnOnce() -> Option<(bool, Arc<[FactVersionRef]>)>,
+        F: FnOnce() -> ComputedEntry<bool>,
     {
         // The keyed source canonical is the entry's self-root — strict
         // warm-read validation rejects a same-canonical edit or an
@@ -860,11 +1108,38 @@ impl ResolvabilityDb {
             entries: &self.entries,
             inflight: &self.inflight,
             live_counter: &self.live_counter,
+            self_root_canonicals: self_roots,
             compute: std::cell::RefCell::new(Some(move || {
-                compute().map(|(value, facts)| (value, facts, Arc::clone(&self_roots)))
+                single_entry_admission(probe, compute())
             })),
         };
         lookup(&node, key.clone(), ctx)
+    }
+
+    /// Test-only: drive [`Self::get_or_compute`] the way a production producer
+    /// does — inside a REAL cacheability tracer scope opened around the whole
+    /// compute.
+    ///
+    /// A [`crate::fact_signature_helpers::CacheabilityProbe`] cannot be forged;
+    /// `with_cacheability_scope` is its only constructor. So this helper is not an
+    /// escape hatch around the admission contract — it IS the contract, spelled for
+    /// a test that has no surrounding producer. A test whose compute consumes a
+    /// non-cacheable read is refused admission here exactly as production is.
+    #[cfg(test)]
+    pub(crate) fn get_or_compute_traced_for_test<F>(
+        &self,
+        key: &ResolvabilityKey,
+        ctx: &dyn ResolverContext,
+        compute: F,
+    ) -> Option<bool>
+    where
+        F: FnOnce() -> ComputedEntry<bool>,
+    {
+        crate::fact_signature_helpers::with_cacheability_scope(
+            ctx.host_for_fact_tracer_install(),
+            |probe| self.get_or_compute(key, ctx, probe, compute),
+        )
+        .0
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -908,17 +1183,29 @@ impl Default for ResolvabilityDb {
 }
 
 // ===========================================================================
-// 4. OwnerCollectionDb — `Arc<str> (name) → Option<TypeExpr>`
+// 4. OwnerCollectionDb — `(owner, name) → Option<AuthoredBodyLocator>`
 //
 // Note: keyed solely by name within an owner scope. Since multiple owners
-// may collide on the same name with different TypeExprs, the entry tracks
-// the owner_canonical at insertion time and validates per-canonical only.
+// may collide on the same name with different collection bodies, the entry
+// tracks the owner_canonical at insertion time and validates per-canonical
+// only.
+//
+// The VALUE is the content-free AUTHORED BODY LOCATOR of the owner's
+// collection declaration — never a stored body. Consumers lower the
+// locator on demand through the ONE shared dispatch
+// (`raise_authored_locator_to_hot` / `lower_locator`) and read node-domain
+// predicates off the lowered node. The key `(owner, name)` and the owner
+// self-root are unchanged from the body-bearing era — a VALUE migration
+// only, not a key or validity-oracle change.
 // ===========================================================================
 
 pub type OwnerCollectionKey = (Arc<str>, Arc<str>); // (owner, name)
 
 pub struct OwnerCollectionDb {
-    entries: DashMap<OwnerCollectionKey, Arc<CacheEntry<Option<Arc<TypeExpr>>>>>,
+    entries: DashMap<
+        OwnerCollectionKey,
+        Arc<CacheEntry<Option<verter_type_expr::locators::AuthoredBodyLocator>>>,
+    >,
     inflight: InflightTable<QueryFlightKey<OwnerCollectionKey>>,
     live_counter: Arc<AtomicU64>,
 }
@@ -936,30 +1223,78 @@ impl OwnerCollectionDb {
         }
     }
 
+    /// The SOLE admission funnel for `OwnerCollectionDb`.
+    ///
+    /// `probe` is REQUIRED — see [`ShapeCacheDb::get_or_compute`] for the full
+    /// contract. The verdict is consulted AFTER `compute` returns
+    /// ([`single_entry_admission`]); the computed locator is still returned to
+    /// the winner through `ReturnOnly`.
+    ///
+    /// The reason this funnel needs the probe is CONTENT-NEUTRAL and worth
+    /// stating plainly: the value is built from a prepared-decl read, and a
+    /// BROKEN DECL-BODY LEASE (`LeaseMiss`) makes that read yield a degraded
+    /// `None` WITHOUT superseding the artifact or moving the owner's content
+    /// hash. The entry would therefore root on the LIVE hash and validate on
+    /// every warm read forever — permanently shadowing a recoverable
+    /// declaration as a proven absence. `PreparedDeclBundle::get` leaves its
+    /// write-once slot VACANT on a lease miss for exactly this reason; this
+    /// funnel must not undo that by publishing the `None` one level up.
+    ///
+    /// The closure reports a [`ComputedEntry`], whose `Failed` arm means "no
+    /// prepared-decl observation at all" — distinct from `Unrooted`, which is a
+    /// locator the cache may serve but must not publish.
     pub(crate) fn get_or_compute<F>(
         &self,
         key: &OwnerCollectionKey,
         ctx: &dyn ResolverContext,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
         compute: F,
-    ) -> Option<Option<Arc<TypeExpr>>>
+    ) -> Option<Option<verter_type_expr::locators::AuthoredBodyLocator>>
     where
-        F: FnOnce() -> Option<(Option<TypeExpr>, Arc<[FactVersionRef]>)>,
+        F: FnOnce() -> ComputedEntry<Option<verter_type_expr::locators::AuthoredBodyLocator>>,
     {
-        // The owner canonical is the entry's self-root. This cache is
-        // body-bearing (stores a `TypeExpr`), so strict self-root
-        // validation is the correctness floor — a content edit to the
-        // owner file invalidates the cached collection expression.
+        // The owner canonical is the entry's self-root. The locator is
+        // content-free, but the position it addresses is only meaningful
+        // against the owner content version the producer observed, so
+        // strict self-root validation remains the correctness floor — a
+        // content edit to the owner file invalidates the cached locator.
         let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
         let node = SingleEntryArtifactNode {
             entries: &self.entries,
             inflight: &self.inflight,
             live_counter: &self.live_counter,
+            self_root_canonicals: self_roots,
             compute: std::cell::RefCell::new(Some(move || {
-                compute()
-                    .map(|(value, facts)| (value.map(Arc::new), facts, Arc::clone(&self_roots)))
+                single_entry_admission(probe, compute())
             })),
         };
         lookup(&node, key.clone(), ctx)
+    }
+
+    /// Test-only: drive [`Self::get_or_compute`] the way a production producer
+    /// does — inside a REAL cacheability tracer scope opened around the whole
+    /// compute.
+    ///
+    /// A [`crate::fact_signature_helpers::CacheabilityProbe`] cannot be forged;
+    /// `with_cacheability_scope` is its only constructor. So this helper is not an
+    /// escape hatch around the admission contract — it IS the contract, spelled for
+    /// a test that has no surrounding producer. A test whose compute consumes a
+    /// non-cacheable read is refused admission here exactly as production is.
+    #[cfg(test)]
+    pub(crate) fn get_or_compute_traced_for_test<F>(
+        &self,
+        key: &OwnerCollectionKey,
+        ctx: &dyn ResolverContext,
+        compute: F,
+    ) -> Option<Option<verter_type_expr::locators::AuthoredBodyLocator>>
+    where
+        F: FnOnce() -> ComputedEntry<Option<verter_type_expr::locators::AuthoredBodyLocator>>,
+    {
+        crate::fact_signature_helpers::with_cacheability_scope(
+            ctx.host_for_fact_tracer_install(),
+            |probe| self.get_or_compute(key, ctx, probe, compute),
+        )
+        .0
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -1053,44 +1388,45 @@ impl Default for OwnerCollectionDb {
 //      `bump_project_generation_and_evict` detect cross-generation drift
 //      on overlay open/close.
 
-/// A [`TypeExpr`] structurally proven to carry NO
-/// [`TypeExpr::SyntheticSlotBinding`] anywhere in its tree.
+/// Synthetic-carrier classification of a `TypeExpr`-START shape-route
+/// subject — the ONE classification both the production key constructor
+/// ([`ShapeCacheKey::type_expr_whole_with_context`]) and the test-support
+/// classifier probe route through, so the verdicts cannot drift.
 ///
-/// This is the structural confinement that keeps a synthetic carrier's
-/// `value_node` arena ordinal out of the [`ShapeSubject::TypeExpr`]
-/// structural hash. `TypeExpr`'s derived `Hash` descends recursively, so
-/// a carrier nested under `Object` / `Parenthesized` / `Function` /
-/// `TypeParameter.default` / etc. would otherwise fold its
-/// `SyntheticCarrierKey.value_node` (a store/generation-relative ordinal,
-/// NOT content-free) into the `TypeExpr`-subject key — an R6 violation.
-/// The shallow-terminal rule is a PRODUCER contract; this wrapper makes
-/// it a STRUCTURAL guarantee: a `ShapeSubject::TypeExpr` is non-
-/// constructible from a synthetic-carrying expression.
+/// - [`BareCarrier`](Self::BareCarrier): a top-level
+///   `TypeExpr::SyntheticSlotBinding` — redirects to the content-free
+///   [`ShapeSubject::SyntheticBinding`] identity (the carrier's
+///   `value_node` arena ordinal is provenance, never key material).
+/// - [`CarrierFree`](Self::CarrierFree): no carrier anywhere — the sound
+///   subject is the LOWERED settled graph node
+///   ([`ShapeSubject::MemberValueNode`]); the caller lowers ONCE through
+///   the shared dispatch and keys that node.
+/// - [`UnkeyableNested`](Self::UnkeyableNested): a composite that NESTS a
+///   carrier — its identity would depend on the carrier's store-relative
+///   `value_node` ordinal, which has no content-free representation, so
+///   the subject keys NO slot (cache bypass, not value bypass).
 ///
-/// Construction is fallible ([`Self::new`]) and module-private; the only
-/// way a carrier-free `TypeExpr` reaches the key is through the
-/// `type_expr_whole*` constructors, which classify the incoming
-/// expression (bare carrier → [`ShapeSubject::SyntheticBinding`];
-/// carrier-free → here; nested carrier → no cache key).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NonSyntheticTypeExpr(Arc<TypeExpr>);
+/// Reuses the shared depth-safe, iterative, no-allocation walker
+/// [`crate::semantic_query_memo::synthetic_carrier_guard::type_expr_contains_synthetic_slot_binding`]
+/// — there is exactly one carrier-detection walker.
+enum TypeExprShapeSubjectClass {
+    BareCarrier(crate::semantic_query::SyntheticBindingId),
+    CarrierFree,
+    UnkeyableNested,
+}
 
-impl NonSyntheticTypeExpr {
-    /// Wrap `expr` only if it carries NO `TypeExpr::SyntheticSlotBinding`
-    /// anywhere in its tree. Returns `None` when a carrier is present
-    /// (bare or nested) — such an expression has no sound content-free
-    /// `TypeExpr`-subject key. Reuses the shared depth-safe, iterative,
-    /// no-allocation walker
-    /// [`crate::semantic_query_memo::synthetic_carrier_guard::type_expr_contains_synthetic_slot_binding`]
-    /// — there is exactly one carrier-detection walker.
-    fn new(expr: Arc<TypeExpr>) -> Option<Self> {
-        if crate::semantic_query_memo::synthetic_carrier_guard::type_expr_contains_synthetic_slot_binding(
-            &expr,
-        ) {
-            None
-        } else {
-            Some(Self(expr))
-        }
+fn classify_type_expr_shape_subject(expr: &TypeExpr) -> TypeExprShapeSubjectClass {
+    if let TypeExpr::SyntheticSlotBinding(carrier) = expr {
+        return TypeExprShapeSubjectClass::BareCarrier(
+            crate::semantic_query::SyntheticBindingId::from_carrier_key(carrier),
+        );
+    }
+    if crate::semantic_query_memo::synthetic_carrier_guard::type_expr_contains_synthetic_slot_binding(
+        expr,
+    ) {
+        TypeExprShapeSubjectClass::UnkeyableNested
+    } else {
+        TypeExprShapeSubjectClass::CarrierFree
     }
 }
 
@@ -1101,8 +1437,8 @@ impl NonSyntheticTypeExpr {
 /// literal — the ONLY build path is the `ShapeCacheKey::*_whole*`
 /// constructors. Pattern-matching with `{ .. }` is unaffected.
 ///
-/// The `TypeExpr` variant does not need this marker: its
-/// `expr: NonSyntheticTypeExpr` field is itself module-private to
+/// The `MemberValueNode` variant does not need this marker: its
+/// `node: MemberShapeNodeSubject` field is itself module-private to
 /// construct, which already seals that arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct ConstructionSeal;
@@ -1150,6 +1486,17 @@ impl MemberShapeNodeSubject {
         Self(node)
     }
 
+    /// Sanctioned construction from the TypeExpr-START shape route's
+    /// pre-peek LOWERED subject node. The classifier
+    /// ([`ShapeCacheKey::type_expr_whole_with_context`]) proves the
+    /// expression carrier-free FIRST, then lowers it ONCE through the
+    /// shared dispatch and mints the settled node here — module-private,
+    /// so an arbitrary raw `SemanticNodeId` still cannot reach the sealed
+    /// member-shape subject from outside the classifying constructors.
+    fn from_lowered_type_expr(node: crate::semantic_query::SemanticNodeId) -> Self {
+        Self(node)
+    }
+
     /// Test-only construction from a raw `&SurfaceMember`. The cache-rail
     /// key-identity tests (`query_db_self_root_tests`) build keys directly from
     /// synthetic members to assert the subject collapses siblings sharing
@@ -1171,10 +1518,12 @@ impl MemberShapeNodeSubject {
 
 /// Subject of a [`ShapeCacheKey`] — the *what* whose shape is cached.
 ///
-/// `TypeExpr` covers callers whose start point is a parser-produced
-/// `TypeExpr` annotation. `MemberValueNode` covers the per-member route
-/// whose start point is the settled `SurfaceMember.value` graph node,
-/// keyed by the sealed [`MemberShapeNodeSubject`] newtype.
+/// `MemberValueNode` covers BOTH the per-member route whose start point is
+/// the settled `SurfaceMember.value` graph node AND the TypeExpr-START
+/// materialiser route, whose parser-produced annotation is LOWERED once
+/// through the shared dispatch and keyed by its settled node (the former
+/// `TypeExpr` structural-hash subject — deleted: a `TypeExpr` never enters
+/// a cache key). Keyed by the sealed [`MemberShapeNodeSubject`] newtype.
 /// `SyntheticBinding` covers explicit deepening of a synthetic
 /// slot-binding carrier, keyed by the content-free
 /// [`crate::semantic_query::SyntheticBindingId`]. All subjects share the
@@ -1182,13 +1531,12 @@ impl MemberShapeNodeSubject {
 /// entries.
 ///
 /// The variant payloads are non-constructible outside this module: the
-/// `TypeExpr` arm via its module-private [`NonSyntheticTypeExpr`] field,
-/// the `MemberValueNode` arm via the module-private [`MemberShapeNodeSubject`]
+/// `MemberValueNode` arm via the module-private [`MemberShapeNodeSubject`]
 /// newtype's inner field, the `SyntheticBinding` arm via a module-private
 /// [`ConstructionSeal`] marker. External code matches on the variants
 /// (with `{ .. }`) but builds them ONLY through the `ShapeCacheKey`
 /// constructors. This is the structural half of the synthetic-carrier
-/// confinement — see [`NonSyntheticTypeExpr`].
+/// confinement — see [`classify_type_expr_shape_subject`].
 ///
 /// `private_interfaces` is allowed deliberately: a module-private
 /// [`ConstructionSeal`] field on a `pub` enum is reachable for matching
@@ -1198,25 +1546,15 @@ impl MemberShapeNodeSubject {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[allow(private_interfaces)]
 pub enum ShapeSubject {
-    /// TypeExpr-keyed subject. Sibling members of the same
-    /// `Pick<Foo, 'a' | 'b'>` raise hash to distinct entries because
-    /// the raised `TypeExpr` is structurally distinct per member —
-    /// callers seeking per-member dedup should prefer the
-    /// `MemberValueNode` subject. The expression is wrapped in
-    /// [`NonSyntheticTypeExpr`] so a synthetic carrier can never fold
-    /// its `value_node` ordinal into the structural hash.
-    TypeExpr {
-        scope: Arc<str>,
-        expr: NonSyntheticTypeExpr,
-    },
     /// Member-value graph-node subject. Sibling members whose
     /// `SurfaceMember.value` is the same settled graph node collapse onto
-    /// each other's warm hits. Keyed by the sealed [`MemberShapeNodeSubject`]
-    /// newtype (its inner arena ordinal is module-private), so a raw
-    /// `SemanticNodeId` cannot spread into the shape-key subject. This is a
-    /// generation/store-scoped graph-instance memo (single-entry,
-    /// fact-validated, generation-gated), NOT a durable content-free
-    /// query-identity key.
+    /// each other's warm hits — as do TypeExpr-start materialisations
+    /// whose annotations lower to the same settled node. Keyed by the
+    /// sealed [`MemberShapeNodeSubject`] newtype (its inner arena ordinal
+    /// is module-private), so a raw `SemanticNodeId` cannot spread into
+    /// the shape-key subject. This is a generation/store-scoped
+    /// graph-instance memo (single-entry, fact-validated,
+    /// generation-gated), NOT a durable content-free query-identity key.
     MemberValueNode {
         scope: Arc<str>,
         node: MemberShapeNodeSubject,
@@ -1242,9 +1580,7 @@ impl ShapeSubject {
     /// invalidation.
     pub(crate) fn scope_canonical(&self) -> &Arc<str> {
         match self {
-            ShapeSubject::TypeExpr { scope, .. } | ShapeSubject::MemberValueNode { scope, .. } => {
-                scope
-            }
+            ShapeSubject::MemberValueNode { scope, .. } => scope,
             ShapeSubject::SyntheticBinding { id, .. } => &id.scope_canonical_id,
         }
     }
@@ -1343,50 +1679,24 @@ impl ShapeCacheKey {
         self.subject.scope_canonical()
     }
 
-    /// Construct a TypeExpr-subject whole-subject key (the default
-    /// for callers that have not adopted path-precise demand). The
-    /// terminal context is implicitly `Published(mode)` for backwards-
-    /// compatible whole-subject lookups.
-    ///
-    /// Mode-only convenience: production callers route through
-    /// [`Self::type_expr_whole_with_context`]; only tests and the
-    /// `cfg(any(test, debug_assertions))` schema-probe helpers reach the
-    /// mode-only form, so it is gated to match (no dead surface in
-    /// release).
-    ///
-    /// Test callers pass non-synthetic expressions, so this unwraps the
-    /// classified key. A `SyntheticSlotBinding`-carrying expression here
-    /// is a test-fixture error and panics loudly.
-    ///
-    /// Gated `#[cfg(any(test, feature = "test-support"))]` (NOT
-    /// `debug_assertions`): the only callers are in-crate `#[cfg(test)]` suites
-    /// and the test-support `insert_synthetic_for_schema_test` helper — there is
-    /// no production caller (production keys via
-    /// [`Self::type_expr_whole_with_context`]). Keeping the mode-only test
-    /// shortcut on the production-unreachable `test-support` gate (rather than
-    /// `debug_assertions`) keeps it out of every production build and coherent
-    /// with the carrier `_for_test` accessors it feeds through that helper.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn type_expr_whole(
-        scope: Arc<str>,
-        expr: Arc<TypeExpr>,
-        mode: ProjectionMode,
-    ) -> Self {
-        Self::type_expr_whole_with_context(
-            scope,
-            expr,
-            crate::semantic_query::ProjectionReductionContext::published(mode),
-        )
-        .expect("type_expr_whole test callers pass non-synthetic expressions")
-    }
-
-    /// Construct a TypeExpr-subject whole-subject key under an explicit
+    /// Construct the TypeExpr-START whole-subject key under an explicit
     /// [`ProjectionReductionContext`], CLASSIFYING the incoming
-    /// expression for synthetic-carrier confinement. The context
-    /// discriminator keeps the TypeExpr field materialiser's per-prop
-    /// `Published(Navigate)` publication slot disjoint from a
-    /// `StructuralTransit(Navigate)` carrier-lower slot — same subject,
-    /// distinct cache entries.
+    /// expression for synthetic-carrier confinement and keying the
+    /// carrier-free case by its LOWERED settled graph node
+    /// ([`ShapeSubject::MemberValueNode`]) — a raw `TypeExpr` never
+    /// enters the key. The context discriminator keeps the field
+    /// materialiser's per-prop `Published(Navigate)` publication slot
+    /// disjoint from a `StructuralTransit(Navigate)` carrier-lower slot —
+    /// same subject, distinct cache entries.
+    ///
+    /// `lower_carrier_free` runs AT MOST ONCE, only for the carrier-free
+    /// class: the caller lowers the expression through the ONE shared
+    /// dispatch (under the same tear-free scope observation its
+    /// value/self-root publish under) and returns the settled node. The
+    /// materialiser passes its already-lowered pre-peek node; the
+    /// peek-only route lowers through the same shared helper. `None` from
+    /// the closure (no view-correct scope identity to lower against)
+    /// yields no key — cache bypass, not value bypass.
     ///
     /// Returns `None` ("no sound cache key") when `expr` NESTS a
     /// `TypeExpr::SyntheticSlotBinding` carrier under a composite
@@ -1394,38 +1704,46 @@ impl ShapeCacheKey {
     /// would depend on the carrier's store-relative `value_node` ordinal,
     /// which has no content-free representation. Callers that get `None`
     /// run the cold compute and return WITHOUT a cache write (cache
-    /// bypass, not value bypass). Classification:
+    /// bypass, not value bypass). Classification
+    /// ([`classify_type_expr_shape_subject`] — shared with the
+    /// test-support probe so verdicts cannot drift):
     ///   - bare top-level carrier ⇒ redirect to the content-free
-    ///     [`ShapeSubject::SyntheticBinding`] identity;
-    ///   - no carrier anywhere ⇒ [`ShapeSubject::TypeExpr`] over the
-    ///     [`NonSyntheticTypeExpr`]-sealed expression;
-    ///   - nested carrier ⇒ `None`.
+    ///     [`ShapeSubject::SyntheticBinding`] identity (no lowering);
+    ///   - no carrier anywhere ⇒ [`ShapeSubject::MemberValueNode`] over
+    ///     the lowered settled node;
+    ///   - nested carrier ⇒ `None` (no lowering).
     pub(crate) fn type_expr_whole_with_context(
         scope: Arc<str>,
-        expr: Arc<TypeExpr>,
+        expr: &TypeExpr,
         terminal_context: crate::semantic_query::ProjectionReductionContext,
+        lower_carrier_free: impl FnOnce() -> Option<crate::semantic_query::SemanticNodeId>,
     ) -> Option<Self> {
-        // A bare top-level carrier redirects to the content-free
-        // synthetic-binding identity — its sound cache key is the
-        // `SyntheticBindingId`, never the structural hash of the carrier
-        // (which folds `value_node`).
-        if let TypeExpr::SyntheticSlotBinding(carrier) = expr.as_ref() {
-            return Some(Self::synthetic_binding_whole_with_context(
-                crate::semantic_query::SyntheticBindingId::from_carrier_key(carrier),
-                terminal_context,
-            ));
+        match classify_type_expr_shape_subject(expr) {
+            // A bare top-level carrier redirects to the content-free
+            // synthetic-binding identity — its sound cache key is the
+            // `SyntheticBindingId`, never any structural encoding of the
+            // carrier (which folds `value_node`).
+            TypeExprShapeSubjectClass::BareCarrier(id) => Some(
+                Self::synthetic_binding_whole_with_context(id, terminal_context),
+            ),
+            // A composite that NESTS a carrier has no sound content-free
+            // key.
+            TypeExprShapeSubjectClass::UnkeyableNested => None,
+            // Carrier-free: the sound subject is the settled graph node
+            // the expression lowers to — exact `Eq` on the node, sibling
+            // expressions lowering to the same node collapse onto one
+            // entry (the ratified `MemberValueNode` memo semantics).
+            TypeExprShapeSubjectClass::CarrierFree => {
+                let node = lower_carrier_free()?;
+                Some(Self {
+                    subject: ShapeSubject::MemberValueNode {
+                        scope,
+                        node: MemberShapeNodeSubject::from_lowered_type_expr(node),
+                    },
+                    demand: ShapeDemand::whole_subject_with_context(terminal_context),
+                })
+            }
         }
-        // A carrier-free expression seals into the `TypeExpr` subject. A
-        // composite that NESTS a carrier fails the seal (`None`) → no
-        // sound cache key.
-        let sealed = NonSyntheticTypeExpr::new(expr)?;
-        Some(Self {
-            subject: ShapeSubject::TypeExpr {
-                scope,
-                expr: sealed,
-            },
-            demand: ShapeDemand::whole_subject_with_context(terminal_context),
-        })
     }
 
     /// Test-only: build a member-value-subject key from an ARBITRARY node id.
@@ -1613,11 +1931,13 @@ impl ShapeCacheDb {
         // The entry carries its own self-roots, validated strictly.
         let result = single_entry_peek(&self.entries, key, ctx);
         if let Some(rctx) = crate::request_context::current_request_context() {
+            // Every ShapeCacheDb subject is a member-shape-route identity
+            // now that the TypeExpr-START route also keys its LOWERED
+            // settled node (`MemberValueNode`) — so all peeks count into
+            // the member-shape layer. The former `materialize_memo`
+            // per-request layer stays as a field on the audit
+            // `CacheLayerBreakdown` (additive wire rule) and reads zero.
             let counter = match &key.subject {
-                ShapeSubject::TypeExpr { .. } => &rctx.cache_counters.materialize_memo,
-                // The synthetic-binding subject is a member-shape route —
-                // route its peek to the same counter as the regular
-                // `MemberValueNode` member route.
                 ShapeSubject::MemberValueNode { .. } | ShapeSubject::SyntheticBinding { .. } => {
                     &rctx.cache_counters.member_shape_cache
                 }
@@ -1631,10 +1951,37 @@ impl ShapeCacheDb {
         result
     }
 
+    /// The SOLE admission funnel for every `ShapeCacheDb` subject —
+    /// [`Self::admit_computed`] delegates here, so this is the one place a
+    /// shape can enter the shared cache.
+    ///
+    /// `probe` is the [`crate::fact_signature_helpers::CacheabilityProbe`] of
+    /// the cacheability tracer scope enclosing the producer's compute. It is
+    /// REQUIRED, not optional: the token can be minted only by
+    /// `fact_signature_helpers::with_cacheability_scope`, so a producer that
+    /// runs its compute with NO tracer cannot reach this function at all, and a
+    /// producer that HAS a scope cannot forget to consult its verdict — the
+    /// funnel consults it. That closes both shapes of the laundering class by
+    /// construction (an untraced producer, and a traced producer that drops the
+    /// verdict on the floor).
+    ///
+    /// A non-cacheable verdict (a fenced serve / lease miss / unrootable route /
+    /// unobservable source env consumed anywhere in the compute, or a
+    /// fact-signature overflow) publishes NOTHING: the value is returned to the
+    /// winner through `ReturnOnly`. Refusal is CACHE-ONLY — the value stays
+    /// `Complete`, never a fabricated `Partial`.
+    ///
+    /// The verdict is sampled AFTER `compute()` returns, inside the cold
+    /// winner's closure. That is the load-bearing sampling point: `compute()`
+    /// runs INSIDE the flight, so a check at funnel entry alone would sit
+    /// BEFORE every read the compute performs, and a fenced serve consumed
+    /// there would sail into a `Cacheable` admission. See
+    /// [`single_entry_admission`].
     pub(crate) fn get_or_compute<F>(
         &self,
         key: &ShapeCacheKey,
         ctx: &dyn ResolverContext,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
         compute: F,
     ) -> Option<MaterializedOutputTypeExpr>
     where
@@ -1644,36 +1991,33 @@ impl ShapeCacheDb {
         // strict warm-read validation rejects a same-scope content edit.
         let self_roots: Arc<[Arc<str>]> =
             Arc::from(vec![Arc::clone(key.subject.scope_canonical())]);
-        // Central partial gate. The gate is PURE over the value's OWN
-        // `result_is_partial` — a computed shape that is itself a GENUINE
-        // partial must NOT be admitted into `ShapeCacheDb` (a warm replay
-        // would serve the partial as a complete shape). It does NOT OR-in
-        // any request-global partial sticky. The cold value is still
-        // returned to the caller; only the cache write is skipped. The
-        // `refused_partial` cell captures the value when the gate refuses
-        // so `lookup` (which would surface `None` for a `None`-returning
-        // compute) does not erase it.
-        let refused_partial: std::cell::RefCell<Option<MaterializedOutputTypeExpr>> =
-            std::cell::RefCell::new(None);
         let node = SingleEntryArtifactNode {
             entries: &self.entries,
             inflight: &self.inflight,
             live_counter: &self.live_counter,
-            compute: std::cell::RefCell::new(Some(|| {
-                compute().and_then(|(value, facts)| {
-                    if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                        value.result_is_partial(),
-                    ) {
-                        *refused_partial.borrow_mut() = Some(value);
-                        None
-                    } else {
-                        Some((value, facts, Arc::clone(&self_roots)))
+            self_root_canonicals: self_roots,
+            compute: std::cell::RefCell::new(Some(move || {
+                // Central partial gate, folded through the SAME `ReturnOnly`
+                // arm as the cacheability refusal. The gate is PURE over the
+                // value's OWN `result_is_partial` — a computed shape that is
+                // itself a GENUINE partial must NOT be admitted (a warm replay
+                // would serve the partial as a complete shape). It does NOT
+                // OR-in any request-global partial sticky. Both refusals keep
+                // the value: `ReturnOnly` hands it back to the winner, so
+                // neither needs a side-channel cell to survive the flight.
+                match single_entry_admission(probe, compute().into()) {
+                    SingleEntryOutcome::Cacheable(value, facts)
+                        if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                            value.result_is_partial(),
+                        ) =>
+                    {
+                        SingleEntryOutcome::ReturnOnly(value, NonAdmissionReason::PartialResult)
                     }
-                })
+                    outcome => outcome,
+                }
             })),
         };
-        let admitted = lookup(&node, key.clone(), ctx);
-        admitted.or_else(|| refused_partial.into_inner())
+        lookup(&node, key.clone(), ctx)
     }
 
     /// Universal-caching admission helper. Admits an already-computed
@@ -1698,14 +2042,58 @@ impl ShapeCacheDb {
         &self,
         key: &ShapeCacheKey,
         ctx: &dyn ResolverContext,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
         value: MaterializedOutputTypeExpr,
         fact_dep_signature: Arc<[FactVersionRef]>,
     ) -> MaterializedOutputTypeExpr {
         let value_for_closure = value.clone();
-        let admitted = self.get_or_compute(key, ctx, move || {
+        let admitted = self.get_or_compute(key, ctx, probe, move || {
             Some((value_for_closure, fact_dep_signature))
         });
         admitted.unwrap_or(value)
+    }
+
+    /// Test-only: drive [`Self::get_or_compute`] the way a production producer
+    /// does — inside a REAL cacheability tracer scope opened around the whole
+    /// compute.
+    ///
+    /// A [`crate::fact_signature_helpers::CacheabilityProbe`] cannot be forged;
+    /// `with_cacheability_scope` is its only constructor. So this helper is not an
+    /// escape hatch around the admission contract — it is the contract, spelled for
+    /// a test that has no surrounding producer. A test whose compute consumes a
+    /// fenced serve is refused admission here exactly as production is.
+    #[cfg(test)]
+    pub(crate) fn get_or_compute_traced_for_test<F>(
+        &self,
+        key: &ShapeCacheKey,
+        ctx: &dyn ResolverContext,
+        compute: F,
+    ) -> Option<MaterializedOutputTypeExpr>
+    where
+        F: FnOnce() -> Option<(MaterializedOutputTypeExpr, Arc<[FactVersionRef]>)>,
+    {
+        crate::fact_signature_helpers::with_cacheability_scope(
+            ctx.host_for_fact_tracer_install(),
+            |probe| self.get_or_compute(key, ctx, probe, compute),
+        )
+        .0
+    }
+
+    /// Test-only sibling of [`Self::get_or_compute_traced_for_test`] for
+    /// [`Self::admit_computed`].
+    #[cfg(test)]
+    pub(crate) fn admit_computed_traced_for_test(
+        &self,
+        key: &ShapeCacheKey,
+        ctx: &dyn ResolverContext,
+        value: MaterializedOutputTypeExpr,
+        fact_dep_signature: Arc<[FactVersionRef]>,
+    ) -> MaterializedOutputTypeExpr {
+        crate::fact_signature_helpers::with_cacheability_scope(
+            ctx.host_for_fact_tracer_install(),
+            |probe| self.admit_computed(key, ctx, probe, value, fact_dep_signature),
+        )
+        .0
     }
 
     pub fn invalidate_canonical(&self, canonical_id: &str) {
@@ -1753,9 +2141,17 @@ impl ShapeCacheDb {
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
         use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
-        let key = ShapeCacheKey::type_expr_whole(
-            Arc::from(marker),
-            Arc::new(TypeExpr::Unknown { raw: String::new() }),
+        // The schema-eviction fixture needs SOME key rooted at the marker
+        // scope; the content-free synthetic-binding identity is the one
+        // subject constructible without a live store (the member-value
+        // subject requires a lowered node).
+        let key = ShapeCacheKey::synthetic_binding_whole(
+            crate::semantic_query::SyntheticBindingId {
+                scope_canonical_id: Arc::from(marker),
+                surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
+                slot_name: None,
+                binding_name: Arc::from("__schema_probe__"),
+            },
             ProjectionMode::Shallow,
         );
         let entry = Arc::new(CacheEntry {
@@ -1791,13 +2187,15 @@ impl ShapeCacheDb {
     // and consult `ShapeCacheDb`. The cache identity is the content-free
     // `SyntheticBindingId` (`scope_canonical_id, surface_kind, slot_name,
     // binding_name`); the carrier's `value_node` arena ordinal is
-    // value-side provenance only. Zero production consumers exercise this
-    // route today — every projector, reducer, registry, and graph-builder
-    // site refuses the carrier as a shallow terminal. The positive-proof
-    // integration test
+    // value-side provenance only. The ONE production consumer of this
+    // route is the terminal-demand raise of the synthetic-binding SOURCE
+    // arm (`deepen_synthetic_binding_to_hot` in
+    // `project_semantic_dispatch/semantic_source.rs`); every projector,
+    // reducer, registry, and graph-builder site still refuses the carrier
+    // as a shallow terminal. The positive-proof integration test
     // `tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs` uses these
     // helpers to prove the content-free cache-key identity is well-defined
-    // for any future consumer that needs it.
+    // for every consumer of the route.
 
     /// Insert a synthetic-carrier-deep entry into the cache under the
     /// content-free synthetic-binding identity. The key is built via
@@ -1864,20 +2262,21 @@ impl ShapeCacheDb {
             .map(|entry| entry.value.type_expr_for_test().clone())
     }
 
-    /// Test-observable: does the TypeExpr shape route produce a SOUND cache
-    /// key for `expr`, or is the subject UNCACHED?
+    /// Test-observable: does the TypeExpr shape route classify `expr` to a
+    /// SOUND, keyable subject, or is the subject UNCACHED?
     ///
-    /// Returns `true` when `ShapeCacheKey::type_expr_whole_with_context`
-    /// classifies `expr` to `Some(key)` (a sound, keyable subject — a
-    /// carrier-free `TypeExpr` subject, or a bare top-level carrier
-    /// redirected to the content-free `SyntheticBinding` identity), and
-    /// `false` when it returns `None` (an unkeyable composite that NESTS a
-    /// synthetic carrier — `NonSyntheticTypeExpr::new` fails, so the subject
-    /// keys NO slot and the caller cache-bypasses). This is the SHAPE-route
-    /// analog of `MaterializationCacheKey`'s root-less-anonymous-subject
-    /// `None` (which already keys no DB slot): an unsound/unkeyable subject
-    /// yields `None` (uncached), never a forged key. Read-only — it does NOT
-    /// touch the cache.
+    /// Returns `true` for a keyable classification (a carrier-free
+    /// expression — keyed by its lowered settled node in production — or a
+    /// bare top-level carrier redirected to the content-free
+    /// `SyntheticBinding` identity), and `false` for the unkeyable
+    /// composite that NESTS a synthetic carrier (the subject keys NO slot
+    /// and the caller cache-bypasses). Routes through the SAME
+    /// `classify_type_expr_shape_subject` the production constructor
+    /// consults, so the probe's verdict cannot drift from production. This
+    /// is the SHAPE-route analog of `MaterializationCacheKey`'s
+    /// root-less-anonymous-subject `None` (which already keys no DB slot):
+    /// an unsound/unkeyable subject yields `None` (uncached), never a
+    /// forged key. Read-only — it does NOT touch the cache.
     ///
     /// Gated `#[cfg(any(test, feature = "test-support"))]` (NOT
     /// `debug_assertions`): it is reached directly from the
@@ -1887,16 +2286,14 @@ impl ShapeCacheDb {
     /// builds.
     #[cfg(any(test, feature = "test-support"))]
     pub fn type_expr_shape_route_keys_subject_for_test(
-        scope: Arc<str>,
+        _scope: Arc<str>,
         expr: Arc<TypeExpr>,
-        mode: ProjectionMode,
+        _mode: ProjectionMode,
     ) -> bool {
-        ShapeCacheKey::type_expr_whole_with_context(
-            scope,
-            expr,
-            crate::semantic_query::ProjectionReductionContext::published(mode),
+        !matches!(
+            classify_type_expr_shape_subject(expr.as_ref()),
+            TypeExprShapeSubjectClass::UnkeyableNested
         )
-        .is_some()
     }
 }
 
@@ -3023,7 +3420,7 @@ where
         let validated_at_generation = ctx.project_type_store().current_project_generation();
         let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
         let mut observed_self_roots: Vec<(Arc<str>, crate::types::Hash16)> = Vec::new();
-        let (result, finalise, fenced_serve_observed) =
+        let (result, finalise, non_cacheable_read_observed) =
             crate::fact_signature_helpers::install_fact_tracer(host, || {
                 compute_bfs(&mut compute_fence, &mut observed_self_roots)
             });
@@ -3067,7 +3464,7 @@ where
         // served-without-publication artifact while its fact carrier
         // validates against the live view. The computed bool is still
         // returned via `ReturnOnly`, carrying the BFS fence.
-        if fenced_serve_observed {
+        if non_cacheable_read_observed {
             provenance
                 .ref_cycle_overflow_refusals
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3330,7 +3727,7 @@ pub(crate) fn app_config_no_override_proof_get_or_compute(
             .map(|ir| !ir.declares_interface_app_config)
             .unwrap_or(true)
     };
-    let (no_override, finalise, fenced_serve_observed) =
+    let (no_override, finalise, non_cacheable_read_observed) =
         crate::fact_signature_helpers::install_fact_tracer(host, cold_body);
     host.provenance
         .app_config_proof_fact_tracer_installs
@@ -3339,7 +3736,7 @@ pub(crate) fn app_config_no_override_proof_get_or_compute(
     // from a served-without-publication artifact must not seal a
     // shared no-override entry whose facts validate against the live
     // view. Decline to publish; the consumer takes the slow path.
-    if fenced_serve_observed {
+    if non_cacheable_read_observed {
         host.provenance
             .app_config_proof_overflow_refusals
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

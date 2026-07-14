@@ -25,7 +25,12 @@ use super::shallow_file_state::{
     BudgetDomain, BudgetExceededFailure, ExportTarget, ExternalSymbolRef, LocalClosureStatus,
     ResolutionBudgets, ResolutionCounters, ShallowFileState,
 };
-use verter_type_expr::{TypeExpr, TypeParam};
+use verter_type_expr::facts::{NarrowFrontierBody, NarrowTypeParam};
+use verter_type_expr::locators::{
+    AuthoredAnchor, LocatorSymbolSpace, SymbolBodyLocator, TypeBodyPathStep, TypeBodySlot,
+    TypeParamBoundPosition,
+};
+use verter_type_expr::TypeParam;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -92,14 +97,98 @@ pub struct ResolvedSymbol {
     pub canonical_id: String,
     pub exported_name: String,
     pub status: ResolvedSymbolStatus,
-    /// Post-local-closure symbolic body for locally-defined symbols.
-    pub body: Option<TypeExpr>,
-    /// Generic parameters on the defining local symbol.
-    pub type_parameters: Vec<TypeParam>,
+    /// The graph-free narrowed frontier body of a locally-defined symbol: the
+    /// [`NarrowFrontierBody::Resolvable`] locator escape (the keyable inverse of
+    /// a session handle) addressing the resolvable body, lowered on demand by a
+    /// consumer. The frontier lives below the session graph and never reads the
+    /// body as a `TypeExpr`; the former eager `lookup_object()` population is
+    /// this locator escape. Minted from the defining file's local type
+    /// declaration BEFORE local closure runs and attached regardless of the
+    /// terminal [`ResolvedSymbolStatus`] — a `BudgetExceeded` /
+    /// `InvalidDeclaration` symbol whose file still declares the type carries
+    /// the locator, mirroring the former read (which also attached the local
+    /// decl's body irrespective of closure status). `None` exactly when the
+    /// symbol has no local type declaration (reexport / alias forward hops,
+    /// route-not-found, missing files).
+    pub frontier_body: Option<NarrowFrontierBody>,
+    /// Narrowed generic parameters on the defining local symbol — each
+    /// constraint / default bound is addressed by a body-slot locator, never an
+    /// embedded `TypeExpr`.
+    pub type_parameters: Vec<NarrowTypeParam>,
     /// External refs that need resolution in subsequent levels.
     pub unresolved_external: Vec<ExternalSymbolRef>,
     /// Route provenance for invalidation and observability.
     pub route_provenance: Option<ResolvedRouteProvenance>,
+}
+
+/// Mint the graph-free narrowed frontier body for a locally-defined symbol: a
+/// [`NarrowFrontierBody::Resolvable`] wrapping a [`SymbolBodyLocator`] that
+/// addresses the resolvable body (replacing the eager `lookup_object()`
+/// `TypeExpr` population — the frontier lives below the session graph and never
+/// consumes the body as a `TypeExpr`; a consumer lowers the locator on demand)
+/// plus narrowed type-parameter facts. The caller mints this from the local
+/// declaration (`state.type_decl(name)`) BEFORE running local closure and
+/// attaches the result whatever the closure's terminal status turns out to be
+/// (so a `BudgetExceeded` / `InvalidDeclaration` outcome still carries the
+/// locator + type-param facts when the local declaration exists) — exactly as
+/// the former read attached the local decl's body regardless of closure
+/// status. Returns `(None, [])` when the symbol has no local declaration,
+/// mirroring the former read.
+fn resolve_local_frontier_body(
+    state: &ShallowFileState,
+    canonical_id: &str,
+    symbol_name: &str,
+) -> (Option<NarrowFrontierBody>, Vec<NarrowTypeParam>) {
+    state
+        .type_decl(symbol_name)
+        .map(|lowered| {
+            let anchor = AuthoredAnchor {
+                canonical_id: Arc::from(canonical_id),
+                symbol: Arc::from(symbol_name),
+                space: LocatorSymbolSpace::Type,
+            };
+            let type_parameters = narrow_frontier_type_params(&lowered.type_parameters, &anchor);
+            (
+                Some(NarrowFrontierBody::Resolvable(SymbolBodyLocator {
+                    anchor: anchor.clone(),
+                })),
+                type_parameters,
+            )
+        })
+        .unwrap_or_else(|| (None, Vec::new()))
+}
+
+/// Narrow the defining symbol's authored type parameters to graph-free
+/// [`NarrowTypeParam`] facts: the name + declaration ordinal are carried
+/// directly, and each present constraint / default bound becomes a body-slot
+/// locator addressing its authored position (never an embedded `TypeExpr`).
+fn narrow_frontier_type_params(
+    type_params: &[TypeParam],
+    anchor: &AuthoredAnchor,
+) -> Vec<NarrowTypeParam> {
+    type_params
+        .iter()
+        .enumerate()
+        .map(|(index, tp)| {
+            let ordinal = index as u32;
+            let bound_slot = |position: TypeParamBoundPosition| TypeBodySlot {
+                anchor: anchor.clone(),
+                path: Arc::from(vec![TypeBodyPathStep::TypeParamBound { ordinal, position }]),
+            };
+            NarrowTypeParam {
+                name: tp.name.clone(),
+                ordinal,
+                constraint: tp
+                    .constraint
+                    .as_ref()
+                    .map(|_| bound_slot(TypeParamBoundPosition::Constraint)),
+                default: tp
+                    .default
+                    .as_ref()
+                    .map(|_| bound_slot(TypeParamBoundPosition::Default)),
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +378,7 @@ impl ExternalTypeFrontier {
                 canonical_id: pending.canonical_id.clone(),
                 exported_name: pending.exported_name.clone(),
                 status: ResolvedSymbolStatus::RouteNotFound,
-                body: None,
+                frontier_body: None,
                 type_parameters: Vec::new(),
                 unresolved_external: Vec::new(),
                 route_provenance: None,
@@ -324,7 +413,7 @@ impl ExternalTypeFrontier {
                         canonical_id: pending.canonical_id.clone(),
                         exported_name: pending.exported_name.clone(),
                         status: existing.status.clone(),
-                        body: existing.body.clone(),
+                        frontier_body: existing.frontier_body.clone(),
                         type_parameters: existing.type_parameters.clone(),
                         unresolved_external: existing.unresolved_external.clone(),
                         route_provenance: Some(ResolvedRouteProvenance {
@@ -355,7 +444,7 @@ impl ExternalTypeFrontier {
             canonical_id: pending.canonical_id.clone(),
             exported_name: pending.exported_name.clone(),
             status: ResolvedSymbolStatus::RouteNotFound,
-            body: None,
+            frontier_body: None,
             type_parameters: Vec::new(),
             unresolved_external: Vec::new(),
             route_provenance: None,
@@ -397,7 +486,7 @@ impl ExternalTypeFrontier {
                                 canonical_id: pending.canonical_id.clone(),
                                 exported_name: pending.exported_name.clone(),
                                 status: ResolvedSymbolStatus::ResolvedWithUnresolvedExternal,
-                                body: None,
+                                frontier_body: None,
                                 type_parameters: Vec::new(),
                                 unresolved_external: vec![ExternalSymbolRef {
                                     local_name: symbol_name.clone(),
@@ -417,21 +506,14 @@ impl ExternalTypeFrontier {
                 }
 
                 if host.route_exports_only() {
-                    let (body, type_parameters) = state
-                        .type_decl(symbol_name)
-                        .map(|lowered| {
-                            (
-                                Some(lowered.body.lookup_object().into_owned()),
-                                lowered.type_parameters.clone(),
-                            )
-                        })
-                        .unwrap_or_else(|| (None, Vec::new()));
+                    let (frontier_body, type_parameters) =
+                        resolve_local_frontier_body(state, &pending.canonical_id, symbol_name);
 
                     return ResolvedSymbol {
                         canonical_id: pending.canonical_id.clone(),
                         exported_name: pending.exported_name.clone(),
                         status: ResolvedSymbolStatus::Resolved,
-                        body,
+                        frontier_body,
                         type_parameters,
                         unresolved_external: Vec::new(),
                         route_provenance: Some(ResolvedRouteProvenance {
@@ -442,15 +524,8 @@ impl ExternalTypeFrontier {
                     };
                 }
 
-                let (body, type_parameters) = state
-                    .type_decl(symbol_name)
-                    .map(|lowered| {
-                        (
-                            Some(lowered.body.lookup_object().into_owned()),
-                            lowered.type_parameters.clone(),
-                        )
-                    })
-                    .unwrap_or_else(|| (None, Vec::new()));
+                let (frontier_body, type_parameters) =
+                    resolve_local_frontier_body(state, &pending.canonical_id, symbol_name);
 
                 // Run route-aware closure when a route demand is present,
                 // otherwise fall back to full local closure.
@@ -478,7 +553,7 @@ impl ExternalTypeFrontier {
                     canonical_id: pending.canonical_id.clone(),
                     exported_name: pending.exported_name.clone(),
                     status,
-                    body,
+                    frontier_body,
                     type_parameters,
                     unresolved_external: closure.unresolved_external,
                     route_provenance: Some(ResolvedRouteProvenance {
@@ -514,7 +589,7 @@ impl ExternalTypeFrontier {
                         canonical_id: pending.canonical_id.clone(),
                         exported_name: pending.exported_name.clone(),
                         status: ResolvedSymbolStatus::ResolvedWithUnresolvedExternal,
-                        body: None,
+                        frontier_body: None,
                         type_parameters: Vec::new(),
                         unresolved_external: vec![ExternalSymbolRef {
                             local_name: pending.exported_name.clone(),
@@ -534,7 +609,7 @@ impl ExternalTypeFrontier {
                         canonical_id: pending.canonical_id.clone(),
                         exported_name: pending.exported_name.clone(),
                         status: ResolvedSymbolStatus::RouteNotFound,
-                        body: None,
+                        frontier_body: None,
                         type_parameters: Vec::new(),
                         unresolved_external: Vec::new(),
                         route_provenance: None,
@@ -723,8 +798,8 @@ mod tests {
             }
         }
 
-        fn add_file(&mut self, canonical_id: &str, state: ShallowFileState) {
-            self.files.insert(canonical_id.to_string(), Arc::new(state));
+        fn add_file(&mut self, canonical_id: &str, state: impl Into<Arc<ShallowFileState>>) {
+            self.files.insert(canonical_id.to_string(), state.into());
         }
 
         fn add_missing_type_edge(
@@ -792,25 +867,24 @@ mod tests {
 
     fn make_analysis(
         source: &str,
-    ) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    ) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
         let alloc = oxc_allocator::Allocator::new();
         Arc::new(
-            verter_compiler::utils::oxc::script::type_surface::analyze_external_type_source(
+            verter_parser::utils::oxc::script::type_surface::analyze_external_type_source(
                 source, &alloc,
             ),
         )
     }
 
     fn make_state(source: &str) -> ShallowFileState {
-        ShallowFileState::from_analysis(Hash16::default(), make_analysis(source), None)
+        ShallowFileState::header_routing_only_for_test(Hash16::default(), make_analysis(source))
     }
 
     fn make_state_resolved(source: &str, resolutions: &[(&str, &str)]) -> ShallowFileState {
         let resolver = MapResolver::from_pairs(resolutions);
-        ShallowFileState::from_analysis_with_resolver_seeded(
+        ShallowFileState::header_routing_only_with_resolver_for_test(
             Hash16::default(),
             make_analysis(source),
-            None,
             &resolver,
         )
     }
@@ -1516,12 +1590,8 @@ mod tests {
         );
 
         // types.ts: defines Props locally
-        let types_source = "export interface Props { label: string }";
-        let types_analysis = make_analysis(types_source);
-        let types_env =
-            verter_semantic::analysis::type_eval_build::parse_and_build_env(types_source);
         let types_state =
-            ShallowFileState::from_analysis(Hash16::default(), types_analysis, Some(&types_env));
+            ShallowFileState::service_backed_for_test("export interface Props { label: string }");
         host.add_file("/src/types.ts", types_state);
 
         let mut frontier = ExternalTypeFrontier::new();
@@ -1553,11 +1623,86 @@ mod tests {
             "types.ts Props should be fully resolved (local definition with eval env)"
         );
         assert!(
-            types_resolved.body.is_some(),
-            "resolved local symbol should have a body"
+            matches!(
+                types_resolved.frontier_body,
+                Some(NarrowFrontierBody::Resolvable(_))
+            ),
+            "resolved local symbol should carry a graph-free Resolvable frontier body locator"
         );
 
         // Negative: canonical edges alone must suffice for the traversal.
+    }
+
+    #[test]
+    fn resolved_local_generic_symbol_carries_exact_locator_and_type_param_facts() {
+        // A locally-defined GENERIC symbol must narrow to the EXACT graph-free
+        // locator facts — not merely "some Resolvable arm": the
+        // `SymbolBodyLocator`'s `AuthoredAnchor` identity (canonical / symbol /
+        // space) and, per authored type parameter, the `NarrowTypeParam` name +
+        // declaration ordinal plus body-slot locators for exactly the authored
+        // constraint / default bounds (absent bounds stay `None`).
+        let mut host = MockHost::new();
+        let source =
+            "export interface Props<T extends string = number, U = boolean> { label: T; extra: U }";
+        let state = ShallowFileState::service_backed_for_test(source);
+        host.add_file("/src/types.ts", state);
+
+        let mut frontier = ExternalTypeFrontier::new();
+        frontier.seed(vec![PendingExternalSymbol {
+            canonical_id: "/src/types.ts".to_string(),
+            exported_name: "Props".to_string(),
+            route: None,
+        }]);
+
+        frontier.run(&host).unwrap();
+
+        let resolved = frontier
+            .get_resolved("/src/types.ts", "Props")
+            .expect("locally-defined generic symbol should be resolved");
+        assert_eq!(
+            resolved.status,
+            ResolvedSymbolStatus::Resolved,
+            "local generic definition with an eval env should fully resolve"
+        );
+
+        let expected_anchor = AuthoredAnchor {
+            canonical_id: Arc::from("/src/types.ts"),
+            symbol: Arc::from("Props"),
+            space: LocatorSymbolSpace::Type,
+        };
+        assert_eq!(
+            resolved.frontier_body,
+            Some(NarrowFrontierBody::Resolvable(SymbolBodyLocator {
+                anchor: expected_anchor.clone(),
+            })),
+            "the frontier body must be the Resolvable locator anchored at the defining \
+             (canonical, symbol, Type-space) declaration"
+        );
+
+        let bound_slot = |ordinal: u32, position: TypeParamBoundPosition| TypeBodySlot {
+            anchor: expected_anchor.clone(),
+            path: Arc::from(vec![TypeBodyPathStep::TypeParamBound { ordinal, position }]),
+        };
+        assert_eq!(
+            resolved.type_parameters,
+            vec![
+                NarrowTypeParam {
+                    name: "T".to_string(),
+                    ordinal: 0,
+                    constraint: Some(bound_slot(0, TypeParamBoundPosition::Constraint)),
+                    default: Some(bound_slot(0, TypeParamBoundPosition::Default)),
+                },
+                NarrowTypeParam {
+                    name: "U".to_string(),
+                    ordinal: 1,
+                    constraint: None,
+                    default: Some(bound_slot(1, TypeParamBoundPosition::Default)),
+                },
+            ],
+            "narrowed type params must carry the authored name + declaration ordinal, a \
+             constraint/default body-slot locator exactly where a bound is authored, and \
+             None exactly where it is not"
+        );
     }
 
     #[test]

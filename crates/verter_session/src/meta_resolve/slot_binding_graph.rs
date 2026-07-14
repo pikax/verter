@@ -29,7 +29,6 @@ use verter_semantic::analysis::type_expand::{
     ExpansionExecutionStatus, ExpansionStopReason,
 };
 use verter_semantic::analysis::AnalyzedMacroKind;
-use verter_type_expr::TypeExpr;
 
 use super::dep_signature::accumulate_dispatch_dep_signature;
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
@@ -38,7 +37,7 @@ use crate::resolver_core::component_meta::ResolvedMacroMeta;
 use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
 use crate::resolver_core::ResolverContext;
 
-/// Paired emission helper for the five dispatch-read fact observation
+/// Paired emission helper for the seven dispatch-read fact observation
 /// sites in this file.
 ///
 /// The slot-binding-graph traversal has no result cache of its own;
@@ -138,6 +137,17 @@ pub(crate) struct ResolvedSlotBinding {
     pub binding_name: Arc<str>,
     /// Maps to the `value` field on `SurfaceMember`.
     pub value_node: SemanticNodeId,
+    /// Authored USE-SITE body slot of the binding's VALUE, staged for an
+    /// ARGUMENT-BEARING named-reference value (`message: MessageBase<string>`
+    /// declared on a named non-generic param type). Publication emits the
+    /// arg-preserving `Authored(DeclBody)` carrier from it — the deref
+    /// replays the instantiation WITH its type arguments through the one
+    /// shared dispatch — instead of the argument-less `Closed(Leaf(Ref))`
+    /// named-reference carrier (which destroys the substitution and the
+    /// declaring canonical scope). `None` for every other value shape and
+    /// whenever the recovery/honesty gates fail closed (see
+    /// [`crate::meta_resolve::arg_preserving_member_use_site_slot`]).
+    pub value_use_site: Option<verter_type_expr::locators::TypeBodySlot>,
     pub optional: bool,
     /// Captured from the surface member's TypeScript `readonly` modifier.
     /// `ExpandedField` does not yet expose a `readonly` channel; the
@@ -373,7 +383,7 @@ fn accumulate_lowered_node_carrier_deps(
                 }
             }
             // Object / Function surface bodies, primitives, literals,
-            // type-params, infer placeholders, and Vue macro elements have no
+            // type-params, and infer placeholders have no
             // further carrier-bearing children for the purpose of dep-signature
             // carrier discovery from the lowered macro arg. Object/Function
             // surfaces only appear here when they are inline structural types in
@@ -1134,11 +1144,61 @@ pub(crate) fn compute_bindings_via_graph(
             if !binding.visibility.is_public() {
                 continue;
             }
+            // Dep-observation: an unresolved-reference binding VALUE carrier
+            // (`BareRef` / `ImportType`) head-resolves HERE, at the
+            // publication walk, so the cross-file declaration dependency is
+            // LOADED and RECORDED into the result's fact signature. The
+            // empty-path `Navigate` read routes through the canonical
+            // entry normalization (`resolve_carrier_subject_node`), which
+            // resolves the import route WITHOUT expanding the declaration
+            // body; non-carrier values take no read at all, so no
+            // unrelated file is ever walked. A carrier that does not
+            // resolve keeps the original node (fail-closed shallow).
+            let value_node = match crate::project_semantic_dispatch::node_data_for(
+                ctx,
+                binding.value,
+            )
+            .as_deref()
+            {
+                Some(SemanticNodeData::BareRef(_)) | Some(SemanticNodeData::ImportType(_)) => {
+                    let value_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+                        base: binding.value,
+                        path: empty_path.clone(),
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            ProjectionMode::Navigate,
+                        ),
+                    });
+                    // Dual-emit: legacy accumulator + fact-tracer fan-out.
+                    crate::request_context::observe_component_meta_read_suppress(&value_read);
+                    emit_slot_binding_graph_dispatch_facts(ctx, &value_read.dep_signature);
+                    if value_read.result_is_partial {
+                        *should_suppress = true;
+                    }
+                    match value_read.value {
+                        QueryResult::Value(id) => id,
+                        QueryResult::Recursive(_) | QueryResult::Error(_) => binding.value,
+                    }
+                }
+                _ => binding.value,
+            };
+            // Arg-preserving use-site staging: an ARGUMENT-BEARING
+            // named-reference value recovers its authored member-value
+            // slot here (where the declaring SurfaceMember is in hand) so
+            // publication can emit the substitution-preserving
+            // `Authored(DeclBody)` carrier. Fast-fails on every other
+            // value shape (one bounded node peek, no dispatch).
+            let value_use_site = crate::meta_resolve::arg_preserving_member_use_site_slot(
+                dispatch,
+                binding.name.as_ref(),
+                binding.declaration_origin.as_deref(),
+                value_node,
+            );
             out.push(ResolvedSlotBinding {
                 owner_macro: owner_macro.clone(),
                 slot_name: slot_member.name.clone(),
                 binding_name: binding.name.clone(),
-                value_node: binding.value,
+                value_node,
+                value_use_site,
                 optional: binding.optional,
                 readonly: binding.readonly,
                 source: SlotBindingSource::GraphNative,
@@ -1187,6 +1247,288 @@ fn typeinfo_macro_dtos(
     // the enclosing component-meta result's warm promotion is refused.
     read.observe_partial();
     read.dtos
+}
+
+/// Classify a graph-native binding VALUE node as a CLOSED symbolic
+/// indexed-access route and translate it into its publication source.
+///
+/// Bounded typed-node inspection (never text): walks ONLY an
+/// `IndexedAccess` chain, accepts ONLY literal STRING index keys, and
+/// stops at a named `DeclRef` object that becomes the fact's
+/// [`TypeBodySlot`](verter_type_expr::locators::TypeBodySlot). `Alias`
+/// hops unwrap transparently (pointer indirection, not body
+/// expansion). An argument-less unresolved-reference object head
+/// (`BareRef` / `ImportType`) head-resolves through the ONE shared
+/// entry normalization (`resolve_carrier_subject_node`, carrier-
+/// preserving under `Navigate` — name-to-declaration routing only,
+/// never body expansion) so the fact anchors on the DECLARING file,
+/// not the occurrence file.
+///
+/// Route-preservation policy at the resolved `DeclRef` root:
+///
+/// - a NON-OWNER root (the declaration lives outside the publishing
+///   SFC) preserves the symbolic member path — imported routes stay
+///   shallow carriers per the shallow-by-default rule;
+/// - an OWNER-LOCAL root preserves ONLY when the accessed member's
+///   authored value reaches a non-owner reference (the imported-helper
+///   / open-index-signature widening class); a purely-local closed
+///   member value takes the slow path (the evaluator's expanded shape
+///   is the intended public surface), so the caller keeps the
+///   synthetic carrier and the value deepens on demand.
+///
+/// Everything else FAILS CLOSED to `None` — a `TypeParam`, an open
+/// generic, an `InstantiationRef` or parameterized head (arguments
+/// carry open call-site meaning), a carrier that does not resolve, a
+/// numeric / type-node index key, an unindexable root body — so the
+/// caller keeps the shallow synthetic carrier.
+/// The shallow named-reference publication source for a graph-raised binding
+/// VALUE that is a named reference carrier (`DeclRef` / `InstantiationRef` /
+/// unresolved bare head): the closed leaf `Ref(name)` fact the consumer
+/// re-resolves in the owner scope on demand. `None` for every non-reference
+/// value shape (the caller falls through to the synthetic carrier).
+fn named_reference_carrier_source(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    value_node: SemanticNodeId,
+) -> Option<verter_type_expr::facts::SemanticTypeSource> {
+    let mut current = value_node;
+    // Peel aliases (bounded).
+    for _ in 0..16 {
+        let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, current)?;
+        match &*data {
+            SemanticNodeData::Alias(inner) => current = *inner,
+            SemanticNodeData::DeclRef { identity } => {
+                return Some(verter_type_expr::facts::SemanticTypeSource::Closed(
+                    verter_type_expr::facts::ClosedTypeFact::Leaf(
+                        verter_type_expr::facts::LeafTypeFact::Ref(
+                            identity.decl_name.as_ref().to_string(),
+                        ),
+                    ),
+                ));
+            }
+            SemanticNodeData::InstantiationRef { base, .. } => {
+                return Some(verter_type_expr::facts::SemanticTypeSource::Closed(
+                    verter_type_expr::facts::ClosedTypeFact::Leaf(
+                        verter_type_expr::facts::LeafTypeFact::Ref(
+                            base.decl_name.as_ref().to_string(),
+                        ),
+                    ),
+                ));
+            }
+            _ => {
+                let (name, _scope) = data.bare_ref_head()?;
+                return Some(verter_type_expr::facts::SemanticTypeSource::Closed(
+                    verter_type_expr::facts::ClosedTypeFact::Leaf(
+                        verter_type_expr::facts::LeafTypeFact::Ref(name.as_ref().to_string()),
+                    ),
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn closed_member_path_route_source(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
+    value_node: SemanticNodeId,
+) -> Option<verter_type_expr::facts::SemanticTypeSource> {
+    use crate::semantic_query::IndexKey;
+
+    // Index keys collect outer-to-inner; the fact's `index_path` is
+    // inner-to-outer, so reverse on emit.
+    let mut rev_keys: Vec<String> = Vec::new();
+    let mut current = value_node;
+    // Bounded: an authored indexed-access chain is short; the cap only
+    // guards against pathological graph shapes.
+    for _ in 0..64 {
+        let data = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, current)?;
+        match &*data {
+            SemanticNodeData::Alias(inner) => {
+                current = *inner;
+            }
+            SemanticNodeData::IndexedAccess { object, index } => {
+                match index {
+                    IndexKey::String(key) => rev_keys.push(key.as_ref().to_string()),
+                    // Numeric / type-node keys require evaluation to
+                    // enumerate — fail closed.
+                    IndexKey::Number(_) | IndexKey::TypeNode(_) => return None,
+                }
+                current = *object;
+            }
+            SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)
+                if !rev_keys.is_empty() && data.carrier_type_args().is_empty() =>
+            {
+                // Head-resolve the argument-less object reference through
+                // the shared carrier-preserving normalization; a resolved
+                // head re-enters the loop (a `DeclRef` mints the fact), an
+                // unresolved head fails closed below.
+                drop(data);
+                let resolved = dispatch.resolve_carrier_subject_node(
+                    current,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Navigate,
+                    ),
+                );
+                if resolved == current {
+                    return None;
+                }
+                current = resolved;
+            }
+            SemanticNodeData::DeclRef { identity } if !rev_keys.is_empty() => {
+                if identity.canonical_id.as_ref() == owner_canonical
+                    && !owner_local_member_reaches_non_owner_ref(
+                        dispatch,
+                        owner_canonical,
+                        identity,
+                        // The INNERMOST hop (applied first to the root body)
+                        // is the last-collected key.
+                        rev_keys.last().map(String::as_str)?,
+                    )
+                {
+                    return None;
+                }
+                let index_path: Vec<String> = rev_keys.into_iter().rev().collect();
+                return Some(verter_type_expr::facts::SemanticTypeSource::Closed(
+                    verter_type_expr::facts::ClosedTypeFact::IndexedAccess(
+                        verter_type_expr::facts::IndexedAccessFact {
+                            object: verter_type_expr::locators::TypeBodySlot {
+                                anchor: verter_type_expr::locators::AuthoredAnchor {
+                                    canonical_id: Arc::clone(&identity.canonical_id),
+                                    symbol: Arc::clone(&identity.decl_name),
+                                    space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                                },
+                                path: Arc::from(Vec::new().into_boxed_slice()),
+                            },
+                            index_path: Arc::from(index_path.into_boxed_slice()),
+                        },
+                    ),
+                ));
+            }
+            // A bare `DeclRef` with no index hop is not an indexed-access
+            // route; `TypeParam` / `InstantiationRef` / unresolved
+            // carriers / structural shapes all fail closed.
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Whether an OWNER-LOCAL indexed-access root's accessed member value
+/// reaches a non-owner reference — the route-preservation trigger for
+/// an owner-declared root.
+///
+/// Reads the root declaration's shallow member HEADER
+/// (`PreparedTypeDecl::member_index`, eager syntactic state) and raises
+/// ONLY that member's authored annotation through the memoized
+/// `LowerLocator` route under `Navigate` structural transit — one
+/// member annotation, never a body expansion. Fails closed to `false`
+/// (slow path / synthetic) when the root has no prepared decl, the
+/// member is absent, or the annotation cannot raise.
+fn owner_local_member_reaches_non_owner_ref(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
+    identity: &DeclIdentity,
+    member_name: &str,
+) -> bool {
+    let Some(prepared) = dispatch
+        .ctx
+        .prepared_type_decl(identity.canonical_id.as_ref(), identity.decl_name.as_ref())
+    else {
+        return false;
+    };
+    let Some(member) = prepared.member_index.get(member_name) else {
+        return false;
+    };
+    let Some(member_node) = dispatch.raise_authored_locator_to_hot(
+        &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
+        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+            ProjectionMode::Navigate,
+        ),
+    ) else {
+        return false;
+    };
+    node_reaches_non_owner_ref(dispatch, owner_canonical, member_node.node(), 0)
+}
+
+/// Bounded typed-node scan: does any reference reachable under `node`
+/// resolve OUTSIDE `owner_canonical`? The node-domain mirror of the
+/// route-preservation "member value contains an imported reference"
+/// walk — refs that cannot be located are ignored (they cannot be
+/// proven imported; fail-closed keeps the slow path).
+fn node_reaches_non_owner_ref(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
+    node: SemanticNodeId,
+    depth: u32,
+) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node) else {
+        return false;
+    };
+    let recur =
+        |n: SemanticNodeId| node_reaches_non_owner_ref(dispatch, owner_canonical, n, depth + 1);
+    match &*data {
+        SemanticNodeData::DeclRef { identity } => identity.canonical_id.as_ref() != owner_canonical,
+        SemanticNodeData::InstantiationRef { base, args } => {
+            base.canonical_id.as_ref() != owner_canonical || args.iter().copied().any(recur)
+        }
+        // A dynamic-import reference names a module by specifier — a
+        // non-owner reference by construction.
+        SemanticNodeData::ImportType(_) => true,
+        SemanticNodeData::BareRef(_) => {
+            // Head-resolve through the shared carrier-preserving
+            // normalization (`Navigate` — routing only, no body
+            // expansion); an unresolvable name cannot be proven
+            // imported and is ignored.
+            drop(data);
+            let resolved = dispatch.resolve_carrier_subject_node(
+                node,
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Navigate,
+                ),
+            );
+            resolved != node && recur(resolved)
+        }
+        SemanticNodeData::Alias(inner) => recur(*inner),
+        SemanticNodeData::Array { element, .. } => recur(*element),
+        SemanticNodeData::KeyOf { base } => recur(*base),
+        SemanticNodeData::IndexedAccess { object, index } => {
+            recur(*object)
+                || matches!(index, crate::semantic_query::IndexKey::TypeNode(inner) if recur(*inner))
+        }
+        SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
+        SemanticNodeData::Union(members)
+        | SemanticNodeData::Intersection(members)
+        | SemanticNodeData::MergedDecl {
+            contributors: members,
+        } => members.iter().copied().any(recur),
+        SemanticNodeData::Object(surface) => {
+            surface.members.iter().any(|m| recur(m.value))
+                || surface
+                    .index_signatures
+                    .iter()
+                    .any(|sig| recur(sig.key_type) || recur(sig.value_type))
+                || surface.call_signatures.iter().copied().any(recur)
+                || surface.construct_signatures.iter().copied().any(recur)
+        }
+        SemanticNodeData::Function {
+            params,
+            return_type,
+            ..
+        } => params.iter().any(|p| recur(p.ty)) || recur(*return_type),
+        SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            ..
+        } => {
+            recur(*check) || recur(*extends) || recur(*true_branch_ref) || recur(*false_branch_ref)
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn publish_merged_bindings(
@@ -1262,37 +1604,29 @@ pub(crate) fn publish_merged_bindings(
     // availability of a parser-path binding for the `(slot, binding)`
     // key:
     //
-    //   - Parser path available: the OXC-lowered `binding_expr` is
-    //     the syntactic authority, carrying the source-text annotation
-    //     verbatim (e.g. `IndexedAccess<Ref(OwnProps), 'actions'>`).
-    //     The published `r#type` is that lowered expression unchanged;
-    //     NO synthetic carrier is minted.
+    //   - Parser path available: the authored payload POSITION
+    //     (`AnalyzedSlotFieldBinding.payload`) is the typed authority.
+    //     The published `r#type` is that authored source; the demand
+    //     side re-raises it through the one shared dispatch.
     //
-    //   - No parser path: publish a
-    //     `TypeExpr::SyntheticSlotBinding(Arc::new(SyntheticCarrierKey {
-    //       scope_canonical_id, surface_kind, slot_name, binding_name,
-    //       value_node }))` carrier. The variant identity is the full
-    //     tuple — intrinsic and structurally distinct from any real
-    //     workspace alias. The carrier is shallow by construction; the
-    //     `binding_name` is NOT a registry-lookup target.
+    //   - No parser path: a SESSION-RAISED row — the published source
+    //     is the PRODUCING macro TYPE-ARGUMENT payload position (the
+    //     lower-neutral carrier of a session-raised value). The
+    //     deepening route for a session-raised binding is the
+    //     content-free synthetic-binding identity
+    //     (`ShapeCacheKey::synthetic_binding_whole`, consulted through
+    //     `ShapeCacheDb`). The `binding_name` is NOT a registry-lookup
+    //     target.
     //
     // Downstream consumers (`reduce_published_field_types`,
-    // `collect_component_meta_registry_public_field_refs`,
-    // JS compat `compatSlotBindingTypeText`, audit footprint miner)
-    // pre-empt on the variant identity directly — no sidecar table or
-    // verdict cache exists. A consumer that needs to deepen the
-    // carrier into its underlying member shape routes through the
+    // `collect_component_meta_registry_public_field_refs`) recognise
+    // the producing-payload locator POSITION (a typed identity, not a
+    // name heuristic) and skip per-row parent-shell reduction /
+    // registry enqueue. A consumer that needs to deepen a session-raised
+    // binding into its underlying member shape routes through the
     // content-free synthetic-binding identity
-    // `ShapeCacheKey::synthetic_binding_whole(
-    //     SyntheticBindingId::from_carrier_key(&carrier), mode)`
-    // — the `value_node` arena ordinal is value-side provenance only
-    // (re-attached at the compat boundary via
-    // `SemanticNodeData::SyntheticBinding`'s `to_carrier_key`/`raise`),
-    // never part of the cache identity. This is the only legitimate
-    // explicit-deepen path (enforced by the
-    // `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`
-    // architecture guard, which bans any `SemanticNodeId(_.value_node)`
-    // ordinal cache key).
+    // (`ShapeCacheKey::synthetic_binding_whole`) — the graph `value_node`
+    // arena ordinal stays value-side provenance, never cache identity.
     for (key, gb) in graph_native.iter() {
         let (slot_name, binding_name) = key.clone();
         let field_name = format!("{}.{}", slot_name, binding_name);
@@ -1306,54 +1640,103 @@ pub(crate) fn publish_merged_bindings(
         // loop below (which iterates the residual).
         let parser_path = parser_index.remove(&(slot_name.clone(), binding_name.clone()));
 
-        let (r#type, shallow_type_expr, shallow_type_expr_scope, is_synthetic) = match parser_path
-            .and_then(|pb| pb.binding_expr.as_ref().zip(pb.binding_expr_scope.as_ref()))
+        let (r#type, shallow_source, is_session_raised) = match parser_path
+            .and_then(|pb| pb.payload.as_ref())
         {
-            Some((expr, scope)) => {
-                // Parser-path branch — the OXC-lowered annotation
-                // is concrete; no synthetic carrier minted.
-                let expr_owned = expr.clone();
+            Some(payload) => {
+                // Parser-path branch — the authored payload position is the
+                // typed authority; the demand side re-raises it through the
+                // one shared dispatch.
+                let locator =
+                    verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload.clone());
                 (
-                    expr_owned.clone(),
-                    Some(expr_owned),
-                    Some(scope.clone()),
+                    verter_type_expr::facts::SemanticTypeSource::Authored(locator.clone()),
+                    Some(locator),
                     false,
                 )
             }
             None => {
-                // No-parser branch — mint the typed-IR synthetic
-                // carrier variant. The carrier's identity is the
-                // FULL `(scope_canonical_id, surface_kind,
-                // slot_name, binding_name, value_node)` tuple —
-                // intrinsic and structurally distinct from any
-                // real workspace alias. The scope is the owning
-                // macro's canonical id; the value-node is
-                // `gb.value_node` (the `SemanticNodeId` the graph
-                // publisher minted the carrier from).
-                let scope_canonical: Arc<str> =
-                    Arc::from(gb.owner_macro.owner.canonical_id.as_ref());
-                let carrier_key = Arc::new(verter_type_expr::SyntheticCarrierKey {
-                    scope_canonical_id: scope_canonical.clone(),
-                    surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
-                    slot_name: Some(slot_name.clone()),
-                    binding_name: binding_name.clone(),
-                    value_node: gb.value_node.0,
-                });
-                let carrier = TypeExpr::SyntheticSlotBinding(carrier_key);
-                let scope = verter_type_expr::TypeExprScope::new(scope_canonical.as_ref());
-                (carrier.clone(), Some(carrier), Some(scope), true)
+                // No-parser branch — a SESSION-RAISED binding row (the graph
+                // walk off the macro payload's Shallow surface produced
+                // `gb.value_node`). Differentiated source selection:
+                //
+                //   - A CLOSED symbolic indexed-access route (a literal
+                //     string index path over a named declaration body slot)
+                //     publishes the honest closed fact
+                //     (`Closed(IndexedAccess)`), so the shallow view shows
+                //     the concrete member-path form (`AppProps['avatar']`)
+                //     consumers re-resolve on demand — no body expansion,
+                //     path-precise per the shallow-by-default rule.
+                //
+                //   - Everything else (open generic, non-indexed,
+                //     unrepresentable, concrete-inline) publishes the
+                //     FIRST-CLASS synthetic binding carrier: the
+                //     content-free `(scope, slot, binding)` identity plus
+                //     the value-side `value_node` provenance seed.
+                //     Publishing the whole macro TYPE-ARGUMENT position here
+                //     discarded the `(slot, binding)` precision the graph
+                //     walk already had — the raise could only return the
+                //     whole `defineSlots<T>` payload. A consumer deepening
+                //     THIS binding's value routes through the content-free
+                //     synthetic-binding identity
+                //     (`ShapeCacheKey::synthetic_binding_whole_with_context`
+                //     through `ShapeCacheDb`), cold-reducing from the
+                //     same-generation `value_node` seed. Downstream
+                //     publication loops recognise the synthetic-source
+                //     identity and never reduce a parent shell per row.
+                if let Some(closed) =
+                    closed_member_path_route_source(dispatch, owner_canonical, gb.value_node)
+                {
+                    (closed, None, true)
+                } else if let Some(slot) = gb.value_use_site.as_ref() {
+                    // An ARGUMENT-BEARING named-reference value (`message:
+                    // MessageBase<string>`) publishes the arg-preserving
+                    // authored USE-SITE carrier staged by the walk: the
+                    // declaring decl's member-value slot, whose deref
+                    // replays the instantiation WITH its type arguments
+                    // through the one shared dispatch (`Instantiate`
+                    // re-derives the substitution on demand). Content-free
+                    // and NON-EXECUTED — never a serialized graph node,
+                    // never an eager expansion. The argument-less
+                    // `Closed(Leaf(Ref))` fallback below would destroy
+                    // both the substitution and the declaring scope.
+                    (
+                        verter_type_expr::facts::SemanticTypeSource::Authored(
+                            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
+                        ),
+                        None,
+                        true,
+                    )
+                } else if let Some(named) = named_reference_carrier_source(dispatch, gb.value_node)
+                {
+                    // A NAMED reference value (`message: MessageBase<T>` — a
+                    // `DeclRef` / `InstantiationRef` / bare-ref head) publishes
+                    // the shallow named-reference carrier: the published
+                    // shallow shape is the re-resolvable `Ref` (shallow-by-
+                    // default), never the synthetic stand-in and never a
+                    // flattened surface.
+                    (named, None, true)
+                } else {
+                    let carrier = verter_type_expr::SyntheticCarrierKey {
+                        scope_canonical_id: Arc::from(gb.owner_macro.owner.canonical_id.as_ref()),
+                        surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
+                        slot_name: Some(Arc::clone(&slot_name)),
+                        binding_name: Arc::clone(&binding_name),
+                        value_node: gb.value_node.0,
+                    };
+                    (
+                        verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(
+                            Arc::new(carrier),
+                        ),
+                        None,
+                        true,
+                    )
+                }
             }
         };
 
         let exactness = compute_exactness_for_node(dispatch, gb.value_node);
         let raw_type = parser_path.and_then(|p| p.type_annotation.clone());
-
-        debug_assert_eq!(
-            shallow_type_expr.is_some(),
-            shallow_type_expr_scope.is_some(),
-            "ExpandedField (graph-native slot binding) shallow_type_expr/shallow_type_expr_scope pairing violated for binding `{}`",
-            field_name
-        );
 
         tracing::trace!(
             target: "verter::meta_resolve::slot_binding",
@@ -1361,20 +1744,19 @@ pub(crate) fn publish_merged_bindings(
             exactness = ?exactness,
             has_raw_type = raw_type.is_some(),
             has_parser_typed = parser_path.is_some(),
-            is_synthetic_carrier = is_synthetic,
+            is_session_raised = is_session_raised,
             "publish_slot_binding",
         );
 
         expanded.slot_bindings.push(ExpandedField {
             name: field_name,
-            r#type,
+            r#type: verter_type_expr::facts::SourcePosition::Present(r#type),
             raw_type,
             optional: gb.optional,
             exactness,
             execution_status: ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr,
-            shallow_type_expr_scope,
+            shallow_source,
             // Slot bindings are positional parameters of a slot's
             // function signature, not declared members of the macro
             // T's own body. The fact applies at the slot level (the
@@ -1405,31 +1787,31 @@ pub(crate) fn publish_merged_bindings(
             continue;
         }
         let raw_type = pb.type_annotation.clone();
-        // Typed-IR-Only Resolver Rule: `binding.binding_expr` is the
-        // authoritative typed form populated by the analyzer at OXC
-        // visit time. W1.1c closed the producer gap for inline slot
-        // bindings. No reparse of `type_annotation`.
-        let shallow_type_expr = pb.binding_expr.clone();
-        let shallow_type_expr_scope = pb.binding_expr_scope.clone();
-        debug_assert_eq!(
-            shallow_type_expr.is_some(),
-            shallow_type_expr_scope.is_some(),
-            "ExpandedField (parser-only slot binding) shallow_type_expr/shallow_type_expr_scope pairing violated for binding `{}`",
-            field_name
-        );
-        let parsed_type = shallow_type_expr.clone().unwrap_or(TypeExpr::Unknown {
-            raw: "unknown".to_string(),
-        });
+        // Typed-IR-Only Resolver Rule: `binding.payload` is the authoritative
+        // typed position when a producer stamped one; the demand side
+        // re-raises it through the one shared dispatch. No reparse of
+        // `type_annotation`. A payload-less parser row is a PROVEN
+        // unannotated schema absence (the parser saw no annotation) —
+        // rendered as the centralized typed `unknown`, never a fabricated
+        // reference and never a failure.
+        let shallow_source = pb
+            .payload
+            .clone()
+            .map(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload);
+        let published_source = shallow_source
+            .clone()
+            .map(verter_type_expr::facts::SemanticTypeSource::Authored)
+            .map(verter_type_expr::facts::SourcePosition::Present)
+            .unwrap_or_else(verter_type_expr::facts::SourcePosition::unannotated);
         expanded.slot_bindings.push(ExpandedField {
             name: field_name,
-            r#type: parsed_type,
+            r#type: published_source,
             raw_type,
             optional: false,
             exactness: ExpansionExactness::ExactConcrete,
             execution_status: ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr,
-            shallow_type_expr_scope,
+            shallow_source,
             // Slot bindings are positional parameters of a slot's
             // function signature, not declared members of the macro
             // T's own body — `false` is the structural truth (see

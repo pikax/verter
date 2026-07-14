@@ -1425,8 +1425,8 @@ impl VerterHost {
             // state — an entry the read-side fact rail cannot reject.
             // Consult the tracer's by-value flag and refuse admission;
             // the caller is still served the fresh output below.
-            let fenced_serve_observed = fact_read_set.fenced_serve_observed();
-            let admission = if fenced_serve_observed {
+            let non_cacheable_read_observed = fact_read_set.non_cacheable_read_observed();
+            let admission = if non_cacheable_read_observed {
                 crate::cache_runtime::SignatureAdmission::NonCacheable(
                     crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
                 )

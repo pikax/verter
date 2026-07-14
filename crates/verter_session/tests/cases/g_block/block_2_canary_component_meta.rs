@@ -35,6 +35,27 @@ use verter_session::FileLanguage;
 
 use super::canary_harness::{meta_hits, meta_misses, upsert, workspace_host};
 
+/// Demand-materialize the named prop's published type source through
+/// the ONE shared dispatch — the explicit consumer resolution step for
+/// a shallow-by-default publication.
+fn demand_prop_type(
+    host: &verter_session::VerterHost,
+    owner: &str,
+    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+) -> verter_type_expr::TypeExpr {
+    let source = prop
+        .type_source
+        .present()
+        .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name));
+    verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
+        .unwrap_or_else(|| {
+            panic!(
+                "prop `{}`'s published source must demand-materialize",
+                prop.name
+            )
+        })
+}
+
 /// Sorted slot-binding names for the named slot of a
 /// `get_component_meta` result.
 fn slot_binding_names(
@@ -136,23 +157,22 @@ fn imported_prop_type_edit_misses_warm_component_meta() {
         .iter()
         .find(|p| p.name == "a")
         .expect("recomputed meta must publish prop `a`");
+    let a_ty = demand_prop_type(&host, "/workspace/src/Comp.vue", a_prop);
     assert!(
         !matches!(
-            a_prop.type_expr,
+            a_ty,
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         ),
         "the recomputed `a` prop must NOT be the stale `number` type — \
-         got {:?}",
-        a_prop.type_expr
+         got {a_ty:?}"
     );
     assert!(
         matches!(
-            a_prop.type_expr,
+            a_ty,
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
         ),
         "the recomputed `a` prop MUST carry the edited `string` type — \
-         a stale warm hit would still report `number`. Got {:?}",
-        a_prop.type_expr
+         a stale warm hit would still report `number`. Got {a_ty:?}"
     );
 }
 
@@ -302,13 +322,13 @@ fn transitive_type_dep_edit_misses_warm_component_meta() {
         .into_iter()
         .find(|p| p.name == "msg")
         .expect("prime meta must publish prop `msg`");
+    let msg_pre_ty = demand_prop_type(&host, "/workspace/src/App.vue", &msg_pre);
     assert!(
         matches!(
-            msg_pre.type_expr,
+            msg_pre_ty,
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
         ),
-        "pre-edit `msg` prop must be `string` (Nested = string) — got {:?}",
-        msg_pre.type_expr
+        "pre-edit `msg` prop must be `string` (Nested = string) — got {msg_pre_ty:?}"
     );
 
     let misses_before = warm_sanity_then_misses(&host, "/workspace/src/App.vue");
@@ -345,15 +365,15 @@ fn transitive_type_dep_edit_misses_warm_component_meta() {
         .into_iter()
         .find(|p| p.name == "msg")
         .expect("recomputed meta must publish prop `msg`");
+    let msg_post_ty = demand_prop_type(&host, "/workspace/src/App.vue", &msg_post);
     assert!(
         matches!(
-            msg_post.type_expr,
+            msg_post_ty,
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         ),
         "the recomputed `msg` prop MUST carry the edited transitive type \
          `number` (Nested = number) — a stale warm hit would still report \
-         `string`. Got {:?}",
-        msg_post.type_expr
+         `string`. Got {msg_post_ty:?}"
     );
 }
 

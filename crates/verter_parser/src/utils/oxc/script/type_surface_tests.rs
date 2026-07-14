@@ -69,60 +69,6 @@ fn infer_type(type_str: &str) -> Vec<RuntimeType> {
     vec![RuntimeType::Unknown]
 }
 
-/// Mock `NamedTypeCache` impl used by the existing `*_reuses_context_cache`
-/// tests to probe cache state without touching the (now-removed) per-context
-/// `Rc<RefCell<FxHashMap>>` field. Count-wise semantically equivalent to the
-/// pre-refactor cache: one entry per unique `ResolvedNamedTypeCacheKey`.
-#[derive(Debug, Default)]
-struct TestNamedTypeCache {
-    inner: std::sync::Mutex<
-        rustc_hash::FxHashMap<
-            super::cache_keys::ResolvedNamedTypeCacheKey,
-            std::sync::Arc<ResolvedElements>,
-        >,
-    >,
-}
-
-impl TestNamedTypeCache {
-    fn new() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self::default())
-    }
-
-    fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
-    }
-
-    fn contains_key(&self, key: &super::cache_keys::ResolvedNamedTypeCacheKey) -> bool {
-        self.inner.lock().unwrap().contains_key(key)
-    }
-
-    fn key_names(&self) -> std::collections::BTreeSet<String> {
-        self.inner
-            .lock()
-            .unwrap()
-            .keys()
-            .map(|key| String::from_utf8_lossy(&key.name).to_string())
-            .collect()
-    }
-}
-
-impl super::cache_keys::NamedTypeCache for TestNamedTypeCache {
-    fn get(
-        &self,
-        key: &super::cache_keys::ResolvedNamedTypeCacheKey,
-    ) -> Option<std::sync::Arc<ResolvedElements>> {
-        self.inner.lock().unwrap().get(key).cloned()
-    }
-
-    fn insert(
-        &self,
-        key: super::cache_keys::ResolvedNamedTypeCacheKey,
-        value: std::sync::Arc<ResolvedElements>,
-    ) {
-        self.inner.lock().unwrap().insert(key, value);
-    }
-}
-
 /// Helper to resolve a `type Test = ...` declaration using context, returning resolved elements
 /// and collected diagnostics.
 fn resolve_with_ctx(source: &str) -> (ResolvedElements, Vec<ResolutionDiagnostic>) {
@@ -512,551 +458,6 @@ interface Options { bar: number }"#;
 }
 
 #[test]
-fn repeated_named_interface_resolution_reuses_context_cache() {
-    let allocator = Allocator::default();
-    let source = r#"
-interface Base { foo: string }
-interface Props extends Base { bar: number }
-"#;
-    let source_type = SourceType::ts();
-    let parser = Parser::new(&allocator, source, source_type);
-    let result = parser.parse();
-
-    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
-    let mock_cache = TestNamedTypeCache::new();
-    ctx.set_named_type_cache(Some(mock_cache.clone()));
-
-    let mut guard = vec!["Props".to_string()];
-    let first = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, true, &mut guard)
-        .expect("Props should resolve");
-    assert_eq!(
-        first.props.len(),
-        2,
-        "Props should include inherited members"
-    );
-
-    let cached_after_first = mock_cache.len();
-    assert!(
-        cached_after_first >= 1,
-        "the directly resolved root should be cached after first resolution"
-    );
-
-    let mut second_guard = vec!["Props".to_string()];
-    let second =
-        resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, true, &mut second_guard)
-            .expect("Props should resolve from cache");
-    assert_eq!(
-        second.props.len(),
-        2,
-        "Cached resolution should stay correct"
-    );
-    assert_eq!(
-        mock_cache.len(),
-        cached_after_first,
-        "Repeated resolution should reuse the existing cache entries"
-    );
-}
-
-#[test]
-fn interface_resolution_caches_root_result_without_materializing_each_ancestor_closure() {
-    let allocator = Allocator::default();
-    let source = r#"
-interface Base { foo: string }
-interface Mid extends Base { bar: number }
-interface Props extends Mid { baz: boolean }
-"#;
-    let source_type = SourceType::ts();
-    let parser = Parser::new(&allocator, source, source_type);
-    let result = parser.parse();
-
-    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
-    let mock_cache = TestNamedTypeCache::new();
-    ctx.set_named_type_cache(Some(mock_cache.clone()));
-
-    let mut guard = vec!["Props".to_string()];
-    let resolved = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, true, &mut guard)
-        .expect("Props should resolve");
-    assert_eq!(
-        resolved.props.len(),
-        3,
-        "Props should still include the full inherited surface",
-    );
-
-    assert_eq!(
-        mock_cache.len(),
-        1,
-        "resolving the root interface should cache the requested closure without materializing each ancestor closure",
-    );
-}
-
-#[test]
-fn repeated_nongeneric_interface_resolution_reuses_cache_inside_generic_context() {
-    let allocator = Allocator::default();
-    let source = r#"
-interface Base { foo: string }
-type Wrapper<T> = Base & { value: T }
-type Use = Wrapper<string>
-"#;
-    let source_type = SourceType::ts();
-    let parser = Parser::new(&allocator, source, source_type);
-    let result = parser.parse();
-
-    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
-    let mock_cache = TestNamedTypeCache::new();
-    ctx.set_named_type_cache(Some(mock_cache.clone()));
-
-    let wrapper_alias = result
-        .program
-        .body
-        .iter()
-        .find_map(|stmt| match stmt {
-            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "Wrapper" => Some(alias),
-            _ => None,
-        })
-        .expect("Wrapper alias should exist");
-    let use_alias = result
-        .program
-        .body
-        .iter()
-        .find_map(|stmt| match stmt {
-            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "Use" => Some(alias),
-            _ => None,
-        })
-        .expect("Use alias should exist");
-    let type_ref = match &use_alias.type_annotation {
-        TSType::TSTypeReference(type_ref) => type_ref,
-        _ => panic!("Use alias should reference Wrapper<string>"),
-    };
-
-    let child = instantiate_type_params_ctx(
-        &ctx,
-        wrapper_alias.type_parameters.as_deref(),
-        type_ref.type_arguments.as_deref(),
-    );
-
-    let mut first_guard = vec!["Base".to_string()];
-    let first =
-        resolve_named_local_type_with_ctx_ref("Base", None, 0, &child, true, &mut first_guard)
-            .expect("Base should resolve");
-    assert_eq!(
-        first.props.len(),
-        1,
-        "Base should resolve in generic child context"
-    );
-    let cached_after_first = mock_cache.len();
-    assert!(
-        cached_after_first >= 1,
-        "nongeneric Base should still be cached even when outer generic bindings are active",
-    );
-
-    let mut second_guard = vec!["Base".to_string()];
-    let second =
-        resolve_named_local_type_with_ctx_ref("Base", None, 0, &child, true, &mut second_guard)
-            .expect("Base should resolve from cache");
-    assert_eq!(
-        second.props.len(),
-        1,
-        "cached Base resolution should stay correct"
-    );
-    assert_eq!(
-        mock_cache.len(),
-        cached_after_first,
-        "repeated nongeneric resolution inside a generic context should reuse the same cache entry",
-    );
-}
-
-#[test]
-fn nongeneric_interface_cache_key_ignores_unrelated_outer_generic_bindings() {
-    let allocator = Allocator::default();
-    let source = r#"
-interface Base { foo: string }
-type Wrapper<T> = Base & { value: T }
-type UseA = Wrapper<string>
-type UseB = Wrapper<number>
-"#;
-    let source_type = SourceType::ts();
-    let parser = Parser::new(&allocator, source, source_type);
-    let result = parser.parse();
-
-    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
-    let mock_cache = TestNamedTypeCache::new();
-    ctx.set_named_type_cache(Some(mock_cache.clone()));
-
-    let wrapper_alias = result
-        .program
-        .body
-        .iter()
-        .find_map(|stmt| match stmt {
-            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "Wrapper" => Some(alias),
-            _ => None,
-        })
-        .expect("Wrapper alias should exist");
-    let use_a_alias = result
-        .program
-        .body
-        .iter()
-        .find_map(|stmt| match stmt {
-            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "UseA" => Some(alias),
-            _ => None,
-        })
-        .expect("UseA alias should exist");
-    let use_b_alias = result
-        .program
-        .body
-        .iter()
-        .find_map(|stmt| match stmt {
-            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "UseB" => Some(alias),
-            _ => None,
-        })
-        .expect("UseB alias should exist");
-
-    let use_a_ref = match &use_a_alias.type_annotation {
-        TSType::TSTypeReference(type_ref) => type_ref,
-        _ => panic!("UseA should reference Wrapper<string>"),
-    };
-    let use_b_ref = match &use_b_alias.type_annotation {
-        TSType::TSTypeReference(type_ref) => type_ref,
-        _ => panic!("UseB should reference Wrapper<number>"),
-    };
-
-    let child_a = instantiate_type_params_ctx(
-        &ctx,
-        wrapper_alias.type_parameters.as_deref(),
-        use_a_ref.type_arguments.as_deref(),
-    );
-    let child_b = instantiate_type_params_ctx(
-        &ctx,
-        wrapper_alias.type_parameters.as_deref(),
-        use_b_ref.type_arguments.as_deref(),
-    );
-
-    let mut first_guard = vec!["Base".to_string()];
-    let first =
-        resolve_named_local_type_with_ctx_ref("Base", None, 0, &child_a, true, &mut first_guard)
-            .expect("Base should resolve under Wrapper<string>");
-    assert_eq!(first.props.len(), 1);
-
-    let cached_after_first = mock_cache.len();
-
-    let mut second_guard = vec!["Base".to_string()];
-    let second =
-        resolve_named_local_type_with_ctx_ref("Base", None, 0, &child_b, true, &mut second_guard)
-            .expect("Base should resolve under Wrapper<number>");
-    assert_eq!(second.props.len(), 1);
-
-    assert_eq!(
-        mock_cache.len(),
-        cached_after_first,
-        "nongeneric Base should reuse the same cache entry across unrelated outer generic bindings",
-    );
-}
-
-#[test]
-fn generic_named_resolution_caches_by_effective_type_param_bindings() {
-    let allocator = Allocator::default();
-    let source = r#"
-interface Base<T> { value: T }
-type A = Base<string>
-type B = Base<number>
-"#;
-    let source_type = SourceType::ts();
-    let parser = Parser::new(&allocator, source, source_type);
-    let result = parser.parse();
-
-    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
-    let mock_cache = TestNamedTypeCache::new();
-    ctx.set_named_type_cache(Some(mock_cache.clone()));
-
-    let base_interface = result
-        .program
-        .body
-        .iter()
-        .find_map(|stmt| match stmt {
-            Statement::TSInterfaceDeclaration(interface) if interface.id.name == "Base" => {
-                Some(interface)
-            }
-            _ => None,
-        })
-        .expect("Base interface should exist");
-    let a_alias = result
-        .program
-        .body
-        .iter()
-        .find_map(|stmt| match stmt {
-            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "A" => Some(alias),
-            _ => None,
-        })
-        .expect("A alias should exist");
-    let b_alias = result
-        .program
-        .body
-        .iter()
-        .find_map(|stmt| match stmt {
-            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "B" => Some(alias),
-            _ => None,
-        })
-        .expect("B alias should exist");
-
-    let a_ref = match &a_alias.type_annotation {
-        TSType::TSTypeReference(type_ref) => type_ref,
-        _ => panic!("A should reference Base<string>"),
-    };
-    let b_ref = match &b_alias.type_annotation {
-        TSType::TSTypeReference(type_ref) => type_ref,
-        _ => panic!("B should reference Base<number>"),
-    };
-
-    let string_child = instantiate_type_params_ctx(
-        &ctx,
-        base_interface.type_parameters.as_deref(),
-        a_ref.type_arguments.as_deref(),
-    );
-    let number_child = instantiate_type_params_ctx(
-        &ctx,
-        base_interface.type_parameters.as_deref(),
-        b_ref.type_arguments.as_deref(),
-    );
-    let string_key = string_child.cache_key_for_name(b"Base", 0, true);
-    let number_key = number_child.cache_key_for_name(b"Base", 0, true);
-
-    assert_ne!(
-        string_key, number_key,
-        "distinct generic bindings should produce distinct cache keys",
-    );
-    assert!(
-        !mock_cache.contains_key(&string_key),
-        "cache should start empty for Base<string>",
-    );
-    assert!(
-        !mock_cache.contains_key(&number_key),
-        "cache should start empty for Base<number>",
-    );
-
-    let mut string_guard = vec!["Base".to_string()];
-    let resolved_string = resolve_named_local_type_with_ctx_ref(
-        "Base",
-        a_ref.type_arguments.as_deref(),
-        0,
-        &ctx,
-        true,
-        &mut string_guard,
-    )
-    .expect("Base<string> should resolve");
-    assert_eq!(
-        resolved_string.props.len(),
-        1,
-        "Base<string> should expose one inherited member",
-    );
-    assert!(
-        mock_cache.contains_key(&string_key),
-        "Base<string> should be cached under its bound-parameter key",
-    );
-    assert!(
-        !mock_cache.contains_key(&number_key),
-        "Base<number> should not share the Base<string> cache entry",
-    );
-
-    let mut number_guard = vec!["Base".to_string()];
-    let resolved_number = resolve_named_local_type_with_ctx_ref(
-        "Base",
-        b_ref.type_arguments.as_deref(),
-        0,
-        &ctx,
-        true,
-        &mut number_guard,
-    )
-    .expect("Base<number> should resolve");
-    assert_eq!(
-        resolved_number.props.len(),
-        1,
-        "Base<number> should expose one inherited member",
-    );
-    assert!(
-        mock_cache.contains_key(&string_key),
-        "Base<string> cache entry should remain available after Base<number>",
-    );
-    assert!(
-        mock_cache.contains_key(&number_key),
-        "Base<number> should be cached under its own bound-parameter key",
-    );
-    assert!(
-        mock_cache.len() >= 2,
-        "distinct generic instantiations should keep distinct cache entries",
-    );
-}
-
-#[test]
-fn generic_named_resolution_reuses_cache_for_semantically_identical_bindings() {
-    let allocator = Allocator::default();
-    let source = r#"
-interface Base<T> { value: T }
-type A = Base<string>
-type B = Base<string>
-"#;
-    let source_type = SourceType::ts();
-    let parser = Parser::new(&allocator, source, source_type);
-    let result = parser.parse();
-
-    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
-    let mock_cache = TestNamedTypeCache::new();
-    ctx.set_named_type_cache(Some(mock_cache.clone()));
-
-    let base_interface = result
-        .program
-        .body
-        .iter()
-        .find_map(|stmt| match stmt {
-            Statement::TSInterfaceDeclaration(interface) if interface.id.name == "Base" => {
-                Some(interface)
-            }
-            _ => None,
-        })
-        .expect("Base interface should exist");
-    let a_alias = result
-        .program
-        .body
-        .iter()
-        .find_map(|stmt| match stmt {
-            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "A" => Some(alias),
-            _ => None,
-        })
-        .expect("A alias should exist");
-    let b_alias = result
-        .program
-        .body
-        .iter()
-        .find_map(|stmt| match stmt {
-            Statement::TSTypeAliasDeclaration(alias) if alias.id.name == "B" => Some(alias),
-            _ => None,
-        })
-        .expect("B alias should exist");
-
-    let a_ref = match &a_alias.type_annotation {
-        TSType::TSTypeReference(type_ref) => type_ref,
-        _ => panic!("A should reference Base<string>"),
-    };
-    let b_ref = match &b_alias.type_annotation {
-        TSType::TSTypeReference(type_ref) => type_ref,
-        _ => panic!("B should reference Base<string>"),
-    };
-
-    let a_child = instantiate_type_params_ctx(
-        &ctx,
-        base_interface.type_parameters.as_deref(),
-        a_ref.type_arguments.as_deref(),
-    );
-    let b_child = instantiate_type_params_ctx(
-        &ctx,
-        base_interface.type_parameters.as_deref(),
-        b_ref.type_arguments.as_deref(),
-    );
-    let a_key = a_child.cache_key_for_name(b"Base", 0, true);
-    let b_key = b_child.cache_key_for_name(b"Base", 0, true);
-
-    assert_eq!(
-        a_key, b_key,
-        "semantically identical bindings should produce the same cache key",
-    );
-
-    let mut first_guard = vec!["Base".to_string()];
-    let first = resolve_named_local_type_with_ctx_ref(
-        "Base",
-        a_ref.type_arguments.as_deref(),
-        0,
-        &ctx,
-        true,
-        &mut first_guard,
-    )
-    .expect("Base<string> should resolve");
-    assert_eq!(first.props.len(), 1);
-
-    let cached_after_first = mock_cache.len();
-
-    let mut second_guard = vec!["Base".to_string()];
-    let second = resolve_named_local_type_with_ctx_ref(
-        "Base",
-        b_ref.type_arguments.as_deref(),
-        0,
-        &ctx,
-        true,
-        &mut second_guard,
-    )
-    .expect("second Base<string> should reuse cache");
-    assert_eq!(second.props.len(), 1);
-    assert_eq!(
-        mock_cache.len(),
-        cached_after_first,
-        "second semantically identical binding should reuse the first cache entry",
-    );
-}
-
-#[test]
-fn named_resolution_cache_separates_distinct_companion_sets() {
-    let allocator = Allocator::default();
-    let source = r#"
-interface Props extends Imported {
-  local: string
-}
-"#;
-    let source_type = SourceType::ts();
-    let parser = Parser::new(&allocator, source, source_type);
-    let result = parser.parse();
-
-    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
-    let mut with_companion = ctx.clone();
-    let mut imported = ResolvedElements::default();
-    imported.props.push(ResolvedProp {
-        span: Span { start: 0, end: 0 },
-        key: Span { start: 0, end: 0 },
-        key_name: Some("inherited".to_string()),
-        optional: false,
-        types: vec![RuntimeType::String],
-        visibility: ResolvedMemberVisibility::Public,
-        type_span: None,
-        type_text: None,
-        map_local: true,
-        span_is_absolute: false,
-        type_expr: None,
-        type_expr_scope: None,
-        declared_in_macro_type_arg: false,
-    });
-    with_companion
-        .extend_companion_types(&FxHashMap::from_iter([("Imported".to_string(), imported)]));
-
-    let without_key = ctx.cache_key_for_name(b"Props", 0, true);
-    let with_key = with_companion.cache_key_for_name(b"Props", 0, true);
-    assert_ne!(
-        without_key, with_key,
-        "named-type cache keys must separate different companion availability sets",
-    );
-
-    let mut rich_guard = vec!["Props".to_string()];
-    let rich = resolve_named_local_type_with_ctx_ref(
-        "Props",
-        None,
-        0,
-        &with_companion,
-        true,
-        &mut rich_guard,
-    )
-    .expect("Props should resolve with imported companion");
-    assert_eq!(
-        rich.props.len(),
-        2,
-        "Props should include imported and local members when the companion exists",
-    );
-
-    let mut lean_guard = vec!["Props".to_string()];
-    let lean = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, true, &mut lean_guard)
-        .expect("Props should still resolve without a companion");
-    assert_eq!(
-        lean.props.len(),
-        1,
-        "Props without the companion should not reuse the richer cached expansion",
-    );
-}
-
-#[test]
 fn test_resolve_type_alias_with_context() {
     let (resolved, diagnostics) = resolve_with_ctx(
         r#"type Props = { foo: string; bar: number };
@@ -1357,8 +758,6 @@ type Test = Local;"#;
         type_text: None,
         map_local: true,
         span_is_absolute: false,
-        type_expr: None,
-        type_expr_scope: None,
         declared_in_macro_type_arg: false,
     });
     companions.insert("Base".to_string(), base_resolved);
@@ -1429,8 +828,6 @@ export interface Props extends LocalBase {
         type_text: None,
         map_local: false,
         span_is_absolute: false,
-        type_expr: None,
-        type_expr_scope: None,
         declared_in_macro_type_arg: false,
     });
     companion_types.insert("LocalBase".to_string(), base);
@@ -1477,8 +874,6 @@ export interface Props extends LocalBase {
         type_text: None,
         map_local: false,
         span_is_absolute: false,
-        type_expr: None,
-        type_expr_scope: None,
         declared_in_macro_type_arg: false,
     });
     companion_types.insert("LocalBase".to_string(), base);
@@ -1512,8 +907,6 @@ export interface Emits extends BaseEmits {
         },
         map_local: false,
         span_is_absolute: false,
-        type_expr: None,
-        type_expr_scope: None,
     });
     companion_types.insert("BaseEmits".to_string(), base);
 
@@ -2091,59 +1484,6 @@ export interface Props extends Inner {
 }
 
 #[test]
-fn default_export_named_interface_populates_named_resolution_cache() {
-    let allocator = Allocator::new();
-    let source = r#"
-interface Base {
-  base: string
-}
-
-export default interface Props extends Base {
-  id: string
-}
-"#;
-    let analysis = analyze_external_type_source(source, &allocator);
-
-    let program_alloc = Allocator::new();
-    let parsed = Parser::new(&program_alloc, source, SourceType::ts()).parse();
-    let mut base_ctx = build_type_context(&parsed.program, source.as_bytes(), 0);
-    let mock_cache = TestNamedTypeCache::new();
-    base_ctx.set_named_type_cache(Some(mock_cache.clone()));
-    let companions = FxHashMap::default();
-
-    let resolved = resolve_external_type_in_context_with_analyzed_symbol_companion(
-        "default",
-        &parsed.program,
-        source.as_bytes(),
-        &base_ctx,
-        &analysis,
-        &companions,
-    )
-    .expect("default-exported interface should resolve");
-
-    let prop_names = resolved
-        .props
-        .iter()
-        .map(|prop| prop.key_name.clone().unwrap_or_default())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert!(prop_names.contains("id"));
-    assert!(prop_names.contains("base"));
-
-    let cached_names = mock_cache.key_names();
-
-    assert!(
-        cached_names.contains("Props"),
-        "default-exported interface should populate named cache, got {:?}",
-        cached_names
-    );
-    assert!(
-        !cached_names.contains("Base"),
-        "walking a default-exported interface should not materialize each inherited ancestor closure, got {:?}",
-        cached_names
-    );
-}
-
-#[test]
 fn extract_bindings_keeps_namespace_type_imports() {
     let allocator = Allocator::new();
     let source = "import type * as Types from './types';";
@@ -2593,8 +1933,6 @@ fn ctx_ref_companion_fallback() {
         type_text: None,
         map_local: false,
         span_is_absolute: false,
-        type_expr: None,
-        type_expr_scope: None,
         declared_in_macro_type_arg: false,
     });
     companions.insert("CompanionType".to_string(), comp);
@@ -2716,8 +2054,6 @@ fn typeof_query_with_companion() {
         type_text: None,
         map_local: false,
         span_is_absolute: false,
-        type_expr: None,
-        type_expr_scope: None,
         declared_in_macro_type_arg: false,
     });
     companions.insert("myVar".to_string(), comp);
@@ -3265,8 +2601,6 @@ export type Outer = Prettify<Inner>
             type_text: None,
             map_local: false,
             span_is_absolute: false,
-            type_expr: None,
-            type_expr_scope: None,
             declared_in_macro_type_arg: false,
         });
     }
@@ -3779,8 +3113,6 @@ fn companion_extends_omit_preserves_inherited_props() {
             type_text: None,
             map_local: false,
             span_is_absolute: false,
-            type_expr: None,
-            type_expr_scope: None,
             declared_in_macro_type_arg: false,
         });
     }
@@ -3914,8 +3246,6 @@ fn companion_extends_omit_preserves_inherited_emits() {
             },
             map_local: false,
             span_is_absolute: false,
-            type_expr: None,
-            type_expr_scope: None,
         });
     }
 
@@ -4191,23 +3521,6 @@ fn resolved_elements_supports_deep_partial_eq() {
     );
 }
 
-#[test]
-fn type_resolution_context_handle_is_send_and_sync() {
-    // Discriminating invariant: `TypeResolutionContext`'s handle is
-    // `Send + Sync` so the resolved-named-types cache can live on the
-    // host-owned DashMap.
-    //
-    // Pre-fix: `TypeResolutionContext` carries `Rc<RefCell<...>>` and
-    // `Rc<Cell<u16>>` — both are `!Send + !Sync`, which blocks moving the
-    // resolved-named-types cache to a host-owned DashMap.
-    //
-    // Post-fix: those fields are replaced by `Option<Arc<dyn NamedTypeCache + Send + Sync>>`
-    // (cache handle) and a threaded `u16` parameter (depth). The cache handle
-    // must itself be `Send + Sync` so it can be shared across requests.
-    fn _assert_send_sync<T: Send + Sync + ?Sized>() {}
-    _assert_send_sync::<dyn super::cache_keys::NamedTypeCache>();
-}
-
 /// Discriminating test for `declared_in_macro_type_arg`:
 /// own-body literal members must be distinguished from
 /// heritage-injected members reaching the surface via
@@ -4266,8 +3579,6 @@ export interface Foo extends Omit<Bar, 'x'> {
             type_text: None,
             map_local: false,
             span_is_absolute: false,
-            type_expr: None,
-            type_expr_scope: None,
             declared_in_macro_type_arg: false,
         });
     }
@@ -4350,8 +3661,6 @@ fn declared_in_macro_type_arg_companion_root_preserves_inherited_heritage_false(
         type_text: None,
         map_local: false,
         span_is_absolute: false,
-        type_expr: None,
-        type_expr_scope: None,
         declared_in_macro_type_arg: true,
     });
     // Heritage-injected member — marked `false` by the producer
@@ -4368,8 +3677,6 @@ fn declared_in_macro_type_arg_companion_root_preserves_inherited_heritage_false(
         type_text: None,
         map_local: false,
         span_is_absolute: false,
-        type_expr: None,
-        type_expr_scope: None,
         declared_in_macro_type_arg: false,
     });
     companion_types.insert("Foo".to_string(), foo);
@@ -4429,8 +3736,6 @@ fn declared_in_macro_type_arg_companion_at_heritage_descent_flips_to_false() {
         type_text: None,
         map_local: false,
         span_is_absolute: false,
-        type_expr: None,
-        type_expr_scope: None,
         declared_in_macro_type_arg: true,
     });
     companion_types.insert("Foo".to_string(), foo);
@@ -4554,4 +3859,107 @@ interface Foo extends Omit<Vendor, 'removed'> { y: string }"#;
          out of `extract_companion_types` (heritage-descent boundary forces it); \
          got {by_name:?}",
     );
+}
+
+/// The `ResolvedElements` member DTOs carry EXACTLY the codegen-survivor
+/// field set — no typed-IR sidecar.
+///
+/// The exhaustive (no `..` rest pattern) destructurings below are the
+/// compile-time half of the pin: re-adding a `type_expr` /
+/// `type_expr_scope` field (or any other field) to `ResolvedProp` or
+/// `ResolvedNamedCallSignature` makes both patterns non-exhaustive and this
+/// test FAILS TO COMPILE — the perturbation discriminator. The runtime
+/// half proves a real resolution still populates every survivor field
+/// (spans, key naming, optionality, runtime types, visibility,
+/// type_span/type_text, map_local, span_is_absolute,
+/// declared_in_macro_type_arg, and the emit payload signature).
+#[test]
+fn resolved_elements_members_carry_exactly_the_codegen_survivor_fields() {
+    let allocator = Allocator::default();
+    let source = r#"
+interface Props {
+  label?: string
+  (e: 'save', id: number): void
+}
+type Test = Props;
+"#;
+    let parser = Parser::new(&allocator, source, SourceType::ts());
+    let result = parser.parse();
+    assert!(result.errors.is_empty(), "fixture must parse");
+
+    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mut guard = vec!["Props".to_string()];
+    let resolved = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, true, &mut guard)
+        .expect("Props should resolve");
+
+    let prop = resolved
+        .props
+        .iter()
+        .find(|p| {
+            p.key_name.as_deref() == Some("label")
+                || &source.as_bytes()[p.key.start as usize..p.key.end as usize] == b"label"
+        })
+        .expect("the `label` prop must be on the surface");
+
+    // Compile-time exhaustive-field pin (ResolvedProp).
+    let ResolvedProp {
+        span,
+        key,
+        key_name: _,
+        optional,
+        types,
+        visibility,
+        type_span,
+        type_text: _,
+        map_local,
+        span_is_absolute,
+        declared_in_macro_type_arg,
+    } = prop.clone();
+
+    // Runtime survivor-field assertions.
+    assert!(span.end > span.start, "prop span must cover the signature");
+    assert!(key.end > key.start, "prop key span must cover the name");
+    assert!(optional, "`label?` must resolve optional");
+    assert_eq!(types, vec![RuntimeType::String]);
+    assert!(visibility.is_public());
+    assert!(
+        type_span.is_some(),
+        "an annotated property keeps its type_span"
+    );
+    assert!(map_local, "a local prop maps locally");
+    assert!(!span_is_absolute, "base_offset 0 keeps spans relative");
+    assert!(
+        declared_in_macro_type_arg,
+        "own-body member resolved with from_root_body=true"
+    );
+
+    let emit = resolved
+        .call_signatures
+        .first()
+        .expect("the call-signature emit must be on the surface");
+
+    // Compile-time exhaustive-field pin (ResolvedNamedCallSignature).
+    let ResolvedNamedCallSignature {
+        span: emit_span,
+        name,
+        name_span,
+        signature,
+        map_local: emit_map_local,
+        span_is_absolute: emit_span_is_absolute,
+    } = emit.clone();
+
+    assert!(emit_span.end > emit_span.start);
+    assert_eq!(name, "save");
+    assert!(
+        name_span.is_some(),
+        "string-literal event names carry a span"
+    );
+    match signature {
+        ResolvedCallPayloadForm::Call { params_text } => {
+            assert_eq!(params_text, "id: number");
+        }
+        other => panic!("call-signature emits keep the Call payload form, got {other:?}"),
+    }
+    assert!(emit_map_local);
+    assert!(!emit_span_is_absolute);
 }

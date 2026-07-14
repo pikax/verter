@@ -333,7 +333,7 @@ mod tests {
             span: verter_span::Span::default(),
             bindings: Vec::new(),
             return_type: None,
-            return_expr: None,
+            payload: None,
             return_expr_scope: None,
             description: None,
             tags: Vec::new(),
@@ -394,7 +394,7 @@ mod tests {
             is_optional: false,
             span: verter_span::Span::default(),
             type_annotation: None,
-            type_expr: None,
+            payload: None,
             type_expr_scope: None,
             description: None,
             tags: Vec::new(),
@@ -404,7 +404,12 @@ mod tests {
         };
         let runes = ResolvedOutcome::Resolved(Arc::new(MacroSurfaceDtos {
             props: Some(crate::typeinfo::framework_surface::results::PropsSurface {
-                fields: vec![prop("a")],
+                fields: vec![
+                    crate::typeinfo::framework_surface::results::ResolvedPropField {
+                        analysis: prop("a"),
+                        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+                    },
+                ],
                 index_signatures: Vec::new(),
                 ..Default::default()
             }),
@@ -435,7 +440,11 @@ mod tests {
             ResolvedOutcome::Resolved(d) => d,
             other => panic!("PROPS must be Resolved once a source resolved, got {other:?}"),
         };
-        let names: Vec<&str> = dtos.prop_fields().iter().map(|f| f.name.as_str()).collect();
+        let names: Vec<&str> = dtos
+            .prop_fields()
+            .iter()
+            .map(|f| f.analysis.name.as_str())
+            .collect();
         assert_eq!(names, vec!["a"], "the runes source's prop folds in");
     }
 }

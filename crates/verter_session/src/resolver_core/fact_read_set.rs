@@ -56,9 +56,21 @@
 //! A [`FactReadSetCell`] is `!Send + !Sync` by construction: it
 //! cannot leak across a task boundary even by accident. The
 //! installer lives on the calling thread for the duration of one
-//! cold compute; nested installations panic. This makes the tracer
-//! a true per-compute substrate, not a shared accumulator that
-//! readers race on.
+//! cold compute. This makes the tracer a true per-compute substrate,
+//! not a shared accumulator that readers race on.
+//!
+//! ## Nesting is supported
+//!
+//! Installations NEST: the installer pushes onto a per-thread tracer
+//! STACK, and every observation fans out to ALL active cells (see
+//! `resolver_context`'s fan-out chokepoints). An inner cold compute
+//! therefore records its facts into its own cell AND into every
+//! enclosing one, so an outer compute's observation set stays complete
+//! while the inner one can make its OWN admission decision (a nested
+//! non-cacheable read or a nested signature overflow refuses the inner
+//! entry without silently laundering into the outer signature). The
+//! per-cell `!Send + !Sync` lifetime above is unchanged — the stack is
+//! thread-local, and each cell still belongs to exactly one compute.
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -89,16 +101,21 @@ const INLINE_CAPACITY: usize = 16;
 /// marker enforces this at compile time.
 pub struct FactReadSet {
     observations: SmallVec<[FactVersionRef; INLINE_CAPACITY]>,
-    /// TRUE when a FENCED (ReturnOnly, `store_published == false`)
-    /// `IndexedReady` serve was consumed inside this tracer's scope.
-    /// Set through the fan-out at the serve chokepoint
-    /// (`VerterHost::ensure_indexed_ready_serve` / the overlay
-    /// materialiser); consumers refuse shared-cache admission for a
-    /// result whose compute consumed a fenced serve — the result's
-    /// fact stamps are read from the LIVE post-mutation state while
-    /// its payload was computed FROM the superseded artifact, an
-    /// entry the read-side fact rail cannot reject.
-    fenced_serve_observed: bool,
+    /// TRUE when a NON-CACHEABLE read was consumed inside this tracer's
+    /// scope. The class is: a FENCED (ReturnOnly, `store_published ==
+    /// false`) `IndexedReady` serve; a broken decl-body lease
+    /// (`DemandOutcome` / `PreparedDeclOutcome` / `LocatorBodyDerefError`
+    /// `LeaseMiss`); an unrootable / unadmitted import route; an
+    /// unobservable contributor source-env identity. Set through the
+    /// fan-out marking chokepoint (`note_non_cacheable_read_fan_out`);
+    /// consumers refuse shared-cache admission for a result whose compute
+    /// consumed such a read — the result's fact stamps are read from the
+    /// LIVE post-mutation state while its payload was computed from a
+    /// superseded / unrootable / transient basis the read-side fact rail
+    /// cannot reject. Orthogonal to completeness: such a result stays
+    /// `Complete` and flows to the caller; ONLY memo/cache admission is
+    /// refused.
+    non_cacheable_read_observed: bool,
     _not_send_sync: PhantomData<*const ()>,
 }
 
@@ -124,24 +141,25 @@ impl FactReadSet {
     pub fn new() -> Self {
         Self {
             observations: SmallVec::new(),
-            fenced_serve_observed: false,
+            non_cacheable_read_observed: false,
             _not_send_sync: PhantomData,
         }
     }
 
-    /// Record that a FENCED (ReturnOnly) serve was consumed inside this
-    /// tracer's scope. Monotonic — never cleared.
+    /// Record that a NON-CACHEABLE read (fenced serve, broken decl-body
+    /// lease, unrootable route, unobservable source-env) was consumed
+    /// inside this tracer's scope. Monotonic — never cleared.
     #[inline]
-    pub fn note_fenced_serve(&mut self) {
-        self.fenced_serve_observed = true;
+    pub fn note_non_cacheable_read(&mut self) {
+        self.non_cacheable_read_observed = true;
     }
 
-    /// TRUE when any fenced (ReturnOnly) serve was consumed inside this
-    /// tracer's scope.
+    /// TRUE when any non-cacheable read was consumed inside this tracer's
+    /// scope.
     #[inline]
     #[must_use]
-    pub fn fenced_serve_observed(&self) -> bool {
-        self.fenced_serve_observed
+    pub fn non_cacheable_read_observed(&self) -> bool {
+        self.non_cacheable_read_observed
     }
 
     /// Record one observed fact.
@@ -183,6 +201,35 @@ impl FactReadSet {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.observations.is_empty()
+    }
+
+    /// Whether sealing this tracer WOULD report
+    /// [`FactReadSetFinalise::Overflow`] — WITHOUT sealing it.
+    ///
+    /// The overflow-only peek for a consumer that reads the tracer's
+    /// CACHEABILITY verdict but builds its cache entry's signature from
+    /// another source (a carrier's `dep_signature`, a keyed canonical's
+    /// observed hash). Such a consumer never needs the finalised set, so
+    /// it must not pay [`Self::finalise`]'s `Arc<[FactVersionRef]>`
+    /// allocation — nor emit the overflow audit event, which stays owned
+    /// by the ONE signature-consuming [`Self::finalise`] boundary per
+    /// compute (a nested peek that also emitted would multiply one
+    /// overflowing compute's event + counter across every enclosing
+    /// tracer level).
+    ///
+    /// Cheap by construction: dedup can only SHRINK the observation set,
+    /// so a raw count at-or-under [`FACT_SIGNATURE_CAP`] cannot overflow
+    /// and short-circuits before any sort. The over-cap branch sorts and
+    /// dedups in place — the observations stay a valid multiset for a
+    /// later `finalise`, which re-sorts regardless.
+    #[must_use]
+    pub fn would_overflow(&mut self) -> bool {
+        if self.observations.len() <= FACT_SIGNATURE_CAP {
+            return false;
+        }
+        self.observations.sort_by(compare_fact_refs);
+        self.observations.dedup();
+        self.observations.len() > FACT_SIGNATURE_CAP
     }
 
     /// Seal the tracer into either an immutable signature or an
@@ -273,17 +320,17 @@ impl FactReadSetCell {
         self.0.borrow_mut().observe_borrowed_signature(sig);
     }
 
-    /// Record a fenced (ReturnOnly) serve consumption through `&self`.
+    /// Record a non-cacheable read consumption through `&self`.
     #[inline]
-    pub fn note_fenced_serve(&self) {
-        self.0.borrow_mut().note_fenced_serve();
+    pub fn note_non_cacheable_read(&self) {
+        self.0.borrow_mut().note_non_cacheable_read();
     }
 
-    /// Whether a fenced (ReturnOnly) serve was consumed in this scope.
+    /// Whether a non-cacheable read was consumed in this scope.
     #[inline]
     #[must_use]
-    pub fn fenced_serve_observed(&self) -> bool {
-        self.0.borrow().fenced_serve_observed()
+    pub fn non_cacheable_read_observed(&self) -> bool {
+        self.0.borrow().non_cacheable_read_observed()
     }
 
     /// Number of observations recorded so far (pre-dedup).
@@ -298,6 +345,17 @@ impl FactReadSetCell {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.borrow().is_empty()
+    }
+
+    /// Whether sealing this cell WOULD overflow — the non-finalising,
+    /// non-emitting overflow peek through `&self`. See
+    /// [`FactReadSet::would_overflow`]. Readable MID-SCOPE (the tracer
+    /// accumulates monotonically), so a cacheability scope can consult its
+    /// verdict at an admission point without popping the cell.
+    #[inline]
+    #[must_use]
+    pub fn would_overflow(&self) -> bool {
+        self.0.borrow_mut().would_overflow()
     }
 
     /// Consume the cell and return the underlying [`FactReadSet`].

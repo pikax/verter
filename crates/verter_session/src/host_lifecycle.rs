@@ -77,7 +77,6 @@ impl VerterHost {
         // rebuild on demand from their retained scheduler sources.
         self.project_type_store.indexed().clear_all();
         self.resolver.reset_all();
-        self.resolved_type_cache().clear();
         self.semantic_invalidate_all();
         // The workspace authority swapped, so the cached base-view snapshot
         // (built against the OLD workspace / project graph) is structurally
@@ -136,7 +135,6 @@ impl VerterHost {
     }
 
     pub(crate) fn bump_store_view_epoch(&self) -> u64 {
-        self.clear_resolved_named_type_cache();
         self.store_view_epoch
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1
@@ -349,15 +347,24 @@ impl VerterHost {
             entry.cached_meta_payload = None;
             entry.cached_fallthrough = None;
         }
-        self.resolved_type_cache().clear();
         self.bump_store_view_epoch();
     }
 
+    /// The generated static-catalog intrinsic surface for `tag`: each member
+    /// fact carries its content-free catalog id; consumers recover the type
+    /// shape / raise a graph handle on demand.
     pub(crate) fn intrinsic_members_for_tag(
         &self,
         tag: &str,
-    ) -> Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember> {
+    ) -> Vec<crate::resolver_core::IntrinsicSurfaceMember> {
         verter_semantic::analysis::html_intrinsics::owned_intrinsic_members_for_tag(tag)
+            .into_iter()
+            .map(|fact| crate::resolver_core::IntrinsicSurfaceMember {
+                name: fact.name,
+                kind: fact.kind,
+                source: crate::resolver_core::IntrinsicMemberTypeSource::Static(fact.type_id),
+            })
+            .collect()
     }
 
     /// Release all cached data (files, aliases, dependency graph).
@@ -472,7 +479,6 @@ impl VerterHost {
             entry.dependencies.clear();
         }
         self.resolver.reset_all();
-        self.resolved_type_cache().clear();
         self.semantic_invalidate_all();
         // `configure_projects` is a route-resolution mutation: the
         // project graph changes. STAMP-ONLY bump — retained payloads
@@ -637,7 +643,6 @@ impl VerterHost {
         // no re-parse).
         self.project_type_store
             .evict_canonical_for_route_mutation(canonical);
-        self.resolved_type_cache().clear();
         // R4 producer: rebuild parse-domain facts for the reloaded
         // canonical so the next resolver pass sees the new content.
         self.register_facts_for_new_content(canonical);

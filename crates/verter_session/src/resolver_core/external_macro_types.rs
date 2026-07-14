@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::FxHashMap;
-use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+use verter_parser::utils::oxc::script::type_surface::ResolvedElements;
 use verter_semantic::analysis::{AnalyzedImport, MacroTypeDep};
 use verter_span::Span;
 
@@ -99,7 +99,7 @@ mod tests {
         collect_external_macro_types, ExternalMacroTypeCollectorHost, ExternalMacroTypeDiagnostic,
     };
     use std::collections::{BTreeMap, BTreeSet};
-    use verter_compiler::utils::oxc::script::type_surface::{ResolvedElements, RuntimeType};
+    use verter_parser::utils::oxc::script::type_surface::{ResolvedElements, RuntimeType};
     use verter_semantic::analysis::{AnalyzedImport, MacroTypeDep};
     use verter_span::Span;
 

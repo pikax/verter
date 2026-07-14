@@ -54,11 +54,32 @@ const REGISTRY_ROUTE_FIXTURE_VUE: &str = include_str!("../fixtures/audit/registr
 /// time.
 #[test]
 fn recursive_alias_self_pick_publishes_shallow_ref() {
+    // Attach an explicitly-built host (identical config + upsert flow to
+    // the builder's hermetic path) so the published source can be
+    // shell-materialized against it below.
+    let host = {
+        let workspace: std::sync::Arc<dyn verter_workspace::WorkspaceAccess> = std::sync::Arc::new(
+            verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default()),
+        );
+        let host = std::sync::Arc::new(verter_session::VerterHost::new(
+            verter_session::HostConfig {
+                audit_enabled: true,
+                footprint_capture: true,
+                ..verter_session::HostConfig::default()
+            },
+            workspace,
+        ));
+        let _ = host.upsert(verter_session::UpsertRequest {
+            canonical_id: Some("/c.vue".to_string()),
+            input_id: "/c.vue".to_string(),
+            source: std::sync::Arc::from(REGISTRY_ROUTE_FIXTURE_VUE),
+            file_language: host.language_classifier().classify("/c.vue"),
+            aliases: Vec::new(),
+        });
+        host
+    };
     let result = AuditedRequest::builder()
-        .files(vec![(
-            "/c.vue".to_string(),
-            REGISTRY_ROUTE_FIXTURE_VUE.to_string(),
-        )])
+        .attach_to(std::sync::Arc::clone(&host))
         .resolve_component_meta("/c.vue");
     let (_analysis, resolution, _record) =
         result.expect("audited request must succeed without panicking on the cycle fixture");
@@ -72,11 +93,21 @@ fn recursive_alias_self_pick_publishes_shallow_ref() {
         .find(|f| f.name == "value")
         .expect("evaluated_types.props missing field `value`");
 
+    // Shell-materialize the published source WITHOUT a resolution
+    // demand: the SHALLOW published shape is exactly what this guard
+    // pins (a demand would resolve and invert the claim).
+    let shallow = verter_session::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/c.vue",
+        value_field.r#type.present().expect("present source"),
+    )
+    .unwrap_or_else(|| panic!("`value`'s published source must shell-materialize"));
+
     // Discriminating assertion: the projector path publishes the bare
     // `Self` ref. A non-shallow shape (eager Pick expansion, an
     // expanded object, etc.) would indicate a regression that
     // re-introduced eager materialisation at publication time.
-    match &value_field.r#type {
+    match &shallow {
         TypeExpr::Ref {
             name,
             type_arguments,

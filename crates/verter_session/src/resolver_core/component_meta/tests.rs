@@ -1,9 +1,9 @@
 use super::*;
 use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
 use std::collections::BTreeMap;
-use verter_compiler::utils::oxc::script::type_surface::{
-    ResolvedCallPayloadForm, ResolvedMemberVisibility, ResolvedNamedCallSignature, ResolvedProp,
-    RuntimeType,
+use verter_parser::utils::oxc::script::type_surface::{
+    ResolvedCallPayloadForm, ResolvedElements, ResolvedMemberVisibility,
+    ResolvedNamedCallSignature, ResolvedProp, RuntimeType,
 };
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::types::{
@@ -11,7 +11,24 @@ use verter_semantic::analysis::types::{
     ResolvedLocalType,
 };
 use verter_span::Span;
-use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
+use verter_type_expr::PrimitiveName;
+
+/// The analyzer's synthesized closed shape for a locally-resolved type
+/// reference: a non-primitive body stays a shallow named-reference locator
+/// resolved on demand, under the analyzer's local-file scope convention (the
+/// empty producing canonical) — the same idiom as the production
+/// `local_type_ref_shape` producer in `verter_semantic::analysis::macros`.
+fn local_ref_shape(type_ref: &str) -> verter_type_expr::facts::ResolvedLocalShape {
+    verter_type_expr::facts::ResolvedLocalShape::Ref(
+        verter_type_expr::locators::SymbolBodyLocator {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: std::sync::Arc::from(""),
+                symbol: std::sync::Arc::from(type_ref),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+            },
+        },
+    )
+}
 
 #[derive(Clone)]
 struct TestSnapshot {
@@ -127,10 +144,16 @@ impl ComponentMetaResolverHost for TestHost {
         _resolution_deps: &mut BTreeSet<String>,
         _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         _visiting: &mut FxHashSet<(String, String)>,
-    ) -> Option<ResolvedElements> {
+    ) -> Option<crate::resolver_core::ResolvedMacroElements> {
         self.external_macro_elements
             .get(&(import_source.to_string(), exported_name.to_string()))
             .cloned()
+            .map(|elements| crate::resolver_core::ResolvedMacroElements {
+                elements,
+                // The TestHost fixtures exercise dep gating / suppression /
+                // registry seeding; none of them assert `native_props`.
+                native_props: Vec::new(),
+            })
     }
 
     fn resolve_jsdoc_block(
@@ -250,7 +273,7 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
         _resolution_deps: &mut BTreeSet<String>,
         _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         _visiting: &mut FxHashSet<(String, String)>,
-    ) -> Option<ResolvedElements> {
+    ) -> Option<crate::resolver_core::ResolvedMacroElements> {
         panic!(
             "resolve_component_meta_parts should not separately ask for imported macro elements"
         );
@@ -278,37 +301,49 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
                 kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
                 text: Some("export interface Props { label: string }".to_string()),
             },
-            elements: ResolvedElements {
-                props: vec![ResolvedProp {
-                    span: Span::new(0, 29),
-                    key: Span::new(24, 29),
-                    key_name: Some("label".to_string()),
-                    optional: false,
-                    types: vec![RuntimeType::String],
-                    visibility: ResolvedMemberVisibility::Public,
-                    type_span: Some(Span::new(31, 37)),
-                    type_text: Some("string".to_string()),
-                    map_local: false,
-                    span_is_absolute: true,
-                    type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                    type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                    declared_in_macro_type_arg: false,
+            resolution: crate::resolver_core::ResolvedMacroElements {
+                elements: ResolvedElements {
+                    props: vec![ResolvedProp {
+                        span: Span::new(0, 29),
+                        key: Span::new(24, 29),
+                        key_name: Some("label".to_string()),
+                        optional: false,
+                        types: vec![RuntimeType::String],
+                        visibility: ResolvedMemberVisibility::Public,
+                        type_span: Some(Span::new(31, 37)),
+                        type_text: Some("string".to_string()),
+                        map_local: false,
+                        span_is_absolute: true,
+                        declared_in_macro_type_arg: false,
+                    }],
+                    call_signatures: vec![ResolvedNamedCallSignature {
+                        span: Span::new(0, 24),
+                        name: "save".to_string(),
+                        name_span: None,
+                        signature: ResolvedCallPayloadForm::Tuple {
+                            tuple_text: "[value: string]".to_string(),
+                        },
+                        map_local: false,
+                        span_is_absolute: true,
+                    }],
+                    ..ResolvedElements::default()
+                },
+                // The keep-all native rows carried alongside the elements.
+                // DELIBERATELY DIFFERENT from the `elements` carrier (which
+                // holds only the public `label` prop): the mock carries a
+                // PRIVATE `secret` row that `elements` does not contain, so
+                // the combined-surface test discriminates the SOURCING — a
+                // regression that re-derived `native_props` from the
+                // elements DTO would surface `label`/Public instead of
+                // `secret`/Private and FAIL the assertions in
+                // `resolve_component_meta_parts_prefers_combined_imported_macro_surface`.
+                native_props: vec![crate::resolver_core::ResolvedNativeProp {
+                    name: "secret".to_string(),
+                    is_optional: true,
+                    type_annotation: Some("boolean".to_string()),
+                    visibility: verter_type_expr::MemberVisibility::Private,
+                    span: Span::default(),
                 }],
-                call_signatures: vec![ResolvedNamedCallSignature {
-                    span: Span::new(0, 24),
-                    name: "save".to_string(),
-                    name_span: None,
-                    signature: ResolvedCallPayloadForm::Tuple {
-                        tuple_text: "[value: string]".to_string(),
-                    },
-                    map_local: false,
-                    span_is_absolute: true,
-                    type_expr: Some(TypeExpr::Unknown {
-                        raw: "[value: string]".to_string(),
-                    }),
-                    type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
-                }],
-                ..ResolvedElements::default()
             },
         })
     }
@@ -408,16 +443,37 @@ fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
         "expanded imported-macro resolution should use the combined surface path exactly once",
     );
     assert_eq!(resolved.resolved_macros.len(), 1);
-    // The combined imported-macro surface still feeds `native_props` (the
-    // class-member visibility carrier). The published props surface is owned
-    // by the typeinfo path and is not carried on `ResolvedMacroMeta`.
+    // The combined imported-macro surface feeds `native_props` (the
+    // class-member visibility carrier) DIRECTLY from the resolution payload
+    // (`ResolvedMacroElements.native_props`) — the cold resolver plumbs the
+    // CARRIED rows through without re-projecting them from the elements
+    // DTO. The mock's two carriers deliberately DIVERGE (`elements` holds
+    // only the public `label` prop; `native_props` holds only the private
+    // `secret` row), so this discriminates the sourcing: a regression that
+    // re-derived `native_props` from `elements` would publish
+    // `label`/Public here and FAIL. The published props surface is owned by
+    // the typeinfo path and is not carried on `ResolvedMacroMeta`.
+    let native = &resolved.resolved_macros[0].native_props;
     assert_eq!(
-        resolved.resolved_macros[0]
-            .native_props
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["label"],
+        native.len(),
+        1,
+        "exactly the carried native row must come through: {:?}",
+        native.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(native[0].name, "secret");
+    assert_eq!(
+        native[0].visibility,
+        verter_type_expr::MemberVisibility::Private,
+        "the carried row's visibility must survive verbatim"
+    );
+    assert!(native[0].is_optional);
+    assert_eq!(native[0].type_annotation.as_deref(), Some("boolean"));
+    assert_eq!(native[0].span, Span::default());
+    assert!(
+        !native.iter().any(|p| p.name == "label"),
+        "native_props must NOT contain the elements-DTO prop `label` — its \
+         presence would mean the rows were re-derived from `elements` \
+         instead of the carried `resolution.native_props`"
     );
     assert_eq!(
         resolved.resolved_macros[0].declaration.canonical_source, "/dep.ts",
@@ -516,19 +572,25 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
                                     properties: vec![
                                         verter_semantic::analysis::type_expand::ExpandedProperty {
                                             name: "save".to_string(),
-                                            ty: verter_type_expr::TypeExpr::Tuple {
-                                                elements: std::sync::Arc::from(vec![
-                                                    verter_type_expr::TupleElement {
-                                                        label: Some("value".to_string()),
-                                                        ty: verter_type_expr::TypeExpr::Primitive(
-                                                            verter_type_expr::PrimitiveName::String,
-                                                        ),
-                                                        optional: false,
-                                                        rest: false,
+                                            ty: verter_type_expr::facts::SourcePosition::Present(verter_type_expr::facts::SemanticTypeSource::Synthesized(
+                                                verter_type_expr::facts::ResolvedLocalShape::Tuple(
+                                                    verter_type_expr::facts::TuplePayloadFact {
+                                                        readonly: false,
+                                                        elements: std::sync::Arc::from(vec![
+                                                            verter_type_expr::facts::TupleElementFact {
+                                                                label: Some("value".to_string()),
+                                                                optional: false,
+                                                                rest: false,
+                                                                ty: verter_type_expr::facts::FactOrLocator::Leaf(
+                                                                    verter_type_expr::facts::LeafTypeFact::Primitive(
+                                                                        verter_type_expr::PrimitiveName::String,
+                                                                    ),
+                                                                ),
+                                                            },
+                                                        ]),
                                                     },
-                                                ]),
-                                                readonly: false,
-                                            },
+                                                ),
+                                            )),
                                             optional: false,
                                             readonly: false,
                                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -545,6 +607,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
                     define_slots: Vec::new(),
                     slot_bindings: Vec::new(),
                     bindings: Vec::new(),
+                    exposed: Vec::new(),
                 },
             ),
             tracked_dependencies: BTreeSet::new(),
@@ -669,12 +732,7 @@ defineEmits<Emits>()
             resolved_local_types: vec![ResolvedLocalType {
                 name: "Emits".to_string(),
                 expanded: "interface Emits extends RootEmits {}".to_string(),
-                type_expr: Some(
-                    verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
-                        "interface Emits extends RootEmits {}",
-                        None,
-                    ),
-                ),
+                shape: local_ref_shape("Emits"),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -747,8 +805,7 @@ fn local_resolved_macro_types_push_authoritative_owner_local_entry() {
                 expanded:
                     "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }"
                         .to_string(),
-                type_expr: Some(verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
-                    "{ 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined] }", None)),
+                shape: local_ref_shape("AccordionEmits"),
                 span: Span::new(0, 1),
             }],
             parsed_type_argument: None,
@@ -877,12 +934,7 @@ defineSlots<CalendarSlots>()
             resolved_local_types: vec![ResolvedLocalType {
                 name: "CalendarSlots".to_string(),
                 expanded: "{ day?: (props: { day: Date }) => any }".to_string(),
-                type_expr: Some(
-                    verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
-                        "{ day?: (props: { day: Date }) => any }",
-                        None,
-                    ),
-                ),
+                shape: local_ref_shape("CalendarSlots"),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -936,8 +988,6 @@ type LocalItem = {
                 type_text: Some("string".to_string()),
                 map_local: false,
                 span_is_absolute: true,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                 declared_in_macro_type_arg: false,
             }],
             ..ResolvedElements::default()
@@ -957,10 +1007,6 @@ type LocalItem = {
                 type_text: Some("'href' | 'target'".to_string()),
                 map_local: false,
                 span_is_absolute: true,
-                type_expr: Some(TypeExpr::Unknown {
-                    raw: "'href' | 'target'".to_string(),
-                }),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                 declared_in_macro_type_arg: false,
             }],
             ..ResolvedElements::default()
@@ -990,17 +1036,7 @@ type LocalItem = {
             resolved_local_types: vec![ResolvedLocalType {
                 name: "Props".to_string(),
                 expanded: "{ item?: LocalItem }".to_string(),
-                type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                        "item".to_string(),
-                        TypeExpr::Ref {
-                            name: "LocalItem".into(),
-                            type_arguments: Vec::new().into(),
-                        },
-                        true,
-                        false,
-                    ))],
-                }))),
+                shape: local_ref_shape("Props"),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -1072,8 +1108,6 @@ type Props = Pick<ImportedBase, 'href'>
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
-                    type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                    type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                     declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
@@ -1089,7 +1123,15 @@ type Props = Pick<ImportedBase, 'href'>
                                 properties: vec![
                                     verter_semantic::analysis::type_expand::ExpandedProperty {
                                         name: "href".to_string(),
-                                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                                        ty: verter_type_expr::facts::SourcePosition::Present(
+                                            verter_type_expr::facts::SemanticTypeSource::Closed(
+                                                verter_type_expr::facts::ClosedTypeFact::Leaf(
+                                                    verter_type_expr::facts::LeafTypeFact::Primitive(
+                                                        PrimitiveName::String,
+                                                    ),
+                                                ),
+                                            ),
+                                        ),
                                         optional: true,
                                         readonly: false,
                                         visibility: verter_type_expr::MemberVisibility::Public,
@@ -1128,14 +1170,7 @@ type Props = Pick<ImportedBase, 'href'>
             resolved_local_types: vec![ResolvedLocalType {
                 name: "Props".to_string(),
                 expanded: "{ href?: string }".to_string(),
-                type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                        "href".to_string(),
-                        TypeExpr::Primitive(PrimitiveName::String),
-                        true,
-                        false,
-                    ))],
-                }))),
+                shape: local_ref_shape("Props"),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -1200,8 +1235,6 @@ type Props = Pick<ImportedBase, 'href'>
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
-                    type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                    type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                     declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
@@ -1225,12 +1258,22 @@ type Props = Pick<ImportedBase, 'href'>
                 is_optional: true,
                 span: Span::new(0, 0),
                 type_annotation: Some("string".to_string()),
+                payload: Some(verter_type_expr::locators::MacroPayloadLocator {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: std::sync::Arc::from("/test.ts"),
+                        symbol: std::sync::Arc::from("default"),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    macro_index: 0,
+                    payload: verter_type_expr::locators::MacroPayloadPosition::Field {
+                        field_index: 0,
+                    },
+                }),
+                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                 description: None,
                 tags: Vec::new(),
                 resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
                 resolution_error: None,
-                type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                 declared_in_macro_type_arg: false,
             }],
             emit_fields: Vec::new(),
@@ -1241,14 +1284,7 @@ type Props = Pick<ImportedBase, 'href'>
             resolved_local_types: vec![ResolvedLocalType {
                 name: "Props".to_string(),
                 expanded: "{ href?: string }".to_string(),
-                type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                        "href".to_string(),
-                        TypeExpr::Primitive(PrimitiveName::String),
-                        true,
-                        false,
-                    ))],
-                }))),
+                shape: local_ref_shape("Props"),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -1313,8 +1349,6 @@ type Props = {
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
-                    type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                    type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                     declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
@@ -1342,20 +1376,7 @@ type Props = {
             resolved_local_types: vec![ResolvedLocalType {
                 name: "Props".to_string(),
                 expanded: "{ href?: ImportedBase['href'] }".to_string(),
-                type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                        "href".to_string(),
-                        TypeExpr::IndexedAccess {
-                            object: std::sync::Arc::new(TypeExpr::Ref {
-                                name: "ImportedBase".into(),
-                                type_arguments: Vec::new().into(),
-                            }),
-                            index: std::sync::Arc::new(TypeExpr::string_literal("href")),
-                        },
-                        true,
-                        false,
-                    ))],
-                }))),
+                shape: local_ref_shape("Props"),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -1424,8 +1445,6 @@ type Props = {
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
-                    type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                    type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                     declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
@@ -1453,17 +1472,7 @@ type Props = {
             resolved_local_types: vec![ResolvedLocalType {
                 name: "Props".to_string(),
                 expanded: "{ tooltip?: ImportedBase }".to_string(),
-                type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                        "tooltip".to_string(),
-                        TypeExpr::Ref {
-                            name: "ImportedBase".into(),
-                            type_arguments: Vec::new().into(),
-                        },
-                        true,
-                        false,
-                    ))],
-                }))),
+                shape: local_ref_shape("Props"),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -1527,8 +1536,6 @@ type Props = Omit<ImportedBase, 'hidden'>
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
-                    type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                    type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                     declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
@@ -1556,12 +1563,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             resolved_local_types: vec![ResolvedLocalType {
                 name: "Props".to_string(),
                 expanded: "Omit<ImportedBase, 'hidden'>".to_string(),
-                type_expr: Some(
-                    verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
-                        "Omit<ImportedBase, 'hidden'>",
-                        None,
-                    ),
-                ),
+                shape: local_ref_shape("Props"),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -1621,8 +1623,6 @@ type Props = Omit<ImportedBase, 'hidden'>
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
-                    type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                    type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                     declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
@@ -1655,9 +1655,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             resolved_local_types: vec![ResolvedLocalType {
                 name: "Props".to_string(),
                 expanded: "{}".to_string(),
-                type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: Vec::new(),
-                }))),
+                shape: local_ref_shape("Props"),
                 span: Span::new(0, source.len() as u32),
             }],
             parsed_type_argument: None,
@@ -1713,8 +1711,6 @@ fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
                     type_text: Some("string".to_string()),
                     map_local: false,
                     span_is_absolute: true,
-                    type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                    type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                     declared_in_macro_type_arg: false,
                 }],
                 ..ResolvedElements::default()
@@ -1813,8 +1809,6 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
                         type_text: Some("object".to_string()),
                         map_local: false,
                         span_is_absolute: true,
-                        type_expr: Some(TypeExpr::Primitive(PrimitiveName::Object)),
-                        type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                         declared_in_macro_type_arg: false,
                     },
                     ResolvedProp {
@@ -1828,8 +1822,6 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
                         type_text: Some("string".to_string()),
                         map_local: false,
                         span_is_absolute: true,
-                        type_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                        type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                         declared_in_macro_type_arg: false,
                     },
                 ],
@@ -1929,23 +1921,13 @@ interface Helper {
                 ResolvedLocalType {
                     name: "Props".to_string(),
                     expanded: "{ label?: string }".to_string(),
-                    type_expr: Some(TypeExpr::Ref {
-                        name: "Helper".into(),
-                        type_arguments: Vec::new().into(),
-                    }),
+                    shape: local_ref_shape("Props"),
                     span: Span::new(0, "type Props = Helper".len() as u32),
                 },
                 ResolvedLocalType {
                     name: "Helper".to_string(),
                     expanded: "{ label?: string }".to_string(),
-                    type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                            "label".to_string(),
-                            TypeExpr::Primitive(PrimitiveName::String),
-                            true,
-                            false,
-                        ))],
-                    }))),
+                    shape: local_ref_shape("Helper"),
                     span: Span::new(0, source.len() as u32),
                 },
             ],
@@ -1974,76 +1956,5 @@ interface Helper {
         resolved_names,
         vec!["Props"],
         "only the direct local macro root should project into resolved_macros; helper companions should stay lazy",
-    );
-}
-
-/// Characterisation: pin the invariant that
-/// `ResolvedLocalType.type_expr` MUST be populated whenever
-/// `expanded` is non-empty. The cold resolver consumes the typed
-/// form via `.expect(...)`; a violation panics with a stable
-/// message.
-///
-/// Pre-W0.2 the consumer fell back through
-/// text-mode reparse of `resolved.expanded` and silently
-/// recovered, so this fixture would not panic and `should_panic`
-/// would FAIL. Post-W0.2 the consumer asserts the invariant via
-/// `.expect(...)`, the panic fires, and `should_panic` PASSES.
-#[test]
-#[should_panic(expected = "ResolvedLocalType.type_expr populated by analyzer")]
-fn cold_resolver_panics_when_type_expr_missing_for_non_empty_expanded() {
-    let host = TestHost {
-        external_macro_elements: BTreeMap::new(),
-        eval_outputs: ComponentMetaEvalOutputs::default(),
-        projectable_owner_local_roots: BTreeSet::new(),
-        owner_local_roots_with_surface: BTreeSet::new(),
-    };
-    let snapshot = TestSnapshot {
-        imports: Vec::new(),
-        macros: vec![AnalyzedMacro {
-            kind: AnalyzedMacroKind::DefineEmits,
-            is_type_based: true,
-            type_references: vec!["ViolatingEmits".to_string()],
-            binding_name: Some("emit".to_string()),
-            model_name: None,
-            has_inherit_attrs_false: false,
-            prop_fields: Vec::new(),
-            emit_fields: Vec::new(),
-            slot_fields: Vec::new(),
-            default_keys: Vec::new(),
-            default_values: Vec::new(),
-            expose_fields: Vec::new(),
-            // Synthetic violation: `expanded` is non-empty but
-            // `type_expr` is `None`. This shape is unreachable
-            // from production producers (both constructor sites in
-            // `verter_semantic::analysis::macros` populate
-            // `type_expr` via `build_expanded_type_expr`), but the
-            // fixture mints it directly to discriminate the
-            // consumer's invariant assertion.
-            resolved_local_types: vec![ResolvedLocalType {
-                name: "ViolatingEmits".to_string(),
-                expanded: "{ change: [value: string] }".to_string(),
-                type_expr: None,
-                span: Span::new(0, 1),
-            }],
-            parsed_type_argument: None,
-            parsed_type_argument_scope: None,
-            span: Span::new(0, 1),
-        }],
-        macro_type_deps: Vec::new(),
-    };
-
-    // Routing through `resolve_component_meta_parts` is the same
-    // entry point production consumers use. The direct-local
-    // resolved-type registry seeding block at the consumer's
-    // `.expect(...)` site fires for `(resolved_index == 0,
-    // direct_named_reference, first-seen registry name)`, which
-    // this fixture satisfies.
-    let _ = resolve_component_meta_parts(
-        &host,
-        "/src/Violator.vue",
-        &snapshot,
-        true,
-        None,
-        ComponentMetaResolutionPurpose::Full,
     );
 }

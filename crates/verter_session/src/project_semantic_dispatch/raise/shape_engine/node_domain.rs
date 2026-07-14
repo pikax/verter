@@ -1166,9 +1166,6 @@ pub(super) fn project_root_summary(
         SemanticNodeData::RawFallback { raw } => {
             RootOnlySummary::from_summary(summary::unknown(raw))
         }
-        SemanticNodeData::VueMacroElements(_) => RootOnlySummary::from_summary(
-            summary::opaque_sentinel(&QueryError::VueMacroElementsPlaceholder),
-        ),
 
         SemanticNodeData::Alias(target) => {
             if !active.insert(node) {
@@ -1304,6 +1301,31 @@ pub(super) fn project_root_summary(
             _ => RootOnlySummary::from_summary(summary::opaque_sentinel(err)),
         },
     })
+}
+
+/// `true` when `node` is an interned resolver-control FAILURE carrier — a
+/// [`SemanticNodeData::Opaque`] whose shell materialization renders
+/// `Unknown { raw }` (`Miss`, `BudgetExceeded`, `Other(..)`, …). The two
+/// legitimately-publishable opaque carriers are NOT failures and stay
+/// `false`: `RecursiveRef` raises to `TypeExpr::RecursiveRef` and
+/// `DeclPlaceholder` raises to the named `Ref` shell — mirroring the
+/// `fold_node` `Opaque` conduit and the root-summary `Opaque` arm above,
+/// held in agreement by proximity. Raise boundaries use this to FAIL
+/// CLOSED: a projection that "succeeds" onto such a node is a projection
+/// MISS and must answer `None` instead of handing out a node whose
+/// publication would silently read `Unknown`.
+pub(in crate::project_semantic_dispatch) fn node_is_unknown_materializing_failure(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> bool {
+    matches!(
+        node_data_for(dispatch.ctx, node).as_deref(),
+        Some(SemanticNodeData::Opaque(err))
+            if !matches!(
+                err,
+                QueryError::RecursiveRef { .. } | QueryError::DeclPlaceholder { .. }
+            )
+    )
 }
 
 #[cfg(test)]

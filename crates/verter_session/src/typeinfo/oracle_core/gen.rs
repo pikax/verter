@@ -701,7 +701,7 @@ fn preflight_reduces_clean(spec: &QuerySpec) -> Result<(), GenError> {
 
     let host = build_source_host(spec);
     let (outcome, _record) = host
-        .resolve_named_symbol_with_audit(spec.primary_canonical, symbol, &[], Some(mode))
+        .resolve_named_symbol_with_audit(spec.primary_canonical, symbol, Some(mode))
         .into_parts();
     let node = outcome.ok().flatten().ok_or_else(|| {
         GenError::PreflightUnclean(format!(

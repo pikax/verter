@@ -403,10 +403,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // per-variant arms below (the `Published(Shallow)` / `structural_transit`
         // carrier-head arms). The literal-union / name arms still recover the
         // exact key set.
-        let resolved = self.evaluate_deferred_semantic_node_with_context(
-            node,
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        );
+        let resolved = self
+            .evaluate_deferred_semantic_node_with_context(
+                node,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_active_query_build_node(self);
         let data = self.graph().node_data(resolved)?;
         match data.as_ref() {
             SemanticNodeData::Literal(LiteralValue::String(name)) => Some(vec![KeyDomainKey {

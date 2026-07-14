@@ -170,10 +170,10 @@ export interface ChatMessageProps {
 
 // The `user?: Pick<ChatMessageProps, 'actions'>` shape is the field-
 // nested Pick pattern that exercises the registry-collection path
-// (per `component_meta_registry_public_utility_route` and
-// `materialize_component_meta_registry_candidate_for_route`'s Pick
-// arm). The original ChatMessages.vue scenario from the failure
-// matrix uses exactly this nesting depth.
+// (the node-domain utility-route discovery,
+// `component_meta_registry_node_utility_route`). The original
+// ChatMessages.vue scenario from the failure matrix uses exactly this
+// nesting depth.
 const POS_CHAT_VUE: &str = r#"<script setup lang="ts">
 import type { ChatMessageProps } from './ChatMessageProps'
 defineProps<{
@@ -189,8 +189,8 @@ defineProps<{
 /// hanging (the original failure scenario hung the cold-resolution
 /// path) and the per-request capture-token counter
 /// `pick_member_route_callable_descent_count` MUST NOT exceed zero —
-/// every descent the registry-collection path attempts must be
-/// suppressed by `pick_member_route_should_skip_callable_descent`.
+/// registry publication is shallow, so no path descends into the
+/// package-backed callable parameter type.
 #[test]
 fn declared_session_meta_preserves_imported_pick_callback_package_param() {
     let project = build_hermetic_project(&[
@@ -260,13 +260,10 @@ defineProps<{
 "#;
 
 /// Issue #10 counterfixture — when the callback parameter type root
-/// is workspace-local (not package-backed), the suppression predicate
-/// (`pick_member_route_should_skip_callable_descent`) MUST NOT fire.
-/// If it falsely fired, the workspace-local `LocalDataShape` would be
-/// kept symbolic (a Ref) instead of being expanded into prop metadata.
-/// The discriminating assertion: the resolved `user` prop's surface,
-/// when descended into, contains `LocalDataShape`'s expanded shape (or
-/// at minimum a non-empty meaningful resolution), NOT a no-op fallback.
+/// is workspace-local (not package-backed), the workspace-local Pick
+/// surface must still resolve to real prop metadata. The
+/// discriminating assertion: the resolved `user` prop is present on
+/// the published surface, NOT a no-op fallback.
 #[test]
 fn pick_callback_workspace_local_param_still_descends() {
     let project = build_hermetic_project(&[
@@ -283,19 +280,13 @@ fn pick_callback_workspace_local_param_still_descends() {
     let meta = meta.expect("workspace-local Pick<...> resolution must complete");
 
     // Discriminating: the `user` prop must be present on the
-    // resolved meta. Without false-positive suppression, the
-    // ChatMessagePropsLocal Pick would resolve normally and produce
-    // a `user` prop on the surface. (A false positive would cause
-    // suppression of the workspace-local descent which is correct
-    // for the materialiser since LocalDataShape isn't a function
-    // parameter root resolving to package backed; descent runs the
-    // same way as without the predicate.)
+    // resolved meta — the workspace-local Pick resolves normally and
+    // produces a `user` prop on the published surface.
     let has_user_prop = meta.props.iter().any(|p| p.name == "user");
     assert!(
         has_user_prop,
         "workspace-local Pick<ChatMessagePropsLocal, 'actions'> must \
-         resolve to a non-empty `user` prop surface (the suppression \
-         predicate must not falsely fire for workspace-local types); \
+         resolve to a non-empty `user` prop surface; \
          got props {:?}",
         meta.props.iter().map(|p| &p.name).collect::<Vec<_>>(),
     );
@@ -690,7 +681,15 @@ fn chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier() {
     // TWO type arguments are (arg0) the OPEN `PropsBase<T>` source — a
     // bare `Ref`, NOT an expanded object — and (arg1) the requested key
     // union.
-    let pick_args = match &user.type_expr {
+    let user_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+        host,
+        canonical,
+        user.type_source
+            .present()
+            .expect("`user` prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("`user` prop's published source must shell-materialize"));
+    let pick_args = match &user_type {
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -822,10 +821,9 @@ fn chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier() {
         }
     }
     assert!(
-        !surface_mentions_uimessage_internals(&user.type_expr),
+        !surface_mentions_uimessage_internals(&user_type),
         "the shallow `user` carrier must not inline UIMessage internals (deep walk, including \
-         Ref type-arguments): {:?}",
-        user.type_expr
+         Ref type-arguments): {user_type:?}"
     );
 
     // The completed, non-suppressed result must WARM the final-result
@@ -1054,7 +1052,16 @@ fn closed_pick_sources_still_materialize_path_precisely() {
         .expect("`closedObj` prop must publish");
     // CLOSED finite object literal: must materialise to `{ bar }` only,
     // NOT stay a `Pick` carrier.
-    match &closed_obj.type_expr {
+    let closed_obj_type = crate::test_only::semantic_source_probe::demand_type_expr(
+        project.host(),
+        "/workspace/src/runtime/components/ClosedPick.vue",
+        closed_obj
+            .type_source
+            .present()
+            .expect("`closedObj` prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("`closedObj`'s published source must demand-materialize"));
+    match &closed_obj_type {
         TypeExpr::Object(object) => {
             let names: Vec<&str> = object
                 .properties
@@ -1093,7 +1100,16 @@ fn closed_pick_sources_still_materialize_path_precisely() {
         .iter()
         .find(|p| p.name == "closedSimpleInst")
         .expect("`closedSimpleInst` prop must publish");
-    match &closed_simple_inst.type_expr {
+    let closed_simple_inst_type = crate::test_only::semantic_source_probe::demand_type_expr(
+        project.host(),
+        "/workspace/src/runtime/components/ClosedPick.vue",
+        closed_simple_inst
+            .type_source
+            .present()
+            .expect("`closedSimpleInst` prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("`closedSimpleInst`'s published source must demand-materialize"));
+    match &closed_simple_inst_type {
         TypeExpr::Object(object) => {
             let names: Vec<&str> = object
                 .properties
@@ -1146,13 +1162,21 @@ fn closed_pick_sources_still_materialize_path_precisely() {
         .iter()
         .find(|p| p.name == "closedInst")
         .expect("`closedInst` prop must publish");
-    if let TypeExpr::Ref { name, .. } = &closed_inst.type_expr {
+    let closed_inst_type = crate::test_only::semantic_source_probe::demand_type_expr(
+        project.host(),
+        "/workspace/src/runtime/components/ClosedPick.vue",
+        closed_inst
+            .type_source
+            .present()
+            .expect("`closedInst` prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("`closedInst`'s published source must demand-materialize"));
+    if let TypeExpr::Ref { name, .. } = &closed_inst_type {
         assert_ne!(
             name.as_ref(),
             "Pick",
             "Pick<PropsBase<UIMessage[]>,'icon'> has a CONCRETE source — L1 must NOT keep it a \
-             `Pick` carrier (over-broad); got {:?}",
-            closed_inst.type_expr
+             `Pick` carrier (over-broad); got {closed_inst_type:?}"
         );
     }
 }

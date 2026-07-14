@@ -63,15 +63,27 @@ fn prop_names(
     names
 }
 
-/// Debug-rendered resolved `type_expr` of the prop named `name`.
+/// Debug-rendered resolved type of the prop named `name`,
+/// demand-materialized from its published source through the ONE
+/// shared dispatch.
 fn prop_type_repr(
+    host: &VerterHost,
+    owner: &str,
     meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
 ) -> Option<String> {
-    meta.props
-        .iter()
-        .find(|p| p.name == name)
-        .map(|p| format!("{:?}", p.type_expr))
+    meta.props.iter().find(|p| p.name == name).map(|p| {
+        let source = p
+            .type_source
+            .present()
+            .unwrap_or_else(|| panic!("prop `{name}` must publish a typed source"));
+        let ty =
+            verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
+                .unwrap_or_else(|| {
+                    panic!("prop `{name}`'s published source must demand-materialize")
+                });
+        format!("{ty:?}")
+    })
 }
 
 /// The `artifact_key.content_hash` the cached augmentation index holds for
@@ -304,8 +316,13 @@ fn augmenter_member_type_only_edit_invalidates_warm_consumer() {
         .host()
         .get_component_meta("/workspace/src/Comp.vue")
         .expect("cold component-meta returns Some");
-    let pre_type = prop_type_repr(&pre_meta, "fromAug")
-        .expect("augmenter member `fromAug` must surface as a prop pre-edit");
+    let pre_type = prop_type_repr(
+        project.host(),
+        "/workspace/src/Comp.vue",
+        &pre_meta,
+        "fromAug",
+    )
+    .expect("augmenter member `fromAug` must surface as a prop pre-edit");
     assert!(
         pre_type.contains("String"),
         "control: pre-edit augmenter member type is string: {pre_type}"
@@ -377,8 +394,13 @@ fn augmenter_member_type_only_edit_invalidates_warm_consumer() {
     // the SEMANTIC `MergedDecl` memo entry; dropping it lets that memo validate
     // falsely so the recompute returns the stale `string` — this assertion is
     // the one that fails when the self-root is removed.
-    let post_type = prop_type_repr(&post_meta, "fromAug")
-        .expect("augmenter member `fromAug` must still surface post-edit");
+    let post_type = prop_type_repr(
+        project.host(),
+        "/workspace/src/Comp.vue",
+        &post_meta,
+        "fromAug",
+    )
+    .expect("augmenter member `fromAug` must still surface post-edit");
     assert!(
         post_type.contains("Number"),
         "DISCRIMINATING: a body-only augmenter member-type edit \

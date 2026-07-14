@@ -13,14 +13,10 @@
 //!   it PLANS the Vue component's typed surface demands and NORMALIZES the
 //!   executor-resolved surfaces into per-kind DTO bundles. It holds NO
 //!   resolution.
-//! - [`runtime_ctor`] — `runtime_constructors_from_type_expr`, a pure
-//!   `TypeExpr` walk classifying runtime constructors (a genuine thin typed-IR
-//!   normalizer; zero ctx / dispatch).
 //! - [`parse_access`] — the `vue_parse()` carrier accessor + the carrier-token
 //!   receipt.
 
 pub mod adapter;
 pub mod parse_access;
-pub mod runtime_ctor;
 
 pub(crate) use parse_access::{receive_vue_carrier_token, vue_carrier_token_clone, vue_parse};

@@ -549,7 +549,6 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
       "relate_key_covers_relation_kind_policy_freshness_and_context",
       "relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit",
       "relate_same_nodes_different_inference_context_do_not_warm_hit",
-      "resolved_named_type_key_identity_is_env_scoped",
       "semantic_query_key_spec_table_equals_enum",
       "query_modes_are_presets_over_projection_demand_eval_policy",
       "skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode",
@@ -1666,7 +1665,7 @@ const MECHANISM_TO_KEYS = new Map([
   ["LedgerCoverageGate", []],
   [
     "QueryValueDomainFoundation",
-    ["ResolveDecl", "TypeOf", "NormalizeUnion", "NormalizeIntersection", "ResolvedNamedType"],
+    ["ResolveDecl", "TypeOf", "NormalizeUnion", "NormalizeIntersection"],
   ],
   ["WireSurfaceClosure", []],
   ["ExporterPublication", []],
@@ -2509,7 +2508,6 @@ const KEY_OWNING_BLOCK = new Map([
   ["TypeOf", "U2QueryValueDomain"],
   ["NormalizeUnion", "U2QueryValueDomain"],
   ["NormalizeIntersection", "U2QueryValueDomain"],
-  ["ResolvedNamedType", "U2QueryValueDomain"],
   // Generic substitution is a value-domain instantiation produced by
   // U2.QUERY_VALUE_DOMAIN's foundation, NOT a relation inference.
   ["Instantiate", "U2QueryValueDomain"],

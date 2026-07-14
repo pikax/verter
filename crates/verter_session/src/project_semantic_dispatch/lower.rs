@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
-use verter_type_expr::{ObjectMember, TypeExpr};
+use verter_type_expr::facts::{EnumPrimitiveDomain, EnumScalar, LeafTypeFact};
+use verter_type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 
 use super::{map_primitive_name, ProjectSemanticDispatch};
 use crate::resolver_core::bare_name_resolve::{
@@ -31,6 +32,55 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember,
     SurfaceView, TupleElement, ValueRootKey,
 };
+
+/// The scalar → projected-`TypeExpr` mapping for a stored enum member fact —
+/// the session-side reader of the closed [`EnumScalar`] vocabulary (a folded
+/// numeric scalar stores the CANONICAL `f64` display string, so the parse-back
+/// recovers the exact bits; a deferred member's domain maps to its degraded
+/// sound arm). Mirrors the `verter_semantic` fingerprint producer's
+/// `scalar_to_type_expr` mapping — the shared closed grammar, not a resolver.
+pub(crate) fn enum_scalar_type_expr(scalar: &EnumScalar) -> TypeExpr {
+    match scalar {
+        EnumScalar::String(value) => TypeExpr::string_literal(value.as_str()),
+        EnumScalar::Number(value) => TypeExpr::number_literal(
+            value
+                .parse::<f64>()
+                .expect("EnumScalar::Number stores the canonical f64 display string"),
+        ),
+        EnumScalar::Primitive(domain) => match domain {
+            EnumPrimitiveDomain::Number => TypeExpr::Primitive(PrimitiveName::Number),
+            EnumPrimitiveDomain::String => TypeExpr::Primitive(PrimitiveName::String),
+            EnumPrimitiveDomain::NumberOrString => TypeExpr::union(vec![
+                TypeExpr::Primitive(PrimitiveName::Number),
+                TypeExpr::Primitive(PrimitiveName::String),
+            ]),
+            EnumPrimitiveDomain::Unknown => TypeExpr::Primitive(PrimitiveName::Unknown),
+        },
+    }
+}
+
+/// The leaf-fact → `TypeExpr` projection for a directly-closed
+/// [`LeafTypeFact`] source (the trivially-closed inferred-annotation carrier)
+/// — a closed-grammar data projection, not a resolver: a bare `Ref` leaf
+/// stays a shallow reference the shared dispatch resolves on demand.
+pub(crate) fn leaf_type_fact_expr(leaf: &LeafTypeFact) -> TypeExpr {
+    match leaf {
+        LeafTypeFact::Primitive(name) => TypeExpr::Primitive(*name),
+        LeafTypeFact::StringLiteral(value) => TypeExpr::string_literal(value.as_str()),
+        LeafTypeFact::NumberLiteral(value) => TypeExpr::number_literal(
+            value
+                .parse::<f64>()
+                .expect("LeafTypeFact::NumberLiteral stores the canonical f64 display string"),
+        ),
+        LeafTypeFact::BooleanLiteral(value) => {
+            TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(*value))
+        }
+        LeafTypeFact::Ref(name) => TypeExpr::Ref {
+            name: Arc::from(name.as_str()),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        },
+    }
+}
 
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Project a dotted type-position reference `Enum.Member` to the named
@@ -86,15 +136,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         // A DECLARED member projects to its type — the folded literal for a
         // foldable member, the degraded sound primitive for a deferred one
-        // (`EnumMemberValue::projected_type`), never a miss. An UNDECLARED name
-        // is genuinely absent (`find` yields `None`) and stays a miss, so the
-        // member-existence gate is preserved.
+        // (the stored scalar via [`enum_scalar_type_expr`]), never a miss. An
+        // UNDECLARED name is genuinely absent (`find` yields `None`) and
+        // stays a miss, so the member-existence gate is preserved.
         prepared
             .enum_members
             .as_ref()?
+            .members
             .iter()
-            .find(|(name, _)| name == member)
-            .map(|(_, value)| value.projected_type().clone())
+            .find(|entry| entry.name == member)
+            .map(|entry| enum_scalar_type_expr(&entry.value))
     }
 
     /// Shallow-lower a [`TypeExpr`] under `env` (type-parameter bindings)

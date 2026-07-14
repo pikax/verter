@@ -240,8 +240,8 @@ fn consumed_bindings_key_is_uncacheable_for_override_bearing() {
 }
 
 /// #4 — Recursive-alias characterization of the PRE-EXISTING cycle-sentinel
-/// termination invariant (the `structural_materialize` `active` Navigate-node
-/// sentinel), NOT this change's walker memo: a recursive alias prop materializes
+/// termination invariant (the registry materialisation path's in-progress
+/// cycle sentinel), NOT this change's walker memo: a recursive alias prop materializes
 /// a bounded recursive/opaque leaf and the resolution returns WITHOUT stack
 /// growth. Reaching the assertions (rather than overflowing/hanging) is the
 /// no-stack-growth discriminator; the bounded published surface is the
@@ -325,7 +325,7 @@ defineProps<{ root: Tree }>()
 ///
 /// RED on the pre-fix tree: `enter_node` returns `Halt` on a budget trip
 /// WITHOUT folding, so the scope stays `Complete` and `is_partial()` is `false`.
-/// GREEN after: the trip folds via `mark_request_materialization_cache_suppress`.
+/// GREEN after: the trip folds via `mark_request_result_partial`.
 #[test]
 fn over_cap_walker_trip_folds_partial_into_cold_compute_scope() {
     let project = open_project();

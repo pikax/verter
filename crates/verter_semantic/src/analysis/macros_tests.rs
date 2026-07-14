@@ -1451,6 +1451,66 @@ fn define_model_required_option_marks_prop_required() {
     );
 }
 
+#[test]
+fn define_model_typed_extracts_default_value() {
+    let code = "const def = defineModel<boolean>('defaulted', { default: false })";
+    let macros = parse_macros(code);
+    let dm = &macros[0];
+    assert_eq!(dm.kind, AnalyzedMacroKind::DefineModel);
+    assert_eq!(dm.default_keys, vec!["defaulted".to_string()]);
+    assert_eq!(
+        dm.default_values.len(),
+        1,
+        "the authored `default` option must surface as a value entry"
+    );
+    assert_eq!(dm.default_values[0].key, "defaulted");
+    assert_eq!(
+        dm.default_values[0].value, "false",
+        "the default value carries the verbatim source text"
+    );
+}
+
+#[test]
+fn define_model_untyped_extracts_default_value() {
+    let code = "const flag = defineModel('flag', { default: false })";
+    let macros = parse_macros(code);
+    let dm = &macros[0];
+    assert_eq!(dm.kind, AnalyzedMacroKind::DefineModel);
+    assert_eq!(dm.default_keys, vec!["flag".to_string()]);
+    assert_eq!(dm.default_values.len(), 1);
+    assert_eq!(dm.default_values[0].key, "flag");
+    assert_eq!(dm.default_values[0].value, "false");
+}
+
+#[test]
+fn define_model_unnamed_default_keys_on_model_value() {
+    // Options object as the FIRST argument (no name string): the entry is
+    // keyed by the implicit `modelValue` name, and a string default keeps
+    // its verbatim source quoting.
+    let code = "const m = defineModel<string>({ default: 'hi' })";
+    let macros = parse_macros(code);
+    let dm = &macros[0];
+    assert_eq!(dm.default_keys, vec!["modelValue".to_string()]);
+    assert_eq!(dm.default_values.len(), 1);
+    assert_eq!(dm.default_values[0].key, "modelValue");
+    assert_eq!(dm.default_values[0].value, "'hi'");
+}
+
+#[test]
+fn define_model_without_default_extracts_no_default_value() {
+    let code = "const m = defineModel<boolean>('plain', { required: true })";
+    let macros = parse_macros(code);
+    let dm = &macros[0];
+    assert!(
+        dm.default_keys.is_empty(),
+        "no authored `default` option means no default key"
+    );
+    assert!(
+        dm.default_values.is_empty(),
+        "no authored `default` option means no default value entry"
+    );
+}
+
 // ── Type resolution tests ──
 
 #[test]
@@ -2214,94 +2274,87 @@ fn resolve_local_slots_intersection_keeps_resolvable_branches_when_utility_branc
 }
 
 // ---------------------------------------------------------------------------
-// W1.1 — discriminating regression tests for typed-form lowering at every
-// macros.rs producer site. Each test would FAIL on the pre-W1.1 tree (where
-// `*_expr` was unconditionally `None`) and PASS post-W1.1.
+// Discriminating producer tests for authored payload-POSITION emission at
+// every macros.rs producer site. Each test fails if the stamp pass stops
+// minting the content-free payload locator (or mints a wrong position); the
+// typed body itself is demanded through the shared dispatch, never stored.
 // ---------------------------------------------------------------------------
 
-mod w1_1_typed_form_regression {
+mod authored_payload_position_emission {
     use super::*;
-    use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
+    use verter_type_expr::locators::MacroPayloadPosition;
 
-    /// Site #1: `extract_fields_from_interface_body_like` — the inline prop
-    /// type literal lowers each property's type annotation directly.
+    /// Inline prop type-literal members each get a payload position at their
+    /// own field index, with the scope pairing intact.
     #[test]
-    fn inline_prop_type_literal_populates_type_expr_per_field() {
+    fn inline_prop_type_literal_stamps_per_field_payload_positions() {
         let alloc = Allocator::new();
         let macros = parse_and_extract(
             &alloc,
             "defineProps<{ count: number; label: 'a' | 'b' }>();",
         );
-        let dp = macros
+        let dp_index = macros
             .iter()
-            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .position(|m| m.kind == AnalyzedMacroKind::DefineProps)
             .expect("DefineProps macro");
-        let count = dp
-            .prop_fields
-            .iter()
-            .find(|f| f.name == "count")
-            .expect("count field");
-        assert!(
-            matches!(
-                count.type_expr,
-                Some(TypeExpr::Primitive(PrimitiveName::Number))
-            ),
-            "count.type_expr must be Primitive(Number); got {:?}",
-            count.type_expr
-        );
-        assert!(
-            count.type_expr_scope.is_some(),
-            "pairing invariant: type_expr_scope must be Some when type_expr is Some"
-        );
-        let label = dp
-            .prop_fields
-            .iter()
-            .find(|f| f.name == "label")
-            .expect("label field");
-        match &label.type_expr {
-            Some(TypeExpr::Union(arms)) => {
-                assert_eq!(arms.len(), 2, "union arity");
-                assert!(arms
-                    .iter()
-                    .all(|t| matches!(t, TypeExpr::Literal(LiteralValue::String(_)))));
-            }
-            other => panic!("label.type_expr expected Union of string literals; got {other:?}"),
+        let dp = &macros[dp_index];
+        for (field_index, name) in ["count", "label"].iter().enumerate() {
+            let field = dp
+                .prop_fields
+                .iter()
+                .find(|f| &f.name == name)
+                .unwrap_or_else(|| panic!("{name} field"));
+            let payload = field
+                .payload
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} must carry a payload position"));
+            assert_eq!(payload.macro_index as usize, dp_index);
+            assert_eq!(
+                payload.payload,
+                MacroPayloadPosition::Field {
+                    field_index: field_index as u32
+                },
+                "{name} stamps its own field index"
+            );
+            assert!(
+                field.type_expr_scope.is_some(),
+                "pairing invariant: scope must be Some when payload is Some"
+            );
         }
     }
 
-    /// Site #2: `try_extract_macro::parsed_type_argument` lowers the macro's
-    /// first type argument directly via `lower_ts_type` and stamps a paired
-    /// scope.
+    /// The macro's first type argument gets the TypeArgument payload position.
     #[test]
-    fn macro_parsed_type_argument_lowers_directly() {
+    fn macro_parsed_type_argument_stamps_type_argument_position() {
         let alloc = Allocator::new();
         let macros = parse_and_extract(&alloc, "defineProps<MyProps>();");
         let dp = macros
             .iter()
             .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
             .expect("DefineProps macro");
-        match dp.parsed_type_argument.as_deref() {
-            Some(TypeExpr::Ref {
-                name,
-                type_arguments,
-            }) => {
-                assert_eq!(name.as_ref(), "MyProps");
-                assert!(type_arguments.is_empty());
-            }
-            other => {
-                panic!("parsed_type_argument expected Ref {{ name: \"MyProps\" }}; got {other:?}")
-            }
-        }
+        let parsed = dp
+            .parsed_type_argument
+            .as_ref()
+            .expect("parsed_type_argument position");
+        assert_eq!(parsed.payload, MacroPayloadPosition::TypeArgument);
         assert!(
             dp.parsed_type_argument_scope.is_some(),
-            "pairing invariant: parsed_type_argument_scope must be Some when parsed_type_argument is Some"
+            "pairing invariant: parsed_type_argument_scope must be Some"
         );
+        // NEGATIVE: a macro with no type arguments emits no position.
+        let macros = parse_and_extract(&alloc, "defineProps({ a: String });");
+        let dp = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .expect("DefineProps macro");
+        assert_eq!(dp.parsed_type_argument, None);
+        assert_eq!(dp.parsed_type_argument_scope, None);
     }
 
-    /// Site #3: `extract_define_model_type` lowers the model type annotation
-    /// directly.
+    /// `defineModel<T>()` synthesizes a model prop field with an authored
+    /// payload position.
     #[test]
-    fn define_model_type_lowers_directly() {
+    fn define_model_stamps_model_prop_payload_position() {
         let alloc = Allocator::new();
         let macros = parse_and_extract(&alloc, "defineModel<string>();");
         let dm = macros
@@ -2310,27 +2363,23 @@ mod w1_1_typed_form_regression {
             .expect("DefineModel macro");
         let field = dm
             .prop_fields
-            .first()
-            .expect("DefineModel produces a single prop field");
-        assert!(
-            matches!(
-                field.type_expr,
-                Some(TypeExpr::Primitive(PrimitiveName::String))
-            ),
-            "defineModel type_expr should be Primitive(String); got {:?}",
-            field.type_expr
+            .iter()
+            .find(|f| f.name == "modelValue")
+            .expect("modelValue field");
+        let payload = field.payload.as_ref().expect("model payload position");
+        assert_eq!(
+            payload.payload,
+            MacroPayloadPosition::Field { field_index: 0 }
         );
         assert!(field.type_expr_scope.is_some(), "pairing invariant");
     }
 
-    /// Site #4: `extract_ts_as_type` returns `Option<TypeExpr>`. The
-    /// `as PropType<T>` form lowers the inner type — NOT a string. The
-    /// runtime-prop caller stores the typed form on the field.
+    /// A runtime prop's `X as PropType<T>` assertion records an authored
+    /// payload position; a bare constructor shorthand does not.
     #[test]
-    fn as_prop_type_lowers_to_type_expr() {
+    fn as_prop_type_assertion_stamps_payload_position() {
         let alloc = Allocator::new();
-        let source =
-            "defineProps({\n  foo: { type: Object as PropType<{ a: string; b: number }> }\n});\n";
+        let source = "defineProps({\n  foo: { type: Object as PropType<{ a: string; b: number }> },\n  bar: String\n});\n";
         let macros = parse_and_extract(&alloc, source);
         let dp = macros
             .iter()
@@ -2341,57 +2390,53 @@ mod w1_1_typed_form_regression {
             .iter()
             .find(|f| f.name == "foo")
             .expect("foo field");
-        match &foo.type_expr {
-            Some(TypeExpr::Object(obj)) => {
-                let names: Vec<String> = obj
-                    .properties
-                    .iter()
-                    .filter_map(|m| match m {
-                        verter_type_expr::ObjectMember::Property(p) => Some(p.name.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                assert!(names.contains(&"a".to_string()));
-                assert!(names.contains(&"b".to_string()));
-            }
-            other => {
-                panic!("as PropType<{{a,b}}> expected to lower to TypeExpr::Object; got {other:?}")
-            }
-        }
+        assert!(
+            foo.payload.is_some(),
+            "PropType<T> assertion must record an authored payload position"
+        );
         assert!(foo.type_expr_scope.is_some(), "pairing invariant");
+        let bar = dp
+            .prop_fields
+            .iter()
+            .find(|f| f.name == "bar")
+            .expect("bar field");
+        assert_eq!(
+            bar.payload, None,
+            "a bare constructor shorthand has no authored payload TYPE position"
+        );
+        assert_eq!(bar.type_expr_scope, None, "pairing invariant");
     }
 
-    /// Site #5: emit `payload_type` lowers via `lower_ts_type` for property
-    /// signatures. Tuple-form lowers to `TypeExpr::Tuple`.
+    /// Emit property signatures record per-field payload positions.
     #[test]
-    fn emit_property_signature_payload_lowers_to_typed_tuple() {
+    fn emit_property_signature_stamps_payload_position() {
         let alloc = Allocator::new();
         let macros = parse_and_extract(
             &alloc,
             "defineEmits<{ change: [id: number, label: string] }>();",
         );
-        let de = macros
+        let de_index = macros
             .iter()
-            .find(|m| m.kind == AnalyzedMacroKind::DefineEmits)
+            .position(|m| m.kind == AnalyzedMacroKind::DefineEmits)
             .expect("DefineEmits macro");
-        let change = de
+        let change = macros[de_index]
             .emit_fields
             .iter()
             .find(|f| f.name == "change")
             .expect("change emit");
-        match &change.payload_expr {
-            Some(TypeExpr::Tuple { elements, .. }) => {
-                assert_eq!(elements.len(), 2);
-            }
-            other => panic!("emit payload_expr expected Tuple; got {other:?}"),
-        }
+        let payload = change.payload.as_ref().expect("emit payload position");
+        assert_eq!(payload.macro_index as usize, de_index);
+        assert_eq!(
+            payload.payload,
+            MacroPayloadPosition::Field { field_index: 0 }
+        );
         assert!(change.payload_expr_scope.is_some(), "pairing invariant");
     }
 
-    /// Site #6: slot `return_expr` lowers via `lower_ts_type`. Property-
-    /// signature slots and method-signature slots both populate.
+    /// Slot returns record per-slot payload positions (property-signature and
+    /// method-signature slots both).
     #[test]
-    fn slot_return_type_lowers_to_type_expr() {
+    fn slot_return_stamps_payload_position() {
         let alloc = Allocator::new();
         let source = "defineSlots<{\n    default(props: { item: string }): boolean;\n    header: (props: { count: number }) => void;\n}>();\n";
         let macros = parse_and_extract(&alloc, source);
@@ -2399,45 +2444,31 @@ mod w1_1_typed_form_regression {
             .iter()
             .find(|m| m.kind == AnalyzedMacroKind::DefineSlots)
             .expect("DefineSlots macro");
-        let default_slot = ds
-            .slot_fields
-            .iter()
-            .find(|f| f.name == "default")
-            .expect("default slot");
-        assert!(
-            matches!(
-                default_slot.return_expr,
-                Some(TypeExpr::Primitive(PrimitiveName::Boolean))
-            ),
-            "default slot return_expr should be Primitive(Boolean); got {:?}",
-            default_slot.return_expr
-        );
-        assert!(
-            default_slot.return_expr_scope.is_some(),
-            "pairing invariant"
-        );
-
-        let header = ds
-            .slot_fields
-            .iter()
-            .find(|f| f.name == "header")
-            .expect("header slot");
-        assert!(
-            matches!(
-                header.return_expr,
-                Some(TypeExpr::Primitive(PrimitiveName::Void))
-            ),
-            "header slot return_expr should be Primitive(Void); got {:?}",
-            header.return_expr
-        );
+        for (slot_index, name) in ["default", "header"].iter().enumerate() {
+            let slot = ds
+                .slot_fields
+                .iter()
+                .find(|f| &f.name == name)
+                .unwrap_or_else(|| panic!("{name} slot"));
+            let payload = slot
+                .payload
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} return payload position"));
+            assert_eq!(
+                payload.payload,
+                MacroPayloadPosition::Field {
+                    field_index: slot_index as u32
+                }
+            );
+            assert!(slot.return_expr_scope.is_some(), "pairing invariant");
+        }
     }
 
-    /// Site #7 (analyzer-side): Pick AST shape recovery emits the symbolic
-    /// shape `IndexedAccess { object, index }` directly. The analyzer does
-    /// NOT resolve userland alias keys — only emits `Ref { name: alias }`
-    /// inside the IndexedAccess.
+    /// Slot BINDINGS carry display text only: a nested (slot, binding)
+    /// position is not addressable by the flat payload vocabulary, so the
+    /// typed binding channel is host-raised and no payload is fabricated.
     #[test]
-    fn pick_with_string_literal_keys_emits_indexed_access_with_literal_index() {
+    fn slot_bindings_carry_display_text_without_fabricated_positions() {
         let alloc = Allocator::new();
         let source =
             "defineSlots<{\n    row(props: Pick<RowApi, 'name' | 'value'>): void;\n}>();\n";
@@ -2452,35 +2483,28 @@ mod w1_1_typed_form_regression {
             .find(|f| f.name == "row")
             .expect("row slot");
         let mut binding_names: Vec<&str> = row.bindings.iter().map(|b| b.name.as_str()).collect();
-        binding_names.sort();
+        binding_names.sort_unstable();
         assert_eq!(binding_names, vec!["name", "value"]);
         for b in &row.bindings {
-            match &b.binding_expr {
-                Some(TypeExpr::IndexedAccess { object, index }) => {
-                    assert!(
-                        matches!(
-                            object.as_ref(),
-                            TypeExpr::Ref { name, .. } if name.as_ref() == "RowApi"
-                        ),
-                        "Pick object should be Ref {{ name: \"RowApi\" }}; got {object:?}"
-                    );
-                    assert!(
-                        matches!(index.as_ref(), TypeExpr::Literal(LiteralValue::String(_))),
-                        "Pick literal-key index should be Literal(String); got {index:?}"
-                    );
-                }
-                other => panic!("binding_expr should be IndexedAccess; got {other:?}"),
-            }
-            assert!(b.binding_expr_scope.is_some(), "pairing invariant");
+            assert_eq!(b.payload, None, "no fabricated nested position");
+            assert_eq!(b.binding_expr_scope, None, "pairing invariant");
+            assert!(
+                b.type_annotation
+                    .as_deref()
+                    .is_some_and(|t| t.contains("RowApi")),
+                "display text preserved, got {:?}",
+                b.type_annotation
+            );
         }
     }
 
-    /// Site #7 — userland alias key form: `Pick<RowApi, BindingKey>`. The
-    /// analyzer emits a SINGLE binding entry whose `binding_expr` is
-    /// `IndexedAccess { object, index: Ref }`. The projector / cross-file
-    /// resolver enumerates the literal-union members downstream.
+    /// Userland alias key form: `Pick<RowApi, BindingKey>`. The analyzer
+    /// emits exactly ONE binding named after the alias, carrying the
+    /// `Object[Key]` display text and NO fabricated payload — enumerating the
+    /// alias's literal-union members is downstream work through the
+    /// host-raised typed binding channel.
     #[test]
-    fn pick_with_userland_alias_key_emits_indexed_access_with_ref_index() {
+    fn pick_with_userland_alias_key_emits_one_display_text_binding() {
         let alloc = Allocator::new();
         let source = "defineSlots<{\n    row(props: Pick<RowApi, BindingKey>): void;\n}>();\n";
         let macros = parse_and_extract(&alloc, source);
@@ -2499,35 +2523,18 @@ mod w1_1_typed_form_regression {
             "analyzer emits one binding for the alias-key form (resolution is downstream)"
         );
         let b = &row.bindings[0];
-        match &b.binding_expr {
-            Some(TypeExpr::IndexedAccess { object, index }) => {
-                assert!(
-                    matches!(
-                        object.as_ref(),
-                        TypeExpr::Ref { name, .. } if name.as_ref() == "RowApi"
-                    ),
-                    "Pick object should be Ref {{ name: \"RowApi\" }}; got {object:?}"
-                );
-                match index.as_ref() {
-                    TypeExpr::Ref {
-                        name,
-                        type_arguments,
-                    } => {
-                        assert_eq!(name.as_ref(), "BindingKey");
-                        assert!(type_arguments.is_empty());
-                    }
-                    other => panic!(
-                        "alias-key index should be Ref {{ name: \"BindingKey\" }}; got {other:?}"
-                    ),
-                }
-            }
-            other => panic!("binding_expr should be IndexedAccess; got {other:?}"),
-        }
-        assert!(b.binding_expr_scope.is_some(), "pairing invariant");
+        assert_eq!(b.name, "BindingKey", "binding is named after the alias");
+        assert_eq!(
+            b.type_annotation.as_deref(),
+            Some("RowApi[BindingKey]"),
+            "display text preserves the authored object/key spelling"
+        );
+        assert_eq!(b.payload, None, "no fabricated nested position");
+        assert_eq!(b.binding_expr_scope, None, "pairing invariant");
     }
 
-    /// Pairing invariant: every `*_expr` field is paired with a populated
-    /// `*_expr_scope` (the §3.1 invariant) at every analyzer producer site.
+    /// The pairing invariant holds across every producer site: payload
+    /// presence and scope presence always agree.
     #[test]
     fn analyzer_pairing_invariant_holds_across_all_producer_sites() {
         let alloc = Allocator::new();
@@ -2537,38 +2544,36 @@ mod w1_1_typed_form_regression {
             assert_eq!(
                 m.parsed_type_argument.is_some(),
                 m.parsed_type_argument_scope.is_some(),
-                "AnalyzedMacro pairing invariant violated for kind {:?}",
-                m.kind
+                "macro pairing invariant"
             );
             for f in &m.prop_fields {
                 assert_eq!(
-                    f.type_expr.is_some(),
+                    f.payload.is_some(),
                     f.type_expr_scope.is_some(),
-                    "AnalyzedPropField pairing invariant violated for {}",
+                    "prop pairing invariant for {}",
                     f.name
                 );
             }
             for f in &m.emit_fields {
                 assert_eq!(
-                    f.payload_expr.is_some(),
+                    f.payload.is_some(),
                     f.payload_expr_scope.is_some(),
-                    "AnalyzedEmitField pairing invariant violated for {}",
+                    "emit pairing invariant for {}",
                     f.name
                 );
             }
             for f in &m.slot_fields {
                 assert_eq!(
-                    f.return_expr.is_some(),
+                    f.payload.is_some(),
                     f.return_expr_scope.is_some(),
-                    "AnalyzedSlotField pairing invariant violated for {}",
+                    "slot pairing invariant for {}",
                     f.name
                 );
                 for b in &f.bindings {
                     assert_eq!(
-                        b.binding_expr.is_some(),
+                        b.payload.is_some(),
                         b.binding_expr_scope.is_some(),
-                        "AnalyzedSlotFieldBinding pairing invariant violated for {} -> {}",
-                        f.name,
+                        "binding pairing invariant for {}",
                         b.name
                     );
                 }
@@ -2578,133 +2583,154 @@ mod w1_1_typed_form_regression {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// W2.5 — `build_expanded_type_expr` consumes the analyzer-populated
-// `AnalyzedPropField.type_expr` directly, never parsing
-// `type_annotation` text via `parse_jsdoc_tag_type_payload`, which loses the
-// producer's typed precision and replaces complex shapes with whatever the
-// text parser reconstructs. The discriminator is to construct a synthetic
-// prop field whose `type_expr` shape would NOT round-trip through text:
-// the resulting object property's `ty` must equal the typed input exactly.
-// ───────────────────────────────────────────────────────────────────────────
-#[test]
-fn build_expanded_type_expr_consumes_type_expr_field_directly_without_reparse() {
-    use crate::analysis::types::{AnalyzedPropField, TypeResolutionSource};
-    use std::sync::Arc;
-    use verter_type_expr::{
-        LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr, TypeExprScope,
-    };
+// Deref-side replay of authored per-field macro payloads
+// (`lower_macro_field_payload_at`): the mint stamps `Field { field_index }`
+// positions; the replay must re-derive the SAME field's authored typed IR
+// from the program — content-asserted per shape, absences typed.
+mod field_payload_deref_replay {
+    use super::*;
+    use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
-    // A shape the producer captured but the text annotation does NOT
-    // describe (the annotation says one thing, the typed form says
-    // another). Discriminating invariant: `build_expanded_type_expr`
-    // must consume the typed form directly without falling back to
-    // reparsing the text annotation; the typed shape survives end-to-end.
-    let typed_indexed_access = TypeExpr::IndexedAccess {
-        object: Arc::new(TypeExpr::Ref {
-            name: "ImportedAlias".into(),
-            type_arguments: Vec::<TypeExpr>::new().into(),
-        }),
-        index: Arc::new(TypeExpr::Literal(LiteralValue::String("a".to_string()))),
-    };
+    fn replay(source: &str, macro_index: u32, field_index: u32) -> MacroFieldPayloadLowering {
+        let alloc = Allocator::new();
+        let parser =
+            Parser::new(&alloc, source, SourceType::ts()).with_options(ParseOptions::default());
+        let result = parser.parse();
+        assert!(!result.panicked, "failed to parse: {source}");
+        lower_macro_field_payload_at(&result.program, source, macro_index, field_index)
+    }
 
-    let fields = vec![AnalyzedPropField {
-        name: "prop".to_string(),
-        is_optional: false,
-        span: verter_span::Span::default(),
-        type_annotation: Some("Garbage<<<unparseable".to_string()),
-        type_expr: Some(typed_indexed_access.clone()),
-        type_expr_scope: Some(TypeExprScope::new("test:fixture")),
-        description: None,
-        tags: Vec::new(),
-        resolution_source: TypeResolutionSource::Rust,
-        resolution_error: None,
-        declared_in_macro_type_arg: false,
-    }];
+    /// Inline type-literal prop annotation lowers to its authored typed IR.
+    #[test]
+    fn inline_prop_annotation_lowers_to_authored_ir() {
+        let lowering = replay("defineProps<{ count: number, label?: 'a' | 'b' }>();", 0, 1);
+        let MacroFieldPayloadLowering::Payload(expr) = lowering else {
+            panic!("label must lower to its authored payload, got {lowering:?}");
+        };
+        let TypeExpr::Union(arms) = &expr else {
+            panic!("label authors a literal union, got {expr:?}");
+        };
+        assert_eq!(
+            arms.as_ref(),
+            &[
+                TypeExpr::Literal(LiteralValue::String("a".to_string())),
+                TypeExpr::Literal(LiteralValue::String("b".to_string())),
+            ]
+        );
+    }
 
-    let result = super::build_expanded_type_expr(&fields);
+    /// A prop resolved from a LOCAL interface body (the analyzer's
+    /// local-registry resolution) replays through the same registry.
+    #[test]
+    fn local_interface_prop_annotation_replays_through_registry() {
+        let source = "interface Props { to?: RouteLocationRaw }\ndefineProps<Props>();";
+        let lowering = replay(source, 0, 0);
+        let MacroFieldPayloadLowering::Payload(expr) = lowering else {
+            panic!("to must lower to its authored payload, got {lowering:?}");
+        };
+        assert!(
+            matches!(&expr, TypeExpr::Ref { name, .. } if name.as_ref() == "RouteLocationRaw"),
+            "the AUTHORED spelling survives the replay, got {expr:?}"
+        );
+    }
 
-    let expected = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "prop".to_string(),
-            typed_indexed_access.clone(),
-            false,
-            false,
-        ))],
-    }));
+    /// An emit call signature's payload replays as the parameters-after-name
+    /// tuple (the same shape the analyzer displays).
+    #[test]
+    fn emit_call_signature_replays_payload_tuple() {
+        let source = "defineEmits<{ (e: 'change', id: number, label?: string): void }>();";
+        let lowering = replay(source, 0, 0);
+        let MacroFieldPayloadLowering::Payload(TypeExpr::Tuple { ref elements, .. }) = lowering
+        else {
+            panic!("call-signature emit must lower to a payload tuple, got {lowering:?}");
+        };
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0].label.as_deref(), Some("id"));
+        assert_eq!(elements[0].ty, TypeExpr::Primitive(PrimitiveName::Number));
+        assert!(!elements[0].optional);
+        assert_eq!(elements[1].label.as_deref(), Some("label"));
+        assert_eq!(elements[1].ty, TypeExpr::Primitive(PrimitiveName::String));
+        assert!(elements[1].optional);
+    }
 
-    assert_eq!(
-        result, expected,
-        "build_expanded_type_expr must read field.type_expr directly, not reparse type_annotation"
-    );
+    /// An emit property signature replays its member value type.
+    #[test]
+    fn emit_property_signature_replays_value_type() {
+        let lowering = replay("defineEmits<{ change: [id: number] }>();", 0, 0);
+        let MacroFieldPayloadLowering::Payload(TypeExpr::Tuple { ref elements, .. }) = lowering
+        else {
+            panic!("property-signature emit must lower to its authored tuple, got {lowering:?}");
+        };
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].label.as_deref(), Some("id"));
+        assert_eq!(elements[0].ty, TypeExpr::Primitive(PrimitiveName::Number));
+    }
 
-    // Negative discrimination: prove the typed shape differs from what
-    // the text parser would have produced. If they happened to coincide
-    // (e.g. via accidental annotation choice), the test would not be
-    // characterising anything.
-    let from_text =
-        crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("Garbage<<<unparseable", None);
-    assert_ne!(
-        from_text, typed_indexed_access,
-        "the annotation text MUST NOT round-trip back to the typed shape; \
-         otherwise the test does not discriminate the post-W2.5 typed read \
-         from the pre-W2.5 reparse"
-    );
+    /// Slot method-signature and property-signature RETURN positions replay.
+    #[test]
+    fn slot_return_positions_replay() {
+        let source = "defineSlots<{\n  default(props: { item: string }): boolean;\n  header: (props: { count: number }) => void;\n}>();";
+        let default_ret = replay(source, 0, 0);
+        assert!(
+            matches!(
+                &default_ret,
+                MacroFieldPayloadLowering::Payload(TypeExpr::Primitive(PrimitiveName::Boolean))
+            ),
+            "method-signature slot return must lower, got {default_ret:?}"
+        );
+        let header_ret = replay(source, 0, 1);
+        assert!(
+            matches!(
+                &header_ret,
+                MacroFieldPayloadLowering::Payload(TypeExpr::Primitive(PrimitiveName::Void))
+            ),
+            "property-signature slot return must lower, got {header_ret:?}"
+        );
+    }
 
-    // Sanity: when type_expr is None the function emits Unknown { raw }
-    // (no string parsing).
-    let fields_no_typed = vec![AnalyzedPropField {
-        name: "prop".to_string(),
-        is_optional: false,
-        span: verter_span::Span::default(),
-        type_annotation: Some("AnythingHere".to_string()),
-        type_expr: None,
-        type_expr_scope: None,
-        description: None,
-        tags: Vec::new(),
-        resolution_source: TypeResolutionSource::Rust,
-        resolution_error: None,
-        declared_in_macro_type_arg: false,
-    }];
-    let result_no_typed = super::build_expanded_type_expr(&fields_no_typed);
-    let expected_no_typed = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "prop".to_string(),
-            TypeExpr::Unknown {
-                raw: "AnythingHere".to_string(),
-            },
-            false,
-            false,
-        ))],
-    }));
-    assert_eq!(
-        result_no_typed, expected_no_typed,
-        "type_expr=None must yield Unknown {{ raw: type_annotation }} — never a parsed shape"
-    );
+    /// `defineModel<T>()` replays the macro type argument as the model
+    /// field's payload.
+    #[test]
+    fn define_model_replays_type_argument() {
+        let lowering = replay("defineModel<string>();", 0, 0);
+        assert!(
+            matches!(
+                &lowering,
+                MacroFieldPayloadLowering::Payload(TypeExpr::Primitive(PrimitiveName::String))
+            ),
+            "model payload must lower to the type argument, got {lowering:?}"
+        );
+    }
 
-    // Floor: type_annotation=None and type_expr=None yields Unknown { raw: \"unknown\" }.
-    let fields_none = vec![AnalyzedPropField {
-        name: "p".to_string(),
-        is_optional: false,
-        span: verter_span::Span::default(),
-        type_annotation: None,
-        type_expr: None,
-        type_expr_scope: None,
-        description: None,
-        tags: Vec::new(),
-        resolution_source: TypeResolutionSource::Rust,
-        resolution_error: None,
-        declared_in_macro_type_arg: false,
-    }];
-    let result_none = super::build_expanded_type_expr(&fields_none);
-    let expected_none = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-            "p".to_string(),
-            TypeExpr::Unknown {
-                raw: "unknown".to_string(),
-            },
-            false,
-            false,
-        ))],
-    }));
-    assert_eq!(result_none, expected_none);
+    /// A runtime `as PropType<T>` assertion replays the asserted argument.
+    #[test]
+    fn runtime_prop_type_assertion_replays_argument() {
+        let source =
+            "defineProps({ foo: { type: Object as PropType<{ a: string }> }, bar: String });";
+        let lowering = replay(source, 0, 0);
+        let MacroFieldPayloadLowering::Payload(TypeExpr::Object(obj)) = &lowering else {
+            panic!("PropType<T> assertion must lower T, got {lowering:?}");
+        };
+        assert_eq!(obj.properties.len(), 1);
+        // NEGATIVE: the bare-constructor field has no authored payload.
+        let bar = replay(source, 0, 1);
+        assert!(
+            matches!(bar, MacroFieldPayloadLowering::Unauthored),
+            "bare constructor shorthand is a typed absence, got {bar:?}"
+        );
+    }
+
+    /// Ordinal drift stays a typed miss — never a fabricated body.
+    #[test]
+    fn out_of_range_ordinals_are_typed_misses() {
+        let source = "defineProps<{ count: number }>();";
+        assert!(matches!(
+            replay(source, 0, 5),
+            MacroFieldPayloadLowering::NoField
+        ));
+        assert!(matches!(
+            replay(source, 3, 0),
+            MacroFieldPayloadLowering::NoField
+        ));
+    }
 }

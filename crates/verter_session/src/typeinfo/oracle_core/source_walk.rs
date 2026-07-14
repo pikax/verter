@@ -54,7 +54,7 @@
 
 use rustc_hash::FxHashSet;
 
-use verter_compiler::utils::oxc::script::raw_surface::SymbolSpace;
+use verter_parser::utils::oxc::script::raw_surface::SymbolSpace;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use crate::resolver_core::{ExportTarget, ResolverContext};

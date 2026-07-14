@@ -272,15 +272,6 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "no_new_type_surface_engine_path_production_file",
             "no_new_resolved_elements_production_file",
             "no_new_prepared_surface_projection_production_file",
-            // Static producer-bound unreachability pin: the footprint
-            // encoder's `SemanticNodeData::VueMacroElements` `Debug` arm can
-            // never receive a `TypeExpr::SyntheticSlotBinding` ordinal because
-            // the producer surface is fixed to (1) carrier-free
-            // parser/compiler, (2) a single `insert_resolved_named_type`
-            // caller, (3) a single `VueMacroElements` construction. Closes the
-            // (provably-unreachable-today) ordinal-leak class without an
-            // encoder change or a second-engine allowlist.
-            "vue_macro_elements_ordinal_leak_is_producer_unreachable",
         ],
     ),
     (
@@ -932,7 +923,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // Bans a hand-rolled `SemanticNodeId(<ident>.value_node)`
             // ordinal cache-key construction in production source — the
             // bounded residual SYNTACTIC supplement to the structural
-            // confinement (sealed `NonSyntheticTypeExpr` + module-private
+            // confinement (the shared shape-subject classifier + module-private
             // `ShapeSubject`/`ShapeCacheKey` construction + sealed
             // `MemberShapeNodeSubject`). The `value_node` arena ordinal is
             // value-side provenance, never a cache key. Lives at

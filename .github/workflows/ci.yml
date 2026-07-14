@@ -22,7 +22,6 @@ jobs:
       wasm: ${{ steps.filter.outputs.wasm }}
       playground: ${{ steps.filter.outputs.playground }}
       vscode: ${{ steps.filter.outputs.vscode }}
-      native: ${{ steps.filter.outputs.native }}
       dx: ${{ steps.filter.outputs.dx }}
       svelte_oracle: ${{ steps.filter.outputs.svelte_oracle }}
     steps:
@@ -101,24 +100,6 @@ jobs:
               - 'packages/vue-vscode/**'
               - 'packages/language-shared/**'
               - 'packages/typescript-plugin/**'
-              - '.github/workflows/ci.yml'
-            native:
-              - 'crates/verter_napi/**'
-              - 'crates/verter_compiler/**'
-              - 'crates/verter_parser/**'
-              - 'crates/verter_analysis/**'
-              - 'crates/verter_session/**'
-              - 'crates/verter_workspace/**'
-              - 'crates/verter_semantic/**'
-              - 'crates/verter_ffi/**'
-              - 'crates/verter_diagnostics/**'
-              - 'crates/verter_actions/**'
-              - 'crates/verter_span/**'
-              - 'packages/native/**'
-              - 'packages/unplugin/**'
-              - 'packages/typescript-plugin/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             dx:
               - 'crates/verter_dx_baseline/**'
@@ -516,7 +497,14 @@ jobs:
   native-test:
     name: Native Package Tests
     needs: detect-changes
-    if: needs.detect-changes.outputs.native == 'true'
+    # Dependency-closure gate: this job builds the real native binding and
+    # drives the @verter/component-meta native-eval suite against it, whose
+    # dependency closure spans every workspace crate plus the JS workspace
+    # deps it imports (type-ir, proto, types, language-shared, root
+    # manifests/lockfile/tsconfig). A hand-written path subset silently
+    # skips the job for closure members it forgot, so the gate is the broad
+    # rust/js change outputs: ANY Rust or JS change runs native-eval.
+    if: needs.detect-changes.outputs.rust == 'true' || needs.detect-changes.outputs.js == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -546,6 +534,14 @@ jobs:
         run: pnpm --filter @verter/typescript-plugin test
       - name: Test @verter/unplugin
         run: pnpm --filter @verter/unplugin test
+      # MANDATORY native-eval gate: the @verter/component-meta suite that
+      # exercises the REAL native binding (excluded from the package's
+      # artifact-independent default `test` script, so this is its only
+      # enforcement point). Sequenced after `build:native` (the .node
+      # artifact) and `build:ts` (the workspace deps it imports); a
+      # native-eval regression fails this required job.
+      - name: Native-eval @verter/component-meta
+        run: pnpm --filter @verter/component-meta test:native
 
   dx-harness-hermetic:
     name: DX Harness (raw-LSP hermetic)

@@ -60,8 +60,8 @@ use std::sync::Arc;
 use crate::semantic_query::{HashValue, ResolvedDeclSlotIdentity, SemanticSymbolSpace};
 use verter_type_expr::locators::{
     AugmentationBodyLocator, AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator,
-    LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition, SymbolBodyLocator,
-    TypeArgLocator, TypeBodyPathStep, TypeBodySlot, TypeParamBoundPosition,
+    JsdocTypedefBodyLocator, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
+    SymbolBodyLocator, TypeArgLocator, TypeBodyPathStep, TypeBodySlot, TypeParamBoundPosition,
 };
 
 mod sealed {
@@ -347,6 +347,7 @@ impl_r6_key_safe!(
     MacroPayloadLocator => w_macro_payload_locator,
     AuthoredAugmentationScope => w_authored_augmentation_scope,
     AugmentationBodyLocator => w_augmentation_body_locator,
+    JsdocTypedefBodyLocator => w_jsdoc_typedef_body_locator,
     AuthoredBodyLocator => w_authored_body_locator,
     SemanticSymbolSpace => w_semantic_symbol_space,
     SlotEnvIdentity => w_slot_env_identity,
@@ -381,8 +382,24 @@ fn w_type_body_path_step(step: &TypeBodyPathStep) {
     match step {
         TypeBodyPathStep::MergedContributor { ordinal }
         | TypeBodyPathStep::IntersectionArm { ordinal }
-        | TypeBodyPathStep::Member { ordinal } => key_safe(ordinal),
-        TypeBodyPathStep::MemberValue => {}
+        | TypeBodyPathStep::Member { ordinal }
+        | TypeBodyPathStep::FunctionParam { ordinal }
+        | TypeBodyPathStep::ValueSignature { ordinal }
+        | TypeBodyPathStep::UnionArm { ordinal }
+        | TypeBodyPathStep::TupleElement { ordinal } => key_safe(ordinal),
+        TypeBodyPathStep::MemberValue
+        | TypeBodyPathStep::FunctionReturn
+        | TypeBodyPathStep::MappedSource
+        | TypeBodyPathStep::MappedValue
+        | TypeBodyPathStep::MappedNameType
+        | TypeBodyPathStep::ConditionalCheck
+        | TypeBodyPathStep::ConditionalExtends
+        | TypeBodyPathStep::ConditionalTrue
+        | TypeBodyPathStep::ConditionalFalse
+        | TypeBodyPathStep::IndexedAccessObject
+        | TypeBodyPathStep::IndexedAccessIndex
+        | TypeBodyPathStep::IndexSignatureKey
+        | TypeBodyPathStep::IndexSignatureValue => {}
         TypeBodyPathStep::TypeParamBound { ordinal, position } => {
             key_safe(ordinal);
             key_safe(position);
@@ -420,7 +437,9 @@ fn w_type_arg_locator(l: &TypeArgLocator) {
 
 fn w_macro_payload_position(p: &MacroPayloadPosition) {
     match p {
-        MacroPayloadPosition::TypeArgument | MacroPayloadPosition::ObjectArgument => {}
+        MacroPayloadPosition::TypeArgument
+        | MacroPayloadPosition::ObjectArgument
+        | MacroPayloadPosition::TypeAnnotation => {}
         MacroPayloadPosition::Field { field_index } => key_safe(field_index),
     }
 }
@@ -458,8 +477,15 @@ fn w_authored_body_locator(l: &AuthoredBodyLocator) {
     match l {
         AuthoredBodyLocator::DeclBody(slot) => key_safe(slot),
         AuthoredBodyLocator::AugmentationBody(aug) => key_safe(aug),
+        AuthoredBodyLocator::JsdocTypedefBody(typedef) => key_safe(typedef),
         AuthoredBodyLocator::MacroPayload(payload) => key_safe(payload),
     }
+}
+
+fn w_jsdoc_typedef_body_locator(l: &JsdocTypedefBodyLocator) {
+    let JsdocTypedefBodyLocator { anchor, path } = l;
+    key_safe(anchor);
+    key_safe(path);
 }
 
 fn w_semantic_symbol_space(s: &SemanticSymbolSpace) {
@@ -586,6 +612,7 @@ impl LocatorLoweringKey {
         let anchor = match &locator {
             AuthoredBodyLocator::DeclBody(slot_locator) => &slot_locator.anchor,
             AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
+            AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
             AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
         };
         if anchor.canonical_id != slot.defining_canonical {

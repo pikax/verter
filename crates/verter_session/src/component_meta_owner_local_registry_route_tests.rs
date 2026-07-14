@@ -241,29 +241,14 @@ fn public_field_refs_keep_external_indexed_access_routes() {
     // First ensure the host has loaded the file (warms up the
     // import resolution path).
     let _ = host.get_component_meta("/workspace/src/Comp.vue");
-    // Then drive the predicate directly: build an indexed-access
-    // `Foo['variants']['variant']` `TypeExpr` and assert the owner-
-    // local rewrite predicate declines for the external (imported)
-    // `Foo` alias. The actual route emitted by the pipeline is
-    // preserved unchanged because the predicate declines.
+    // Then drive the predicate directly: the caller extracts the route
+    // root name (`Foo`, the root of `Foo['variants']['variant']`) in its
+    // own carrier domain and the owner-local rewrite predicate declines
+    // for the external (imported) `Foo` alias. The actual route emitted
+    // by the pipeline is preserved unchanged because the predicate
+    // declines.
     use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
     use crate::resolver_core::ResolverContext;
-    use std::sync::Arc;
-    use verter_type_expr::{LiteralValue, TypeExpr};
-    let foo_indexed = TypeExpr::IndexedAccess {
-        object: Arc::new(TypeExpr::IndexedAccess {
-            object: Arc::new(TypeExpr::Ref {
-                name: Arc::from("Foo"),
-                type_arguments: Arc::from([] as [TypeExpr; 0]),
-            }),
-            index: Arc::new(TypeExpr::Literal(LiteralValue::String(
-                "variants".to_string(),
-            ))),
-        }),
-        index: Arc::new(TypeExpr::Literal(LiteralValue::String(
-            "variant".to_string(),
-        ))),
-    };
     let analysis: crate::types::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
@@ -271,7 +256,7 @@ fn public_field_refs_keep_external_indexed_access_routes() {
         host.as_ref() as &dyn ResolverContext,
         "/workspace/src/Comp.vue",
         &analysis,
-        &foo_indexed,
+        Some("Foo"),
         None,
     );
     assert!(
@@ -337,29 +322,14 @@ fn owner_local_alias_of_alias_external_import_declines() {
 
     let _ = host.get_component_meta("/workspace/src/Comp.vue");
 
-    // Drive the public predicate directly with an indexed-access
-    // `Foo['variants']['variant']` carrier and assert the rewrite
+    // Drive the public predicate directly with the route root name
+    // (`Foo`, the root of `Foo['variants']['variant']`, extracted in
+    // the caller's own carrier domain) and assert the rewrite
     // declines. For an alias-of-alias chain reached via `import
     // type`, the predicate must NOT rewrite to Whole — the imported
     // root preserves its existing routing.
     use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
     use crate::resolver_core::ResolverContext;
-    use std::sync::Arc;
-    use verter_type_expr::{LiteralValue, TypeExpr};
-    let foo_indexed = TypeExpr::IndexedAccess {
-        object: Arc::new(TypeExpr::IndexedAccess {
-            object: Arc::new(TypeExpr::Ref {
-                name: Arc::from("Foo"),
-                type_arguments: Arc::from([] as [TypeExpr; 0]),
-            }),
-            index: Arc::new(TypeExpr::Literal(LiteralValue::String(
-                "variants".to_string(),
-            ))),
-        }),
-        index: Arc::new(TypeExpr::Literal(LiteralValue::String(
-            "variant".to_string(),
-        ))),
-    };
     let analysis: crate::types::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
@@ -367,7 +337,7 @@ fn owner_local_alias_of_alias_external_import_declines() {
         host.as_ref() as &dyn ResolverContext,
         "/workspace/src/Comp.vue",
         &analysis,
-        &foo_indexed,
+        Some("Foo"),
         None,
     );
     assert!(
@@ -401,14 +371,9 @@ fn owner_local_generic_typeparameter_body_declines() {
 
     use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
     use crate::resolver_core::ResolverContext;
-    use verter_type_expr::{TypeExpr, TypeParam};
-    // A bare type parameter — the predicate must decline since
-    // there is no declaration to enqueue.
-    let bare_param = TypeExpr::TypeParameter(TypeParam {
-        name: "T".to_string(),
-        constraint: None,
-        default: None,
-    });
+    // A bare type parameter's name (`T`) — the predicate must decline
+    // since there is no declaration to enqueue (no owner-local alias
+    // named `T` resolves to a `ComponentConfig` body).
     let analysis: crate::types::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
@@ -416,7 +381,7 @@ fn owner_local_generic_typeparameter_body_declines() {
         host.as_ref() as &dyn ResolverContext,
         "/workspace/src/Comp.vue",
         &analysis,
-        &bare_param,
+        Some("T"),
         None,
     );
     assert!(

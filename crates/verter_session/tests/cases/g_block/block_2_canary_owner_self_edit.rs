@@ -38,17 +38,24 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 use super::canary_harness::{compile_main, prime_compile, standalone_host, upsert};
 
 /// The named prop's evaluated `TypeExpr` from a `get_component_meta`
-/// result.
-fn prop_type<'a>(
-    meta: &'a verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+/// result, demand-materialized from its published source through the
+/// ONE shared dispatch.
+fn prop_type(
+    host: &verter_session::VerterHost,
+    owner: &str,
+    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
-) -> &'a TypeExpr {
-    &meta
+) -> TypeExpr {
+    let source = meta
         .props
         .iter()
         .find(|p| p.name == name)
         .unwrap_or_else(|| panic!("missing prop `{name}`"))
-        .type_expr
+        .type_source
+        .present()
+        .unwrap_or_else(|| panic!("prop `{name}` must publish a typed source"));
+    verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
+        .unwrap_or_else(|| panic!("prop `{name}`'s published source must demand-materialize"))
 }
 
 /// Sorted slot-binding names for the named slot of a
@@ -104,13 +111,10 @@ fn owner_self_edit_to_local_prop_type_recomputes_component_meta() {
     let pre = host
         .get_component_meta("/src/Comp.vue")
         .expect("cold get_component_meta must resolve");
+    let value_pre = prop_type(&host, "/src/Comp.vue", &pre, "value");
     assert!(
-        matches!(
-            prop_type(&pre, "value"),
-            TypeExpr::Primitive(PrimitiveName::Number)
-        ),
-        "precondition: cold `value` prop must be `number` — got {:?}",
-        prop_type(&pre, "value"),
+        matches!(value_pre, TypeExpr::Primitive(PrimitiveName::Number)),
+        "precondition: cold `value` prop must be `number` — got {value_pre:?}",
     );
 
     // Owner-self edit: re-upsert `Comp.vue` with `LocalProps.value`
@@ -129,24 +133,17 @@ fn owner_self_edit_to_local_prop_type_recomputes_component_meta() {
     let post = host
         .get_component_meta("/src/Comp.vue")
         .expect("post-edit get_component_meta must resolve");
+    let value_post = prop_type(&host, "/src/Comp.vue", &post, "value");
     assert!(
-        !matches!(
-            prop_type(&post, "value"),
-            TypeExpr::Primitive(PrimitiveName::Number)
-        ),
+        !matches!(value_post, TypeExpr::Primitive(PrimitiveName::Number)),
         "the recomputed `value` prop must NOT be the stale `number` type — \
          a surviving query-identity entry for (/src/Comp.vue, LocalProps) \
-         without a self-version root would still report `number`. Got {:?}",
-        prop_type(&post, "value"),
+         without a self-version root would still report `number`. Got {value_post:?}",
     );
     assert!(
-        matches!(
-            prop_type(&post, "value"),
-            TypeExpr::Primitive(PrimitiveName::String)
-        ),
+        matches!(value_post, TypeExpr::Primitive(PrimitiveName::String)),
         "the recomputed `value` prop MUST carry the owner-self-edited `string` \
-         type — got {:?}",
-        prop_type(&post, "value"),
+         type — got {value_post:?}",
     );
 }
 
@@ -375,12 +372,20 @@ fn owner_self_edit_to_local_prop_type_recomputes_evaluate_types() {
     let pre = host
         .evaluate_types("/src/Comp.vue")
         .expect("cold evaluate_types must resolve the owner");
-    let pre_flag = &pre
+    let pre_flag_source = pre
         .props
         .iter()
         .find(|f| f.name == "flag")
         .expect("cold evaluated props must include `flag`")
-        .r#type;
+        .r#type
+        .present()
+        .expect("present source");
+    let pre_flag = verter_session::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/src/Comp.vue",
+        pre_flag_source,
+    )
+    .unwrap_or_else(|| panic!("evaluated `flag`'s published source must demand-materialize"));
     assert!(
         matches!(pre_flag, TypeExpr::Primitive(PrimitiveName::Boolean)),
         "precondition: cold evaluated `flag` must be `boolean` — got {pre_flag:?}",
@@ -401,12 +406,20 @@ fn owner_self_edit_to_local_prop_type_recomputes_evaluate_types() {
     let post = host
         .evaluate_types("/src/Comp.vue")
         .expect("post-edit evaluate_types must resolve the owner");
-    let post_flag = &post
+    let post_flag_source = post
         .props
         .iter()
         .find(|f| f.name == "flag")
         .expect("post-edit evaluated props must include `flag`")
-        .r#type;
+        .r#type
+        .present()
+        .expect("present source");
+    let post_flag = verter_session::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/src/Comp.vue",
+        post_flag_source,
+    )
+    .unwrap_or_else(|| panic!("evaluated `flag`'s published source must demand-materialize"));
     assert!(
         !matches!(post_flag, TypeExpr::Primitive(PrimitiveName::Boolean)),
         "the recomputed evaluated `flag` must NOT be the stale `boolean` type — \

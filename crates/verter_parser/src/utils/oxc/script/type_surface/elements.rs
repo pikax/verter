@@ -10,97 +10,8 @@
 
 use oxc_ast::ast::*;
 use oxc_span::GetSpan;
-use std::sync::Arc;
-use verter_type_expr::{FunctionExpr, FunctionParam, FunctionSpans, PrimitiveName, TypeExpr};
-use verter_type_expr_oxc::lower_ts_type;
 
 use crate::common::Span;
-
-/// Lower an OXC `TSType<'_>` into a `TypeExpr`, decoding `source` as UTF-8.
-/// `source` typically comes from `&[u8]` resolver inputs; on invalid UTF-8 we
-/// fall back to an empty slice — `lower_ts_type` only consults `source` for
-/// raw-text fallback / literal extraction, so an empty slice degrades to
-/// `TypeExpr::Unknown { raw: String::new() }` for the affected sub-nodes.
-#[inline]
-pub(super) fn lower_ts_type_from_bytes(ts_type: &TSType<'_>, source: &[u8]) -> TypeExpr {
-    let source_str = std::str::from_utf8(source).unwrap_or("");
-    lower_ts_type(ts_type, source_str)
-}
-
-/// Lower a call signature's emit payload into a `TypeExpr::Function`.
-///
-/// The first parameter (`e: 'eventName'`) is the event-name selector and is
-/// dropped — consumers reading `type_expr` want the payload shape, which is
-/// the parameter list AFTER the event name plus any rest parameter. The
-/// return type is the call signature's declared return type, defaulting to
-/// `void` when none is present.
-pub(super) fn lower_call_signature_payload(
-    call_sig: &TSCallSignatureDeclaration<'_>,
-    source: &[u8],
-) -> TypeExpr {
-    let source_str = std::str::from_utf8(source).unwrap_or("");
-    let mut parameters: Vec<FunctionParam> = Vec::new();
-    for param in call_sig.params.items.iter().skip(1) {
-        let name = if let BindingPattern::BindingIdentifier(id) = &param.pattern {
-            Some(id.name.to_string())
-        } else {
-            None
-        };
-        let has_ts_annotation = param.type_annotation.is_some();
-        let ty = param
-            .type_annotation
-            .as_ref()
-            .map(|ta| lower_ts_type(&ta.type_annotation, source_str))
-            .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-        parameters.push(FunctionParam::with_span(
-            name,
-            ty,
-            param.optional,
-            false,
-            Some(param.span.into()),
-            has_ts_annotation,
-        ));
-    }
-    if let Some(rest) = &call_sig.params.rest {
-        let name = if let BindingPattern::BindingIdentifier(id) = &rest.rest.argument {
-            Some(id.name.to_string())
-        } else {
-            None
-        };
-        let has_ts_annotation = rest.type_annotation.is_some();
-        let ty = rest
-            .type_annotation
-            .as_ref()
-            .map(|ta| lower_ts_type(&ta.type_annotation, source_str))
-            .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-        parameters.push(FunctionParam::with_span(
-            name,
-            ty,
-            false,
-            true,
-            Some(rest.span.into()),
-            has_ts_annotation,
-        ));
-    }
-    let return_type = call_sig
-        .return_type
-        .as_ref()
-        .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source_str)))
-        .unwrap_or_else(|| Arc::new(TypeExpr::Primitive(PrimitiveName::Void)));
-    let fn_spans = FunctionSpans {
-        signature: Some(call_sig.span.into()),
-        return_type: call_sig
-            .return_type
-            .as_ref()
-            .map(|rt| rt.type_annotation.span().into()),
-    };
-    TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
-        parameters,
-        Some(return_type),
-        Vec::new(),
-        fn_spans,
-    )))
-}
 
 use super::{
     get_type_reference_name, infer_runtime_type, resolve_type_elements_with_ctx_ref,
@@ -192,10 +103,6 @@ pub(super) fn resolve_mapped_type_with_ctx<'ctx, 'a: 'ctx>(
         .as_ref()
         .map(|ann| infer_runtime_type(ann))
         .unwrap_or_else(|| vec![RuntimeType::Unknown]);
-    let type_expr = mapped
-        .type_annotation
-        .as_ref()
-        .map(|ann| lower_ts_type_from_bytes(ann, ctx.source));
     let optional_override = mapped_optional_override(mapped.optional);
 
     for key in keys {
@@ -213,8 +120,6 @@ pub(super) fn resolve_mapped_type_with_ctx<'ctx, 'a: 'ctx>(
             type_text: type_text.clone(),
             map_local: true,
             span_is_absolute: base_offset != 0,
-            type_expr: type_expr.clone(),
-            type_expr_scope: None,
             // Mapped-type members are own-body members of the mapped
             // construction currently being resolved — they reflect the
             // caller's macro-T own-body / heritage context unchanged.
@@ -333,7 +238,6 @@ pub(super) fn resolve_property_as_emit(
                 ann.type_annotation.span().start,
                 ann.type_annotation.span().end,
             )?;
-            let type_expr = lower_ts_type_from_bytes(&ann.type_annotation, source);
             return Some(ResolvedNamedCallSignature {
                 span: Span {
                     start: prop.span.start + base_offset,
@@ -344,8 +248,6 @@ pub(super) fn resolve_property_as_emit(
                 signature: ResolvedCallPayloadForm::Tuple { tuple_text },
                 map_local: true,
                 span_is_absolute: base_offset != 0,
-                type_expr: Some(type_expr),
-                type_expr_scope: None,
             });
         }
     }
@@ -387,11 +289,6 @@ pub(super) fn resolve_call_signature_as_emit(
                 }
                 params_text.push_str(&slice_source_span(source, rest.span.start, rest.span.end)?);
             }
-            // Lower the call signature into a `TypeExpr::Function` whose
-            // `parameters` are the post-event-name params (the actual emit
-            // payload). The first param (e: 'eventName') is the event-name
-            // selector; consumers reading `type_expr` want the payload shape.
-            let type_expr = lower_call_signature_payload(call_sig, source);
             return Some(ResolvedNamedCallSignature {
                 span: Span {
                     start: call_sig.span.start + base_offset,
@@ -405,8 +302,6 @@ pub(super) fn resolve_call_signature_as_emit(
                 signature: ResolvedCallPayloadForm::Call { params_text },
                 map_local: true,
                 span_is_absolute: base_offset != 0,
-                type_expr: Some(type_expr),
-                type_expr_scope: None,
             });
         }
     }
@@ -550,10 +445,6 @@ pub(super) fn resolve_property_signature(
         .type_annotation
         .as_ref()
         .and_then(|ann| span_text(source, ann.type_annotation.span().into()));
-    let type_expr = prop
-        .type_annotation
-        .as_ref()
-        .map(|ann| lower_ts_type_from_bytes(&ann.type_annotation, source));
 
     Some(ResolvedProp {
         span,
@@ -566,8 +457,6 @@ pub(super) fn resolve_property_signature(
         type_text,
         map_local: true,
         span_is_absolute: base_offset != 0,
-        type_expr,
-        type_expr_scope: None,
         declared_in_macro_type_arg: from_root_body,
     })
 }
@@ -591,7 +480,6 @@ pub(super) fn resolve_method_signature(
         end: method.span.end + base_offset,
     };
 
-    let type_expr = lower_method_signature(method, source);
     Some(ResolvedProp {
         span,
         key,
@@ -610,109 +498,8 @@ pub(super) fn resolve_method_signature(
         ),
         map_local: true,
         span_is_absolute: base_offset != 0,
-        type_expr: Some(type_expr),
-        type_expr_scope: None,
         declared_in_macro_type_arg: from_root_body,
     })
-}
-
-/// Lower a method signature into a `TypeExpr::Function` representing the
-/// method's call shape: `(...params) => return_type`. Used for property
-/// surfaces declared as method signatures (`onClick(): void`).
-pub(super) fn lower_method_signature(method: &TSMethodSignature<'_>, source: &[u8]) -> TypeExpr {
-    let source_str = std::str::from_utf8(source).unwrap_or("");
-    lower_function_shape(
-        &method.params,
-        method.return_type.as_deref().map(|rt| &rt.type_annotation),
-        source_str,
-    )
-}
-
-/// Lower a class method's shape (used by `resolve_class_method_definition`
-/// for class declarations: `class C { onClick(): void {} }`).
-pub(super) fn lower_method_signature_for_class(
-    method: &MethodDefinition<'_>,
-    source: &[u8],
-) -> TypeExpr {
-    let source_str = std::str::from_utf8(source).unwrap_or("");
-    lower_function_shape(
-        &method.value.params,
-        method
-            .value
-            .return_type
-            .as_deref()
-            .map(|rt| &rt.type_annotation),
-        source_str,
-    )
-}
-
-/// Build a `TypeExpr::Function` from a `FormalParameters` and an optional
-/// return-type annotation. Shared by emit call signatures, type-literal
-/// method signatures, and class method definitions.
-fn lower_function_shape(
-    params: &FormalParameters<'_>,
-    return_type: Option<&TSType<'_>>,
-    source_str: &str,
-) -> TypeExpr {
-    let mut parameters: Vec<FunctionParam> = Vec::new();
-    for param in params.items.iter() {
-        let name = if let BindingPattern::BindingIdentifier(id) = &param.pattern {
-            Some(id.name.to_string())
-        } else {
-            None
-        };
-        let has_ts_annotation = param.type_annotation.is_some();
-        let ty = param
-            .type_annotation
-            .as_ref()
-            .map(|ta| lower_ts_type(&ta.type_annotation, source_str))
-            .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-        parameters.push(FunctionParam::with_span(
-            name,
-            ty,
-            param.optional,
-            false,
-            Some(param.span.into()),
-            has_ts_annotation,
-        ));
-    }
-    if let Some(rest) = &params.rest {
-        let name = if let BindingPattern::BindingIdentifier(id) = &rest.rest.argument {
-            Some(id.name.to_string())
-        } else {
-            None
-        };
-        let has_ts_annotation = rest.type_annotation.is_some();
-        let ty = rest
-            .type_annotation
-            .as_ref()
-            .map(|ta| lower_ts_type(&ta.type_annotation, source_str))
-            .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-        parameters.push(FunctionParam::with_span(
-            name,
-            ty,
-            false,
-            true,
-            Some(rest.span.into()),
-            has_ts_annotation,
-        ));
-    }
-    let return_type_expr = return_type
-        .map(|rt| Arc::new(lower_ts_type(rt, source_str)))
-        .unwrap_or_else(|| Arc::new(TypeExpr::Primitive(PrimitiveName::Void)));
-    // No enclosing signature node is available here (parameters and return
-    // type arrive separately), so `signature` stays `None`; the return-type
-    // span is recovered from the supplied return-type node.
-    let fn_spans = FunctionSpans {
-        signature: None,
-        return_type: return_type.map(|rt| rt.span().into()),
-    };
-    TypeExpr::Function(Arc::new(FunctionExpr::with_spans(
-        parameters,
-        Some(return_type_expr),
-        Vec::new(),
-        fn_spans,
-    )))
 }
 
 pub(super) fn callable_signature_text<'a>(

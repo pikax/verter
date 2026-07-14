@@ -32,10 +32,8 @@ use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
-    )
+) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
 }
 
 fn workspace_root() -> PathBuf {
@@ -60,16 +58,17 @@ fn fixture(name: &str) -> String {
 }
 
 fn build_indexed_with_source(raw: &str) -> Arc<IndexedReady> {
-    // Build the shallow inventory through the REAL binder so the typed
-    // augmentation inventory (the single source of truth for augmentation
-    // facts) is populated, exactly as production does.
-    let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(raw);
-    let shallow = ShallowFileState::from_analysis([0u8; 16], empty_external(), Some(&env));
+    // Build the shallow inventory through the REAL service-backed
+    // construction (parse → header index → lazy decl-body memo) so the
+    // typed augmentation inventory (the single source of truth for
+    // augmentation facts) is populated, exactly as production does.
+    let shallow =
+        ShallowFileState::service_backed_for_test_with_hash("/aug-fixture.ts", raw, [0u8; 16]);
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
-        Arc::new(shallow),
+        shallow,
         Arc::from(raw),
-        Arc::from(""),
+        Arc::from(raw),
         empty_external(),
     ))
 }

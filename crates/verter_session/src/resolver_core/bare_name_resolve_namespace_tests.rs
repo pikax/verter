@@ -10,25 +10,12 @@
 
 use std::sync::Arc;
 
-use verter_compiler::utils::oxc::script::type_surface::{
-    analyze_external_type_source, AnalyzedExternalTypeSource,
-};
-use verter_semantic::analysis::type_eval_build::parse_and_build_env;
-use verter_semantic::analysis::Hash16;
-
 use super::resolve_namespace_sibling_in_scope;
 use crate::resolver_core::ShallowFileState;
 use crate::semantic_query::{LocalScopeOrigin, LocalScopePayload};
 
-fn make_analysis(source: &str) -> Arc<AnalyzedExternalTypeSource> {
-    let alloc = oxc_allocator::Allocator::new();
-    Arc::new(analyze_external_type_source(source, &alloc))
-}
-
-fn state_from(source: &str) -> ShallowFileState {
-    let analysis = make_analysis(source);
-    let env = parse_and_build_env(source);
-    ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env))
+fn state_from(source: &str) -> Arc<ShallowFileState> {
+    ShallowFileState::service_backed_for_test(source)
 }
 
 fn namespace(prefix: &str, origin: LocalScopeOrigin) -> LocalScopePayload {

@@ -30,7 +30,7 @@ fn read_projectors_mod() -> String {
 
 /// Read the terminal `output_sink` sink module. The boundary-consuming
 /// publication functions (`member_shape_peek_or_compute`,
-/// `reduce_field_type_expr_with_mode`, `surface_member_to_expanded_field`,
+/// `reduce_field_value_node`, `surface_member_to_expanded_field`,
 /// `project_model`, `reduce_published_field_types`) live HERE — the only module
 /// that touches the projectors reverse-materialization boundary — NOT in the
 /// parent `projectors/mod.rs`. The peek primitive (`peek_member_shape_known` /
@@ -87,60 +87,68 @@ fn peek_member_shape_known_exists_with_request_bound_assert() {
 }
 
 // ---------------------------------------------------------------------------
-// Guard 2: `reduce_field_type_expr` consults peek BEFORE the route gate
-//          for the structural short-circuits (Leaf / BareCarrier). The
-//          peek call site MUST precede the route gate so primitive /
-//          bare-alias inputs return without a workspace lookup. Cached
-//          short-circuits run after the route gate (see Guard 2b).
+// Guard 2: `member_shape_peek_or_compute` peeks the `ShapeCacheDb` per-member
+//          slot BEFORE any node-domain gate. The warm path must pay zero
+//          raise/gate cost — moving the peek after the package-backed gate
+//          would re-run the workspace-touching gate on every warm hit.
+//          (Successor of the retired `reduce_field_type_expr_with_mode`
+//          TypeExpr-peek ordering guard: the per-field reducer was reworked
+//          onto node-domain sources and the sink-level peek is now the
+//          `ShapeCacheDb` slot peek.)
 // ---------------------------------------------------------------------------
 #[test]
-fn reduce_field_type_expr_peeks_before_route_gate() {
-    // `reduce_field_type_expr_with_mode` is now SINK-PRIVATE in the terminal
-    // `output_sink` module (the only module that unwraps a sealed carrier). The
-    // peek-before-gate ordering invariant lives with the body there.
+fn member_shape_peek_or_compute_peeks_cache_before_node_gates() {
     let content = read_output_sink();
-    let body = fn_body_slice(&content, "fn reduce_field_type_expr_with_mode(");
+    let body = fn_body_slice(&content, "fn member_shape_peek_or_compute(");
 
     let peek_idx = body
-        .find("peek_member_shape_known(")
-        .expect("guard: `reduce_field_type_expr_with_mode` MUST invoke `peek_member_shape_known`.");
+        .find("cache.peek(&key")
+        .expect("guard: `member_shape_peek_or_compute` MUST peek the `ShapeCacheDb` slot.");
     let route_gate_idx = body
-        .find("type_expr_has_package_backed_object_like_root(")
-        .expect("guard: route gate must remain present in `reduce_field_type_expr_with_mode`.");
+        .find("node_package_backed_object_like_root_with_fence(")
+        .expect(
+            "guard: the node-domain package-backed gate must remain present in \
+             `member_shape_peek_or_compute`.",
+        );
     assert!(
         peek_idx < route_gate_idx,
-        "guard: `peek_member_shape_known` MUST be invoked BEFORE \
-         `type_expr_has_package_backed_object_like_root` in \
-         `reduce_field_type_expr_with_mode` so primitive / bare-alias \
-         inputs (`PeekedShape::Leaf` / `PeekedShape::BareCarrier`) \
-         short-circuit without the workspace-rebuilding route lookup.",
+        "guard: the `ShapeCacheDb` peek MUST run BEFORE \
+         `node_package_backed_object_like_root_with_fence` in \
+         `member_shape_peek_or_compute` so warm per-member hits return in \
+         peek time without paying the node-gate cost.",
     );
 }
 
 // ---------------------------------------------------------------------------
-// Guard 2b: `reduce_field_type_expr` ALSO consults the cached-shape
-//          variant of the peek AFTER the package-backed gate clears.
-//          The cached short-circuit must follow the gate so a warm
-//          `MaterializeMemoDb` entry cannot leak a reduced shape past
-//          the shallow-by-default gate for shared cache entries.
+// Guard 2b: `member_shape_peek_or_compute` admits to the shared shape cache
+//          ONLY AFTER the package-backed gate has run. Every
+//          `admit_member_shape_if_possible` call site must follow the gate:
+//          admitting before it could publish a warm entry that leaks a
+//          reduced shape past the shallow-by-default gate for shared cache
+//          entries. (Successor of the retired cached-peek-after-gate guard
+//          on `reduce_field_type_expr_with_mode`: the node-domain rework
+//          replaced re-checking the gate on warm hits with gate-cleared-only
+//          admission.)
 // ---------------------------------------------------------------------------
 #[test]
-fn reduce_field_type_expr_consults_cached_peek_after_gate() {
-    // Body lives in `reduce_field_type_expr_with_mode`, now sink-private in the
-    // terminal `output_sink` module.
+fn member_shape_admissions_run_only_after_package_backed_gate() {
     let content = read_output_sink();
-    let body = fn_body_slice(&content, "fn reduce_field_type_expr_with_mode(");
+    let body = fn_body_slice(&content, "fn member_shape_peek_or_compute(");
 
     let route_gate_idx = body
-        .find("type_expr_has_package_backed_object_like_root(")
-        .expect("guard: route gate must remain present.");
-    let after_gate = &body[route_gate_idx..];
+        .find("node_package_backed_object_like_root_with_fence(")
+        .expect("guard: the node-domain package-backed gate must remain present.");
+    let first_admit_idx = body.find("admit_member_shape_if_possible(").expect(
+        "guard: `member_shape_peek_or_compute` MUST admit gate-cleared shapes \
+         through `admit_member_shape_if_possible`.",
+    );
     assert!(
-        after_gate.contains("PeekedShape::Cached(materialized)"),
-        "guard: `reduce_field_type_expr_with_mode` MUST re-consult the \
-         cached operator-shape peek AFTER the package-backed gate clears. \
-         A warm `MaterializeMemoDb` entry can otherwise leak a reduced \
-         shape past the shallow-by-default gate for shared cache entries.",
+        route_gate_idx < first_admit_idx,
+        "guard: every `admit_member_shape_if_possible` call in \
+         `member_shape_peek_or_compute` MUST run AFTER the node-domain \
+         package-backed gate. Admitting before the gate would let a warm \
+         `ShapeCacheDb` entry leak a reduced shape past the \
+         shallow-by-default gate for shared cache entries.",
     );
 }
 
@@ -180,8 +188,7 @@ fn member_shape_peek_or_compute_runs_node_gates_before_graph_native_reducer() {
          covers it); re-adding it reverts to a materialize-then-decide shared-slot peek.",
     );
 
-    // The node-domain package-backed gate (fence-bearing successor of the
-    // TypeExpr `type_expr_has_package_backed_object_like_root`).
+    // The node-domain package-backed gate.
     let gate_idx = body
         .find("node_package_backed_object_like_root_with_fence(")
         .expect(

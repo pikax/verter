@@ -63,23 +63,26 @@ fn fixture(name: &str) -> String {
 }
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
-    )
+) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
 }
 
-fn build_indexed_with_source(raw: &str, whole_hash: [u8; 16]) -> Arc<IndexedReady> {
-    // Build the shallow inventory through the REAL binder so the typed
+fn build_indexed_with_source(
+    canonical: &str,
+    raw: &str,
+    whole_hash: [u8; 16],
+) -> Arc<IndexedReady> {
+    // Build the shallow inventory through the REAL service-backed
+    // construction (parse → header index → lazy decl-body memo) so the typed
     // augmentation inventory (the single source of truth for augmentation
-    // facts) is populated, exactly as production does.
-    let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(raw);
-    let shallow = ShallowFileState::from_analysis(whole_hash, empty_external(), Some(&env));
+    // facts) is populated and augmenter bodies lower on demand, exactly as
+    // production does.
+    let shallow = ShallowFileState::service_backed_for_test_with_hash(canonical, raw, whole_hash);
     Arc::new(IndexedReady::new_for_test_with_state(
         whole_hash,
-        Arc::new(shallow),
+        shallow,
         Arc::from(raw),
-        Arc::from(""),
+        Arc::from(raw),
         empty_external(),
     ))
 }
@@ -94,7 +97,7 @@ fn insert_artifact_from_fixture(
     content_hash: [u8; 16],
 ) -> FileArtifactKey {
     let raw = fixture(fixture_name);
-    let indexed = build_indexed_with_source(&raw, content_hash);
+    let indexed = build_indexed_with_source(canonical, &raw, content_hash);
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     let artifacts = Arc::new(FileArtifacts {
@@ -123,7 +126,7 @@ fn insert_artifact_with_raw_source(
     raw: &str,
     content_hash: [u8; 16],
 ) -> FileArtifactKey {
-    let indexed = build_indexed_with_source(raw, content_hash);
+    let indexed = build_indexed_with_source(canonical, raw, content_hash);
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     let artifacts = Arc::new(FileArtifacts {
@@ -148,7 +151,7 @@ fn insert_artifact_with_raw_source(
 /// Used to pre-build a reusable payload for cheap re-entrant writes in
 /// the resolver-off-guard test.
 fn build_filler_artifacts(raw: &str, content_hash: [u8; 16]) -> Arc<FileArtifacts> {
-    let indexed = build_indexed_with_source(raw, content_hash);
+    let indexed = build_indexed_with_source("/filler.ts", raw, content_hash);
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     Arc::new(FileArtifacts {
@@ -1148,7 +1151,7 @@ fn effective_export_set_session_view_stitches_overlay_augmenter() {
     let overlay_discriminator =
         verter_session::session_view::overlay_artifact_discriminator_for_fingerprint(fingerprint);
     let raw = fixture("module_augmentation_external.ts");
-    let indexed = build_indexed_with_source(&raw, [99u8; 16]);
+    let indexed = build_indexed_with_source("/aug-overlay.ts", &raw, [99u8; 16]);
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     let overlay_key = FileArtifactKey {
@@ -1296,7 +1299,7 @@ fn session_overlay_augmenter_isolated_from_base_index() {
             overlay_fingerprint,
         );
     let raw = fixture("module_augmentation_external.ts");
-    let indexed = build_indexed_with_source(&raw, [99u8; 16]);
+    let indexed = build_indexed_with_source("/aug-overlay.ts", &raw, [99u8; 16]);
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     let overlay_key = FileArtifactKey {
@@ -1593,7 +1596,7 @@ fn base_augmenter_legacy_insert_invalidates_index() {
     let primary_raw = fixture("module_augmentation_external.ts");
     store.insert(
         Arc::from("/primary.ts"),
-        build_indexed_with_source(&primary_raw, [61u8; 16]),
+        build_indexed_with_source("/primary.ts", &primary_raw, [61u8; 16]),
     );
 
     let target = AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from("vue"));
@@ -1616,7 +1619,7 @@ fn base_augmenter_legacy_insert_invalidates_index() {
     let secondary_raw = fixture("module_augmentation_external.ts");
     store.insert(
         Arc::from("/secondary.ts"),
-        build_indexed_with_source(&secondary_raw, [62u8; 16]),
+        build_indexed_with_source("/secondary.ts", &secondary_raw, [62u8; 16]),
     );
 
     let after = store.ensure_augmentation_index_populated(&key, |_, _| None, None);
@@ -1929,7 +1932,7 @@ fn seed_base_and_overlay_augmenters(
     let overlay_discriminator =
         verter_session::session_view::overlay_artifact_discriminator_for_fingerprint(fingerprint);
     let raw = fixture("module_augmentation_external.ts");
-    let indexed = build_indexed_with_source(&raw, [99u8; 16]);
+    let indexed = build_indexed_with_source("/aug-overlay.ts", &raw, [99u8; 16]);
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     let overlay_key = FileArtifactKey {
@@ -2559,7 +2562,7 @@ fn insert_artifact_at_parser_version(
     parser_version: u32,
 ) -> FileArtifactKey {
     let raw = fixture(fixture_name);
-    let indexed = build_indexed_with_source(&raw, content_hash);
+    let indexed = build_indexed_with_source(canonical, &raw, content_hash);
     let emission = emit_parse_facts(&indexed);
     let parse_stable_hash = verter_session::parse_stable_hash::compute_parse_stable_hash(&indexed);
     let artifacts = Arc::new(FileArtifacts {

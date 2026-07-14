@@ -114,3 +114,37 @@ pub mod budget_sentinel {
         )
     }
 }
+
+/// Test-only demand probes for published `SemanticTypeSource` carriers.
+///
+/// Publication is shallow-by-default; a test asserting the type a consumer
+/// resolves from a published source performs the demand step explicitly
+/// through these probes — both route raise → reduction → sealed output
+/// materialisation through the ONE shared dispatch (no second engine).
+#[cfg(any(test, feature = "test-support"))]
+pub mod semantic_source_probe {
+    /// Demand-materialize a published source under `Published(Expanded)` —
+    /// the explicit full consumer walk.
+    pub use crate::project_semantic_dispatch::semantic_source::demand_semantic_source_type_expr as demand_type_expr;
+    /// Shell-materialize a published source WITHOUT a reduction demand —
+    /// the shallow published shape (`Ref` / utility carriers survive).
+    pub use crate::project_semantic_dispatch::semantic_source::shallow_semantic_source_type_expr as shallow_type_expr;
+}
+
+/// Test-only arm for the component-meta output force-fail knob: the next
+/// `build_component_meta_output` for EXACTLY `canonical` fails with a typed
+/// `ComponentMetaOutputError` (consuming that canonical's arm). A
+/// canonical-keyed SET — process-global, so it reaches batch pool-worker
+/// threads and the LSP integration harness, and multi-arm, so concurrently
+/// running tests arming DIFFERENT canonicals never steal (or overwrite)
+/// each other's arm.
+#[cfg(any(test, feature = "test-support"))]
+pub mod component_meta_output {
+    /// Arm the canonical-keyed force-fail knob for `canonical`.
+    pub fn force_output_failure_for(canonical: &str) {
+        crate::meta_resolve::projectors::OUTPUT_MATERIALIZE_FORCE_FAIL_FOR
+            .lock()
+            .unwrap()
+            .insert(canonical.to_string());
+    }
+}

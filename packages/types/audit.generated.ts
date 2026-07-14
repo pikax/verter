@@ -769,7 +769,7 @@ edges: Array<DerivationEdgeRecord>, };
 /**
  * Dispatch key kind — semantic-query cache key discriminator.
  */
-export type DispatchKeyKind = "ResolveDecl" | "Instantiate" | "ProjectMember" | "ProjectIndex" | "ProjectPath" | "Normalize" | "ResolvedNamedType";
+export type DispatchKeyKind = "ResolveDecl" | "Instantiate" | "ProjectMember" | "ProjectIndex" | "ProjectPath" | "Normalize";
 
 /**
  * Why the runtime downgraded a requested `CompileCacheMode` — mirror

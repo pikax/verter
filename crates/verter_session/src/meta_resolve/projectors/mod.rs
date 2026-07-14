@@ -75,6 +75,14 @@ pub(crate) mod props;
 // token instead of a forgeable `(&SurfaceMember, ProjectionCursor)` pair.
 pub(crate) mod publication_authority;
 pub(crate) mod published_reducer;
+// Published-SOURCE upgrades for reduced publication nodes (leaf / leaf-union
+// / member ref-identity) — pure node-domain projections consumed by the
+// terminal sink.
+mod published_source;
+// The demand-validated structural member-source projection — shared with the
+// vue_exec DTO normalizers (the normalized prop/expose rows publish the same
+// closed/ref/member-path ladder the member sink publishes).
+pub(crate) use published_source::structural_member_value_source;
 pub(crate) mod slots;
 
 // The projectors' reverse-materialization capability is DEFINED in the terminal
@@ -107,7 +115,6 @@ pub(crate) use exposed::project_exposed;
 pub(crate) use options::project_options;
 pub(crate) use props::project_props;
 pub(crate) use published_reducer::classify_node_reduction_gates;
-pub(crate) use published_reducer::type_expr_contains_reducible_operator;
 pub(crate) use slots::project_slots;
 
 // The boundary-consuming publication functions live in the terminal
@@ -127,6 +134,21 @@ pub(crate) use slots::project_slots;
 // per-kind projector children name it through `super::output_sink::` directly
 // so the admitted-token discipline reads at the call site.
 pub(crate) use output_sink::{project_model, reduce_published_field_types};
+
+// The output-ENVELOPE builder: the terminal sink materializes the
+// component-meta output type lanes and seals them (with the analysis and the
+// optional narrowed resolution sidecar) into the request-local
+// `crate::meta_resolve::ComponentMetaOutput` the wire converter consumes.
+// Re-exported at the stable `crate::meta_resolve::projectors::*` path for the
+// view-fenced host entry; envelope construction itself stays inside the sink
+// (the envelope constructors require the sink-mintable capability).
+pub(crate) use output_sink::build_component_meta_output;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use output_sink::OUTPUT_MATERIALIZE_FORCE_FAIL_FOR;
+#[cfg(test)]
+pub(crate) use output_sink::{
+    LAST_OUTPUT_MATERIALIZE_CALLS, LAST_OUTPUT_MEMO_HASH_OPS, OUTPUT_MATERIALIZE_FORCE_FAIL,
+};
 
 /// Merge a projector's `Vec<ExpandedField>` output into the target
 /// `Vec<ExpandedField>` on `evaluated_types`.
@@ -173,7 +195,14 @@ fn merge_projected_fields_by_name(
 
 /// Top-level driver that dispatches every type-based macro in the
 /// snapshot through its per-kind projector and writes the resulting
-/// fields into `evaluated_types`. The driver:
+/// fields into `evaluated_types`.
+///
+/// The flat fields this driver populates are a METADATA + display surface
+/// (exactness / execution status / diagnostics / raw display types for the
+/// `evaluate_types` payload) — NEVER a published-source authority: every
+/// published `SourcePosition` is owned by the NORMALIZED macro rows
+/// (`ResolvedPropField` / `ResolvedEmitField` / `ResolvedExposeField` and
+/// the `define_*` shape lanes built from them). The driver:
 ///
 /// 1. For each `defineProps<T>`, calls [`project_props`] and extends
 ///    `evaluated_types.props` with the resulting fields.
@@ -280,7 +309,13 @@ pub(crate) fn project_evaluated_types(
             }
             AnalyzedMacroKind::DefineExpose => {
                 let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Exposed);
-                let _ = project_exposed(
+                // The projected surface members carry the exposed members'
+                // typed sources (`ExpandedField.r#type`); publish them on
+                // the canonical aggregate's per-macro `exposed` lane so the
+                // exposed-analysis join pairs them by the stable
+                // `(macro_index, member name)` identity. Idempotent per
+                // macro: a re-projection replaces the macro's lane entry.
+                let fields = project_exposed(
                     query_engine,
                     &owner,
                     file,
@@ -290,6 +325,17 @@ pub(crate) fn project_evaluated_types(
                     diag_sink,
                     projection.cursor(),
                 );
+                evaluated_types
+                    .exposed
+                    .retain(|entry| entry.macro_index != macro_index);
+                if !fields.is_empty() {
+                    evaluated_types.exposed.push(
+                        verter_semantic::analysis::type_expand::ExpandedMacroExposed {
+                            macro_index,
+                            fields,
+                        },
+                    );
+                }
             }
             AnalyzedMacroKind::DefineOptions => {
                 let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Options);
@@ -440,15 +486,34 @@ pub(crate) fn peek_member_shape_known(
             // cache identity. A bare `published(mode)` key would miss a
             // `StructuralTransit(Navigate)`-published entry (or, worse,
             // hit a published entry storing a transit-lowered value).
-            // A composite expression that NESTS a synthetic carrier has
-            // no sound content-free cache key — bypass the cache (no warm
-            // hit available) and report a miss so the caller cold-computes.
-            // A bare carrier / carrier-free expression yields a key
-            // normally.
+            // The subject is the LOWERED settled node — lowered through
+            // the SAME shared pre-peek helper the materialiser keys and
+            // publishes with (`lower_type_expr_for_shape_subject`), so
+            // the peeked node identity and the published node identity
+            // cannot diverge. A composite expression that NESTS a
+            // synthetic carrier has no sound content-free cache key —
+            // bypass the cache (no warm hit available) and report a miss
+            // so the caller cold-computes; a scope with no view-correct
+            // identity likewise yields no key (miss).
+            let reduction_context = super::materialize::type_expr_materialize_reduction_context(
+                ctx,
+                scope_canonical_id,
+                expr,
+                mode,
+            );
             crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
                 Arc::<str>::from(scope_canonical_id),
-                Arc::new(expr.clone()),
-                super::materialize::type_expr_materialize_reduction_context(expr, mode),
+                expr,
+                reduction_context,
+                || {
+                    super::materialize::lower_type_expr_for_shape_subject(
+                        query_engine,
+                        scope_canonical_id,
+                        expr,
+                        reduction_context,
+                    )
+                    .map(|lowering| lowering.lowered)
+                },
             )
             .and_then(|key| {
                 ctx.project_type_store()
@@ -773,6 +838,22 @@ pub(crate) fn resolve_macro_payload(
                                 QueryResult::Error(err) => Some(format!("{err:?}")),
                                 QueryResult::Recursive(_) => None,
                             }
+                        }
+                        // An unresolved-reference carrier SURVIVING the
+                        // Navigate identity retry is a genuine unresolved
+                        // route/declaration: a resolvable head would have
+                        // become its `DeclRef` / `InstantiationRef` identity
+                        // carrier under the Navigate probe. The preserved
+                        // `BareRef` / `ImportType` / `TypeOf` shape is the
+                        // carrier-preserving counterpart of the pre-carrier
+                        // `Opaque(Miss)` terminal — same silent-miss
+                        // contract, one diagnostic.
+                        Some(data)
+                            if data.bare_ref_head().is_some()
+                                || data.import_type_head().is_some()
+                                || data.typeof_head().is_some() =>
+                        {
+                            Some("unresolved reference carrier".to_string())
                         }
                         _ => None,
                     };

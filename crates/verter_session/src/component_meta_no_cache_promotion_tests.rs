@@ -397,7 +397,7 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
 }
 
 /// Non-projection-op queries (ResolveDecl, NormalizeUnion,
-/// NormalizeIntersection, ResolvedNamedType, Relate,
+/// NormalizeIntersection, Relate,
 /// ResolveMacroPayload) MUST be unaffected by the post-trip
 /// fast-path early-exit — the projection-op fuse only bounds the
 /// budget-counted subset of the dispatch surface, and a request that
@@ -1229,7 +1229,7 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
 ///    wrongly suppress here.
 #[test]
 fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
-    use crate::request_context::{current_materialization_cache_suppress, RequestContext};
+    use crate::request_context::{current_request_result_is_partial, RequestContext};
     use crate::semantic_query::CacheRead;
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
@@ -1290,10 +1290,10 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
             host.config.projection_op_budget,
         );
         let _g = RequestContextGuard::install(ctx);
-        assert!(!current_materialization_cache_suppress());
+        assert!(!current_request_result_is_partial());
         crate::request_context::observe_component_meta_read_suppress(&complete_non_cacheable);
         assert!(
-            !current_materialization_cache_suppress(),
+            !current_request_result_is_partial(),
             "a complete-but-non-cacheable result (cache_suppress=true, result_is_partial=false) \
              MUST NOT raise the warm-gate suppress flag — it must still be allowed to warm a \
              complete component-meta result"
@@ -1313,10 +1313,10 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
             host.config.projection_op_budget,
         );
         let _g = RequestContextGuard::install(ctx);
-        assert!(!current_materialization_cache_suppress());
+        assert!(!current_request_result_is_partial());
         crate::request_context::observe_component_meta_read_suppress(&value_partial);
         assert!(
-            current_materialization_cache_suppress(),
+            current_request_result_is_partial(),
             "a Value-partial (result_is_partial=true) MUST raise the warm-gate suppress flag — a \
              value-kind gate misses this complete Value and would have warmed the partial"
         );
@@ -1337,7 +1337,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
 /// refused warm promotion.
 #[test]
 fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
-    use crate::request_context::{current_materialization_cache_suppress, RequestContext};
+    use crate::request_context::{current_request_result_is_partial, RequestContext};
     use crate::semantic_query::CacheRead;
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
@@ -1399,7 +1399,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
             host.config.projection_op_budget,
         );
         let _g = RequestContextGuard::install(ctx);
-        assert!(!current_materialization_cache_suppress());
+        assert!(!current_request_result_is_partial());
         // Sanity: the shape is a COMPLETE Value, non-cacheable only.
         assert!(
             matches!(read.value, QueryResult::Value(_))
@@ -1410,7 +1410,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
         );
         crate::request_context::observe_component_meta_read_suppress(&read);
         assert!(
-            !current_materialization_cache_suppress(),
+            !current_request_result_is_partial(),
             "{label}: a COMPLETE but non-cacheable result (cache_suppress=true, \
              result_is_partial=false) MUST NOT raise the warm-gate suppress flag — it must still \
              warm the component-meta final cache. A memo site wrongly setting result_is_partial=true \
@@ -1443,7 +1443,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
 /// complete.
 #[test]
 fn projectpath_over_instantiationref_budget_trip_surfaces_value_partial_and_does_not_warm() {
-    use crate::request_context::current_materialization_cache_suppress;
+    use crate::request_context::current_request_result_is_partial;
 
     // `projection_op_budget = 2`: the outer `ProjectPath` (op 1) and the
     // nested `Instantiate(Partial<…>)` (op 2) both pass the entry/raw-build
@@ -1521,7 +1521,7 @@ fn projectpath_over_instantiationref_budget_trip_surfaces_value_partial_and_does
     // confirms it (and is idempotent).
     crate::request_context::observe_component_meta_read_suppress(&read);
     assert!(
-        current_materialization_cache_suppress(),
+        current_request_result_is_partial(),
         "the Value-partial from the budget-tripped ProjectPath-over-InstantiationRef MUST raise the \
          warm-gate suppress flag so the partial is NOT promoted into ComponentMetaResultDb"
     );
@@ -1562,7 +1562,7 @@ fn projectpath_over_instantiationref_budget_trip_surfaces_value_partial_and_does
 /// complete `result_is_partial = false` Value and warms the memo.
 #[test]
 fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_refuses_memo() {
-    use crate::request_context::current_materialization_cache_suppress;
+    use crate::request_context::current_request_result_is_partial;
     use crate::{FileLanguage, UpsertRequest};
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
@@ -1622,7 +1622,7 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
     // Warm-gate: the partial raises the suppression flag (no component-meta warm).
     crate::request_context::observe_component_meta_read_suppress(&read);
     assert!(
-        current_materialization_cache_suppress(),
+        current_request_result_is_partial(),
         "the lower.rs operator partial MUST raise the component-meta warm-gate suppress flag"
     );
 
@@ -1657,7 +1657,7 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
 /// admits the partial-derived `Unknown` to the relation memo.
 #[test]
 fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
-    use crate::request_context::current_materialization_cache_suppress;
+    use crate::request_context::current_request_result_is_partial;
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
@@ -1736,7 +1736,7 @@ fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
     // confirms it (and is idempotent).
     crate::request_context::observe_component_meta_read_suppress(&read);
     assert!(
-        current_materialization_cache_suppress(),
+        current_request_result_is_partial(),
         "the relation-derived conditional partial MUST raise the component-meta warm-gate suppress flag"
     );
 

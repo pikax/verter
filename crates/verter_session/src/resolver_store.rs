@@ -825,20 +825,6 @@ impl CurrentHostStoreView {
     pub(crate) fn view(&self) -> &HostStoreView {
         &self.0
     }
-
-    /// Re-root this proven-current base view through a session overlay
-    /// WITHOUT laundering currentness: the overlay re-roots per-canonical
-    /// snapshots and recomputes the coalescing fingerprint, but the base
-    /// was already proven current, so the overlaid view is current too.
-    /// A non-current base never reaches this method — it stays
-    /// [`StoreViewRead::ReturnOnly`].
-    pub(crate) fn with_session_overlay(
-        self,
-        host: &VerterHost,
-        view: &dyn crate::session_view::SessionView,
-    ) -> Self {
-        CurrentHostStoreView(self.0.with_session_overlay(host, view))
-    }
 }
 
 /// A [`HostStoreView`] the [`StoreViewManager`] could NOT prove current at
@@ -1106,17 +1092,12 @@ impl StoreViewRead {
         }
     }
 
-    /// Whether this read is [`Self::Current`], for the cold-path PUBLISH
-    /// fence.
-    ///
-    /// A cold compute MAY seed from either arm (via
-    /// [`Self::into_cold_seed_view`]), but the result of a compute seeded
-    /// by a non-current ([`Self::ReturnOnly`]) view must NEVER be promoted
-    /// to the shared cache — the manager could not prove the snapshot
-    /// current, so the result is return-only. The publish fence reads this
-    /// from the SAME `StoreViewRead` it derives the cold-seed view from
-    /// (see [`crate::VerterHost::cold_seed_view_and_fence`]) so the
-    /// currentness and the seeded view cannot describe different snapshots.
+    /// Whether this read is [`Self::Current`] — the currentness bit the
+    /// publish fences derive from the SAME read as the seed view. Production
+    /// entries obtain it through `capture_batch_fixed_view`
+    /// ([`BatchFixedView::is_current`]); the non-current-contract tests
+    /// assert the raw read arm directly.
+    #[cfg(test)]
     pub(crate) fn is_current_for_promotion(&self) -> bool {
         matches!(self, StoreViewRead::Current(_))
     }
@@ -1882,51 +1863,6 @@ impl HostStoreView {
         let view = freshest
             .expect("STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS >= 1 guarantees at least one built view");
         SnapshotBuildOutcome::Superseded { view }
-    }
-
-    /// Build a session-scoped store view from a raw session id.
-    ///
-    /// The compat token includes the session identity so that two sessions
-    /// with different overlays but the same epoch never coalesce into the
-    /// same singleflight lane.
-    ///
-    /// This entry point replaces an earlier `from_session(view: &SessionView,
-    /// host)` overload. The old overload took a session-scoped
-    /// `SessionView` epoch carrier; under R17 the per-session
-    /// overlay-mutation machinery is gone, so the singleflight
-    /// lane identity is the raw `session_id` plumbed through the
-    /// caller; the runtime-side epoch carrier no longer exists.
-    pub(crate) fn from_session_id(session_id: u64, host: &VerterHost) -> Self {
-        Self::from_session_id_read(session_id, host).0
-    }
-
-    /// Build a session-scoped store view together with the manager's
-    /// currentness proof: `true` iff a coherent `build_coherent` produced
-    /// the view, `false` iff the host churned and the fallback returned a
-    /// known-stale base-derived snapshot.
-    ///
-    /// Session-scoped views carry per-session overlay identity, so they are
-    /// not manager-cached (the manager caches the base workspace snapshot
-    /// keyed by the base token); but they still get the no-torn-return
-    /// guarantee. On supersession the host is genuinely contended — fall
-    /// back to the manager's bounded base build re-scoped to this session
-    /// id rather than risk a torn capture. `base_view` is itself bounded:
-    /// under sustained churn it returns `ReturnOnly` in bounded time, so
-    /// this fallback never spins; a `ReturnOnly` base is reported as
-    /// non-current so the stable-request driver suppresses its warm peek.
-    pub(crate) fn from_session_id_read(session_id: u64, host: &VerterHost) -> (Self, bool) {
-        match Self::build_coherent(host, Some(session_id)) {
-            SnapshotBuildOutcome::Coherent { view, .. } => (view, true),
-            SnapshotBuildOutcome::Superseded { .. } => {
-                let (mut base, is_current) = match host.store_view_manager().base_view(host) {
-                    StoreViewRead::Current(current) => (current.view().clone(), true),
-                    StoreViewRead::ReturnOnly { view, .. } => (view, false),
-                };
-                base.session_id = Some(session_id);
-                base.compat_token = base.compute_compat_token();
-                (base, is_current)
-            }
-        }
     }
 
     /// Drop every per-canonical / per-domain snapshot for a

@@ -1,7 +1,66 @@
 use super::*;
 use crate::analysis::types::AnalyzedExposeField;
 use std::sync::Arc;
+use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact};
+use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace, MacroPayloadPosition};
 use verter_type_expr::PrimitiveName;
+
+/// A closed primitive-leaf source (the evaluated-source fixture analogue of a
+/// lowered primitive annotation).
+pub(crate) fn closed_leaf(primitive: PrimitiveName) -> SemanticTypeSource {
+    SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(primitive)))
+}
+
+/// A closed named-reference leaf source.
+pub(crate) fn closed_ref(name: &str) -> SemanticTypeSource {
+    SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Ref(name.to_string())))
+}
+
+/// A closed string-literal leaf source.
+pub(crate) fn closed_string(value: &str) -> SemanticTypeSource {
+    SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::StringLiteral(
+        value.to_string(),
+    )))
+}
+
+/// A deterministic test payload locator at `field_index` (the analyzer's
+/// local-file anchor convention).
+pub(crate) fn test_payload(field_index: u32) -> MacroPayloadLocator {
+    MacroPayloadLocator {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(""),
+            symbol: Arc::from("default"),
+            space: LocatorSymbolSpace::Value,
+        },
+        macro_index: 0,
+        payload: MacroPayloadPosition::Field { field_index },
+    }
+}
+
+/// The authored source a payload locator resolves to at this layer.
+pub(crate) fn authored_source(field_index: u32) -> SemanticTypeSource {
+    SemanticTypeSource::Authored(AuthoredBodyLocator::MacroPayload(test_payload(field_index)))
+}
+
+/// A synthesized tuple source: labeled leaf elements (the evaluated-source
+/// fixture analogue of a materialized event-payload tuple).
+pub(crate) fn synthesized_tuple(elements: &[(Option<&str>, LeafTypeFact)]) -> SemanticTypeSource {
+    use verter_type_expr::facts::{
+        FactOrLocator, ResolvedLocalShape, TupleElementFact, TuplePayloadFact,
+    };
+    SemanticTypeSource::Synthesized(ResolvedLocalShape::Tuple(TuplePayloadFact {
+        readonly: false,
+        elements: elements
+            .iter()
+            .map(|(label, leaf)| TupleElementFact {
+                label: label.map(|l| l.to_string()),
+                optional: false,
+                rest: false,
+                ty: FactOrLocator::Leaf(leaf.clone()),
+            })
+            .collect(),
+    }))
+}
 
 fn empty_input(macros: &[AnalyzedMacro]) -> ComponentMetaInput<'_> {
     ComponentMetaInput {
@@ -42,35 +101,69 @@ fn make_define_props(fields: Vec<AnalyzedPropField>) -> AnalyzedMacro {
     }
 }
 
-/// Test helper: simulate the analyzer producer's lowering of a TS type
-/// annotation. Production code calls `lower_ts_type` on an OXC `TSType<'_>`
-/// AST node; this helper accepts the same source text and uses the OXC
-/// text-input adapter to mirror the producer-populated `(*_expr, *_expr_scope)`
-/// pairing invariant. Returns `(None, None)` when lowering produces an
-/// `Unknown`, matching the producer's contract that unparseable annotations
-/// leave the typed field unset.
+/// Test helper: simulate the analyzer producer's authored-payload emission for
+/// a TS type annotation. Production records authored-annotation presence and
+/// the stamp pass mints the payload position; this fixture mirrors the
+/// producer-populated `(payload, *_scope)` pairing invariant directly.
 pub(crate) fn lower_for_test(
     type_ann: Option<&str>,
 ) -> (
-    Option<verter_type_expr::TypeExpr>,
+    Option<MacroPayloadLocator>,
     Option<verter_type_expr::TypeExprScope>,
 ) {
-    let Some(text) = type_ann else {
+    let Some(_text) = type_ann else {
         return (None, None);
     };
-    let lowered = crate::analysis::jsdoc::parse_jsdoc_tag_type_payload(text, None);
-    if matches!(lowered, verter_type_expr::TypeExpr::Unknown { .. }) {
-        (None, None)
-    } else {
-        (
-            Some(lowered),
-            Some(verter_type_expr::TypeExprScope::new("test:fixture")),
-        )
+    (
+        Some(test_payload(0)),
+        Some(verter_type_expr::TypeExprScope::new("test:fixture")),
+    )
+}
+
+/// Wrap an analysis prop field as a host-resolved row: the source mirrors
+/// the production analyzer wrapping (the authored payload position, or the
+/// PROVEN unannotated absence for a payload-less field).
+fn resolved_prop_input(
+    field: AnalyzedPropField,
+) -> crate::analysis::component_meta::ResolvedPropInput {
+    let type_source = field
+        .payload
+        .clone()
+        .map(|payload| {
+            verter_type_expr::facts::SourcePosition::Present(
+                verter_type_expr::facts::SemanticTypeSource::Authored(
+                    verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload),
+                ),
+            )
+        })
+        .unwrap_or_else(verter_type_expr::facts::SourcePosition::unannotated);
+    crate::analysis::component_meta::ResolvedPropInput { field, type_source }
+}
+
+/// Wrap an analysis emit field as a host-resolved row (see
+/// [`resolved_prop_input`]).
+fn resolved_emit_input(
+    field: crate::analysis::types::AnalyzedEmitField,
+) -> crate::analysis::component_meta::ResolvedEmitInput {
+    let payload_source = field
+        .payload
+        .clone()
+        .map(|payload| {
+            verter_type_expr::facts::SourcePosition::Present(
+                verter_type_expr::facts::SemanticTypeSource::Authored(
+                    verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload),
+                ),
+            )
+        })
+        .unwrap_or_else(verter_type_expr::facts::SourcePosition::unannotated);
+    crate::analysis::component_meta::ResolvedEmitInput {
+        field,
+        payload_source,
     }
 }
 
 fn make_prop(name: &str, type_ann: Option<&str>, optional: bool) -> AnalyzedPropField {
-    let (type_expr, type_expr_scope) = lower_for_test(type_ann);
+    let (payload, type_expr_scope) = lower_for_test(type_ann);
     AnalyzedPropField {
         name: name.to_string(),
         is_optional: optional,
@@ -80,7 +173,7 @@ fn make_prop(name: &str, type_ann: Option<&str>, optional: bool) -> AnalyzedProp
         tags: Vec::new(),
         resolution_source: crate::analysis::types::TypeResolutionSource::Rust,
         resolution_error: None,
-        type_expr,
+        payload,
         type_expr_scope,
         declared_in_macro_type_arg: false,
     }
@@ -127,23 +220,23 @@ fn extracts_props_from_define_props_macro() {
 }
 
 #[test]
-fn props_use_evaluated_type_when_available() {
+fn flat_evaluated_props_contribute_metadata_not_the_source() {
     let macros = vec![make_define_props(vec![make_prop(
         "label",
         Some("string"),
         false,
     )])];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
             name: "label".to_string(),
-            r#type: TypeExpr::Primitive(PrimitiveName::String),
+            r#type: SourcePosition::Present(closed_leaf(PrimitiveName::String)),
             raw_type: None,
             optional: false,
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_props: Vec::new(),
@@ -160,11 +253,19 @@ fn props_use_evaluated_type_when_available() {
     let result = extract_component_meta(input);
 
     assert_eq!(result.props.len(), 1);
-    assert_eq!(
-        result.props[0].type_expr,
-        TypeExpr::Primitive(PrimitiveName::String),
-        "should prefer evaluated type over raw annotation"
-    );
+    // SOLE-AUTHORITY: the row's own source (the authored payload position)
+    // is published; the flat evaluated lane's Closed(Leaf) value must NOT
+    // shadow it (the legacy preference published the flat value here).
+    match result.props[0].type_source.present() {
+        Some(SemanticTypeSource::Authored(
+            verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(_),
+        )) => {}
+        other => panic!(
+            "the row's authored source is authoritative — the flat evaluated \
+             lane contributes metadata only; got {other:?}"
+        ),
+    }
+    // The flat lane's expansion METADATA still folds in.
     assert_eq!(
         result.props[0]
             .type_expansion
@@ -182,9 +283,10 @@ fn props_preserve_expansion_metadata_when_available() {
         false,
     )])];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
             name: "label".to_string(),
-            r#type: TypeExpr::named("Missing"),
+            r#type: SourcePosition::Present(closed_ref("Missing")),
             raw_type: None,
             optional: false,
             exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
@@ -194,8 +296,7 @@ fn props_preserve_expansion_metadata_when_available() {
                 context: "unresolved type reference 'Missing'".to_string(),
                 property_name: None,
             }],
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_props: Vec::new(),
@@ -227,23 +328,23 @@ fn props_preserve_expansion_metadata_when_available() {
 }
 
 #[test]
-fn evaluated_types_are_used_when_supplied() {
+fn flat_evaluated_types_never_shadow_the_row_source() {
     let macros = vec![make_define_props(vec![make_prop(
         "label",
         Some("MyType"),
         false,
     )])];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
             name: "label".to_string(),
-            r#type: TypeExpr::Primitive(PrimitiveName::String),
+            r#type: SourcePosition::Present(closed_leaf(PrimitiveName::String)),
             raw_type: None,
             optional: false,
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_props: Vec::new(),
@@ -259,11 +360,18 @@ fn evaluated_types_are_used_when_supplied() {
 
     let result = extract_component_meta(input);
 
-    assert_eq!(
-        result.props[0].type_expr,
-        TypeExpr::Primitive(PrimitiveName::String),
-        "projection should use host-supplied evaluated types without a local expansion flag"
-    );
+    // SOLE-AUTHORITY: the row's authored `MyType` annotation position is
+    // published; the flat evaluated lane's Closed(Leaf(String)) value must
+    // NOT shadow it (the legacy preference published the flat value here).
+    match result.props[0].type_source.present() {
+        Some(SemanticTypeSource::Authored(
+            verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(_),
+        )) => {}
+        other => panic!(
+            "the row's authored source is authoritative — the flat evaluated \
+             lane contributes metadata only; got {other:?}"
+        ),
+    }
 }
 
 #[test]
@@ -277,7 +385,10 @@ fn props_fall_back_to_parsed_annotation_when_no_evaluated_type() {
     let result = extract_component_meta(empty_input(&macros));
 
     assert_eq!(result.props.len(), 1);
-    assert_eq!(result.props[0].type_expr, TypeExpr::named("MyType"));
+    assert_eq!(
+        result.props[0].type_source,
+        SourcePosition::Present(authored_source(0))
+    );
     assert_eq!(
         result.props[0].raw_type.as_deref(),
         Some("MyType"),
@@ -289,6 +400,7 @@ fn props_fall_back_to_parsed_annotation_when_no_evaluated_type() {
 fn define_props_eval_supplements_missing_prop_fields() {
     let macros = vec![make_define_props(Vec::new())];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: Vec::new(),
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
             macro_index: 0,
@@ -297,7 +409,7 @@ fn define_props_eval_supplements_missing_prop_fields() {
                     properties: vec![
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "x".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::Number),
+                            ty: SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
                             optional: false,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -305,7 +417,7 @@ fn define_props_eval_supplements_missing_prop_fields() {
                         },
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "y".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            ty: SourcePosition::Present(closed_leaf(PrimitiveName::String)),
                             optional: true,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -343,14 +455,14 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
     let resolved = vec![
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
-            props: vec![make_prop("x", Some("string"), false)],
+            props: vec![resolved_prop_input(make_prop("x", Some("string"), false))],
             emits: Vec::new(),
             slots: Vec::new(),
             exposed: Vec::new(),
         },
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
-            props: vec![make_prop("y", Some("number"), true)],
+            props: vec![resolved_prop_input(make_prop("y", Some("number"), true))],
             emits: Vec::new(),
             slots: Vec::new(),
             exposed: Vec::new(),
@@ -391,14 +503,14 @@ fn resolved_macro_projection_merges_duplicate_prop_metadata() {
     let resolved = vec![
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
-            props: vec![sparse],
+            props: vec![resolved_prop_input(sparse)],
             emits: Vec::new(),
             slots: Vec::new(),
             exposed: Vec::new(),
         },
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
-            props: vec![rich],
+            props: vec![resolved_prop_input(rich)],
             emits: Vec::new(),
             slots: Vec::new(),
             exposed: Vec::new(),
@@ -503,7 +615,7 @@ fn extracts_events_from_define_emits() {
                 payload_type: Some("[value: string]".to_string()),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: lower_for_test(Some("[value: string]")).0,
+                payload: lower_for_test(Some("[value: string]")).0,
                 payload_expr_scope: lower_for_test(Some("[value: string]")).1,
             },
             crate::analysis::types::AnalyzedEmitField {
@@ -512,7 +624,7 @@ fn extracts_events_from_define_emits() {
                 payload_type: None,
                 description: None,
                 tags: Vec::new(),
-                payload_expr: None,
+                payload: None,
                 payload_expr_scope: None,
             },
         ],
@@ -544,7 +656,7 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
             payload_type: Some("[value: string]".to_string()),
             description: Some("Local update event".to_string()),
             tags: Vec::new(),
-            payload_expr: lower_for_test(Some("[value: string]")).0,
+            payload: lower_for_test(Some("[value: string]")).0,
             payload_expr_scope: lower_for_test(Some("[value: string]")).1,
         }],
         ..make_define_props(vec![])
@@ -554,28 +666,29 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
         exposed: Vec::new(),
         props: Vec::new(),
         emits: vec![
-            crate::analysis::types::AnalyzedEmitField {
+            resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
                 name: "escapeKeyDown".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[event: KeyboardEvent]".to_string()),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: lower_for_test(Some("[event: KeyboardEvent]")).0,
+                payload: lower_for_test(Some("[event: KeyboardEvent]")).0,
                 payload_expr_scope: lower_for_test(Some("[event: KeyboardEvent]")).1,
-            },
-            crate::analysis::types::AnalyzedEmitField {
+            }),
+            resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
                 name: "closeAutoFocus".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[event: Event]".to_string()),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: lower_for_test(Some("[event: Event]")).0,
+                payload: lower_for_test(Some("[event: Event]")).0,
                 payload_expr_scope: lower_for_test(Some("[event: Event]")).1,
-            },
+            }),
         ],
         slots: Vec::new(),
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: vec![crate::analysis::type_expand::ExpandedMacroObjectShape {
@@ -585,15 +698,10 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                     properties: vec![
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "escapeKeyDown".to_string(),
-                            ty: TypeExpr::Tuple {
-                                elements: Arc::from(vec![verter_type_expr::TupleElement {
-                                    label: Some("event".to_string()),
-                                    ty: TypeExpr::named("KeyboardEvent"),
-                                    optional: false,
-                                    rest: false,
-                                }]),
-                                readonly: false,
-                            },
+                            ty: SourcePosition::Present(synthesized_tuple(&[(
+                                Some("event"),
+                                LeafTypeFact::Ref("KeyboardEvent".to_string()),
+                            )])),
                             optional: false,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -601,15 +709,10 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                         },
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "closeAutoFocus".to_string(),
-                            ty: TypeExpr::Tuple {
-                                elements: Arc::from(vec![verter_type_expr::TupleElement {
-                                    label: Some("event".to_string()),
-                                    ty: TypeExpr::named("Event"),
-                                    optional: false,
-                                    rest: false,
-                                }]),
-                                readonly: false,
-                            },
+                            ty: SourcePosition::Present(synthesized_tuple(&[(
+                                Some("event"),
+                                LeafTypeFact::Ref("Event".to_string()),
+                            )])),
                             optional: false,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -617,15 +720,10 @@ fn define_emits_eval_supplements_local_tuple_property_events() {
                         },
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "update:searchTerm".to_string(),
-                            ty: TypeExpr::Tuple {
-                                elements: Arc::from(vec![verter_type_expr::TupleElement {
-                                    label: Some("value".to_string()),
-                                    ty: TypeExpr::Primitive(PrimitiveName::String),
-                                    optional: false,
-                                    rest: false,
-                                }]),
-                                readonly: false,
-                            },
+                            ty: SourcePosition::Present(synthesized_tuple(&[(
+                                Some("value"),
+                                LeafTypeFact::Primitive(PrimitiveName::String),
+                            )])),
                             optional: false,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -684,28 +782,29 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
         exposed: Vec::new(),
         props: Vec::new(),
         emits: vec![
-            crate::analysis::types::AnalyzedEmitField {
+            resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
                 name: "escapeKeyDown".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[event: KeyboardEvent]".to_string()),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: lower_for_test(Some("[event: KeyboardEvent]")).0,
+                payload: lower_for_test(Some("[event: KeyboardEvent]")).0,
                 payload_expr_scope: lower_for_test(Some("[event: KeyboardEvent]")).1,
-            },
-            crate::analysis::types::AnalyzedEmitField {
+            }),
+            resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
                 name: "closeAutoFocus".to_string(),
                 span: verter_span::Span::default(),
                 payload_type: Some("[]".to_string()),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: lower_for_test(Some("[]")).0,
+                payload: lower_for_test(Some("[]")).0,
                 payload_expr_scope: lower_for_test(Some("[]")).1,
-            },
+            }),
         ],
         slots: Vec::new(),
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: vec![crate::analysis::type_expand::ExpandedMacroObjectShape {
@@ -715,15 +814,10 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                     properties: vec![
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "escapeKeyDown".to_string(),
-                            ty: TypeExpr::Tuple {
-                                elements: Arc::from(vec![verter_type_expr::TupleElement {
-                                    label: Some("event".to_string()),
-                                    ty: TypeExpr::named("KeyboardEvent"),
-                                    optional: false,
-                                    rest: false,
-                                }]),
-                                readonly: false,
-                            },
+                            ty: SourcePosition::Present(synthesized_tuple(&[(
+                                Some("event"),
+                                LeafTypeFact::Ref("KeyboardEvent".to_string()),
+                            )])),
                             optional: false,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -731,10 +825,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                         },
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "closeAutoFocus".to_string(),
-                            ty: TypeExpr::Tuple {
-                                elements: Arc::from(vec![]),
-                                readonly: false,
-                            },
+                            ty: SourcePosition::Present(synthesized_tuple(&[])),
                             optional: false,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -742,10 +833,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                         },
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "openAutoFocus".to_string(),
-                            ty: TypeExpr::Tuple {
-                                elements: Arc::from(vec![]),
-                                readonly: false,
-                            },
+                            ty: SourcePosition::Present(synthesized_tuple(&[])),
                             optional: false,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -753,10 +841,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                         },
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "entryFocus".to_string(),
-                            ty: TypeExpr::Tuple {
-                                elements: Arc::from(vec![]),
-                                readonly: false,
-                            },
+                            ty: SourcePosition::Present(synthesized_tuple(&[])),
                             optional: false,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -808,13 +893,13 @@ fn extracts_slots_from_define_slots() {
                 name: "item".to_string(),
                 type_annotation: Some("string".to_string()),
                 span: verter_span::Span::default(),
-                binding_expr: lower_for_test(Some("string")).0,
+                payload: lower_for_test(Some("string")).0,
                 binding_expr_scope: lower_for_test(Some("string")).1,
             }],
             return_type: None,
             description: None,
             tags: Vec::new(),
-            return_expr: None,
+            payload: None,
             return_expr_scope: None,
         }],
         ..make_define_props(vec![])
@@ -834,12 +919,13 @@ fn extracts_slots_from_define_slots() {
 }
 
 #[test]
-fn define_slots_eval_extracts_bindings_from_optional_function_types() {
+fn evaluated_slots_take_bindings_from_the_per_binding_channel_only() {
     let macros = vec![AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineSlots,
         ..make_define_props(vec![])
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -848,53 +934,56 @@ fn define_slots_eval_extracts_bindings_from_optional_function_types() {
             macro_index: 0,
             result: crate::analysis::type_expand::ExpansionResult::exact(
                 crate::analysis::type_expand::ExpandedObjectShape {
-                    properties: vec![crate::analysis::type_expand::ExpandedProperty {
-                        name: "leading".to_string(),
-                        ty: TypeExpr::union(vec![
-                            TypeExpr::Function(Arc::new(
-                                verter_type_expr::FunctionExpr::synthetic(
-                                    vec![verter_type_expr::FunctionParam::synthetic(
-                                        Some("props".to_string()),
-                                        TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                                            properties: vec![
-                                                verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic_public(
-                                                        "item".to_string(),
-                                                        TypeExpr::Primitive(PrimitiveName::String),
-                                                        false,
-                                                        false,
-                                                    ),
-                                                ),
-                                                verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic_public(
-                                                        "open".to_string(),
-                                                        TypeExpr::Primitive(PrimitiveName::Boolean),
-                                                        false,
-                                                        false,
-                                                    ),
-                                                ),
-                                            ],
-                                        })),
-                                        false,
-                                        false,
-                                    )],
-                                    Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
-                                    Vec::new(),
-                                ),
-                            )),
-                            TypeExpr::Primitive(PrimitiveName::Undefined),
-                        ]),
-                        optional: true,
-                        readonly: false,
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        declared_in_macro_type_arg: false,
-                    }],
+                    properties: vec![
+                        crate::analysis::type_expand::ExpandedProperty {
+                            name: "leading".to_string(),
+                            // The slot's materialized function shape lives on
+                            // the host's hot mirror — the lower layer carries
+                            // only the resolved SOURCE.
+                            ty: SourcePosition::Present(closed_ref("LeadingSlotFn")),
+                            optional: true,
+                            readonly: false,
+                            visibility: verter_type_expr::MemberVisibility::Public,
+                            declared_in_macro_type_arg: false,
+                        },
+                        crate::analysis::type_expand::ExpandedProperty {
+                            name: "trailing".to_string(),
+                            ty: SourcePosition::Present(closed_ref("TrailingSlotFn")),
+                            optional: false,
+                            readonly: false,
+                            visibility: verter_type_expr::MemberVisibility::Public,
+                            declared_in_macro_type_arg: false,
+                        },
+                    ],
                     index_signatures: Vec::new(),
                     call_signatures: Vec::new(),
                 },
             ),
         }],
-        slot_bindings: Vec::new(),
+        slot_bindings: vec![
+            crate::analysis::type_expand::ExpandedField {
+                name: "leading.item".to_string(),
+                r#type: SourcePosition::Present(closed_leaf(PrimitiveName::String)),
+                raw_type: None,
+                optional: false,
+                exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+                shallow_source: None,
+                declared_in_macro_type_arg: false,
+            },
+            crate::analysis::type_expand::ExpandedField {
+                name: "leading.open".to_string(),
+                r#type: SourcePosition::Present(closed_leaf(PrimitiveName::Boolean)),
+                raw_type: None,
+                optional: false,
+                exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+                shallow_source: None,
+                declared_in_macro_type_arg: false,
+            },
+        ],
         bindings: Vec::new(),
     };
 
@@ -902,119 +991,43 @@ fn define_slots_eval_extracts_bindings_from_optional_function_types() {
     input.evaluated_types = Some(&evaluated);
 
     let result = extract_component_meta(input);
-    let slot = result
+    let leading = result
         .slots
         .iter()
         .find(|slot| slot.name == "leading")
         .expect("leading slot should be extracted from defineSlots eval");
-    let binding_names: Vec<_> = slot
+    let binding_names: Vec<_> = leading
         .bindings
         .iter()
         .map(|binding| binding.name.as_str())
         .collect();
-
-    assert_eq!(binding_names, vec!["item", "open"]);
-}
-
-/// A `defineSlots` member whose value is a bare CONSTRUCTOR type
-/// (`new (props: { item: string }) => any`) must extract its first
-/// parameter's object members as slot bindings — exactly as the
-/// function-typed equivalent does. A constructor type carries the same
-/// `FunctionExpr` payload as a function type.
-///
-/// Discriminator: `collect_slot_binding_param_types` ran on analyzer IR
-/// (the lowered slot type, BEFORE any dispatch collapse). Pre-fix it
-/// matched only `TypeExpr::Function` and fell through `_ => {}` for a
-/// `ConstructorType`, so the first parameter was never collected and the
-/// slot published ZERO bindings.
-#[test]
-fn define_slots_eval_extracts_bindings_from_constructor_type_member() {
-    let macros = vec![AnalyzedMacro {
-        kind: AnalyzedMacroKind::DefineSlots,
-        ..make_define_props(vec![])
-    }];
-    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
-        props: Vec::new(),
-        define_props: Vec::new(),
-        define_emits: Vec::new(),
-        emits: Vec::new(),
-        define_slots: vec![crate::analysis::type_expand::ExpandedMacroObjectShape {
-            macro_index: 0,
-            result: crate::analysis::type_expand::ExpansionResult::exact(
-                crate::analysis::type_expand::ExpandedObjectShape {
-                    properties: vec![crate::analysis::type_expand::ExpandedProperty {
-                        name: "leading".to_string(),
-                        // `new (props: { item: string; open: boolean }) => any`
-                        ty: TypeExpr::ConstructorType(Arc::new(
-                            verter_type_expr::FunctionExpr::synthetic(
-                                vec![verter_type_expr::FunctionParam::synthetic(
-                                    Some("props".to_string()),
-                                    TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                                        properties: vec![
-                                            verter_type_expr::ObjectMember::Property(
-                                                verter_type_expr::ObjectProperty::synthetic_public(
-                                                    "item".to_string(),
-                                                    TypeExpr::Primitive(PrimitiveName::String),
-                                                    false,
-                                                    false,
-                                                ),
-                                            ),
-                                            verter_type_expr::ObjectMember::Property(
-                                                verter_type_expr::ObjectProperty::synthetic_public(
-                                                    "open".to_string(),
-                                                    TypeExpr::Primitive(PrimitiveName::Boolean),
-                                                    false,
-                                                    false,
-                                                ),
-                                            ),
-                                        ],
-                                    })),
-                                    false,
-                                    false,
-                                )],
-                                Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
-                                Vec::new(),
-                            ),
-                        )),
-                        optional: false,
-                        readonly: false,
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        declared_in_macro_type_arg: false,
-                    }],
-                    index_signatures: Vec::new(),
-                    call_signatures: Vec::new(),
-                },
-            ),
-        }],
-        slot_bindings: Vec::new(),
-        bindings: Vec::new(),
-    };
-
-    let mut input = empty_input(&macros);
-    input.evaluated_types = Some(&evaluated);
-
-    let result = extract_component_meta(input);
-    let slot = result
-        .slots
-        .iter()
-        .find(|slot| slot.name == "leading")
-        .expect("leading slot should be extracted from a constructor-typed defineSlots member");
-    let binding_names: Vec<_> = slot
-        .bindings
-        .iter()
-        .map(|binding| binding.name.as_str())
-        .collect();
-
     assert_eq!(
         binding_names,
         vec!["item", "open"],
-        "a constructor-typed slot member must surface its first parameter's object members as \
-         bindings, identically to the function-typed equivalent"
+        "per-binding evaluation entries populate the slot's bindings"
+    );
+    assert_eq!(
+        leading.bindings[0].type_source,
+        SourcePosition::Present(closed_leaf(PrimitiveName::String))
+    );
+    assert!(!leading.is_required, "optional slot stays optional");
+
+    // NEGATIVE (the layer boundary): a slot WITHOUT per-binding entries
+    // publishes ZERO derived bindings — walking the slot's materialized
+    // function shape for binding members is a host concern, never done here.
+    let trailing = result
+        .slots
+        .iter()
+        .find(|slot| slot.name == "trailing")
+        .expect("trailing slot should be extracted");
+    assert!(
+        trailing.bindings.is_empty(),
+        "no shape-derived bindings at this layer — the typed binding surface is host-raised"
     );
 }
 
 #[test]
-fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
+fn partial_slot_expansion_without_binding_channel_keeps_authored_binding_source() {
     let macros = vec![AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineSlots,
         slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
@@ -1025,18 +1038,19 @@ fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
                 name: "day".to_string(),
                 type_annotation: Some("CalendarCellTriggerProps['day']".to_string()),
                 span: verter_span::Span::default(),
-                binding_expr: lower_for_test(Some("CalendarCellTriggerProps['day']")).0,
+                payload: lower_for_test(Some("CalendarCellTriggerProps['day']")).0,
                 binding_expr_scope: lower_for_test(Some("CalendarCellTriggerProps['day']")).1,
             }],
             return_type: Some("VNode[]".to_string()),
             description: None,
             tags: Vec::new(),
-            return_expr: lower_for_test(Some("VNode[]")).0,
+            payload: lower_for_test(Some("VNode[]")).0,
             return_expr_scope: lower_for_test(Some("VNode[]")).1,
         }],
         ..make_define_props(vec![])
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -1047,27 +1061,7 @@ fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "day".to_string(),
-                        ty: TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(vec![verter_type_expr::FunctionParam::synthetic(Some("props".to_string()), TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                                    properties: vec![
-                                        verter_type_expr::ObjectMember::Property(
-                                            verter_type_expr::ObjectProperty::synthetic_public("day".to_string(), TypeExpr::Object(Arc::new(
-                                                    verter_type_expr::ObjectExpr {
-                                                        properties: (0..512)
-                                                            .map(|index| {
-                                                                verter_type_expr::ObjectMember::Property(
-                                                                    verter_type_expr::ObjectProperty::synthetic_public(format!("field{index}"), TypeExpr::Primitive(
-                                                                            PrimitiveName::String,
-                                                                        ), true, false),
-                                                                )
-                                                            })
-                                                            .collect(),
-                                                    },
-                                                )), false, false),
-                                        ),
-                                    ],
-                                })), false, false)], Some(Arc::new(TypeExpr::Primitive(
-                                PrimitiveName::Any,
-                            ))), Vec::new()))),
+                        ty: SourcePosition::Present(closed_ref("DaySlotFn")),
                         optional: true,
                         readonly: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
@@ -1102,13 +1096,12 @@ fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
         .find(|binding| binding.name == "day")
         .expect("day binding should be extracted");
 
+    // No per-binding evaluation entries exist, so the binding publishes the
+    // author's own annotation position — never a torn partial.
     assert_eq!(
-        binding.type_expr,
-        TypeExpr::IndexedAccess {
-            object: Arc::new(TypeExpr::named("CalendarCellTriggerProps")),
-            index: Arc::new(TypeExpr::string_literal("day")),
-        },
-        "huge partial slot binding expansions should keep the symbolic source contract"
+        binding.type_source,
+        SourcePosition::Present(authored_source(0)),
+        "partial slot expansions keep the authored binding source"
     );
     assert_eq!(
         binding.raw_type.as_deref(),
@@ -1117,7 +1110,7 @@ fn huge_partial_slot_binding_expansions_fall_back_to_symbolic_source_type() {
 }
 
 #[test]
-fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_access() {
+fn incomplete_per_binding_evaluation_falls_back_to_the_authored_binding_source() {
     let macros = vec![AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineSlots,
         slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
@@ -1128,18 +1121,19 @@ fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_ac
                 name: "ui".to_string(),
                 type_annotation: Some("Button['ui']".to_string()),
                 span: verter_span::Span::default(),
-                binding_expr: lower_for_test(Some("Button['ui']")).0,
+                payload: lower_for_test(Some("Button['ui']")).0,
                 binding_expr_scope: lower_for_test(Some("Button['ui']")).1,
             }],
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
-            return_expr: lower_for_test(Some("any")).0,
+            payload: lower_for_test(Some("any")).0,
             return_expr_scope: lower_for_test(Some("any")).1,
         }],
         ..make_define_props(vec![])
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -1147,31 +1141,17 @@ fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_ac
         define_slots: Vec::new(),
         slot_bindings: vec![crate::analysis::type_expand::ExpandedField {
             name: "default.ui".to_string(),
-            r#type: TypeExpr::Ref {
-                name: Arc::from("ComponentUI"),
-                type_arguments: Arc::from(vec![TypeExpr::TypeOf(verter_type_expr::ValueRef {
-                    path: vec!["theme".to_string()],
-                    type_args: Vec::new(),
-                })]),
-            },
+            r#type: SourcePosition::Present(closed_ref("ComponentUI")),
             raw_type: Some("Button['ui']".to_string()),
             optional: false,
             exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
-            diagnostics: vec![
-                crate::analysis::type_expand::ExpansionDiagnostic {
-                    reason: crate::analysis::type_expand::ExpansionStopReason::UnresolvedReference,
-                    context: "unresolved type reference 'ComponentUI'".to_string(),
-                    property_name: Some("default.ui".to_string()),
-                },
-                crate::analysis::type_expand::ExpansionDiagnostic {
-                    reason: crate::analysis::type_expand::ExpansionStopReason::UnsupportedOperator,
-                    context: "typeof theme was preserved symbolically".to_string(),
-                    property_name: Some("default.ui".to_string()),
-                },
-            ],
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            diagnostics: vec![crate::analysis::type_expand::ExpansionDiagnostic {
+                reason: crate::analysis::type_expand::ExpansionStopReason::UnresolvedReference,
+                context: "unresolved type reference 'ComponentUI'".to_string(),
+                property_name: Some("default.ui".to_string()),
+            }],
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         bindings: Vec::new(),
@@ -1192,19 +1172,18 @@ fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_ac
         .find(|binding| binding.name == "ui")
         .expect("ui binding should be extracted");
 
+    // The per-binding evaluation is INCOMPLETE and the author supplied an
+    // annotation — the authored position wins over the torn partial.
     assert_eq!(
-        binding.type_expr,
-        TypeExpr::IndexedAccess {
-            object: Arc::new(TypeExpr::named("Button")),
-            index: Arc::new(TypeExpr::string_literal("ui")),
-        },
-        "partial helper slot bindings should keep the symbolic indexed-access source contract"
+        binding.type_source,
+        SourcePosition::Present(authored_source(0)),
+        "incomplete per-binding evaluations fall back to the authored source"
     );
     assert_eq!(binding.raw_type.as_deref(), Some("Button['ui']"));
 }
 
 #[test]
-fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bindings() {
+fn define_slots_prefer_exact_evaluated_slot_bindings_over_authored_sources() {
     let macros = vec![AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineSlots,
         slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
@@ -1215,88 +1194,33 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
                 name: "ui".to_string(),
                 type_annotation: Some("Button['ui']".to_string()),
                 span: verter_span::Span::default(),
-                binding_expr: lower_for_test(Some("Button['ui']")).0,
+                payload: lower_for_test(Some("Button['ui']")).0,
                 binding_expr_scope: lower_for_test(Some("Button['ui']")).1,
             }],
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
-            return_expr: lower_for_test(Some("any")).0,
+            payload: lower_for_test(Some("any")).0,
             return_expr_scope: lower_for_test(Some("any")).1,
         }],
         ..make_define_props(vec![])
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
         emits: Vec::new(),
-        define_slots: vec![crate::analysis::type_expand::ExpandedMacroObjectShape {
-            macro_index: 0,
-            result: crate::analysis::type_expand::ExpansionResult::exact(
-                crate::analysis::type_expand::ExpandedObjectShape {
-                    properties: vec![crate::analysis::type_expand::ExpandedProperty {
-                        name: "default".to_string(),
-                        ty: TypeExpr::Function(Arc::new(
-                            verter_type_expr::FunctionExpr::synthetic(
-                                vec![verter_type_expr::FunctionParam::synthetic(
-                                    Some("props".to_string()),
-                                    TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                                        properties: vec![verter_type_expr::ObjectMember::Property(
-                                            verter_type_expr::ObjectProperty::synthetic_public(
-                                                "ui".to_string(),
-                                                TypeExpr::Ref {
-                                                    name: Arc::from("ComponentUI"),
-                                                    type_arguments: Arc::from(vec![
-                                                        TypeExpr::TypeOf(
-                                                            verter_type_expr::ValueRef {
-                                                                path: vec!["theme".to_string()],
-                                                                type_args: Vec::new(),
-                                                            },
-                                                        ),
-                                                    ]),
-                                                },
-                                                false,
-                                                false,
-                                            ),
-                                        )],
-                                    })),
-                                    false,
-                                    false,
-                                )],
-                                Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
-                                Vec::new(),
-                            ),
-                        )),
-                        optional: true,
-                        readonly: false,
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        declared_in_macro_type_arg: false,
-                    }],
-                    index_signatures: Vec::new(),
-                    call_signatures: Vec::new(),
-                },
-            ),
-        }],
+        define_slots: Vec::new(),
         slot_bindings: vec![crate::analysis::type_expand::ExpandedField {
             name: "default.ui".to_string(),
-            r#type: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                properties: vec![verter_type_expr::ObjectMember::Property(
-                    verter_type_expr::ObjectProperty::synthetic_public(
-                        "base".to_string(),
-                        TypeExpr::Primitive(PrimitiveName::String),
-                        false,
-                        false,
-                    ),
-                )],
-            })),
+            r#type: SourcePosition::Present(closed_ref("ButtonUi")),
             raw_type: Some("Button['ui']".to_string()),
             optional: false,
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         bindings: Vec::new(),
@@ -1317,22 +1241,13 @@ fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bin
         .find(|binding| binding.name == "ui")
         .expect("ui binding should be extracted");
 
-    let TypeExpr::Object(object) = &binding.type_expr else {
-        panic!(
-            "rescued evaluated slot binding should materialize to an object, got {:?}",
-            binding.type_expr
-        );
-    };
-    assert!(
-        object.properties.iter().any(|member| {
-            matches!(
-                member,
-                verter_type_expr::ObjectMember::Property(property)
-                    if property.name == "base"
-            )
-        }),
-        "rescued evaluated slot binding should expose concrete members, got {:?}",
-        binding.type_expr
+    // The per-binding evaluation is EXACT, so the evaluated source wins over
+    // the author's annotation position (the authored fallback is reserved for
+    // incomplete evaluations).
+    assert_eq!(
+        binding.type_source,
+        SourcePosition::Present(closed_ref("ButtonUi")),
+        "exact evaluated slot bindings win over the authored source"
     );
     assert_eq!(binding.raw_type.as_deref(), Some("Button['ui']"));
 }
@@ -1349,18 +1264,19 @@ fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
                 name: "day".to_string(),
                 type_annotation: Some("CalendarCellTriggerProps['day']".to_string()),
                 span: verter_span::Span::default(),
-                binding_expr: lower_for_test(Some("CalendarCellTriggerProps['day']")).0,
+                payload: lower_for_test(Some("CalendarCellTriggerProps['day']")).0,
                 binding_expr_scope: lower_for_test(Some("CalendarCellTriggerProps['day']")).1,
             }],
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
-            return_expr: lower_for_test(Some("any")).0,
+            payload: lower_for_test(Some("any")).0,
             return_expr_scope: lower_for_test(Some("any")).1,
         }],
         ..make_define_props(vec![])
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -1371,21 +1287,7 @@ fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "day".to_string(),
-                        ty: TypeExpr::Function(Arc::new(
-                            verter_type_expr::FunctionExpr::synthetic(
-                                vec![verter_type_expr::FunctionParam::synthetic(
-                                    Some("props".to_string()),
-                                    TypeExpr::IndexedAccess {
-                                        object: Arc::new(TypeExpr::named("CalendarSlotProps")),
-                                        index: Arc::new(TypeExpr::string_literal("day")),
-                                    },
-                                    false,
-                                    false,
-                                )],
-                                Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
-                                Vec::new(),
-                            ),
-                        )),
+                        ty: SourcePosition::Present(closed_ref("DaySlotFn")),
                         optional: true,
                         readonly: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
@@ -1416,124 +1318,14 @@ fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
         .expect("day binding should fall back to the source slot binding");
 
     assert_eq!(
-        binding.type_expr,
-        TypeExpr::IndexedAccess {
-            object: Arc::new(TypeExpr::named("CalendarCellTriggerProps")),
-            index: Arc::new(TypeExpr::string_literal("day")),
-        }
+        binding.type_source,
+        SourcePosition::Present(authored_source(0)),
+        "source bindings survive when the evaluator produced no per-binding entries"
     );
     assert_eq!(
         binding.raw_type.as_deref(),
         Some("CalendarCellTriggerProps['day']")
     );
-}
-
-#[test]
-fn define_slots_extract_bindings_from_call_signature_object_types() {
-    let macros = vec![AnalyzedMacro {
-        kind: AnalyzedMacroKind::DefineSlots,
-        slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
-            name: "content".to_string(),
-            is_required: false,
-            span: verter_span::Span::default(),
-            bindings: Vec::new(),
-            return_type: Some("any".to_string()),
-            description: None,
-            tags: Vec::new(),
-            return_expr: lower_for_test(Some("any")).0,
-            return_expr_scope: lower_for_test(Some("any")).1,
-        }],
-        ..make_define_props(vec![])
-    }];
-    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
-        props: Vec::new(),
-        define_props: Vec::new(),
-        define_emits: Vec::new(),
-        emits: Vec::new(),
-        define_slots: vec![crate::analysis::type_expand::ExpandedMacroObjectShape {
-            macro_index: 0,
-            result: crate::analysis::type_expand::ExpansionResult::exact(
-                crate::analysis::type_expand::ExpandedObjectShape {
-                    properties: vec![crate::analysis::type_expand::ExpandedProperty {
-                        name: "content".to_string(),
-                        ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                            properties: vec![verter_type_expr::ObjectMember::CallSignature(
-                                verter_type_expr::FunctionExpr::synthetic(
-                                    vec![verter_type_expr::FunctionParam::synthetic(
-                                        Some("props".to_string()),
-                                        TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                                            properties: vec![
-                                                verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic_public(
-                                                        "item".to_string(),
-                                                        TypeExpr::named("T"),
-                                                        false,
-                                                        false,
-                                                    ),
-                                                ),
-                                                verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic_public(
-                                                        "index".to_string(),
-                                                        TypeExpr::Primitive(PrimitiveName::Number),
-                                                        false,
-                                                        false,
-                                                    ),
-                                                ),
-                                                verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic_public(
-                                                        "ui".to_string(),
-                                                        TypeExpr::IndexedAccess {
-                                                            object: Arc::new(TypeExpr::named(
-                                                                "Tabs",
-                                                            )),
-                                                            index: Arc::new(
-                                                                TypeExpr::string_literal("ui"),
-                                                            ),
-                                                        },
-                                                        false,
-                                                        false,
-                                                    ),
-                                                ),
-                                            ],
-                                        })),
-                                        false,
-                                        false,
-                                    )],
-                                    Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
-                                    Vec::new(),
-                                ),
-                            )],
-                        })),
-                        optional: true,
-                        readonly: false,
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        declared_in_macro_type_arg: false,
-                    }],
-                    index_signatures: Vec::new(),
-                    call_signatures: Vec::new(),
-                },
-            ),
-        }],
-        slot_bindings: Vec::new(),
-        bindings: Vec::new(),
-    };
-
-    let mut input = empty_input(&macros);
-    input.evaluated_types = Some(&evaluated);
-
-    let result = extract_component_meta(input);
-    let slot = result
-        .slots
-        .iter()
-        .find(|slot| slot.name == "content")
-        .expect("content slot should be extracted");
-    let binding_names: Vec<_> = slot
-        .bindings
-        .iter()
-        .map(|binding| binding.name.as_str())
-        .collect();
-
-    assert_eq!(binding_names, vec!["item", "index", "ui"]);
 }
 
 #[test]
@@ -1544,19 +1336,16 @@ fn source_prop_raw_type_beats_expanded_backend_display_when_it_preserves_macro_c
         true,
     )])];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
             name: "ui".to_string(),
-            r#type: TypeExpr::union(vec![
-                TypeExpr::Primitive(PrimitiveName::String),
-                TypeExpr::Primitive(PrimitiveName::Undefined),
-            ]),
+            r#type: SourcePosition::Present(closed_ref("EvaluatedShape")),
             raw_type: Some("{ root?: string } | undefined".to_string()),
             optional: true,
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -1565,10 +1354,7 @@ fn source_prop_raw_type_beats_expanded_backend_display_when_it_preserves_macro_c
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "ui".to_string(),
-                        ty: TypeExpr::union(vec![
-                            TypeExpr::Primitive(PrimitiveName::String),
-                            TypeExpr::Primitive(PrimitiveName::Undefined),
-                        ]),
+                        ty: SourcePosition::Present(closed_ref("EvaluatedShape")),
                         optional: true,
                         readonly: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
@@ -1607,23 +1393,16 @@ fn optional_prop_raw_type_prefers_source_annotation_without_adding_undefined() {
         true,
     )])];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
             name: "modelValue".to_string(),
-            r#type: TypeExpr::union(vec![
-                TypeExpr::Primitive(PrimitiveName::String),
-                TypeExpr::Array {
-                    element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
-                    readonly: false,
-                },
-                TypeExpr::Primitive(PrimitiveName::Undefined),
-            ]),
+            r#type: SourcePosition::Present(closed_ref("EvaluatedShape")),
             raw_type: Some("string | string[] | undefined".to_string()),
             optional: true,
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -1632,14 +1411,7 @@ fn optional_prop_raw_type_prefers_source_annotation_without_adding_undefined() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "modelValue".to_string(),
-                        ty: TypeExpr::union(vec![
-                            TypeExpr::Primitive(PrimitiveName::String),
-                            TypeExpr::Array {
-                                element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
-                                readonly: false,
-                            },
-                            TypeExpr::Primitive(PrimitiveName::Undefined),
-                        ]),
+                        ty: SourcePosition::Present(closed_ref("EvaluatedShape")),
                         optional: true,
                         readonly: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
@@ -1677,29 +1449,28 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
         make_prop("trailingIcon", Some("IconProps['name']"), true),
     ])];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![
             crate::analysis::type_expand::ExpandedField {
                 name: "labelKey".to_string(),
-                r#type: TypeExpr::Primitive(PrimitiveName::Any),
+                r#type: SourcePosition::Present(closed_leaf(PrimitiveName::Any)),
                 raw_type: Some("any".to_string()),
                 optional: true,
                 exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
-                shallow_type_expr: None,
-                shallow_type_expr_scope: None,
+                shallow_source: None,
                 declared_in_macro_type_arg: false,
             },
             crate::analysis::type_expand::ExpandedField {
                 name: "trailingIcon".to_string(),
-                r#type: TypeExpr::Primitive(PrimitiveName::Any),
+                r#type: SourcePosition::Present(closed_leaf(PrimitiveName::Any)),
                 raw_type: Some("any".to_string()),
                 optional: true,
                 exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
-                shallow_type_expr: None,
-                shallow_type_expr_scope: None,
+                shallow_source: None,
                 declared_in_macro_type_arg: false,
             },
         ],
@@ -1710,7 +1481,7 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
                     properties: vec![
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "labelKey".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::Any),
+                            ty: SourcePosition::Present(closed_leaf(PrimitiveName::Any)),
                             optional: true,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -1718,7 +1489,7 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
                         },
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "trailingIcon".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::Any),
+                            ty: SourcePosition::Present(closed_leaf(PrimitiveName::Any)),
                             optional: true,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -1762,31 +1533,28 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
         make_prop("to", Some("RouteLocationRaw"), true),
         make_prop("href", Some("NuxtLinkProps['to']"), true),
     ])];
-    let placeholder = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-        properties: Vec::new(),
-    }));
     let diagnostics = vec![crate::analysis::type_expand::ExpansionDiagnostic {
         reason: crate::analysis::type_expand::ExpansionStopReason::IndeterminateConditional,
         context: "conditional type could not be resolved".to_string(),
         property_name: Some("to".to_string()),
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![
             crate::analysis::type_expand::ExpandedField {
                 name: "to".to_string(),
-                r#type: placeholder.clone(),
+                r#type: SourcePosition::Present(closed_ref("EvaluatedShape")),
                 raw_type: Some("RouteLocationRaw".to_string()),
                 optional: true,
                 exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: diagnostics.clone(),
-                shallow_type_expr: None,
-                shallow_type_expr_scope: None,
+                shallow_source: None,
                 declared_in_macro_type_arg: false,
             },
             crate::analysis::type_expand::ExpandedField {
                 name: "href".to_string(),
-                r#type: placeholder.clone(),
+                r#type: SourcePosition::Present(closed_ref("EvaluatedShape")),
                 raw_type: Some("NuxtLinkProps['to']".to_string()),
                 optional: true,
                 exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
@@ -1797,8 +1565,7 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
                     context: "conditional type could not be resolved".to_string(),
                     property_name: Some("href".to_string()),
                 }],
-                shallow_type_expr: None,
-                shallow_type_expr_scope: None,
+                shallow_source: None,
                 declared_in_macro_type_arg: false,
             },
         ],
@@ -1809,7 +1576,7 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
                     properties: vec![
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "to".to_string(),
-                            ty: placeholder.clone(),
+                            ty: SourcePosition::Present(closed_ref("EvaluatedShape")),
                             optional: true,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -1817,7 +1584,7 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
                         },
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "href".to_string(),
-                            ty: placeholder,
+                            ty: SourcePosition::Present(closed_ref("EvaluatedShape")),
                             optional: true,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -1853,16 +1620,13 @@ fn small_partial_placeholder_prop_expansions_fall_back_to_symbolic_source_type()
         .expect("href prop should be extracted");
 
     assert_eq!(
-        to.type_expr,
-        TypeExpr::named("RouteLocationRaw"),
-        "small partial placeholder props should keep the symbolic source contract",
+        to.type_source,
+        SourcePosition::Present(authored_source(0)),
+        "small partial placeholder props fall back to the authored source",
     );
     assert_eq!(
-        href.type_expr,
-        TypeExpr::IndexedAccess {
-            object: Arc::new(TypeExpr::named("NuxtLinkProps")),
-            index: Arc::new(TypeExpr::string_literal("to")),
-        },
+        href.type_source,
+        SourcePosition::Present(authored_source(0)),
         "small partial indexed-access props should keep the symbolic source contract",
     );
     assert_eq!(to.raw_type.as_deref(), Some("RouteLocationRaw"));
@@ -1882,22 +1646,22 @@ fn suspicious_partial_identifier_props_fall_back_to_source_any() {
     }];
     let resolved_macros = vec![ResolvedMacroInput {
         macro_index: 0,
-        props: vec![imported],
+        props: vec![resolved_prop_input(imported)],
         emits: Vec::new(),
         slots: Vec::new(),
         exposed: Vec::new(),
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
             name: "as".to_string(),
-            r#type: TypeExpr::named("ton"),
+            r#type: SourcePosition::Present(closed_ref("ton")),
             raw_type: Some("ton".to_string()),
             optional: true,
             exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -1906,7 +1670,7 @@ fn suspicious_partial_identifier_props_fall_back_to_source_any() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "as".to_string(),
-                        ty: TypeExpr::named("ton"),
+                        ty: SourcePosition::Present(closed_ref("ton")),
                         optional: true,
                         readonly: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
@@ -1937,9 +1701,9 @@ fn suspicious_partial_identifier_props_fall_back_to_source_any() {
         .expect("as prop should be extracted");
 
     assert_eq!(
-        prop.type_expr,
-        TypeExpr::Primitive(PrimitiveName::Any),
-        "partial suspicious identifiers should fall back to the richer source annotation",
+        prop.type_source,
+        SourcePosition::Present(authored_source(0)),
+        "partial evaluated identifiers fall back to the authored source",
     );
     assert_eq!(prop.raw_type.as_deref(), Some("any"));
     assert_eq!(prop.tags.len(), 1);
@@ -1952,30 +1716,11 @@ fn small_partial_undefined_object_props_fall_back_to_symbolic_source_type() {
         Some("Button['slots']"),
         true,
     )])];
-    let degraded = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-        properties: vec![
-            verter_type_expr::ObjectMember::Property(
-                verter_type_expr::ObjectProperty::synthetic_public(
-                    "base".to_string(),
-                    TypeExpr::Primitive(PrimitiveName::Undefined),
-                    false,
-                    false,
-                ),
-            ),
-            verter_type_expr::ObjectMember::Property(
-                verter_type_expr::ObjectProperty::synthetic_public(
-                    "label".to_string(),
-                    TypeExpr::Primitive(PrimitiveName::Undefined),
-                    false,
-                    false,
-                ),
-            ),
-        ],
-    }));
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
             name: "ui".to_string(),
-            r#type: degraded.clone(),
+            r#type: SourcePosition::Present(closed_ref("EvaluatedShape")),
             raw_type: Some("Button['slots']".to_string()),
             optional: true,
             exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
@@ -1985,8 +1730,7 @@ fn small_partial_undefined_object_props_fall_back_to_symbolic_source_type() {
                 context: "indexed access was preserved symbolically".to_string(),
                 property_name: Some("ui".to_string()),
             }],
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -1995,7 +1739,7 @@ fn small_partial_undefined_object_props_fall_back_to_symbolic_source_type() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "ui".to_string(),
-                        ty: degraded,
+                        ty: SourcePosition::Present(closed_ref("EvaluatedShape")),
                         optional: true,
                         readonly: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
@@ -2029,11 +1773,8 @@ fn small_partial_undefined_object_props_fall_back_to_symbolic_source_type() {
         .expect("ui prop should be extracted");
 
     assert_eq!(
-        prop.type_expr,
-        TypeExpr::IndexedAccess {
-            object: Arc::new(TypeExpr::named("Button")),
-            index: Arc::new(TypeExpr::string_literal("slots")),
-        },
+        prop.type_source,
+        SourcePosition::Present(authored_source(0)),
         "partial degraded objects should keep the symbolic indexed-access contract",
     );
     assert_eq!(prop.raw_type.as_deref(), Some("Button['slots']"));
@@ -2046,46 +1787,11 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
         Some("boolean | Partial<Omit<MentionOptions, 'suggestion' | 'suggestions'>>"),
         true,
     )])];
-    let huge_members = (0..512)
-        .map(|index| {
-            verter_type_expr::ObjectMember::Property(
-                verter_type_expr::ObjectProperty::synthetic_public(
-                    format!("field{index}"),
-                    TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                        properties: vec![
-                            verter_type_expr::ObjectMember::Property(
-                                verter_type_expr::ObjectProperty::synthetic_public(
-                                    "enabled".to_string(),
-                                    TypeExpr::Primitive(PrimitiveName::Boolean),
-                                    false,
-                                    false,
-                                ),
-                            ),
-                            verter_type_expr::ObjectMember::Property(
-                                verter_type_expr::ObjectProperty::synthetic_public(
-                                    "label".to_string(),
-                                    TypeExpr::Primitive(PrimitiveName::String),
-                                    true,
-                                    false,
-                                ),
-                            ),
-                        ],
-                    })),
-                    true,
-                    false,
-                ),
-            )
-        })
-        .collect();
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
             name: "mention".to_string(),
-            r#type: TypeExpr::Union(Arc::from(vec![
-                TypeExpr::Primitive(PrimitiveName::Boolean),
-                TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                    properties: huge_members,
-                })),
-            ])),
+            r#type: SourcePosition::Present(closed_ref("EvaluatedShape")),
             raw_type: Some(
                 "boolean | Partial<Omit<MentionOptions, 'suggestion' | 'suggestions'>>".to_string(),
             ),
@@ -2104,8 +1810,7 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
                     property_name: Some("mention".to_string()),
                 },
             ],
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -2114,23 +1819,7 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "mention".to_string(),
-                        ty: TypeExpr::Union(Arc::from(vec![
-                            TypeExpr::Primitive(PrimitiveName::Boolean),
-                            TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                                properties: (0..512)
-                                    .map(|index| {
-                                        verter_type_expr::ObjectMember::Property(
-                                            verter_type_expr::ObjectProperty::synthetic_public(
-                                                format!("field{index}"),
-                                                TypeExpr::Primitive(PrimitiveName::String),
-                                                true,
-                                                false,
-                                            ),
-                                        )
-                                    })
-                                    .collect(),
-                            })),
-                        ])),
+                        ty: SourcePosition::Present(closed_ref("EvaluatedShape")),
                         optional: true,
                         readonly: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
@@ -2164,24 +1853,9 @@ fn huge_partial_prop_expansions_fall_back_to_symbolic_source_type() {
         .expect("mention prop should be extracted");
 
     assert_eq!(
-        prop.type_expr,
-        TypeExpr::union(vec![
-            TypeExpr::Primitive(PrimitiveName::Boolean),
-            TypeExpr::named_with_args(
-                "Partial",
-                vec![TypeExpr::named_with_args(
-                    "Omit",
-                    vec![
-                        TypeExpr::named("MentionOptions"),
-                        TypeExpr::union(vec![
-                            TypeExpr::string_literal("suggestion"),
-                            TypeExpr::string_literal("suggestions"),
-                        ]),
-                    ],
-                )],
-            ),
-        ]),
-        "huge partial evaluated prop expansions should keep the symbolic source contract"
+        prop.type_source,
+        SourcePosition::Present(authored_source(0)),
+        "partial evaluated prop expansions keep the authored source"
     );
     assert_eq!(
         prop.raw_type.as_deref(),
@@ -2201,36 +1875,25 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
             ),
             description: None,
             tags: Vec::new(),
-            payload_expr: None,
+            payload: None,
             payload_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
         emits: vec![crate::analysis::type_expand::ExpandedField {
             name: "update:modelValue".to_string(),
-            r#type: TypeExpr::Tuple {
-                elements: Arc::from(vec![verter_type_expr::TupleElement {
-                    label: Some("value".to_string()),
-                    ty: TypeExpr::union(vec![
-                        TypeExpr::Primitive(PrimitiveName::String),
-                        TypeExpr::Primitive(PrimitiveName::Undefined),
-                    ]),
-                    optional: false,
-                    rest: false,
-                }]),
-                readonly: false,
-            },
+            r#type: SourcePosition::Present(closed_ref("EvaluatedShape")),
             raw_type: Some("string | undefined".to_string()),
             optional: false,
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_slots: Vec::new(),
@@ -2272,30 +1935,23 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
                 ),
                 description: None,
                 tags: Vec::new(),
-                payload_expr: None,
+                payload: None,
                 payload_expr_scope: None,
             }],
             ..make_define_props(vec![])
         },
     ];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
             name: "modelValue".to_string(),
-            r#type: TypeExpr::union(vec![
-                TypeExpr::Primitive(PrimitiveName::String),
-                TypeExpr::Array {
-                    element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
-                    readonly: false,
-                },
-                TypeExpr::Primitive(PrimitiveName::Undefined),
-            ]),
+            r#type: SourcePosition::Present(closed_ref("EvaluatedShape")),
             raw_type: Some("string | string[] | undefined".to_string()),
             optional: true,
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
@@ -2304,14 +1960,7 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "modelValue".to_string(),
-                        ty: TypeExpr::union(vec![
-                            TypeExpr::Primitive(PrimitiveName::String),
-                            TypeExpr::Array {
-                                element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
-                                readonly: false,
-                            },
-                            TypeExpr::Primitive(PrimitiveName::Undefined),
-                        ]),
+                        ty: SourcePosition::Present(closed_ref("EvaluatedShape")),
                         optional: true,
                         readonly: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
@@ -2325,29 +1974,13 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
         define_emits: Vec::new(),
         emits: vec![crate::analysis::type_expand::ExpandedField {
             name: "update:modelValue".to_string(),
-            r#type: TypeExpr::Tuple {
-                elements: Arc::from(vec![verter_type_expr::TupleElement {
-                    label: Some("value".to_string()),
-                    ty: TypeExpr::union(vec![
-                        TypeExpr::Primitive(PrimitiveName::String),
-                        TypeExpr::Array {
-                            element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
-                            readonly: false,
-                        },
-                        TypeExpr::Primitive(PrimitiveName::Undefined),
-                    ]),
-                    optional: false,
-                    rest: false,
-                }]),
-                readonly: false,
-            },
+            r#type: SourcePosition::Present(closed_ref("EvaluatedShape")),
             raw_type: Some("(T extends 'single' ? string : string[]) | undefined".to_string()),
             optional: false,
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_slots: Vec::new(),
@@ -2381,36 +2014,25 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
             payload_type: Some("[date: CalendarModelValue<R, M>]".to_string()),
             description: None,
             tags: Vec::new(),
-            payload_expr: lower_for_test(Some("[date: CalendarModelValue<R, M>]")).0,
+            payload: lower_for_test(Some("[date: CalendarModelValue<R, M>]")).0,
             payload_expr_scope: lower_for_test(Some("[date: CalendarModelValue<R, M>]")).1,
         }],
         ..make_define_props(vec![])
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
         emits: vec![crate::analysis::type_expand::ExpandedField {
             name: "update:modelValue".to_string(),
-            r#type: TypeExpr::Tuple {
-                elements: Arc::from(vec![verter_type_expr::TupleElement {
-                    label: Some("date".to_string()),
-                    ty: TypeExpr::named_with_args(
-                        "CalendarModelValue",
-                        vec![TypeExpr::named("R"), TypeExpr::named("M")],
-                    ),
-                    optional: false,
-                    rest: false,
-                }]),
-                readonly: false,
-            },
+            r#type: SourcePosition::Present(closed_ref("EvaluatedShape")),
             raw_type: Some("[date: CalendarModelValue<R, M>]".to_string()),
             optional: false,
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_slots: Vec::new(),
@@ -2448,33 +2070,34 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
                     name: "item".to_string(),
                     type_annotation: Some("T".to_string()),
                     span: verter_span::Span::default(),
-                    binding_expr: lower_for_test(Some("T")).0,
+                    payload: lower_for_test(Some("T")).0,
                     binding_expr_scope: lower_for_test(Some("T")).1,
                 },
                 crate::analysis::types::AnalyzedSlotFieldBinding {
                     name: "index".to_string(),
                     type_annotation: Some("number".to_string()),
                     span: verter_span::Span::default(),
-                    binding_expr: lower_for_test(Some("number")).0,
+                    payload: lower_for_test(Some("number")).0,
                     binding_expr_scope: lower_for_test(Some("number")).1,
                 },
                 crate::analysis::types::AnalyzedSlotFieldBinding {
                     name: "open".to_string(),
                     type_annotation: Some("boolean".to_string()),
                     span: verter_span::Span::default(),
-                    binding_expr: lower_for_test(Some("boolean")).0,
+                    payload: lower_for_test(Some("boolean")).0,
                     binding_expr_scope: lower_for_test(Some("boolean")).1,
                 },
             ],
             return_type: None,
             description: None,
             tags: Vec::new(),
-            return_expr: None,
+            payload: None,
             return_expr_scope: None,
         }],
         ..make_define_props(vec![])
     }];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -2485,48 +2108,7 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "default".to_string(),
-                        ty: TypeExpr::union(vec![
-                            TypeExpr::Function(Arc::new(
-                                verter_type_expr::FunctionExpr::synthetic(
-                                    vec![verter_type_expr::FunctionParam::synthetic(
-                                        Some("props".to_string()),
-                                        TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-                                            properties: vec![
-                                                verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic_public(
-                                                        "index".to_string(),
-                                                        TypeExpr::Primitive(PrimitiveName::Number),
-                                                        false,
-                                                        false,
-                                                    ),
-                                                ),
-                                                verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic_public(
-                                                        "item".to_string(),
-                                                        TypeExpr::named("T"),
-                                                        false,
-                                                        false,
-                                                    ),
-                                                ),
-                                                verter_type_expr::ObjectMember::Property(
-                                                    verter_type_expr::ObjectProperty::synthetic_public(
-                                                        "open".to_string(),
-                                                        TypeExpr::Primitive(PrimitiveName::Boolean),
-                                                        false,
-                                                        false,
-                                                    ),
-                                                ),
-                                            ],
-                                        })),
-                                        false,
-                                        false,
-                                    )],
-                                    Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
-                                    Vec::new(),
-                                ),
-                            )),
-                            TypeExpr::Primitive(PrimitiveName::Undefined),
-                        ]),
+                        ty: SourcePosition::Present(closed_ref("EvaluatedShape")),
                         optional: true,
                         readonly: false,
                         visibility: verter_type_expr::MemberVisibility::Public,
@@ -2571,13 +2153,13 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
                 name: "item".to_string(),
                 type_annotation: Some("string".to_string()),
                 span: verter_span::Span::default(),
-                binding_expr: lower_for_test(Some("string")).0,
+                payload: lower_for_test(Some("string")).0,
                 binding_expr_scope: lower_for_test(Some("string")).1,
             }],
             return_type: None,
             description: None,
             tags: Vec::new(),
-            return_expr: None,
+            payload: None,
             return_expr_scope: None,
         }],
         ..make_define_props(vec![])
@@ -2596,13 +2178,13 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
                     name: "row".to_string(),
                     type_annotation: Some("number".to_string()),
                     span: verter_span::Span::default(),
-                    binding_expr: lower_for_test(Some("number")).0,
+                    payload: lower_for_test(Some("number")).0,
                     binding_expr_scope: lower_for_test(Some("number")).1,
                 }],
                 return_type: Some("VNode[]".to_string()),
                 description: Some("resolved default slot".to_string()),
                 tags: Vec::new(),
-                return_expr: lower_for_test(Some("VNode[]")).0,
+                payload: lower_for_test(Some("VNode[]")).0,
                 return_expr_scope: lower_for_test(Some("VNode[]")).1,
             },
             crate::analysis::types::AnalyzedSlotField {
@@ -2613,7 +2195,7 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
                 return_type: Some("any".to_string()),
                 description: Some("resolved header slot".to_string()),
                 tags: Vec::new(),
-                return_expr: lower_for_test(Some("any")).0,
+                payload: lower_for_test(Some("any")).0,
                 return_expr_scope: lower_for_test(Some("any")).1,
             },
         ],
@@ -2738,6 +2320,228 @@ fn define_model_without_default_stays_optional_in_component_meta() {
     );
 }
 
+/// A DEFAULTED model's `update:<name>` event displays a BARE payload
+/// (`[value: T]`) — the model ref always holds a value once a default
+/// exists, so the event never emits `undefined`. Only an UNDEFAULTED
+/// optional model surfaces `[value: T | undefined]` (pinned by
+/// `define_model_without_default_stays_optional_in_component_meta`
+/// and re-asserted by the control below).
+#[test]
+fn define_model_with_default_emits_bare_update_event_payload() {
+    // `defineModel<string>('title', { default: 'untitled' })` — the
+    // analyzer always pairs a default key with its authored value entry.
+    let defaulted = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineModel,
+        model_name: Some("title".to_string()),
+        prop_fields: vec![make_prop("title", Some("string"), true)],
+        default_keys: vec!["title".to_string()],
+        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
+            key: "title".to_string(),
+            value: "'untitled'".to_string(),
+            span: verter_span::Span::default(),
+        }],
+        ..make_define_props(vec![])
+    }];
+
+    let result = extract_component_meta(empty_input(&defaulted));
+    let model_prop = result
+        .props
+        .iter()
+        .find(|prop| prop.name == "title")
+        .expect("defaulted defineModel should synthesize a model prop");
+    let model_event = result
+        .events
+        .iter()
+        .find(|event| event.name == "update:title")
+        .expect("defaulted defineModel should synthesize an update event");
+
+    assert!(
+        !model_prop.required,
+        "a defaulted model prop stays not-required"
+    );
+    assert!(
+        model_prop.has_default,
+        "the default key must surface as has_default on the model prop"
+    );
+    assert_eq!(
+        model_event.raw_signature.as_deref(),
+        Some("[value: string]"),
+        "a DEFAULTED model's update event payload displays BARE `[value: T]`, \
+         never `[value: T | undefined]`"
+    );
+
+    // Control: an UNDEFAULTED optional model keeps the optionalized
+    // event display.
+    let undefaulted = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineModel,
+        model_name: Some("draft".to_string()),
+        prop_fields: vec![make_prop("draft", Some("string"), true)],
+        ..make_define_props(vec![])
+    }];
+
+    let control = extract_component_meta(empty_input(&undefaulted));
+    let control_event = control
+        .events
+        .iter()
+        .find(|event| event.name == "update:draft")
+        .expect("undefaulted defineModel should synthesize an update event");
+    assert_eq!(
+        control_event.raw_signature.as_deref(),
+        Some("[value: string | undefined]"),
+        "an UNDEFAULTED optional model's update event display stays `[value: T | undefined]`"
+    );
+}
+
+/// The authored `defineModel` default VALUE threads onto the synthesized
+/// model prop: `default_value` carries the verbatim source text and the
+/// `@defaultValue` tag derives from it, so `has_default` and
+/// `default_value` never diverge.
+#[test]
+fn define_model_threads_default_value_into_synthesized_prop() {
+    // `defineModel<boolean>('defaulted', { default: false })`
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineModel,
+        model_name: Some("defaulted".to_string()),
+        prop_fields: vec![make_prop("defaulted", Some("boolean"), true)],
+        default_keys: vec!["defaulted".to_string()],
+        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
+            key: "defaulted".to_string(),
+            value: "false".to_string(),
+            span: verter_span::Span::default(),
+        }],
+        ..make_define_props(vec![])
+    }];
+
+    let result = extract_component_meta(empty_input(&macros));
+    let prop = result
+        .props
+        .iter()
+        .find(|prop| prop.name == "defaulted")
+        .expect("defaulted defineModel should synthesize a model prop");
+
+    assert!(prop.has_default, "the default must surface as has_default");
+    assert_eq!(
+        prop.default_value.as_deref(),
+        Some("false"),
+        "the authored default VALUE must thread onto the synthesized model prop"
+    );
+    let tag = prop
+        .tags
+        .iter()
+        .find(|tag| tag.name == "defaultValue")
+        .expect("a threaded default value must synthesize the @defaultValue tag");
+    assert_eq!(tag.text.as_deref(), Some("false"));
+}
+
+/// The untyped `defineModel('flag', { default: false })` form (no type
+/// argument, so no analyzer prop field) threads the default value the same
+/// way as the typed form.
+#[test]
+fn untyped_define_model_threads_default_value_into_synthesized_prop() {
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineModel,
+        model_name: Some("flag".to_string()),
+        default_keys: vec!["flag".to_string()],
+        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
+            key: "flag".to_string(),
+            value: "false".to_string(),
+            span: verter_span::Span::default(),
+        }],
+        ..make_define_props(vec![])
+    }];
+
+    let result = extract_component_meta(empty_input(&macros));
+    let prop = result
+        .props
+        .iter()
+        .find(|prop| prop.name == "flag")
+        .expect("untyped defaulted defineModel should synthesize a model prop");
+
+    assert!(prop.has_default);
+    assert_eq!(prop.default_value.as_deref(), Some("false"));
+    let tag = prop
+        .tags
+        .iter()
+        .find(|tag| tag.name == "defaultValue")
+        .expect("a threaded default value must synthesize the @defaultValue tag");
+    assert_eq!(tag.text.as_deref(), Some("false"));
+}
+
+/// A model prop already declared by `defineProps` receives the model's
+/// default value on the reconciliation path too.
+#[test]
+fn define_model_default_value_updates_existing_prop() {
+    let macros = vec![
+        AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineProps,
+            ..make_define_props(vec![make_prop("modelValue", Some("string"), true)])
+        },
+        AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineModel,
+            model_name: None,
+            prop_fields: vec![make_prop("modelValue", Some("string"), true)],
+            default_keys: vec!["modelValue".to_string()],
+            default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
+                key: "modelValue".to_string(),
+                value: "'fallback'".to_string(),
+                span: verter_span::Span::default(),
+            }],
+            ..make_define_props(vec![])
+        },
+    ];
+
+    let result = extract_component_meta(empty_input(&macros));
+    assert_eq!(
+        result
+            .props
+            .iter()
+            .filter(|prop| prop.name == "modelValue")
+            .count(),
+        1,
+        "the declared prop and the model prop must reconcile into one"
+    );
+    let prop = result
+        .props
+        .iter()
+        .find(|prop| prop.name == "modelValue")
+        .expect("the reconciled model prop should exist");
+    assert!(prop.has_default);
+    assert_eq!(
+        prop.default_value.as_deref(),
+        Some("'fallback'"),
+        "the model default VALUE must land on the pre-existing declared prop"
+    );
+}
+
+/// Negative control: a model without an authored `default` keeps
+/// `default_value` unset and synthesizes no `@defaultValue` tag.
+#[test]
+fn define_model_without_default_keeps_default_value_none() {
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineModel,
+        model_name: Some("plain".to_string()),
+        prop_fields: vec![make_prop("plain", Some("string"), true)],
+        ..make_define_props(vec![])
+    }];
+
+    let result = extract_component_meta(empty_input(&macros));
+    let prop = result
+        .props
+        .iter()
+        .find(|prop| prop.name == "plain")
+        .expect("defineModel should synthesize a model prop");
+
+    assert!(!prop.has_default, "no authored default → has_default false");
+    assert!(
+        prop.default_value.is_none(),
+        "no authored default → no default value text"
+    );
+    assert!(
+        !prop.tags.iter().any(|tag| tag.name == "defaultValue"),
+        "no authored default → no synthesized @defaultValue tag"
+    );
+}
+
 #[test]
 fn define_model_reconciles_existing_model_value_prop_from_define_props() {
     let macros = vec![
@@ -2753,29 +2557,28 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
         },
     ];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![
             crate::analysis::type_expand::ExpandedField {
                 name: "modelValue".to_string(),
-                r#type: TypeExpr::Primitive(PrimitiveName::String),
+                r#type: SourcePosition::Present(closed_leaf(PrimitiveName::String)),
                 raw_type: Some("string".to_string()),
                 optional: false,
                 exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
-                shallow_type_expr: None,
-                shallow_type_expr_scope: None,
+                shallow_source: None,
                 declared_in_macro_type_arg: false,
             },
             crate::analysis::type_expand::ExpandedField {
                 name: "label".to_string(),
-                r#type: TypeExpr::Primitive(PrimitiveName::String),
+                r#type: SourcePosition::Present(closed_leaf(PrimitiveName::String)),
                 raw_type: Some("string".to_string()),
                 optional: false,
                 exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
-                shallow_type_expr: None,
-                shallow_type_expr_scope: None,
+                shallow_source: None,
                 declared_in_macro_type_arg: false,
             },
         ],
@@ -2786,7 +2589,7 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
                     properties: vec![
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "label".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            ty: SourcePosition::Present(closed_leaf(PrimitiveName::String)),
                             optional: false,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -2794,7 +2597,7 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
                         },
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "modelValue".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            ty: SourcePosition::Present(closed_leaf(PrimitiveName::String)),
                             optional: false,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -2809,22 +2612,16 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
         define_emits: Vec::new(),
         emits: vec![crate::analysis::type_expand::ExpandedField {
             name: "update:modelValue".to_string(),
-            r#type: TypeExpr::Tuple {
-                elements: Arc::from(vec![verter_type_expr::TupleElement {
-                    label: Some("value".to_string()),
-                    ty: TypeExpr::Primitive(PrimitiveName::String),
-                    optional: false,
-                    rest: false,
-                }]),
-                readonly: false,
-            },
+            r#type: SourcePosition::Present(synthesized_tuple(&[(
+                Some("value"),
+                LeafTypeFact::Primitive(PrimitiveName::String),
+            )])),
             raw_type: Some("[value: string]".to_string()),
             optional: false,
             exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
             execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
             diagnostics: Vec::new(),
-            shallow_type_expr: None,
-            shallow_type_expr_scope: None,
+            shallow_source: None,
             declared_in_macro_type_arg: false,
         }],
         define_slots: Vec::new(),
@@ -2889,7 +2686,7 @@ fn extracts_exposed_from_define_expose() {
         expose_fields: vec![AnalyzedExposeField {
             name: "focus".to_string(),
             span: Some(verter_span::Span::new(0, 5)),
-            type_expr: None,
+            payload: None,
             type_expr_scope: None,
             description: None,
             tags: Vec::new(),
@@ -2912,7 +2709,10 @@ fn resolved_macros_supply_imported_metadata_without_snapshot_mutation() {
     ];
     let resolved_macros = vec![ResolvedMacroInput {
         macro_index: 0,
-        props: resolved_fields,
+        props: resolved_fields
+            .into_iter()
+            .map(resolved_prop_input)
+            .collect(),
         emits: Vec::new(),
         slots: Vec::new(),
         exposed: Vec::new(),
@@ -2945,7 +2745,11 @@ fn resolved_macros_merge_with_local_prop_fields_for_mixed_type_sources() {
     )])];
     let resolved_macros = vec![ResolvedMacroInput {
         macro_index: 0,
-        props: vec![make_prop("importedOnly", Some("number"), true)],
+        props: vec![resolved_prop_input(make_prop(
+            "importedOnly",
+            Some("number"),
+            true,
+        ))],
         emits: Vec::new(),
         slots: Vec::new(),
         exposed: Vec::new(),
@@ -2974,7 +2778,7 @@ fn type_registry_comes_from_resolved_inputs_not_macro_local_types() {
     let macros = vec![make_define_props(Vec::new())];
     let registry = vec![ResolvedTypeAnalysis {
         name: "ImportedProps".to_string(),
-        type_expr: TypeExpr::Primitive(PrimitiveName::String),
+        type_source: SourcePosition::Present(closed_leaf(PrimitiveName::String)),
         type_expansion: None,
     }];
 
@@ -3005,7 +2809,7 @@ fn options_api_props_used_when_no_composition_props() {
             has_default: true,
             default_value: None,
             type_annotation: None,
-            type_expr: None,
+            payload: None,
             type_expr_scope: None,
             description: None,
             tags: Vec::new(),
@@ -3036,8 +2840,8 @@ fn options_api_props_used_when_no_composition_props() {
     assert!(result.props[0].has_default);
     assert!(result.options_api, "options_api flag should be true");
     assert_eq!(
-        result.props[0].type_expr,
-        TypeExpr::Primitive(PrimitiveName::String),
+        result.props[0].type_source,
+        SourcePosition::Present(closed_leaf(PrimitiveName::String)),
         "String runtime type should map to Primitive(String)"
     );
 }
@@ -3052,12 +2856,11 @@ fn options_api_prop_type_annotation_is_preserved() {
             has_default: false,
             default_value: None,
             type_annotation: Some("HTMLCanvasElement".to_string()),
-            // Post-M5 fix: the Options API analyzer lowers PropType<T> AST
-            // nodes directly via `verter_type_expr_oxc::lower_ts_type` at
-            // the producer site. The fixture mints the typed sidecar here
-            // to mirror the analyzer-producer output.
-            type_expr: Some(TypeExpr::named("HTMLCanvasElement")),
-            type_expr_scope: Some(verter_type_expr::TypeExprScope::new("")),
+            // An Options-API `PropType<T>` annotation carries display text
+            // only at this layer (no macro-anchored payload position exists);
+            // the typed channel is host-raised.
+            payload: None,
+            type_expr_scope: None,
             description: None,
             tags: Vec::new(),
             span: verter_span::Span::default(),
@@ -3083,17 +2886,13 @@ fn options_api_prop_type_annotation_is_preserved() {
     let result = extract_component_meta(input);
 
     assert_eq!(result.props.len(), 1);
-    // Post-M5 fix: the Options API path now surfaces the typed `Ref` shape
-    // because `extract_options_props` lowers `PropType<T>` AST nodes via
-    // `lower_ts_type` directly at the analyzer-producer site. The published
-    // `PropAnalysis.type_expr` is the structured `Ref { name: "HTMLCanvasElement" }`
-    // — NOT the previous `Unknown { raw: "..." }` fallback that masked the
-    // producer-chain gap.
+    // An Options-API `PropType<T>` annotation has no macro-anchored payload
+    // position at this layer, so no typed source is fabricated — the typed
+    // channel is host-raised while the display text is preserved verbatim.
     assert_eq!(
-        result.props[0].type_expr,
-        TypeExpr::named("HTMLCanvasElement"),
-        "Options API PropType<T> must surface as the typed Ref form, NOT Unknown {{ raw }} — \
-         pre-M5 fix the analyzer didn't lower PropType<T> AST nodes",
+        result.props[0].type_source,
+        SourcePosition::unannotated(),
+        "no fabricated typed source for an Options-API PropType<T> annotation",
     );
     assert_eq!(
         result.props[0].raw_type.as_deref(),
@@ -4348,29 +4147,28 @@ fn macro_wide_diagnostics_split_from_per_field_diagnostics() {
     ])];
 
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: vec![
             crate::analysis::type_expand::ExpandedField {
                 name: "foo".to_string(),
-                r#type: TypeExpr::Primitive(PrimitiveName::String),
+                r#type: SourcePosition::Present(closed_leaf(PrimitiveName::String)),
                 raw_type: None,
                 optional: false,
                 exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
-                shallow_type_expr: None,
-                shallow_type_expr_scope: None,
+                shallow_source: None,
                 declared_in_macro_type_arg: false,
             },
             crate::analysis::type_expand::ExpandedField {
                 name: "bar".to_string(),
-                r#type: TypeExpr::Primitive(PrimitiveName::Number),
+                r#type: SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
                 raw_type: None,
                 optional: false,
                 exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
                 execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
-                shallow_type_expr: None,
-                shallow_type_expr_scope: None,
+                shallow_source: None,
                 declared_in_macro_type_arg: false,
             },
         ],
@@ -4381,7 +4179,7 @@ fn macro_wide_diagnostics_split_from_per_field_diagnostics() {
                     properties: vec![
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "foo".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            ty: SourcePosition::Present(closed_leaf(PrimitiveName::String)),
                             optional: false,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -4389,7 +4187,7 @@ fn macro_wide_diagnostics_split_from_per_field_diagnostics() {
                         },
                         crate::analysis::type_expand::ExpandedProperty {
                             name: "bar".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::Number),
+                            ty: SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
                             optional: false,
                             readonly: false,
                             visibility: verter_type_expr::MemberVisibility::Public,
@@ -4530,6 +4328,7 @@ fn define_emits_call_signature_events_get_empty_diagnostics_not_global_clones() 
     }];
 
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: vec![crate::analysis::type_expand::ExpandedMacroObjectShape {
@@ -4543,22 +4342,20 @@ fn define_emits_call_signature_events_get_empty_diagnostics_not_global_clones() 
                             // First param is the event name literal
                             crate::analysis::type_expand::ExpandedParameter {
                                 name: "e".to_string(),
-                                ty: TypeExpr::Literal(verter_type_expr::LiteralValue::String(
-                                    "change".to_string(),
-                                )),
+                                ty: closed_string("change"),
                                 optional: false,
                                 rest: false,
                             },
                             // Second param is the payload
                             crate::analysis::type_expand::ExpandedParameter {
                                 name: "value".to_string(),
-                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                ty: closed_leaf(PrimitiveName::String),
                                 optional: false,
                                 rest: false,
                             },
                         ],
-                        return_type: TypeExpr::Primitive(PrimitiveName::Void),
-                        type_parameters: Vec::new(),
+                        return_type: closed_leaf(PrimitiveName::Void),
+                        type_parameters: [].into(),
                     }],
                 },
                 crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
@@ -4776,13 +4573,14 @@ fn synthesizes_default_value_tag_for_runtime_define_props() {
 fn evaluator_only_props_publish_no_fabricated_jsdoc() {
     let macros = vec![make_define_props(Vec::new())];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        exposed: Vec::new(),
         define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
             macro_index: 0,
             result: crate::analysis::type_expand::ExpansionResult::exact(
                 crate::analysis::type_expand::ExpandedObjectShape {
                     properties: vec![crate::analysis::type_expand::ExpandedProperty {
                         name: "foo".to_string(),
-                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        ty: SourcePosition::Present(closed_leaf(PrimitiveName::String)),
                         optional: false,
                         readonly: false,
                         visibility: verter_type_expr::MemberVisibility::Public,

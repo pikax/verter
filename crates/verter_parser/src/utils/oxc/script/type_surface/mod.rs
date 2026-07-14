@@ -14,13 +14,6 @@
 //! pre-resolved data is merged into [`TypeResolutionContext::companion_types`]
 //! so lookups for imported type names fall back to those owned surfaces —
 //! the module itself never loads or walks other files.
-//!
-//! One deliberate Vue-owned dependency: the named-type memo seam
-//! (`TypeResolutionContext::named_type_cache`) is typed by the
-//! `NamedTypeCache` trait and cache-key identities owned by
-//! `crate::utils::oxc::vue::script::named_type_keys` — that cache identity
-//! backs the host's Vue resolved-named-type identity and is Vue semantics,
-//! not part of this neutral surface capture.
 
 #![allow(dead_code)]
 
@@ -31,9 +24,7 @@ use std::{
 };
 
 use oxc_ast::ast::*;
-use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_type_expr::{TypeExpr, TypeExprScope};
 
 use crate::common::Span;
 
@@ -221,17 +212,6 @@ pub struct ResolvedProp {
     pub map_local: bool,
     /// Whether spans on this prop are already SFC-absolute.
     pub span_is_absolute: bool,
-    /// Lowered typed form of the prop's type annotation. Populated by the
-    /// producer that has the OXC `TSType<'_>` AST node in scope (local-SFC
-    /// inference or cross-file external resolver). Authoritative for
-    /// downstream consumers — `type_text` is display-only.
-    pub type_expr: Option<TypeExpr>,
-    /// Scope of `type_expr`: canonical_id of the file whose OXC parse produced
-    /// the typed expression. For local-SFC parses this is the owner SFC's
-    /// canonical_id; for the external-resolution path this is the external
-    /// file's canonical_id. Pairing invariant:
-    /// `type_expr.is_some() <=> type_expr_scope.is_some()`.
-    pub type_expr_scope: Option<TypeExprScope>,
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source like an imported interface).
@@ -276,14 +256,6 @@ pub struct ResolvedNamedCallSignature {
     pub map_local: bool,
     /// Whether spans on this emit are already SFC-absolute.
     pub span_is_absolute: bool,
-    /// Lowered typed form of the emit's payload type. Populated by the
-    /// producer that has the OXC `TSType<'_>` AST node in scope.
-    /// Authoritative for downstream consumers — `signature` text is display-only.
-    pub type_expr: Option<TypeExpr>,
-    /// Scope of `type_expr`: canonical_id of the file whose OXC parse produced
-    /// the typed expression. Pairing invariant:
-    /// `type_expr.is_some() <=> type_expr_scope.is_some()`.
-    pub type_expr_scope: Option<TypeExprScope>,
 }
 
 /// Resolution surface that a `BlockedType` applies to.
@@ -353,79 +325,6 @@ impl ResolvedElements {
                 true
             }
         });
-    }
-
-    /// Stamp `type_expr_scope` on every prop / emit whose `type_expr` is
-    /// populated but whose scope is missing. Called by parser-boundary callers
-    /// to attach the canonical_id of the file whose OXC parse produced the
-    /// typed expression.
-    ///
-    /// The local-SFC parse path stamps the owner SFC's canonical_id; the
-    /// external-resolution path is stamped inside
-    /// `finalize_external_resolution_with_offset` with the external file's
-    /// canonical_id.
-    ///
-    /// This method is the producer-side authority for the pairing invariant
-    /// `type_expr.is_some() <=> type_expr_scope.is_some()` enforced by
-    /// `assert_typed_form_populated`.
-    pub fn stamp_type_expr_scope(&mut self, scope: &TypeExprScope) {
-        for prop in &mut self.props {
-            if prop.type_expr.is_some() && prop.type_expr_scope.is_none() {
-                prop.type_expr_scope = Some(scope.clone());
-            }
-        }
-        for emit in &mut self.call_signatures {
-            if emit.type_expr.is_some() && emit.type_expr_scope.is_none() {
-                emit.type_expr_scope = Some(scope.clone());
-            }
-        }
-    }
-
-    /// Assert that every `ResolvedProp` and `ResolvedNamedCallSignature` satisfies the typed
-    /// form pairing invariant:
-    /// - `type_expr.is_some() <=> type_expr_scope.is_some()`, and
-    /// - `type_expr.is_some()` whenever `type_span.is_some() || type_text.is_some()`
-    ///   (props) or `signature` carries a non-empty payload (emits).
-    ///
-    /// Returns `Ok(())` if every prop / emit complies. Returns a `Err(message)`
-    /// listing every violator. Used for `debug_assert!` at the parser-boundary
-    /// exit so consumers can `expect("type_expr+scope populated by parser")`
-    /// at read time.
-    pub fn assert_typed_form_populated(&self) -> Result<(), String> {
-        let mut violators: Vec<String> = Vec::new();
-        for prop in &self.props {
-            let display_name = prop
-                .key_name
-                .clone()
-                .unwrap_or_else(|| "<anonymous>".to_string());
-            if prop.type_expr.is_some() != prop.type_expr_scope.is_some() {
-                violators.push(format!(
-                    "ResolvedProp `{display_name}`: type_expr/type_expr_scope pairing violated (type_expr.is_some()={}, type_expr_scope.is_some()={})",
-                    prop.type_expr.is_some(),
-                    prop.type_expr_scope.is_some(),
-                ));
-            }
-            if prop.type_expr.is_none() && (prop.type_span.is_some() || prop.type_text.is_some()) {
-                violators.push(format!(
-                    "ResolvedProp `{display_name}`: type_span/type_text present but type_expr is None"
-                ));
-            }
-        }
-        for emit in &self.call_signatures {
-            if emit.type_expr.is_some() != emit.type_expr_scope.is_some() {
-                violators.push(format!(
-                    "ResolvedNamedCallSignature `{}`: type_expr/type_expr_scope pairing violated (type_expr.is_some()={}, type_expr_scope.is_some()={})",
-                    emit.name,
-                    emit.type_expr.is_some(),
-                    emit.type_expr_scope.is_some(),
-                ));
-            }
-        }
-        if violators.is_empty() {
-            Ok(())
-        } else {
-            Err(violators.join("\n"))
-        }
     }
 }
 
@@ -540,8 +439,6 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     pub type_params: Vec<(Span, Option<&'ctx TSType<'a>>)>,
     /// Bound generic type parameters for the current instantiation.
     pub type_param_bindings: Vec<(Span, &'ctx TSType<'a>)>,
-    /// Stable cache-key representation of `type_param_bindings`.
-    type_param_bindings_cache_key: Arc<[ResolvedTypeParamBindingCacheKey]>,
     /// Diagnostics collected during resolution
     pub diagnostics: Vec<ResolutionDiagnostic>,
     /// Pre-resolved types from companion `<script>` block.
@@ -558,30 +455,8 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     /// Current resolution surface, used to filter `blocked_types` by surface.
     /// When None, all blocked types apply regardless of surface.
     pub current_surface: Option<BlockedTypeSurface>,
-    /// Stable sorted imported companion names available during this resolution.
-    /// Included in named-type cache keys so different companion availability
-    /// sets do not reuse an incompatible cached local expansion.
-    companion_cache_key: Arc<[Box<[u8]>]>,
     /// Optional debug/trace label for the owning source file.
     trace_label: Option<Arc<str>>,
-    /// Optional canonical_id of the file whose source is being resolved by
-    /// this context. When set, the lowering producer sites in
-    /// `elements.rs` / `decl.rs` populate `ResolvedProp.type_expr_scope` /
-    /// `ResolvedNamedCallSignature.type_expr_scope` with this value, completing the
-    /// pairing invariant
-    /// (`type_expr.is_some() <=> type_expr_scope.is_some()`) at construction
-    /// time. When `None`, construction sites leave `type_expr_scope` as
-    /// `None` and a downstream stamping helper
-    /// (`ResolvedElements::stamp_type_expr_scope`) is responsible for
-    /// completing the invariant before the result leaves the parser.
-    owner_canonical: Option<TypeExprScope>,
-    /// Injected host-owned cache handle for fully-resolved named local symbols.
-    /// `None` for standalone callers (tests, direct parsing); resolution still
-    /// succeeds but pays no memoization cost. When `Some`, the adapter closes
-    /// over a `(canonical_id, whole_hash)` scoping tuple so cache entries are
-    /// keyed against the owning file's content generation. See
-    /// [`cache_keys::NamedTypeCache`] for the trait contract.
-    named_type_cache: Option<Arc<dyn cache_keys::NamedTypeCache + Send + Sync>>,
 }
 
 /// Maximum syntactic descent depth for in-file type resolution. This is a
@@ -711,10 +586,6 @@ pub struct InterfaceResolutionEntry<'ctx, 'a: 'ctx> {
     pub type_params: Option<&'ctx TSTypeParameterDeclaration<'a>>,
 }
 
-use crate::utils::oxc::vue::named_type_keys::{
-    self as cache_keys, ResolvedTypeParamBindingCacheKey,
-};
-
 #[derive(Debug, Clone)]
 enum NamedTypeResolutionPlan<'ctx, 'a: 'ctx> {
     Interface(InterfaceResolutionPlan<'ctx, 'a>),
@@ -784,72 +655,13 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             classes: FxHashMap::default(),
             type_params: Vec::new(),
             type_param_bindings: Vec::new(),
-            type_param_bindings_cache_key: Arc::from(
-                Vec::<ResolvedTypeParamBindingCacheKey>::new().into_boxed_slice(),
-            ),
             diagnostics: Vec::new(),
             companion_types: rustc_hash::FxHashMap::default(),
             companion_origins: rustc_hash::FxHashMap::default(),
             blocked_types: Vec::new(),
             current_surface: None,
-            companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
             trace_label: None,
-            owner_canonical: None,
-            named_type_cache: None,
         }
-    }
-
-    /// Set the canonical_id of the file this context is resolving against.
-    /// When set, construction-site lowering populates `type_expr_scope`
-    /// atomically with `type_expr`, satisfying the pairing invariant at the
-    /// producer site.
-    pub fn set_owner_canonical(&mut self, canonical_id: impl Into<String>) {
-        self.owner_canonical = Some(TypeExprScope::new(canonical_id));
-    }
-
-    /// Read the canonical_id of the file this context is resolving against.
-    /// Returns `None` for standalone callers (tests, direct parsing) that
-    /// have not bound the context to a file canonical_id.
-    pub(super) fn owner_canonical_scope(&self) -> Option<&TypeExprScope> {
-        self.owner_canonical.as_ref()
-    }
-
-    /// Inject a host-owned named-type cache. Subsequent recursive resolutions
-    /// (including child contexts produced by [`instantiate_type_params_ctx`])
-    /// consult this handle before computing from AST, and store new results
-    /// on completion. Calling this with `None` disables memoization.
-    pub fn set_named_type_cache(
-        &mut self,
-        cache: Option<Arc<dyn cache_keys::NamedTypeCache + Send + Sync>>,
-    ) {
-        self.named_type_cache = cache;
-    }
-
-    pub fn refresh_companion_cache_key(&mut self) {
-        let mut names = self
-            .companion_types
-            .keys()
-            .map(|name| name.as_bytes().to_vec().into_boxed_slice())
-            .collect::<Vec<_>>();
-        names.sort_unstable();
-        self.companion_cache_key = Arc::from(names.into_boxed_slice());
-    }
-
-    pub fn refresh_type_param_bindings_cache_key(&mut self) {
-        let bindings = self
-            .type_param_bindings
-            .iter()
-            .map(|(name_span, bound)| ResolvedTypeParamBindingCacheKey {
-                name: symbol_key_from_span(self.source, *name_span),
-                bound: semantic_type_cache_key(bound, self),
-            })
-            .collect::<Vec<_>>();
-        self.type_param_bindings_cache_key = Arc::from(bindings.into_boxed_slice());
-    }
-
-    pub fn clear_type_param_bindings(&mut self) {
-        self.type_param_bindings.clear();
-        self.refresh_type_param_bindings_cache_key();
     }
 
     pub fn set_trace_label(&mut self, label: impl Into<Arc<str>>) {
@@ -865,7 +677,6 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
                 .entry(name.clone())
                 .or_insert_with(|| resolved.clone());
         }
-        self.refresh_companion_cache_key();
     }
 
     /// Check if a type name is blocked by the per-surface blocklist.
@@ -954,74 +765,6 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         self.classes.get(name).copied()
     }
 
-    fn cache_key_for_name(
-        &self,
-        name: &[u8],
-        base_offset: u32,
-        from_root_body: bool,
-    ) -> cache_keys::ResolvedNamedTypeCacheKey {
-        cache_keys::ResolvedNamedTypeCacheKey {
-            name: name.to_vec().into_boxed_slice(),
-            surface: self.current_surface.clone(),
-            base_offset,
-            from_root_body,
-            companion_cache_key: Arc::clone(&self.companion_cache_key),
-            type_param_bindings: Arc::clone(&self.type_param_bindings_cache_key),
-        }
-    }
-
-    fn cached_named_resolution(
-        &self,
-        name: &[u8],
-        base_offset: u32,
-        from_root_body: bool,
-    ) -> Option<Arc<ResolvedElements>> {
-        #[cfg(feature = "parser_cache_audit")]
-        {
-            // Emit an audit trace on every cache hit. The full slow-path
-            // recompute + `PartialEq` assertion lives at the adapter layer
-            // (see `verter_session::host_manage::HostNamedTypeCacheAdapter`'s
-            // audit branch) — this trace gives us observability on hit rate
-            // and key shape during focused audit runs.
-            if let Some(cache) = &self.named_type_cache {
-                if cache
-                    .get(&self.cache_key_for_name(name, base_offset, from_root_body))
-                    .is_some()
-                {
-                    component_meta_core_trace_event(
-                        "parser_cache_audit_hit",
-                        format!(
-                            "file={} name={} base_offset={} from_root_body={} bindings={} companions={}",
-                            self.trace_label.as_deref().unwrap_or("<unknown>"),
-                            String::from_utf8_lossy(name),
-                            base_offset,
-                            from_root_body,
-                            self.type_param_bindings.len(),
-                            self.companion_types.len(),
-                        ),
-                    );
-                }
-            }
-        }
-        self.named_type_cache
-            .as_ref()?
-            .get(&self.cache_key_for_name(name, base_offset, from_root_body))
-    }
-
-    fn store_named_resolution(
-        &self,
-        name: &[u8],
-        base_offset: u32,
-        from_root_body: bool,
-        resolved: Arc<ResolvedElements>,
-    ) {
-        if let Some(cache) = self.named_type_cache.as_ref() {
-            cache.insert(
-                self.cache_key_for_name(name, base_offset, from_root_body),
-                resolved,
-            );
-        }
-    }
     /// Look up a type parameter constraint by comparing spans against source bytes
     pub fn find_type_param(&self, name: &[u8]) -> Option<&'ctx TSType<'a>> {
         if let Some(bound) = self
@@ -1043,282 +786,6 @@ fn symbol_key_from_span(source: &[u8], span: Span) -> Box<[u8]> {
     source[span.start as usize..span.end as usize]
         .to_vec()
         .into_boxed_slice()
-}
-
-fn normalized_source_key_from_span(source: &[u8], span: Span) -> Box<[u8]> {
-    source[span.start as usize..span.end as usize]
-        .iter()
-        .copied()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .collect::<Vec<_>>()
-        .into_boxed_slice()
-}
-
-fn append_type_name_cache_key(out: &mut Vec<u8>, type_name: &TSTypeName<'_>) {
-    match type_name {
-        TSTypeName::IdentifierReference(ident) => out.extend_from_slice(ident.name.as_bytes()),
-        TSTypeName::QualifiedName(qualified) => {
-            append_qualified_type_name_cache_key(out, qualified)
-        }
-        TSTypeName::ThisExpression(_) => out.extend_from_slice(b"this"),
-    }
-}
-
-fn append_qualified_type_name_cache_key(out: &mut Vec<u8>, qualified: &TSQualifiedName<'_>) {
-    append_type_name_cache_key(out, &qualified.left);
-    out.push(b'.');
-    out.extend_from_slice(qualified.right.name.as_bytes());
-}
-
-fn append_literal_cache_key(out: &mut Vec<u8>, literal: &TSLiteralType<'_>) {
-    match &literal.literal {
-        TSLiteral::StringLiteral(value) => {
-            out.extend_from_slice(b"str:");
-            out.extend_from_slice(value.value.as_bytes());
-        }
-        TSLiteral::NumericLiteral(value) => {
-            out.extend_from_slice(b"num:");
-            if let Some(raw) = &value.raw {
-                out.extend_from_slice(raw.as_bytes());
-            } else {
-                out.extend_from_slice(value.value.to_string().as_bytes());
-            }
-        }
-        TSLiteral::BooleanLiteral(value) => {
-            out.extend_from_slice(if value.value {
-                b"bool:true"
-            } else {
-                b"bool:false"
-            });
-        }
-        TSLiteral::BigIntLiteral(value) => {
-            out.extend_from_slice(b"bigint:");
-            if let Some(raw) = &value.raw {
-                out.extend_from_slice(raw.as_bytes());
-            }
-        }
-        TSLiteral::TemplateLiteral(template) => {
-            out.extend_from_slice(b"tpl:");
-            for quasi in &template.quasis {
-                out.extend_from_slice(quasi.value.raw.as_bytes());
-                out.push(b'|');
-            }
-        }
-        TSLiteral::UnaryExpression(unary) => {
-            out.extend_from_slice(b"unary:");
-            match unary.operator {
-                UnaryOperator::UnaryNegation => out.push(b'-'),
-                UnaryOperator::UnaryPlus => out.push(b'+'),
-                _ => out.push(b'?'),
-            }
-            if let Expression::NumericLiteral(value) = &unary.argument {
-                if let Some(raw) = &value.raw {
-                    out.extend_from_slice(raw.as_bytes());
-                } else {
-                    out.extend_from_slice(value.value.to_string().as_bytes());
-                }
-            } else if let Expression::BigIntLiteral(value) = &unary.argument {
-                if let Some(raw) = &value.raw {
-                    out.extend_from_slice(raw.as_bytes());
-                }
-            }
-        }
-    }
-}
-
-fn append_semantic_type_cache_key<'ctx, 'a: 'ctx>(
-    out: &mut Vec<u8>,
-    ty: &'ctx TSType<'a>,
-    ctx: &TypeResolutionContext<'ctx, 'a>,
-    active_type_params: &mut Vec<Box<[u8]>>,
-) {
-    match ty {
-        TSType::TSStringKeyword(_) => out.extend_from_slice(b"kw:string"),
-        TSType::TSNumberKeyword(_) => out.extend_from_slice(b"kw:number"),
-        TSType::TSBooleanKeyword(_) => out.extend_from_slice(b"kw:boolean"),
-        TSType::TSAnyKeyword(_) => out.extend_from_slice(b"kw:any"),
-        TSType::TSUnknownKeyword(_) => out.extend_from_slice(b"kw:unknown"),
-        TSType::TSNeverKeyword(_) => out.extend_from_slice(b"kw:never"),
-        TSType::TSVoidKeyword(_) => out.extend_from_slice(b"kw:void"),
-        TSType::TSNullKeyword(_) => out.extend_from_slice(b"kw:null"),
-        TSType::TSUndefinedKeyword(_) => out.extend_from_slice(b"kw:undefined"),
-        TSType::TSObjectKeyword(_) => out.extend_from_slice(b"kw:object"),
-        TSType::TSSymbolKeyword(_) => out.extend_from_slice(b"kw:symbol"),
-        TSType::TSBigIntKeyword(_) => out.extend_from_slice(b"kw:bigint"),
-        TSType::TSLiteralType(literal) => append_literal_cache_key(out, literal),
-        TSType::TSParenthesizedType(paren) => {
-            out.extend_from_slice(b"paren(");
-            append_semantic_type_cache_key(out, &paren.type_annotation, ctx, active_type_params);
-            out.push(b')');
-        }
-        TSType::TSArrayType(array) => {
-            out.extend_from_slice(b"arr(");
-            append_semantic_type_cache_key(out, &array.element_type, ctx, active_type_params);
-            out.push(b')');
-        }
-        TSType::TSTupleType(tuple) => {
-            out.extend_from_slice(b"tuple(");
-            for element in &tuple.element_types {
-                match element {
-                    TSTupleElement::TSOptionalType(optional) => {
-                        out.extend_from_slice(b"opt(");
-                        append_semantic_type_cache_key(
-                            out,
-                            &optional.type_annotation,
-                            ctx,
-                            active_type_params,
-                        );
-                        out.push(b')');
-                    }
-                    TSTupleElement::TSRestType(rest) => {
-                        out.extend_from_slice(b"rest(");
-                        append_semantic_type_cache_key(
-                            out,
-                            &rest.type_annotation,
-                            ctx,
-                            active_type_params,
-                        );
-                        out.push(b')');
-                    }
-                    TSTupleElement::TSNamedTupleMember(named) => {
-                        out.extend_from_slice(named.label.name.as_bytes());
-                        out.push(b':');
-                        if let Some(ts_type) = named.element_type.as_ts_type() {
-                            append_semantic_type_cache_key(out, ts_type, ctx, active_type_params);
-                        }
-                    }
-                    _ => {
-                        if let Some(ts_type) = element.as_ts_type() {
-                            append_semantic_type_cache_key(out, ts_type, ctx, active_type_params);
-                        }
-                    }
-                }
-                out.push(b',');
-            }
-            out.push(b')');
-        }
-        TSType::TSUnionType(union) => {
-            let mut parts = union
-                .types
-                .iter()
-                .map(|part| semantic_type_cache_key_with_active(part, ctx, active_type_params))
-                .collect::<Vec<_>>();
-            parts.sort_unstable();
-            out.extend_from_slice(b"union(");
-            for part in parts {
-                out.extend_from_slice(part.as_ref());
-                out.push(b',');
-            }
-            out.push(b')');
-        }
-        TSType::TSIntersectionType(intersection) => {
-            let mut parts = intersection
-                .types
-                .iter()
-                .map(|part| semantic_type_cache_key_with_active(part, ctx, active_type_params))
-                .collect::<Vec<_>>();
-            parts.sort_unstable();
-            out.extend_from_slice(b"inter(");
-            for part in parts {
-                out.extend_from_slice(part.as_ref());
-                out.push(b',');
-            }
-            out.push(b')');
-        }
-        TSType::TSTypeReference(type_ref) => {
-            let mut name = Vec::new();
-            append_type_name_cache_key(&mut name, &type_ref.type_name);
-            if let Some(bound) = ctx
-                .type_param_bindings
-                .iter()
-                .rev()
-                .find(|(span, _)| {
-                    &ctx.source[span.start as usize..span.end as usize] == name.as_slice()
-                })
-                .map(|(_, bound)| *bound)
-            {
-                let name_key = name.into_boxed_slice();
-                if active_type_params
-                    .iter()
-                    .any(|active| active.as_ref() == name_key.as_ref())
-                {
-                    out.extend_from_slice(b"param:");
-                    out.extend_from_slice(name_key.as_ref());
-                    return;
-                }
-                active_type_params.push(name_key.clone());
-                out.extend_from_slice(b"bound(");
-                append_semantic_type_cache_key(out, bound, ctx, active_type_params);
-                out.push(b')');
-                active_type_params.pop();
-                return;
-            }
-
-            out.extend_from_slice(b"ref:");
-            out.extend_from_slice(&name);
-            if let Some(type_args) = &type_ref.type_arguments {
-                out.push(b'<');
-                for arg in &type_args.params {
-                    append_semantic_type_cache_key(out, arg, ctx, active_type_params);
-                    out.push(b',');
-                }
-                out.push(b'>');
-            }
-        }
-        TSType::TSTypeOperatorType(operator) => {
-            out.extend_from_slice(b"op:");
-            out.extend_from_slice(format!("{:?}", operator.operator).as_bytes());
-            out.push(b'(');
-            append_semantic_type_cache_key(out, &operator.type_annotation, ctx, active_type_params);
-            out.push(b')');
-        }
-        TSType::TSIndexedAccessType(indexed) => {
-            out.extend_from_slice(b"idx(");
-            append_semantic_type_cache_key(out, &indexed.object_type, ctx, active_type_params);
-            out.push(b',');
-            append_semantic_type_cache_key(out, &indexed.index_type, ctx, active_type_params);
-            out.push(b')');
-        }
-        TSType::TSTypeQuery(query) => {
-            out.extend_from_slice(b"query:");
-            match &query.expr_name {
-                TSTypeQueryExprName::IdentifierReference(ident) => {
-                    out.extend_from_slice(ident.name.as_bytes());
-                }
-                TSTypeQueryExprName::QualifiedName(qualified) => {
-                    append_qualified_type_name_cache_key(out, qualified);
-                }
-                TSTypeQueryExprName::ThisExpression(_) => out.extend_from_slice(b"this"),
-                TSTypeQueryExprName::TSImportType(import) => {
-                    out.extend_from_slice(b"import(");
-                    out.extend_from_slice(
-                        normalized_source_key_from_span(ctx.source, import.span.into()).as_ref(),
-                    );
-                    out.push(b')');
-                }
-            }
-        }
-        _ => out.extend_from_slice(
-            normalized_source_key_from_span(ctx.source, ty.span().into()).as_ref(),
-        ),
-    }
-}
-
-fn semantic_type_cache_key_with_active<'ctx, 'a: 'ctx>(
-    ty: &'ctx TSType<'a>,
-    ctx: &TypeResolutionContext<'ctx, 'a>,
-    active_type_params: &mut Vec<Box<[u8]>>,
-) -> Box<[u8]> {
-    let mut out = Vec::new();
-    append_semantic_type_cache_key(&mut out, ty, ctx, active_type_params);
-    out.into_boxed_slice()
-}
-
-fn semantic_type_cache_key<'ctx, 'a: 'ctx>(
-    ty: &'ctx TSType<'a>,
-    ctx: &TypeResolutionContext<'ctx, 'a>,
-) -> Box<[u8]> {
-    semantic_type_cache_key_with_active(ty, ctx, &mut Vec::new())
 }
 
 fn binding_name_from_span(source: &[u8], span: Span) -> Option<&str> {
@@ -1487,7 +954,7 @@ fn instantiate_type_params_ctx<'ctx, 'a: 'ctx>(
     let mut child = ctx.clone();
     child.diagnostics.clear();
     let Some(decl_params) = decl_params else {
-        child.clear_type_param_bindings();
+        child.type_param_bindings.clear();
         return child;
     };
 
@@ -1516,8 +983,6 @@ fn instantiate_type_params_ctx<'ctx, 'a: 'ctx>(
         }
     }
 
-    child.refresh_type_param_bindings_cache_key();
-
     child
 }
 
@@ -1537,7 +1002,7 @@ fn instantiate_type_params_ctx<'ctx, 'a: 'ctx>(
 ///     `resolve_interface_with_extends_ctx_ref` forces
 ///     `from_root_body = false` on every named-target lookup).
 ///
-/// The consumer (`resolve_named_local_type_with_ctx_ref_inner`) preserves
+/// The consumer (`resolve_named_local_type_with_ctx_ref`) preserves
 /// these per-prop facts when the caller is at the macro-T root, and flips
 /// every prop to `false` when the caller is itself at heritage descent.
 /// This preserves the invariant that a companion's heritage-injected
@@ -1559,7 +1024,7 @@ pub fn extract_companion_types(
     //   - Heritage-injected members (via `extends Omit<...>` etc.): `false`,
     //     because the heritage-descent boundary inside `resolve_interface_with_extends_ctx_ref`
     //     forces `from_root_body = false` on every named-target lookup.
-    // The consumer (`resolve_named_local_type_with_ctx_ref_inner`) preserves
+    // The consumer (`resolve_named_local_type_with_ctx_ref`) preserves
     // these per-prop facts when the caller is at the macro-T root, and flips
     // every prop to `false` when the caller is itself at heritage descent.
     let from_root_body = true;
@@ -1691,19 +1156,6 @@ pub fn resolve_type_elements(
     let mut result = ResolvedElements::default();
     resolve_type_elements_inner(node, base_offset, &mut result, b"", from_root_body);
     result.root_runtime_types = infer_runtime_type(node);
-    // Standalone (no-ctx) callers have no canonical_id; stamp the empty
-    // scope so the pairing invariant holds without requiring callers to
-    // know about the typed-form contract.
-    let scope = TypeExprScope::new("");
-    result.stamp_type_expr_scope(&scope);
-    debug_assert!(
-        result.assert_typed_form_populated().is_ok(),
-        "resolve_type_elements must satisfy the typed-form pairing invariant: {}",
-        result
-            .assert_typed_form_populated()
-            .err()
-            .unwrap_or_default()
-    );
     result
 }
 
@@ -1726,19 +1178,6 @@ pub fn resolve_type_elements_with_ctx<'ctx, 'a: 'ctx>(
     resolve_type_elements_inner_with_ctx(node, base_offset, &mut result, ctx, from_root_body);
     result.root_runtime_types =
         resolve_root_runtime_type_with_ctx(node, ctx).unwrap_or_else(|| infer_runtime_type(node));
-    let scope = ctx
-        .owner_canonical_scope()
-        .cloned()
-        .unwrap_or_else(|| TypeExprScope::new(""));
-    result.stamp_type_expr_scope(&scope);
-    debug_assert!(
-        result.assert_typed_form_populated().is_ok(),
-        "resolve_type_elements_with_ctx must satisfy the typed-form pairing invariant: {}",
-        result
-            .assert_typed_form_populated()
-            .err()
-            .unwrap_or_default()
-    );
     result
 }
 
@@ -1766,19 +1205,6 @@ pub fn resolve_type_elements_with_ctx_ref<'ctx, 'a: 'ctx>(
     resolve_type_elements_inner_with_ctx_ref(node, base_offset, &mut result, ctx, from_root_body);
     result.root_runtime_types = resolve_root_runtime_type_with_ctx_ref(node, ctx)
         .unwrap_or_else(|| infer_runtime_type(node));
-    let scope = ctx
-        .owner_canonical_scope()
-        .cloned()
-        .unwrap_or_else(|| TypeExprScope::new(""));
-    result.stamp_type_expr_scope(&scope);
-    debug_assert!(
-        result.assert_typed_form_populated().is_ok(),
-        "resolve_type_elements_with_ctx_ref must satisfy the typed-form pairing invariant: {}",
-        result
-            .assert_typed_form_populated()
-            .err()
-            .unwrap_or_default()
-    );
     result
 }
 
@@ -1811,11 +1237,8 @@ pub use external::{
     hash_resolved_type, imported_member_name_for_required_alias,
     required_import_alias_names_for_binding, resolve_external_type,
     resolve_external_type_in_context_with_analyzed_symbol_companion,
-    resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical,
     resolve_external_type_in_program_with_analyzed_symbol_companion,
-    resolve_external_type_in_program_with_analyzed_symbol_companion_and_canonical,
-    resolve_external_type_with_canonical, resolve_external_type_with_companion,
-    resolve_external_type_with_companion_and_canonical, AnalyzedExternalTypeSource,
+    resolve_external_type_with_companion, AnalyzedExternalTypeSource,
     AnalyzedExternalTypeSourceStats, AnalyzedExternalTypeSymbol, AnalyzedExternalTypeSymbolKind,
     DeclDependencyNames, ExtractedExportSurface, ExtractedTypeBindings, ImportedTypeBinding,
 };

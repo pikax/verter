@@ -56,6 +56,7 @@ mod handle_capable_equivalence_tests;
 mod macro_member_walk;
 pub(crate) mod materialize;
 mod origin_graph;
+pub(crate) mod output;
 pub(crate) mod projection_demand;
 pub(crate) mod projectors;
 #[cfg(test)]
@@ -64,10 +65,6 @@ mod projectors_peek_tests;
 #[cfg(test)]
 #[path = "meta_resolve/projectors_silent_miss_tests.rs"]
 mod projectors_silent_miss_tests;
-mod registry_materialize;
-#[cfg(test)]
-#[path = "meta_resolve/registry_materialize_tests.rs"]
-mod registry_materialize_tests;
 mod resolved_state;
 mod scoring;
 pub(crate) mod slot_binding_graph;
@@ -100,7 +97,8 @@ pub(crate) use callable_view::{
     ArmCombineNode, CallableNodeView, PositionalParamNode, SignatureNodeView, SlotCallableNodeParts,
 };
 pub(crate) use dispatch_helpers::{
-    project_expr_class_a_node_via_dispatch_threaded, project_expr_class_a_via_dispatch,
+    arg_preserving_member_use_site_slot, project_expr_class_a_node_via_dispatch_threaded,
+    project_expr_class_a_via_dispatch,
 };
 pub(crate) use graph_predicates::{
     build_keys_union_node, component_meta_ref_resolves_to_package_node,
@@ -139,24 +137,11 @@ pub(crate) use macro_member_walk::{
 };
 // Capture-token counter names — test/debug instrumentation only; gated to
 // match their definitions (absent in release).
-#[cfg(any(test, debug_assertions))]
-pub(crate) use macro_member_walk::{
-    PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER, SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER,
-};
-pub(crate) use materialize::{
-    collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
-};
-pub(crate) use origin_graph::build_origin_graph;
-pub(crate) use registry_materialize::{
-    component_meta_registry_prefers_structural_materialization_node,
-    component_meta_registry_should_keep_raw_symbolic_non_object_alias,
-    preserve_nested_symbolic_member_routes, preserve_registry_callable_param_member_routes,
-    type_expr_needs_nested_symbolic_route_preservation,
-};
-// Test-only registry-materialise predicates — exercised by parity tests
-// for symbolic-route preservation contract.
 #[cfg(test)]
-pub(crate) use registry_materialize::preserve_package_backed_symbolic_refs_node;
+pub(crate) use macro_member_walk::PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER;
+#[cfg(any(test, debug_assertions))]
+pub(crate) use macro_member_walk::SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER;
+pub(crate) use origin_graph::build_origin_graph;
 // `request_host` source moved to
 // `host_manage/component_meta_request_impl.rs` (host-impl tier per
 // §10a.0.A). The re-export re-points at the new home so the
@@ -168,18 +153,21 @@ pub(crate) use crate::host_manage::component_meta_request_impl::{
 pub use crate::host_manage::component_meta_request_impl::{
     CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedDeclarationKind,
     ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp,
-    ResolvedTypeDeclaration, ResolvedTypeRegistryMeta, SessionRequestHost,
+    ResolvedTypeDeclaration, ResolvedTypeRegistryMeta,
 };
-pub(crate) use resolved_state::{lowered_root_reaches_transitive_cycle, RegistryMaterialization};
+pub use output::{
+    ComponentMetaOutput, ComponentMetaOutputError, ComponentMetaOutputFailure,
+    ComponentMetaOutputLane, ComponentMetaResolutionOutput, InteriorSourceStep,
+    MaterializedComponentMetaTypeLanes, MaterializedComponentMetaTypes,
+};
+pub(crate) use resolved_state::RegistryMaterialization;
 pub use resolved_state::{ResolvedComponentMetaState, SurfaceNodeIdentities};
-pub(crate) use scoring::compare_type_expr_improvement;
 pub(crate) use scoring::{compare_node_improvement, node_root_is_explicit_selector_operator};
+// The `TypeExpr`-front reference scorer is test-only (the single-algebra parity
+// differentials assert `compare_node_improvement` agrees with it).
+#[cfg(test)]
+pub(crate) use scoring::compare_type_expr_improvement;
 // promoted to `pub(crate)` so the moved
-// `host_manage::component_meta_methods.rs` (formerly the in-tree
-// `host_methods.rs`) reaches the function via the `crate::meta_resolve`
-// re-export instead of the now-out-of-scope `super::scoring::...`.
-pub(crate) use scoring::component_meta_registry_prefers_structural_materialization;
-
 #[cfg(test)]
 #[path = "meta_resolve_tests.rs"]
 mod meta_resolve_tests;

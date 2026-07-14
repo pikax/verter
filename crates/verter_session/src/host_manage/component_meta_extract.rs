@@ -1,18 +1,16 @@
 //! `host_manage::component_meta_extract` — component-meta extraction
-//! free functions: snapshot → ComponentMetaAnalysis projection,
-//! evaluated-type merge, and SFC sidecar population.
+//! free functions: snapshot → ComponentMetaAnalysis projection and SFC
+//! sidecar population.
 //!
 //! Domain K. Owns the public-facing
 //! `extract_component_meta_from_resolved` /
 //! `extract_component_meta_from_resolved_with_facts` entry points
-//! plus their internal helpers (`merge_evaluated_prop_types_into_meta`,
-//! `populate_sfc_blocks_sidecar`, `populate_public_instance_sidecar`,
+//! plus their internal helpers (`populate_sfc_blocks_sidecar`,
+//! `populate_public_instance_sidecar`,
 //! etc.). The `crate::host_manage::*` import paths used by `meta.rs`,
 //! `component_meta_host.rs`, and
 //! `component_meta_resolution_policy.rs` are preserved by a `pub(crate)
 //! use` re-export block in the parent shell — see §11c.5.
-
-use std::sync::Arc;
 
 use crate::instant::Instant;
 
@@ -196,126 +194,6 @@ fn extract_component_meta_from_inputs(
     meta
 }
 
-fn merge_evaluated_prop_types_into_meta(
-    host: &VerterHost,
-    owner_canonical: &str,
-    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-    snapshot: &FileAnalysisSnapshot,
-    evaluated_types: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
-) {
-    use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
-    use verter_semantic::analysis::AnalyzedMacroKind;
-
-    let Some(evaluated_types) = evaluated_types else {
-        return;
-    };
-
-    // Macro kinds whose type arguments contribute to the "props-like"
-    // surface: `defineProps`, `withDefaults` (which wraps defineProps),
-    // and `defineModel` (whose declared type joins the props surface).
-    // The same helper is reused for emit (`&[DefineEmits]`), slot
-    // (`&[DefineSlots]`), and model (`&[DefineModel]`) callers.
-    let prop_macro_kinds: &[AnalyzedMacroKind] = &[
-        AnalyzedMacroKind::DefineProps,
-        AnalyzedMacroKind::WithDefaults,
-        AnalyzedMacroKind::DefineModel,
-    ];
-
-    // Build the macro-participation index ONCE per call by reading
-    // analyzer-published facts (`AnalyzedMacro.type_references`,
-    // `parsed_type_argument`'s pre-recorded refs, and the
-    // `resolved_local_types[i].type_expr` closure). The set keys by
-    // `ResolvedRootIdentity` so the same name declared in two scopes
-    // is not collapsed. Type-role classification is structural — see
-    // the Typed-IR-Only Resolver Rule in CLAUDE.md.
-    let macro_participating_identities =
-        build_macro_participating_identities(host, owner_canonical, snapshot, prop_macro_kinds);
-
-    /// Iterative worklist walk over a `TypeExpr` checking whether any node
-    /// resolves to `target` at the requested arity.
-    ///
-    /// W6.1 contract: the walker MUST be iterative (no recursion — stack
-    /// overflow is a real failure mode on deeply nested types like 100-level
-    /// `Object` chains, deep `Conditional` ladders, Pinia/strict tuple
-    /// builders) AND exhaustive over every `TypeExpr` variant that can
-    /// transitively reach a `Ref`. The previous recursive walker covered
-    /// only Parenthesized / Ref / Union / Intersection / Array / Tuple /
-    /// IndexedAccess — Object / Function / Conditional / Mapped / KeyOf /
-    /// RecursiveRef / TemplateLiteral nodes silently terminated the walk
-    /// and produced false negatives.
-    fn expr_contains_root_identity(
-        root: &verter_type_expr::TypeExpr,
-        host: &VerterHost,
-        owner_canonical: &str,
-        target: &ResolvedRootIdentity,
-        type_argument_arity: usize,
-    ) -> bool {
-        // Real logic lives at module scope (`expr_contains_root_identity_impl`)
-        // so it is directly unit-testable via `expr_contains_root_identity_for_test`;
-        // this binding preserves the merge-path call site that references the
-        // predicate by name.
-        expr_contains_root_identity_impl(root, host, owner_canonical, target, type_argument_arity)
-    }
-
-    let evaluated_by_name = evaluated_types
-        .props
-        .iter()
-        .map(|field| (field.name.as_str(), &field.r#type))
-        .collect::<rustc_hash::FxHashMap<_, _>>();
-
-    for prop in &mut meta.props {
-        let Some(evaluated) = evaluated_by_name.get(prop.name.as_str()) else {
-            continue;
-        };
-        let imported_macro_participating_refs = collect_imported_macro_participating_refs(
-            host,
-            owner_canonical,
-            &prop.type_expr,
-            &macro_participating_identities,
-        );
-        if !imported_macro_participating_refs.is_empty()
-            && !imported_macro_participating_refs
-                .iter()
-                .all(|(identity, type_argument_arity)| {
-                    expr_contains_root_identity(
-                        evaluated,
-                        host,
-                        owner_canonical,
-                        identity,
-                        *type_argument_arity,
-                    )
-                })
-        {
-            // Allow the merge when the evaluated type is a materialized Object
-            // and the current type_expr is a bare Ref — the evaluate_types path
-            // already decided to materialize this imported type.
-            let evaluated_is_materialized_form = matches!(
-                (evaluated, &prop.type_expr),
-                (
-                    verter_type_expr::TypeExpr::Object(_),
-                    verter_type_expr::TypeExpr::Ref {
-                        type_arguments, ..
-                    }
-                ) if type_arguments.is_empty()
-            );
-            if !evaluated_is_materialized_form {
-                continue;
-            }
-        }
-        if crate::meta_resolve::compare_type_expr_improvement(evaluated, &prop.type_expr)
-            || matches!(
-                (&prop.type_expr, *evaluated),
-                (
-                    verter_type_expr::TypeExpr::Object(_),
-                    verter_type_expr::TypeExpr::Union(_) | verter_type_expr::TypeExpr::Primitive(_),
-                )
-            )
-        {
-            prop.type_expr = (*evaluated).clone();
-        }
-    }
-}
-
 /// Resolve a bare type-name reference in the owner file's scope to its
 /// canonical `ResolvedRootIdentity` (defining file + symbol name).
 ///
@@ -345,97 +223,11 @@ pub(crate) fn resolve_ref_to_root_identity(
         .map(|(canonical_id, exported_name)| ResolvedRootIdentity::new(canonical_id, exported_name))
 }
 
-/// Build the set of macro-participating `ResolvedRootIdentity` values
-/// for an owner file's analysis snapshot, restricted to macros whose
-/// `kind` matches `macro_kinds`.
-///
-/// Reads ONLY analyzer-published facts:
-/// - `AnalyzedMacro.type_references` — names directly declared in the
-///   macro's `<Type>` argument.
-/// - `AnalyzedMacro.parsed_type_argument` — the macro's typed argument
-///   (`Arc<TypeExpr>`); the walker harvests every `Ref` name in the
-///   subtree.
-/// - `AnalyzedMacro.resolved_local_types[i].type_expr` — local-scope
-///   type expansions the analyzer already linked to the macro chain;
-///   every `Ref` name in the subtree contributes.
-///
-/// Names resolve to identities through `resolve_ref_to_root_identity`
-/// (scope-aware). Each identity is added once regardless of how many
-/// times its name appears.
-///
-/// Per the walker contract: this is an INDEX over analyzer-published
-/// facts. The walker does NOT recurse into alias bodies, does NOT walk
-/// the cross-file declaration graph, and does NOT trigger semantic
-/// expansion. Shallow-by-default holds; semantic expansion remains the
-/// consumer's lazy concern at the projector layer.
-pub(crate) fn build_macro_participating_identities(
-    host: &VerterHost,
-    owner_canonical: &str,
-    snapshot: &FileAnalysisSnapshot,
-    macro_kinds: &[verter_semantic::analysis::AnalyzedMacroKind],
-) -> rustc_hash::FxHashSet<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
-    let mut identities = rustc_hash::FxHashSet::default();
-
-    // Per-walk visited set for raw names so a recursive type alias
-    // (`type Foo = { next: Foo | null }`) is harvested exactly once
-    // even when both the name and the macro chain reach it from
-    // multiple anchors.
-    let mut visited_names: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
-
-    let record_name = |name: &str,
-                       identities: &mut rustc_hash::FxHashSet<_>,
-                       visited_names: &mut rustc_hash::FxHashSet<String>| {
-        if !visited_names.insert(name.to_string()) {
-            return;
-        }
-        if let Some(identity) = resolve_ref_to_root_identity(host, owner_canonical, name) {
-            identities.insert(identity);
-        }
-    };
-
-    for mac in snapshot.macros.iter() {
-        if !macro_kinds.contains(&mac.kind) {
-            continue;
-        }
-
-        for type_name in mac.type_references.iter() {
-            record_name(type_name.as_str(), &mut identities, &mut visited_names);
-        }
-
-        if let Some(parsed_arg) = mac.parsed_type_argument.as_ref() {
-            harvest_ref_names_iterative(parsed_arg.as_ref(), |name| {
-                record_name(name, &mut identities, &mut visited_names);
-            });
-        }
-
-        for resolved_local in mac.resolved_local_types.iter() {
-            // The local-type name itself participates (it is by
-            // definition a macro chain participant — the analyzer
-            // linked it).
-            record_name(
-                resolved_local.name.as_str(),
-                &mut identities,
-                &mut visited_names,
-            );
-            if let Some(local_expr) = resolved_local.type_expr.as_ref() {
-                harvest_ref_names_iterative(local_expr, |name| {
-                    record_name(name, &mut identities, &mut visited_names);
-                });
-            }
-        }
-    }
-
-    identities
-}
-
-/// Iterative `TypeExpr` walk collecting every `Ref` name in the
-/// subtree. Stack-overflow safe for deeply nested object/intersection
-/// types — the dedicated termination test exercises a programmatic
-/// 100-level nest.
-///
-/// Visited pointer-set guards against shared sub-expression revisits
-/// when the same `TypeExpr` node appears under multiple parents in a
-/// shared `Arc`-rooted tree.
+/// `TypeExpr`-shape name-harvest walker — retained as the DIFFERENTIAL TEST
+/// ORACLE for the node-domain harvest (production routes through
+/// [`harvest_ref_names_from_node`]); the deep-nesting termination
+/// characterisation exercises it via `harvest_ref_names_for_test`.
+#[cfg(test)]
 fn harvest_ref_names_iterative<F: FnMut(&str)>(root: &verter_type_expr::TypeExpr, mut sink: F) {
     use verter_type_expr::TypeExpr;
 
@@ -556,399 +348,24 @@ fn harvest_ref_names_iterative<F: FnMut(&str)>(root: &verter_type_expr::TypeExpr
     }
 }
 
-/// Iterative worklist walk over a `TypeExpr` checking whether any node
-/// resolves to `target` at the requested arity.
+/// Build the `$slots` public-instance container member.
 ///
-/// The walker MUST be iterative (no recursion — stack overflow is a real
-/// failure mode on deeply nested types like 100-level `Object` chains,
-/// deep `Conditional` ladders, strict tuple builders) AND exhaustive over
-/// every `TypeExpr` variant that can transitively reach a `Ref`.
-///
-/// A function type and a bare constructor type (`new (...) => R`) carry the
-/// same `FunctionExpr` payload; both expose their parameter and return
-/// types to the reachability walk.
-pub(in crate::host_manage) fn expr_contains_root_identity_impl(
-    root: &verter_type_expr::TypeExpr,
-    host: &VerterHost,
-    owner_canonical: &str,
-    target: &verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
-    type_argument_arity: usize,
-) -> bool {
-    use verter_type_expr::TypeExpr;
-
-    let mut visited: rustc_hash::FxHashSet<*const TypeExpr> = rustc_hash::FxHashSet::default();
-    let mut worklist: Vec<&TypeExpr> = vec![root];
-
-    while let Some(node) = worklist.pop() {
-        if !visited.insert(node as *const TypeExpr) {
-            continue;
-        }
-        match node {
-            TypeExpr::Parenthesized(inner) => worklist.push(inner),
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } => {
-                if type_arguments.len() == type_argument_arity {
-                    if let Some(identity) =
-                        resolve_ref_to_root_identity(host, owner_canonical, name.as_ref())
-                    {
-                        if identity == *target {
-                            return true;
-                        }
-                    }
-                }
-                for arg in type_arguments.iter() {
-                    worklist.push(arg);
-                }
-            }
-            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-                for ty in types.iter() {
-                    worklist.push(ty);
-                }
-            }
-            TypeExpr::Array { element, .. } => worklist.push(element),
-            TypeExpr::Tuple { elements, .. } => {
-                for element in elements.iter() {
-                    worklist.push(&element.ty);
-                }
-            }
-            TypeExpr::IndexedAccess { object, index } => {
-                worklist.push(object);
-                worklist.push(index);
-            }
-            TypeExpr::Object(obj) => {
-                for member in obj.properties.iter() {
-                    match member {
-                        verter_type_expr::ObjectMember::Property(prop) => worklist.push(&prop.ty),
-                        verter_type_expr::ObjectMember::Method(method) => {
-                            for param in method.function.parameters.iter() {
-                                worklist.push(&param.ty);
-                            }
-                            if let Some(ret) = method.function.return_type.as_ref() {
-                                worklist.push(ret.as_ref());
-                            }
-                        }
-                        verter_type_expr::ObjectMember::IndexSignature(idx) => {
-                            worklist.push(&idx.key_type);
-                            worklist.push(&idx.value_type);
-                        }
-                        verter_type_expr::ObjectMember::CallSignature(func)
-                        | verter_type_expr::ObjectMember::ConstructSignature(func) => {
-                            for param in func.parameters.iter() {
-                                worklist.push(&param.ty);
-                            }
-                            if let Some(ret) = func.return_type.as_ref() {
-                                worklist.push(ret.as_ref());
-                            }
-                        }
-                    }
-                }
-            }
-            // A function type and a bare constructor type (`new (...) => R`)
-            // carry the same `FunctionExpr` payload; both expose their
-            // parameter and return types to the reachability walk.
-            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-                for param in func.parameters.iter() {
-                    worklist.push(&param.ty);
-                }
-                if let Some(ret) = func.return_type.as_ref() {
-                    worklist.push(ret.as_ref());
-                }
-            }
-            TypeExpr::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
-            } => {
-                worklist.push(check);
-                worklist.push(extends);
-                worklist.push(true_type);
-                worklist.push(false_type);
-            }
-            TypeExpr::Mapped {
-                source,
-                value,
-                name_type,
-                ..
-            } => {
-                worklist.push(source);
-                worklist.push(value);
-                if let Some(nt) = name_type.as_ref() {
-                    worklist.push(nt.as_ref());
-                }
-            }
-            TypeExpr::KeyOf(inner) => worklist.push(inner),
-            TypeExpr::Rest(inner) => worklist.push(inner),
-            TypeExpr::RecursiveRef {
-                name,
-                type_arguments,
-                ..
-            } => {
-                if type_arguments.len() == type_argument_arity {
-                    if let Some(identity) =
-                        resolve_ref_to_root_identity(host, owner_canonical, name.as_ref())
-                    {
-                        if identity == *target {
-                            return true;
-                        }
-                    }
-                }
-                for arg in type_arguments.iter() {
-                    worklist.push(arg);
-                }
-            }
-            TypeExpr::TemplateLiteral { expressions, .. } => {
-                for ty in expressions.iter() {
-                    worklist.push(ty);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    false
-}
-
-/// Walk `expr` (typed) collecting every `Ref` name with arity that
-/// resolves to a macro-participating identity in `participating`.
-///
-/// The walker is iterative (worklist-based) to avoid stack overflow on
-/// deeply nested types — see W6.1 deep-nesting termination test.
-/// Visited pointer-set prevents re-resolving the same `TypeExpr` node,
-/// and visited identity-set deduplicates the result set per call.
-///
-/// Cross-file resolution lookups (`resolve_ref_to_root_identity`) hit
-/// the shared host cache; no fresh resolver instance is constructed.
-fn collect_imported_macro_participating_refs(
-    host: &VerterHost,
-    owner_canonical: &str,
-    expr: &verter_type_expr::TypeExpr,
-    participating: &rustc_hash::FxHashSet<
-        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
-    >,
-) -> rustc_hash::FxHashSet<(
-    verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
-    usize,
-)> {
-    use verter_type_expr::TypeExpr;
-
-    let mut out = rustc_hash::FxHashSet::default();
-    if participating.is_empty() {
-        return out;
-    }
-
-    let mut visited: rustc_hash::FxHashSet<*const TypeExpr> = rustc_hash::FxHashSet::default();
-    let mut worklist: Vec<&TypeExpr> = vec![expr];
-
-    while let Some(node) = worklist.pop() {
-        if !visited.insert(node as *const TypeExpr) {
-            continue;
-        }
-        match node {
-            TypeExpr::Parenthesized(inner) => worklist.push(inner),
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } => {
-                if let Some(identity) =
-                    resolve_ref_to_root_identity(host, owner_canonical, name.as_ref())
-                {
-                    if participating.contains(&identity) && identity.canonical_id != owner_canonical
-                    {
-                        out.insert((identity, type_arguments.len()));
-                    }
-                }
-                for arg in type_arguments.iter() {
-                    worklist.push(arg);
-                }
-            }
-            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-                for ty in types.iter() {
-                    worklist.push(ty);
-                }
-            }
-            TypeExpr::Array { element, .. } => worklist.push(element),
-            TypeExpr::Tuple { elements, .. } => {
-                for element in elements.iter() {
-                    worklist.push(&element.ty);
-                }
-            }
-            TypeExpr::IndexedAccess { object, index } => {
-                worklist.push(object);
-                worklist.push(index);
-            }
-            TypeExpr::Object(obj) => {
-                for member in obj.properties.iter() {
-                    match member {
-                        verter_type_expr::ObjectMember::Property(prop) => worklist.push(&prop.ty),
-                        verter_type_expr::ObjectMember::Method(method) => {
-                            for param in method.function.parameters.iter() {
-                                worklist.push(&param.ty);
-                            }
-                            if let Some(ret) = method.function.return_type.as_ref() {
-                                worklist.push(ret.as_ref());
-                            }
-                        }
-                        verter_type_expr::ObjectMember::IndexSignature(idx) => {
-                            worklist.push(&idx.key_type);
-                            worklist.push(&idx.value_type);
-                        }
-                        verter_type_expr::ObjectMember::CallSignature(func)
-                        | verter_type_expr::ObjectMember::ConstructSignature(func) => {
-                            for param in func.parameters.iter() {
-                                worklist.push(&param.ty);
-                            }
-                            if let Some(ret) = func.return_type.as_ref() {
-                                worklist.push(ret.as_ref());
-                            }
-                        }
-                    }
-                }
-            }
-            // A function type and a bare constructor type (`new (...) => R`)
-            // carry the same `FunctionExpr` payload; both expose their
-            // parameter and return types to the reachability walk.
-            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-                for param in func.parameters.iter() {
-                    worklist.push(&param.ty);
-                }
-                if let Some(ret) = func.return_type.as_ref() {
-                    worklist.push(ret.as_ref());
-                }
-            }
-            TypeExpr::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
-            } => {
-                worklist.push(check);
-                worklist.push(extends);
-                worklist.push(true_type);
-                worklist.push(false_type);
-            }
-            TypeExpr::Mapped {
-                source,
-                value,
-                name_type,
-                ..
-            } => {
-                worklist.push(source);
-                worklist.push(value);
-                if let Some(nt) = name_type.as_ref() {
-                    worklist.push(nt.as_ref());
-                }
-            }
-            TypeExpr::KeyOf(inner) => worklist.push(inner),
-            TypeExpr::Rest(inner) => worklist.push(inner),
-            TypeExpr::RecursiveRef {
-                name,
-                type_arguments,
-                ..
-            } => {
-                if let Some(identity) =
-                    resolve_ref_to_root_identity(host, owner_canonical, name.as_ref())
-                {
-                    if participating.contains(&identity) && identity.canonical_id != owner_canonical
-                    {
-                        out.insert((identity, type_arguments.len()));
-                    }
-                }
-                for arg in type_arguments.iter() {
-                    worklist.push(arg);
-                }
-            }
-            TypeExpr::TemplateLiteral { expressions, .. } => {
-                for ty in expressions.iter() {
-                    worklist.push(ty);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    out
-}
-
-fn build_public_instance_slot_type(
-    slot: &verter_semantic::analysis::component_meta::SlotAnalysis,
-) -> verter_type_expr::TypeExpr {
-    let parameter_type =
-        verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-            properties: slot
-                .bindings
-                .iter()
-                .map(|binding| {
-                    verter_type_expr::ObjectMember::Property(
-                        verter_type_expr::ObjectProperty::synthetic_public(
-                            binding.name.clone(),
-                            binding.type_expr.clone(),
-                            false,
-                            false,
-                        ),
-                    )
-                })
-                .collect(),
-        }));
-    // Typed-IR-only: read the analyzer-populated `return_expr` directly.
-    // `return_type` is display-only; we never reparse it. See the
-    // Typed-IR-Only Resolver Rule in CLAUDE.md.
-    let return_type = slot
-        .return_expr
-        .clone()
-        .unwrap_or(verter_type_expr::TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::Unknown,
-        ));
-    let function =
-        verter_type_expr::TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(
-            if slot.bindings.is_empty() {
-                Vec::new()
-            } else {
-                vec![verter_type_expr::FunctionParam::synthetic(
-                    Some("props".to_string()),
-                    parameter_type,
-                    false,
-                    false,
-                )]
-            },
-            Some(Arc::new(return_type)),
-            Vec::new(),
-        )));
-    if slot.is_required {
-        function
-    } else {
-        verter_type_expr::TypeExpr::union(vec![
-            function,
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
-        ])
-    }
-}
-
+/// The container is a SYNTHESIZED session surface (each slot's callable shape
+/// composes from its bindings + return SOURCE positions on demand through the
+/// shared dispatch bridge — `SemanticTypeSource::Closed(Function)` raises
+/// intern a `SemanticNodeData::Function`); it has no single content-free
+/// authored position of its own, so the lower-crate member publishes
+/// `type_source: None` (the documented untyped-member value) while the
+/// per-slot typed sources stay authoritative on `meta.slots[..]`
+/// (`return_source` + each binding's `type_source`) — no information is
+/// destroyed at this boundary.
 fn build_public_instance_slots_member(
-    slots: &[verter_semantic::analysis::component_meta::SlotAnalysis],
+    _slots: &[verter_semantic::analysis::component_meta::SlotAnalysis],
 ) -> verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
-    let slot_properties = slots
-        .iter()
-        .map(|slot| {
-            verter_type_expr::ObjectMember::Property(
-                verter_type_expr::ObjectProperty::synthetic_public(
-                    slot.name.clone(),
-                    build_public_instance_slot_type(slot),
-                    !slot.is_required,
-                    false,
-                ),
-            )
-        })
-        .collect();
-
     verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
         name: "$slots".to_string(),
         kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::SlotContainer,
-        type_expr: verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-            properties: slot_properties,
-        })),
+        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
         type_expansion: None,
         raw_type: None,
         description: None,
@@ -969,7 +386,7 @@ pub(crate) fn populate_public_instance_sidecar(
         verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
             name: prop.name.clone(),
             kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Prop,
-            type_expr: prop.type_expr.clone(),
+            type_source: prop.type_source.clone(),
             type_expansion: prop.type_expansion.clone(),
             raw_type: prop.raw_type.clone(),
             description: prop.description.clone(),
@@ -981,7 +398,7 @@ pub(crate) fn populate_public_instance_sidecar(
         let next = verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
             name: exposed.name.clone(),
             kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed,
-            type_expr: exposed.type_expr.clone(),
+            type_source: exposed.type_source.clone(),
             type_expansion: exposed.type_expansion.clone(),
             raw_type: None,
             description: exposed.description.clone(),
@@ -1081,13 +498,6 @@ pub(crate) fn extract_component_meta_from_resolved(
         &resolved_type_registry,
         resolved.evaluated_types.as_ref(),
     );
-    merge_evaluated_prop_types_into_meta(
-        host,
-        canonical.as_str(),
-        &mut meta,
-        &resolved.snapshot,
-        resolved.evaluated_types.as_ref(),
-    );
     if include_fallthrough {
         let mut visiting = rustc_hash::FxHashSet::default();
         // The completeness travels WITH the resolution via the outcome carrier
@@ -1170,13 +580,6 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         &resolved_type_registry,
         resolved.evaluated_types.as_ref(),
     );
-    merge_evaluated_prop_types_into_meta(
-        host,
-        canonical.as_str(),
-        &mut meta,
-        &resolved.snapshot,
-        resolved.evaluated_types.as_ref(),
-    );
     let mut visiting = rustc_hash::FxHashSet::default();
     // The outcome carrier centralises the per-call completeness scope: a
     // fallthrough partial folds in so the fallthrough's OWN caches
@@ -1230,32 +633,6 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     }
 }
 
-/// Test-only entry point that exercises `harvest_ref_names_iterative`
-/// without requiring host state. Used by the deep-nesting termination
-/// characterisation test.
-#[cfg(test)]
-pub(in crate::host_manage) fn harvest_ref_names_for_test<F: FnMut(&str)>(
-    root: &verter_type_expr::TypeExpr,
-    sink: F,
-) {
-    harvest_ref_names_iterative(root, sink)
-}
-
-/// Test-only entry point that exercises `expr_contains_root_identity` —
-/// the merge-gate reachability walker. Pins that the walker descends into
-/// a bare constructor type's parameter and return types (function-like),
-/// not just a plain function type.
-#[cfg(test)]
-pub(in crate::host_manage) fn expr_contains_root_identity_for_test(
-    root: &verter_type_expr::TypeExpr,
-    host: &VerterHost,
-    owner_canonical: &str,
-    target: &verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
-    type_argument_arity: usize,
-) -> bool {
-    expr_contains_root_identity_impl(root, host, owner_canonical, target, type_argument_arity)
-}
-
 /// Test-only entry point that exercises `resolve_ref_to_root_identity`
 /// for the scope-correctness characterisation test.
 #[cfg(test)]
@@ -1265,52 +642,6 @@ pub(in crate::host_manage) fn resolve_ref_to_root_identity_for_test(
     name: &str,
 ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
     resolve_ref_to_root_identity(host, owner_canonical, name)
-}
-
-/// Test-only entry point that exercises
-/// `build_macro_participating_identities`. Pins the structural macro-
-/// participation contract: a type is a participant because a Vue SFC
-/// macro (`defineProps`, `defineEmits`, ...) consumes its declaration
-/// — NOT because its identifier suffix is `Props` / `Emits` / etc.
-/// See the Typed-IR-Only Resolver Rule in CLAUDE.md and the
-/// `/component-meta` skill.
-#[cfg(test)]
-pub(in crate::host_manage) fn build_macro_participating_identities_for_test(
-    host: &VerterHost,
-    owner_canonical: &str,
-    snapshot: &FileAnalysisSnapshot,
-    macro_kinds: &[verter_semantic::analysis::AnalyzedMacroKind],
-) -> rustc_hash::FxHashSet<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
-    build_macro_participating_identities(host, owner_canonical, snapshot, macro_kinds)
-}
-
-/// Test-only entry point that exercises
-/// `collect_imported_macro_participating_refs` for the positive
-/// macro-participation characterisation test.
-#[cfg(test)]
-pub(in crate::host_manage) fn collect_imported_macro_participating_refs_for_test(
-    host: &VerterHost,
-    owner_canonical: &str,
-    expr: &verter_type_expr::TypeExpr,
-    participating: &rustc_hash::FxHashSet<
-        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
-    >,
-) -> rustc_hash::FxHashSet<(
-    verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
-    usize,
-)> {
-    collect_imported_macro_participating_refs(host, owner_canonical, expr, participating)
-}
-
-/// Test-only entry point that exercises `build_public_instance_slot_type`.
-/// Pins the typed-IR contract: `SlotAnalysis.return_expr` (typed) is the
-/// authority — `SlotAnalysis.return_type` (display string) MUST NOT feed
-/// semantic decisions. See the Typed-IR-Only Resolver Rule in CLAUDE.md.
-#[cfg(test)]
-pub(in crate::host_manage) fn build_public_instance_slot_type_for_test(
-    slot: &verter_semantic::analysis::component_meta::SlotAnalysis,
-) -> verter_type_expr::TypeExpr {
-    build_public_instance_slot_type(slot)
 }
 
 #[cfg(test)]

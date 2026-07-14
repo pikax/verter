@@ -45,11 +45,10 @@ mod materialize;
 mod node_domain;
 mod publication;
 
-use conversions::{
-    mapped_modifier_for_optionality, mapped_modifier_for_readonly,
-    semantic_primitive_to_primitive_name,
-};
+pub(crate) use conversions::semantic_primitive_to_primitive_name;
+use conversions::{mapped_modifier_for_optionality, mapped_modifier_for_readonly};
 pub(in crate::project_semantic_dispatch) use materialize::fold_to_type_expr;
+pub(in crate::project_semantic_dispatch) use node_domain::node_is_unknown_materializing_failure;
 use node_domain::{type_expr_to_key, RaisedFactsAlg, RaisedShapeAlg};
 pub(in crate::project_semantic_dispatch) use publication::{
     project_node_publication_score, type_expr_publication_score,
@@ -449,9 +448,7 @@ pub(in crate::project_semantic_dispatch) enum FactShapeTag {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::project_semantic_dispatch) enum RaisedRootKind {
     /// Raises to `TypeExpr::Object` — an `Object` / representable empty object,
-    /// and the `MergedDecl` carrier that folds through the object constructors. A
-    /// `VueMacroElements` carrier does NOT reach here: it folds to the
-    /// `VueMacroElementsPlaceholder` sentinel, whose root classifies as `Other`.
+    /// and the `MergedDecl` carrier that folds through the object constructors.
     Object,
     /// Raises to `TypeExpr::Ref` — a `DeclRef` / `InstantiationRef` / `BareRef` /
     /// `DeclPlaceholder` carrier.
@@ -644,7 +641,7 @@ trait RaisedShapeAlgebra {
     fn unknown(&mut self, raw: Arc<str>) -> Self::Out;
     /// A TYPED resolver-control sentinel reaching the reverse boundary (an
     /// alias / type-param cycle, a sub-result raise miss, an unrepresentable
-    /// surface or surface member, a Vue-macro-elements placeholder) — AND every
+    /// surface or surface member) — AND every
     /// other `Opaque(QueryError)` node (`Miss`, `Other(...)`, `BudgetExceeded`,
     /// `DeclPlaceholder`, …) reaching the `fold_node` `Opaque` conduit, since the
     /// input there is a typed `QueryError`, not a raw carrier. The materializer
@@ -1007,9 +1004,6 @@ fn fold_node<A: RaisedShapeAlgebra>(
             // contract.
             _ => alg.opaque_sentinel(err),
         },
-        SemanticNodeData::VueMacroElements(_) => {
-            alg.opaque_sentinel(&QueryError::VueMacroElementsPlaceholder)
-        }
         SemanticNodeData::Function {
             params,
             return_type,
@@ -1354,8 +1348,8 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_is_typeof(
 
 /// Node-domain equivalent of `matches!(raise(node), TypeExpr::Object(_))`: whether
 /// `node`'s NORMALIZED raised root is EXACTLY an `Object` (an `Object` / empty
-/// object / `MergedDecl` — a `Union` / `Intersection` root, or a
-/// `VueMacroElements` placeholder, is NOT). Reads the post-normalized
+/// object / `MergedDecl` — a `Union` / `Intersection` root is NOT).
+/// Reads the post-normalized
 /// [`RaisedRootKind`] (no `TypeExpr`
 /// materialised), so e.g. `Intersection([{}, Object])` — which the root-only
 /// projection collapses to its `Object` arm — answers `true`, matching the
@@ -1397,9 +1391,8 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_is_indexed_access(
 /// `root_unmaterialized_sentinel == false` there — the two answer different
 /// questions and must not be conflated.
 ///
-/// TEST-ONLY: its sole caller (the `raise::node_contains_semantic_miss_with_dispatch`
-/// accessor) is itself test-only until the component-meta carrier-path consumer lands.
-#[cfg(test)]
+/// Read through the `raise::node_contains_semantic_miss_with_dispatch` accessor
+/// by the publication reducer's input-side no-poison gate.
 pub(in crate::project_semantic_dispatch) fn project_node_contains_semantic_miss(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,

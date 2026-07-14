@@ -113,9 +113,13 @@ pub(crate) fn node_root_is_explicit_selector_operator(
 /// Whether `candidate` is a strictly BETTER published shape than `current`,
 /// scored over the `TypeExpr` front of the SHARED publication formula. Reproduces
 /// the historical symbolic-penalty / structural-top-level / generic-detail
-/// comparison EXACTLY (it now reads [`PublicationScore`] instead of three
-/// standalone walks), so this function's existing callers (e.g.
-/// `host_manage::component_meta_extract`) see byte-identical verdicts.
+/// comparison EXACTLY (it reads [`PublicationScore`] instead of three standalone
+/// walks). Production picks between shapes in node domain
+/// ([`compare_node_improvement`]); this `TypeExpr` front is retained as the
+/// reference oracle the single-algebra parity differentials assert against
+/// ([`compare_node_improvement`] must agree with it over the raised shapes), so
+/// it is `#[cfg(test)]`-gated.
+#[cfg(test)]
 pub(crate) fn compare_type_expr_improvement(
     candidate: &verter_type_expr::TypeExpr,
     current: &verter_type_expr::TypeExpr,
@@ -125,50 +129,6 @@ pub(crate) fn compare_type_expr_improvement(
     let current_score =
         crate::project_semantic_dispatch::raise::type_expr_publication_score(current);
     publication_score_improves(&candidate_score, &current_score)
-}
-
-// promoted from `pub(super)` to `pub(crate)` so the moved
-// `host_manage::component_meta_methods.rs` (formerly the in-tree
-// `host_methods.rs`) reaches the function via the
-// `crate::meta_resolve::component_meta_registry_prefers_structural_materialization`
-// re-export. Without the promotion, the parent shell's `pub(crate) use`
-// would be rejected (E0364).
-pub(crate) fn component_meta_registry_prefers_structural_materialization(
-    expr: &verter_type_expr::TypeExpr,
-) -> bool {
-    use verter_type_expr::TypeExpr;
-
-    match expr {
-        TypeExpr::Parenthesized(_)
-        | TypeExpr::Array { .. }
-        | TypeExpr::Tuple { .. }
-        | TypeExpr::Union(_)
-        | TypeExpr::Intersection(_)
-        | TypeExpr::Conditional { .. }
-        | TypeExpr::Mapped { .. }
-        | TypeExpr::TemplateLiteral { .. }
-        | TypeExpr::Function(_)
-        // A constructor type prefers structural materialization like a function.
-        | TypeExpr::ConstructorType(_)
-        | TypeExpr::KeyOf(_)
-        | TypeExpr::Rest(_) => true,
-        TypeExpr::Ref { .. }
-        | TypeExpr::Object(_)
-        | TypeExpr::IndexedAccess { .. }
-        | TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. }
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::TypeParameter(_)
-        // Synthetic carriers are intrinsic terminals — already final at
-        // the projector surface; no structural materialisation needed.
-        | TypeExpr::SyntheticSlotBinding(_)
-        // An import-type is a symbolic cross-file reference (like a `Ref`);
-        // it does not prefer structural materialisation.
-        | TypeExpr::ImportType { .. }
-        | TypeExpr::Infer { .. } => false,
-    }
 }
 
 #[cfg(test)]

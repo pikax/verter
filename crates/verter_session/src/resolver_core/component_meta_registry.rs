@@ -11,7 +11,6 @@ use std::sync::Arc;
 use crate::resolver_core::ResolverContext;
 use crate::resolver_core::RouteDemand;
 use crate::types::FileAnalysisSnapshot;
-use verter_type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 
 /// Issue #7 / capture-token counters for route-demand
 /// emission. Recorded inside [`enqueue_component_meta_registry_ref`]
@@ -69,6 +68,42 @@ pub(crate) struct PendingComponentMetaRegistryRef {
     pub(crate) source_hint: Option<String>,
     pub(crate) exported_name: Option<String>,
     pub(crate) route: RouteDemand,
+    /// Authored USE-SITE slots for single-member (`len == 1` `MemberPath`)
+    /// route discoveries: `(top-level member name, the authored annotation
+    /// slot that expressed the indexed access)`. A route-scoped publication
+    /// RETAINS the use-site slot as the selected member's payload when the
+    /// member's declaring surface sits behind a generic substitution —
+    /// replaying the use-site through the one shared dispatch re-derives
+    /// navigation + substitution (never a serialized post-substitution graph
+    /// node). Unsubstituted members keep their declaring contributor's
+    /// prepared member slot instead.
+    pub(crate) member_use_sites: Vec<(String, verter_type_expr::locators::TypeBodySlot)>,
+}
+
+/// Attach a single-member route USE-SITE slot to every pending queue entry
+/// for `name` (see [`PendingComponentMetaRegistryRef::member_use_sites`]).
+/// Pairs are consumed BY MEMBER NAME at publication, so attaching to every
+/// same-name pending is idempotent for the published surface.
+pub(crate) fn attach_component_meta_registry_member_use_site(
+    referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    name: &str,
+    member: &str,
+    slot: &verter_type_expr::locators::TypeBodySlot,
+) {
+    for pending in referenced_names
+        .iter_mut()
+        .filter(|pending| pending.name == name)
+    {
+        if !pending
+            .member_use_sites
+            .iter()
+            .any(|(existing, _)| existing == member)
+        {
+            pending
+                .member_use_sites
+                .push((member.to_string(), slot.clone()));
+        }
+    }
 }
 
 pub(crate) fn upsert_component_meta_registry_entry(
@@ -80,10 +115,10 @@ pub(crate) fn upsert_component_meta_registry_entry(
     published_names: &mut rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
     referenced_names: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    ctx: &dyn ResolverContext,
     name: String,
-    type_expr: verter_type_expr::TypeExpr,
+    type_source: verter_type_expr::facts::SemanticTypeSource,
     declaration: crate::resolver_core::ResolvedTypeDeclaration,
-    collection_expr: Option<&verter_type_expr::TypeExpr>,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) {
     let declaration_source_hint =
@@ -92,16 +127,162 @@ pub(crate) fn upsert_component_meta_registry_entry(
         owner_canonical,
         declaration_source_hint.as_deref(),
     );
+    // One dispatch for candidate preference and nested-ref discovery: the
+    // published content-free source raises ONCE through the shared bridge;
+    // preference between an existing and an incoming candidate is decided in
+    // NODE DOMAIN (`compare_node_improvement`), and transitive references are
+    // discovered by the node-domain walk — no materialised `TypeExpr`.
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let transit_ctx =
+        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+            crate::semantic_query::ProjectionMode::Navigate,
+        );
+    let raise_scope = declaration_source_hint
+        .as_deref()
+        .unwrap_or(owner_canonical);
+    let raise = |source: &verter_type_expr::facts::SemanticTypeSource| {
+        dispatch.raise_semantic_type_source_to_hot(
+            source,
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: raise_scope,
+                context: transit_ctx,
+                interior_failures: None,
+            },
+        )
+    };
     if let Some(index) = resolved_type_registry
         .iter()
         .position(|entry| entry.name == name)
     {
-        let existing = resolved_type_registry[index].type_expr.clone();
-        let preferred =
-            merge_component_meta_registry_candidates(Some(existing.clone()), Some(type_expr))
-                .unwrap_or(existing.clone());
-        if preferred != existing {
-            resolved_type_registry[index].type_expr = preferred.clone();
+        if resolved_type_registry[index].type_source.present() == Some(&type_source) {
+            return;
+        }
+        // Monotonic route-scoped combination (route-demand publication
+        // encoding): multiple route discoveries for one name COMBINE —
+        // `Whole` dominates; otherwise the selected top-level members union
+        // deterministically (existing surface order first, then new-only
+        // members in candidate order).
+        enum RouteCombine {
+            /// Both sides are projected surfaces → publish the member union.
+            Union(verter_type_expr::facts::SemanticTypeSource),
+            /// Existing WHOLE authored body dominates the route-scoped
+            /// candidate → keep the existing entry.
+            KeepWhole,
+            /// WHOLE authored candidate dominates the existing route-scoped
+            /// surface → replace it.
+            ReplaceWithWhole,
+            /// Not a route-combination pair → fall through to the
+            /// node-domain improvement comparator.
+            Fallthrough,
+        }
+        let decision = {
+            use verter_type_expr::facts::{ProjectedTypeFact, SemanticTypeSource};
+            match (
+                resolved_type_registry[index].type_source.present(),
+                &type_source,
+            ) {
+                (
+                    Some(SemanticTypeSource::Projected(ProjectedTypeFact::Surface(current))),
+                    SemanticTypeSource::Projected(ProjectedTypeFact::Surface(candidate)),
+                ) => {
+                    let mut members = current.members.to_vec();
+                    for member in candidate.members.iter() {
+                        if !members.iter().any(|existing| existing.name == member.name) {
+                            members.push(member.clone());
+                        }
+                    }
+                    let union = verter_type_expr::facts::ProjectedSurfaceFact {
+                        members: std::sync::Arc::from(members.into_boxed_slice()),
+                        call_signatures: current.call_signatures.clone(),
+                        construct_signatures: current.construct_signatures.clone(),
+                        index_signatures: current.index_signatures.clone(),
+                        has_index_signature: current.has_index_signature
+                            || candidate.has_index_signature,
+                    };
+                    RouteCombine::Union(SemanticTypeSource::Projected(ProjectedTypeFact::Surface(
+                        union,
+                    )))
+                }
+                (
+                    Some(SemanticTypeSource::Authored(_)),
+                    SemanticTypeSource::Projected(ProjectedTypeFact::Surface(_)),
+                ) => RouteCombine::KeepWhole,
+                (
+                    Some(SemanticTypeSource::Projected(ProjectedTypeFact::Surface(_))),
+                    SemanticTypeSource::Authored(_),
+                ) => RouteCombine::ReplaceWithWhole,
+                _ => RouteCombine::Fallthrough,
+            }
+        };
+        match decision {
+            RouteCombine::Union(union_source) => {
+                if resolved_type_registry[index].type_source.present() != Some(&union_source) {
+                    resolved_type_registry[index].type_source =
+                        verter_type_expr::facts::SourcePosition::Present(union_source.clone());
+                    if collect_nested_refs {
+                        if let Some(hot) = raise(&union_source) {
+                            collect_component_meta_registry_refs_node(
+                                ctx,
+                                hot.node(),
+                                published_names,
+                                queued_names,
+                                referenced_names,
+                                declaration_source_hint.as_deref(),
+                                RegistryMemberRefPolicy::PublicationBoundary,
+                                cursor,
+                            );
+                        }
+                    }
+                }
+                return;
+            }
+            RouteCombine::KeepWhole => return,
+            RouteCombine::ReplaceWithWhole => {
+                resolved_type_registry[index].type_source =
+                    verter_type_expr::facts::SourcePosition::Present(type_source.clone());
+                if let Some(meta) = resolved_type_registry_meta.get_mut(index) {
+                    *meta = crate::resolver_core::ResolvedTypeRegistryMeta {
+                        name: name.clone(),
+                        declaration,
+                    };
+                }
+                if collect_nested_refs {
+                    if let Some(hot) = raise(&type_source) {
+                        collect_component_meta_registry_refs_node(
+                            ctx,
+                            hot.node(),
+                            published_names,
+                            queued_names,
+                            referenced_names,
+                            declaration_source_hint.as_deref(),
+                            RegistryMemberRefPolicy::PublicationBoundary,
+                            cursor,
+                        );
+                    }
+                }
+                return;
+            }
+            RouteCombine::Fallthrough => {}
+        }
+        // An unraisable candidate never replaces the existing source; a
+        // raisable candidate replaces an unraisable existing; both raisable
+        // → the node-domain improvement comparator decides.
+        let improves = match (
+            raise(&type_source),
+            resolved_type_registry[index]
+                .type_source
+                .present()
+                .and_then(raise),
+        ) {
+            (Some(candidate), Some(current)) => {
+                crate::meta_resolve::compare_node_improvement(ctx, candidate.node(), current.node())
+            }
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if improves {
+            resolved_type_registry[index].type_source =
+                verter_type_expr::facts::SourcePosition::Present(type_source.clone());
             if let Some(meta) = resolved_type_registry_meta.get_mut(index) {
                 *meta = crate::resolver_core::ResolvedTypeRegistryMeta {
                     name: name.clone(),
@@ -109,35 +290,41 @@ pub(crate) fn upsert_component_meta_registry_entry(
                 };
             }
             if collect_nested_refs {
-                collect_component_meta_registry_refs(
-                    collection_expr.unwrap_or(&preferred),
-                    published_names,
-                    queued_names,
-                    referenced_names,
-                    declaration_source_hint.as_deref(),
-                    false,
-                    cursor,
-                );
+                if let Some(hot) = raise(&type_source) {
+                    collect_component_meta_registry_refs_node(
+                        ctx,
+                        hot.node(),
+                        published_names,
+                        queued_names,
+                        referenced_names,
+                        declaration_source_hint.as_deref(),
+                        RegistryMemberRefPolicy::PublicationBoundary,
+                        cursor,
+                    );
+                }
             }
         }
         return;
     }
 
     if collect_nested_refs {
-        collect_component_meta_registry_refs(
-            collection_expr.unwrap_or(&type_expr),
-            published_names,
-            queued_names,
-            referenced_names,
-            declaration_source_hint.as_deref(),
-            false,
-            cursor,
-        );
+        if let Some(hot) = raise(&type_source) {
+            collect_component_meta_registry_refs_node(
+                ctx,
+                hot.node(),
+                published_names,
+                queued_names,
+                referenced_names,
+                declaration_source_hint.as_deref(),
+                RegistryMemberRefPolicy::PublicationBoundary,
+                cursor,
+            );
+        }
     }
     resolved_type_registry.push(
         verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
             name: name.clone(),
-            type_expr,
+            type_source: verter_type_expr::facts::SourcePosition::Present(type_source),
             type_expansion: None,
         },
     );
@@ -167,72 +354,46 @@ pub(crate) fn owner_component_meta_registry_import_root(
     ctx.resolve_owner_direct_import(owner_canonical, local_name)
 }
 
-/// Issue #7 / extract the route's root name when `expr` is
-/// either an `IndexedAccess` (`Foo['variants']['variant']`) or a
-/// utility wrapper (`Pick<Foo, ...>` / `Omit<Foo, ...>`).
-fn component_meta_registry_route_root_name(expr: &TypeExpr) -> Option<String> {
-    if let Some((root, _)) = component_meta_registry_public_utility_route(expr) {
-        return Some(root);
-    }
-    if let Some((root, _)) = component_meta_registry_public_indexed_access_route(expr) {
-        return Some(root);
-    }
-    None
-}
-
 /// Issue #7 / true when the named alias's prepared body
-/// resolves (modulo single alias-of-alias indirection) to a `Ref {
-/// name: "ComponentConfig", type_arguments: nonempty }`.
+/// resolves (modulo single alias-of-alias indirection) to a
+/// `ComponentConfig<...>` reference with a nonempty argument list —
+/// classified NODE-DOMAIN off the prepared declaration's lowered body slot.
 ///
 /// Returns `false` for:
-/// - missing prepared decl
-/// - body is a `TypeParameter`
-/// - body is a non-generic `Ref` to anything other than another local
-///   alias whose body satisfies the rule (alias-of-alias depth 1)
-/// - body is a `Ref` to `ComponentConfig` with no type arguments
+/// - missing prepared decl / unraisable body
+/// - body root is a type parameter
+/// - body root is a non-generic reference to anything other than another
+///   local alias whose body satisfies the rule (alias-of-alias depth 1)
+/// - body root is a `ComponentConfig` reference with no type arguments
 pub(crate) fn component_meta_registry_owner_local_component_config_alias_name(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
     name: &str,
 ) -> bool {
-    /// Strip leading `Parenthesized` wrappers iteratively (no recursion;
-    /// satisfies `no_unbounded_recursion_in_resolver_core`).
-    fn unwrap_paren(mut expr: &TypeExpr) -> &TypeExpr {
-        while let TypeExpr::Parenthesized(inner) = expr {
-            expr = inner;
+    fn body_head(
+        ctx: &dyn ResolverContext,
+        owner_canonical: &str,
+        name: &str,
+    ) -> Option<(String, Vec<SemanticNodeId>)> {
+        let prepared = ctx.prepared_type_decl(owner_canonical, name)?;
+        let root = prepared_body_root_node(ctx, prepared.as_ref())?;
+        if node_root_is_type_parameter(ctx, root) {
+            return None;
         }
-        expr
+        component_meta_registry_node_ref_head(ctx, root)
     }
 
-    let Some(prepared) = ctx.prepared_type_decl(owner_canonical, name) else {
+    let Some((ref_name, type_arguments)) = body_head(ctx, owner_canonical, name) else {
         return false;
     };
-    if matches!(prepared.body, TypeExpr::TypeParameter(_)) {
-        return false;
+    if ref_name == "ComponentConfig" && !type_arguments.is_empty() {
+        return true;
     }
-    let body = unwrap_paren(&prepared.body);
-    if let TypeExpr::Ref {
-        name: ref_name,
-        type_arguments,
-    } = body
-    {
-        if ref_name.as_ref() == "ComponentConfig" && !type_arguments.is_empty() {
-            return true;
-        }
-        // Single alias-of-alias indirection — follow once.
-        if type_arguments.is_empty() {
-            if let Some(next) = ctx.prepared_type_decl(owner_canonical, ref_name.as_ref()) {
-                if matches!(next.body, TypeExpr::TypeParameter(_)) {
-                    return false;
-                }
-                if let TypeExpr::Ref {
-                    name: nested_name,
-                    type_arguments: nested_args,
-                } = unwrap_paren(&next.body)
-                {
-                    return nested_name.as_ref() == "ComponentConfig" && !nested_args.is_empty();
-                }
-            }
+    // Single alias-of-alias indirection — follow once.
+    if type_arguments.is_empty() {
+        if let Some((nested_name, nested_args)) = body_head(ctx, owner_canonical, ref_name.as_str())
+        {
+            return nested_name == "ComponentConfig" && !nested_args.is_empty();
         }
     }
     false
@@ -253,7 +414,7 @@ pub(crate) fn component_meta_registry_public_route_owner_local_root(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
-    expr: &TypeExpr,
+    route_root_name: Option<&str>,
     source_hint: Option<&str>,
 ) -> Option<String> {
     // Source hint must be either None (component-local) or match the
@@ -264,9 +425,9 @@ pub(crate) fn component_meta_registry_public_route_owner_local_root(
         }
     }
 
-    // Extract the route's root name (either utility or indexed
-    // access).
-    let root_name = component_meta_registry_route_root_name(expr)?;
+    // The route's root name (utility or indexed access), extracted by the
+    // caller in its own carrier domain.
+    let root_name = route_root_name?.to_string();
 
     // Owner-local rule: no import binding on `root_name`. If the
     // resolver routes the name to an external file, it is imported.
@@ -339,6 +500,7 @@ pub(crate) fn enqueue_component_meta_registry_ref(
                 source_hint,
                 exported_name,
                 route,
+                member_use_sites: Vec::new(),
             });
         }
         return;
@@ -348,6 +510,7 @@ pub(crate) fn enqueue_component_meta_registry_ref(
         source_hint,
         exported_name,
         route,
+        member_use_sites: Vec::new(),
     });
 }
 
@@ -372,817 +535,6 @@ fn route_demand_keeps_exact_deep_member_path(
         },
         _ => true,
     }
-}
-
-pub(crate) fn choose_preferred_component_meta_registry_candidate(
-    left: Option<verter_type_expr::TypeExpr>,
-    right: Option<verter_type_expr::TypeExpr>,
-) -> Option<verter_type_expr::TypeExpr> {
-    match (left, right) {
-        (Some(left), Some(right)) => {
-            let left_non_object = component_meta_registry_has_non_object_top_level_surface(&left);
-            let right_non_object = component_meta_registry_has_non_object_top_level_surface(&right);
-            if left_non_object != right_non_object {
-                return Some(if left_non_object { right } else { left });
-            }
-
-            if component_meta_registry_indexed_ref_penalty(&left)
-                != component_meta_registry_indexed_ref_penalty(&right)
-            {
-                return Some(
-                    if component_meta_registry_indexed_ref_penalty(&left)
-                        < component_meta_registry_indexed_ref_penalty(&right)
-                    {
-                        left
-                    } else {
-                        right
-                    },
-                );
-            }
-
-            choose_preferred_imported_type_body(Some(left), Some(right))
-        }
-        (left, right) => choose_preferred_imported_type_body(left, right),
-    }
-}
-
-/// Maximum recursion depth for nested object merging to prevent stack overflow
-/// on deeply nested `ComponentConfig` types.
-const MAX_REGISTRY_MERGE_DEPTH: u8 = 8;
-
-pub(crate) fn merge_component_meta_registry_candidates(
-    left: Option<verter_type_expr::TypeExpr>,
-    right: Option<verter_type_expr::TypeExpr>,
-) -> Option<verter_type_expr::TypeExpr> {
-    merge_component_meta_registry_candidates_bounded(left, right, 0)
-}
-
-fn merge_component_meta_registry_candidates_bounded(
-    left: Option<verter_type_expr::TypeExpr>,
-    right: Option<verter_type_expr::TypeExpr>,
-    depth: u8,
-) -> Option<verter_type_expr::TypeExpr> {
-    use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
-
-    fn merge_member_types(left: &TypeExpr, right: &TypeExpr, depth: u8) -> TypeExpr {
-        if depth >= MAX_REGISTRY_MERGE_DEPTH {
-            return left.clone();
-        }
-        merge_component_meta_registry_candidates_bounded(
-            Some(left.clone()),
-            Some(right.clone()),
-            depth + 1,
-        )
-        .unwrap_or_else(|| left.clone())
-    }
-
-    fn merge_object_members(left: &TypeExpr, right: &TypeExpr, depth: u8) -> Option<TypeExpr> {
-        let (TypeExpr::Object(left_obj), TypeExpr::Object(right_obj)) = (left, right) else {
-            return None;
-        };
-
-        let mut merged_members = left_obj.properties.to_vec();
-        for right_member in &right_obj.properties {
-            match right_member {
-                ObjectMember::Property(right_property) => {
-                    if let Some(ObjectMember::Property(existing_property)) =
-                        merged_members.iter_mut().find(|member| {
-                            matches!(
-                                member,
-                                ObjectMember::Property(property)
-                                    if property.name == right_property.name
-                            )
-                        })
-                    {
-                        existing_property.ty =
-                            merge_member_types(&existing_property.ty, &right_property.ty, depth);
-                        existing_property.optional =
-                            existing_property.optional && right_property.optional;
-                        existing_property.readonly =
-                            existing_property.readonly && right_property.readonly;
-                        // Duplicate member (same name in both sides): aggregate
-                        // to the MOST-RESTRICTIVE visibility (the shared merge
-                        // rule). A merged member is Public only when Public in
-                        // BOTH contributors, so a member non-public in either
-                        // side stays non-public — never synthesized Public.
-                        existing_property.visibility = existing_property
-                            .visibility
-                            .most_restrictive(right_property.visibility);
-                    } else {
-                        // RHS-only property: carry the right-hand property's OXC
-                        // spans AND its declared accessibility verbatim (rebuild
-                        // of an existing member — `with_spans` would default it
-                        // to Public).
-                        merged_members.push(ObjectMember::Property(
-                            ObjectProperty::with_visibility(
-                                right_property.name.clone(),
-                                right_property.ty.clone(),
-                                right_property.optional,
-                                right_property.readonly,
-                                right_property.visibility,
-                                right_property.spans,
-                            ),
-                        ));
-                    }
-                }
-                ObjectMember::Method(right_method) => {
-                    if let Some(ObjectMember::Method(existing_method)) =
-                        merged_members.iter_mut().find(|member| {
-                            matches!(
-                                member,
-                                ObjectMember::Method(method)
-                                    if method.name == right_method.name
-                            )
-                        })
-                    {
-                        // Duplicate method (same name in both sides): aggregate
-                        // to the MOST-RESTRICTIVE visibility via the shared merge
-                        // rule, exactly as the duplicate-property arm does. A
-                        // merged method is Public only when Public in BOTH
-                        // contributors, so a method non-public in either side
-                        // stays non-public — never synthesized Public. `optional`
-                        // ANDs (present-without-`?` in either side ⇒ required);
-                        // the existing (left) signature is retained.
-                        existing_method.optional =
-                            existing_method.optional && right_method.optional;
-                        existing_method.visibility = existing_method
-                            .visibility
-                            .most_restrictive(right_method.visibility);
-                    } else {
-                        // RHS-only method: carry the right-hand method's OXC spans
-                        // AND its declared accessibility verbatim (rebuild of an
-                        // existing member — a source-less constructor would
-                        // default it to Public).
-                        merged_members.push(ObjectMember::Method(
-                            verter_type_expr::MethodSignature::with_visibility(
-                                right_method.name.clone(),
-                                right_method.function.clone(),
-                                right_method.optional,
-                                right_method.visibility,
-                                right_method.spans,
-                            ),
-                        ));
-                    }
-                }
-                _ => {
-                    if !merged_members.contains(right_member) {
-                        merged_members.push(right_member.clone());
-                    }
-                }
-            }
-        }
-
-        Some(TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: merged_members,
-        })))
-    }
-
-    match (left, right) {
-        (Some(left), Some(right)) => merge_object_members(&left, &right, depth).or_else(|| {
-            choose_preferred_component_meta_registry_candidate(Some(left), Some(right))
-        }),
-        (left, right) => choose_preferred_component_meta_registry_candidate(left, right),
-    }
-}
-
-fn choose_preferred_imported_type_body(
-    resolved_body: Option<TypeExpr>,
-    resolved_decl_body: Option<TypeExpr>,
-) -> Option<TypeExpr> {
-    match (resolved_body, resolved_decl_body) {
-        (Some(left), Some(right)) => {
-            let left_empty_object = is_empty_object_surface(&left);
-            let right_empty_object = is_empty_object_surface(&right);
-            if left_empty_object != right_empty_object {
-                return Some(if left_empty_object { right } else { left });
-            }
-
-            let left_surface_props = extracted_surface_property_count(&left);
-            let right_surface_props = extracted_surface_property_count(&right);
-            if let (Some(left_count), Some(right_count)) = (left_surface_props, right_surface_props)
-            {
-                if left_count != right_count {
-                    return Some(if left_count > right_count {
-                        left
-                    } else {
-                        right
-                    });
-                }
-            }
-
-            let left_method_surface = method_surface_specificity_score(&left);
-            let right_method_surface = method_surface_specificity_score(&right);
-            if left_method_surface != right_method_surface {
-                return Some(if left_method_surface > right_method_surface {
-                    left
-                } else {
-                    right
-                });
-            }
-
-            let left_top_level_branching = top_level_branching_surface_score(&left);
-            let right_top_level_branching = top_level_branching_surface_score(&right);
-            if left_top_level_branching != right_top_level_branching {
-                return Some(if left_top_level_branching > right_top_level_branching {
-                    left
-                } else {
-                    right
-                });
-            }
-
-            let left_nested = contains_nested_resolution_targets(&left);
-            let right_nested = contains_nested_resolution_targets(&right);
-            if left_nested != right_nested {
-                return Some(if left_nested { right } else { left });
-            }
-
-            let left_non_object = component_meta_registry_has_non_object_top_level_surface(&left);
-            let right_non_object = component_meta_registry_has_non_object_top_level_surface(&right);
-            if left_non_object != right_non_object {
-                return Some(if left_non_object { right } else { left });
-            }
-
-            let left_bound_generic_penalty = bound_generic_ref_penalty(&left);
-            let right_bound_generic_penalty = bound_generic_ref_penalty(&right);
-            if left_bound_generic_penalty != right_bound_generic_penalty {
-                return Some(
-                    if left_bound_generic_penalty < right_bound_generic_penalty {
-                        left
-                    } else {
-                        right
-                    },
-                );
-            }
-
-            if imported_type_body_specificity_score(&right)
-                > imported_type_body_specificity_score(&left)
-            {
-                Some(right)
-            } else {
-                Some(left)
-            }
-        }
-        (Some(body), None) | (None, Some(body)) => Some(body),
-        (None, None) => None,
-    }
-}
-
-fn is_empty_object_surface(expr: &TypeExpr) -> bool {
-    match expr {
-        TypeExpr::Parenthesized(inner) => is_empty_object_surface(inner),
-        TypeExpr::Object(obj) => obj.properties.is_empty(),
-        _ => false,
-    }
-}
-
-fn contains_nested_resolution_targets(expr: &TypeExpr) -> bool {
-    match expr {
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. }
-        // Synthetic carriers are intrinsic terminal leaves; no nested
-        // resolution targets reach through them.
-        | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::TypeParameter(_) => false,
-        TypeExpr::Ref { .. }
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::IndexedAccess { .. }
-        | TypeExpr::Conditional { .. }
-        | TypeExpr::Mapped { .. }
-        // An import-type IS a cross-file resolution target — grouped with the
-        // other nested-resolution-target carriers (`Ref` / `TypeOf` / …).
-        | TypeExpr::ImportType { .. } => true,
-        TypeExpr::Parenthesized(inner)
-        | TypeExpr::Array { element: inner, .. }
-        | TypeExpr::KeyOf(inner)
-        | TypeExpr::Rest(inner) => contains_nested_resolution_targets(inner),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .any(|element| contains_nested_resolution_targets(&element.ty)),
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            types.iter().any(contains_nested_resolution_targets)
-        }
-        TypeExpr::Object(_) => false,
-        // A constructor type, like a function type, is treated as a terminal
-        // here (its signature is not walked for nested resolution targets) —
-        // identical to the `Function` arm.
-        TypeExpr::Function(_) | TypeExpr::ConstructorType(_) => false,
-        TypeExpr::TemplateLiteral { expressions, .. } => {
-            expressions.iter().any(contains_nested_resolution_targets)
-        }
-        TypeExpr::Infer { .. } => false,
-    }
-}
-
-fn extracted_surface_property_count(expr: &TypeExpr) -> Option<usize> {
-    match expr {
-        TypeExpr::Parenthesized(inner) => extracted_surface_property_count(inner),
-        TypeExpr::Object(obj) => Some(
-            obj.properties
-                .iter()
-                .filter(|member| {
-                    matches!(member, ObjectMember::Property(_) | ObjectMember::Method(_))
-                })
-                .count(),
-        ),
-        TypeExpr::Intersection(types) => {
-            let mut total = 0usize;
-            let mut saw_surface = false;
-            for ty in types.iter() {
-                let count = extracted_surface_property_count(ty)?;
-                total += count;
-                saw_surface = true;
-            }
-            saw_surface.then_some(total)
-        }
-        _ => None,
-    }
-}
-
-fn method_surface_specificity_score(expr: &TypeExpr) -> usize {
-    match expr {
-        TypeExpr::Parenthesized(inner) => method_surface_specificity_score(inner),
-        TypeExpr::Object(obj) => obj
-            .properties
-            .iter()
-            .map(|member| match member {
-                ObjectMember::Method(method) => {
-                    2 + method_surface_specificity_score(&TypeExpr::Function(Arc::new(
-                        method.function.clone(),
-                    )))
-                }
-                ObjectMember::Property(prop) => {
-                    // A bare constructor type is an equally-specific callable
-                    // surface as a function type — both earn the bonus.
-                    usize::from(matches!(
-                        prop.ty,
-                        TypeExpr::Function(_) | TypeExpr::ConstructorType(_)
-                    )) + method_surface_specificity_score(&prop.ty)
-                }
-                ObjectMember::IndexSignature(sig) => {
-                    method_surface_specificity_score(&sig.key_type)
-                        + method_surface_specificity_score(&sig.value_type)
-                }
-                ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                    method_surface_specificity_score(&TypeExpr::Function(Arc::new(func.clone())))
-                }
-            })
-            .sum(),
-        // A constructor type carries the same `FunctionExpr` payload as a
-        // function type and is an equally-specific callable surface, so it is
-        // scored identically.
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            func.parameters
-                .iter()
-                .map(|param| method_surface_specificity_score(&param.ty))
-                .sum::<usize>()
-                + func
-                    .return_type
-                    .as_deref()
-                    .map(method_surface_specificity_score)
-                    .unwrap_or_default()
-        }
-        TypeExpr::Array { element, .. } | TypeExpr::KeyOf(element) | TypeExpr::Rest(element) => {
-            method_surface_specificity_score(element)
-        }
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .map(|element| method_surface_specificity_score(&element.ty))
-            .sum(),
-        TypeExpr::Union(types)
-        | TypeExpr::Intersection(types)
-        | TypeExpr::TemplateLiteral {
-            expressions: types, ..
-        } => types.iter().map(method_surface_specificity_score).sum(),
-        TypeExpr::IndexedAccess { object, index } => {
-            method_surface_specificity_score(object) + method_surface_specificity_score(index)
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            method_surface_specificity_score(check)
-                + method_surface_specificity_score(extends)
-                + method_surface_specificity_score(true_type)
-                + method_surface_specificity_score(false_type)
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            method_surface_specificity_score(source)
-                + method_surface_specificity_score(value)
-                + name_type
-                    .as_deref()
-                    .map(method_surface_specificity_score)
-                    .unwrap_or_default()
-        }
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. }
-        | TypeExpr::Ref { .. }
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::TypeParameter(_)
-        // Synthetic carriers carry no method surface — score 0.
-        | TypeExpr::SyntheticSlotBinding(_)
-        // An import-type is a symbolic reference (like a bare `Ref`); it
-        // carries no method surface — score 0.
-        | TypeExpr::ImportType { .. }
-        | TypeExpr::Infer { .. } => 0,
-    }
-}
-
-fn bound_generic_ref_penalty(expr: &TypeExpr) -> usize {
-    match expr {
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. }
-        // Synthetic carriers reference no bound generic; no penalty.
-        | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Infer { .. } => 0,
-        TypeExpr::TypeOf(_) => 1,
-        TypeExpr::TypeParameter(param) => {
-            param
-                .constraint
-                .as_deref()
-                .map(bound_generic_ref_penalty)
-                .unwrap_or_default()
-                + param
-                    .default
-                    .as_deref()
-                    .map(bound_generic_ref_penalty)
-                    .unwrap_or_default()
-        }
-        TypeExpr::Ref { type_arguments, .. } => {
-            usize::from(!type_arguments.is_empty())
-                + type_arguments
-                    .iter()
-                    .map(bound_generic_ref_penalty)
-                    .sum::<usize>()
-        }
-        // Mirrors the `Ref` arm: an `import("m").Generic<Arg>` is a bound
-        // generic reference, penalised identically over its `type_arguments`.
-        TypeExpr::ImportType { type_arguments, .. } => {
-            usize::from(!type_arguments.is_empty())
-                + type_arguments
-                    .iter()
-                    .map(bound_generic_ref_penalty)
-                    .sum::<usize>()
-        }
-        TypeExpr::Parenthesized(inner)
-        | TypeExpr::Array { element: inner, .. }
-        | TypeExpr::KeyOf(inner)
-        | TypeExpr::Rest(inner) => bound_generic_ref_penalty(inner),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .map(|element| bound_generic_ref_penalty(&element.ty))
-            .sum(),
-        TypeExpr::Union(types)
-        | TypeExpr::Intersection(types)
-        | TypeExpr::TemplateLiteral {
-            expressions: types, ..
-        } => types.iter().map(bound_generic_ref_penalty).sum(),
-        TypeExpr::Object(obj) => obj
-            .properties
-            .iter()
-            .map(|member| match member {
-                ObjectMember::Property(prop) => bound_generic_ref_penalty(&prop.ty),
-                ObjectMember::IndexSignature(sig) => {
-                    bound_generic_ref_penalty(&sig.key_type)
-                        + bound_generic_ref_penalty(&sig.value_type)
-                }
-                ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                    func.parameters
-                        .iter()
-                        .map(|param| bound_generic_ref_penalty(&param.ty))
-                        .sum::<usize>()
-                        + func
-                            .return_type
-                            .as_deref()
-                            .map(bound_generic_ref_penalty)
-                            .unwrap_or_default()
-                        + func
-                            .type_parameters
-                            .iter()
-                            .map(|param| {
-                                param
-                                    .constraint
-                                    .as_deref()
-                                    .map(bound_generic_ref_penalty)
-                                    .unwrap_or_default()
-                                    + param
-                                        .default
-                                        .as_deref()
-                                        .map(bound_generic_ref_penalty)
-                                        .unwrap_or_default()
-                            })
-                            .sum::<usize>()
-                }
-                ObjectMember::Method(method) => {
-                    method
-                        .function
-                        .parameters
-                        .iter()
-                        .map(|param| bound_generic_ref_penalty(&param.ty))
-                        .sum::<usize>()
-                        + method
-                            .function
-                            .return_type
-                            .as_deref()
-                            .map(bound_generic_ref_penalty)
-                            .unwrap_or_default()
-                        + method
-                            .function
-                            .type_parameters
-                            .iter()
-                            .map(|param| {
-                                param
-                                    .constraint
-                                    .as_deref()
-                                    .map(bound_generic_ref_penalty)
-                                    .unwrap_or_default()
-                                    + param
-                                        .default
-                                        .as_deref()
-                                        .map(bound_generic_ref_penalty)
-                                        .unwrap_or_default()
-                            })
-                            .sum::<usize>()
-                }
-            })
-            .sum(),
-        // A constructor type's signature is penalised identically to a function
-        // type's (same `FunctionExpr` payload).
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            func.parameters
-                .iter()
-                .map(|param| bound_generic_ref_penalty(&param.ty))
-                .sum::<usize>()
-                + func
-                    .return_type
-                    .as_deref()
-                    .map(bound_generic_ref_penalty)
-                    .unwrap_or_default()
-                + func
-                    .type_parameters
-                    .iter()
-                    .map(|param| {
-                        param
-                            .constraint
-                            .as_deref()
-                            .map(bound_generic_ref_penalty)
-                            .unwrap_or_default()
-                            + param
-                                .default
-                                .as_deref()
-                                .map(bound_generic_ref_penalty)
-                                .unwrap_or_default()
-                    })
-                    .sum::<usize>()
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            bound_generic_ref_penalty(object) + bound_generic_ref_penalty(index)
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            bound_generic_ref_penalty(check)
-                + bound_generic_ref_penalty(extends)
-                + bound_generic_ref_penalty(true_type)
-                + bound_generic_ref_penalty(false_type)
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            bound_generic_ref_penalty(source)
-                + bound_generic_ref_penalty(value)
-                + name_type
-                    .as_deref()
-                    .map(bound_generic_ref_penalty)
-                    .unwrap_or_default()
-        }
-    }
-}
-
-fn top_level_branching_surface_score(expr: &TypeExpr) -> usize {
-    match expr {
-        TypeExpr::Parenthesized(inner) => top_level_branching_surface_score(inner),
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            let mut score = 0usize;
-            for ty in types.iter() {
-                match ty {
-                    TypeExpr::Primitive(PrimitiveName::Undefined) => {}
-                    TypeExpr::Unknown { .. } => {}
-                    _ => score += 1,
-                }
-            }
-            if score >= 2 {
-                score
-            } else {
-                0
-            }
-        }
-        _ => 0,
-    }
-}
-
-const SPECIFICITY_UNKNOWN: usize = 0;
-const SPECIFICITY_TYPEOF: usize = 4;
-const SPECIFICITY_TERMINAL: usize = 8;
-const SPECIFICITY_REF_BASE: usize = 16;
-const SPECIFICITY_TEMPLATE_LITERAL_BASE: usize = 20;
-const SPECIFICITY_WRAPPER_BASE: usize = 24;
-const SPECIFICITY_INDEXED_ACCESS_BASE: usize = 28;
-const SPECIFICITY_MAPPED_BASE: usize = 32;
-const SPECIFICITY_TUPLE_BASE: usize = 40;
-const SPECIFICITY_FUNCTION_BASE: usize = 48;
-const SPECIFICITY_UNION_BASE: usize = 56;
-const SPECIFICITY_INTERSECTION_BASE: usize = 64;
-const SPECIFICITY_OBJECT_BASE: usize = 96;
-const SPECIFICITY_OBJECT_PROPERTY: usize = 12;
-const SPECIFICITY_INDEX_SIGNATURE: usize = 6;
-const SPECIFICITY_CALL_LIKE_MEMBER: usize = 10;
-
-fn imported_type_body_specificity_score(expr: &TypeExpr) -> usize {
-    match expr {
-        TypeExpr::Unknown { .. } => SPECIFICITY_UNKNOWN,
-        TypeExpr::Primitive(_) | TypeExpr::Literal(_) => SPECIFICITY_TERMINAL,
-        TypeExpr::TypeOf(_) => SPECIFICITY_TYPEOF,
-        TypeExpr::TypeParameter(param) => {
-            SPECIFICITY_REF_BASE
-                + param
-                    .constraint
-                    .as_deref()
-                    .map(imported_type_body_specificity_score)
-                    .unwrap_or_default()
-                + param
-                    .default
-                    .as_deref()
-                    .map(imported_type_body_specificity_score)
-                    .unwrap_or_default()
-        }
-        TypeExpr::Ref { type_arguments, .. } => {
-            SPECIFICITY_REF_BASE
-                + type_arguments
-                    .iter()
-                    .map(imported_type_body_specificity_score)
-                    .sum::<usize>()
-        }
-        // Mirrors the `Ref` arm: an import-type is a symbolic reference, scored
-        // at the same `SPECIFICITY_REF_BASE` plus the sum over its
-        // `type_arguments`.
-        TypeExpr::ImportType { type_arguments, .. } => {
-            SPECIFICITY_REF_BASE
-                + type_arguments
-                    .iter()
-                    .map(imported_type_body_specificity_score)
-                    .sum::<usize>()
-        }
-        TypeExpr::Array { element, .. }
-        | TypeExpr::KeyOf(element)
-        | TypeExpr::Rest(element)
-        | TypeExpr::Parenthesized(element) => {
-            SPECIFICITY_WRAPPER_BASE + imported_type_body_specificity_score(element)
-        }
-        TypeExpr::Tuple { elements, .. } => {
-            SPECIFICITY_TUPLE_BASE
-                + elements
-                    .iter()
-                    .map(|element| imported_type_body_specificity_score(&element.ty))
-                    .sum::<usize>()
-        }
-        TypeExpr::Union(types) => {
-            SPECIFICITY_UNION_BASE
-                + types
-                    .iter()
-                    .map(imported_type_body_specificity_score)
-                    .sum::<usize>()
-        }
-        TypeExpr::Intersection(types) => {
-            SPECIFICITY_INTERSECTION_BASE
-                + types
-                    .iter()
-                    .map(imported_type_body_specificity_score)
-                    .sum::<usize>()
-        }
-        TypeExpr::Object(obj) => {
-            SPECIFICITY_OBJECT_BASE
-                + obj
-                    .properties
-                    .iter()
-                    .map(|member| match member {
-                        ObjectMember::Property(prop) => {
-                            SPECIFICITY_OBJECT_PROPERTY
-                                + imported_type_body_specificity_score(&prop.ty)
-                        }
-                        ObjectMember::IndexSignature(sig) => {
-                            SPECIFICITY_INDEX_SIGNATURE
-                                + imported_type_body_specificity_score(&sig.key_type)
-                                + imported_type_body_specificity_score(&sig.value_type)
-                        }
-                        ObjectMember::CallSignature(func)
-                        | ObjectMember::ConstructSignature(func) => {
-                            SPECIFICITY_CALL_LIKE_MEMBER + imported_function_specificity_score(func)
-                        }
-                        ObjectMember::Method(method) => {
-                            SPECIFICITY_CALL_LIKE_MEMBER
-                                + imported_function_specificity_score(&method.function)
-                        }
-                    })
-                    .sum::<usize>()
-        }
-        // A constructor type scores as a function surface (same `FunctionExpr`
-        // payload, same callable-specificity contribution).
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            SPECIFICITY_FUNCTION_BASE + imported_function_specificity_score(func)
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            SPECIFICITY_INDEXED_ACCESS_BASE
-                + imported_type_body_specificity_score(object)
-                + imported_type_body_specificity_score(index)
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            SPECIFICITY_WRAPPER_BASE
-                + imported_type_body_specificity_score(check)
-                + imported_type_body_specificity_score(extends)
-                + imported_type_body_specificity_score(true_type)
-                + imported_type_body_specificity_score(false_type)
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            SPECIFICITY_MAPPED_BASE
-                + imported_type_body_specificity_score(source)
-                + imported_type_body_specificity_score(value)
-                + name_type
-                    .as_deref()
-                    .map(imported_type_body_specificity_score)
-                    .unwrap_or_default()
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => {
-            SPECIFICITY_TEMPLATE_LITERAL_BASE
-                + expressions
-                    .iter()
-                    .map(imported_type_body_specificity_score)
-                    .sum::<usize>()
-        }
-        TypeExpr::Infer { .. } => SPECIFICITY_TYPEOF,
-        TypeExpr::RecursiveRef { .. } => SPECIFICITY_REF_BASE,
-        // Synthetic carrier — intrinsic terminal leaf, same specificity
-        // as primitive / literal terminals.
-        TypeExpr::SyntheticSlotBinding(_) => SPECIFICITY_TERMINAL,
-    }
-}
-
-fn imported_function_specificity_score(func: &FunctionExpr) -> usize {
-    let params = func
-        .parameters
-        .iter()
-        .map(|param| imported_type_body_specificity_score(&param.ty))
-        .sum::<usize>();
-    let ret = func
-        .return_type
-        .as_deref()
-        .map(imported_type_body_specificity_score)
-        .unwrap_or_default();
-    let generics = func
-        .type_parameters
-        .iter()
-        .map(|param| {
-            param
-                .constraint
-                .as_deref()
-                .map(imported_type_body_specificity_score)
-                .unwrap_or_default()
-                + param
-                    .default
-                    .as_deref()
-                    .map(imported_type_body_specificity_score)
-                    .unwrap_or_default()
-        })
-        .sum::<usize>();
-    params + ret + generics
 }
 
 pub(crate) fn component_meta_registry_has_non_object_top_level_surface(
@@ -1226,786 +578,6 @@ pub(crate) fn component_meta_registry_has_explicit_object_surface(
     }
 }
 
-/// Is `expr` an UN-MERGED heritage intersection — the analyzer body of
-/// `interface X extends Base { ... }`, lowered as
-/// `Intersection([Ref{Base}, Object{own members}])` (heritage carrier
-/// arms alongside an explicit own-member Object arm)?
-///
-/// Such a body is NOT an explicit one-level surface the registry may
-/// publish raw: a registry consumer reads the entry as a member surface,
-/// and an intersection mixing symbolic heritage arms with an Object arm
-/// carries no interpretable key set. The candidate materialiser must fold
-/// it through the shared empty-path Shallow surface walker (heritage
-/// merge) instead of returning the raw body.
-///
-/// A homogeneous compound (`Object & Object`, `Object | Object`) is NOT
-/// flagged — it is already an explicit surface. A heritage-only
-/// intersection (`Ref & Ref`) is not flagged either: it has no explicit
-/// Object arm, so the prefer-raw branch never applies to it.
-pub(crate) fn component_meta_registry_has_unmerged_heritage_intersection(
-    expr: &verter_type_expr::TypeExpr,
-) -> bool {
-    use verter_type_expr::TypeExpr;
-
-    let mut current = expr;
-    while let TypeExpr::Parenthesized(inner) = current {
-        current = inner;
-    }
-    match current {
-        TypeExpr::Intersection(types) => {
-            types
-                .iter()
-                .any(component_meta_registry_has_explicit_object_surface)
-                && types
-                    .iter()
-                    .any(component_meta_registry_has_non_object_top_level_surface)
-        }
-        _ => false,
-    }
-}
-
-pub(crate) fn component_meta_registry_raw_member_path_surface(
-    expr: &verter_type_expr::TypeExpr,
-    path: &[String],
-) -> Option<verter_type_expr::TypeExpr> {
-    use verter_type_expr::{MemberVisibility, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
-
-    /// Navigate into a `TypeExpr::Object` by a single property name,
-    /// unwrapping `Parenthesized`. Returns the matched source
-    /// `ObjectProperty` (value + declared visibility) so the member-path
-    /// wrapper can thread the navigated member's visibility rather than
-    /// silently re-minting it as `Public`. Returns `None` if `expr` is not
-    /// an Object or no member matches.
-    fn navigate_object_member<'a>(
-        expr: &'a TypeExpr,
-        member_name: &str,
-    ) -> Option<&'a ObjectProperty> {
-        match expr {
-            TypeExpr::Parenthesized(inner) => navigate_object_member(inner, member_name),
-            TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == member_name => Some(property),
-                _ => None,
-            }),
-            _ => None,
-        }
-    }
-
-    if path.is_empty() {
-        return Some(expr.clone());
-    }
-
-    let mut leaf = expr;
-    // Record each hop's declared visibility (aligned with `path`) so the
-    // rebuilt wrapper preserves the source member's accessibility.
-    let mut hop_visibilities: Vec<MemberVisibility> = Vec::with_capacity(path.len());
-    for member_name in path {
-        let property = navigate_object_member(leaf, member_name)?;
-        hop_visibilities.push(property.visibility);
-        leaf = &property.ty;
-    }
-
-    Some(path.iter().zip(hop_visibilities).rev().fold(
-        leaf.clone(),
-        |child, (member_name, visibility)| {
-            // Nested-object wrapper for one navigation hop. The member name
-            // comes from the path; its visibility is the source member's
-            // declared accessibility (threaded above) so a non-public hop is
-            // never re-minted as `Public`.
-            TypeExpr::Object(Arc::new(ObjectExpr {
-                properties: vec![ObjectMember::Property(
-                    ObjectProperty::synthetic_with_visibility(
-                        member_name.clone(),
-                        child,
-                        true,
-                        false,
-                        visibility,
-                    ),
-                )],
-            }))
-        },
-    ))
-}
-
-pub(crate) fn component_meta_registry_expr_references_name(
-    expr: &verter_type_expr::TypeExpr,
-    target_name: &str,
-) -> bool {
-    use verter_type_expr::{ObjectMember, TypeExpr};
-
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        }
-        | TypeExpr::RecursiveRef {
-            name,
-            type_arguments,
-            ..
-        } => {
-            name.as_ref() == target_name
-                || type_arguments
-                    .iter()
-                    .any(|arg| component_meta_registry_expr_references_name(arg, target_name))
-        }
-        // Mirrors the `Ref` arm's recursion into `type_arguments`. The
-        // `specifier`/`qualifier` are a module path, not the registry
-        // `target_name`, so only the nested type-argument exprs are searched.
-        TypeExpr::ImportType { type_arguments, .. } => type_arguments
-            .iter()
-            .any(|arg| component_meta_registry_expr_references_name(arg, target_name)),
-        TypeExpr::Array { element, .. }
-        | TypeExpr::Parenthesized(element)
-        | TypeExpr::Rest(element)
-        | TypeExpr::KeyOf(element) => {
-            component_meta_registry_expr_references_name(element, target_name)
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            component_meta_registry_expr_references_name(object, target_name)
-                || component_meta_registry_expr_references_name(index, target_name)
-        }
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .any(|element| component_meta_registry_expr_references_name(&element.ty, target_name)),
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
-            .iter()
-            .any(|ty| component_meta_registry_expr_references_name(ty, target_name)),
-        TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
-            ObjectMember::Property(property) => {
-                component_meta_registry_expr_references_name(&property.ty, target_name)
-            }
-            ObjectMember::IndexSignature(signature) => {
-                component_meta_registry_expr_references_name(&signature.key_type, target_name)
-                    || component_meta_registry_expr_references_name(
-                        &signature.value_type,
-                        target_name,
-                    )
-            }
-            ObjectMember::CallSignature(function) | ObjectMember::ConstructSignature(function) => {
-                function.parameters.iter().any(|param| {
-                    component_meta_registry_expr_references_name(&param.ty, target_name)
-                }) || function.return_type.as_deref().is_some_and(|return_type| {
-                    component_meta_registry_expr_references_name(return_type, target_name)
-                })
-            }
-            ObjectMember::Method(method) => {
-                method.function.parameters.iter().any(|param| {
-                    component_meta_registry_expr_references_name(&param.ty, target_name)
-                }) || method
-                    .function
-                    .return_type
-                    .as_deref()
-                    .is_some_and(|return_type| {
-                        component_meta_registry_expr_references_name(return_type, target_name)
-                    })
-            }
-        }),
-        // A constructor type may reference the target name in its parameters /
-        // return exactly like a function type (same `FunctionExpr` payload).
-        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
-            function
-                .parameters
-                .iter()
-                .any(|param| component_meta_registry_expr_references_name(&param.ty, target_name))
-                || function.return_type.as_deref().is_some_and(|return_type| {
-                    component_meta_registry_expr_references_name(return_type, target_name)
-                })
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            component_meta_registry_expr_references_name(check, target_name)
-                || component_meta_registry_expr_references_name(extends, target_name)
-                || component_meta_registry_expr_references_name(true_type, target_name)
-                || component_meta_registry_expr_references_name(false_type, target_name)
-        }
-        TypeExpr::Mapped {
-            source,
-            name_type,
-            value,
-            ..
-        } => {
-            component_meta_registry_expr_references_name(source, target_name)
-                || name_type.as_deref().is_some_and(|name_type| {
-                    component_meta_registry_expr_references_name(name_type, target_name)
-                })
-                || component_meta_registry_expr_references_name(value, target_name)
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => expressions
-            .iter()
-            .any(|expr| component_meta_registry_expr_references_name(expr, target_name)),
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::TypeParameter(_)
-        // Synthetic carriers reference no public type name — their
-        // identity is closed (the binding_name is intrinsic, not a
-        // registry-lookup target).
-        | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Infer { .. } => false,
-    }
-}
-
-pub(crate) fn component_meta_registry_indexed_ref_penalty(
-    expr: &verter_type_expr::TypeExpr,
-) -> usize {
-    use verter_type_expr::{ObjectMember, TypeExpr};
-
-    match expr {
-        TypeExpr::IndexedAccess { object, index } => {
-            let local_penalty = matches!(object.as_ref(), TypeExpr::Ref { .. }) as usize;
-            local_penalty
-                + component_meta_registry_indexed_ref_penalty(object)
-                + component_meta_registry_indexed_ref_penalty(index)
-        }
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
-            .iter()
-            .map(component_meta_registry_indexed_ref_penalty)
-            .sum(),
-        TypeExpr::Array { element, .. }
-        | TypeExpr::Rest(element)
-        | TypeExpr::Parenthesized(element)
-        | TypeExpr::KeyOf(element) => component_meta_registry_indexed_ref_penalty(element),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .map(|element| component_meta_registry_indexed_ref_penalty(&element.ty))
-            .sum(),
-        TypeExpr::Object(obj) => obj
-            .properties
-            .iter()
-            .map(|member| match member {
-                ObjectMember::Property(prop) => {
-                    component_meta_registry_indexed_ref_penalty(&prop.ty)
-                }
-                ObjectMember::IndexSignature(sig) => {
-                    component_meta_registry_indexed_ref_penalty(&sig.key_type)
-                        + component_meta_registry_indexed_ref_penalty(&sig.value_type)
-                }
-                ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                    func.parameters
-                        .iter()
-                        .map(|param| component_meta_registry_indexed_ref_penalty(&param.ty))
-                        .sum::<usize>()
-                        + func
-                            .return_type
-                            .as_deref()
-                            .map(component_meta_registry_indexed_ref_penalty)
-                            .unwrap_or(0)
-                }
-                ObjectMember::Method(method) => {
-                    method
-                        .function
-                        .parameters
-                        .iter()
-                        .map(|param| component_meta_registry_indexed_ref_penalty(&param.ty))
-                        .sum::<usize>()
-                        + method
-                            .function
-                            .return_type
-                            .as_deref()
-                            .map(component_meta_registry_indexed_ref_penalty)
-                            .unwrap_or(0)
-                }
-            })
-            .sum(),
-        // A constructor type is penalised identically to a function type (same
-        // `FunctionExpr` payload walked for indexed refs).
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            func.parameters
-                .iter()
-                .map(|param| component_meta_registry_indexed_ref_penalty(&param.ty))
-                .sum::<usize>()
-                + func
-                    .return_type
-                    .as_deref()
-                    .map(component_meta_registry_indexed_ref_penalty)
-                    .unwrap_or(0)
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            component_meta_registry_indexed_ref_penalty(check)
-                + component_meta_registry_indexed_ref_penalty(extends)
-                + component_meta_registry_indexed_ref_penalty(true_type)
-                + component_meta_registry_indexed_ref_penalty(false_type)
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            component_meta_registry_indexed_ref_penalty(source)
-                + component_meta_registry_indexed_ref_penalty(value)
-                + name_type
-                    .as_deref()
-                    .map(component_meta_registry_indexed_ref_penalty)
-                    .unwrap_or(0)
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => expressions
-            .iter()
-            .map(component_meta_registry_indexed_ref_penalty)
-            .sum(),
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. }
-        | TypeExpr::Ref { .. }
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::TypeParameter(_)
-        // Synthetic carriers carry no indexed-ref penalty.
-        | TypeExpr::SyntheticSlotBinding(_)
-        // An import-type is a symbolic reference (like a bare `Ref`), a
-        // terminal here — no indexed-ref penalty.
-        | TypeExpr::ImportType { .. }
-        | TypeExpr::Infer { .. } => 0,
-    }
-}
-
-/// Walk `expr` and enqueue every nominal `Ref` reachable through the
-/// supplied [`ProjectionCursor`].
-///
-/// **Cursor contract** (per the G1 + G2 path-precision gates): when the
-/// cursor is at a whole-surface node (`is_whole_surface()`), descent
-/// is unbounded — preserves pre-path-precision behaviour. When the cursor
-/// carries a narrowed filter (Pick → `Include`, Omit → `Exclude`,
-/// or an explicit `ProjectionNode::children` map):
-///
-/// - **Object arm** (G2): `Property` and `Method` (named members)
-///   gate per-member descent on `cursor.admits_key(name)`. Anonymous
-///   structural members — `IndexSignature`, `CallSignature`,
-///   `ConstructSignature` — are skipped entirely under a narrowed
-///   cursor because named-key narrowing (Pick/Omit) produces a
-///   property-only surface that does not carry index/callable
-///   shapes.
-///
-/// - **Conditional arm** (G1): the predicate sides (`check`,
-///   `extends`) are type-level operands, NOT part of the published
-///   value surface. Under a narrowed cursor we walk only the
-///   result-side branches (`true_type`, `false_type`) — both,
-///   because openness is not tracked here (treat as open: distribute
-///   the remaining demand into both branches). Whole-surface walks
-///   all four.
-///
-/// - **Mapped arm** (G1): the `source` (the mapped-source key
-///   domain `T` in `{ [K in keyof T]: V }`) and the `name_type`
-///   (the `as` remapping) are type-level metadata. Under a narrowed
-///   cursor we walk only `value` (the produced value type for the
-///   requested keys). Whole-surface walks `source` + `value` +
-///   `name_type`.
-pub(crate) fn collect_component_meta_registry_refs(
-    expr: &verter_type_expr::TypeExpr,
-    published_names: &rustc_hash::FxHashSet<String>,
-    queued_names: &mut rustc_hash::FxHashSet<String>,
-    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
-    source_hint: Option<&str>,
-    allow_plain_member_refs: bool,
-    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
-) {
-    use verter_type_expr::TypeExpr;
-
-    if let Some((root_name, route)) = component_meta_registry_public_utility_route(expr) {
-        enqueue_component_meta_registry_ref(
-            published_names,
-            queued_names,
-            output,
-            root_name.as_str(),
-            source_hint,
-            None,
-            route,
-        );
-        return;
-    }
-
-    if let Some((root_name, route)) = component_meta_registry_public_indexed_access_route(expr) {
-        enqueue_component_meta_registry_ref(
-            published_names,
-            queued_names,
-            output,
-            root_name.as_str(),
-            source_hint,
-            None,
-            route,
-        );
-        return;
-    }
-
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments: _,
-        } => {
-            enqueue_component_meta_registry_ref(
-                published_names,
-                queued_names,
-                output,
-                name.as_ref(),
-                source_hint,
-                None,
-                RouteDemand::Whole,
-            );
-        }
-        TypeExpr::Array { element, .. }
-        | TypeExpr::Parenthesized(element)
-        | TypeExpr::KeyOf(element)
-        | TypeExpr::Rest(element) => {
-            collect_component_meta_registry_refs(
-                element,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_member_refs,
-                cursor,
-            );
-        }
-        TypeExpr::Tuple { elements, .. } => {
-            for element in elements.iter() {
-                collect_component_meta_registry_refs(
-                    &element.ty,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                    allow_plain_member_refs,
-                    cursor,
-                );
-            }
-        }
-        TypeExpr::Union(types)
-        | TypeExpr::Intersection(types)
-        | TypeExpr::TemplateLiteral {
-            expressions: types, ..
-        } => {
-            if !allow_plain_member_refs {
-                return;
-            }
-            for ty in types.iter() {
-                collect_component_meta_registry_refs(
-                    ty,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                    allow_plain_member_refs,
-                    cursor,
-                );
-            }
-        }
-        // Registry publication stays shallow: object/function member types remain
-        // inline on the owning helper instead of spawning separate registry
-        // entries for every nested support type. Routed helper refs still need
-        // to preserve their member path here; imported deep member-path roots
-        // are filtered later in `meta_resolve` once the consuming field surface
-        // has already been projected concretely.
-        TypeExpr::Object(obj) => {
-            use verter_type_expr::ObjectMember;
-
-            for member in &obj.properties {
-                match member {
-                    ObjectMember::Property(prop) => {
-                        // Path-precise gate. If
-                        // the cursor's key filter rejects this
-                        // property's name, skip the member's nested
-                        // refs entirely — that sibling is OUTSIDE
-                        // the published surface the consumer walks.
-                        // Whole-surface cursors admit every key so
-                        // pre-path-precision top-level callers see no
-                        // behaviour change.
-                        if !cursor.admits_key(prop.name.as_str()) {
-                            continue;
-                        }
-                        collect_component_meta_registry_member_surface_refs(
-                            &prop.ty,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                            allow_plain_member_refs,
-                        );
-                    }
-                    ObjectMember::IndexSignature(sig) => {
-                        // G2 path-precision gate for
-                        // non-Property members. `IndexSignature`
-                        // (`[key: K]: V`) is anonymous; it
-                        // applies structurally to every key
-                        // matching `K`. Under a narrowed cursor
-                        // (Pick/Omit/explicit-children) the
-                        // published surface enumerates named keys
-                        // only — the index signature's `V` is NOT
-                        // in the narrowed value surface. Skip its
-                        // nested refs unless the cursor is
-                        // genuinely whole-surface.
-                        if !cursor.is_whole_surface() {
-                            continue;
-                        }
-                        collect_component_meta_registry_member_surface_refs(
-                            &sig.key_type,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                            allow_plain_member_refs,
-                        );
-                        collect_component_meta_registry_member_surface_refs(
-                            &sig.value_type,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                            allow_plain_member_refs,
-                        );
-                    }
-                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                        // G2 path-precision gate.
-                        // `CallSignature` / `ConstructSignature`
-                        // are anonymous callable shapes; named-
-                        // key narrowing (`Pick<Foo, "k">`)
-                        // produces a property-only surface that
-                        // does NOT carry the callable shape.
-                        // Skip nested refs unless whole-surface.
-                        if !cursor.is_whole_surface() {
-                            continue;
-                        }
-                        collect_component_meta_registry_function_surface_refs(
-                            func,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                        );
-                    }
-                    ObjectMember::Method(method) => {
-                        // G2 path-precision gate.
-                        // Methods are named members; apply the
-                        // same `admits_key` gate as the Property
-                        // arm so a `Pick<Foo, "methodA">`-style
-                        // narrowing prunes `methodB`'s nested
-                        // refs.
-                        if !cursor.admits_key(method.name.as_str()) {
-                            continue;
-                        }
-                        collect_component_meta_registry_function_surface_refs(
-                            &method.function,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                        );
-                    }
-                }
-            }
-        }
-        // A constructor type's signature surface is collected identically to a
-        // function type's (same `FunctionExpr` payload).
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            collect_component_meta_registry_function_surface_refs(
-                func,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-            );
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            collect_component_meta_registry_refs(
-                object,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_member_refs,
-                cursor,
-            );
-            collect_component_meta_registry_refs(
-                index,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_member_refs,
-                cursor,
-            );
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            if !allow_plain_member_refs {
-                return;
-            }
-            // Path-precision gate. The doc-comment on
-            // this fn promises the Conditional arm gates on
-            // `is_whole_surface()`; recursing into all four branches
-            // unconditionally would leak unselected type-level predicate
-            // sides into a narrowed surface.
-            //
-            // - Whole-surface (no narrowing): walk all four (check +
-            //   extends + true_type + false_type). Preserves
-            //   whole-surface top-level callers' refs and audit
-            //   behaviour.
-            // - Narrowed (Include/Exclude/explicit-children at this
-            //   hop): the cursor enumerates a value-surface; the
-            //   conditional's `check`/`extends` are type-level
-            //   predicate operands, NOT part of the published-value
-            //   surface. We only enqueue refs reachable through the
-            //   result-side branches (`true_type` + `false_type`)
-            //   because we can't statically tell which branch a path
-            //   resolves to (treat as open: distribute remaining
-            //   demand into both). Cf. CLAUDE.md "Macro Type
-            //   Traversal Rule": open conditionals distribute the
-            //   remaining path into both branches.
-            if cursor.is_whole_surface() {
-                collect_component_meta_registry_refs(
-                    check,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                    allow_plain_member_refs,
-                    cursor,
-                );
-                collect_component_meta_registry_refs(
-                    extends,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                    allow_plain_member_refs,
-                    cursor,
-                );
-            }
-            collect_component_meta_registry_refs(
-                true_type,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_member_refs,
-                cursor,
-            );
-            collect_component_meta_registry_refs(
-                false_type,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_member_refs,
-                cursor,
-            );
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            if !allow_plain_member_refs {
-                return;
-            }
-            // Path-precision gate. The doc-comment on
-            // this fn promises the Mapped arm gates on
-            // `is_whole_surface()`; recursing into source + value +
-            // name_type unconditionally would leak the mapped-source
-            // key-domain into a narrowed surface even when only specific
-            // keys are requested.
-            //
-            // - Whole-surface: walk source + value (+ name_type).
-            //   Preserves whole-surface refs.
-            // - Narrowed: walk only `value` — the published-value
-            //   surface produced by `{ [K in keyof T]: V }` for the
-            //   requested keys is `V`; the mapped-source `T` itself
-            //   (and the `as` name_type remapping) is type-level
-            //   metadata outside the value surface.
-            if cursor.is_whole_surface() {
-                collect_component_meta_registry_refs(
-                    source,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                    allow_plain_member_refs,
-                    cursor,
-                );
-            }
-            collect_component_meta_registry_refs(
-                value,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_member_refs,
-                cursor,
-            );
-            if cursor.is_whole_surface() {
-                if let Some(name_type) = name_type.as_deref() {
-                    collect_component_meta_registry_refs(
-                        name_type,
-                        published_names,
-                        queued_names,
-                        output,
-                        source_hint,
-                        allow_plain_member_refs,
-                        cursor,
-                    );
-                }
-            }
-        }
-        TypeExpr::TypeParameter(_) => {}
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. }
-        | TypeExpr::TypeOf(_)
-        // Synthetic carrier — never enqueues as a public type
-        // reference; its `binding_name` is intrinsic, not a workspace
-        // alias.
-        | TypeExpr::SyntheticSlotBinding(_)
-        // An import-type carries no enqueue-able workspace registry NAME
-        // (only a cross-file module path resolved by the shared dispatch);
-        // like the `TypeOf` / `Unknown` terminals, it enqueues nothing here.
-        | TypeExpr::ImportType { .. }
-        | TypeExpr::Infer { .. } => {}
-    }
-}
-
-pub(crate) fn collect_component_meta_registry_function_surface_refs(
-    func: &verter_type_expr::FunctionExpr,
-    published_names: &rustc_hash::FxHashSet<String>,
-    queued_names: &mut rustc_hash::FxHashSet<String>,
-    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
-    source_hint: Option<&str>,
-) {
-    for param in &func.parameters {
-        collect_component_meta_registry_member_surface_refs(
-            &param.ty,
-            published_names,
-            queued_names,
-            output,
-            source_hint,
-            false,
-        );
-    }
-    if let Some(return_type) = func.return_type.as_deref() {
-        collect_component_meta_registry_member_surface_refs(
-            return_type,
-            published_names,
-            queued_names,
-            output,
-            source_hint,
-            false,
-        );
-    }
-}
-
 pub(crate) fn collect_component_meta_registry_public_field_refs(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
@@ -2016,31 +588,58 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
 ) {
-    // Typed-IR-Only Resolver Rule: when the post-expansion
-    // `field.r#type` carries no actionable route (no `IndexedAccess`,
-    // `Pick`, etc. shape the registry can route on), fall back to the
-    // analyzer-populated shallow form — the bare annotation the user
-    // wrote, e.g. `TypeExpr::Ref { name: "Props" }` or
-    // `TypeExpr::IndexedAccess { object: Ref { name: "Props" }, … }`.
-    // No reparse of `raw_type`.
-    let shallow_recovery =
-        (!component_meta_registry_field_expr_has_actionable_route(&field.r#type))
-            .then_some(field.shallow_type_expr.as_ref())
-            .flatten()
-            .filter(|shallow| {
-                let deep_indexed_path = component_meta_registry_public_indexed_access_route(
-                    shallow,
+    // One dispatch: the field's published SOURCE and its authored shallow
+    // locator raise through the shared bridge; every route decision below
+    // runs NODE-DOMAIN off the raised carriers.
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let transit_ctx =
+        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+            crate::semantic_query::ProjectionMode::Navigate,
+        );
+    let type_node = field
+        .r#type
+        .present()
+        .and_then(|source| {
+            dispatch.raise_semantic_type_source_to_hot(
+                source,
+                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                    scope_canonical_id: owner_canonical,
+                    context: transit_ctx,
+                    interior_failures: None,
+                },
+            )
+        })
+        .map(|hot| hot.node());
+
+    // When the post-expansion source carries no actionable route (no
+    // reference / utility / indexed-access head the registry can route on),
+    // fall back to the analyzer-populated authored SHALLOW locator — the
+    // bare annotation the user wrote. A deep indexed member path (len > 1)
+    // recovers only when the resolved source is an explicit object surface.
+    let shallow_node = (!type_node
+        .is_some_and(|node| component_meta_registry_node_has_actionable_route(ctx, node)))
+    .then(|| {
+        field.shallow_source.as_ref().and_then(|locator| {
+            dispatch
+                .raise_authored_locator_to_hot(locator, transit_ctx)
+                .map(|hot| hot.node())
+        })
+    })
+    .flatten()
+    .filter(|shallow| {
+        let deep_indexed_path = component_meta_registry_node_indexed_access_route(ctx, *shallow)
+            .is_some_and(|(_, route)| {
+                matches!(
+                    route,
+                    RouteDemand::MemberPath(ref path) if path.len() > 1,
                 )
-                .is_some_and(|(_, route)| {
-                    matches!(
-                        route,
-                        RouteDemand::MemberPath(ref path) if path.len() > 1,
-                    )
-                });
-                !deep_indexed_path
-                    || component_meta_registry_has_explicit_object_surface(&field.r#type)
             });
-    let expr = shallow_recovery.unwrap_or(&field.r#type);
+        !deep_indexed_path
+            || type_node.is_some_and(|node| node_root_has_explicit_object_surface(ctx, node))
+    });
+    let Some(node) = shallow_node.or(type_node) else {
+        return;
+    };
 
     // Issue #7 / owner-local ComponentConfig alias rewrite.
     // When the indexed-access or utility route's root resolves to an
@@ -2051,11 +650,14 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     //
     // External imports preserve `MemberPath`/`Pick` (the predicate
     // declines when the route root has an import binding).
+    let route_root_name = component_meta_registry_node_utility_route(ctx, node)
+        .or_else(|| component_meta_registry_node_indexed_access_route(ctx, node))
+        .map(|(root, _)| root);
     if let Some(owner_local_root) = component_meta_registry_public_route_owner_local_root(
         ctx,
         owner_canonical,
         snapshot,
-        expr,
+        route_root_name.as_deref(),
         source_hint,
     ) {
         enqueue_component_meta_registry_ref(
@@ -2070,59 +672,65 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
         return;
     }
 
-    let skip_direct_plain_ref = component_meta_registry_ref_name(expr).is_some_and(|name| {
-        ctx.prepared_type_decl(owner_canonical, name)
-            .is_some_and(|prepared| {
-                matches!(prepared.body, verter_type_expr::TypeExpr::TypeParameter(_),)
-            })
-            || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
-                .and_then(|(canonical_id, exported_name)| {
-                    (!canonical_id.is_empty()
-                        && !ctx.workspace_is_package_backed(canonical_id.as_str()))
-                    .then(|| ctx.prepared_type_decl(canonical_id.as_str(), exported_name.as_str()))
-                })
-                .flatten()
-                .is_some_and(|prepared| {
-                    component_meta_registry_has_non_object_top_level_surface(&prepared.body)
-                        && !component_meta_registry_has_explicit_object_surface(&prepared.body)
-                })
-            || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
-                .is_some_and(|(canonical_id, _)| {
-                    ctx.workspace_is_package_backed(canonical_id.as_str())
-                })
-            || ctx.workspace_is_package_backed(
-                ctx.resolve_type_declaration_for_dep(owner_canonical, name)
-                    .canonical_source
-                    .as_str(),
-            )
-    });
-    let skip_imported_generic_non_object_ref = component_meta_registry_direct_public_ref(expr)
-        .is_some_and(|(name, type_arguments)| {
+    // Prepared-body classifications run NODE-DOMAIN off the declaration's
+    // lowered body slot (never an embedded body).
+    let prepared_body_root = |canonical_id: &str, symbol_name: &str| {
+        ctx.prepared_type_decl(canonical_id, symbol_name)
+            .and_then(|prepared| prepared_body_root_node(ctx, prepared.as_ref()))
+    };
+    let skip_direct_plain_ref =
+        component_meta_registry_node_ref_name(ctx, node).is_some_and(|name| {
+            let name = name.as_str();
+            prepared_body_root(owner_canonical, name)
+                .is_some_and(|root| node_root_is_type_parameter(ctx, root))
+                || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
+                    .and_then(|(canonical_id, exported_name)| {
+                        (!canonical_id.is_empty()
+                            && !ctx.workspace_is_package_backed(canonical_id.as_str()))
+                        .then(|| prepared_body_root(canonical_id.as_str(), exported_name.as_str()))
+                    })
+                    .flatten()
+                    .is_some_and(|root| {
+                        node_root_has_non_object_top_level_surface(ctx, root)
+                            && !node_root_has_explicit_object_surface(ctx, root)
+                    })
+                || owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
+                    .is_some_and(|(canonical_id, _)| {
+                        ctx.workspace_is_package_backed(canonical_id.as_str())
+                    })
+                || ctx.workspace_is_package_backed(
+                    ctx.resolve_type_declaration_for_dep(owner_canonical, name)
+                        .canonical_source
+                        .as_str(),
+                )
+        });
+    let direct_ref = component_meta_registry_node_ref_head(ctx, node);
+    let skip_imported_generic_non_object_ref =
+        direct_ref.as_ref().is_some_and(|(name, type_arguments)| {
             if type_arguments.is_empty() {
                 return false;
             }
-            let Some((canonical_id, exported_name)) =
-                owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name)
-            else {
+            let Some((canonical_id, exported_name)) = owner_component_meta_registry_import_root(
+                ctx,
+                owner_canonical,
+                snapshot,
+                name.as_str(),
+            ) else {
                 return false;
             };
             if canonical_id.is_empty() || ctx.workspace_is_package_backed(canonical_id.as_str()) {
                 return false;
             }
-            ctx.prepared_type_decl(canonical_id.as_str(), exported_name.as_str())
-                .is_some_and(|prepared| {
-                    component_meta_registry_has_non_object_top_level_surface(&prepared.body)
-                        && !component_meta_registry_has_explicit_object_surface(&prepared.body)
-                })
+            prepared_body_root(canonical_id.as_str(), exported_name.as_str()).is_some_and(|root| {
+                node_root_has_non_object_top_level_surface(ctx, root)
+                    && !node_root_has_explicit_object_surface(ctx, root)
+            })
         });
-    let direct_ref = component_meta_registry_direct_public_ref(expr);
     if (skip_direct_plain_ref || skip_imported_generic_non_object_ref)
-        && direct_ref.is_some_and(|(name, _)| {
-            let local_type_parameter =
-                ctx.prepared_type_decl(owner_canonical, name)
-                    .is_some_and(|prepared| {
-                        matches!(prepared.body, verter_type_expr::TypeExpr::TypeParameter(_),)
-                    });
+        && direct_ref.as_ref().is_some_and(|(name, _)| {
+            let name = name.as_str();
+            let local_type_parameter = prepared_body_root(owner_canonical, name)
+                .is_some_and(|root| node_root_is_type_parameter(ctx, root));
             let import_root =
                 owner_component_meta_registry_import_root(ctx, owner_canonical, snapshot, name);
             let package_backed = import_root.as_ref().is_some_and(|(canonical_id, _)| {
@@ -2135,12 +743,12 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             !local_type_parameter && !package_backed
         })
     {
-        if let Some((name, _)) = direct_ref {
+        if let Some((name, _)) = direct_ref.as_ref() {
             enqueue_component_meta_registry_ref(
                 published_names,
                 queued_names,
                 output,
-                name,
+                name.as_str(),
                 source_hint,
                 None,
                 RouteDemand::Whole,
@@ -2148,8 +756,9 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
         }
     }
     if !skip_direct_plain_ref && !skip_imported_generic_non_object_ref {
-        collect_component_meta_registry_public_surface_refs(
-            expr,
+        collect_component_meta_registry_public_surface_refs_node(
+            ctx,
+            node,
             published_names,
             queued_names,
             output,
@@ -2157,51 +766,98 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
         );
     }
 
-    collect_component_meta_registry_public_indexed_access_roots(
-        ctx,
-        owner_canonical,
-        expr,
-        published_names,
-        queued_names,
-        output,
-        source_hint,
-    );
-}
-
-pub(crate) fn component_meta_registry_ref_name(expr: &verter_type_expr::TypeExpr) -> Option<&str> {
-    use verter_type_expr::TypeExpr;
-
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } if type_arguments.is_empty() => Some(name.as_ref()),
-        TypeExpr::Parenthesized(inner) => component_meta_registry_ref_name(inner),
-        _ => None,
+    // Indexed-access roots whose owner-local prepared body is not a type
+    // parameter enqueue their member-path route.
+    if let Some((root_name, route)) = component_meta_registry_node_indexed_access_route(ctx, node) {
+        if prepared_body_root(owner_canonical, root_name.as_str())
+            .is_some_and(|root| !node_root_is_type_parameter(ctx, root))
+        {
+            // A single-member route records the field's authored annotation
+            // slot as the member USE-SITE: when the member's declaring
+            // surface sits behind a generic substitution, the route-scoped
+            // publication retains this slot as the member payload — replaying
+            // it re-derives navigation + substitution.
+            let use_site = match &route {
+                RouteDemand::MemberPath(path) if path.len() == 1 => {
+                    match field.shallow_source.as_ref() {
+                        Some(verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)) => {
+                            Some((path[0].clone(), slot.clone()))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            enqueue_component_meta_registry_ref(
+                published_names,
+                queued_names,
+                output,
+                root_name.as_str(),
+                source_hint,
+                None,
+                route,
+            );
+            if let Some((member, slot)) = use_site {
+                attach_component_meta_registry_member_use_site(
+                    output,
+                    root_name.as_str(),
+                    member.as_str(),
+                    &slot,
+                );
+            }
+        }
+    } else if let Some((head_name, resolved_identity, route)) =
+        component_meta_registry_node_instantiated_indexed_access_route(ctx, node)
+    {
+        // Instantiated-root indexed access (`LocalConfig<string>['slot']`):
+        // enqueue under the AUTHORED owner-scope name — the resolved base
+        // identity reverse-maps through the owner's import bindings to the
+        // renamed local alias; an unresolved bare head already carries the
+        // authored name.
+        let local_name = resolved_identity
+            .as_ref()
+            .and_then(|(canonical, decl_name)| {
+                snapshot.imports.iter().find_map(|import| {
+                    let resolved = import.resolved_canonical_id.as_deref()?;
+                    if resolved != canonical.as_ref() {
+                        return None;
+                    }
+                    import.bindings.iter().find_map(|binding| {
+                        let imported = binding.imported_name.as_deref().unwrap_or(&binding.name);
+                        (imported == decl_name.as_ref()).then(|| binding.name.clone())
+                    })
+                })
+            })
+            .unwrap_or(head_name);
+        let use_site = match &route {
+            RouteDemand::MemberPath(path) if path.len() == 1 => {
+                match field.shallow_source.as_ref() {
+                    Some(verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)) => {
+                        Some((path[0].clone(), slot.clone()))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        enqueue_component_meta_registry_ref(
+            published_names,
+            queued_names,
+            output,
+            local_name.as_str(),
+            source_hint,
+            None,
+            route,
+        );
+        if let Some((member, slot)) = use_site {
+            attach_component_meta_registry_member_use_site(
+                output,
+                local_name.as_str(),
+                member.as_str(),
+                &slot,
+            );
+        }
     }
-}
-
-pub(crate) fn component_meta_registry_direct_public_ref(
-    expr: &verter_type_expr::TypeExpr,
-) -> Option<(&str, &[verter_type_expr::TypeExpr])> {
-    use verter_type_expr::TypeExpr;
-
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => Some((name.as_ref(), type_arguments.as_ref())),
-        TypeExpr::Parenthesized(inner) => component_meta_registry_direct_public_ref(inner),
-        _ => None,
-    }
-}
-
-pub(crate) fn component_meta_registry_field_expr_has_actionable_route(
-    expr: &verter_type_expr::TypeExpr,
-) -> bool {
-    component_meta_registry_direct_public_ref(expr).is_some()
-        || component_meta_registry_public_utility_route(expr).is_some()
-        || component_meta_registry_public_indexed_access_route(expr).is_some()
 }
 
 pub(crate) fn component_meta_registry_string_literal_keys(
@@ -2259,9 +915,9 @@ pub(crate) fn component_meta_registry_public_utility_route(
                 return None;
             }
             let route = if name.as_ref() == "Pick" {
-                RouteDemand::Pick(members)
+                RouteDemand::pick(members)
             } else {
-                RouteDemand::Omit(members)
+                RouteDemand::omit(members)
             };
             Some((root_name, route))
         }
@@ -2332,114 +988,363 @@ pub(crate) fn component_meta_registry_public_indexed_access_route(
     if path.is_empty() {
         return None;
     }
-    Some((root, RouteDemand::MemberPath(path)))
+    Some((root, RouteDemand::member_path(path)))
 }
 
-pub(crate) fn collect_component_meta_registry_public_surface_refs(
-    expr: &verter_type_expr::TypeExpr,
-    published_names: &rustc_hash::FxHashSet<String>,
-    queued_names: &mut rustc_hash::FxHashSet<String>,
-    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
-    source_hint: Option<&str>,
-) {
-    use verter_type_expr::TypeExpr;
+// + §6.10 sub-task 4 — both legacy
+// member-path helpers retired. The shared object-member navigation
+// logic is inlined into the body of
+// `component_meta_registry_raw_member_path_surface` (its only
+// surviving caller). The retired symbols are listed in the
+// `RETIRED_SYMBOLS` array of the static-grep gate test.
 
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments: _,
-        } => {
-            enqueue_component_meta_registry_ref(
-                published_names,
-                queued_names,
-                output,
-                name.as_ref(),
-                source_hint,
-                None,
-                RouteDemand::Whole,
-            );
-        }
-        TypeExpr::Parenthesized(element) => {
-            collect_component_meta_registry_public_surface_refs(
-                element,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-            );
-        }
-        TypeExpr::IndexedAccess { .. }
-        | TypeExpr::Array { .. }
-        | TypeExpr::KeyOf(_)
-        | TypeExpr::Rest(_)
-        | TypeExpr::Tuple { .. }
-        | TypeExpr::Union(_)
-        | TypeExpr::Intersection(_)
-        | TypeExpr::Conditional { .. }
-        | TypeExpr::Mapped { .. }
-        | TypeExpr::TemplateLiteral { .. } => {}
-        TypeExpr::Object(_)
-        | TypeExpr::Function(_)
-        // A constructor type, like a function/object type, enqueues no top-level
-        // public-surface ref here (its inner signature is walked elsewhere).
-        | TypeExpr::ConstructorType(_)
-        | TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. }
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::TypeParameter(_)
-        // Synthetic carrier — never enqueues as a public surface ref.
-        | TypeExpr::SyntheticSlotBinding(_)
-        // An import-type carries no enqueue-able workspace NAME (only a
-        // cross-file module path) — like the `TypeOf` / `Unknown` terminals,
-        // it enqueues no top-level public-surface ref here.
-        | TypeExpr::ImportType { .. }
-        | TypeExpr::Infer { .. } => {}
-    }
-}
+// ===========================================================================
+// Node-domain discovery: the registry BFS over raised semantic-graph nodes
+// ===========================================================================
+//
+// The registry publishes content-free SOURCES (authored body locators /
+// closed leaf facts) and discovers transitive references by walking the
+// semantic-graph NODES those sources raise to through the one shared
+// dispatch. These are the node-domain siblings of the `TypeExpr` route
+// extractors above: route DISCOVERY (which names enqueue, with which
+// `RouteDemand`) stays path-precise, while publication stays a shallow
+// content-free source the consumer re-raises on demand.
+//
+// Node walks carry a `visited` set: graph nodes are interned and may be
+// shared or cyclic (recursive types), unlike the tree-shaped `TypeExpr`
+// inputs of the sibling walkers.
 
-pub(crate) fn collect_component_meta_registry_public_indexed_access_roots(
+use crate::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
+
+fn registry_node_data(
     ctx: &dyn ResolverContext,
-    owner_canonical: &str,
-    expr: &verter_type_expr::TypeExpr,
+    node: SemanticNodeId,
+) -> Option<Arc<SemanticNodeData>> {
+    crate::project_semantic_dispatch::node_data_for(ctx, node)
+}
+
+/// Unwrap ONE `Alias` hop (the node-domain analog of stripping a
+/// `Parenthesized` wrapper), mirroring the root-kind classifier convention
+/// in `meta_resolve::exactness::node_root_should_stay_symbolic`.
+fn registry_unalias(ctx: &dyn ResolverContext, node: SemanticNodeId) -> SemanticNodeId {
+    match registry_node_data(ctx, node).as_deref() {
+        Some(SemanticNodeData::Alias(target)) => *target,
+        _ => node,
+    }
+}
+
+/// The node's reference HEAD: `(name, type-argument nodes)` for the three
+/// reference carriers (`BareRef` / `InstantiationRef` / `DeclRef`).
+pub(crate) fn component_meta_registry_node_ref_head(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> Option<(String, Vec<SemanticNodeId>)> {
+    let data = registry_node_data(ctx, registry_unalias(ctx, node))?;
+    if let Some((name, _scope)) = data.bare_ref_head() {
+        return Some((name.to_string(), data.carrier_type_args().to_vec()));
+    }
+    match data.as_ref() {
+        SemanticNodeData::DeclRef { identity } => {
+            Some((identity.decl_name.to_string(), Vec::new()))
+        }
+        SemanticNodeData::InstantiationRef { base, args } => {
+            Some((base.decl_name.to_string(), args.to_vec()))
+        }
+        _ => None,
+    }
+}
+
+/// The node-domain sibling of [`component_meta_registry_ref_name`]: the
+/// bare (argument-free) reference head name.
+pub(crate) fn component_meta_registry_node_ref_name(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> Option<String> {
+    component_meta_registry_node_ref_head(ctx, node)
+        .filter(|(_, args)| args.is_empty())
+        .map(|(name, _)| name)
+}
+
+/// The node-domain sibling of [`component_meta_registry_string_literal_keys`].
+pub(crate) fn component_meta_registry_node_string_literal_keys(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> Option<Vec<String>> {
+    fn keys_of(
+        ctx: &dyn ResolverContext,
+        node: SemanticNodeId,
+        out: &mut Vec<String>,
+    ) -> Option<()> {
+        match registry_node_data(ctx, registry_unalias(ctx, node)).as_deref() {
+            Some(SemanticNodeData::Literal(verter_type_expr::LiteralValue::String(value))) => {
+                out.push(value.clone());
+                Some(())
+            }
+            Some(SemanticNodeData::Union(arms)) => {
+                for arm in arms.iter() {
+                    keys_of(ctx, *arm, out)?;
+                }
+                Some(())
+            }
+            _ => None,
+        }
+    }
+    let mut keys = Vec::new();
+    keys_of(ctx, node, &mut keys)?;
+    keys.sort();
+    keys.dedup();
+    Some(keys)
+}
+
+/// The node-domain sibling of [`component_meta_registry_public_utility_route`]:
+/// a `Pick<Inner, K>` / `Omit<Inner, K>` reference head whose key argument is
+/// a string-literal set routes as `Pick`/`Omit` on the inner reference name.
+pub(crate) fn component_meta_registry_node_utility_route(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> Option<(String, RouteDemand)> {
+    let (name, args) = component_meta_registry_node_ref_head(ctx, node)?;
+    if args.len() != 2 || !matches!(name.as_str(), "Pick" | "Omit") {
+        return None;
+    }
+    // The inner reference may carry type arguments (`Pick<Foo<T>, K>`) —
+    // the route filter operates on member NAMES, matching the `TypeExpr`
+    // sibling's contract.
+    let (root_name, _) = component_meta_registry_node_ref_head(ctx, args[0])?;
+    let members = component_meta_registry_node_string_literal_keys(ctx, args[1])?;
+    if members.is_empty() {
+        return None;
+    }
+    let route = if name.as_str() == "Pick" {
+        RouteDemand::pick(members)
+    } else {
+        RouteDemand::omit(members)
+    };
+    Some((root_name, route))
+}
+
+/// The node-domain sibling of
+/// [`component_meta_registry_public_indexed_access_route`]: an
+/// `IndexedAccess` spine of string keys rooted at a bare reference routes as
+/// a `MemberPath`.
+pub(crate) fn component_meta_registry_node_indexed_access_route(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> Option<(String, RouteDemand)> {
+    let (path_rev, cursor) = indexed_access_string_key_spine(ctx, node)?;
+    let root = component_meta_registry_node_ref_name(ctx, cursor)?;
+    Some((root, member_path_from_rev(path_rev)))
+}
+
+/// Walk an `IndexedAccess` spine of STRING keys from `node` to its root:
+/// `Some((keys outer-to-inner, root cursor))` for a non-empty spine whose
+/// every index is a string literal; `None` otherwise.
+fn indexed_access_string_key_spine(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> Option<(Vec<String>, SemanticNodeId)> {
+    let mut path_rev: Vec<String> = Vec::new();
+    let mut cursor = registry_unalias(ctx, node);
+    while let Some(SemanticNodeData::IndexedAccess { object, index }) =
+        registry_node_data(ctx, cursor).as_deref()
+    {
+        let IndexKey::String(member) = index else {
+            return None;
+        };
+        path_rev.push(member.to_string());
+        cursor = registry_unalias(ctx, *object);
+    }
+    (!path_rev.is_empty()).then_some((path_rev, cursor))
+}
+
+/// Reverse the outer-to-inner spine keys into the inner-to-outer
+/// `MemberPath` route.
+fn member_path_from_rev(mut path_rev: Vec<String>) -> RouteDemand {
+    path_rev.reverse();
+    RouteDemand::member_path(path_rev)
+}
+
+/// Instantiated-root sibling of
+/// [`component_meta_registry_node_indexed_access_route`]: an indexed-access
+/// spine whose root is a GENERIC APPLICATION (`LocalConfig<string>['slot']`)
+/// rather than a bare reference. Returns the root head name (the authored
+/// name for an unresolved bare head, the resolved declaration name for an
+/// `InstantiationRef`), the resolved base identity when available
+/// (`(canonical, decl_name)` — the discovery site reverse-maps it through the
+/// owner's import bindings to recover the authored local alias), and the
+/// member-path route.
+pub(crate) fn component_meta_registry_node_instantiated_indexed_access_route(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> Option<InstantiatedIndexedAccessRoute> {
+    let (path_rev, cursor) = indexed_access_string_key_spine(ctx, node)?;
+    let (name, args) = component_meta_registry_node_ref_head(ctx, cursor)?;
+    if args.is_empty() {
+        // A bare root belongs to the plain extractor above.
+        return None;
+    }
+    let resolved_identity = match registry_node_data(ctx, cursor).as_deref() {
+        Some(SemanticNodeData::InstantiationRef { base, .. }) => Some((
+            std::sync::Arc::clone(&base.canonical_id),
+            std::sync::Arc::clone(&base.decl_name),
+        )),
+        _ => None,
+    };
+    Some((name, resolved_identity, member_path_from_rev(path_rev)))
+}
+
+/// The instantiated-root route extraction result: the root head name, the
+/// resolved base identity when available (`(canonical, decl_name)`), and the
+/// member-path route.
+pub(crate) type InstantiatedIndexedAccessRoute = (
+    String,
+    Option<(std::sync::Arc<str>, std::sync::Arc<str>)>,
+    RouteDemand,
+);
+
+/// The node-domain sibling of
+/// [`component_meta_registry_field_expr_has_actionable_route`].
+pub(crate) fn component_meta_registry_node_has_actionable_route(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    component_meta_registry_node_ref_head(ctx, node).is_some()
+        || component_meta_registry_node_utility_route(ctx, node).is_some()
+        || component_meta_registry_node_indexed_access_route(ctx, node).is_some()
+}
+
+/// The node-domain sibling of
+/// [`collect_component_meta_registry_public_surface_refs`]: a top-level
+/// reference head enqueues a `Whole` route; every other root enqueues
+/// nothing.
+pub(crate) fn collect_component_meta_registry_public_surface_refs_node(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
 ) {
-    let Some((root_name, route)) = component_meta_registry_public_indexed_access_route(expr) else {
-        return;
-    };
-    let Some(prepared) = ctx.prepared_type_decl(owner_canonical, root_name.as_str()) else {
-        return;
-    };
-    if matches!(prepared.body, verter_type_expr::TypeExpr::TypeParameter(_),) {
-        return;
+    if let Some((name, _)) = component_meta_registry_node_ref_head(ctx, node) {
+        enqueue_component_meta_registry_ref(
+            published_names,
+            queued_names,
+            output,
+            name.as_str(),
+            source_hint,
+            None,
+            RouteDemand::Whole,
+        );
     }
-    enqueue_component_meta_registry_ref(
+}
+
+/// Eligibility policy for enqueuing PLAIN named refs (bare `Ref { name }`
+/// heads with no utility / indexed-access route) discovered on member paths
+/// of a registry seed's raised surface.
+///
+/// A plain named ref reached on an ACTIVELY DEMANDED member path of an
+/// owner-local seed is a registry dependency, regardless of transparent
+/// wrappers (`Section<T>` and `Section<T>[]` have IDENTICAL discovery
+/// eligibility — an array is not a publication boundary). Transparent
+/// composites (arrays / tuples / unions / intersections / aliases / mapped
+/// and conditional operands) thread the policy UNCHANGED; only genuine
+/// publication boundaries (function parameter / return positions) force
+/// [`Self::PublicationBoundary`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegistryMemberRefPolicy {
+    /// The walk is inside the actively demanded member surface of an
+    /// owner-local seed (or a route-root operand position): a plain named
+    /// ref head IS a registry dependency — enqueue the carrier and stop.
+    DemandedOwnerLocalSurface,
+    /// Publication boundary: a plain named ref head stays inline in the
+    /// published surface (the consumer re-resolves it on demand); only
+    /// utility / indexed-access routes enqueue.
+    PublicationBoundary,
+}
+
+impl RegistryMemberRefPolicy {
+    /// Whether a plain named ref head on the current path enqueues as a
+    /// registry dependency.
+    pub(crate) fn allows_plain_member_refs(self) -> bool {
+        matches!(self, Self::DemandedOwnerLocalSurface)
+    }
+}
+
+/// Whether an intersection's arms form the lone-`extends` heritage shape:
+/// `DeclRef` heritage arms (bare, no type arguments through alias peeling)
+/// plus exactly ONE own-member `Object` arm. This is the shape the
+/// heritage-merged surface observation composes into ONE published surface,
+/// absorbing the heritage bases.
+fn intersection_is_lone_extends_heritage(
+    ctx: &dyn ResolverContext,
+    arms: &[SemanticNodeId],
+) -> bool {
+    let mut decl_ref_arms = 0usize;
+    let mut object_arms = 0usize;
+    for arm in arms {
+        let mut node = *arm;
+        loop {
+            match registry_node_data(ctx, node).as_deref() {
+                Some(SemanticNodeData::Alias(inner)) => node = *inner,
+                Some(SemanticNodeData::DeclRef { .. }) => {
+                    decl_ref_arms += 1;
+                    break;
+                }
+                Some(SemanticNodeData::Object(_)) => {
+                    object_arms += 1;
+                    break;
+                }
+                _ => return false,
+            }
+        }
+    }
+    decl_ref_arms >= 1 && object_arms == 1
+}
+
+/// The node-domain sibling of [`collect_component_meta_registry_refs`]:
+/// walk a raised registry-entry body node and enqueue its transitive
+/// references, path-precise under `cursor`.
+pub(crate) fn collect_component_meta_registry_refs_node(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+    published_names: &rustc_hash::FxHashSet<String>,
+    queued_names: &mut rustc_hash::FxHashSet<String>,
+    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    source_hint: Option<&str>,
+    member_ref_policy: RegistryMemberRefPolicy,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
+) {
+    let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+    collect_registry_refs_node_inner(
+        ctx,
+        node,
         published_names,
         queued_names,
         output,
-        root_name.as_str(),
         source_hint,
-        None,
-        route,
+        member_ref_policy,
+        cursor,
+        &mut visited,
     );
 }
 
-pub(crate) fn collect_component_meta_registry_member_surface_refs(
-    expr: &verter_type_expr::TypeExpr,
+#[allow(clippy::too_many_arguments)]
+fn collect_registry_refs_node_inner(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
-    allow_plain_refs: bool,
+    member_ref_policy: RegistryMemberRefPolicy,
+    cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
+    visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
 ) {
-    use verter_type_expr::{ObjectMember, TypeExpr};
-
-    if let Some((root_name, route)) = component_meta_registry_public_utility_route(expr)
-        .or_else(|| component_meta_registry_public_indexed_access_route(expr))
+    if !visited.insert(node) {
+        return;
+    }
+    if let Some((root_name, route)) = component_meta_registry_node_utility_route(ctx, node)
+        .or_else(|| component_meta_registry_node_indexed_access_route(ctx, node))
     {
         enqueue_component_meta_registry_ref(
             published_names,
@@ -2452,239 +1357,726 @@ pub(crate) fn collect_component_meta_registry_member_surface_refs(
         );
         return;
     }
+    if let Some((name, _)) = component_meta_registry_node_ref_head(ctx, node) {
+        enqueue_component_meta_registry_ref(
+            published_names,
+            queued_names,
+            output,
+            name.as_str(),
+            source_hint,
+            None,
+            RouteDemand::Whole,
+        );
+        return;
+    }
+    let Some(data) = registry_node_data(ctx, node) else {
+        return;
+    };
+    match data.as_ref() {
+        SemanticNodeData::Alias(target) => {
+            collect_registry_refs_node_inner(
+                ctx,
+                *target,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                member_ref_policy,
+                cursor,
+                visited,
+            );
+        }
+        SemanticNodeData::Array { element, .. } | SemanticNodeData::KeyOf { base: element } => {
+            collect_registry_refs_node_inner(
+                ctx,
+                *element,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                member_ref_policy,
+                cursor,
+                visited,
+            );
+        }
+        SemanticNodeData::Tuple { elements, .. } => {
+            for element in elements.iter() {
+                collect_registry_refs_node_inner(
+                    ctx,
+                    element.value,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    member_ref_policy,
+                    cursor,
+                    visited,
+                );
+            }
+        }
+        SemanticNodeData::Union(arms) => {
+            if !member_ref_policy.allows_plain_member_refs() {
+                return;
+            }
+            for arm in arms.iter() {
+                collect_registry_refs_node_inner(
+                    ctx,
+                    *arm,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    member_ref_policy,
+                    cursor,
+                    visited,
+                );
+            }
+        }
+        SemanticNodeData::Intersection(arms) => {
+            if !member_ref_policy.allows_plain_member_refs() {
+                return;
+            }
+            // A lone-`extends` heritage intersection (`DeclRef` heritage arms
+            // plus exactly ONE own-member `Object` arm) is ABSORBED into the
+            // derived entry's published MERGED surface (heritage composed at
+            // surface observation) — the heritage bases are NOT whole registry
+            // dependencies of their own. Their members' routes (indexed
+            // access / utilities) are discovered from the merged surface at
+            // publication, so only route-scoped demands publish the base.
+            let heritage_shape = intersection_is_lone_extends_heritage(ctx, arms);
+            for arm in arms.iter() {
+                if heritage_shape
+                    && component_meta_registry_node_ref_head(ctx, *arm)
+                        .is_some_and(|(_, args)| args.is_empty())
+                {
+                    continue;
+                }
+                collect_registry_refs_node_inner(
+                    ctx,
+                    *arm,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    member_ref_policy,
+                    cursor,
+                    visited,
+                );
+            }
+        }
+        SemanticNodeData::TemplateLiteral { expressions, .. } => {
+            if !member_ref_policy.allows_plain_member_refs() {
+                return;
+            }
+            for expr in expressions.iter() {
+                collect_registry_refs_node_inner(
+                    ctx,
+                    *expr,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    member_ref_policy,
+                    cursor,
+                    visited,
+                );
+            }
+        }
+        // Registry publication stays shallow: object member VALUES route
+        // through the member-surface walker under the same G2 path-precision
+        // cursor gates as the `TypeExpr` sibling.
+        SemanticNodeData::Object(surface) => {
+            for member in surface.members.iter() {
+                if !cursor.admits_key(member.name.as_ref()) {
+                    continue;
+                }
+                collect_registry_member_surface_refs_node(
+                    ctx,
+                    member.value,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    member_ref_policy,
+                    visited,
+                );
+            }
+            if cursor.is_whole_surface() {
+                for signature in surface
+                    .call_signatures
+                    .iter()
+                    .chain(surface.construct_signatures.iter())
+                {
+                    collect_registry_member_surface_refs_node(
+                        ctx,
+                        *signature,
+                        published_names,
+                        queued_names,
+                        output,
+                        source_hint,
+                        member_ref_policy,
+                        visited,
+                    );
+                }
+                for signature in surface.index_signatures.iter() {
+                    collect_registry_member_surface_refs_node(
+                        ctx,
+                        signature.key_type,
+                        published_names,
+                        queued_names,
+                        output,
+                        source_hint,
+                        member_ref_policy,
+                        visited,
+                    );
+                    collect_registry_member_surface_refs_node(
+                        ctx,
+                        signature.value_type,
+                        published_names,
+                        queued_names,
+                        output,
+                        source_hint,
+                        member_ref_policy,
+                        visited,
+                    );
+                }
+            }
+        }
+        SemanticNodeData::Function {
+            params,
+            return_type,
+            ..
+        } => {
+            for param in params.iter() {
+                collect_registry_member_surface_refs_node(
+                    ctx,
+                    param.ty,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    RegistryMemberRefPolicy::PublicationBoundary,
+                    visited,
+                );
+            }
+            collect_registry_member_surface_refs_node(
+                ctx,
+                *return_type,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                RegistryMemberRefPolicy::PublicationBoundary,
+                visited,
+            );
+        }
+        SemanticNodeData::ConstructorType { signature } => {
+            collect_registry_refs_node_inner(
+                ctx,
+                *signature,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                member_ref_policy,
+                cursor,
+                visited,
+            );
+        }
+        SemanticNodeData::IndexedAccess { object, index } => {
+            collect_registry_refs_node_inner(
+                ctx,
+                *object,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                member_ref_policy,
+                cursor,
+                visited,
+            );
+            if let IndexKey::TypeNode(index_node) = index {
+                collect_registry_refs_node_inner(
+                    ctx,
+                    *index_node,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    member_ref_policy,
+                    cursor,
+                    visited,
+                );
+            }
+        }
+        _ => {}
+    }
+}
 
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments: _,
-        } if allow_plain_refs => {
+/// The node-domain sibling of
+/// [`collect_component_meta_registry_member_surface_refs`].
+#[allow(clippy::too_many_arguments)]
+fn collect_registry_member_surface_refs_node(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+    published_names: &rustc_hash::FxHashSet<String>,
+    queued_names: &mut rustc_hash::FxHashSet<String>,
+    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    source_hint: Option<&str>,
+    member_ref_policy: RegistryMemberRefPolicy,
+    visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
+) {
+    if !visited.insert(node) {
+        return;
+    }
+    if let Some((root_name, route)) = component_meta_registry_node_utility_route(ctx, node)
+        .or_else(|| component_meta_registry_node_indexed_access_route(ctx, node))
+    {
+        enqueue_component_meta_registry_ref(
+            published_names,
+            queued_names,
+            output,
+            root_name.as_str(),
+            source_hint,
+            None,
+            route,
+        );
+        return;
+    }
+    if component_meta_registry_node_instantiated_indexed_access_route(ctx, node).is_some() {
+        // Instantiated-root indexed access: the authored-name discovery
+        // (with the owner's import-binding reverse map) happens at the
+        // public-field collector, which has the owner snapshot. Recursing
+        // into the object here would misclassify the RESOLVED base name as
+        // a whole registry dependency of the owner.
+        return;
+    }
+    if let Some((name, _)) = component_meta_registry_node_ref_head(ctx, node) {
+        if member_ref_policy.allows_plain_member_refs() {
             enqueue_component_meta_registry_ref(
                 published_names,
                 queued_names,
                 output,
-                name.as_ref(),
+                name.as_str(),
                 source_hint,
                 None,
                 RouteDemand::Whole,
             );
         }
-        TypeExpr::IndexedAccess { object, index } => {
-            collect_component_meta_registry_member_surface_refs(
-                object,
-                published_names,
+        return;
+    }
+    let Some(data) = registry_node_data(ctx, node) else {
+        return;
+    };
+    let recurse = |ctx: &dyn ResolverContext,
+                   child: SemanticNodeId,
+                   queued_names: &mut rustc_hash::FxHashSet<String>,
+                   output: &mut VecDeque<PendingComponentMetaRegistryRef>,
+                   policy: RegistryMemberRefPolicy,
+                   visited: &mut rustc_hash::FxHashSet<SemanticNodeId>| {
+        collect_registry_member_surface_refs_node(
+            ctx,
+            child,
+            published_names,
+            queued_names,
+            output,
+            source_hint,
+            policy,
+            visited,
+        );
+    };
+    match data.as_ref() {
+        SemanticNodeData::Alias(target) => {
+            recurse(
+                ctx,
+                *target,
                 queued_names,
                 output,
-                source_hint,
-                true,
-            );
-            collect_component_meta_registry_member_surface_refs(
-                index,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                true,
+                member_ref_policy,
+                visited,
             );
         }
-        TypeExpr::Array { element, .. }
-        | TypeExpr::Parenthesized(element)
-        | TypeExpr::KeyOf(element)
-        | TypeExpr::Rest(element) => {
-            collect_component_meta_registry_member_surface_refs(
-                element,
-                published_names,
+        SemanticNodeData::IndexedAccess { object, index } => {
+            // Route-root operand positions: a plain ref head here IS the
+            // root of an actively demanded projection, so it is always
+            // dependency-eligible regardless of the inherited policy.
+            recurse(
+                ctx,
+                *object,
                 queued_names,
                 output,
-                source_hint,
-                allow_plain_refs,
+                RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
+                visited,
+            );
+            if let IndexKey::TypeNode(index_node) = index {
+                recurse(
+                    ctx,
+                    *index_node,
+                    queued_names,
+                    output,
+                    RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
+                    visited,
+                );
+            }
+        }
+        SemanticNodeData::Array { element, .. } | SemanticNodeData::KeyOf { base: element } => {
+            recurse(
+                ctx,
+                *element,
+                queued_names,
+                output,
+                member_ref_policy,
+                visited,
             );
         }
-        TypeExpr::Tuple { elements, .. } => {
+        SemanticNodeData::Tuple { elements, .. } => {
             for element in elements.iter() {
-                collect_component_meta_registry_member_surface_refs(
-                    &element.ty,
-                    published_names,
+                recurse(
+                    ctx,
+                    element.value,
                     queued_names,
                     output,
-                    source_hint,
-                    allow_plain_refs,
+                    member_ref_policy,
+                    visited,
                 );
             }
         }
-        TypeExpr::Union(types)
-        | TypeExpr::Intersection(types)
-        | TypeExpr::TemplateLiteral {
-            expressions: types, ..
-        } => {
-            for ty in types.iter() {
-                collect_component_meta_registry_member_surface_refs(
-                    ty,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                    allow_plain_refs,
-                );
+        SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            for arm in arms.iter() {
+                recurse(ctx, *arm, queued_names, output, member_ref_policy, visited);
             }
         }
-        TypeExpr::Conditional {
+        SemanticNodeData::TemplateLiteral { expressions, .. } => {
+            for expr in expressions.iter() {
+                recurse(ctx, *expr, queued_names, output, member_ref_policy, visited);
+            }
+        }
+        SemanticNodeData::Conditional {
             check,
             extends,
-            true_type,
-            false_type,
-        } => {
-            collect_component_meta_registry_member_surface_refs(
-                check,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_refs,
-            );
-            collect_component_meta_registry_member_surface_refs(
-                extends,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_refs,
-            );
-            collect_component_meta_registry_member_surface_refs(
-                true_type,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_refs,
-            );
-            collect_component_meta_registry_member_surface_refs(
-                false_type,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-                allow_plain_refs,
-            );
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
+            true_branch_ref,
+            false_branch_ref,
             ..
         } => {
-            collect_component_meta_registry_member_surface_refs(
-                source,
-                published_names,
+            recurse(
+                ctx,
+                *check,
                 queued_names,
                 output,
-                source_hint,
-                allow_plain_refs,
+                member_ref_policy,
+                visited,
             );
-            collect_component_meta_registry_member_surface_refs(
-                value,
-                published_names,
+            recurse(
+                ctx,
+                *extends,
                 queued_names,
                 output,
-                source_hint,
-                allow_plain_refs,
+                member_ref_policy,
+                visited,
             );
-            if let Some(name_type) = name_type.as_deref() {
-                collect_component_meta_registry_member_surface_refs(
-                    name_type,
-                    published_names,
+            recurse(
+                ctx,
+                *true_branch_ref,
+                queued_names,
+                output,
+                member_ref_policy,
+                visited,
+            );
+            recurse(
+                ctx,
+                *false_branch_ref,
+                queued_names,
+                output,
+                member_ref_policy,
+                visited,
+            );
+        }
+        SemanticNodeData::Mapped { source, .. } => {
+            recurse(
+                ctx,
+                *source,
+                queued_names,
+                output,
+                member_ref_policy,
+                visited,
+            );
+        }
+        SemanticNodeData::Function {
+            params,
+            return_type,
+            ..
+        } => {
+            for param in params.iter() {
+                recurse(
+                    ctx,
+                    param.ty,
                     queued_names,
                     output,
-                    source_hint,
-                    allow_plain_refs,
+                    RegistryMemberRefPolicy::PublicationBoundary,
+                    visited,
+                );
+            }
+            recurse(
+                ctx,
+                *return_type,
+                queued_names,
+                output,
+                RegistryMemberRefPolicy::PublicationBoundary,
+                visited,
+            );
+        }
+        SemanticNodeData::ConstructorType { signature } => {
+            recurse(
+                ctx,
+                *signature,
+                queued_names,
+                output,
+                member_ref_policy,
+                visited,
+            );
+        }
+        SemanticNodeData::Object(surface) => {
+            for member in surface.members.iter() {
+                recurse(
+                    ctx,
+                    member.value,
+                    queued_names,
+                    output,
+                    member_ref_policy,
+                    visited,
+                );
+            }
+            for signature in surface
+                .call_signatures
+                .iter()
+                .chain(surface.construct_signatures.iter())
+            {
+                recurse(
+                    ctx,
+                    *signature,
+                    queued_names,
+                    output,
+                    member_ref_policy,
+                    visited,
+                );
+            }
+            for signature in surface.index_signatures.iter() {
+                recurse(
+                    ctx,
+                    signature.key_type,
+                    queued_names,
+                    output,
+                    member_ref_policy,
+                    visited,
+                );
+                recurse(
+                    ctx,
+                    signature.value_type,
+                    queued_names,
+                    output,
+                    member_ref_policy,
+                    visited,
                 );
             }
         }
-        // A constructor type's signature surface is collected identically to a
-        // function type's (same `FunctionExpr` payload).
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            collect_component_meta_registry_function_surface_refs(
-                func,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-            );
-        }
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                match member {
-                    ObjectMember::Property(prop) => {
-                        collect_component_meta_registry_member_surface_refs(
-                            &prop.ty,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                            allow_plain_refs,
-                        );
-                    }
-                    ObjectMember::IndexSignature(sig) => {
-                        collect_component_meta_registry_member_surface_refs(
-                            &sig.key_type,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                            allow_plain_refs,
-                        );
-                        collect_component_meta_registry_member_surface_refs(
-                            &sig.value_type,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                            allow_plain_refs,
-                        );
-                    }
-                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                        collect_component_meta_registry_function_surface_refs(
-                            func,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                        );
-                    }
-                    ObjectMember::Method(method) => {
-                        collect_component_meta_registry_function_surface_refs(
-                            &method.function,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                        );
-                    }
-                }
-            }
-        }
-        TypeExpr::TypeParameter(_)
-        | TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. }
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::Infer { .. }
-        // Synthetic carrier — never enqueues as a member surface ref.
-        | TypeExpr::SyntheticSlotBinding(_)
-        // An import-type carries no enqueue-able workspace NAME (only a
-        // cross-file module path) — like the terminal `Ref` arm here, it
-        // enqueues no member surface ref.
-        | TypeExpr::ImportType { .. }
-        | TypeExpr::Ref { .. } => {}
+        _ => {}
     }
 }
 
-// + §6.10 sub-task 4 — both legacy
-// member-path helpers retired. The shared object-member navigation
-// logic is inlined into the body of
-// `component_meta_registry_raw_member_path_surface` (its only
-// surviving caller). The retired symbols are listed in the
-// `RETIRED_SYMBOLS` array of the static-grep gate test.
+/// Collect every reference-head NAME reachable from `node` (bounded,
+/// visited-guarded). Used for seeded-dependency-name accounting over
+/// raised registry sources in the host registry BFS.
+pub(crate) fn collect_node_ref_names(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+    names: &mut rustc_hash::FxHashSet<String>,
+) {
+    let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+    let mut worklist: Vec<SemanticNodeId> = vec![node];
+    while let Some(node) = worklist.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        let Some(data) = registry_node_data(ctx, node) else {
+            continue;
+        };
+        if let Some((name, args)) = component_meta_registry_node_ref_head(ctx, node) {
+            names.insert(name);
+            worklist.extend(args);
+            continue;
+        }
+        match data.as_ref() {
+            SemanticNodeData::Alias(target) => worklist.push(*target),
+            SemanticNodeData::Array { element, .. } | SemanticNodeData::KeyOf { base: element } => {
+                worklist.push(*element)
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                worklist.extend(elements.iter().map(|element| element.value));
+            }
+            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                worklist.extend(arms.iter().copied());
+            }
+            SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                worklist.extend(expressions.iter().copied());
+            }
+            SemanticNodeData::Object(surface) => {
+                worklist.extend(surface.members.iter().map(|member| member.value));
+                worklist.extend(surface.call_signatures.iter().copied());
+                worklist.extend(surface.construct_signatures.iter().copied());
+                for signature in surface.index_signatures.iter() {
+                    worklist.push(signature.key_type);
+                    worklist.push(signature.value_type);
+                }
+            }
+            SemanticNodeData::Function {
+                params,
+                return_type,
+                ..
+            } => {
+                worklist.extend(params.iter().map(|param| param.ty));
+                worklist.push(*return_type);
+            }
+            SemanticNodeData::ConstructorType { signature } => worklist.push(*signature),
+            SemanticNodeData::IndexedAccess { object, index } => {
+                worklist.push(*object);
+                if let IndexKey::TypeNode(index_node) = index {
+                    worklist.push(*index_node);
+                }
+            }
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                ..
+            } => {
+                worklist.push(*check);
+                worklist.push(*extends);
+                worklist.push(*true_branch_ref);
+                worklist.push(*false_branch_ref);
+            }
+            SemanticNodeData::Mapped { source, .. } => worklist.push(*source),
+            SemanticNodeData::MergedDecl { contributors } => {
+                worklist.extend(contributors.iter().copied());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Fact-domain classification of a published registry SOURCE as an explicit
+/// object surface: a closed / synthesized / projected object-shape fact IS
+/// one; a leaf, function, tuple, indexed-access, or authored-locator source
+/// is NOT (an authored body's shape is only knowable by lowering, and every
+/// consumer of this predicate treats "unknown" as "not an explicit object").
+pub(crate) fn source_has_explicit_object_surface_fact(
+    source: &verter_type_expr::facts::SemanticTypeSource,
+) -> bool {
+    use verter_type_expr::facts::{
+        ClosedTypeFact, ProjectedTypeFact, ResolvedLocalShape, SemanticTypeSource,
+    };
+    match source {
+        SemanticTypeSource::Closed(ClosedTypeFact::Object(_))
+        | SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(_))
+        | SemanticTypeSource::Projected(ProjectedTypeFact::Surface(_)) => true,
+        _ => false,
+    }
+}
+
+/// Source-domain sibling of [`component_meta_registry_ref_name`]: the bare
+/// named-reference LEAF a shallow registry seed publishes
+/// (`Closed(Leaf(Ref(name)))`), by fact identity — no lowering.
+pub(crate) fn source_bare_ref_name(
+    source: &verter_type_expr::facts::SemanticTypeSource,
+) -> Option<&str> {
+    use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};
+    match source {
+        SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Ref(name))) => {
+            Some(name.as_str())
+        }
+        _ => None,
+    }
+}
+
+/// Lower a prepared declaration's content-free body slot through the ONE
+/// shared dispatch and return the raised body-root node. `None` =
+/// unraisable under the live view (unloaded / evicted producing canonical).
+pub(crate) fn prepared_body_root_node(
+    ctx: &dyn ResolverContext,
+    prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
+) -> Option<SemanticNodeId> {
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    dispatch
+        .raise_authored_locator_to_hot(
+            &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                prepared.body_facts.body_slot.clone(),
+            ),
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        )
+        .map(|hot| hot.node())
+}
+
+/// Node-domain sibling of the `matches!(body, TypeExpr::TypeParameter(_))`
+/// prepared-body classification: the raised body ROOT is a type parameter.
+pub(crate) fn node_root_is_type_parameter(ctx: &dyn ResolverContext, node: SemanticNodeId) -> bool {
+    matches!(
+        registry_node_data(ctx, registry_unalias(ctx, node)).as_deref(),
+        Some(SemanticNodeData::TypeParam { .. })
+    )
+}
+
+/// Node-domain sibling of
+/// [`component_meta_registry_has_non_object_top_level_surface`]: the raised
+/// root carries a non-object top-level surface (a reference / indexed-access
+/// / conditional / mapped root, or a union / intersection with a non-object
+/// arm).
+pub(crate) fn node_root_has_non_object_top_level_surface(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    let node = registry_unalias(ctx, node);
+    let Some(data) = registry_node_data(ctx, node) else {
+        return false;
+    };
+    if component_meta_registry_node_ref_head(ctx, node).is_some() {
+        return true;
+    }
+    match data.as_ref() {
+        SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+            arms.iter()
+                .any(|arm| node_root_has_non_object_top_level_surface(ctx, *arm))
+                || arms.iter().any(|arm| {
+                    !matches!(
+                        registry_node_data(ctx, registry_unalias(ctx, *arm)).as_deref(),
+                        Some(SemanticNodeData::Object(_))
+                    )
+                })
+        }
+        SemanticNodeData::IndexedAccess { .. }
+        | SemanticNodeData::Conditional { .. }
+        | SemanticNodeData::Mapped { .. } => true,
+        _ => false,
+    }
+}
+
+/// Node-domain sibling of
+/// [`component_meta_registry_has_explicit_object_surface`]: the raised root
+/// is an object surface, or a union / intersection carrying one.
+pub(crate) fn node_root_has_explicit_object_surface(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    let node = registry_unalias(ctx, node);
+    match registry_node_data(ctx, node).as_deref() {
+        Some(SemanticNodeData::Object(_)) => true,
+        Some(SemanticNodeData::Union(arms)) | Some(SemanticNodeData::Intersection(arms)) => arms
+            .iter()
+            .any(|arm| node_root_has_explicit_object_surface(ctx, *arm)),
+        _ => false,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2692,12 +2084,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        choose_preferred_imported_type_body, collect_component_meta_registry_refs,
-        component_meta_registry_field_expr_has_actionable_route,
-        component_meta_registry_public_indexed_access_route,
-        component_meta_registry_raw_member_path_surface, enqueue_component_meta_registry_ref,
-        imported_type_body_specificity_score, merge_component_meta_registry_candidates,
-        method_surface_specificity_score, owner_component_meta_registry_import_root, RouteDemand,
+        component_meta_registry_public_indexed_access_route, enqueue_component_meta_registry_ref,
+        owner_component_meta_registry_import_root, RegistryMemberRefPolicy, RouteDemand,
     };
     use crate::types::{AnalysisLevel, DependencyResolution, HostConfig};
     use crate::VerterHost;
@@ -2752,23 +2140,6 @@ mod tests {
         }))
     }
 
-    /// A constructor-type property is an equally-specific callable surface as a
-    /// function-type property, so the specificity score must be IDENTICAL.
-    /// Discriminating: the `Object`-property branch counted
-    /// `matches!(prop.ty, TypeExpr::Function(_))` only; a constructor-type
-    /// property missed that callable-surface bonus and scored one lower.
-    #[test]
-    fn constructor_type_prop_scores_like_function_prop() {
-        let function_obj = object_with_callable_prop(false);
-        let constructor_obj = object_with_callable_prop(true);
-        assert_eq!(
-            method_surface_specificity_score(&constructor_obj),
-            method_surface_specificity_score(&function_obj),
-            "a constructor-type property is an equally-specific callable surface \
-             as a function-type property",
-        );
-    }
-
     #[test]
     fn indexed_access_route_preserves_full_member_path() {
         let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
@@ -2780,46 +2151,8 @@ mod tests {
             component_meta_registry_public_indexed_access_route(&expr),
             Some((
                 "Button".to_string(),
-                RouteDemand::MemberPath(vec!["variants".to_string(), "color".to_string()]),
+                RouteDemand::member_path(vec!["variants".to_string(), "color".to_string()]),
             ))
-        );
-    }
-
-    #[test]
-    fn collect_registry_refs_preserves_indexed_access_member_path() {
-        let expr =
-            verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload("Button['ui']", None);
-        let published_names = rustc_hash::FxHashSet::default();
-        let mut queued_names = rustc_hash::FxHashSet::default();
-        let mut output = VecDeque::new();
-        let proj = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
-            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
-        );
-
-        collect_component_meta_registry_refs(
-            &expr,
-            &published_names,
-            &mut queued_names,
-            &mut output,
-            Some("/src/Button.vue"),
-            false,
-            proj.cursor(),
-        );
-
-        let pending = output
-            .pop_front()
-            .expect("indexed-access helper should enqueue a registry ref");
-        assert_eq!(pending.name, "Button");
-        assert_eq!(pending.source_hint.as_deref(), Some("/src/Button.vue"));
-        assert_eq!(pending.exported_name, None);
-        assert_eq!(
-            pending.route,
-            RouteDemand::MemberPath(vec!["ui".to_string()]),
-            "indexed-access helper refs should preserve the requested member path instead of widening to Whole",
-        );
-        assert!(
-            output.is_empty(),
-            "indexed-access helper refs should enqueue only the routed root helper"
         );
     }
 
@@ -2836,7 +2169,7 @@ mod tests {
             "Button",
             Some("/src/Button.vue"),
             None,
-            RouteDemand::Pick(vec!["slots".to_string()]),
+            RouteDemand::pick(vec!["slots".to_string()]),
         );
         enqueue_component_meta_registry_ref(
             &published_names,
@@ -2845,7 +2178,7 @@ mod tests {
             "Button",
             Some("/src/Button.vue"),
             None,
-            RouteDemand::MemberPath(vec!["variants".to_string(), "color".to_string()]),
+            RouteDemand::member_path(vec!["variants".to_string(), "color".to_string()]),
         );
 
         assert_eq!(
@@ -2855,78 +2188,12 @@ mod tests {
         );
         assert_eq!(
             output[0].route,
-            RouteDemand::Pick(vec!["slots".to_string()]),
+            RouteDemand::pick(vec!["slots".to_string()]),
         );
         assert_eq!(
             output[1].route,
-            RouteDemand::MemberPath(vec!["variants".to_string(), "color".to_string()]),
+            RouteDemand::member_path(vec!["variants".to_string(), "color".to_string()]),
         );
-    }
-
-    #[test]
-    fn merge_registry_candidates_combines_partial_object_routes() {
-        let left = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "slots".to_string(),
-                object_with_props(&["base", "label"]),
-                true,
-                false,
-            ))],
-        }));
-        let right = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "variants".to_string(),
-                TypeExpr::Object(Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                        "color".to_string(),
-                        TypeExpr::union(vec![
-                            TypeExpr::string_literal("primary"),
-                            TypeExpr::string_literal("secondary"),
-                        ]),
-                        false,
-                        false,
-                    ))],
-                })),
-                true,
-                false,
-            ))],
-        }));
-
-        let merged = merge_component_meta_registry_candidates(Some(left), Some(right))
-            .expect("partial route candidates should merge");
-        let TypeExpr::Object(shape) = &merged else {
-            panic!("merged partial route candidates should stay object-shaped");
-        };
-
-        assert_eq!(
-            shape.properties.len(),
-            2,
-            "merged object should have exactly 2 properties (slots, variants)"
-        );
-        assert!(shape.properties.iter().any(|member| {
-            matches!(member, ObjectMember::Property(property) if property.name == "slots")
-        }));
-        let variants = shape
-            .properties
-            .iter()
-            .find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == "variants" => {
-                    Some(&property.ty)
-                }
-                _ => None,
-            })
-            .expect("merged surface should keep variants");
-        let TypeExpr::Object(variants_shape) = variants else {
-            panic!("variants should stay object-shaped after merge, got {variants:?}");
-        };
-        assert_eq!(
-            variants_shape.properties.len(),
-            1,
-            "variants should have exactly 1 property (color)"
-        );
-        assert!(variants_shape.properties.iter().any(|member| {
-            matches!(member, ObjectMember::Property(property) if property.name == "color")
-        }));
     }
 
     fn property_with_visibility(
@@ -2957,118 +2224,6 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("merged object must contain `{name}`"))
-    }
-
-    /// F3 (RHS-only member): registry object merge must carry an RHS-only
-    /// property's declared accessibility verbatim — a private member
-    /// contributed only by the right side stays Private on the merged surface.
-    ///
-    /// Discriminating: against the tree where the RHS-only push uses
-    /// `with_spans`, the merged `right_only` member is Public and this FAILS.
-    #[test]
-    fn merge_registry_preserves_rhs_only_member_visibility() {
-        use verter_type_expr::MemberVisibility;
-        let left = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![property_with_visibility(
-                "left_only",
-                MemberVisibility::Public,
-            )],
-        }));
-        let right = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![property_with_visibility(
-                "right_only",
-                MemberVisibility::Private,
-            )],
-        }));
-
-        let merged = merge_component_meta_registry_candidates(Some(left), Some(right))
-            .expect("object candidates merge");
-        assert_eq!(
-            merged_property_visibility(&merged, "right_only"),
-            MemberVisibility::Private,
-            "an RHS-only private member must stay Private through the registry merge",
-        );
-        assert_eq!(
-            merged_property_visibility(&merged, "left_only"),
-            MemberVisibility::Public,
-            "the LHS public member is unchanged",
-        );
-    }
-
-    /// F3 (duplicate member): when both sides declare a member of the same
-    /// name, the merged member takes the MOST-RESTRICTIVE visibility (the shared
-    /// rule) — Public only when Public in BOTH sides. This is arm-order
-    /// independent.
-    ///
-    /// Discriminating: against the tree where the duplicate-member branch leaves
-    /// `existing_property.visibility` untouched (keeping the LEFT side's
-    /// visibility), `(Public-left, Private-right)` merges to Public and the
-    /// arm-order-independence assertion FAILS.
-    #[test]
-    fn merge_registry_duplicate_member_takes_most_restrictive_visibility() {
-        use verter_type_expr::MemberVisibility;
-
-        let merge_dup = |left_vis, right_vis| {
-            let left = TypeExpr::Object(Arc::new(ObjectExpr {
-                properties: vec![property_with_visibility("dup", left_vis)],
-            }));
-            let right = TypeExpr::Object(Arc::new(ObjectExpr {
-                properties: vec![property_with_visibility("dup", right_vis)],
-            }));
-            let merged = merge_component_meta_registry_candidates(Some(left), Some(right))
-                .expect("object candidates merge");
-            merged_property_visibility(&merged, "dup")
-        };
-
-        // Public in both -> Public.
-        assert_eq!(
-            merge_dup(MemberVisibility::Public, MemberVisibility::Public),
-            MemberVisibility::Public,
-        );
-        // Any non-public side -> non-public (most restrictive), arm-order
-        // independent.
-        assert_eq!(
-            merge_dup(MemberVisibility::Public, MemberVisibility::Private),
-            MemberVisibility::Private,
-            "public-left + private-right must merge to Private",
-        );
-        assert_eq!(
-            merge_dup(MemberVisibility::Private, MemberVisibility::Public),
-            MemberVisibility::Private,
-            "private-left + public-right must merge to Private (arm-order independent)",
-        );
-        assert_eq!(
-            merge_dup(MemberVisibility::Protected, MemberVisibility::Private),
-            MemberVisibility::Private,
-            "protected + private -> Private",
-        );
-        assert_eq!(
-            merge_dup(MemberVisibility::Public, MemberVisibility::Protected),
-            MemberVisibility::Protected,
-        );
-    }
-
-    #[test]
-    fn field_expr_actionable_route_recognizes_direct_generic_refs() {
-        let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
-            "GetModelValue<T, VK, true>",
-            None,
-        );
-
-        assert!(
-            component_meta_registry_field_expr_has_actionable_route(&expr),
-            "direct public generic refs should reuse the existing symbolic field expr instead of reparsing raw_type",
-        );
-    }
-
-    #[test]
-    fn field_expr_actionable_route_rejects_expanded_object_surfaces() {
-        let expr = object_with_props(&["base", "label"]);
-
-        assert!(
-            !component_meta_registry_field_expr_has_actionable_route(&expr),
-            "expanded object surfaces still need raw_type reparsing when the raw annotation carries a routed helper like Button['ui']",
-        );
     }
 
     #[test]
@@ -3168,224 +2323,6 @@ export interface AvatarProps {
         );
     }
 
-    #[test]
-    fn choose_preferred_imported_type_body_prefers_more_specific_shapes() {
-        let resolved_body = Some(TypeExpr::named("Props"));
-        let decl_body = Some(object_with_props(&["label", "count"]));
-
-        let chosen = choose_preferred_imported_type_body(resolved_body, decl_body.clone());
-
-        assert_eq!(
-            chosen, decl_body,
-            "the body with the richer concrete surface should win"
-        );
-    }
-
-    #[test]
-    fn choose_preferred_imported_type_body_keeps_existing_body_on_equal_specificity() {
-        let left = object_with_props(&["label"]);
-        let right = object_with_props(&["count"]);
-
-        let chosen = choose_preferred_imported_type_body(Some(left.clone()), Some(right));
-
-        assert_eq!(
-            chosen,
-            Some(left),
-            "equal scores should preserve the first successful resolution"
-        );
-    }
-
-    #[test]
-    fn choose_preferred_imported_type_body_rejects_empty_object_placeholders() {
-        let resolved_body = Some(empty_object());
-        let decl_body = Some(TypeExpr::union(vec![
-            TypeExpr::Literal(LiteralValue::String("to".to_string())),
-            TypeExpr::Literal(LiteralValue::String("replace".to_string())),
-        ]));
-
-        let chosen = choose_preferred_imported_type_body(resolved_body, decl_body.clone());
-
-        assert_eq!(
-            chosen, decl_body,
-            "empty-object placeholders must not outrank concrete literal-union aliases"
-        );
-    }
-
-    #[test]
-    fn imported_type_body_specificity_prefers_object_surfaces_over_refs_and_typeof() {
-        let typeof_score = imported_type_body_specificity_score(&TypeExpr::TypeOf(ValueRef {
-            path: vec!["theme".to_string()],
-            type_args: Vec::new(),
-        }));
-        let ref_score = imported_type_body_specificity_score(&TypeExpr::named("Props"));
-        let object_score = imported_type_body_specificity_score(&object_with_props(&["label"]));
-
-        assert!(
-            typeof_score < ref_score && ref_score < object_score,
-            "specificity ordering should keep typeof < ref < object, got typeof={typeof_score} ref={ref_score} object={object_score}"
-        );
-    }
-
-    #[test]
-    fn imported_type_body_specificity_rewards_richer_object_surfaces() {
-        let small = imported_type_body_specificity_score(&object_with_props(&["label"]));
-        let large = imported_type_body_specificity_score(&object_with_props(&["label", "count"]));
-
-        assert!(
-            large > small,
-            "object surfaces with more top-level members should score higher, got small={small} large={large}"
-        );
-    }
-
-    #[test]
-    fn choose_preferred_imported_type_body_prefers_richer_object_surface_with_nested_members() {
-        let resolved_body = Some(object_with_props(&["next"]));
-        let decl_body = Some(TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![
-                ObjectMember::Property(ObjectProperty::synthetic_public(
-                    "base".to_string(),
-                    TypeExpr::Primitive(PrimitiveName::String),
-                    true,
-                    false,
-                )),
-                ObjectMember::Property(ObjectProperty::synthetic_public(
-                    "current".to_string(),
-                    TypeExpr::named("T"),
-                    true,
-                    false,
-                )),
-                ObjectMember::Property(ObjectProperty::synthetic_public(
-                    "next".to_string(),
-                    TypeExpr::Primitive(PrimitiveName::Number),
-                    true,
-                    false,
-                )),
-            ],
-        })));
-
-        let chosen = choose_preferred_imported_type_body(resolved_body, decl_body.clone());
-
-        assert_eq!(
-            chosen, decl_body,
-            "a richer concrete object surface should beat a smaller local-eval object even when one member type stays symbolic"
-        );
-    }
-
-    #[test]
-    fn choose_preferred_imported_type_body_keeps_meaningful_top_level_union_surface() {
-        let flattened_object = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "path".to_string(),
-                TypeExpr::Primitive(PrimitiveName::String),
-                false,
-                false,
-            ))],
-        }));
-        let symbolic_union = TypeExpr::union(vec![
-            TypeExpr::Primitive(PrimitiveName::String),
-            TypeExpr::named("St"),
-            TypeExpr::named("vt"),
-        ]);
-
-        let preferred = choose_preferred_imported_type_body(
-            Some(flattened_object.clone()),
-            Some(symbolic_union.clone()),
-        )
-        .expect("preferred body should exist");
-
-        assert_eq!(preferred, symbolic_union);
-        assert_ne!(preferred, flattened_object);
-    }
-
-    #[test]
-    fn choose_preferred_imported_type_body_prefers_method_signatures_over_function_properties() {
-        let function = FunctionExpr::synthetic(
-            vec![FunctionParam::synthetic(
-                Some("props".to_string()),
-                TypeExpr::Object(Arc::new(ObjectExpr {
-                    properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                        "ui".to_string(),
-                        TypeExpr::Primitive(PrimitiveName::String),
-                        false,
-                        false,
-                    ))],
-                })),
-                false,
-                false,
-            )],
-            Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
-            vec![],
-        );
-        let property_object = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "default".to_string(),
-                TypeExpr::Function(Arc::new(function.clone())),
-                true,
-                false,
-            ))],
-        }));
-        let method_object = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Method(MethodSignature::synthetic_public(
-                "default".to_string(),
-                function,
-                true,
-            ))],
-        }));
-
-        let preferred =
-            choose_preferred_imported_type_body(Some(property_object), Some(method_object.clone()))
-                .expect("preferred body should exist");
-
-        assert_eq!(preferred, method_object);
-    }
-
-    #[test]
-    fn raw_member_path_surface_projects_explicit_object_members_without_widening() {
-        let raw = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![
-                ObjectMember::Property(ObjectProperty::synthetic_public(
-                    "ui".to_string(),
-                    TypeExpr::Object(Arc::new(ObjectExpr {
-                        properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                            "base".to_string(),
-                            TypeExpr::Primitive(PrimitiveName::String),
-                            true,
-                            false,
-                        ))],
-                    })),
-                    true,
-                    false,
-                )),
-                ObjectMember::Property(ObjectProperty::synthetic_public(
-                    "label".to_string(),
-                    TypeExpr::Primitive(PrimitiveName::String),
-                    true,
-                    false,
-                )),
-            ],
-        }));
-
-        let projected = component_meta_registry_raw_member_path_surface(&raw, &["ui".to_string()])
-            .expect("explicit object surface should project the requested member path");
-
-        let TypeExpr::Object(shape) = &projected else {
-            panic!("member path projection should stay object-shaped, got {projected:?}");
-        };
-        let member_names: Vec<_> = shape
-            .properties
-            .iter()
-            .filter_map(|member| match member {
-                ObjectMember::Property(property) => Some(property.name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            member_names,
-            vec!["ui"],
-            "raw member path projection should stay on the requested member instead of widening to siblings"
-        );
-    }
-
     // -----------------------------------------------------------------
     // G1 — Conditional / Mapped walker gates on
     // `cursor.is_whole_surface()`. Under a narrowed cursor the
@@ -3424,165 +2361,6 @@ export interface AvatarProps {
         output.iter().map(|p| p.name.clone()).collect()
     }
 
-    #[test]
-    fn g1_conditional_under_narrowed_cursor_skips_check_extends() {
-        // Conditional { check: CheckRef, extends: ExtendsRef,
-        //              true_type: TrueRef, false_type: FalseRef }
-        // Narrowed cursor (Include("a")) — predicate sides MUST NOT
-        // be walked; result branches MUST be walked.
-        let expr = TypeExpr::Conditional {
-            check: Arc::new(ref_named("CheckRef")),
-            extends: Arc::new(ref_named("ExtendsRef")),
-            true_type: Arc::new(ref_named("TrueRef")),
-            false_type: Arc::new(ref_named("FalseRef")),
-        };
-        let published_names = rustc_hash::FxHashSet::default();
-        let mut queued_names = rustc_hash::FxHashSet::default();
-        let mut output = VecDeque::new();
-        let proj = narrowed_include_projection(&["a"]);
-
-        collect_component_meta_registry_refs(
-            &expr,
-            &published_names,
-            &mut queued_names,
-            &mut output,
-            None,
-            true, // allow_plain_member_refs — Conditional gate runs after this
-            proj.cursor(),
-        );
-
-        let names = drain_names(&output);
-        assert!(
-            !names.iter().any(|n| n == "CheckRef"),
-            "G1: narrowed cursor must NOT walk Conditional.check (was: {names:?})"
-        );
-        assert!(
-            !names.iter().any(|n| n == "ExtendsRef"),
-            "G1: narrowed cursor must NOT walk Conditional.extends (was: {names:?})"
-        );
-        assert!(
-            names.iter().any(|n| n == "TrueRef"),
-            "G1: narrowed cursor MUST walk Conditional.true_type (open: distribute remaining demand) (was: {names:?})"
-        );
-        assert!(
-            names.iter().any(|n| n == "FalseRef"),
-            "G1: narrowed cursor MUST walk Conditional.false_type (open: distribute remaining demand) (was: {names:?})"
-        );
-    }
-
-    #[test]
-    fn g1_conditional_under_whole_surface_walks_all_four() {
-        let expr = TypeExpr::Conditional {
-            check: Arc::new(ref_named("CheckRef")),
-            extends: Arc::new(ref_named("ExtendsRef")),
-            true_type: Arc::new(ref_named("TrueRef")),
-            false_type: Arc::new(ref_named("FalseRef")),
-        };
-        let published_names = rustc_hash::FxHashSet::default();
-        let mut queued_names = rustc_hash::FxHashSet::default();
-        let mut output = VecDeque::new();
-        let proj = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
-            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
-        );
-
-        collect_component_meta_registry_refs(
-            &expr,
-            &published_names,
-            &mut queued_names,
-            &mut output,
-            None,
-            true,
-            proj.cursor(),
-        );
-
-        let names = drain_names(&output);
-        for n in ["CheckRef", "ExtendsRef", "TrueRef", "FalseRef"] {
-            assert!(
-                names.iter().any(|name| name == n),
-                "G1: whole-surface MUST walk every Conditional branch including {n} (was: {names:?})"
-            );
-        }
-    }
-
-    #[test]
-    fn g1_mapped_under_narrowed_cursor_skips_source_and_name_type() {
-        // Mapped { source: SourceRef, value: ValueRef, name_type: Some(NameTypeRef) }
-        // Narrowed cursor — source/name_type are type-level, must
-        // not be walked. Value MUST be walked.
-        let expr = TypeExpr::Mapped {
-            parameter: "K".to_string(),
-            source: Arc::new(ref_named("SourceRef")),
-            value: Arc::new(ref_named("ValueRef")),
-            name_type: Some(Arc::new(ref_named("NameTypeRef"))),
-            optional: verter_type_expr::MappedModifier::None,
-            readonly: verter_type_expr::MappedModifier::None,
-        };
-        let published_names = rustc_hash::FxHashSet::default();
-        let mut queued_names = rustc_hash::FxHashSet::default();
-        let mut output = VecDeque::new();
-        let proj = narrowed_include_projection(&["a"]);
-
-        collect_component_meta_registry_refs(
-            &expr,
-            &published_names,
-            &mut queued_names,
-            &mut output,
-            None,
-            true,
-            proj.cursor(),
-        );
-
-        let names = drain_names(&output);
-        assert!(
-            !names.iter().any(|n| n == "SourceRef"),
-            "G1: narrowed cursor must NOT walk Mapped.source (was: {names:?})"
-        );
-        assert!(
-            !names.iter().any(|n| n == "NameTypeRef"),
-            "G1: narrowed cursor must NOT walk Mapped.name_type (was: {names:?})"
-        );
-        assert!(
-            names.iter().any(|n| n == "ValueRef"),
-            "G1: narrowed cursor MUST walk Mapped.value (the produced value type) (was: {names:?})"
-        );
-    }
-
-    #[test]
-    fn g1_mapped_under_whole_surface_walks_source_value_name_type() {
-        let expr = TypeExpr::Mapped {
-            parameter: "K".to_string(),
-            source: Arc::new(ref_named("SourceRef")),
-            value: Arc::new(ref_named("ValueRef")),
-            name_type: Some(Arc::new(ref_named("NameTypeRef"))),
-            optional: verter_type_expr::MappedModifier::None,
-            readonly: verter_type_expr::MappedModifier::None,
-        };
-        let published_names = rustc_hash::FxHashSet::default();
-        let mut queued_names = rustc_hash::FxHashSet::default();
-        let mut output = VecDeque::new();
-        let proj = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
-            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
-        );
-
-        collect_component_meta_registry_refs(
-            &expr,
-            &published_names,
-            &mut queued_names,
-            &mut output,
-            None,
-            true,
-            proj.cursor(),
-        );
-
-        let names = drain_names(&output);
-        for n in ["SourceRef", "ValueRef", "NameTypeRef"] {
-            assert!(
-                names.iter().any(|name| name == n),
-                "G1: whole-surface MUST walk every Mapped branch including {n} (was: {names:?})"
-            );
-        }
-    }
-
     // -----------------------------------------------------------------
     // G2 — non-Property ObjectMember arms (Method,
     // IndexSignature, CallSignature, ConstructSignature) apply the
@@ -3593,190 +2371,5 @@ export interface AvatarProps {
         TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![member],
         }))
-    }
-
-    fn fn_returning(name: &str) -> FunctionExpr {
-        // Wrap the named ref in an IndexedAccess so the registry's
-        // routed-helper path enqueues the root name. A bare `Ref`
-        // would be filtered by `allow_plain_refs=false` in
-        // `collect_component_meta_registry_function_surface_refs`.
-        FunctionExpr::synthetic(
-            Vec::new(),
-            Some(Arc::new(TypeExpr::IndexedAccess {
-                object: Arc::new(ref_named(name)),
-                index: Arc::new(TypeExpr::Literal(LiteralValue::String("x".to_string()))),
-            })),
-            Vec::new(),
-        )
-    }
-
-    #[test]
-    fn g2_method_under_narrowed_cursor_gates_on_admits_key() {
-        // Pick<Foo, "methodA"> equivalent — Include("methodA"). The
-        // Method arm must skip `methodB` and walk `methodA`'s nested
-        // refs.
-        let method_a = ObjectMember::Method(MethodSignature::synthetic_public(
-            "methodA".to_string(),
-            fn_returning("MethodAReturnRef"),
-            false,
-        ));
-        let method_b = ObjectMember::Method(MethodSignature::synthetic_public(
-            "methodB".to_string(),
-            fn_returning("MethodBReturnRef"),
-            false,
-        ));
-        let expr = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![method_a, method_b],
-        }));
-        let published_names = rustc_hash::FxHashSet::default();
-        let mut queued_names = rustc_hash::FxHashSet::default();
-        let mut output = VecDeque::new();
-        let proj = narrowed_include_projection(&["methodA"]);
-
-        collect_component_meta_registry_refs(
-            &expr,
-            &published_names,
-            &mut queued_names,
-            &mut output,
-            None,
-            true,
-            proj.cursor(),
-        );
-
-        let names = drain_names(&output);
-        assert!(
-            names.iter().any(|n| n == "MethodAReturnRef"),
-            "G2: narrowed cursor MUST walk admitted Method's nested refs (was: {names:?})"
-        );
-        assert!(
-            !names.iter().any(|n| n == "MethodBReturnRef"),
-            "G2: narrowed cursor MUST NOT walk rejected Method's nested refs (was: {names:?})"
-        );
-    }
-
-    #[test]
-    fn g2_index_signature_skipped_under_narrowed_cursor() {
-        let sig = ObjectMember::IndexSignature(verter_type_expr::IndexSignature::synthetic(
-            "key".to_string(),
-            ref_named("IndexKeyRef"),
-            ref_named("IndexValueRef"),
-            false,
-        ));
-        let expr = object_with_member(sig);
-        let published_names = rustc_hash::FxHashSet::default();
-        let mut queued_names = rustc_hash::FxHashSet::default();
-        let mut output = VecDeque::new();
-        let proj = narrowed_include_projection(&["a"]);
-
-        collect_component_meta_registry_refs(
-            &expr,
-            &published_names,
-            &mut queued_names,
-            &mut output,
-            None,
-            true,
-            proj.cursor(),
-        );
-
-        let names = drain_names(&output);
-        assert!(
-            !names.iter().any(|n| n == "IndexKeyRef"),
-            "G2: narrowed cursor must NOT walk IndexSignature.key_type (was: {names:?})"
-        );
-        assert!(
-            !names.iter().any(|n| n == "IndexValueRef"),
-            "G2: narrowed cursor must NOT walk IndexSignature.value_type (was: {names:?})"
-        );
-    }
-
-    #[test]
-    fn g2_index_signature_walked_under_whole_surface() {
-        let sig = ObjectMember::IndexSignature(verter_type_expr::IndexSignature::synthetic(
-            "key".to_string(),
-            ref_named("IndexKeyRef"),
-            ref_named("IndexValueRef"),
-            false,
-        ));
-        let expr = object_with_member(sig);
-        let published_names = rustc_hash::FxHashSet::default();
-        let mut queued_names = rustc_hash::FxHashSet::default();
-        let mut output = VecDeque::new();
-        let proj = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
-            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
-        );
-
-        collect_component_meta_registry_refs(
-            &expr,
-            &published_names,
-            &mut queued_names,
-            &mut output,
-            None,
-            true,
-            proj.cursor(),
-        );
-
-        let names = drain_names(&output);
-        assert!(
-            names.iter().any(|n| n == "IndexKeyRef"),
-            "G2: whole-surface MUST walk IndexSignature.key_type (was: {names:?})"
-        );
-        assert!(
-            names.iter().any(|n| n == "IndexValueRef"),
-            "G2: whole-surface MUST walk IndexSignature.value_type (was: {names:?})"
-        );
-    }
-
-    #[test]
-    fn g2_call_signature_skipped_under_narrowed_cursor() {
-        let call = ObjectMember::CallSignature(fn_returning("CallReturnRef"));
-        let expr = object_with_member(call);
-        let published_names = rustc_hash::FxHashSet::default();
-        let mut queued_names = rustc_hash::FxHashSet::default();
-        let mut output = VecDeque::new();
-        let proj = narrowed_include_projection(&["a"]);
-
-        collect_component_meta_registry_refs(
-            &expr,
-            &published_names,
-            &mut queued_names,
-            &mut output,
-            None,
-            true,
-            proj.cursor(),
-        );
-
-        let names = drain_names(&output);
-        assert!(
-            !names.iter().any(|n| n == "CallReturnRef"),
-            "G2: narrowed cursor must NOT walk CallSignature's nested refs (was: {names:?})"
-        );
-    }
-
-    #[test]
-    fn g2_call_signature_walked_under_whole_surface() {
-        let call = ObjectMember::CallSignature(fn_returning("CallReturnRef"));
-        let expr = object_with_member(call);
-        let published_names = rustc_hash::FxHashSet::default();
-        let mut queued_names = rustc_hash::FxHashSet::default();
-        let mut output = VecDeque::new();
-        let proj = crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
-            crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
-        );
-
-        collect_component_meta_registry_refs(
-            &expr,
-            &published_names,
-            &mut queued_names,
-            &mut output,
-            None,
-            true,
-            proj.cursor(),
-        );
-
-        let names = drain_names(&output);
-        assert!(
-            names.iter().any(|n| n == "CallReturnRef"),
-            "G2: whole-surface MUST walk CallSignature's nested refs (was: {names:?})"
-        );
     }
 }

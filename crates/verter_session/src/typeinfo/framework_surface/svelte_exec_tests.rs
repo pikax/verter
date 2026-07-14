@@ -4,12 +4,17 @@
 use super::*;
 use verter_compiler::svelte::parser::parse_svelte;
 
+/// The owner canonical id the legacy `<slot>` walk tests thread as the
+/// binding resolution scope.
+const LEGACY_SLOT_OWNER: &str = "/Component.svelte";
+
 /// Collect the legacy `<slot>` slot fields from a `.svelte` SOURCE through the
-/// same structural walk the resolver uses (the typed template carrier).
+/// same structural walk the resolver uses (the typed template carrier),
+/// scoped to [`LEGACY_SLOT_OWNER`].
 fn legacy_slots(source: &str) -> Vec<AnalyzedSlotField> {
     let parsed = parse_svelte(source);
     let mut slots = Vec::new();
-    collect_slot_elements(&parsed.template, source, "/Test.svelte", &mut slots);
+    collect_slot_elements(&parsed.template, source, LEGACY_SLOT_OWNER, &mut slots);
     slots
 }
 
@@ -37,15 +42,15 @@ fn legacy_slot_names_are_exact_and_dedup_first_writer_wins() {
                 DOCUMENTED deprecated-path carve-out scoped to legacy-<slot> bindings ONLY (the \
                 slot NAMES are precise). Precise parse-domain forwarded-expression capture (typing \
                 each binding from its `attr={expr}` through the shared engine) is the follow-up. \
-                This test asserts the binding `binding_expr` is PRECISE (NOT `Primitive(Any)`); it \
-                is RED today (the carve-out emits `any`) and flips green (ignore removed) when the \
-                precise-capture follow-up lands."]
+                This test asserts the binding's published `type_annotation` is PRECISE (NOT the \
+                `any` display); it is RED today (the carve-out publishes `any`) and flips green \
+                (ignore removed) when the precise-capture follow-up lands."]
 fn legacy_slot_let_binding_value_precision_is_a_followup() {
     // DISCRIMINATING: the forwarded `item={items[0]}` binding's value type must
     // be PRECISE (resolved from the forwarded expression), NOT the `any`
-    // carve-out. Today `slot_bindings` emits `Primitive(Any)`, so this RED
+    // carve-out. Today `slot_bindings` publishes the `any` display, so this RED
     // assertion is ledgered behind `#[ignore]`. When the precise forwarded-
-    // expression capture lands, `binding_expr` becomes the resolved type and
+    // expression capture lands, `type_annotation` renders the resolved type and
     // this assertion passes — the ignore is then removed.
     let slots = legacy_slots(
         "<script lang=\"ts\">let items: { id: number }[] = []; void items;</script>\n\
@@ -61,37 +66,50 @@ fn legacy_slot_let_binding_value_precision_is_a_followup() {
         .find(|b| b.name == "item")
         .expect("the forwarded `item` binding is collected");
     assert!(
-        !matches!(
-            binding.binding_expr,
-            Some(TypeExpr::Primitive(PrimitiveName::Any))
-        ),
+        binding.type_annotation.as_deref() != Some("any"),
         "the legacy slot binding value must be PRECISE (not the `any` carve-out) — \
              follow-up: precise forwarded-expression capture"
     );
 }
 
 #[test]
-fn legacy_slot_binding_expr_is_paired_with_a_scope() {
-    // PAIRING INVARIANT: even the `any` carve-out value must be paired with a
-    // `binding_expr_scope` (`binding_expr.is_some() <=> binding_expr_scope
-    // .is_some()`). A `Some`-expr / `None`-scope mismatch violates the
-    // documented `AnalyzedSlotFieldBinding` pairing invariant. This is
-    // DISCRIMINATING: it FAILS if `slot_bindings` drops the scope back to
-    // `None`.
+fn legacy_slot_binding_display_value_carries_its_resolution_scope() {
+    // VALUE⇔SCOPE PAIRING INVARIANT: a locator-less display VALUE must carry
+    // its resolution SCOPE (`type_annotation.is_some() <=>
+    // binding_expr_scope.is_some()`), the documented
+    // `AnalyzedSlotFieldBinding` rule for resolver-published display-only
+    // values. Even the `any` carve-out value is a published display value, so
+    // it rides with the owning component's scope. The binding stays
+    // locator-less (`payload: None`): a template `<slot>` attribute has no
+    // authored TYPE position to address — never a fabricated locator. This is
+    // DISCRIMINATING: it FAILS if `slot_bindings` publishes the display value
+    // with a `None` scope (or fabricates a payload locator).
     let slots = legacy_slots("<slot name=\"row\" item={x} />");
     let binding = slots
         .iter()
         .find(|s| s.name == "row")
         .and_then(|s| s.bindings.iter().find(|b| b.name == "item"))
         .expect("the forwarded `item` binding is collected");
+    assert!(
+        binding.type_annotation.is_some(),
+        "the carve-out publishes a display value (the pairing assert below is non-vacuous)"
+    );
     assert_eq!(
-        binding.binding_expr.is_some(),
+        binding.type_annotation.is_some(),
         binding.binding_expr_scope.is_some(),
-        "binding_expr must be paired with binding_expr_scope (pairing invariant)"
+        "a locator-less display value must carry its resolution scope (value⇔scope pairing)"
     );
     assert!(
-        binding.binding_expr_scope.is_some(),
-        "the legacy slot binding's `any` value must carry an owner scope"
+        binding.payload.is_none(),
+        "a template <slot> attribute has no authored TYPE position — locator-less, never fabricated"
+    );
+    assert_eq!(
+        binding
+            .binding_expr_scope
+            .as_ref()
+            .map(verter_type_expr::TypeExprScope::as_str),
+        Some(LEGACY_SLOT_OWNER),
+        "the resolution scope is the owning component's canonical id"
     );
 }
 
@@ -266,8 +284,11 @@ fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
         .expect("the snippet member yields positional params");
     let labels: Vec<Option<&str>> = params.iter().map(|p| p.label.as_deref()).collect();
     assert_eq!(labels, vec![Some("item"), Some("index")]);
-    let scope = verter_type_expr::TypeExprScope::new(component);
-    let bindings = materialize_snippet_slot_bindings(&ctx, &params, &scope);
+    let bindings = materialize_snippet_slot_bindings(
+        &ctx,
+        &verter_type_expr::TypeExprScope::new(component),
+        &params,
+    );
     let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, vec!["item", "index"]);
 }
@@ -407,36 +428,36 @@ fn snippet_carrier_params_tuple_expands_to_ordered_dto_bindings() {
         "position 1 is the exact element node"
     );
 
-    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
-    let bindings = materialize_snippet_slot_bindings(&host, &params, &scope);
+    let bindings = materialize_snippet_slot_bindings(
+        &host,
+        &verter_type_expr::TypeExprScope::new("/Owner.svelte"),
+        &params,
+    );
     let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(
         names,
         vec!["item", "index"],
         "the DTO bindings keep the order"
     );
-    assert!(
-        matches!(
-            bindings[0].binding_expr,
-            Some(TypeExpr::Primitive(PrimitiveName::String))
-        ),
-        "the `item` binding materializes to `string`, got {:?}",
-        bindings[0].binding_expr
+    assert_eq!(
+        bindings[0].type_annotation.as_deref(),
+        Some("string"),
+        "the `item` binding materializes to `string` (rendered at the terminal sink), got {:?}",
+        bindings[0].type_annotation
     );
-    assert!(
-        matches!(
-            bindings[1].binding_expr,
-            Some(TypeExpr::Primitive(PrimitiveName::Number))
-        ),
-        "the `index` binding materializes to `number`, got {:?}",
-        bindings[1].binding_expr
+    assert_eq!(
+        bindings[1].type_annotation.as_deref(),
+        Some("number"),
+        "the `index` binding materializes to `number` (rendered at the terminal sink), got {:?}",
+        bindings[1].type_annotation
     );
-    // Pairing invariant: every binding_expr rides with the member scope.
+    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
+    // Pairing invariant: every binding value rides with the member scope.
     assert!(
         bindings
             .iter()
             .all(|b| b.binding_expr_scope.as_ref() == Some(&scope)),
-        "each binding_expr is paired with the slot member's scope"
+        "each binding value is paired with the slot member's scope"
     );
 }
 
@@ -459,9 +480,13 @@ fn snippet_carrier_empty_params_tuple_yields_present_bindingless_slot() {
         "an empty `Params` tuple has no positions"
     );
 
-    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
     assert!(
-        materialize_snippet_slot_bindings(&host, &params, &scope).is_empty(),
+        materialize_snippet_slot_bindings(
+            &host,
+            &verter_type_expr::TypeExprScope::new("/Owner.svelte"),
+            &params,
+        )
+        .is_empty(),
         "a `Snippet<[]>` publishes NO bindings"
     );
 }
@@ -522,8 +547,11 @@ fn snippet_function_fallback_skips_this_and_expands_rest_tuple_to_dto_bindings()
         "`this` is skipped and the rest-tuple expands in order"
     );
 
-    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
-    let bindings = materialize_snippet_slot_bindings(&host, &params, &scope);
+    let bindings = materialize_snippet_slot_bindings(
+        &host,
+        &verter_type_expr::TypeExprScope::new("/Owner.svelte"),
+        &params,
+    );
     let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(
         names,
@@ -534,21 +562,17 @@ fn snippet_function_fallback_skips_this_and_expands_rest_tuple_to_dto_bindings()
         !names.contains(&"this"),
         "the leading `this` param must be skipped"
     );
-    assert!(
-        matches!(
-            bindings[0].binding_expr,
-            Some(TypeExpr::Primitive(PrimitiveName::String))
-        ),
+    assert_eq!(
+        bindings[0].type_annotation.as_deref(),
+        Some("string"),
         "binding 0 is `string`, got {:?}",
-        bindings[0].binding_expr
+        bindings[0].type_annotation
     );
-    assert!(
-        matches!(
-            bindings[1].binding_expr,
-            Some(TypeExpr::Primitive(PrimitiveName::Number))
-        ),
+    assert_eq!(
+        bindings[1].type_annotation.as_deref(),
+        Some("number"),
         "binding 1 is `number`, got {:?}",
-        bindings[1].binding_expr
+        bindings[1].type_annotation
     );
     assert!(
         bindings.iter().all(|b| b.binding_expr_scope.is_some()),
@@ -574,9 +598,13 @@ fn snippet_function_empty_rest_tuple_yields_no_dto_bindings() {
         "a `Snippet<[]>` callable has no positions"
     );
 
-    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
     assert!(
-        materialize_snippet_slot_bindings(&host, &params, &scope).is_empty(),
+        materialize_snippet_slot_bindings(
+            &host,
+            &verter_type_expr::TypeExprScope::new("/Owner.svelte"),
+            &params,
+        )
+        .is_empty(),
         "no positions ⇒ no published bindings"
     );
 }
@@ -603,8 +631,11 @@ fn snippet_unlabelled_tuple_elements_fall_back_to_arg_index_names() {
         "the reader keeps unlabelled positions label-less (no fabricated name)"
     );
 
-    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
-    let bindings = materialize_snippet_slot_bindings(&host, &params, &scope);
+    let bindings = materialize_snippet_slot_bindings(
+        &host,
+        &verter_type_expr::TypeExprScope::new("/Owner.svelte"),
+        &params,
+    );
     let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(
         names,
@@ -661,14 +692,18 @@ fn snippet_union_arms_combine_by_index_into_intersection_binding() {
         other => panic!("the combined position type is an `Intersection` node, got {other:?}"),
     }
 
-    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
-    let bindings = materialize_snippet_slot_bindings(&host, &params, &scope);
+    let bindings = materialize_snippet_slot_bindings(
+        &host,
+        &verter_type_expr::TypeExprScope::new("/Owner.svelte"),
+        &params,
+    );
     assert_eq!(bindings.len(), 1, "one published binding across both arms");
     assert_eq!(bindings[0].name, "a");
-    assert!(
-        matches!(&bindings[0].binding_expr, Some(TypeExpr::Intersection(arms)) if arms.len() == 2),
+    assert_eq!(
+        bindings[0].type_annotation.as_deref(),
+        Some("string & number"),
         "the published binding type is the intersection of both arms, got {:?}",
-        bindings[0].binding_expr
+        bindings[0].type_annotation
     );
 }
 
@@ -819,17 +854,25 @@ fn prop_defaults_sidecar_carries_default_values_on_the_resolved_bundle() {
     );
     // And the resolved prop fields reflect optionality: defaulted props are
     // optional, the non-defaulted `label` is required.
-    let field = |name: &str| dtos.prop_fields().iter().find(|f| f.name == name).cloned();
+    let field = |name: &str| {
+        dtos.prop_fields()
+            .iter()
+            .find(|f| f.analysis.name == name)
+            .cloned()
+    };
     assert!(
-        field("size").expect("size prop").is_optional,
+        field("size").expect("size prop").analysis.is_optional,
         "size is optional"
     );
     assert!(
-        field("disabled").expect("disabled prop").is_optional,
+        field("disabled")
+            .expect("disabled prop")
+            .analysis
+            .is_optional,
         "disabled is optional"
     );
     assert!(
-        !field("label").expect("label prop").is_optional,
+        !field("label").expect("label prop").analysis.is_optional,
         "label (no default) stays required"
     );
 }
@@ -911,15 +954,71 @@ fn imported_props_members_carry_an_import_member_declaration_origin() {
     );
 }
 
+/// Demand a callback prop's first-param object surface THROUGH THE GRAPH
+/// SURFACE (props surface -> `member_name` member -> realized callable
+/// signature -> first param node -> one-level object surface) and assert it
+/// carries member `id` — the precise named-ref (`Row`) resolution a published
+/// callback event's synthesized payload defers to graph demand (the published
+/// `AnalyzedEmitField` is display + honest locator-less `None`s by contract).
+fn assert_callback_row_param_resolves_precisely(
+    host: &VerterHost,
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    canonical: &str,
+    member_name: &str,
+) {
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(ctx, canonical)
+        .expect("svelte script facts");
+    let props_type = facts.props_type.as_ref().expect("props type payload");
+    let props_surface = navigate_param_to_object_surface(ctx, canonical, props_type)
+        .expect("the `$props` object surface resolves");
+    let member = props_surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == member_name)
+        .unwrap_or_else(|| panic!("the `{member_name}` member is on the props surface"));
+    let dispatch = ctx.dispatch();
+    let signature = CallableNodeView::new(&dispatch, member.value)
+        .signature(nav_context())
+        .expect("the callback member realizes to a callable signature");
+    let row_param_ty = signature
+        .raw_params()
+        .first()
+        .map(|p| p.ty)
+        .expect("the `(row: Row)` callback has one parameter");
+    let resolved = host
+        .project_shallow_surface_from_base(
+            ctx,
+            &dispatch,
+            row_param_ty,
+            Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Shallow,
+            ),
+        )
+        .expect("`Row` resolves to an object surface in its declaring scope");
+    assert!(
+        resolved.members.iter().any(|m| m.name.as_ref() == "id"),
+        "the resolved `Row` surface carries member `id` (precise named-ref \
+         resolution via graph demand), got members {:?}",
+        resolved
+            .members
+            .iter()
+            .map(|m| m.name.as_ref())
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn callback_event_payload_named_ref_resolves_on_the_component_meta_surface() {
     // P1 (COMPONENT-META surface, not IDE-TSX): a callback-prop event
     // `onselect: (row: Row) => void` (with `Row` a same-module interface)
     // resolves through the framework-surface resolver to an `AnalyzedEmitField`
-    // whose payload `Row` reference is PRECISE — its `payload_expr_scope`
-    // anchors the SAME module so a consumer re-resolves `Row` to its object
-    // surface. DISCRIMINATING: if the scope is dropped (`None`), the pairing
-    // breaks and the `Row` re-resolution below cannot anchor.
+    // whose payload display renders the labelled tuple. The `Row` reference is
+    // PRECISE: the typed payload is a graph-surface demand (the synthesized
+    // tuple has no authored position), so the demand below re-resolves `Row`
+    // to its object surface. DISCRIMINATING: an imprecise param type could
+    // not surface `Row`'s member `id`.
     let canonical = "/CbScope.svelte";
     let source = "<script lang=\"ts\">\n\
              interface Row { id: number }\n\
@@ -945,54 +1044,28 @@ fn callback_event_payload_named_ref_resolves_on_the_component_meta_surface() {
     let select = emits
         .fields
         .iter()
-        .find(|e| e.name == "select")
+        .find(|e| e.analysis.name == "select")
         .expect("the `onselect` callback prop surfaces as event `select`");
 
-    // PAIRING: a `Some` payload_expr MUST carry a `Some` payload_expr_scope.
-    assert!(
-        select.payload_expr.is_some(),
+    // The `select` event carries the `(row: Row)` payload tuple (rendered at
+    // the terminal sink).
+    assert_eq!(
+        select.analysis.payload_type.as_deref(),
+        Some("[row: Row]"),
         "the `select` event carries a payload tuple"
     );
-    let scope = select
-        .payload_expr_scope
-        .as_ref()
-        .expect("payload_expr_scope must be Some when payload_expr is Some (P1 pairing)");
-    // The scope anchors the OWNER module where `Row` is declared.
-    assert_eq!(
-        scope.as_str(),
-        canonical,
-        "the callback payload scope anchors the `$props` member's value-node file \
-             (where `Row` is declared)"
+    // The payload tuple is a per-event SYNTHESIS over the callback's params —
+    // it has no authored macro-payload position, so the published locator and
+    // scope are the honest paired `None`s (`payload_type` above is display).
+    assert!(
+        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        "a synthesized callback payload publishes no authored locator/scope"
     );
 
-    // DISCRIMINATING named-ref resolution: take the payload tuple's `Row`
-    // element type and re-resolve it THROUGH THE SHARED RESOLVER in `scope`.
-    // A precise scope yields `Row`'s object surface (member `id`); a dropped
-    // scope could not anchor this resolution.
-    let TypeExpr::Tuple { elements, .. } = select.payload_expr.as_ref().expect("payload tuple")
-    else {
-        panic!("the callback payload is a labelled tuple");
-    };
-    let row_ty = elements
-        .first()
-        .map(|el| el.ty.clone())
-        .expect("the `(row: Row)` callback has one parameter");
-    assert!(
-        matches!(&row_ty, TypeExpr::Ref { name, .. } if name.as_ref() == "Row"),
-        "the payload element is the named `Row` ref, got {row_ty:?}"
-    );
-    let resolved = navigate_param_to_object_surface(&ctx, scope.as_str(), &row_ty)
-        .expect("`Row` resolves to an object surface in its declaring scope");
-    assert!(
-        resolved.members.iter().any(|m| m.name.as_ref() == "id"),
-        "the resolved `Row` surface carries member `id` (precise named-ref \
-             resolution via the payload scope), got members {:?}",
-        resolved
-            .members
-            .iter()
-            .map(|m| m.name.as_ref())
-            .collect::<Vec<_>>()
-    );
+    // DISCRIMINATING named-ref resolution: demand the callback's `(row: Row)`
+    // param through the graph surface and re-resolve `Row` to its object
+    // surface (member `id`).
+    assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");
 }
 
 #[test]
@@ -1029,13 +1102,17 @@ fn optional_callback_prop_classifies_as_event_with_precise_payload() {
         panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
-    let names: Vec<&str> = emits.fields.iter().map(|e| e.name.as_str()).collect();
+    let names: Vec<&str> = emits
+        .fields
+        .iter()
+        .map(|e| e.analysis.name.as_str())
+        .collect();
 
     // (a) the OPTIONAL callback prop IS event `select`.
     let select = emits
         .fields
         .iter()
-        .find(|e| e.name == "select")
+        .find(|e| e.analysis.name == "select")
         .unwrap_or_else(|| {
             panic!(
                 "an OPTIONAL `onselect?:` callback prop must classify as event \
@@ -1054,25 +1131,20 @@ fn optional_callback_prop_classifies_as_event_with_precise_payload() {
         "a non-`on` prop must NOT be an event, got {names:?}"
     );
 
-    // The optional callback's payload is PRECISE — `Row` resolves in scope.
-    let scope = select
-        .payload_expr_scope
-        .as_ref()
-        .expect("optional callback payload_expr_scope is Some (pairing)");
-    let TypeExpr::Tuple { elements, .. } = select.payload_expr.as_ref().expect("payload tuple")
-    else {
-        panic!("optional callback payload is a tuple");
-    };
-    let row_ty = elements
-        .first()
-        .map(|el| el.ty.clone())
-        .expect("the `(row: Row)` callback has one parameter");
-    let resolved = navigate_param_to_object_surface(&ctx, scope.as_str(), &row_ty)
-        .expect("`Row` resolves through the optional callback payload scope");
-    assert!(
-        resolved.members.iter().any(|m| m.name.as_ref() == "id"),
-        "the optional callback's `Row` payload resolves precisely (member `id`)"
+    // The optional callback's payload is PRECISE — the display renders the
+    // labelled tuple, the locator/scope stay the honest paired `None`s (a
+    // synthesized tuple has no authored position), and `Row` resolves through
+    // the graph-surface demand.
+    assert_eq!(
+        select.analysis.payload_type.as_deref(),
+        Some("[row: Row]"),
+        "the optional callback publishes the `[row: Row]` payload display"
     );
+    assert!(
+        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        "a synthesized callback payload publishes no authored locator/scope"
+    );
+    assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");
 }
 
 #[test]
@@ -1103,12 +1175,12 @@ fn union_with_no_callable_arm_is_not_an_event() {
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
     assert!(
-        !emits.fields.iter().any(|e| e.name == "mode"),
+        !emits.fields.iter().any(|e| e.analysis.name == "mode"),
         "an `on`-prefixed union with no callable arm must NOT be an event, got {:?}",
         emits
             .fields
             .iter()
-            .map(|e| e.name.as_str())
+            .map(|e| e.analysis.name.as_str())
             .collect::<Vec<_>>()
     );
 }
@@ -1150,7 +1222,7 @@ fn optional_alias_callback_prop_classifies_as_event_with_precise_payload() {
     let select = emits
         .fields
         .iter()
-        .find(|e| e.name == "select")
+        .find(|e| e.analysis.name == "select")
         .unwrap_or_else(|| {
             panic!(
                 "an OPTIONAL alias callback prop `onselect?: Handler` must classify as \
@@ -1159,28 +1231,23 @@ fn optional_alias_callback_prop_classifies_as_event_with_precise_payload() {
                 emits
                     .fields
                     .iter()
-                    .map(|e| e.name.as_str())
+                    .map(|e| e.analysis.name.as_str())
                     .collect::<Vec<_>>()
             )
         });
-    let scope = select
-        .payload_expr_scope
-        .as_ref()
-        .expect("optional alias callback payload_expr_scope is Some (pairing)");
-    let TypeExpr::Tuple { elements, .. } = select.payload_expr.as_ref().expect("payload tuple")
-    else {
-        panic!("optional alias callback payload is a tuple");
-    };
-    let row_ty = elements
-        .first()
-        .map(|el| el.ty.clone())
-        .expect("the `(row: Row)` callback has one parameter");
-    let resolved = navigate_param_to_object_surface(&ctx, scope.as_str(), &row_ty)
-        .expect("`Row` resolves through the optional alias callback payload scope");
-    assert!(
-        resolved.members.iter().any(|m| m.name.as_ref() == "id"),
-        "the optional alias callback's `Row` payload resolves precisely (member `id`)"
+    // The alias callback's payload is PRECISE — the display renders the
+    // labelled tuple, the locator/scope stay the honest paired `None`s, and
+    // `Row` resolves through the graph-surface demand.
+    assert_eq!(
+        select.analysis.payload_type.as_deref(),
+        Some("[row: Row]"),
+        "the optional alias callback publishes the `[row: Row]` payload display"
     );
+    assert!(
+        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        "a synthesized callback payload publishes no authored locator/scope"
+    );
+    assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");
 }
 
 #[test]
@@ -1225,7 +1292,11 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
         panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
-    let names: Vec<&str> = emits.fields.iter().map(|e| e.name.as_str()).collect();
+    let names: Vec<&str> = emits
+        .fields
+        .iter()
+        .map(|e| e.analysis.name.as_str())
+        .collect();
 
     // (a) the EXPLICIT-union callable VALUE IS event `select` (this is the
     // branch the member-`?` tests do NOT cover — they raise to a bare
@@ -1233,7 +1304,7 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
     let select = emits
         .fields
         .iter()
-        .find(|e| e.name == "select")
+        .find(|e| e.analysis.name == "select")
         .unwrap_or_else(|| {
             panic!(
                 "an EXPLICIT-union callable prop VALUE `onselect: ((row: Row) => void) | \
@@ -1248,25 +1319,19 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
              an event, got {names:?}"
     );
 
-    // The payload is PRECISE — `Row` resolves in scope (member `id`).
-    let scope = select
-        .payload_expr_scope
-        .as_ref()
-        .expect("explicit-union callback payload_expr_scope is Some (pairing)");
-    let TypeExpr::Tuple { elements, .. } = select.payload_expr.as_ref().expect("payload tuple")
-    else {
-        panic!("explicit-union callback payload is a tuple");
-    };
-    let row_ty = elements
-        .first()
-        .map(|el| el.ty.clone())
-        .expect("the `(row: Row)` callback has one parameter");
-    let resolved = navigate_param_to_object_surface(&ctx, scope.as_str(), &row_ty)
-        .expect("`Row` resolves through the explicit-union callback payload scope");
-    assert!(
-        resolved.members.iter().any(|m| m.name.as_ref() == "id"),
-        "the explicit-union callback's `Row` payload resolves precisely (member `id`)"
+    // The payload is PRECISE — the display renders the labelled tuple, the
+    // locator/scope stay the honest paired `None`s, and `Row` resolves
+    // through the graph-surface demand (member `id`).
+    assert_eq!(
+        select.analysis.payload_type.as_deref(),
+        Some("[row: Row]"),
+        "the explicit-union callback publishes the `[row: Row]` payload display"
     );
+    assert!(
+        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        "a synthesized callback payload publishes no authored locator/scope"
+    );
+    assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");
 }
 
 #[test]
@@ -1304,13 +1369,13 @@ fn explicit_union_with_two_distinct_callable_arms_refuses() {
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
     assert!(
-        !emits.fields.iter().any(|e| e.name == "select"),
+        !emits.fields.iter().any(|e| e.analysis.name == "select"),
         "an explicit union with TWO distinct callable arms is ambiguous and must NOT be \
              mined as an event, got {:?}",
         emits
             .fields
             .iter()
-            .map(|e| e.name.as_str())
+            .map(|e| e.analysis.name.as_str())
             .collect::<Vec<_>>()
     );
 }
@@ -1357,13 +1422,17 @@ fn carrier_wrapped_nullish_callback_prop_classifies_as_event_with_precise_payloa
         panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
-    let names: Vec<&str> = emits.fields.iter().map(|e| e.name.as_str()).collect();
+    let names: Vec<&str> = emits
+        .fields
+        .iter()
+        .map(|e| e.analysis.name.as_str())
+        .collect();
 
     // (a) the carrier-wrapped nullish callable alias IS event `select`.
     let select = emits
         .fields
         .iter()
-        .find(|e| e.name == "select")
+        .find(|e| e.analysis.name == "select")
         .unwrap_or_else(|| {
             panic!(
                 "a carrier-wrapped nullish callback alias `onselect: Handler` (Handler = \
@@ -1378,25 +1447,19 @@ fn carrier_wrapped_nullish_callback_prop_classifies_as_event_with_precise_payloa
          got {names:?}"
     );
 
-    // The payload is PRECISE — `Row` resolves in scope (member `id`).
-    let scope = select
-        .payload_expr_scope
-        .as_ref()
-        .expect("carrier-nullish callback payload_expr_scope is Some (pairing)");
-    let TypeExpr::Tuple { elements, .. } = select.payload_expr.as_ref().expect("payload tuple")
-    else {
-        panic!("carrier-nullish callback payload is a tuple");
-    };
-    let row_ty = elements
-        .first()
-        .map(|el| el.ty.clone())
-        .expect("the `(row: Row)` callback has one parameter");
-    let resolved = navigate_param_to_object_surface(&ctx, scope.as_str(), &row_ty)
-        .expect("`Row` resolves through the carrier-nullish callback payload scope");
-    assert!(
-        resolved.members.iter().any(|m| m.name.as_ref() == "id"),
-        "the carrier-nullish callback's `Row` payload resolves precisely (member `id`)"
+    // The payload is PRECISE — the display renders the labelled tuple, the
+    // locator/scope stay the honest paired `None`s, and `Row` resolves
+    // through the graph-surface demand (member `id`).
+    assert_eq!(
+        select.analysis.payload_type.as_deref(),
+        Some("[row: Row]"),
+        "the carrier-nullish callback publishes the `[row: Row]` payload display"
     );
+    assert!(
+        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        "a synthesized callback payload publishes no authored locator/scope"
+    );
+    assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");
 }
 
 #[test]
@@ -1450,12 +1513,13 @@ fn svelte_snippet_slots_normalizer_publishes_node_domain_bindings() {
         "the snippet slot bindings come from the `Params` tuple, in order"
     );
     assert!(
-        row.bindings.iter().all(|b| b.binding_expr.is_some()),
-        "each binding carries a materialized `binding_expr` (minted at the terminal sink)"
+        row.bindings.iter().all(|b| b.type_annotation.is_some()),
+        "each binding carries a display `type_annotation` rendered from the value minted at \
+         the terminal sink"
     );
     assert!(
         row.bindings.iter().all(|b| b.binding_expr_scope.is_some()),
-        "each binding_expr is paired with a scope (pairing invariant)"
+        "each binding value is paired with a scope (pairing invariant)"
     );
 }
 
@@ -1527,8 +1591,11 @@ fn snippet_declref_tuple_params_resolve_to_ordered_dto_bindings() {
 
     // Terminal DTO sink: the SAME nodes publish as the two ordered Svelte slot
     // bindings (exact names, each paired with the member scope).
-    let scope = verter_type_expr::TypeExprScope::new(component);
-    let bindings = materialize_snippet_slot_bindings(&ctx, &params, &scope);
+    let bindings = materialize_snippet_slot_bindings(
+        &ctx,
+        &verter_type_expr::TypeExprScope::new(component),
+        &params,
+    );
     let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(
         names,
@@ -1536,10 +1603,12 @@ fn snippet_declref_tuple_params_resolve_to_ordered_dto_bindings() {
         "the DTO sink publishes the resolved bindings in order"
     );
     assert!(
-        bindings
-            .iter()
-            .all(|b| b.binding_expr.is_some() && b.binding_expr_scope.is_some()),
-        "each published binding carries a materialized value paired with a scope"
+        bindings.iter().all(|b| b.type_annotation.is_some()),
+        "each published binding carries a display rendered from its materialized value"
+    );
+    assert!(
+        bindings.iter().all(|b| b.binding_expr_scope.is_some()),
+        "each published binding value is paired with a scope"
     );
 }
 

@@ -283,7 +283,6 @@ impl SemanticNodeData {
             | Self::Infer { .. }
             | Self::MergedDecl { .. }
             | Self::Conditional { .. }
-            | Self::VueMacroElements(_)
             | Self::Function { .. }
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
@@ -405,7 +404,6 @@ impl SemanticNodeData {
             | Self::Infer { .. }
             | Self::MergedDecl { .. }
             | Self::Conditional { .. }
-            | Self::VueMacroElements(_)
             | Self::Function { .. }
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }

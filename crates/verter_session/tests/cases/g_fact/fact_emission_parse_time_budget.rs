@@ -40,56 +40,31 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_eval::TypeDeclKind;
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::project_type_store::IndexedReady;
-use verter_session::resolver_core::shallow_file_state::{ExportTarget, ShallowFileState};
-use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
+use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
-    )
+) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
 }
 
 fn build_large_indexed(decl_count: usize) -> Arc<IndexedReady> {
-    // Build through the env-seeded construction path: the synthetic
-    // header inventory + seeded declaration-body memo mirror what the
-    // production header walk + lazy memo would hold for the same decls.
-    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
-    let mut exports: FxHashMap<String, ExportTarget> = FxHashMap::default();
+    // Author `decl_count` IDENTICAL-shape interface decls and build
+    // through the production-shaped service-backed path: the real header
+    // walk pre-pays the shallow inventory at construction (untimed), so
+    // the timed section below measures ONLY `emit_parse_facts`.
+    let mut source = String::with_capacity(decl_count * 48);
     for i in 0..decl_count {
-        let name = format!("Decl{i}");
-        let body = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "a".to_string(),
-                TypeExpr::Primitive(if i % 2 == 0 {
-                    PrimitiveName::String
-                } else {
-                    PrimitiveName::Number
-                }),
-                false,
-                false,
-            ))],
-        }));
-        env.add_type(verter_semantic::analysis::type_eval::TypeDeclInfo {
-            name: name.clone(),
-            declaration_id: 0,
-            kind: TypeDeclKind::Interface,
-            type_parameters: Vec::new(),
-            body,
-        });
-        exports.insert(name.clone(), ExportTarget::Local { symbol_name: name });
+        source.push_str(&format!("export interface Decl{i} {{ a: string }}\n"));
     }
-    let mut shallow = ShallowFileState::from_analysis([0u8; 16], empty_external(), Some(&env));
-    shallow.exports = exports;
+    let shallow =
+        ShallowFileState::service_backed_for_test_with_hash("/large.ts", &source, [0u8; 16]);
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
-        Arc::new(shallow),
-        Arc::from(""),
-        Arc::from(""),
+        shallow,
+        Arc::from(source.as_str()),
+        Arc::from(source.as_str()),
         empty_external(),
     ))
 }

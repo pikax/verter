@@ -1,9 +1,15 @@
-//! Component-meta analysis → FFI projection. Includes the public entry points
-//! `component_meta_analysis_to_ffi[_with_resolution]` and
-//! `component_meta_resolution_to_ffi`, plus the internal resolved-meta /
-//! resolved-macro projections.
-
-use verter_session as host;
+//! Session output-envelope → FFI projection. The single public entry point
+//! is [`component_meta_output_to_ffi`]: it consumes the session-owned,
+//! fully-materialized [`ComponentMetaOutput`] envelope by value and
+//! mechanically maps it onto the wire DTO ([`FfiComponentMeta`]).
+//!
+//! CONTEXT-FREE MAPPER: this module performs no dispatch, no lowering, no
+//! source lookup, no reparse, and no second resolution. Every wire type
+//! position reads the envelope's materialized POSITIONAL lane (order-aligned
+//! 1:1 with its analysis vector — duplicate names, nested slot bindings,
+//! registry rows, and every fallthrough branch are positional). The resolved
+//! type-registry name-overlay finalize is SESSION-OWNED and already applied
+//! to `analysis.type_registry` before the envelope was sealed.
 
 use crate::types::*;
 
@@ -22,39 +28,122 @@ use super::string_helpers::{
     style_lang_to_string, vue_api_to_string,
 };
 
-pub fn component_meta_analysis_to_ffi(
-    analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+/// Convert the session-owned output envelope to the FFI boundary DTO.
+///
+/// The envelope is consumed BY VALUE through its single destructive
+/// transfer accessor; the materialized lanes are zipped positionally with
+/// their analysis vectors. This is the sole production wire conversion for
+/// component-meta — there is no raw-analysis converter.
+pub fn component_meta_output_to_ffi(
+    output: verter_session::meta_resolve::ComponentMetaOutput,
 ) -> FfiComponentMeta {
-    component_meta_analysis_to_ffi_with_resolution(analysis, None)
+    let (analysis, resolution, types) = output.into_parts();
+    component_meta_parts_to_ffi(analysis, resolution, types.into_lanes())
 }
 
-/// Convert component-meta analysis plus optional native resolved-state sidecar
-/// to the FFI boundary DTO.
-pub fn component_meta_analysis_to_ffi_with_resolution(
+/// HARD wire-boundary alignment guard: refuse the conversion loudly when a
+/// materialized lane's length does not match its analysis vector. The lanes
+/// are positional 1:1 by construction; a mismatch means the envelope is torn,
+/// and the positional `zip`s below would SILENTLY TRUNCATE the wire payload
+/// (dropping trailing members or pairing values onto the wrong rows). Active
+/// in EVERY build profile — a debug-only assert would let a release build
+/// ship the truncated payload. Shared with the fallthrough lane conversion
+/// (`super::fallthrough`), which zips the same class of positional lanes.
+#[track_caller]
+pub(super) fn require_lane_aligned(lane: &str, analysis_len: usize, lane_len: usize) {
+    assert_eq!(
+        analysis_len, lane_len,
+        "component-meta FFI conversion refused: the `{lane}` lane carries {lane_len} \
+         materialized value(s) for {analysis_len} analysis row(s) — wire lanes are \
+         positional 1:1 and a zip would silently truncate",
+    );
+}
+
+/// Parts-level mechanical mapping — the body of
+/// [`component_meta_output_to_ffi`] after the envelope's destructive
+/// transfer. Module-private: production code converts ONLY the sealed
+/// envelope; the parts seam exists so converter unit tests can exercise the
+/// mapping with hand-built parts without a live host.
+pub(super) fn component_meta_parts_to_ffi(
     analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-    resolved_state: Option<&host::meta_resolve::ResolvedComponentMetaState>,
+    resolution: Option<verter_session::meta_resolve::ComponentMetaResolutionOutput>,
+    lanes: verter_session::meta_resolve::MaterializedComponentMetaTypeLanes,
 ) -> FfiComponentMeta {
     let root_info = root_info_to_ffi(&analysis.root_reachability);
-    let mut merged_type_registry = analysis.type_registry;
-    if let Some(state) = resolved_state {
-        for resolved_entry in &state.resolved_type_registry {
-            if let Some(existing) = merged_type_registry
-                .iter_mut()
-                .find(|entry| entry.name == resolved_entry.name)
-            {
-                *existing = resolved_entry.clone();
-            } else {
-                merged_type_registry.push(resolved_entry.clone());
-            }
-        }
+
+    require_lane_aligned("props", analysis.props.len(), lanes.props.len());
+    require_lane_aligned(
+        "event-payloads",
+        analysis.events.len(),
+        lanes.event_payloads.len(),
+    );
+    require_lane_aligned(
+        "slot-bindings",
+        analysis.slots.len(),
+        lanes.slot_bindings.len(),
+    );
+    for (index, (slot, lane)) in analysis
+        .slots
+        .iter()
+        .zip(lanes.slot_bindings.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            slot.bindings.len(),
+            lane.len(),
+            "component-meta FFI conversion refused: slot #{index} (`{name}`) carries \
+             {lane_len} materialized binding value(s) for {analysis_len} analysis \
+             binding(s) — inner slot-binding lanes are positional 1:1 and a zip \
+             would silently truncate",
+            name = slot.name,
+            lane_len = lane.len(),
+            analysis_len = slot.bindings.len(),
+        );
     }
+    require_lane_aligned("models", analysis.models.len(), lanes.models.len());
+    require_lane_aligned("exposed", analysis.exposed.len(), lanes.exposed.len());
+    require_lane_aligned(
+        "public-instance-members",
+        analysis
+            .public_instance
+            .as_ref()
+            .map(|p| p.members.len())
+            .unwrap_or(0),
+        lanes.public_instance_members.len(),
+    );
+    require_lane_aligned(
+        "type-registry-entries",
+        analysis.type_registry.len(),
+        lanes.type_registry_entries.len(),
+    );
+    require_lane_aligned(
+        "accepted-props",
+        analysis.accepted_props.len(),
+        lanes.accepted_props.len(),
+    );
+    require_lane_aligned(
+        "accepted-event-payloads",
+        analysis.accepted_events.len(),
+        lanes.accepted_event_payloads.len(),
+    );
     FfiComponentMeta {
+        // Typed resolution status: honest on every lane — a payload
+        // without the resolution sidecar self-describes as
+        // `Unavailable(ResolutionProviderAbsent)`.
+        resolution_status: if resolution.is_some() {
+            FfiComponentMetaResolutionStatus::Resolved
+        } else {
+            FfiComponentMetaResolutionStatus::Unavailable(
+                FfiResolutionUnavailableReason::ResolutionProviderAbsent,
+            )
+        },
         props: analysis
             .props
             .into_iter()
-            .map(|p| FfiPropMeta {
+            .zip(lanes.props)
+            .map(|(p, r#type)| FfiPropMeta {
                 name: p.name,
-                r#type: p.type_expr,
+                r#type,
                 type_expansion: p.type_expansion.map(expansion_metadata_to_ffi),
                 raw_type: p.raw_type,
                 required: p.required,
@@ -68,9 +157,10 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
         events: analysis
             .events
             .into_iter()
-            .map(|e| FfiEventMeta {
+            .zip(lanes.event_payloads)
+            .map(|(e, payload)| FfiEventMeta {
                 name: e.name,
-                payload: e.payload,
+                payload,
                 payload_expansion: e.payload_expansion.map(expansion_metadata_to_ffi),
                 raw_signature: e.raw_signature,
                 description: e.description,
@@ -80,15 +170,17 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
         slots: analysis
             .slots
             .into_iter()
-            .map(|s| FfiSlotMeta {
+            .zip(lanes.slot_bindings)
+            .map(|(s, binding_types)| FfiSlotMeta {
                 name: s.name,
                 is_scoped: s.is_scoped,
                 bindings: s
                     .bindings
                     .into_iter()
-                    .map(|b| FfiSlotBindingMeta {
+                    .zip(binding_types)
+                    .map(|(b, r#type)| FfiSlotBindingMeta {
                         name: b.name,
-                        r#type: b.type_expr,
+                        r#type,
                         type_expansion: b.type_expansion.map(expansion_metadata_to_ffi),
                         raw_type: b.raw_type,
                     })
@@ -102,17 +194,19 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
         models: analysis
             .models
             .into_iter()
-            .map(|m| FfiModelMeta {
+            .zip(lanes.models)
+            .map(|(m, r#type)| FfiModelMeta {
                 name: m.name,
-                r#type: m.type_expr,
+                r#type,
             })
             .collect(),
         exposed: analysis
             .exposed
             .into_iter()
-            .map(|e| FfiExposedMeta {
+            .zip(lanes.exposed)
+            .map(|(e, r#type)| FfiExposedMeta {
                 name: e.name,
-                r#type: e.type_expr,
+                r#type,
                 type_expansion: e.type_expansion.map(expansion_metadata_to_ffi),
                 description: e.description,
                 tags: e.tags.into_iter().map(jsdoc_to_ffi).collect(),
@@ -125,10 +219,11 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
                 members: public_instance
                     .members
                     .into_iter()
-                    .map(|member| FfiPublicInstanceMemberMeta {
+                    .zip(lanes.public_instance_members)
+                    .map(|(member, r#type)| FfiPublicInstanceMemberMeta {
                         name: member.name,
                         kind: public_instance_member_kind_to_string(member.kind),
-                        r#type: member.type_expr,
+                        r#type,
                         type_expansion: member.type_expansion.map(expansion_metadata_to_ffi),
                         raw_type: member.raw_type,
                         description: member.description,
@@ -143,12 +238,20 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
             styles: blocks.styles.into_iter().map(style_block_to_ffi).collect(),
             custom: blocks.custom.into_iter().map(custom_block_to_ffi).collect(),
         }),
-        type_registry: merged_type_registry
+        // `analysis.type_registry` already carries the SESSION-owned
+        // resolved-registry name-overlay finalize (applied before
+        // materialization when the envelope carries a resolution); the lane
+        // aligns with the merged registry. The per-name declaration sidecar
+        // reads the narrowed resolution output.
+        type_registry: analysis
+            .type_registry
             .into_iter()
-            .map(|entry| {
-                let declaration = resolved_state
-                    .and_then(|state| {
-                        state
+            .zip(lanes.type_registry_entries)
+            .map(|(entry, r#type)| {
+                let declaration = resolution
+                    .as_ref()
+                    .and_then(|resolution| {
+                        resolution
                             .resolved_type_registry_meta
                             .iter()
                             .find(|meta| meta.name == entry.name)
@@ -165,7 +268,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
 
                 FfiResolvedTypeMeta {
                     name: entry.name,
-                    r#type: entry.type_expr,
+                    r#type,
                     type_expansion: entry.type_expansion.map(expansion_metadata_to_ffi),
                     raw_type: declaration
                         .as_ref()
@@ -320,19 +423,25 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
         accepted_props: analysis
             .accepted_props
             .into_iter()
-            .map(accepted_prop_to_ffi)
+            .zip(lanes.accepted_props)
+            .map(|(prop, r#type)| accepted_prop_to_ffi(prop, r#type))
             .collect(),
         accepted_events: analysis
             .accepted_events
             .into_iter()
-            .map(accepted_event_to_ffi)
+            .zip(lanes.accepted_event_payloads)
+            .map(|(event, payload)| accepted_event_to_ffi(event, payload))
             .collect(),
         accepted_surface_completeness: accepted_surface_completeness_to_ffi(
             analysis.accepted_surface_completeness,
         ),
         root_info,
         root_reachability: root_reachability_to_ffi(analysis.root_reachability),
-        fallthrough_surface: fallthrough_surface_to_ffi(analysis.fallthrough_surface),
+        fallthrough_surface: fallthrough_surface_to_ffi(
+            analysis.fallthrough_surface,
+            lanes.fallthrough_props,
+            lanes.fallthrough_event_payloads,
+        ),
         macro_expansion_diagnostics: analysis
             .macro_expansion_diagnostics
             .into_iter()
@@ -354,19 +463,20 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
             .collect(),
         options_api: analysis.options_api,
         file_path: analysis.file_path,
-        resolution: resolved_state.map(resolved_component_meta_to_ffi),
-        origin: resolved_state
-            .and_then(|s| s.origin_graph.as_ref())
-            .cloned()
+        origin: resolution
+            .as_ref()
+            .and_then(|resolution| resolution.origin_graph.clone())
             .unwrap_or_default(),
+        resolution: resolution.map(|resolution| resolved_component_meta_to_ffi(&resolution)),
     }
 }
+
 pub(super) fn resolved_component_meta_to_ffi(
-    state: &host::meta_resolve::ResolvedComponentMetaState,
+    resolution: &verter_session::meta_resolve::ComponentMetaResolutionOutput,
 ) -> FfiComponentMetaResolution {
     FfiComponentMetaResolution {
-        mode: projection_mode_to_string(state.mode),
-        macros: state
+        mode: projection_mode_to_string(resolution.mode),
+        macros: resolution
             .resolved_macros
             .iter()
             .map(resolved_macro_to_ffi)
@@ -374,17 +484,8 @@ pub(super) fn resolved_component_meta_to_ffi(
     }
 }
 
-/// Public wrapper exposing the resolved-state → FFI projection. Used
-/// by the NAPI/WASM audit bindings to package the resolution alongside
-/// the audit record as JSON.
-pub fn component_meta_resolution_to_ffi(
-    state: &host::meta_resolve::ResolvedComponentMetaState,
-) -> FfiComponentMetaResolution {
-    resolved_component_meta_to_ffi(state)
-}
-
 pub(super) fn resolved_macro_to_ffi(
-    resolved: &host::meta_resolve::ResolvedMacroMeta,
+    resolved: &verter_session::meta_resolve::ResolvedMacroMeta,
 ) -> FfiResolvedMacroMeta {
     FfiResolvedMacroMeta {
         macro_index: resolved.macro_index as u32,

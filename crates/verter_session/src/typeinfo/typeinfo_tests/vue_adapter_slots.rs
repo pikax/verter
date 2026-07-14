@@ -112,12 +112,25 @@ fn define_slots_normalizer_filters_to_functions_and_extracts_bindings() {
         vec!["index", "item"],
         "slot bindings come from the first-param object's properties"
     );
-    assert!(
-        default_slot
-            .bindings
-            .iter()
-            .all(|b| b.binding_expr.is_some()),
-        "each binding carries its typed binding_expr"
+    let item = default_slot
+        .bindings
+        .iter()
+        .find(|b| b.name == "item")
+        .expect("the `item` binding surfaces");
+    assert_eq!(
+        item.type_annotation.as_deref(),
+        Some("string"),
+        "the `item` binding displays its authored `string` type"
+    );
+    let index = default_slot
+        .bindings
+        .iter()
+        .find(|b| b.name == "index")
+        .expect("the `index` binding surfaces");
+    assert_eq!(
+        index.type_annotation.as_deref(),
+        Some("number"),
+        "the `index` binding displays its authored `number` type"
     );
 
     let header = slots.iter().find(|s| s.name == "header").unwrap();
@@ -133,8 +146,8 @@ fn define_slots_normalizer_filters_to_functions_and_extracts_bindings() {
 //      function slots' return type is preserved.
 //
 //      Discriminating: a `notASlot: string` property member is NOT a slot —
-//      it must be absent. The function slot's `return_expr` / `return_type`
-//      must reflect the declared return (not dropped).
+//      it must be absent. The function slot's display `return_type` must
+//      reflect the declared return (not dropped).
 // ---------------------------------------------------------------------------
 
 const VUE_SLOTS_MIXED: &str = r#"<script setup lang="ts">
@@ -170,23 +183,19 @@ fn define_slots_normalizer_filters_non_function_members_and_preserves_return() {
     );
 
     let body = &slots[0];
-    // The function returns `string` — the return is preserved as a typed expr
-    // and a display string, not dropped.
-    let return_expr = body
-        .return_expr
-        .as_ref()
-        .expect("the slot function's return type is preserved");
-    assert!(
-        matches!(
-            return_expr,
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
-        ),
-        "body's return_expr is the primitive `string`, got {return_expr:?}"
-    );
+    // The function returns `string` — the return is preserved as the display
+    // `return_type`, not dropped. A resolved-surface slot is locator-less by
+    // convention (honest `payload: None`), so the display string is the
+    // surviving observable.
     assert_eq!(
         body.return_type.as_deref(),
         Some("string"),
-        "the display return_type renders the typed return"
+        "the display return_type renders the declared `string` return"
+    );
+    assert!(
+        body.payload.is_none(),
+        "a resolved-surface slot stays locator-less (honest `payload: None`, \
+         never a fabricated placeholder)"
     );
 }
 
@@ -258,8 +267,8 @@ fn define_slots_normalizer_publishes_union_of_function_slots() {
         default_slot
             .bindings
             .iter()
-            .all(|b| b.binding_expr.is_some()),
-        "each union-slot binding carries its typed binding_expr"
+            .all(|b| b.type_annotation.is_some()),
+        "each union-slot binding carries its display type_annotation"
     );
 }
 
@@ -398,19 +407,7 @@ fn define_slots_normalizer_extracts_pick_bindings() {
     assert_eq!(
         name.type_annotation.as_deref(),
         Some("RowApi['name']"),
-        "the `name` binding displays the symbolic indexed access"
-    );
-    assert!(
-        matches!(
-            name.binding_expr.as_ref(),
-            Some(verter_type_expr::TypeExpr::IndexedAccess { object, index })
-                if matches!(&**object, verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "RowApi")
-                && matches!(&**index, verter_type_expr::TypeExpr::Literal(
-                    verter_type_expr::LiteralValue::String(member)
-                ) if member == "name")
-        ),
-        "the `name` binding is the symbolic `RowApi['name']` indexed access, got {:?}",
-        name.binding_expr
+        "the `name` binding displays the symbolic `RowApi['name']` indexed access"
     );
     let value = row
         .bindings
@@ -420,19 +417,7 @@ fn define_slots_normalizer_extracts_pick_bindings() {
     assert_eq!(
         value.type_annotation.as_deref(),
         Some("RowApi['value']"),
-        "the `value` binding displays the symbolic indexed access"
-    );
-    assert!(
-        matches!(
-            value.binding_expr.as_ref(),
-            Some(verter_type_expr::TypeExpr::IndexedAccess { object, index })
-                if matches!(&**object, verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "RowApi")
-                && matches!(&**index, verter_type_expr::TypeExpr::Literal(
-                    verter_type_expr::LiteralValue::String(member)
-                ) if member == "value")
-        ),
-        "the `value` binding is the symbolic `RowApi['value']` indexed access, got {:?}",
-        value.binding_expr
+        "the `value` binding displays the symbolic `RowApi['value']` indexed access"
     );
 }
 
@@ -446,8 +431,8 @@ fn define_slots_normalizer_extracts_pick_bindings() {
 //
 //      Discriminating: against a nominal-root predicate that rejects the
 //      inline-authored `BareRef` source root, the binding materialises the
-//      CONCRETE member value (`string`) and the symbolic `IndexedAccess`
-//      assertions FAIL.
+//      CONCRETE member value (`string`) and the symbolic display assertion
+//      FAILS.
 // ---------------------------------------------------------------------------
 
 const PICK_IMPORTED_SOURCE: &str = r#"export interface ImportedRowApi {
@@ -498,19 +483,7 @@ fn define_slots_imported_inline_pick_publishes_symbolic_binding() {
     assert_eq!(
         label.type_annotation.as_deref(),
         Some("ImportedRowApi['label']"),
-        "the `label` binding displays the symbolic indexed access"
-    );
-    assert!(
-        matches!(
-            label.binding_expr.as_ref(),
-            Some(verter_type_expr::TypeExpr::IndexedAccess { object, index })
-                if matches!(&**object, verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "ImportedRowApi")
-                && matches!(&**index, verter_type_expr::TypeExpr::Literal(
-                    verter_type_expr::LiteralValue::String(member)
-                ) if member == "label")
-        ),
-        "the `label` binding is the symbolic `ImportedRowApi['label']` indexed access, got {:?}",
-        label.binding_expr
+        "the `label` binding displays the symbolic `ImportedRowApi['label']` indexed access"
     );
 }
 
@@ -527,7 +500,7 @@ fn define_slots_imported_inline_pick_publishes_symbolic_binding() {
 //      Discriminating: against a nominal-root predicate that accepted only
 //      the `BareRef` arm (dropping `DeclRef` / `InstantiationRef`), the
 //      binding materialises the CONCRETE member value (`string`) and the
-//      symbolic `IndexedAccess` assertions FAIL.
+//      symbolic display assertion FAILS.
 // ---------------------------------------------------------------------------
 
 const VUE_SLOTS_PICK_ALIAS: &str = r#"<script setup lang="ts">
@@ -582,19 +555,7 @@ fn define_slots_named_alias_pick_publishes_symbolic_binding() {
     assert_eq!(
         name.type_annotation.as_deref(),
         Some("RowApi['name']"),
-        "the `name` binding displays the symbolic indexed access"
-    );
-    assert!(
-        matches!(
-            name.binding_expr.as_ref(),
-            Some(verter_type_expr::TypeExpr::IndexedAccess { object, index })
-                if matches!(&**object, verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "RowApi")
-                && matches!(&**index, verter_type_expr::TypeExpr::Literal(
-                    verter_type_expr::LiteralValue::String(member)
-                ) if member == "name")
-        ),
-        "the named-alias Pick binding is the symbolic `RowApi['name']` indexed access, got {:?}",
-        name.binding_expr
+        "the named-alias Pick binding displays the symbolic `RowApi['name']` indexed access"
     );
 }
 
@@ -649,20 +610,18 @@ fn define_slots_userland_pick_shadow_publishes_concrete_not_symbolic() {
         .iter()
         .find(|b| b.name == "wrapped")
         .expect("the userland-Pick body member `wrapped` surfaces as a binding");
-    // The concrete userland-Pick body member is present.
+    // The concrete userland-Pick body member is present (its own minted display).
     assert!(
-        wrapped.binding_expr.is_some(),
-        "the `wrapped` binding carries its concrete typed value"
+        wrapped.type_annotation.is_some(),
+        "the `wrapped` binding carries its concrete display value"
     );
     // THE FIX: NOT the symbolic `Cfg['wrapped']` indexed access.
-    assert!(
-        !matches!(
-            wrapped.binding_expr,
-            Some(verter_type_expr::TypeExpr::IndexedAccess { .. })
-        ),
-        "the userland-Pick `wrapped` binding must NOT be published as a symbolic \
+    assert_ne!(
+        wrapped.type_annotation.as_deref(),
+        Some("Cfg['wrapped']"),
+        "the userland-Pick `wrapped` binding must NOT be published as the symbolic \
          `Cfg['wrapped']` indexed access, got {:?}",
-        wrapped.binding_expr
+        wrapped.type_annotation
     );
 }
 
@@ -704,25 +663,15 @@ fn define_slots_structural_source_pick_publishes_concrete_not_symbolic() {
         .iter()
         .find(|b| b.name == "foo")
         .expect("the picked `foo` key surfaces as a binding");
-    // THE FIX: NOT a symbolic indexed access over the structural object source.
-    assert!(
-        !matches!(
-            foo.binding_expr,
-            Some(verter_type_expr::TypeExpr::IndexedAccess { .. })
-        ),
-        "the structural-source `foo` binding must NOT be a symbolic indexed access, got {:?}",
-        foo.binding_expr
-    );
-    // POSITIVE: the concrete picked member type `string`.
-    assert!(
-        matches!(
-            foo.binding_expr,
-            Some(verter_type_expr::TypeExpr::Primitive(
-                verter_type_expr::PrimitiveName::String
-            ))
-        ),
-        "the `foo` binding is the concrete `string` member type, got {:?}",
-        foo.binding_expr
+    // THE FIX: NOT a symbolic indexed access over the structural object source —
+    // the display is EXACTLY the concrete picked member type `string` (never a
+    // `{ foo: string }['foo']` indexed-access rendering).
+    assert_eq!(
+        foo.type_annotation.as_deref(),
+        Some("string"),
+        "the `foo` binding displays the concrete `string` member type (never a \
+         symbolic indexed access), got {:?}",
+        foo.type_annotation
     );
 }
 
@@ -837,18 +786,19 @@ fn define_slots_two_param_callback_binds_first_param_only() {
 
 // ---------------------------------------------------------------------------
 // (4f) defineSlots normalizer — a slot RETURN written as the degenerate
-//      composite `{} & X` publishes EXACTLY `X`, never a
+//      composite `{} & X` materializes EXACTLY `X`, never a
 //      `TypeExpr::Intersection`. The shared shape-engine fold drops
 //      empty-object / object-surface-sentinel intersection arms
-//      (`{} & X ≡ X`) and collapses a single surviving arm to that arm —
-//      the normalized terminal-DTO behavior. This pins the DEGENERATE
-//      collapse direction through the PUBLIC slot path (the non-degenerate
-//      multi-arm direction is pinned elsewhere).
+//      (`{} & X ≡ X`) and collapses a single surviving arm to that arm.
+//      The published DTO is display + locator-less by contract, so the fold
+//      is pinned on the slot member's RETURN NODE — the same node the
+//      terminal DTO sink materializes — minted once through the test output
+//      cap. (The non-degenerate multi-arm direction is pinned elsewhere.)
 //
 //      Discriminating: against a fold that keeps the vacuous `{}` arm (or
-//      wraps the lone survivor in a one-arm intersection), the published
-//      `return_expr` is a `TypeExpr::Intersection` and BOTH the exact-shape
-//      and the negative assertions FAIL.
+//      wraps the lone survivor in a one-arm intersection), the materialized
+//      return is a `TypeExpr::Intersection` and BOTH the exact-shape and the
+//      negative assertions FAIL.
 // ---------------------------------------------------------------------------
 
 const VUE_SLOTS_DEGENERATE_INTERSECTION_RETURN: &str = r#"<script setup lang="ts">
@@ -877,23 +827,51 @@ fn slot_return_empty_object_intersection_arm_collapses_to_real_arm() {
         .iter()
         .find(|s| s.name == "default")
         .expect("the `default` slot is published");
-    let return_expr = default_slot
-        .return_expr
-        .as_ref()
-        .expect("the slot publishes a typed return_expr");
+    // The published DTO is display + honest locator-less `None`s (a
+    // resolved-surface slot has no flat authored macro-payload position).
+    assert!(
+        default_slot.payload.is_none(),
+        "a resolved-surface slot publishes no authored payload locator"
+    );
 
-    // NEGATIVE: the degenerate `{}` arm never survives into a published
+    // The FOLD is a node-domain fact: realize the slot member's RETURN NODE
+    // through the SAME `CallableNodeView` route the DTO sink uses and mint it
+    // once through the test output cap.
+    use crate::meta_resolve::callable_view::{ArmCombineNode, CallableNodeView};
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let context = crate::semantic_query::ProjectionReductionContext::published(
+        crate::semantic_query::ProjectionMode::Navigate,
+    );
+    let member = surface
+        .surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "default")
+        .expect("the `default` member is on the macro surface");
+    // Single `Function` root — the normalizer's non-`Union` arm combiner.
+    let parts = CallableNodeView::new(&dispatch, member.value)
+        .slot_param_and_return_by_arm(ArmCombineNode::Intersection, context)
+        .expect("the slot member realizes to a callable");
+    let return_node = parts
+        .return_type
+        .expect("the slot declares a return type node");
+    let return_expr = &dispatch
+        .materialize_output_type_expr_for_test(return_node)
+        .expect("the slot return node materializes");
+
+    // NEGATIVE: the degenerate `{}` arm never survives into a materialized
     // intersection — `{} & X` is NOT `TypeExpr::Intersection([...])`.
     assert!(
         !matches!(return_expr, TypeExpr::Intersection(_)),
-        "`{{}} & X` must collapse at the publication fold — the published DTO \
-         is the real arm, never an Intersection; got {return_expr:?}"
+        "`{{}} & X` must collapse at the shape-engine fold — the materialized \
+         return is the real arm, never an Intersection; got {return_expr:?}"
     );
 
-    // POSITIVE (exact shape): the published return IS the real arm
+    // POSITIVE (exact shape): the materialized return IS the real arm
     // `{ label: string }` — one public property, `label: string`.
     let TypeExpr::Object(object) = return_expr else {
-        panic!("`{{}} & X` publishes exactly the real arm X (an Object), got {return_expr:?}");
+        panic!("`{{}} & X` materializes exactly the real arm X (an Object), got {return_expr:?}");
     };
     assert_eq!(
         object.properties.len(),

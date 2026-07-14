@@ -103,23 +103,31 @@ use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurface, TypeInfoSurfaceMe
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::VerterHost;
 
+mod imported_elements;
 mod normalize;
+mod normalize_slots;
 
 // The per-surface normalizers live in the `normalize` submodule (file-size
 // split). Re-export the ones the executor below and external consumers reach
 // through the flat `vue_exec::props_from_typeinfo_surface` path.
+pub(crate) use imported_elements::{
+    imported_emits_resolved_elements, imported_named_props_resolved_elements,
+    imported_props_resolved_elements, named_type_elements_outcome, NamedTypeElementsOutcome,
+    NativeProjection,
+};
 pub(crate) use normalize::{
     emits_from_typeinfo_surface, exposed_from_typeinfo_surface, index_signatures_from_surface,
-    object_members_from_typeinfo_surface, props_from_typeinfo_surface, slots_from_typeinfo_surface,
+    object_members_from_typeinfo_surface, props_from_typeinfo_surface,
 };
+pub(crate) use normalize_slots::slots_from_typeinfo_surface;
 
 crate::project_semantic_dispatch::output_materialization::define_output_capability! {
     /// The Vue framework-surface executor's output-sink capability: the Vue
-    /// resolution leg here (and the `normalize` child) hold this to
+    /// resolution leg here (and its normalizer children) hold this to
     /// materialize a graph node into a sealed output carrier and unwrap it.
     /// Its constructor is visible ONLY within
-    /// `crate::typeinfo::framework_surface::vue_exec` (this module + the
-    /// `normalize` child) — NOT the whole `typeinfo` subtree — so no
+    /// `crate::typeinfo::framework_surface::vue_exec` (this module + its
+    /// children) — NOT the whole `typeinfo` subtree — so no
     /// `typeinfo` sibling can mint it (planted
     /// `TypeinfoVueSurfaceOutputCap::new` outside this leaf is `E0624`).
     pub(crate) struct TypeinfoVueSurfaceOutputCap;
@@ -333,11 +341,13 @@ impl VerterHost {
         if !default_symbol.is_synthesised_component_default {
             return None;
         }
-        // The synthesized default carries a construct-signature return type (the
-        // instance object); its absence means no public instance surface. The
-        // construct signature lives on the synthesized BODY, not the slim header.
+        // The synthesized default carries the instance object as the
+        // annotation-borne closed SOURCE on the synthesized BODY (not the slim
+        // header); its absence means no public instance surface. The synth's
+        // construct signature deliberately carries no authored return position
+        // (`return_ty` is an honest `None`), so the annotation is the gate.
         let default_body = indexed.shallow_state.value_decl("default")?;
-        default_body.signatures.first()?.return_type.as_ref()?;
+        default_body.type_annotation.annotation.as_ref()?;
         let _whole_hash = indexed.whole_hash;
 
         // Query-RETURNER: it returns the public instance surface with no outer
@@ -587,16 +597,21 @@ impl VerterHost {
     }
 }
 
-/// Navigate a `TypeExpr` to its one-level object [`TypeInfoSurface`] through the
-/// SHARED resolver bound to the ACTIVE `ctx`, lowering it in `scope_canonical`
-/// then projecting the empty-path `Shallow` surface.
+/// Navigate an authored type-payload REF to its one-level object
+/// [`TypeInfoSurface`] through the SHARED resolver bound to the ACTIVE `ctx`,
+/// raising the content-free locator in `scope_canonical` then projecting the
+/// empty-path `Shallow` surface.
 ///
-/// Used by the slot-binding extractor to resolve a slot's first-parameter type
-/// (`Pick<RowApi, 'name'>` / a named alias / a parenthesized form) to the
-/// binding object WITHOUT a nominal shape-sniff: `Pick` is navigated,
-/// `Parenthesized` is unwrapped, and an alias `Ref` is resolved by the one
-/// shared resolver. Returns `None` when the scope file is not loaded or the type
-/// does not project to an object surface.
+/// Used by the framework-surface resolvers to resolve a captured authored
+/// payload (a `$props()` runes type, a `createEventDispatcher<E>` event map —
+/// `Pick<RowApi, 'name'>` / a named alias / a parenthesized form) to its
+/// object surface WITHOUT a nominal shape-sniff: the locator raises through
+/// the one shared raise bridge ([`ProjectSemanticDispatch::raise_semantic_type_source_to_hot`]
+/// → the memoized `LowerLocator` / macro type-arg producer), `Pick` is
+/// navigated, and an alias `Ref` is resolved by the one shared resolver.
+/// Returns `None` when the scope file is not loaded, the locator does not
+/// deref under the current view, or the type does not project to an object
+/// surface.
 ///
 /// Bound to `ctx` (`ctx.dispatch()`), so an overlay session resolves the
 /// slot-param object against its OVERLAY content.
@@ -604,18 +619,27 @@ impl VerterHost {
 pub(crate) fn navigate_param_to_object_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     scope_canonical: &str,
-    param_ty: &TypeExpr,
+    payload: &verter_type_expr::locators::AuthoredTypePayloadRef,
 ) -> Option<TypeInfoSurface> {
     let dispatch = ctx.dispatch();
 
-    // Lower the parameter type in its scope under structural-transit Navigate
-    // (member values stay shallow); the empty-path Shallow projection then
-    // synthesises the one-level object surface.
-    let base = dispatch.lower_type_expr_in_scope_with_context(
-        scope_canonical,
-        param_ty,
-        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-    )?;
+    // Raise the authored payload locator to its base node through the shared
+    // source-raise bridge under structural-transit Navigate (member values
+    // stay shallow); the empty-path Shallow projection then synthesises the
+    // one-level object surface. An undeferenceable locator is an honest
+    // `None` — never a fabricated stand-in node.
+    let base = dispatch
+        .raise_semantic_type_source_to_hot(
+            &verter_type_expr::facts::SemanticTypeSource::Authored(payload.locator.clone()),
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: scope_canonical,
+                context: ProjectionReductionContext::structural_transit_with_mode(
+                    ProjectionMode::Navigate,
+                ),
+                interior_failures: None,
+            },
+        )?
+        .node();
     // Open-generic gate: a slot-param root that is symbolic-only (an open
     // Conditional whose check carries a free `TypeParam`, an unresolved
     // `IndexedAccess` / `Mapped`, …) must NOT be materialised into a committed
@@ -896,7 +920,7 @@ pub(crate) fn vue_macro_dtos_with_ctx(
     // its completeness into any enclosing compute scope, so an outer
     // component-meta cold compute inherits this surface's partiality.
     let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-    let (dtos, finalise, fenced_serve_observed) =
+    let (dtos, finalise, non_cacheable_read_observed) =
         crate::fact_signature_helpers::install_fact_tracer(host, || {
             match host.resolve_vue_macro_surface_with_ctx(ctx, &validated_request) {
                 Some(macro_surface) => {
@@ -928,10 +952,10 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                             let prop_fields = props_from_typeinfo_surface(ctx, &resolved);
                             let bindings = prop_fields
                                 .iter()
-                                .map(|prop| {
+                                .map(|row| {
                                     crate::typeinfo::framework_surface::results::ModelBinding {
-                                        name: prop.name.clone(),
-                                        prop: prop.clone(),
+                                        name: row.analysis.name.clone(),
+                                        prop: row.analysis.clone(),
                                     }
                                 })
                                 .collect();
@@ -1013,7 +1037,7 @@ pub(crate) fn vue_macro_dtos_with_ctx(
     // a served-without-publication artifact must not enter the shared
     // metadata store (their carrier facts validate against the live
     // view). Return the freshly-computed bundle WITHOUT caching.
-    if fenced_serve_observed {
+    if non_cacheable_read_observed {
         return MacroDtosRead {
             dtos: Arc::new(dtos),
             completeness,

@@ -25,7 +25,7 @@ use crate::resolver_core::ResolverContext;
 use crate::semantic_query::DeclIdentity;
 use crate::types::FileAnalysisSnapshot;
 
-use super::output_sink::surface_member_to_expanded_field;
+use super::output_sink::{surface_member_to_expanded_field, MemberValuePosition};
 use super::publication_authority::{
     admit_published_member, read_surface_member_candidates, resolve_macro_payload,
     resolve_payload_surface,
@@ -88,7 +88,15 @@ pub(crate) fn project_exposed(
     admitted
         .into_iter()
         .map(|admitted| {
-            surface_member_to_expanded_field(query_engine, file, &admitted, None, None, None)
+            surface_member_to_expanded_field(
+                query_engine,
+                file,
+                &admitted,
+                None,
+                None,
+                mac.parsed_type_argument.as_ref(),
+                MemberValuePosition::ShallowMember,
+            )
         })
         .collect()
 }

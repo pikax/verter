@@ -21,6 +21,7 @@ hotpath-alloc = ["verter_compiler/hotpath-alloc", "hotpath", "hotpath/hotpath-al
 
 [dependencies]
 verter_compiler = { path = "../verter_compiler", features = ["bench"] }
+verter_parser = { path = "../verter_parser" }
 verter_session = { path = "../verter_session" }
 verter_workspace = { path = "../verter_workspace" }
 verter_diagnostics = { path = "../verter_diagnostics" }

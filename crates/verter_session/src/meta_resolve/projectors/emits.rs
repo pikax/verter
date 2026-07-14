@@ -14,7 +14,7 @@ use crate::semantic_query::DeclIdentity;
 use crate::types::FileAnalysisSnapshot;
 
 use super::macro_payload_substrate::PayloadSurfaceScope;
-use super::output_sink::surface_member_to_expanded_field;
+use super::output_sink::{surface_member_to_expanded_field, MemberValuePosition};
 use super::publication_authority::{
     admit_published_member, read_surface_member_candidates, resolve_macro_payload,
     resolve_payload_surface_with_scope, AdmittedPublishedMember,
@@ -41,7 +41,7 @@ pub(crate) fn project_emits(
     let ctx: &dyn ResolverContext = query_engine.ctx;
     // See `project_props` for the PublishedField origin-edge rationale —
     // recorded uniformly inside `admit_published_member`.
-    let admitted: Vec<(AdmittedPublishedMember<'_>, _, _, _)> = {
+    let admitted: Vec<(AdmittedPublishedMember<'_>, _, _)> = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let payload = match resolve_macro_payload(
             &dispatch,
@@ -86,31 +86,29 @@ pub(crate) fn project_emits(
                     .iter()
                     .find(|e| e.name == candidate.member().name.as_ref());
                 let raw_type = analyzed.and_then(|e| e.payload_type.clone());
-                let shallow_type_expr = analyzed.and_then(|e| e.payload_expr.clone());
-                let shallow_type_expr_scope = analyzed.and_then(|e| e.payload_expr_scope.clone());
+                let shallow_payload = analyzed.and_then(|e| e.payload.clone());
                 let admitted = admit_published_member(candidate, &cursor, &dispatch)?;
-                Some((
-                    admitted,
-                    raw_type,
-                    shallow_type_expr,
-                    shallow_type_expr_scope,
-                ))
+                Some((admitted, raw_type, shallow_payload))
             })
             .collect()
     };
     admitted
         .into_iter()
-        .map(
-            |(admitted, raw_type, shallow_type_expr, shallow_type_expr_scope)| {
-                surface_member_to_expanded_field(
-                    query_engine,
-                    file,
-                    &admitted,
-                    raw_type,
-                    shallow_type_expr,
-                    shallow_type_expr_scope,
-                )
-            },
-        )
+        .map(|(admitted, raw_type, shallow_payload)| {
+            surface_member_to_expanded_field(
+                query_engine,
+                file,
+                &admitted,
+                raw_type,
+                shallow_payload,
+                mac.parsed_type_argument.as_ref(),
+                // The flat emit row is a shallow published member value —
+                // METADATA for `define_emits_shape` (exactness / status /
+                // diagnostics), never the payload authority: the published
+                // emit payload source is the normalized
+                // `ResolvedEmitField.payload_source` row.
+                MemberValuePosition::ShallowMember,
+            )
+        })
         .collect()
 }

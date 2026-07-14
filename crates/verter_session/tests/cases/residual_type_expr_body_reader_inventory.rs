@@ -4,7 +4,7 @@
 //! `TypeExpr` reads are an enumerated, curated, justified set while the
 //! genuinely-graph-backed readers route through the shared hot accessor.
 //!
-//! ## NOT the complete semantic-`TypeExpr` census (Stage-10 re-census pointer)
+//! ## NOT the complete semantic-`TypeExpr` census
 //!
 //! This inventory covers ONLY declaration-BODY readers (the `<recv>.body` /
 //! `<recv>.body.<method>` shape). It is a SUBSET of the complete
@@ -12,22 +12,33 @@
 //! RESOLVED / GENERATED class — DTOs the resolver PRODUCES at query time
 //! (`type_expand`/`ExpandedField`, the `component_meta.rs *Analysis` carriers,
 //! the `html_intrinsics` catalog, `svelte_default_synth`, the
-//! `mapper_binder_registry` structural fingerprint, etc.) — NOR the
-//! BELOW-`verter_semantic` graph-persisted parser DTO class (the `verter_parser`
-//! `ResolvedProp`/`ResolvedNamedCallSignature.type_expr` carriers embedded in
-//! `ResolvedElements`, persisted whole as `SemanticNodeData::VueMacroElements`
-//! and warm-cloned on the imported-`.vue` hot path — an independent-confirm
-//! addition, owned by B6; see design §3.6 rule-1 class (vi) / §5.4). The COMPLETE
-//! Stage-10 terminal-completeness census (≈96 semantic surfaces; ≈24 that were
-//! unscoped before the re-census, plus the below-`verter_semantic`
-//! `VueMacroElements` carrier the confirm added) lives in
+//! `mapper_binder_registry` structural fingerprint, etc.). The
+//! below-`verter_semantic` graph-persisted parser DTO class (the former
+//! `verter_parser` `ResolvedProp`/`ResolvedNamedCallSignature.type_expr`
+//! carriers) is DELETED: `ResolvedElements` carries no typed-IR sidecar and no
+//! `SemanticNodeData` carrier persists it. The COMPLETE
+//! semantic-`TypeExpr` terminal-completeness census (≈96 semantic surfaces)
+//! lives in
 //! `docs/arch/stage10-typeexpr-terminal-removal-design.md` §3.6, and the
 //! `type_expand` three-surface handle-native sub-design is §5.7. That
-//! resolved/generated class is enforced STRUCTURALLY in its owning blocks
+//! resolved/generated class is enforced STRUCTURALLY at its owning surfaces
 //! (semantic `TypeExpr` field DELETION + `#[derive(NoTypeExpr)]` +
 //! sealed-output privacy), NOT by this body-reader scanner — adding
 //! name-keyed scanner rows for it here would violate the landed-scanner bar.
-//! This whole inventory file DELETES at the Stage-10 atomic landing (design §0).
+//! The framework/output-boundary subset of that class is CLOSED structurally:
+//! the callerless vue `runtime_ctor` walker is DELETED; the svelte
+//! persisted/candidate facts carry `AuthoredTypePayloadRef`s (locator +
+//! parse-stable payload hash, NoTypeExpr by derive); the typeinfo
+//! `TypeArgList` wire input is `&[SemanticNodeId]` (lowering confined to the
+//! wire-boundary entry `VerterHost::resolve_named_symbol_wire_with_audit`,
+//! inside its audited request); the
+//! `NamedTypeMember` output rides the sealed `NamedTypeMemberOutput`
+//! vocabulary; and the persisted jsdoc `resolved_type` is the sealed
+//! `verter_protocol` `ResolvedJsdocTypeOutput` graph snapshot — none of these
+//! is (or ever was) a declaration-BODY reader, so no row exists here for them.
+//! This whole inventory file DELETES when the residual reader classes are
+//! empty and the typed-IR body bridge is fully removed — at that point the
+//! guard has nothing left to confine.
 //!
 //! ## scanner records (durable guard-local record — Structural-Confinement-First)
 //!
@@ -45,9 +56,9 @@
 //!   fields.
 //! mechanism_ruling: curated inventory plus bounded structural tripwires, not a
 //!   global confinement proof. The structural replacement is private owner-layer
-//!   body storage plus HotPrepared*/HotTypeRef semantic access and an explicit
-//!   AuthoredDeclBody/authored-shape surface with no raw escape to graph-backed
-//!   consumers.
+//!   body storage plus graph-native handle access (`HotTypeRef`, minted on
+//!   demand at the dispatch boundary) and an explicit AuthoredDeclBody/
+//!   authored-shape surface with no raw escape to graph-backed consumers.
 //! hardening_rounds: 0
 //! hardening_history: narrowed claim; no global field-name scanner round consumed.
 //! ```
@@ -100,7 +111,7 @@
 //! because they are output/compat reads. This inventory enumerates and partitions
 //! exactly that residual set. The classes shrink to empty when the structural arms
 //! that retire each one exist (private owner-layer body storage plus
-//! `HotPrepared*` / `HotTypeRef` semantic access, an explicit `AuthoredDeclBody` /
+//! graph-native `HotTypeRef` handle access, an explicit `AuthoredDeclBody` /
 //! authored-shape surface, a graph-native closedness/key-domain classifier, a
 //! below-graph layering seam, and the imported-registry-carrier / locator-split
 //! refactors); at that point the `AuthoredShape` / `GraphFreeDto` /
@@ -150,14 +161,13 @@
 //! .m()` are detected identically to `lowered.body.m()`.
 //!
 //! These method NAMES are NOT unique to `TypeDeclBody`: `contributors` /
-//! `primary` also exist on the eval-env `TypeDeclGroup` / `ValueDeclGroup`, and
-//! `is_merged` also exists on `HotPreparedTypeDecl`. The shape stays a SOUND
-//! proxy not because the names are unique, but because the chain requires the
-//! read to go through a `.body` FIELD — and NO `body:` field in the production
-//! tree is typed as a colliding type (`TypeDeclGroup` / `ValueDeclGroup` /
-//! `HotPreparedTypeDecl` / `TypeDeclInfo` / `ValueDeclInfo`). The only `.body`
+//! `primary` also exist on the eval-env `TypeDeclGroup` / `ValueDeclGroup`. The
+//! shape stays a SOUND proxy not because the names are unique, but because the
+//! chain requires the read to go through a `.body` FIELD — and NO `body:` field
+//! in the production tree is typed as a colliding type (`TypeDeclGroup` /
+//! `ValueDeclGroup` / `TypeDeclInfo` / `ValueDeclInfo`). The only `.body`
 //! field carrying these methods is `LoweredTypeDecl.body: TypeDeclBody`. Note
-//! `PreparedTypeDecl.body` is a `TypeExpr`, NOT a `TypeDeclBody` (verter_semantic
+//! `PreparedTypeDecl` stores body FACTS + locators, not a body (verter_semantic
 //! `prepared.rs`), so a `PreparedTypeDecl.body` read CANNOT be a `.body.<method>`
 //! chain — it is a bare-FIELD read, anchored by the ENUMERATION, not this
 //! tripwire.
@@ -181,7 +191,7 @@
 //! syntactic reach — they are caught ONLY if the author keeps the
 //! MANUALLY-CURATED ENUMERATION complete (and by the behavioural parity rail), NOT
 //! by an automatic structural scan. Closing this hole structurally requires private
-//! owner-layer body storage plus a `HotPrepared*` / `HotTypeRef` semantic surface
+//! owner-layer body storage plus a graph-native `HotTypeRef` semantic surface
 //! and an explicit `AuthoredDeclBody` accessor (a global direct-field scanner is
 //! rejected as a confinement proof — untyped `syn` field reads cannot attribute a
 //! `.body` read to the declaration-body type); that structural arm is a separate
@@ -522,12 +532,11 @@ fn split_cfg_terms(ts: &proc_macro2::TokenStream) -> Vec<Vec<proc_macro2::TokenT
 ///
 /// These are `TypeDeclBody` reader methods — but they are NOT defined ONLY on
 /// `TypeDeclBody`: `contributors` / `primary` also exist on the eval-env
-/// `TypeDeclGroup` / `ValueDeclGroup`, and `is_merged` also exists on
-/// `HotPreparedTypeDecl`. The `<recv>.body.<method>` shape stays a SOUND proxy
-/// not because the method names are unique, but because requiring the receiver
-/// to be a `.body` FIELD access excludes every colliding owner: NO `body:` field
-/// in the production tree is typed as a colliding type (`TypeDeclGroup` /
-/// `ValueDeclGroup` / `HotPreparedTypeDecl` / `TypeDeclInfo` / `ValueDeclInfo`)
+/// `TypeDeclGroup` / `ValueDeclGroup`. The `<recv>.body.<method>` shape stays a
+/// SOUND proxy not because the method names are unique, but because requiring
+/// the receiver to be a `.body` FIELD access excludes every colliding owner: NO
+/// `body:` field in the production tree is typed as a colliding type
+/// (`TypeDeclGroup` / `ValueDeclGroup` / `TypeDeclInfo` / `ValueDeclInfo`)
 /// — the only `.body` field carrying these methods is `LoweredTypeDecl.body:
 /// TypeDeclBody`. That no-colliding-`.body`-field property is a reviewed,
 /// verified premise (a targeted `body:\s*<colliding-type>` field-type search
@@ -1185,9 +1194,8 @@ enum ReaderClass {
     /// body carrier carries `TypeExpr` rather than identity / `HotTypeRef`; the
     /// member-surface-route key enumerator has no graph-native `SemanticNodeData`
     /// key enumerator; the locator is a single `TypeExpr`-returning locator, not
-    /// split into identity/hot vs authored-body locators; the
-    /// `PreparedValueDecl.type_annotation` value-decl handle has no `HotPreparedValueDecl`
-    /// annotation handle). Unlike the `AuthoredShape` / `GraphFreeDto` /
+    /// split into identity/hot vs authored-body locators). Unlike the
+    /// `AuthoredShape` / `GraphFreeDto` /
     /// `ProducerLowering` / `OutputCompat` classes (which record WHY a reader reads
     /// `TypeExpr` as a settled architectural fact), this class is a NON-GROWTH
     /// BOUNDED SET: it is bounded at the readers structurally requiring such an arm,
@@ -1202,10 +1210,11 @@ enum ReaderClass {
     ///   bounded at the readers structurally requiring such an arm, shrinks to empty
     ///   as those arms land, and never grows.
     /// scanner_justification: which graph-backed reader needs a larger structural arm
-    ///   (a carrier identity flip, a graph-native key enumerator, a locator split, a
-    ///   value-decl annotation handle) before it can route through decl_body_hot_ref
-    ///   is an architectural judgement; the named arm in each row records the
-    ///   boundary, a present architectural fact.
+    ///   (a carrier identity flip, a graph-native key enumerator, a locator split)
+    ///   before it can route through decl_body_hot_ref is an architectural
+    ///   judgement; the named arm in each row records the boundary, a present
+    ///   architectural fact. The former value-decl annotation arm landed as the
+    ///   narrowed annotation fact and its rows left the class.
     /// mechanism_ruling: non-growth bounded set — the cap REDs on growth and is
     ///   LOWERED as each structural arm lands; the set empties as the arms land and
     ///   this inventory is deleted.
@@ -1333,9 +1342,10 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         class: ReaderClass::ProducerLowering,
         method_chain: true,
         required_hot_route: &[],
-        reason: "the eager clone path the producer backs — reads lowered.body via lookup_object() / \
-                 is_merged() / contributors() when building the PreparedTypeDecl; producer-mint \
-                 class, preserved",
+        reason: "the type prepare path the producer backs — reads lowered.body.is_merged() / \
+                 lowered.body.contributors() over the content-free TypeDeclBody slot carrier \
+                 (merge-shape + contributor count only; no embedded TypeExpr) when assembling the \
+                 PreparedTypeDecl; producer-mint class, preserved",
     },
     ReaderRow {
         file: "src/resolver_core/prepared_decl.rs",
@@ -1344,277 +1354,131 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         class: ReaderClass::ProducerLowering,
         method_chain: false,
         required_hot_route: &[],
-        reason: "the value eager clone path — reads lowered.type_annotation (LoweredValueDecl) when \
-                 preparing a local value decl; producer-mint class, preserved",
+        reason: "the value prepare path — a thin wrapper over the lease-aware \
+                 prepare_local_value_decl_outcome, which copies lowered.type_annotation (the \
+                 content-free ValueTypeAnnotationFact, no TypeExpr) onto the PreparedValueDecl; \
+                 producer-mint class, preserved",
+    },
+    ReaderRow {
+        file: "src/decl_body_memo/locator_deref.rs",
+        impl_path: "",
+        fn_name: "transient_body_shape",
+        class: ReaderClass::ProducerLowering,
+        method_chain: true,
+        required_hot_route: &[],
+        reason: "the locator-deref half of the lazy body service — assembles the derefed \
+                 whole-body SHAPE (Single vs Merged) from the memo record's content-free \
+                 TypeDeclBody merge-shape carrier (lowered.body.is_merged()) plus the \
+                 lease-re-borrowed transient contributor bodies; the supply line the LowerLocator \
+                 producer lowers through",
+    },
+    ReaderRow {
+        file: "src/project_semantic_dispatch/raise.rs",
+        impl_path: "",
+        fn_name: "deref_slot_body",
+        class: ReaderClass::ProducerLowering,
+        method_chain: false,
+        required_hot_route: &[],
+        reason: "the closedness recipe-escape supply line — derefs ONE authored body position \
+                 lease-only through the shared locator-deref worker and hands the transient \
+                 TypeExpr to the shared lowerer; decision-free (every closedness verdict runs on \
+                 nodes in OpenWalk)",
+    },
+    ReaderRow {
+        file: "src/project_semantic_dispatch/raise.rs",
+        impl_path: "",
+        fn_name: "lower_body_under_env",
+        class: ReaderClass::ProducerLowering,
+        method_chain: false,
+        required_hot_route: &[],
+        reason: "the closedness recipe-escape lowering bridge — feeds the derefed transient body \
+                 to the ONE shared shallow lowerer (structural transit, carrier-preserving) under \
+                 the live binding environment and returns the node; decision-free lowering input \
+                 only",
     },
     // ── AuthoredShape — decision is intrinsically about authored syntax ──
-    ReaderRow {
-        file: "src/project_semantic_dispatch/build.rs",
-        impl_path: "impl ProjectSemanticDispatch",
-        fn_name: "class_heritage_bases",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body for the authored heritage extends/implements refs of a class \
-                 declaration body AND surfaces each base's prepared-body-derived `type_arguments` \
-                 (bare TypeExpr slice), which the ResolveClassSurface consumer LOWERS through the \
-                 reducing lowerer (`lower_class_heritage_args`) — not only ref reads; \
-                 authored-syntax-intrinsic",
-    },
-    ReaderRow {
-        file: "src/project_semantic_dispatch/raise.rs",
-        impl_path: "",
-        fn_name: "userland_instantiation_body_is_closed_object",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body to classify whether a userland instantiation body is a closed \
-                 object — authored-shape closedness over the TypeExpr",
-    },
-    ReaderRow {
-        // Free file-scope fn — the `impl KeyDomainBinding<'_>` block at raise.rs
-        // closes before this definition (verified via `syn`, not line proximity).
-        file: "src/project_semantic_dispatch/raise.rs",
-        impl_path: "",
-        fn_name: "prepared_decl_body_is_closed_unguarded",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body to classify closedness of a prepared decl body — authored-shape \
-                 closedness over the TypeExpr",
-    },
-    ReaderRow {
-        // Free file-scope fn (same as above — outside the KeyDomainBinding impl).
-        file: "src/project_semantic_dispatch/raise.rs",
-        impl_path: "",
-        fn_name: "prepared_instantiation_key_domain_is_closed",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body to classify whether an instantiation's key domain is closed — \
-                 authored-shape key-domain over the TypeExpr",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_registry.rs",
-        impl_path: "",
-        fn_name: "component_meta_registry_owner_local_component_config_alias_name",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body (and a one-hop alias next.body) to classify a ComponentConfig \
-                 alias by authored shape",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_registry.rs",
-        impl_path: "",
-        fn_name: "collect_component_meta_registry_public_field_refs",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body across the registry public-field surface to collect authored \
-                 field refs",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_registry.rs",
-        impl_path: "",
-        fn_name: "collect_component_meta_registry_public_indexed_access_roots",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body to collect authored indexed-access roots",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
-        impl_path: "impl ComponentMetaQueryEngine",
-        fn_name: "should_preserve_transitive_ref",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body to decide transitive-ref preservation by authored shape",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
-        impl_path: "impl ComponentMetaQueryEngine",
-        fn_name: "fast_symbolic_imported_generic_route",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body on the fast symbolic imported-generic route (authored ref \
-                 shape)",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
-        impl_path: "impl ComponentMetaQueryEngine",
-        fn_name: "collapse_same_file_imported_alias_chain",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body when collapsing a same-file imported alias chain (authored \
-                 alias shape)",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
-        impl_path: "impl ComponentMetaQueryEngine",
-        fn_name: "try_fast_expand_shallow_alias_body",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body on the fast shallow-alias expand path (authored alias shape)",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
-        impl_path: "impl ComponentMetaQueryEngine",
-        fn_name: "rewrite_fast_shallow_alias_body",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body on the fast shallow-alias rewrite path (authored alias shape)",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_query_engine/registry_decl.rs",
-        impl_path: "impl ComponentMetaQueryEngine",
-        fn_name: "owner_collection_expr",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.body to return the RAW alias body the registry walker classifies by \
-                 authored shape (Ref{type_arguments}); the value is keyed into the TypeExpr-keyed \
-                 OwnerCollectionDb a handle-derived value must never populate — authored-shape, \
-                 stays TypeExpr",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_query_engine/registry_decl.rs",
-        impl_path: "impl ComponentMetaQueryEngine",
-        fn_name: "named_decl_body",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "the named_decl_body DEFINITION — reads prepared.body and returns the cloned body \
-                 TypeExpr the authored-shape classifiers (C5/C6) and the C7 locator consume",
-    },
-    ReaderRow {
-        file: "src/meta_resolve/registry_materialize.rs",
-        impl_path: "",
-        fn_name: "nested_symbolic_member_route_should_stay_symbolic",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "calls named_decl_body and classifies the returned body by authored shape \
-                 (Ref{type_arguments} non-empty, utility route, indexed-access route) — \
-                 authored-syntax-intrinsic",
-    },
-    ReaderRow {
-        file: "src/meta_resolve/materialize/field_types.rs",
-        impl_path: "",
-        fn_name: "type_expr_has_package_backed_object_like_root_with_fence",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "calls named_decl_body and extracts the authored root (literal Pick/Omit, \
-                 IndexedAccess.object, Ref head) — authored-syntax-intrinsic",
-    },
-    ReaderRow {
-        file: "src/resolver_core/component_meta_query_engine/node_materialize.rs",
-        impl_path: "impl ComponentMetaQueryEngine",
-        fn_name: "owner_local_generic_alias_candidate",
-        class: ReaderClass::AuthoredShape,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "the owner-local generic-alias registry candidate reads prepared.body to gate on the \
-                 authored closed-object substitution shape (matches!(prepared.body, \
-                 TypeExpr::Object(_))) before instantiating — authored-shape closedness over the \
-                 TypeExpr, a bare .body field read anchored by the enumeration",
-    },
+    // The former `class_heritage_bases` row RETIRED: the class-heritage
+    // candidates went fact-native — the lazy decl-body lowering mints
+    // content-free `HeritageBaseFact`s (`collect_heritage_base_facts`, copied
+    // onto `PreparedTypeDecl.heritage_bases`), the dispatch reader resolves
+    // each fact's head through `name_resolution` and derefs + lowers only the
+    // demanded type-argument locators. No query-time TypeExpr walk remains on
+    // that surface.
+    // The three closedness/key-domain AuthoredShape rows
+    // (`userland_instantiation_body_is_closed_object`,
+    // `prepared_decl_body_is_closed_unguarded`,
+    // `prepared_instantiation_key_domain_is_closed`) RETIRED: the closedness
+    // cluster went fact-native — the lazy decl-body lowering mints the
+    // content-free `KeyDomainClosednessFact` (closed-object SHAPE verdict +
+    // one compact `ClosednessRecipe` per contributor body, copied onto
+    // `PreparedTypeDecl.key_domain_closedness`), and the dispatch evaluator
+    // reads the fact tri-state; recipe ESCAPES deref + shallow-lower the
+    // authored position through the ONE shared lowerer (the ProducerLowering
+    // supply rows below) and classify NODES with the node-route `OpenWalk`.
+    // The `key_domain_type_expr_is_closed` walker family is DELETED — the
+    // AuthoredShape class reached its empty target and no query-time
+    // TypeExpr closedness walk remains.
+    // The former registry AuthoredShape rows
+    // (`component_meta_registry_owner_local_component_config_alias_name`,
+    // `collect_component_meta_registry_public_field_refs`,
+    // `collect_component_meta_registry_public_indexed_access_roots`) RETIRED:
+    // the registry ref-collection surface went node-domain — the alias
+    // classifier reads `prepared.body_facts.body_slot` and resolves ref heads
+    // over `SemanticNodeId`s, and the public-field collector raises
+    // `SemanticTypeSource` + shallow locators to hot nodes. No `TypeExpr`
+    // body is read on that surface, so no residual row remains for it.
+    // The five former shallow-preserve fast-path rows
+    // (`should_preserve_transitive_ref`, `fast_symbolic_imported_generic_route`,
+    // `collapse_same_file_imported_alias_chain`,
+    // `try_fast_expand_shallow_alias_body`, `rewrite_fast_shallow_alias_body`)
+    // RETIRED with their functions: the fast-path residuals were closed and
+    // deleted; the surviving preservation decisions run through the shared
+    // dispatch.
+    // The former owner-local generic-alias registry-candidate row
+    // (`owner_local_generic_alias_candidate`) and the package-backed gate's
+    // `TypeExpr`-front row
+    // (`type_expr_has_package_backed_object_like_root_with_fence`) RETIRED
+    // with their functions: the registry candidate path is gone, and the
+    // node-domain front (`node_package_backed_object_like_root_with_fence`)
+    // is the sole entrance to the shared identity tail — no authored
+    // `TypeExpr` walk remains on either surface.
     // ── GraphFreeDto — below the session graph ──────────────────────────
     ReaderRow {
         file: "src/resolver_core/shallow_file_state.rs",
         impl_path: "impl ShallowFileState",
         fn_name: "route_closure",
         class: ReaderClass::GraphFreeDto,
-        method_chain: true,
+        method_chain: false,
         required_hot_route: &[],
-        reason: "reads lowered.body.lookup_object() on the route-closure path — below the session \
-                 graph, cannot carry a HotTypeRef",
+        reason: "thin driver over the shared verter_semantic fact-closure core \
+                 (route_closure_over_facts + SfsRouteFactProvider); the below-graph TypeExpr \
+                 traffic is the provider's deferred key-source fact MINT (key_source_lookup → \
+                 produce_key_source_fact over the lease-only re-borrowed alias contributor \
+                 bodies) — the shared core receives only the content-free KeySourceLookup \
+                 outcome, never a body. No .body field read remains; anchored by the \
+                 enumeration, not the tripwire",
     },
-    ReaderRow {
-        file: "src/resolver_core/shallow_file_state.rs",
-        impl_path: "impl ShallowFileState",
-        fn_name: "member_path_route_closure",
-        class: ReaderClass::GraphFreeDto,
-        method_chain: true,
-        required_hot_route: &[],
-        reason: "reads lowered.body.lookup_object() on the member-path route closure — below the \
-                 session graph",
-    },
-    ReaderRow {
-        file: "src/resolver_core/shallow_file_state.rs",
-        impl_path: "impl ShallowFileState",
-        fn_name: "member_route_closure",
-        class: ReaderClass::GraphFreeDto,
-        method_chain: true,
-        required_hot_route: &[],
-        reason: "reads lowered.body.lookup_object() on the member route closure — below the session \
-                 graph",
-    },
-    ReaderRow {
-        file: "src/resolver_core/shallow_file_state.rs",
-        impl_path: "impl ShallowFileState",
-        fn_name: "whole_route_closure",
-        class: ReaderClass::GraphFreeDto,
-        method_chain: true,
-        required_hot_route: &[],
-        reason: "reads lowered.body.lookup_object() on the whole route closure — below the session \
-                 graph",
-    },
-    ReaderRow {
-        file: "src/resolver_core/shallow_file_state.rs",
-        impl_path: "impl ShallowFileState",
-        fn_name: "follow_local_symbol_precise",
-        class: ReaderClass::GraphFreeDto,
-        method_chain: true,
-        required_hot_route: &[],
-        reason: "reads lowered.body.lookup_object() when following a local symbol precisely — below \
-                 the session graph",
-    },
-    ReaderRow {
-        file: "src/resolver_core/shallow_file_state.rs",
-        impl_path: "impl ShallowFileState",
-        fn_name: "follow_routed_expr",
-        class: ReaderClass::GraphFreeDto,
-        method_chain: true,
-        required_hot_route: &[],
-        reason: "reads lowered.body.lookup_object() when following a routed expression — below the \
-                 session graph",
-    },
-    ReaderRow {
-        file: "src/resolver_core/shallow_file_state.rs",
-        impl_path: "impl ShallowFileState",
-        fn_name: "extract_string_literal_keys_from_type_expr",
-        class: ReaderClass::GraphFreeDto,
-        method_chain: true,
-        required_hot_route: &[],
-        reason: "reads lowered.body.lookup_object() to extract string-literal keys — below the \
-                 session graph",
-    },
-    ReaderRow {
-        file: "src/resolver_core/shallow_file_state.rs",
-        impl_path: "",
-        fn_name: "collect_member_path_seed_names",
-        class: ReaderClass::GraphFreeDto,
-        method_chain: true,
-        required_hot_route: &[],
-        reason: "reads lowered.body.lookup_object() to collect member-path seed names (free fn) — \
-                 below the session graph",
-    },
+    // The seven former route-walker GraphFreeDto rows
+    // (`member_path_route_closure`, `member_route_closure`,
+    // `whole_route_closure`, `follow_local_symbol_precise`,
+    // `follow_routed_expr`, `extract_string_literal_keys_from_type_expr`,
+    // `collect_member_path_seed_names`) RETIRED with their functions: the
+    // query-time TypeExpr route walkers were deleted when the session route
+    // closures swapped onto the shared fact-closure core (LoweredTypeDecl
+    // stores the producer's ShallowRouteFacts; the closures read stored route
+    // facts, never a body re-walk).
     ReaderRow {
         file: "src/resolver_core/external_type_frontier.rs",
         impl_path: "impl ExternalTypeFrontier",
         fn_name: "resolve_through_export",
         class: ReaderClass::GraphFreeDto,
-        method_chain: true,
+        method_chain: false,
         required_hot_route: &[],
-        reason: "reads lowered.body.lookup_object() (two branches) when resolving through an export \
-                 — the external-type frontier lives below the session graph",
+        reason: "mints the graph-free NarrowFrontierBody::Resolvable locator + narrowed \
+                 type-param facts from the local decl (resolve_local_frontier_body) — the \
+                 external-type frontier lives below the session graph. No .body field read (and \
+                 no .body.<method> chain read) remains; anchored by the enumeration, not the \
+                 tripwire",
     },
     ReaderRow {
         file: "src/resolver_core/external_type_frontier.rs",
@@ -1623,10 +1487,11 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         class: ReaderClass::GraphFreeDto,
         method_chain: false,
         required_hot_route: &[],
-        reason: "re-clones a frontier-produced ResolvedSymbol.body (existing.body.clone(), populated \
-                 FROM the lowered body) when rebuilding from an already-resolved chain entry — the \
-                 frontier lives below the session graph. A BARE .body field read, anchored by the \
-                 enumeration, not the tripwire",
+        reason: "re-clones a frontier-produced ResolvedSymbol.frontier_body \
+                 (existing.frontier_body.clone(), a graph-free NarrowFrontierBody locator, not a \
+                 TypeExpr body) when rebuilding from an already-resolved chain entry — the \
+                 frontier lives below the session graph. No .body field read remains; anchored by \
+                 the enumeration, not the tripwire",
     },
     ReaderRow {
         file: "src/host_manage/eval_env.rs",
@@ -1635,8 +1500,10 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         class: ReaderClass::GraphFreeDto,
         method_chain: false,
         required_hot_route: &[],
-        reason: "the typeof peel reads lowered.type_annotation (LoweredValueDecl) — the eval-env \
-                 value-decl peel lives below the session graph",
+        reason: "the typeof peel reads lowered.type_annotation.typeof_alias_target — the \
+                 content-free ValueTypeAnnotationFact's precomputed single-hop typeof-peel target \
+                 (no TypeExpr) — the eval-env value-decl peel lives below the session graph; a \
+                 bare .type_annotation field read anchored by the enumeration",
     },
     ReaderRow {
         file: "src/host_manage/eval_env.rs",
@@ -1645,94 +1512,33 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         class: ReaderClass::GraphFreeDto,
         method_chain: false,
         required_hot_route: &[],
-        reason: "the graph-native value-symbol reader reads lowered.type_annotation \
-                 (effective_value_decl → LoweredValueDecl) — same below-graph carrier class as \
+        reason: "the graph-native value-symbol reader clones lowered.type_annotation — the \
+                 content-free ValueTypeAnnotationFact (effective_value_decl → LoweredValueDecl, \
+                 no TypeExpr) — into ValueDeclInfo; same below-graph carrier class as \
                  peel_value_decl_alias_graph_native. A BARE .type_annotation field read, anchored by \
                  the enumeration",
     },
-    // ── GraphBackedPending — graph-backed, no graph-native arm for its shape ──
-    ReaderRow {
-        file: "src/resolver_core/component_meta_query_engine/helpers.rs",
-        impl_path: "",
-        fn_name: "resolve_imported_registry_symbol_with_budget",
-        class: ReaderClass::GraphBackedPending,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "builds the ResolvedImportedRegistrySymbol.body CARRIER from prepared.body (NOT the \
-                 prepared_type_decl(..).is_some() existence check, which stays a cheap shallow \
-                 presence check) because the imported-registry body carrier holds a TypeExpr body, \
-                 not identity. The structural arm that would retire this reader is an \
-                 imported-registry body carrier that holds identity / HotTypeRef + graph-native \
-                 materialization instead of a TypeExpr body",
-    },
-    ReaderRow {
-        file: "src/host_manage/component_meta_methods.rs",
-        impl_path: "impl VerterHost",
-        fn_name: "append_component_meta_registry_entries",
-        class: ReaderClass::GraphBackedPending,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads the imported-registry symbol body (resolved.body, the \
-                 ResolvedImportedRegistrySymbol.body carrier populated from prepared.body.clone()) \
-                 across registry-publication routing and calls named_decl_body (×3) because that \
-                 carrier holds a TypeExpr body. The structural arm that would retire this reader is \
-                 the same imported-registry body carrier holding identity / HotTypeRef + \
-                 graph-native materialization, through which this consumer then routes. All BARE \
-                 .body field reads, anchored by the enumeration",
-    },
-    ReaderRow {
-        file: "src/component_meta_resolution_policy/core.rs",
-        impl_path: "impl PolicyCtx",
-        fn_name: "locate_declaration",
-        class: ReaderClass::GraphBackedPending,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "calls named_decl_body and returns the located declaration body TypeExpr because the \
-                 locator is a single TypeExpr-returning LOCATOR, too broad to hand back a handle. The \
-                 structural arm that would retire this reader splits the locator into an \
-                 identity/hot-locator (for semantic consumers) vs an authored-body-locator (for \
-                 authored-shape policy code), by downstream need",
-    },
-    ReaderRow {
-        file: "src/project_semantic_dispatch/build.rs",
-        impl_path: "impl ProjectSemanticDispatch",
-        fn_name: "build_typeof",
-        class: ReaderClass::GraphBackedPending,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.type_annotation (PreparedValueDecl, from \
-                 effective_prepared_value_decl) and feeds it to shallow_lower_type_expr_with_context, \
-                 a graph-feeding value-decl annotation reader, because the prepared value decl holds \
-                 a TypeExpr annotation. The structural arm that would retire this reader is a \
-                 HotPreparedValueDecl annotation handle. A BARE .type_annotation field read, anchored \
-                 by the enumeration",
-    },
-    ReaderRow {
-        file: "src/resolver_core/runtime_values.rs",
-        impl_path: "",
-        fn_name: "prepared_value_decl_to_value_decl_info",
-        class: ReaderClass::GraphBackedPending,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads prepared.type_annotation.clone() (PreparedValueDecl) when building the \
-                 ValueDeclInfo round-trip into the importing env, the value-resolution surface, \
-                 because the prepared value decl holds a TypeExpr annotation. The structural arm that \
-                 would retire this reader is a HotPreparedValueDecl annotation handle. A BARE \
-                 .type_annotation field read (free fn), anchored by the enumeration",
-    },
-    ReaderRow {
-        file: "src/host_manage/eval_env.rs",
-        impl_path: "impl VerterHost",
-        fn_name: "component_meta_binding_type_entries",
-        class: ReaderClass::GraphBackedPending,
-        method_chain: false,
-        required_hot_route: &[],
-        reason: "reads decl.type_annotation.clone() (decl = prepared_value_decl(..), a \
-                 PreparedValueDecl) to build the component-meta binding type entries (publication) \
-                 because the prepared value decl holds a TypeExpr annotation. The structural arm that \
-                 would retire this reader is a HotPreparedValueDecl annotation handle. A BARE \
-                 .type_annotation field read, anchored by the enumeration",
-    },
+    // ── GraphBackedPending — EMPTY: every named structural arm landed ──────
+    // The three former value-annotation pending rows (`build_typeof`,
+    // `prepared_value_decl_to_value_decl_info`,
+    // `component_meta_binding_type_entries`) RETIRED: their structural arm —
+    // the narrowed value-annotation FACT (`PreparedValueDecl.type_annotation`
+    // / `LoweredValueDecl.type_annotation` now carry `ValueTypeAnnotationFact`,
+    // content-free classification + locator, no `TypeExpr`) — landed, so those
+    // anchors copy/route facts and are no longer residual `TypeExpr` readers.
+    // The imported-registry pending rows
+    // (`resolve_imported_registry_symbol_with_budget`,
+    // `append_component_meta_registry_entries`) RETIRED the same way: the
+    // imported-registry body carrier arm landed —
+    // `ResolvedImportedRegistrySymbol.body` holds the content-free
+    // `PreparedTypeBodyFacts` (classification + authored body-slot locator,
+    // never an embedded body) and consumers lower the slot through the one
+    // shared dispatch on demand. And the locator-split pending row
+    // (`locate_declaration`) RETIRED when `named_decl_body` went
+    // locator-native: it returns the content-free `AuthoredBodyLocator` and
+    // the policy wraps it as `SemanticTypeSource::Authored(locator)` — no
+    // located TypeExpr body is returned. The class is a non-growth bounded
+    // set whose bound reached its empty target of 0.
 ];
 
 /// One anchored COMPAT body reader: a purpose-named compat helper DEFINITION, or
@@ -1759,8 +1565,10 @@ const COMPAT_BODY_READERS: &[CompatRow] = &[
         file: "src/decl_body_memo.rs",
         impl_path: "impl DeclBodyMemo",
         fn_name: "compat_type_body_hash_input",
-        method_chain: true,
-        reason: "TYPE-space fingerprint hash input — type_decl(name)?.body.lookup_object()",
+        method_chain: false,
+        reason: "TYPE-space fingerprint hash input — returns the stored body_hash FACT (the \
+                 memo-owned fingerprint computed once at lazy lowering); no .body.<method> chain \
+                 read remains",
     },
     CompatRow {
         file: "src/fact_emission.rs",
@@ -1774,8 +1582,10 @@ const COMPAT_BODY_READERS: &[CompatRow] = &[
         file: "src/resolver_core/shallow_file_state.rs",
         impl_path: "impl ShallowFileState",
         fn_name: "compat_type_contributors_for_typeinfo",
-        method_chain: true,
-        reason: "typeinfo-oracle contributor read — type_decl(name)?.body.contributors()",
+        method_chain: false,
+        reason: "typeinfo-oracle contributor read — re-borrows the per-contributor TypeExpr view \
+                 lease-only from the retained snapshot (transient_type_bodies); the record stores \
+                 content-free contributor locators, so no .body.<method> chain read remains",
     },
     // ── The consumer call-site fns that route through the helpers ───────
     CompatRow {
@@ -2367,8 +2177,8 @@ fn nested_fn_body_read_is_attributed_to_the_nested_fn() {
 
 /// Tripwire RED→GREEN: a NEW un-inventoried fn performing a
 /// `<recv>.body.lookup_object()` read IS flagged; the SAME read at an
-/// inventoried anchor (`shallow_file_state.rs :: impl ShallowFileState ::
-/// route_closure`) is NOT.
+/// inventoried anchor (`prepared_decl.rs :: (free fn) ::
+/// prepare_type_decl_from_lowered`) is NOT.
 #[test]
 fn tripwire_fires_on_new_unlisted_reader_not_on_inventoried_anchor() {
     let allowed = method_chain_allowed_anchors();
@@ -2394,19 +2204,18 @@ fn tripwire_fires_on_new_unlisted_reader_not_on_inventoried_anchor() {
     );
 
     // GREEN — the same read shape AT an inventoried anchor is accepted.
-    let at_anchor = "impl ShallowFileState {\n    \
-        fn route_closure(&self, lowered: &L) -> bool {\n        \
-            let _ = lowered.body.lookup_object();\n        \
-            true\n    \
-        }\n}\n";
+    let at_anchor = "fn prepare_type_decl_from_lowered(lowered: &L) -> bool {\n    \
+        let _ = lowered.body.lookup_object();\n    \
+        true\n\
+        }\n";
     let anchor_inv = inventory_for(&[(
-        "src/resolver_core/shallow_file_state.rs".to_string(),
+        "src/resolver_core/prepared_decl.rs".to_string(),
         at_anchor.to_string(),
     )]);
     assert!(
         unclassified_method_chain_reads(&anchor_inv, &allowed).is_empty(),
         "self-test (tripwire GREEN): a `<recv>.body.lookup_object()` read at the inventoried anchor \
-         (shallow_file_state.rs :: impl ShallowFileState :: route_closure) must NOT be flagged"
+         (prepared_decl.rs :: (free fn) :: prepare_type_decl_from_lowered) must NOT be flagged"
     );
 }
 
@@ -2723,18 +2532,20 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
          proving the tripwire cannot be the completeness rail for bare-field readers"
     );
 
-    // (2) Representative bare-field readers of each non-migrated class are
+    // (2) Representative readers of each NON-EMPTY non-migrated class are
     // enumerated AND present + unique on the real tree (the enumeration row is
     // load-bearing). One per class so each class's enumeration is exercised.
+    // GraphBackedPending has NO witness: the class is EMPTY — every named
+    // structural arm landed and its rows left the ledger (the partition pin in
+    // `real_tree_inventory_is_non_vacuous` and the non-growth cap both hold it
+    // at zero).
     let files = production_src_files();
     let real_inv = build_fn_inventory(&files);
-    let class_witness: [(&str, &str, &str, ReaderClass); 4] = [
-        (
-            "src/resolver_core/component_meta_query_engine/helpers.rs",
-            "",
-            "resolve_imported_registry_symbol_with_budget",
-            ReaderClass::GraphBackedPending,
-        ),
+    // AuthoredShape has NO witness: the class is EMPTY — the heritage and
+    // closedness/key-domain clusters both went fact-native and their rows
+    // left the ledger (the partition pin in `real_tree_inventory_is_non_vacuous`
+    // holds it at zero).
+    let class_witness: [(&str, &str, &str, ReaderClass); 3] = [
         (
             "src/resolver_core/external_type_frontier.rs",
             "impl ExternalTypeFrontier",
@@ -2742,10 +2553,10 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
             ReaderClass::GraphFreeDto,
         ),
         (
-            "src/meta_resolve/materialize/field_types.rs",
+            "src/project_semantic_dispatch/raise.rs",
             "",
-            "type_expr_has_package_backed_object_like_root_with_fence",
-            ReaderClass::AuthoredShape,
+            "deref_slot_body",
+            ReaderClass::ProducerLowering,
         ),
         (
             "src/resolver_core/prepared_decl.rs",
@@ -2799,20 +2610,22 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
 #[test]
 fn tripwire_fires_on_moved_inventoried_reader() {
     let allowed = method_chain_allowed_anchors();
-    let moved = "impl ShallowFileState {\n    \
-        fn route_closure(&self) {}\n}\n\
+    let moved = "fn prepare_type_decl_from_lowered(lowered: &L) -> bool { \
+        lowered.body.is_merged() }\n\
         impl SomethingElse {\n    \
-        fn route_closure(&self, lowered: &L) -> bool { lowered.body.is_merged() }\n}\n";
+        fn prepare_type_decl_from_lowered(&self, lowered: &L) -> bool { \
+        lowered.body.is_merged() }\n}\n";
     let inv = inventory_for(&[(
-        "src/resolver_core/shallow_file_state.rs".to_string(),
+        "src/resolver_core/prepared_decl.rs".to_string(),
         moved.to_string(),
     )]);
     let hits = unclassified_method_chain_reads(&inv, &allowed);
     assert!(
         hits.iter()
-            .any(|h| h.fn_name == "route_closure" && h.impl_path == "impl SomethingElse"),
-        "self-test (tripwire move RED): `route_closure` moved to `impl SomethingElse` performing \
-         the chain read MUST be flagged. Got {:?}",
+            .any(|h| h.fn_name == "prepare_type_decl_from_lowered"
+                && h.impl_path == "impl SomethingElse"),
+        "self-test (tripwire move RED): `prepare_type_decl_from_lowered` moved to \
+         `impl SomethingElse` performing the chain read MUST be flagged. Got {:?}",
         hits.iter()
             .map(|h| (h.impl_path.as_str(), h.fn_name.as_str()))
             .collect::<Vec<_>>()
@@ -2820,9 +2633,9 @@ fn tripwire_fires_on_moved_inventoried_reader() {
     assert!(
         !hits
             .iter()
-            .any(|h| h.impl_path == "impl ShallowFileState" && h.fn_name == "route_closure"),
-        "self-test (tripwire move discrimination): the anchored `impl ShallowFileState :: \
-         route_closure` must NOT be flagged"
+            .any(|h| h.impl_path.is_empty() && h.fn_name == "prepare_type_decl_from_lowered"),
+        "self-test (tripwire move discrimination): the anchored free-fn \
+         `prepare_type_decl_from_lowered` performing the SAME chain read must NOT be flagged"
     );
 }
 
@@ -3090,13 +2903,13 @@ fn real_tree_inventory_is_non_vacuous() {
     );
 
     // Total residual + compat surface sizes — pinned so the curated surface
-    // cannot drift silently. The residual surface is 39 readers, partitioned by
+    // cannot drift silently. The residual surface is 12 readers, partitioned by
     // ReaderClass; the migrated anchor `lower_decl_body_to_node` is the
     // GraphBackedMigrated row. The COMPAT surface is 5 rows.
     assert_eq!(
         RESIDUAL_BODY_READERS.len(),
-        39,
-        "self-test (count pin): RESIDUAL_BODY_READERS must have exactly 39 rows"
+        12,
+        "self-test (count pin): RESIDUAL_BODY_READERS must have exactly 12 rows"
     );
     assert_eq!(
         COMPAT_BODY_READERS.len(),
@@ -3104,8 +2917,20 @@ fn real_tree_inventory_is_non_vacuous() {
         "self-test (count pin): COMPAT_BODY_READERS must have exactly 5 rows"
     );
 
-    // Per-class partition pins. 1 GraphBackedMigrated + 3 ProducerLowering + 17
-    // AuthoredShape + 12 GraphFreeDto + 6 GraphBackedPending = 39.
+    // Per-class partition pins. 1 GraphBackedMigrated + 4 ProducerLowering + 3
+    // AuthoredShape + 5 GraphFreeDto + 0 GraphBackedPending = 13. (The
+    // class-heritage row left the AuthoredShape class when the heritage
+    // candidates went fact-native — producer-minted `HeritageBaseFact`s +
+    // dispatch head-resolution over content-free arg locators. The
+    // owner-collection / named-decl-body read surface left the ledger when it
+    // went locator-native: those engine reads return content-free
+    // `AuthoredBodyLocator`s and their consumers lower through the one shared
+    // dispatch — no TypeExpr body is read. The route-walker closure rows left
+    // with their deleted functions when the route closures swapped onto the
+    // shared fact-closure core; the registry ref-collection rows left when
+    // that surface went node-domain; the GraphBackedPending rows left as each
+    // named structural arm landed — see the per-class retirement notes on the
+    // enumeration.)
     let class_count = |c: ReaderClass| {
         RESIDUAL_BODY_READERS
             .iter()
@@ -3120,28 +2945,33 @@ fn real_tree_inventory_is_non_vacuous() {
     );
     assert_eq!(
         class_count(ReaderClass::ProducerLowering),
-        3,
-        "self-test (partition pin): exactly three ProducerLowering rows (the mint + the two clone \
-         paths)"
+        6,
+        "self-test (partition pin): exactly six ProducerLowering rows (the mint + the two \
+         prepare paths + the locator-deref shape assembler + the two closedness recipe-escape \
+         supply lines)"
     );
     assert_eq!(
         class_count(ReaderClass::AuthoredShape),
-        17,
-        "self-test (partition pin): exactly 17 AuthoredShape rows"
+        0,
+        "self-test (partition pin): ZERO AuthoredShape rows. The class reached its empty target: \
+         the heritage candidates and the closedness/key-domain cluster both went fact-native \
+         (HeritageBaseFact / KeyDomainClosednessFact minted at lazy decl-body lowering, evaluated \
+         dispatch-side over recipes + nodes) — no query-time authored-shape TypeExpr walk remains"
     );
     assert_eq!(
         class_count(ReaderClass::GraphFreeDto),
-        12,
-        "self-test (partition pin): exactly 12 GraphFreeDto rows"
+        5,
+        "self-test (partition pin): exactly 5 GraphFreeDto rows"
     );
     assert_eq!(
         class_count(ReaderClass::GraphBackedPending),
-        6,
-        "self-test (partition pin): exactly six GraphBackedPending rows. GraphBackedPending is a \
-         non-growth bounded set (bound 0 is the empty set once every structural arm lands), NOT a \
-         settled stay-class — the non-growth bound is \
-         `graph_backed_pending_is_a_non_growth_bounded_class`; this exact pin coexists with the cap \
-         and is LOWERED (toward 0) as each row's structural arm lands"
+        0,
+        "self-test (partition pin): ZERO GraphBackedPending rows. GraphBackedPending is a \
+         non-growth bounded set whose bound reached its empty target: every named structural arm \
+         landed (the value-annotation fact, the imported-registry facts carrier, the \
+         locator-native named_decl_body) — the non-growth bound is \
+         `graph_backed_pending_is_a_non_growth_bounded_class`; this exact pin coexists with the \
+         cap and stays 0 (a new pending row is growth, which the cap rejects)"
     );
     assert_eq!(
         class_count(ReaderClass::OutputCompat),
@@ -3168,8 +2998,11 @@ fn real_tree_inventory_is_non_vacuous() {
         inv.iter()
             .filter(|d| !d.cfg_test && d.reads_lowered_body())
             .count()
-            >= 10,
-        "self-test: the real tree must contain many production `<recv>.body.<method>` reads"
+            >= 2,
+        "self-test: the real tree must still contain production `<recv>.body.<method>` reads \
+         (the two surviving chain readers: prepare_type_decl_from_lowered and \
+         transient_body_shape, both over the content-free TypeDeclBody merge-shape carrier) — \
+         proving the chain detector is not always-false"
     );
 
     // The method-chain allowlist is exactly the inventoried method_chain rows.
@@ -3188,12 +3021,15 @@ fn real_tree_inventory_is_non_vacuous() {
         "self-test: the method-chain allowlist size must equal the inventoried method_chain rows"
     );
     assert_eq!(
-        compat_chain, 2,
-        "self-test: exactly two COMPAT helpers perform the `<recv>.body.<method>` chain read"
+        compat_chain, 0,
+        "self-test: ZERO COMPAT helpers perform the `<recv>.body.<method>` chain read — the type \
+         hash-input returns the stored body_hash fact and the contributor read re-borrows \
+         lease-only"
     );
     assert_eq!(
-        residual_chain, 10,
-        "self-test: exactly ten residual readers perform the `<recv>.body.<method>` chain read"
+        residual_chain, 2,
+        "self-test: exactly two residual readers perform the `<recv>.body.<method>` chain read \
+         (prepare_type_decl_from_lowered and transient_body_shape)"
     );
 }
 
@@ -3203,10 +3039,12 @@ fn real_tree_inventory_is_non_vacuous() {
 
 /// The non-growth CAP on the `GraphBackedPending` class — its CURRENT count. The
 /// class is a non-growth bounded set: it may only SHRINK as each row's named
-/// structural arm lands. The cap REDDENS on growth (a new pending row), and is
-/// LOWERED toward [`GRAPH_BACKED_PENDING_TARGET`] as a row leaves. It is NOT a
-/// settled final allowlist size.
-const GRAPH_BACKED_PENDING_CAP: usize = 6;
+/// structural arm lands. The cap REDDENS on growth (a new pending row). The
+/// class reached its empty bound — every named structural arm landed (the
+/// value-annotation fact, the imported-registry facts carrier, the
+/// locator-native `named_decl_body`) — so the cap sits at
+/// [`GRAPH_BACKED_PENDING_TARGET`] and holds the class empty.
+const GRAPH_BACKED_PENDING_CAP: usize = 0;
 
 /// The bound of the empty `GraphBackedPending` set: ZERO. Each row leaves the
 /// class the moment its structural arm lands; when the count reaches 0 the class
@@ -3229,7 +3067,7 @@ fn count_pending_in(rows: &[ReaderRow]) -> usize {
 /// instead of routed through a structural arm) pushes the count over
 /// [`GRAPH_BACKED_PENDING_CAP`] and REDDENS this guard; when a pending row's named
 /// structural arm lands and it leaves the class, the cap is LOWERED toward 0. This
-/// is the non-growth rail; the exact `== 6` pin in
+/// is the non-growth rail; the exact `== 3` pin in
 /// `real_tree_inventory_is_non_vacuous` coexists with it.
 #[test]
 fn graph_backed_pending_is_a_non_growth_bounded_class() {
@@ -3260,9 +3098,9 @@ fn graph_backed_pending_is_a_non_growth_bounded_class() {
 }
 
 /// DISCRIMINATING self-test for the non-growth cap: the cap predicate REDDENS on a
-/// synthetic inventory carrying a 7th `GraphBackedPending` row (growth past the
-/// cap of 6) and is GREEN at exactly 6. Proves the non-growth bound fires on a NEW
-/// pending row rather than silently absorbing it.
+/// synthetic inventory carrying ANY `GraphBackedPending` row (growth past the
+/// empty cap of 0) and is GREEN at exactly 0. Proves the non-growth bound fires on
+/// a NEW pending row rather than silently absorbing it.
 #[test]
 fn graph_backed_pending_cap_reddens_on_growth() {
     // A synthetic pending row template — `'static` literals so it fits `ReaderRow`.
@@ -3279,19 +3117,12 @@ fn graph_backed_pending_cap_reddens_on_growth() {
         }
     }
 
-    // GREEN at exactly the cap (6 synthetic pending rows).
-    let at_cap: [ReaderRow; 6] = [
-        synthetic_pending("p0"),
-        synthetic_pending("p1"),
-        synthetic_pending("p2"),
-        synthetic_pending("p3"),
-        synthetic_pending("p4"),
-        synthetic_pending("p5"),
-    ];
+    // GREEN at exactly the cap (the empty pending inventory).
+    let at_cap: [ReaderRow; 0] = [];
     assert_eq!(
         count_pending_in(&at_cap),
         GRAPH_BACKED_PENDING_CAP,
-        "self-test: a synthetic 6-row pending inventory sits exactly AT the cap"
+        "self-test: the empty pending inventory sits exactly AT the cap"
     );
     assert!(
         count_pending_in(&at_cap) <= GRAPH_BACKED_PENDING_CAP,
@@ -3299,58 +3130,43 @@ fn graph_backed_pending_cap_reddens_on_growth() {
          pending rows"
     );
 
-    // RED at cap + 1 (a synthetic 7th pending row — a NEW pending reader).
-    let over_cap: [ReaderRow; 7] = [
-        synthetic_pending("p0"),
-        synthetic_pending("p1"),
-        synthetic_pending("p2"),
-        synthetic_pending("p3"),
-        synthetic_pending("p4"),
-        synthetic_pending("p5"),
-        // The planted 7th row — growth the non-growth bound must reject.
-        synthetic_pending("p6_new_pending_reader"),
+    // RED at cap + 1 (a synthetic pending row — a NEW pending reader).
+    let over_cap: [ReaderRow; 1] = [
+        // The planted row — growth the non-growth bound must reject.
+        synthetic_pending("p0_new_pending_reader"),
     ];
     assert_eq!(
         count_pending_in(&over_cap),
         GRAPH_BACKED_PENDING_CAP + 1,
-        "self-test: a synthetic 7-row pending inventory grows the class by one"
+        "self-test: a synthetic one-row pending inventory grows the class by one"
     );
     assert!(
         count_pending_in(&over_cap) > GRAPH_BACKED_PENDING_CAP,
-        "self-test (cap RED): the cap predicate FAILS the moment a 7th pending row is added — the \
+        "self-test (cap RED): the cap predicate FAILS the moment a pending row is added — the \
          non-growth bound reddens on a NEW graph-backed pending reader rather than absorbing it. \
          (Rows of OTHER classes do NOT count: only GraphBackedPending growth trips the bound.)"
     );
 
     // Discrimination: a synthetic row of a DIFFERENT class does NOT count toward
     // the pending cap (the bound is scoped to GraphBackedPending only).
-    let mixed: [ReaderRow; 7] = [
-        synthetic_pending("p0"),
-        synthetic_pending("p1"),
-        synthetic_pending("p2"),
-        synthetic_pending("p3"),
-        synthetic_pending("p4"),
-        synthetic_pending("p5"),
-        ReaderRow {
-            file: "src/synthetic/over_cap_module.rs",
-            impl_path: "impl Synthetic",
-            fn_name: "authored_shape_not_pending",
-            class: ReaderClass::AuthoredShape,
-            method_chain: false,
-            required_hot_route: &[],
-            reason:
-                "synthetic AuthoredShape row — must NOT count toward the GraphBackedPending cap",
-        },
-    ];
+    let mixed: [ReaderRow; 1] = [ReaderRow {
+        file: "src/synthetic/over_cap_module.rs",
+        impl_path: "impl Synthetic",
+        fn_name: "authored_shape_not_pending",
+        class: ReaderClass::AuthoredShape,
+        method_chain: false,
+        required_hot_route: &[],
+        reason: "synthetic AuthoredShape row — must NOT count toward the GraphBackedPending cap",
+    }];
     assert_eq!(
         count_pending_in(&mixed),
         GRAPH_BACKED_PENDING_CAP,
-        "self-test (cap scope): a 7th row of a NON-pending class does NOT grow the pending count — \
+        "self-test (cap scope): a row of a NON-pending class does NOT grow the pending count — \
          the bound counts ONLY GraphBackedPending rows"
     );
     assert!(
         count_pending_in(&mixed) <= GRAPH_BACKED_PENDING_CAP,
-        "self-test (cap scope GREEN): a non-pending 7th row keeps the cap predicate GREEN"
+        "self-test (cap scope GREEN): a non-pending row keeps the cap predicate GREEN"
     );
 }
 

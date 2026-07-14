@@ -137,8 +137,12 @@ pub(crate) fn resolve_expr(
     type_args: &[Arc<TypeExpr>],
     mode: ProjectionMode,
 ) -> (TypeExpr, verter_audit::RequestAuditRecord) {
+    // Drive the FFI adapters' exact entry `resolve_named_symbol_wire_with_audit`:
+    // the wire `TypeExpr` payloads lower to node ids INSIDE its one audited
+    // request, under the request's single store view, before resolving — no
+    // separate host-boundary lowering pre-step.
     let (outcome, record) = host
-        .resolve_named_symbol_with_audit(canonical_id, name, type_args, Some(mode))
+        .resolve_named_symbol_wire_with_audit(canonical_id, name, type_args, Some(mode))
         .into_parts();
     let node = outcome.ok().flatten();
     let expr = host

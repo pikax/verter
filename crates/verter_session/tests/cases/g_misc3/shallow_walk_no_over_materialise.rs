@@ -171,8 +171,22 @@ fn pick_consumer_materialises_only_selected_member_not_others() {
     // nesting depth. The discriminating signal: the materialised
     // surface MUST contain `bar` (the selected member) and MUST NOT
     // contain `a`, `c`, `d`, or `e` (the unselected Foo members).
+    // Shell-materialize the published source WITHOUT a resolution
+    // demand: the SHALLOW published shape is exactly what this guard
+    // pins (a demand would run the resolution this test forbids from
+    // happening eagerly).
+    let picked_source = picked
+        .type_source
+        .present()
+        .expect("`picked` prop must publish a typed source");
+    let picked_shallow = verter_session::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/owner.vue",
+        picked_source,
+    )
+    .unwrap_or_else(|| panic!("`picked`'s published source must shell-materialize"));
     let mut names = Vec::<String>::new();
-    collect_property_names(&picked.type_expr, &mut names);
+    collect_property_names(&picked_shallow, &mut names);
 
     // The materialised prop type for `picked: Pick<Foo, 'bar'>` may
     // either be:

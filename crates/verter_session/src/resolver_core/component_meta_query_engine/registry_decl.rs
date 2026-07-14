@@ -1,24 +1,29 @@
-//! Imported registry symbol resolution, direct prepared declaration
-//! access, fuse/state/debug accessors, and ctx/dispatch entry helpers
+//! Direct prepared-declaration access, the member-surface node-core and its
+//! demand APIs, prepared-target resolution, and the ctx/dispatch entry helpers
 //! for `ComponentMetaQueryEngine<'a>`.
 //!
 //! Inherent methods defined in a sibling `impl<'a>` block; they read
 //! the engine's private read-through caches and dispatch to the ctx
-//! store, then return resolved declarations or imported registry
-//! symbols.
+//! store, then return resolved declarations or materialised surfaces.
+//!
+//! The engine's four SHARED-CACHE producers (`ImportedRegistryDb`,
+//! `DeclarationLookupDb`, `ResolvabilityDb`, `OwnerCollectionDb`) live in the
+//! sibling `registry_cache_producers` module: they share one admission
+//! discipline (a cacheability tracer scope bracketing the whole cold path) and
+//! are read together. This module keeps the reads that admit into NO shared
+//! cache, plus the output-capability-minting node-core.
 //!
 //! Visibility:
-//! - `pub fn resolve_imported_registry_symbol`, `pub fn
-//!   resolve_direct_prepared_type_declaration`, `pub fn
+//! - `pub fn resolve_direct_prepared_type_declaration`, `pub fn
 //!   resolve_direct_prepared_type_declaration_metadata`, `pub fn
-//!   resolve_type_declaration`, `pub fn resolve_final_prepared_type_target`,
-//!   `pub fn can_resolve_registry_symbol`, `pub fn owner_collection_expr`,
-//!   `pub fn named_decl_body`, `pub fn prepared_member_raw_type` — all `pub`
+//!   resolve_final_prepared_type_target`, `pub fn named_decl_body` — all `pub`
 //!   on the engine, callable from outside the crate.
 //! - `pub(crate) fn materialize_member_surface_expr`,
 //!   `pub(crate) fn prepared_type_decl`, `pub(crate) fn ctx`,
 //!   `pub(crate) fn dispatch_routed_expr_surface_node` — crate-visible
 //!   helpers used by `meta_resolve` and other engine impl methods.
+//! - `pub(super) fn prepared_decl_authored_body_locator` — the ONE locator
+//!   mint, shared with the owner-collection producer next door.
 //! - Private methods (`semantic_dispatch`, `dispatch_root_instantiated`)
 //!   stay private and are visible inside the
 //!   `component_meta_query_engine` folder via parent-private locality.
@@ -26,20 +31,11 @@
 //! The engine's fuse / fanout-budget / cache-length / debug accessors live in
 //! the sibling `engine_accessors` module.
 
-use verter_semantic::analysis::type_solver::query_engine::ProjectedSurface;
-use verter_type_expr::TypeExpr;
-
-use super::helpers::{
-    is_builtin_name, resolve_imported_registry_symbol_with_budget, ImportedRegistrySymbolResolution,
-};
 use super::route_admission::{self, AdmittedRouteProjectionNode};
-use super::surface::{
-    projected_compound_root_surface_via_dispatch, projected_surface_from_semantic_node,
-};
+use super::surface::{compound_root_surface_view_via_dispatch, surface_view_from_semantic_node};
 use super::{
-    empty_semantic_args, engine_fact_signature_for_exported_type,
-    local_type_symbol_metadata_for_known_source, ComponentMetaQueryEngine,
-    DirectPreparedDeclarationResolver, ResolvedImportedRegistrySymbol, ResolvedTypeDeclaration,
+    empty_semantic_args, local_type_symbol_metadata_for_known_source, ComponentMetaQueryEngine,
+    DirectPreparedDeclarationResolver, ResolvedTypeDeclaration,
 };
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
@@ -64,299 +60,6 @@ crate::project_semantic_dispatch::output_materialization::define_output_capabili
 }
 
 impl<'a> ComponentMetaQueryEngine<'a> {
-    pub fn resolve_imported_registry_symbol(
-        &mut self,
-        canonical_id: &str,
-        exported_name: &str,
-    ) -> Option<ResolvedImportedRegistrySymbol> {
-        let key = (canonical_id.to_string(), exported_name.to_string());
-        if let Some(cached) = self.imported_registry_symbols.borrow().get(&key).cloned() {
-            return cached;
-        }
-        // Route through the ctx-owned `ImportedRegistryDb`. The local
-        // RefCell view above is non-authoritative scratch; the
-        // DashMap-backed DB is the authoritative cross-request cache.
-        //
-        // Singleflight shape: peek the shared DB first, and on a miss
-        // run the resolution INSIDE the cold-build `compute` closure that
-        // `ImportedRegistryDb::get_or_compute_admit` drives through the
-        // query-identity `query::lookup` split-publish path.
-        // `resolve_imported_registry_symbol_with_budget` consumes the
-        // wildcard-route fuse (`allow_wildcard_route()` /
-        // `wildcard_route_fanout`) on the slow lane — a side-effecting,
-        // per-request budget. Running it inside the cooperative flight
-        // slot is what bounds that cost to ONE winner: when several
-        // requests miss the same key concurrently, exactly one runs the
-        // closure and joiners block on the slot condvar and reuse its
-        // value. The closure returns `ComputeAdmission::Cacheable` when
-        // the provenance-pure signature builds and
-        // `ComputeAdmission::ReturnOnly` when it cannot — `ReturnOnly`
-        // still returns (and broadcasts) the freshly-resolved value
-        // without admitting the cache and without re-running the
-        // resolution.
-        let arc_key = (
-            std::sync::Arc::<str>::from(canonical_id),
-            std::sync::Arc::<str>::from(exported_name),
-        );
-        // Bind the resolver context to a local `Copy` reference so the
-        // request-local view inserts before and after the cooperative
-        // admission call below borrow `self` only through its `RefCell`
-        // fields, never through the `ctx` field.
-        let ctx = self.ctx;
-        let host_db = ctx.project_type_store().imported_registry_db();
-        if let Some(opt_arc) = host_db.peek(&arc_key, ctx) {
-            let cached = opt_arc.as_deref().cloned();
-            // Per-request audit attribution: imported-registry-symbol
-            // served from a host-cache peek. Differentiate warm
-            // positive from warm negative (`None`) so the audit
-            // reflects how many of the warm hits were actually
-            // "this symbol is known unresolvable".
-            if let Some(obs) = verter_audit::current_observer() {
-                obs.record_event(verter_audit::AuditEvent::ImportedRegistryWarm);
-                if cached.is_none() {
-                    obs.record_event(verter_audit::AuditEvent::ImportedRegistryNegative);
-                }
-            }
-            self.imported_registry_symbols
-                .borrow_mut()
-                .insert(key, cached.clone());
-            return cached;
-        }
-        // Cross-thread singleflight rendezvous seam: when the
-        // imported-registry post-peek barrier is armed for this keyed
-        // canonical, block here so every contending thread is past its
-        // `peek` miss before any enters cooperative admission. A no-op
-        // in production and whenever the gate is unarmed.
-        #[cfg(test)]
-        super::await_imported_registry_post_peek_barrier_for_tests(canonical_id);
-        // Cold path — observe the keyed canonical's content version
-        // ONCE here, before the value is computed, through the
-        // view-aware `authoritative_current_content_hash` oracle —
-        // under a `SessionResolverContext` this resolves the overlay
-        // content hash for an overlay-bearing session, so an
-        // overlay-derived entry roots on the overlay version (and a
-        // later base request mismatches it instead of reusing it). The
-        // signature builder is provenance-pure: it roots the entry's
-        // self-root on this observed hash, never a current-content
-        // re-read inside the cooperative-admission closure. `None`
-        // (canonical has no authoritative current content) refuses
-        // shared-cache admission — but the freshly-computed value is
-        // still returned via `ComputeAdmission::ReturnOnly`. The
-        // observed hash is captured HERE, before the closure, and
-        // `move`-captured in, so provenance purity holds regardless of
-        // which thread wins the singleflight.
-        let observed_keyed_hash = ctx.authoritative_current_content_hash(canonical_id);
-        // Test-only injection: simulate a concurrent request that
-        // validated-and-published this key into the shared DB inside
-        // this request's cold window — after the `peek` miss above,
-        // before the `get_or_compute_admit` call below.
-        // `get_or_compute_admit` then takes its warm-hit `validate` arm
-        // and returns the injected value without running the compute
-        // closure, exactly as it would under a real concurrent publish.
-        #[cfg(test)]
-        super::INJECT_IMPORTED_REGISTRY_CONCURRENT_PUBLISH.with(|slot| {
-            if let Some(symbol) = slot.borrow().clone() {
-                if let crate::cache_runtime::SignatureAdmission::Cacheable(sig) =
-                    engine_fact_signature_for_exported_type(
-                        ctx,
-                        canonical_id,
-                        exported_name,
-                        observed_keyed_hash.expect(
-                            "concurrent-publish injection fixture requires an observed keyed hash",
-                        ),
-                    )
-                {
-                    host_db.insert_for_test(
-                        arc_key.clone(),
-                        std::sync::Arc::new(crate::component_meta_caches::ImportedRegistryEntry {
-                            value: Some(std::sync::Arc::new(symbol)),
-                            fact_dep_signature: sig.facts,
-                            // A simulated concurrent publish stamps the
-                            // live project generation, exactly as the
-                            // real cold-compute path does.
-                            validated_at_generation: ctx
-                                .project_type_store()
-                                .current_project_generation(),
-                        }),
-                    );
-                }
-            }
-        });
-        // Cooperative-admission cold compute. The expensive,
-        // fuse-consuming `resolve_imported_registry_symbol_with_budget`
-        // resolution runs INSIDE the `compute` closure, so it runs
-        // exactly ONCE per key across all concurrent waiters: the
-        // `InflightTable` singleflight elects one winner to run the
-        // closure while joiners block on the slot condvar and reuse the
-        // winner's value. `allow_wildcard_route()` — and therefore the
-        // `wildcard_route_fanout` fuse — is consumed only by the
-        // winner.
-        //
-        // The closure returns a `ComputeAdmission`:
-        //
-        // - `Cacheable` — the provenance-pure fact signature built; the
-        //   entry is admitted and joiners re-read it.
-        // - `ReturnOnly` — the resolution produced a valid value but
-        //   the signature could not be built (no observed shallow
-        //   state for the keyed canonical) or the test refusal hook
-        //   fired; the value is still returned to this caller and
-        //   broadcast to joiners, the cache stays empty, and the
-        //   resolution is NOT re-run (no second fuse consumption).
-        //
-        // `get_or_compute_admit` returns `Option<Option<Arc<_>>>`:
-        //
-        // - `Some(cached)` — a validated value is authoritative: this
-        //   request's own freshly-computed `Cacheable`/`ReturnOnly`
-        //   outcome, OR an entry a CONCURRENT request published into
-        //   the DB between the `peek` miss above and this call (the
-        //   warm-hit `validate` arm returns it without running the
-        //   closure).
-        // - `None` — `compute` returned `Failed`, or post-compute
-        //   revalidation rejected the freshly-built entry (a file
-        //   mutated mid-compute). The request resolves to a transient
-        //   miss; the next request cold-recomputes. The resolution is
-        //   never re-run on this path.
-        let host_value = host_db.get_or_compute_admit(&arc_key, ctx, || {
-            #[cfg(test)]
-            super::IMPORTED_REGISTRY_RESOLVE_INVOCATIONS.with(|n| n.set(n.get().saturating_add(1)));
-            // Cross-thread singleflight slot-coalescing rendezvous seam:
-            // when the imported-registry winner-park gate is armed for
-            // this keyed canonical, the cold winner blocks here — AFTER
-            // it has claimed the in-flight slot (so `claimed == true` is
-            // already published and every later arrival is forced onto
-            // the joiner branch) and BEFORE it runs the fuse-consuming
-            // resolution / publishes / retires the slot. The test
-            // releases the winner only once it has proven every joiner
-            // has coalesced onto this slot, so no worker is left
-            // mid-flight between its `map.get` miss and its slot claim —
-            // closing the window in which a descheduled worker would
-            // form a second cold winner and tick the wildcard-route fuse
-            // again. A no-op in production and whenever the gate is
-            // unarmed.
-            #[cfg(test)]
-            super::await_imported_registry_winner_park_for_tests(canonical_id);
-            // Per-request audit attribution: cold path running the
-            // expensive `resolve_imported_registry_symbol_with_budget`
-            // resolution. Joiners that block on this closure do NOT
-            // re-enter — so the counter reflects unique cold work,
-            // not per-waiter overhead.
-            if let Some(obs) = verter_audit::current_observer() {
-                obs.record_event(verter_audit::AuditEvent::ImportedRegistryCold);
-            }
-            // Snapshot the project generation BEFORE the resolution
-            // dispatches any work. The `fact_dep_signature` carrier
-            // validates only file-content whole-hashes; a
-            // `ProjectGeneration` reset (tsconfig / path-alias / SDK /
-            // workspace-folder change) bumps no file content, so the
-            // entry carries its compute-time generation explicitly. The
-            // read-side gates reject the entry once the live generation
-            // moves past this snapshot.
-            let validated_at_generation = ctx.project_type_store().current_project_generation();
-            // The single, side-effecting resolution: the wildcard-route
-            // fuse is consumed here at most once per key.
-            let resolved: Option<ResolvedImportedRegistrySymbol> =
-                match resolve_imported_registry_symbol_with_budget(
-                    ctx,
-                    canonical_id,
-                    exported_name,
-                    || self.allow_wildcard_route(),
-                ) {
-                    ImportedRegistrySymbolResolution::Resolved(opt) => opt,
-                    ImportedRegistrySymbolResolution::FuseTripped => {
-                        // The wildcard route was needed but the
-                        // per-request fuse was exhausted, so the symbol
-                        // was NEVER looked up. This `None` is a GENUINE
-                        // PARTIAL — admitting it as a warm negative would
-                        // poison subsequent identical requests that DO
-                        // have budget. Mark the request partial sticky so
-                        // the whole component-meta result refuses to warm,
-                        // and route the absent value through
-                        // `ReturnOnly(None)` (NOT a cacheable negative).
-                        crate::request_context::mark_request_materialization_cache_suppress();
-                        let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                            crate::cache_runtime::NonAdmissionReason::PartialResult,
-                        );
-                        return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-                            None,
-                        );
-                    }
-                };
-            let resolved_value = resolved.map(std::sync::Arc::new);
-            #[cfg(test)]
-            if super::FORCE_IMPORTED_REGISTRY_ADMISSION_REFUSAL.with(|f| f.get()) {
-                // Deterministically reproduce the production
-                // admission-refusal contract (`engine_fact_signature_*`
-                // returns `None`) so the discriminating test can drive
-                // the refused-admission path without manufacturing a
-                // stale observed hash. The freshly-resolved value is
-                // still returned — and broadcast to joiners — via
-                // `ReturnOnly`.
-                let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                    crate::cache_runtime::NonAdmissionReason::ForcedTestRefusal,
-                );
-                return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-                    resolved_value,
-                );
-            }
-            let Some(observed) = observed_keyed_hash else {
-                // No authoritative current content for the keyed
-                // canonical — shared-cache admission is refused, but
-                // the value is still returned via `ReturnOnly`. The
-                // missing current-content read means the provenance
-                // could not be rooted to a self-root canonical, so
-                // a cross-view joiner could never view-validate it.
-                let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(
-                    crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
-                );
-                return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(
-                    resolved_value,
-                );
-            };
-            match engine_fact_signature_for_exported_type(
-                ctx,
-                canonical_id,
-                exported_name,
-                observed,
-            ) {
-                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
-                    crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                        crate::component_meta_caches::ImportedRegistryEntry {
-                            value: resolved_value,
-                            fact_dep_signature: sig.facts,
-                            validated_at_generation,
-                        },
-                    )
-                }
-                crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
-                    // Pass the typed refusal reason through the TLS
-                    // bridge so the downstream `CacheAdmission`
-                    // lowering attributes the correct structured
-                    // refusal reason instead of hard-coding
-                    // `SignatureOverflow`.
-                    let _reason_guard = crate::cache_runtime::SetReasonGuard::arm(reason);
-                    crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly(resolved_value)
-                }
-            }
-        });
-        let result = match host_value {
-            Some(cached) => cached.as_deref().cloned(),
-            None => None,
-        };
-        // Per-request audit attribution: a `None` result on the cold
-        // path indicates the imported-registry-symbol resolution
-        // could not find the symbol at all from the owner. The warm
-        // peek branch above handles the warm-negative case separately.
-        if result.is_none() {
-            if let Some(obs) = verter_audit::current_observer() {
-                obs.record_event(verter_audit::AuditEvent::ImportedRegistryNegative);
-            }
-        }
-        self.imported_registry_symbols
-            .borrow_mut()
-            .insert(key, result.clone());
-        result
-    }
-
     pub fn resolve_direct_prepared_type_declaration(
         &mut self,
         canonical_source: &str,
@@ -600,71 +303,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.materialize_member_surface_node_core(scope_canonical_id, base, nested_surface)
     }
 
-    /// Resolve a type declaration, cached per query.
-    pub fn resolve_type_declaration(
-        &mut self,
-        canonical_source: &str,
-        requested_name: &str,
-    ) -> ResolvedTypeDeclaration {
-        let key = (canonical_source.to_string(), requested_name.to_string());
-        if let Some(cached) = self.declarations.borrow().get(&key).cloned() {
-            return cached;
-        }
-        // Step 3 closure: route through ctx-owned DeclarationLookupDb.
-        //
-        // Observe the keyed canonical's content version ONCE here,
-        // before the value is computed, through the view-aware
-        // `authoritative_current_content_hash` oracle (overlay-correct
-        // under a `SessionResolverContext`). The signature builder is
-        // provenance-pure: it roots the entry's self-root on this
-        // observed hash, never a current-content re-read inside the
-        // closure. `None` (canonical has no authoritative current
-        // content) refuses shared-cache admission; the `None`
-        // host-value arm below still produces the value via the cold
-        // resolver.
-        let observed_keyed_hash = self
-            .ctx
-            .authoritative_current_content_hash(canonical_source);
-        let arc_key = (
-            std::sync::Arc::<str>::from(canonical_source),
-            std::sync::Arc::<str>::from(requested_name),
-        );
-        let host_db = self.ctx.project_type_store().declaration_db();
-        let host_value = host_db.get_or_compute(&arc_key, self.ctx, || {
-            let computed = self
-                .resolve_direct_prepared_type_declaration(canonical_source, requested_name)
-                .unwrap_or_else(|| {
-                    self.ctx
-                        .resolve_type_declaration_for_dep(canonical_source, requested_name)
-                });
-            let observed = observed_keyed_hash?;
-            match engine_fact_signature_for_exported_type(
-                self.ctx,
-                canonical_source,
-                requested_name,
-                observed,
-            ) {
-                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
-                    Some((computed, sig.facts))
-                }
-                crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
-            }
-        });
-        let declaration = match host_value {
-            Some(arc_decl) => arc_decl.as_ref().clone(),
-            None => self
-                .resolve_direct_prepared_type_declaration(canonical_source, requested_name)
-                .unwrap_or_else(|| {
-                    self.ctx
-                        .resolve_type_declaration_for_dep(canonical_source, requested_name)
-                }),
-        };
-        self.declarations
-            .borrow_mut()
-            .insert(key, declaration.clone());
-        declaration
-    }
-
     pub fn resolve_final_prepared_type_target(
         &mut self,
         canonical_source: &str,
@@ -686,173 +324,40 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .unwrap_or_else(|| (canonical_source.to_string(), resolved_name.to_string()))
     }
 
-    /// Check if a registry ref can resolve, cached per query.
-    pub fn can_resolve_registry_symbol(
-        &mut self,
-        owner_canonical: &str,
-        exported_name: &str,
-        source_hint: Option<&str>,
-    ) -> bool {
-        if is_builtin_name(exported_name) {
-            return false;
-        }
-        let source_key = source_hint
-            .filter(|s| !s.is_empty())
-            .unwrap_or(owner_canonical);
-        let key = (source_key.to_string(), exported_name.to_string());
-        if let Some(cached) = self.resolvable.borrow().get(&key).copied() {
-            return cached;
-        }
-        // Step 3 closure: route through ctx-owned ResolvabilityDb.
-        //
-        // Observe the keyed canonical's content version ONCE here,
-        // before the value is computed, through the view-aware
-        // `authoritative_current_content_hash` oracle (overlay-correct
-        // under a `SessionResolverContext`). The signature builder is
-        // provenance-pure: it roots the entry's self-root on this
-        // observed hash, never a current-content re-read inside the
-        // closure. `None` (canonical has no authoritative current
-        // content) refuses shared-cache admission; the `None`
-        // host-value arm below still produces the value by recomputing.
-        let observed_keyed_hash = self.ctx.authoritative_current_content_hash(source_key);
-        let arc_key = (
-            std::sync::Arc::<str>::from(source_key),
-            std::sync::Arc::<str>::from(exported_name),
-        );
-        let host_db = self.ctx.project_type_store().resolvable_db();
-        let host_value = host_db.get_or_compute(&arc_key, self.ctx, || {
-            let computed = if self.prepared_type_decl(source_key, exported_name).is_some() {
-                true
-            } else {
-                self.resolve_imported_registry_symbol(source_key, exported_name)
-                    .is_some()
-            };
-            // If the imported-registry resolution above tripped the
-            // wildcard-route fuse (which marked the request-result
-            // completeness partial), the derived `false` is NOT an authoritative
-            // "unresolvable" verdict — the symbol was never looked up.
-            // Refuse to admit it into `ResolvabilityDb`; the caller still
-            // recomputes the bool below so it never sees a spurious cached
-            // `false`. The `ResolvabilityDb` rail has no per-value partial
-            // flag, so it supplies the request-result completeness (one
-            // request resolves one component's meta) to the pure gate.
-            if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                crate::request_context::current_materialization_cache_suppress(),
-            ) {
-                return None;
-            }
-            let observed = observed_keyed_hash?;
-            match engine_fact_signature_for_exported_type(
-                self.ctx,
-                source_key,
-                exported_name,
-                observed,
-            ) {
-                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
-                    Some((computed, sig.facts))
-                }
-                crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
-            }
-        });
-        // A `None` host-value means the signature builder refused
-        // admission (or post-compute revalidation failed). Shared-cache
-        // admission is forgone, but the boolean is still recomputed so
-        // the caller never sees a spurious `false`.
-        let resolved = match host_value {
-            Some(value) => value,
-            None => {
-                if self.prepared_type_decl(source_key, exported_name).is_some() {
-                    true
-                } else {
-                    self.resolve_imported_registry_symbol(source_key, exported_name)
-                        .is_some()
-                }
-            }
-        };
-        self.resolvable.borrow_mut().insert(key, resolved);
-        resolved
-    }
-
-    /// Get the owner's collection expression for a name, cached per query.
-    pub fn owner_collection_expr(
-        &mut self,
-        owner_canonical: &str,
-        name: &str,
-    ) -> Option<verter_type_expr::TypeExpr> {
-        if let Some(cached) = self.owner_collection_exprs.borrow().get(name).cloned() {
-            return cached;
-        }
-
-        // Step 3 closure: route through ctx-owned OwnerCollectionDb.
-        //
-        // Observe the owner canonical's prepared decl AND the content
-        // version it was materialised from from ONE prepared-decl
-        // bundle via `observed_prepared_type_decl`. The cache value
-        // (`prepared.body`) and the entry's fact-signature self-root
-        // therefore root on a single, provably-consistent content
-        // version — they cannot tear against a racing `upsert`, and the
-        // observed hash is view-correct (the bundle is fetched through
-        // the view-aware `prepared_decl_bundle` accessor). The signature
-        // builder is provenance-pure: it never re-reads current content
-        // inside the closure. `None` (owner canonical has no
-        // prepared-decl bundle) refuses shared-cache admission; the
-        // `None` host-value arm below still produces the body by
-        // recomputing.
-        let observed = self.observed_prepared_type_decl(owner_canonical, name);
-        let arc_key = (
-            std::sync::Arc::<str>::from(owner_canonical),
-            std::sync::Arc::<str>::from(name),
-        );
-        let host_db = self.ctx.project_type_store().owner_collection_db();
-        let host_value = host_db.get_or_compute(&arc_key, self.ctx, || {
-            let observed = observed.as_ref()?;
-            let computed = observed.decl.as_ref().map(|prepared| prepared.body.clone());
-            // Root the signature on the canonical AND content version
-            // the observation recorded — the value and the self-root
-            // then provably agree on one content identity.
-            match engine_fact_signature_for_exported_type(
-                self.ctx,
-                observed.canonical_id.as_str(),
-                name,
-                observed.whole_hash,
-            ) {
-                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
-                    Some((computed, sig.facts))
-                }
-                crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
-            }
-        });
-        let body: Option<verter_type_expr::TypeExpr> = match host_value {
-            Some(opt_arc) => opt_arc.map(|arc_expr| arc_expr.as_ref().clone()),
-            // The signature builder refused admission (or post-compute
-            // revalidation failed). Shared-cache admission is forgone;
-            // the body is still produced from a fresh prepared-decl
-            // read so the caller gets the correct result.
-            None => self
-                .prepared_type_decl(owner_canonical, name)
-                .map(|prepared| prepared.body.clone()),
-        };
-        self.owner_collection_exprs
-            .borrow_mut()
-            .insert(name.to_string(), body.clone());
-        body
-    }
-
-    pub fn named_decl_body(&mut self, canonical_id: &str, name: &str) -> Option<TypeExpr> {
-        self.prepared_type_decl(canonical_id, name)
-            .map(|prepared| prepared.body.clone())
-    }
-
-    pub fn prepared_member_raw_type(
+    /// The named declaration's authored body LOCATOR (content-free) —
+    /// consumers lower it through the ONE shared dispatch on demand.
+    pub fn named_decl_body(
         &mut self,
         canonical_id: &str,
-        symbol_name: &str,
-        member_name: &str,
-    ) -> Option<TypeExpr> {
-        self.prepared_type_decl(canonical_id, symbol_name)
-            .and_then(|prepared| prepared.member(member_name).map(|member| member.ty.clone()))
+        name: &str,
+    ) -> Option<verter_type_expr::locators::AuthoredBodyLocator> {
+        self.prepared_type_decl(canonical_id, name)
+            .map(|prepared| prepared_decl_authored_body_locator(&prepared))
     }
 
+    /// The prepared type declaration for `(canonical_id, symbol_name)`,
+    /// memoized in the engine's per-request scratch.
+    ///
+    /// **A degraded `None` is never memoized.** The read's `None` has TWO
+    /// causes: an honest absence (the symbol is not declared in the keyed
+    /// canonical), and a BROKEN DECL-BODY LEASE — `PreparedDeclBundle::get`
+    /// fans [`NonCacheableReadReason::LeaseMiss`] and returns `None` while
+    /// leaving its write-once slot VACANT, precisely so a later demand under a
+    /// live lease RECOVERS the declaration. The decl-body memo evicts its
+    /// poisoned cell for the same reason. A scratch memo that persists the
+    /// degraded `None` undoes that care for the engine's whole scope: the
+    /// recoverable declaration becomes a permanent absence for every later
+    /// lookup in the request.
+    ///
+    /// The two causes are told apart by the CACHEABILITY RAIL, never by the
+    /// value: the read runs inside its own cacheability scope, and a `None`
+    /// whose read consumed a non-cacheable signal leaves the scratch slot
+    /// VACANT (the next lookup retries), mirroring the layers below. The
+    /// nested scope observes only; every fact and every non-cacheability mark
+    /// still fans out to each enclosing tracer, so a producer bracketing this
+    /// read still refuses its own shared-cache admission.
+    ///
+    /// [`NonCacheableReadReason::LeaseMiss`]: crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss
     pub(crate) fn prepared_type_decl(
         &mut self,
         canonical_id: &str,
@@ -868,76 +373,27 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.prepared_type_decl_query_count += 1;
         }
 
-        let resolved = self
-            .ctx
-            .prepared_type_decl(canonical_id, symbol_name)
-            .or_else(|| {
-                // Lazy first-time loading (see scope_payload_for_scope comment).
-                self.ctx
-                    .ensure_loaded(canonical_id)
-                    .then(|| self.ctx.prepared_type_decl(canonical_id, symbol_name))
-                    .flatten()
-            });
+        let ctx = self.ctx;
+        let (resolved, non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
+            ctx.host_for_fact_tracer_install(),
+            |_probe| {
+                ctx.prepared_type_decl(canonical_id, symbol_name)
+                    .or_else(|| {
+                        // Lazy first-time loading (see scope_payload_for_scope comment).
+                        ctx.ensure_loaded(canonical_id)
+                            .then(|| ctx.prepared_type_decl(canonical_id, symbol_name))
+                            .flatten()
+                    })
+            },
+        );
+        if resolved.is_none() && non_cacheable {
+            // Degraded miss (broken decl-body lease / fenced serve): the symbol
+            // may well exist. Leave the slot VACANT so a later lookup — after
+            // the transient clears — reaches the declaration.
+            return None;
+        }
         self.prepared_type_decls.insert(key, resolved.clone());
         resolved
-    }
-
-    /// Resolve a prepared type declaration AND observe the content
-    /// version it was materialised from — both sourced from the SAME
-    /// prepared-decl bundle.
-    ///
-    /// A query-identity cache producer whose value is built from a
-    /// `prepared_type_decl` read must root its fact signature on the
-    /// content version the value was actually built from — never a
-    /// later current-content re-read, which would let an `upsert`
-    /// landing in the publish-race window admit a stale value under a
-    /// fresh signature.
-    ///
-    /// This accessor fetches `canonical_id`'s prepared-decl bundle once
-    /// through [`crate::resolver_core::ResolverContext::prepared_decl_bundle`]
-    /// — which, under a `SessionResolverContext`, routes to the
-    /// view-aware `prepared_decl_bundle_with_context` so an
-    /// overlay-bearing session observes the overlay's bundle. The
-    /// returned `decl` is the bundle's prepared decl for `symbol_name`;
-    /// the returned `whole_hash` is
-    /// [`crate::resolver_core::prepared_decl::PreparedTypeDeclCache::defining_content_hash`]
-    /// — the `whole_hash` of the very `ShallowFileState` that bundle's
-    /// prepared decls are built from. One bundle ⇒ the decl and the
-    /// hash are provably the same content version (untorn against a
-    /// racing `upsert`) AND the hash is view-correct (it reflects
-    /// whatever view the bundle was materialised from). The producer
-    /// threads this ONE observation into both the value and the
-    /// provenance-pure signature builder.
-    ///
-    /// `None` when `canonical_id` has no prepared-decl bundle (unloaded
-    /// / evicted); the producer then refuses shared-cache admission.
-    /// The `decl` field is `Option` because a prepared decl may
-    /// legitimately be absent for a bundled canonical (the requested
-    /// symbol does not exist), but the absence is still rooted on the
-    /// observed hash so a later declaration is detected.
-    pub(crate) fn observed_prepared_type_decl(
-        &mut self,
-        canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<crate::resolver_core::component_meta_query_engine::ObservedPreparedTypeDecl> {
-        let bundle = self.ctx.prepared_decl_bundle(canonical_id)?;
-        let whole_hash = bundle.prepared_type_decls.defining_content_hash();
-        let decl = bundle.prepared_type_decls.get(symbol_name);
-        // Mirror the bundle decl into the engine's per-request
-        // read-through cache so a later `prepared_type_decl` call for
-        // the same `(canonical_id, symbol_name)` hits the warm scratch
-        // entry instead of re-resolving the bundle.
-        self.prepared_type_decls.insert(
-            (canonical_id.to_string(), symbol_name.to_string()),
-            decl.clone(),
-        );
-        Some(
-            crate::resolver_core::component_meta_query_engine::ObservedPreparedTypeDecl {
-                decl,
-                canonical_id: canonical_id.to_string(),
-                whole_hash,
-            },
-        )
     }
 
     /// Single accessor returning the engine's resolver
@@ -950,7 +406,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.ctx
     }
 
-    fn semantic_dispatch(&self) -> ProjectSemanticDispatch<'_> {
+    pub(super) fn semantic_dispatch(&self) -> ProjectSemanticDispatch<'_> {
         ProjectSemanticDispatch::new(self.ctx)
     }
 
@@ -1034,7 +490,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 base,
                 empty_semantic_args(),
                 // `dispatch_root_instantiated` feeds
-                // `projected_surface_from_semantic_node` which reads the
+                // `surface_view_from_semantic_node` which reads the
                 // root's surface members, call/construct lists, etc. Shallow
                 // yields the interpretable one-level surface (member names +
                 // shallow carrier values) — decl-body lowering under Shallow
@@ -1048,21 +504,24 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    /// Project a root symbol's whole surface AND return the graph node
-    /// whose raised surface IS the projected surface: the instantiated root
-    /// (whose own `Object` surface the projector read), or — when the
-    /// compound-root composition fallback fires — the terminal `Object` node the
-    /// shallow walker COMPOSED (NOT the carrier-intact decl anchor). The Whole
-    /// route's node-domain materializedness gate reads that node's raised-shape
-    /// facts directly instead of materializing the surface and inspecting it, so
-    /// for BOTH cases the gate folds over the exact surface being published.
+    /// Project a root symbol's whole one-level [`SurfaceView`] AND return the
+    /// graph node whose raised surface IS the projected surface: the
+    /// instantiated root (whose own `Object` surface the projector read), or —
+    /// when the compound-root composition fallback fires — the terminal
+    /// `Object` node the shallow walker COMPOSED (NOT the carrier-intact decl
+    /// anchor). The Whole route's node-domain materializedness gate reads that
+    /// node's raised-shape facts directly instead of materializing the surface
+    /// and inspecting it, so for BOTH cases the gate folds over the exact
+    /// surface being published. The view stays node-native — the ONE registry
+    /// publication materialisation happens at the terminal
+    /// `surface_view_to_registry_type_expr` sink.
     pub(super) fn dispatch_projected_surface_with_node(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
-    ) -> Option<(ProjectedSurface, SemanticNodeId)> {
+    ) -> Option<(crate::semantic_query::SurfaceView, SemanticNodeId)> {
         let root = self.dispatch_root_instantiated(scope_canonical_id, symbol_name)?;
-        if let Some(surface) = projected_surface_from_semantic_node(self.ctx, root) {
+        if let Some(surface) = surface_view_from_semantic_node(self.ctx, root) {
             return Some((surface, root));
         }
         // The post-`Published(Expanded)` instantiated root did not yield a
@@ -1084,8 +543,151 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // filter rejects.
         let anchor = self.dispatch_decl_anchor(scope_canonical_id, symbol_name)?;
         let (surface, composed_surface_node) =
-            projected_compound_root_surface_via_dispatch(self.ctx, anchor)?;
+            compound_root_surface_view_via_dispatch(self.ctx, anchor)?;
         Some((surface, composed_surface_node))
+    }
+
+    /// Heritage composition at the registry SURFACE-OBSERVATION point: when an
+    /// owner-local declaration's raised body root is the lone-`extends`
+    /// heritage intersection (`Intersection([DeclRef{Base}.., Object{own}])`),
+    /// the registry consumer's one-level member surface composes through the
+    /// SHARED empty-path Shallow surface walker (memoized under the existing
+    /// structural `ProjectPath` query key — heritage-shadow precedence is
+    /// decided THERE, never re-derived here) and publishes as a
+    /// members-only [`ProjectedSurfaceFact`]: base + own members exactly once
+    /// each, every member value a SHALLOW content-free slot resolved from its
+    /// declaring contributor's prepared member facts.
+    ///
+    /// The raw `Intersection` STAYS the graph carrier for the declaration
+    /// itself and for every non-surface observation — this method only
+    /// projects the observed one-level surface into the entry's published
+    /// SOURCE. Declines (`None`, caller keeps the raw carrier) for: a
+    /// non-heritage body root, a generic heritage arm (`extends Base<T>` —
+    /// slot facts cannot carry the substitution), a signature-bearing
+    /// composed surface, or any composed member whose declaring contributor
+    /// exposes no prepared member slot (no fabricated stand-ins).
+    ///
+    /// [`ProjectedSurfaceFact`]: verter_type_expr::facts::ProjectedSurfaceFact
+    pub(crate) fn heritage_merged_surface_fact(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<verter_type_expr::facts::ProjectedSurfaceFact> {
+        use crate::project_semantic_dispatch::node_data_for;
+        use crate::semantic_query::SemanticNodeData;
+        use verter_type_expr::facts::{ProjectedMemberFact, ProjectedSurfaceFact};
+
+        if self.projection_op_budget_exhausted() {
+            return None;
+        }
+        // The declaration's resolved root identity (the same bare-name
+        // resolution the decl-anchor dispatch performs).
+        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id);
+        let (own_canonical, own_name) =
+            crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                self.ctx,
+                scope_canonical_id,
+                scope_payload_arc.as_deref(),
+                symbol_name,
+            )
+            .map(|root| (root.canonical_id, root.symbol_name))
+            .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
+        // SHAPE classification runs on the raised DeclBody carrier (the
+        // lowered body root) — the decl-anchor node is an identity
+        // placeholder, not the body.
+        let body_locator = self.named_decl_body(own_canonical.as_str(), own_name.as_str())?;
+        let body_root = {
+            let dispatch = self.semantic_dispatch();
+            dispatch
+                .raise_authored_locator_to_hot(
+                    &body_locator,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Navigate,
+                    ),
+                )
+                .map(|hot| hot.node())?
+        };
+        let peel_alias = |mut node: SemanticNodeId| {
+            while let Some(SemanticNodeData::Alias(inner)) =
+                node_data_for(self.ctx, node).as_deref()
+            {
+                node = *inner;
+            }
+            node
+        };
+        // Lone-`extends` heritage shape only: heritage `DeclRef` arms plus
+        // exactly ONE own-member `Object` arm.
+        let arms = match node_data_for(self.ctx, peel_alias(body_root)).as_deref() {
+            Some(SemanticNodeData::Intersection(arms)) => arms.clone(),
+            _ => return None,
+        };
+        let mut heritage: Vec<(std::sync::Arc<str>, std::sync::Arc<str>)> = Vec::new();
+        let mut own_object_arms = 0usize;
+        for arm in arms.iter() {
+            match node_data_for(self.ctx, peel_alias(*arm)).as_deref() {
+                Some(SemanticNodeData::DeclRef { identity }) => heritage.push((
+                    std::sync::Arc::clone(&identity.canonical_id),
+                    std::sync::Arc::clone(&identity.decl_name),
+                )),
+                Some(SemanticNodeData::Object(_)) => own_object_arms += 1,
+                _ => return None,
+            }
+        }
+        if heritage.is_empty() || own_object_arms != 1 {
+            return None;
+        }
+        // The one-level MERGED view through the shared empty-path Shallow
+        // surface walker (arm roots only; member values stay shallow nodes).
+        let (view, _surface_node) = compound_root_surface_view_via_dispatch(self.ctx, body_root)?;
+        if !view.call_signatures.is_empty()
+            || !view.construct_signatures.is_empty()
+            || !view.index_signatures.is_empty()
+            || view.has_index_signature
+        {
+            return None;
+        }
+        // Slot lookup mirrors the walker's heritage-shadow precedence: the own
+        // declaration's prepared member facts win; heritage members resolve
+        // from their declaring contributor in arm order.
+        let own_prepared = self.prepared_type_decl(own_canonical.as_str(), own_name.as_str());
+        let heritage_prepared: Vec<_> = heritage
+            .iter()
+            .filter_map(|(canonical, name)| {
+                self.prepared_type_decl(canonical.as_ref(), name.as_ref())
+            })
+            .collect();
+        if heritage_prepared.len() != heritage.len() {
+            return None;
+        }
+        let mut members: Vec<ProjectedMemberFact> = Vec::with_capacity(view.members.len());
+        for member in view.members.iter() {
+            let fact = own_prepared
+                .as_ref()
+                .and_then(|prepared| prepared.member_index.get(member.name.as_ref()))
+                .or_else(|| {
+                    heritage_prepared
+                        .iter()
+                        .find_map(|prepared| prepared.member_index.get(member.name.as_ref()))
+                })?;
+            members.push(ProjectedMemberFact {
+                name: member.name.as_ref().to_string(),
+                optional: fact.optional,
+                readonly: fact.readonly,
+                is_method: fact.is_method,
+                visibility: fact.visibility,
+                declared_in_macro_type_arg: false,
+                declaration_origin: fact.declaration_origin.clone(),
+                ty: fact.ty.clone(),
+                span_origin: fact.span_origin.clone(),
+            });
+        }
+        Some(ProjectedSurfaceFact {
+            members: std::sync::Arc::from(members.into_boxed_slice()),
+            call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            has_index_signature: false,
+        })
     }
 
     /// Node-domain registry route projection: resolve a route to its admitted
@@ -1149,14 +751,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     scope_canonical_id,
                     root_symbol,
                     "Pick",
-                    members,
+                    members.as_slice(),
                 ),
             RouteDemand::Omit(members) if !members.is_empty() => self
                 .dispatch_routed_pick_omit_via_shared_engine_node(
                     scope_canonical_id,
                     root_symbol,
                     "Omit",
-                    members,
+                    members.as_slice(),
                 ),
             _ => None,
         }
@@ -1212,4 +814,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             _ => None,
         }
     }
+}
+
+/// Mint the content-free authored-body locator for a prepared declaration:
+/// the prepared decl's own `body_facts.body_slot` (anchored on the producing
+/// canonical + symbol by the prepared-decl producer). This is the ONE
+/// locator mint for the owner-collection / named-decl-body read surfaces, so
+/// the cache value and every fallback arm publish an identical
+/// representation.
+pub(super) fn prepared_decl_authored_body_locator(
+    prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
+) -> verter_type_expr::locators::AuthoredBodyLocator {
+    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(prepared.body_facts.body_slot.clone())
 }

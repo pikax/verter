@@ -223,7 +223,10 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
         "control: `cfg` is a const"
     );
     assert!(
-        cfg.type_annotation.is_some(),
+        !matches!(
+            cfg.type_annotation.classification,
+            verter_type_expr::facts::ValueAnnotationClass::Absent
+        ) && cfg.type_annotation.annotation.is_some(),
         "control: `cfg` must carry its `{{ a: number }}` annotation so the type_annotation \
          facet is non-trivially compared, got {:?}",
         cfg.type_annotation
@@ -245,8 +248,9 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
         .enum_members
         .as_ref()
         .expect("control: `Color` must carry enum_members so that facet is non-trivially compared")
+        .members
         .iter()
-        .map(|(member_name, _)| member_name.as_str())
+        .map(|member| member.name.as_str())
         .collect();
     assert_eq!(
         color_member_names,
@@ -527,15 +531,17 @@ fn cross_file_value_symbol_depth_pins_multi_contributor_divergence() {
         .enum_members
         .as_ref()
         .expect("graph-native `Merged` must carry enum_members")
+        .members
         .iter()
-        .map(|(member_name, _)| member_name.as_str())
+        .map(|member| member.name.as_str())
         .collect();
     let oracle_merged_names: Vec<&str> = oracle_merged
         .enum_members
         .as_ref()
         .expect("oracle `Merged` must carry enum_members")
+        .members
         .iter()
-        .map(|(member_name, _)| member_name.as_str())
+        .map(|member| member.name.as_str())
         .collect();
 
     // CURRENT divergence: graph-native UNIONS both merged bodies (`{A, B}`); the

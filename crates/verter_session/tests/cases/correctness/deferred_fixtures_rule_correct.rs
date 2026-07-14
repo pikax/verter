@@ -138,7 +138,7 @@ fn run_resolver_under_audit_and_serialize(fixture_id: &str) -> SnapshotView {
         .unwrap_or_else(|| panic!("fixture `{fixture_id}` must be registered in FIXTURES"));
     let host = build_host(fixture.files);
     let req = verter_session::audited_request::AuditedRequest::builder()
-        .attach_to(host)
+        .attach_to(std::sync::Arc::clone(&host))
         .resolve_component_meta(fixture.target);
     let analysis = match req {
         Ok((analysis, _resolution, _record)) => analysis,
@@ -148,7 +148,7 @@ fn run_resolver_under_audit_and_serialize(fixture_id: &str) -> SnapshotView {
             fixture.target,
         ),
     };
-    SnapshotView::from_analysis(&analysis)
+    SnapshotView::from_analysis(&host, &analysis)
 }
 
 /// Rule-correctness gate for the `userland_shadowing_pick` deferred
@@ -475,10 +475,11 @@ fn deferred_fixture_generic_substitution_via_typeof_byte_equal_to_rule_correct_e
 /// branch in `host_manage.rs::compute_evaluated_types*`
 /// lower+raises `parsed_type_argument` directly. The model's
 /// `type_expr` becomes `Primitive(String)` / `Primitive(Number)`;
-/// the prop's `type_signature` becomes `string | undefined` /
-/// `number | undefined` (Vue's optional-by-default contract); the
-/// `update:<name>` event's payload is `[value: T | undefined]`.
-/// Without the branch, dispatching
+/// the prop's `type_signature` surfaces the same BARE `string` /
+/// `number` (the native snapshot renders the published bare carrier;
+/// the `T | undefined` optional-model display is a compat-layer
+/// projection); the `update:<name>` event's display payload is
+/// `[value: T | undefined]`. Without the branch, dispatching
 /// `ProjectPath { base, [Member(model)], Expanded }` on a
 /// `parsed_type_argument` that IS the field type misses and produces
 /// `Unknown { raw: "semanticMiss" }`.

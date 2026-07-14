@@ -180,16 +180,36 @@ defineProps<{
         }],
     );
 
+    let analysis = host
+        .get_analysis("/src/App.vue")
+        .expect("App.vue analysis snapshot");
+    let payload = analysis.macros[0]
+        .prop_fields
+        .iter()
+        .find(|field| field.name == "title")
+        .and_then(|field| field.payload.clone())
+        .unwrap_or_else(|| panic!("the analyzer must stamp the title field's payload locator"));
+
     let mut engine = ComponentMetaQueryEngine::new(&host);
+    let field_value = engine
+        .macro_field_value_node(
+            "/src/App.vue",
+            0,
+            &[verter_semantic::analysis::type_eval_build::PathSegment::Member(Arc::from("title"))],
+        )
+        .expect("title field value node");
     let fast = engine
-        .try_fast_shallow_field_expr("/src/App.vue", &TypeExpr::named("StringOrVNode"))
+        .try_fast_shallow_field_expr("/src/App.vue", &payload, field_value)
         .expect("local aliases that wrap package refs should use the fast shallow path");
 
-    let TypeExpr::Union(members) = &fast.expr else {
-        panic!(
-            "local alias fast path should expand to the alias body, got {:?}",
-            fast.expr
-        );
+    let shallow = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/src/App.vue",
+        &fast.semantic_source,
+    )
+    .unwrap_or_else(|| panic!("the fast path's published source must shell-materialize"));
+    let TypeExpr::Union(members) = &shallow else {
+        panic!("local alias fast path should expand to the alias body, got {shallow:?}");
     };
     assert!(
         members.contains(&TypeExpr::Primitive(PrimitiveName::String)),
@@ -254,25 +274,44 @@ defineProps<{
         }],
     );
 
-    let expr = TypeExpr::Union(Arc::from(vec![
-        TypeExpr::Primitive(PrimitiveName::Boolean),
-        TypeExpr::named_with_args(
-            "Omit",
-            vec![
-                TypeExpr::named("DialogContentProps"),
-                TypeExpr::string_literal("id"),
-            ],
-        ),
-    ]));
+    let analysis = host
+        .get_analysis("/src/App.vue")
+        .expect("App.vue analysis snapshot");
+    let payload = analysis.macros[0]
+        .prop_fields
+        .iter()
+        .find(|field| field.name == "content")
+        .and_then(|field| field.payload.clone())
+        .unwrap_or_else(|| panic!("the analyzer must stamp the content field's payload locator"));
 
     let mut engine = ComponentMetaQueryEngine::new(&host);
+    let field_value = engine
+        .macro_field_value_node(
+            "/src/App.vue",
+            0,
+            &[
+                verter_semantic::analysis::type_eval_build::PathSegment::Member(Arc::from(
+                    "content",
+                )),
+            ],
+        )
+        .expect("content field value node");
     let fast = engine
-        .try_fast_shallow_field_expr("/src/App.vue", &expr)
+        .try_fast_shallow_field_expr("/src/App.vue", &payload, field_value)
         .expect("utility-wrapped imported refs should stay symbolic on the fast shallow path");
 
     assert_eq!(
-        fast.expr, expr,
-        "utility-wrapped imported refs should remain symbolic in fast shallow expansion",
+        fast.hot.node(),
+        field_value.node(),
+        "utility-wrapped imported refs should remain symbolic in fast shallow expansion — the \
+         published carrier is the unexpanded field value",
+    );
+    assert_eq!(
+        fast.semantic_source,
+        verter_type_expr::facts::SemanticTypeSource::Authored(
+            verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload.clone()),
+        ),
+        "the symbolic fast path publishes the field's authored macro-payload source",
     );
 }
 
@@ -322,18 +361,40 @@ defineProps<{
         }],
     );
 
-    let expr = TypeExpr::IndexedAccess {
-        object: Arc::new(TypeExpr::named("DialogContentProps")),
-        index: Arc::new(TypeExpr::string_literal("id")),
-    };
+    let analysis = host
+        .get_analysis("/src/App.vue")
+        .expect("App.vue analysis snapshot");
+    let payload = analysis.macros[0]
+        .prop_fields
+        .iter()
+        .find(|field| field.name == "contentId")
+        .and_then(|field| field.payload.clone())
+        .unwrap_or_else(|| panic!("the analyzer must stamp the contentId field's payload locator"));
 
     let mut engine = ComponentMetaQueryEngine::new(&host);
+    let field_value = engine
+        .macro_field_value_node(
+            "/src/App.vue",
+            0,
+            &[
+                verter_semantic::analysis::type_eval_build::PathSegment::Member(Arc::from(
+                    "contentId",
+                )),
+            ],
+        )
+        .expect("contentId field value node");
     let fast = engine
-        .try_fast_shallow_field_expr("/src/App.vue", &expr)
+        .try_fast_shallow_field_expr("/src/App.vue", &payload, field_value)
         .expect("direct imported member paths should use the fast shallow member path");
 
+    let materialized = crate::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/src/App.vue",
+        &fast.semantic_source,
+    )
+    .unwrap_or_else(|| panic!("the fast path's member source must demand-materialize"));
     assert_eq!(
-        fast.expr,
+        materialized,
         TypeExpr::Primitive(PrimitiveName::String),
         "direct imported member paths should materialize the prepared member body",
     );
@@ -377,7 +438,7 @@ export interface LinkProps extends NuxtLinkProps {
     let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
     let route =
-        crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
+        crate::resolver_core::RouteDemand::pick(vec!["to".to_string(), "target".to_string()]);
 
     let projected = query_engine
         .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
@@ -468,7 +529,7 @@ export class MixedClass {
     };
 
     // Positive control: Pick of the PUBLIC key materialises it.
-    let pub_route = crate::resolver_core::RouteDemand::Pick(vec!["open".to_string()]);
+    let pub_route = crate::resolver_core::RouteDemand::pick(vec!["open".to_string()]);
     if let Some(projected) = query_engine
         .dispatch_routed_expr_surface_node("/src/Mixed.vue", "MixedClass", &pub_route)
         .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
@@ -481,7 +542,7 @@ export class MixedClass {
 
     // DISCRIMINATING: Pick of a PRIVATE / PROTECTED key must NOT materialise it.
     for key in ["secret", "guarded"] {
-        let route = crate::resolver_core::RouteDemand::Pick(vec![key.to_string()]);
+        let route = crate::resolver_core::RouteDemand::pick(vec![key.to_string()]);
         let projected = query_engine
             .dispatch_routed_expr_surface_node("/src/Mixed.vue", "MixedClass", &route)
             .and_then(|node| {
@@ -497,7 +558,7 @@ export class MixedClass {
 
     // DISCRIMINATING: Omit of the PUBLIC key must NOT leave the non-public
     // members on the routed surface.
-    let omit_route = crate::resolver_core::RouteDemand::Omit(vec!["open".to_string()]);
+    let omit_route = crate::resolver_core::RouteDemand::omit(vec!["open".to_string()]);
     if let Some(projected) = query_engine
         .dispatch_routed_expr_surface_node("/src/Mixed.vue", "MixedClass", &omit_route)
         .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
@@ -556,7 +617,7 @@ export interface LinkProps extends NuxtLinkProps {
     let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
     let route =
-        crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
+        crate::resolver_core::RouteDemand::pick(vec!["to".to_string(), "target".to_string()]);
 
     let projected = query_engine
         .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
@@ -654,7 +715,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
     let route =
-        crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
+        crate::resolver_core::RouteDemand::pick(vec!["to".to_string(), "target".to_string()]);
 
     let projected = query_engine
         .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
@@ -780,7 +841,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
     let route =
-        crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
+        crate::resolver_core::RouteDemand::pick(vec!["target".to_string(), "to".to_string()]);
 
     let projected = query_engine
         .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
@@ -907,7 +968,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     let _store_view = host.resolver_store_view_read().into_owned_view();
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
     let route =
-        crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
+        crate::resolver_core::RouteDemand::pick(vec!["target".to_string(), "to".to_string()]);
 
     let projected = query_engine
         .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
@@ -1194,14 +1255,16 @@ defineProps<{
         .iter()
         .find(|p| p.name == "color")
         .expect("should have color prop");
-    let is_resolved_color = matches!(
-        &color_prop.type_expr,
-        TypeExpr::Union(_) | TypeExpr::Literal(_),
-    );
+    let color_ty = crate::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/src/Alert.vue",
+        color_prop.type_source.present().expect("typed color prop"),
+    )
+    .unwrap_or_else(|| panic!("color's published source must demand-materialize"));
+    let is_resolved_color = matches!(&color_ty, TypeExpr::Union(_) | TypeExpr::Literal(_));
     assert!(
         is_resolved_color,
-        "color prop should resolve to a literal union, got {:?}",
-        color_prop.type_expr,
+        "color prop should resolve to a literal union, got {color_ty:?}",
     );
 
     // Check IndexedAccess resolution: variant should resolve to string literal union
@@ -1210,14 +1273,19 @@ defineProps<{
         .iter()
         .find(|p| p.name == "variant")
         .expect("should have variant prop");
-    let is_resolved_variant = matches!(
-        &variant_prop.type_expr,
-        TypeExpr::Union(_) | TypeExpr::Literal(_),
-    );
+    let variant_ty = crate::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/src/Alert.vue",
+        variant_prop
+            .type_source
+            .present()
+            .expect("typed variant prop"),
+    )
+    .unwrap_or_else(|| panic!("variant's published source must demand-materialize"));
+    let is_resolved_variant = matches!(&variant_ty, TypeExpr::Union(_) | TypeExpr::Literal(_));
     assert!(
         is_resolved_variant,
-        "variant prop should resolve to a literal union, got {:?}",
-        variant_prop.type_expr,
+        "variant prop should resolve to a literal union, got {variant_ty:?}",
     );
 
     // Imported Props-like refs stay symbolic in the native API — the compat
@@ -1228,14 +1296,22 @@ defineProps<{
         .iter()
         .find(|p| p.name == "avatar")
         .expect("should have avatar prop");
+    let avatar_ty = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/src/Alert.vue",
+        avatar_prop
+            .type_source
+            .present()
+            .expect("typed avatar prop"),
+    )
+    .unwrap_or_else(|| panic!("avatar's published source must shell-materialize"));
     assert!(
         matches!(
-            &avatar_prop.type_expr,
+            &avatar_ty,
             TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "AvatarProps" && type_arguments.is_empty()
         ),
-        "avatar prop should stay as symbolic Ref('AvatarProps'), got {:?}",
-        avatar_prop.type_expr,
+        "avatar prop should stay as symbolic Ref('AvatarProps'), got {avatar_ty:?}",
     );
 }
 
@@ -1375,9 +1451,9 @@ fn step8_route_hash_pure_content_derived() {
     use verter_semantic::analysis::Hash16;
 
     let analysis = Arc::new(
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
     );
-    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
+    let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
 
     let h1 = crate::resolver_store::hash_route_surface(&state);
     // Construct an unrelated host between calls to ensure
@@ -2058,7 +2134,18 @@ fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
     let concurrent_symbol = ResolvedImportedRegistrySymbol {
         canonical_id: "/concurrent_pub/types.ts".to_string(),
         exported_name: "Props".to_string(),
-        body: TypeExpr::Primitive(PrimitiveName::String),
+        body: verter_type_expr::facts::PreparedTypeBodyFacts {
+            classification: verter_type_expr::facts::TypeBodyClass::Interface,
+            body_slot: verter_type_expr::locators::TypeBodySlot {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: Arc::from("/concurrent_pub/types.ts"),
+                    symbol: Arc::from("Props"),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                },
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            },
+            merged_contributor_slots: Arc::from(Vec::new().into_boxed_slice()),
+        },
         canonical_dependencies: std::collections::BTreeSet::new(),
     };
     let _publish =
@@ -2327,52 +2414,83 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
     }
 }
 
-// ── `projected_surface_to_type_expr` span re-emit (D1) ──────────────
-// These two unit tests pin the span-threading invariants of the kept
-// `projected_surface_to_type_expr` reconstruction directly from a
-// hand-built `ProjectedSurface` — no walker, no dispatch. They build
-// their input as a struct literal, so they characterise the
-// reconstruction in isolation.
+// ── `surface_view_to_registry_type_expr` terminal-sink invariants ────
+// These unit tests pin the span/visibility-threading invariants of the
+// terminal registry publication sink directly from a hand-interned
+// `SurfaceView` (real graph value nodes, no walker), plus the
+// registry object-surface FACT provenance (node-domain, never re-derived
+// from the materialised value).
 
-/// D1 span threading (positive): `projected_surface_to_type_expr` re-emits the
-/// REAL member spans carried on `ProjectedMember` onto the reconstructed IR
-/// property — it does NOT drop them to `MemberSpans::default()`.
+/// A `SurfaceView` wrapping the given members (no signatures, closed).
+fn surface_view_of(
+    members: Vec<crate::semantic_query::SurfaceMember>,
+    has_index_signature: bool,
+) -> crate::semantic_query::SurfaceView {
+    crate::semantic_query::SurfaceView {
+        members: Arc::from(members.into_boxed_slice()),
+        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature,
+    }
+}
+
+/// A surface member over a real interned `value` node with the given
+/// visibility/spans facets.
+fn surface_member_with(
+    name: &str,
+    value: crate::semantic_query::SemanticNodeId,
+    is_method: bool,
+    visibility: verter_type_expr::MemberVisibility,
+    spans: verter_type_expr::MemberSpans,
+) -> crate::semantic_query::SurfaceMember {
+    crate::semantic_query::SurfaceMember {
+        name: Arc::from(name),
+        value,
+        optional: false,
+        readonly: false,
+        is_method,
+        visibility,
+        spans,
+        declaration_origin: None,
+        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+    }
+}
+
+/// Span threading (positive): the terminal sink re-emits the REAL member spans
+/// carried on the graph `SurfaceMember` onto the reconstructed IR property —
+/// it does NOT drop them to `MemberSpans::default()`.
 ///
-/// Discriminating: reverting the reconstruction to pass `MemberSpans::default()`
-/// (the pre-D1 state) makes every `Some(..)` below `None`, failing the asserts.
+/// Discriminating: a reconstruction that passed `MemberSpans::default()`
+/// makes every `Some(..)` below `None`, failing the asserts.
 #[test]
-fn projected_surface_to_type_expr_reemits_member_spans() {
-    use super::surface::projected_surface_to_type_expr;
-    use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
+fn surface_view_to_registry_type_expr_reemits_member_spans() {
+    use super::surface::surface_view_to_registry_type_expr;
+    use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
     use verter_span::Span;
     use verter_type_expr::MemberSpans;
 
-    // A member carrying real OXC declaration-site spans (as the graph
-    // `SurfaceMember` / `PreparedMember` / IR source would).
-    let member = ProjectedMember {
-        name: "label".to_string(),
-        ty: TypeExpr::Primitive(PrimitiveName::String),
-        optional: false,
-        readonly: false,
-        is_method: false,
-        visibility: verter_type_expr::MemberVisibility::Public,
-        declared_in_macro_type_arg: false,
-        spans: MemberSpans {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let value = host
+        .project_type_store()
+        .semantic_graph()
+        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let member = surface_member_with(
+        "label",
+        value,
+        false,
+        verter_type_expr::MemberVisibility::Public,
+        MemberSpans {
             declaration: Some(Span::new(10, 24)),
             name: Some(Span::new(10, 15)),
             type_annotation: Some(Span::new(17, 23)),
         },
-        declaration_origin: Some(std::sync::Arc::from("/decl.ts")),
-    };
-    let surface = ProjectedSurface {
-        members: vec![member],
-        call_signatures: Vec::new(),
-        construct_signatures: Vec::new(),
-        index_signatures: Vec::new(),
-        has_index_signature: false,
-    };
+    );
+    let surface = surface_view_of(vec![member], false);
 
-    let expr = projected_surface_to_type_expr(&surface)
+    let expr = surface_view_to_registry_type_expr(&host, &surface)
         .expect("a one-member surface should reconstruct to an object type");
     let TypeExpr::Object(object) = &expr else {
         panic!("expected an object type, got {expr:?}");
@@ -2380,6 +2498,11 @@ fn projected_surface_to_type_expr_reemits_member_spans() {
     let ObjectMember::Property(property) = &object.properties[0] else {
         panic!("expected a property member, got {:?}", object.properties[0]);
     };
+    assert_eq!(
+        property.ty,
+        TypeExpr::Primitive(PrimitiveName::String),
+        "the member value node must materialise at the terminal sink"
+    );
     assert_eq!(
         property.spans.declaration,
         Some(Span::new(10, 24)),
@@ -2397,69 +2520,64 @@ fn projected_surface_to_type_expr_reemits_member_spans() {
     );
 }
 
-/// F1 visibility threading: `projected_surface_to_type_expr` reconstructs a
-/// member via `with_visibility` (NOT `with_spans`), so a non-public member
-/// projected onto the `ProjectedSurface` survives the
-/// SurfaceView -> ProjectedMember -> TypeExpr round-trip with its true
+/// Visibility threading: the terminal sink reconstructs a member via
+/// `with_visibility` (NOT `with_spans`), so a non-public member on the graph
+/// surface survives the SurfaceView → TypeExpr publication with its true
 /// accessibility. This is both leak-prevention (the reconstructed surface must
 /// not present a private member as public) and `native_props` fidelity.
 ///
-/// Discriminating: against the tree where the reconstruction uses `with_spans`
+/// Discriminating: against a tree where the reconstruction uses `with_spans`
 /// (which defaults Public), the `Private` / `Protected` assertions below FAIL
 /// (the reconstructed members are Public).
 #[test]
-fn projected_surface_to_type_expr_preserves_member_visibility() {
-    use super::surface::projected_surface_to_type_expr;
-    use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
-    use verter_type_expr::{FunctionExpr, MemberSpans, MemberVisibility};
+fn surface_view_to_registry_type_expr_preserves_member_visibility() {
+    use super::surface::surface_view_to_registry_type_expr;
+    use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
+    use verter_type_expr::{MemberSpans, MemberVisibility};
 
-    let private_prop = ProjectedMember {
-        name: "secret".to_string(),
-        ty: TypeExpr::Primitive(PrimitiveName::Number),
-        optional: false,
-        readonly: false,
-        is_method: false,
-        visibility: MemberVisibility::Private,
-        declared_in_macro_type_arg: false,
-        spans: MemberSpans::default(),
-        declaration_origin: None,
-    };
-    let protected_method = ProjectedMember {
-        name: "guarded".to_string(),
-        ty: TypeExpr::Function(std::sync::Arc::new(FunctionExpr::synthetic(
-            Vec::new(),
-            None,
-            Vec::new(),
-        ))),
-        optional: false,
-        readonly: false,
-        is_method: true,
-        visibility: MemberVisibility::Protected,
-        declared_in_macro_type_arg: false,
-        spans: MemberSpans::default(),
-        declaration_origin: None,
-    };
-    let public_prop = ProjectedMember {
-        name: "open".to_string(),
-        ty: TypeExpr::Primitive(PrimitiveName::String),
-        optional: false,
-        readonly: false,
-        is_method: false,
-        visibility: MemberVisibility::Public,
-        declared_in_macro_type_arg: false,
-        spans: MemberSpans::default(),
-        declaration_origin: None,
-    };
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let graph = host.project_type_store().semantic_graph();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    // A real Function-shaped value node so the protected METHOD member
+    // reconstructs through the Method arm.
+    let function = graph.intern_node(SemanticNodeData::Function {
+        params: Arc::from(Vec::new().into_boxed_slice()),
+        return_type: string,
+        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    });
 
-    let surface = ProjectedSurface {
-        members: vec![private_prop, protected_method, public_prop],
-        call_signatures: Vec::new(),
-        construct_signatures: Vec::new(),
-        index_signatures: Vec::new(),
-        has_index_signature: false,
-    };
+    let surface = surface_view_of(
+        vec![
+            surface_member_with(
+                "secret",
+                number,
+                false,
+                MemberVisibility::Private,
+                MemberSpans::default(),
+            ),
+            surface_member_with(
+                "guarded",
+                function,
+                true,
+                MemberVisibility::Protected,
+                MemberSpans::default(),
+            ),
+            surface_member_with(
+                "open",
+                string,
+                false,
+                MemberVisibility::Public,
+                MemberSpans::default(),
+            ),
+        ],
+        false,
+    );
 
-    let expr = projected_surface_to_type_expr(&surface).expect("multi-member surface reconstructs");
+    let expr = surface_view_to_registry_type_expr(&host, &surface)
+        .expect("multi-member surface reconstructs");
     let TypeExpr::Object(object) = &expr else {
         panic!("expected an object type, got {expr:?}");
     };
@@ -2488,41 +2606,35 @@ fn projected_surface_to_type_expr_preserves_member_visibility() {
     assert_eq!(
         find_property("secret"),
         MemberVisibility::Private,
-        "a private projected property must reconstruct as Private",
+        "a private surface property must reconstruct as Private",
     );
     assert_eq!(
         find_method("guarded"),
         MemberVisibility::Protected,
-        "a protected projected method must reconstruct as Protected",
+        "a protected surface method must reconstruct as Protected",
     );
     assert_eq!(
         find_property("open"),
         MemberVisibility::Public,
-        "a public projected property stays Public",
+        "a public surface property stays Public",
     );
 }
 
-/// D1 span threading (negative): the GENUINELY synthetic open-surface index
-/// signature stays span-`None`. `ProjectedSurface` carries only a
+/// Span threading (negative): the GENUINELY synthetic open-surface index
+/// signature stays span-`None`. The surface carries only a
 /// `has_index_signature: bool` — no declared key/value nodes, hence no single
 /// OXC declaration site — so the reconstruction must NOT fabricate spans.
 ///
 /// Discriminating: a reconstruction that fabricated a non-`None` span here
 /// (e.g. a byte-0 placeholder) would fail these `None` asserts.
 #[test]
-fn projected_surface_to_type_expr_keeps_synthetic_index_signature_span_none() {
-    use super::surface::projected_surface_to_type_expr;
-    use verter_semantic::analysis::type_solver::query_engine::ProjectedSurface;
+fn surface_view_to_registry_type_expr_keeps_synthetic_index_signature_span_none() {
+    use super::surface::surface_view_to_registry_type_expr;
 
-    let surface = ProjectedSurface {
-        members: Vec::new(),
-        call_signatures: Vec::new(),
-        construct_signatures: Vec::new(),
-        index_signatures: Vec::new(),
-        has_index_signature: true,
-    };
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let surface = surface_view_of(Vec::new(), true);
 
-    let expr = projected_surface_to_type_expr(&surface)
+    let expr = surface_view_to_registry_type_expr(&host, &surface)
         .expect("an open surface should reconstruct to an object type");
     let TypeExpr::Object(object) = &expr else {
         panic!("expected an object type, got {expr:?}");
@@ -2546,6 +2658,55 @@ fn projected_surface_to_type_expr_keeps_synthetic_index_signature_span_none() {
     assert_eq!(
         index.spans.value, None,
         "synthetic open-surface index signature value has no source site"
+    );
+}
+
+/// The registry object-surface FACT is decided off the PRODUCING node
+/// (`component_meta_registry_node_has_explicit_object_surface` — an
+/// existential arm-set scan), NEVER re-derived from the materialised
+/// `TypeExpr`. A member whose value is `{ x: string } | number` materialises
+/// to a UNION value (not `TypeExpr::Object`), yet its producing node carries
+/// an object-bearing arm — so the published fact is `true`.
+///
+/// Discriminating: a re-derivation from the materialised value
+/// (`matches!(value, TypeExpr::Object(_))`) returns `false` for the union
+/// value and FAILS the `explicit_object_surface` assert below.
+#[test]
+fn registry_member_object_surface_fact_is_node_domain_not_value_derived() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/mixed.ts".to_string(),
+        Arc::from("export interface Mixed { m: { x: string } | number }\n"),
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/mixed.ts"));
+
+    let mut engine = ComponentMetaQueryEngine::new(&host);
+    let route = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::named("Mixed")),
+        index: Arc::new(TypeExpr::string_literal("m")),
+    };
+    let surface = engine.materialize_registry_routed_member_surface("/src/mixed.ts", &route);
+
+    assert!(
+        !matches!(surface.value, TypeExpr::Object(_)),
+        "fixture premise: the routed member value materialises to a NON-Object \
+         (union) value — got {:?}",
+        surface.value,
+    );
+    assert!(
+        surface.explicit_object_surface,
+        "the object-surface fact must come from the node-domain arm-set scan \
+         (an object-bearing union arm ⇒ true); a re-derivation from the \
+         materialised TypeExpr would return false here",
     );
 }
 
@@ -2688,7 +2849,7 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
             "fixture invariant: the wildcard-route fuse tripped during resolvability",
         );
         assert!(
-            crate::request_context::current_materialization_cache_suppress(),
+            crate::request_context::current_request_result_is_partial(),
             "precondition: the fuse-trip MUST set the request partial sticky",
         );
     }
@@ -2707,6 +2868,169 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
         resolvable2,
         "a fresh request WITH wildcard-route budget MUST report the route-only symbol \
          resolvable — a cached fuse-trip `false` would spuriously report it unresolvable",
+    );
+}
+
+/// BLK4 (inner-cache fenced-serve poison) — `ResolvabilityDb` must REFUSE
+/// admission when the resolvability compute (`resolve_imported_registry_symbol`)
+/// consumed a FENCED (ReturnOnly, `store_published == false`) serve. The
+/// verdict stays `Complete` (a fenced serve is non-cacheable, NOT partial), so
+/// the compute's `refuse_result_cache_admission_if_partial` gate — which only
+/// catches the wildcard-route FUSE trip — does NOT fire. The ONLY rail that
+/// refuses the poisoned verdict is the nested fact tracer (the
+/// `RefCycleResultDb` / `app_config_no_override_proof` sibling pattern), which
+/// pre-fix `can_resolve_registry_symbol` never installed — admitting a verdict
+/// derived from a served-without-publication basis whose facts validate live.
+///
+/// DISCRIMINATING: `force_indexed_ready_serve_fence_for_tests` fences every
+/// `ensure_indexed_ready_serve` the compute drives at a STABLE generation (no
+/// bump — so a `GenerationSuperseded` admission gate cannot mask the refusal,
+/// and the served `indexed` still resolves the verdict). The unfenced control
+/// admits the verdict (`live_count` grows); the fenced request must NOT
+/// (`live_count` unchanged) while the request stays `Complete`. RED-pre (no
+/// nested tracer) the fenced verdict LANDS in `ResolvabilityDb` and a later
+/// same-generation warm hit inherits the stale verdict.
+#[test]
+fn fenced_serve_resolvability_verdict_is_not_admitted() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use std::sync::atomic::Ordering;
+
+    // Control — an UNFENCED resolvability query admits the verdict.
+    let control = build_route_only_reexport_host();
+    assert!(control.ensure_indexed_ready("/m4_src/index.ts").is_some());
+    let control_db = control.project_type_store().resolvable_db();
+    let control_before = control_db.live_count();
+    {
+        let rctx = RequestContext::new(1, Arc::from("/m4_src/index.ts"), false, None);
+        let _guard = RequestContextGuard::install(rctx);
+        let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
+        assert!(
+            engine.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None),
+            "fixture invariant: the route-only symbol resolves",
+        );
+    }
+    assert!(
+        control_db.live_count() > control_before,
+        "control: an unfenced resolvability query admits the verdict into ResolvabilityDb \
+         (fixture invariant — otherwise the fenced assertion is vacuous)",
+    );
+
+    // Fenced — every `ensure_indexed_ready_serve` inside the compute is fenced at
+    // a STABLE generation, so the route resolution consumes a served-without-
+    // publication artifact while its facts validate against the live view.
+    let host = build_route_only_reexport_host();
+    assert!(host.ensure_indexed_ready("/m4_src/index.ts").is_some());
+    let db = host.project_type_store().resolvable_db();
+    let before = db.live_count();
+    {
+        let rctx = RequestContext::new(1, Arc::from("/m4_src/index.ts"), false, None);
+        let _guard = RequestContextGuard::install(rctx);
+        let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
+        host.test_force
+            .force_indexed_ready_serve_fence_for_tests
+            .store(true, Ordering::Relaxed);
+        let _ = engine.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None);
+        host.test_force
+            .force_indexed_ready_serve_fence_for_tests
+            .store(false, Ordering::Relaxed);
+        // Orthogonality: a fenced serve is non-cacheable, NOT partial — it must
+        // NOT raise the request partial sticky.
+        assert!(
+            !crate::request_context::current_request_result_is_partial(),
+            "a fenced resolvability serve is non-cacheable, NOT partial — non-cacheability \
+             routes through the fact tracer, never the partial sticky",
+        );
+    }
+    assert_eq!(
+        db.live_count(),
+        before,
+        "POISON: a fenced (non-cacheable) resolvability compute admitted its verdict into \
+         ResolvabilityDb — the nested fact tracer (RefCycleResultDb / app_config sibling \
+         pattern) must refuse admission, else a later same-generation warm hit inherits the \
+         stale verdict derived from a served-without-publication basis",
+    );
+}
+
+/// The SAME `ResolvabilityDb` admission boundary must ALSO refuse on a tracer
+/// `FactReadSetFinalise::Overflow` — the SECOND, independent non-admission
+/// condition. The entry's signature is built from the keyed canonical's observed
+/// hash, NOT from this tracer's finalised set, so an overflow seen only by the
+/// tracer would otherwise be dropped on the floor and a rootless verdict would warm
+/// the shared cache (a signature above `FACT_SIGNATURE_CAP` can root NO entry, so a
+/// warm read could never revalidate it).
+///
+/// DISCRIMINATING: the per-host overflow knob fans `FACT_SIGNATURE_CAP + 1`
+/// synthetic observations into every installed tracer, so the resolvability
+/// compute's tracer finalises `Overflow` with NO fenced serve and NO partial — the
+/// exact state the pre-fix boundary (which read only `non_cacheable_read_observed`
+/// and discarded the finalise) ADMITTED. The unfenced/unarmed control admits
+/// (`live_count` grows); the overflowed compute must NOT.
+#[test]
+fn tracer_overflow_refuses_resolvability_verdict_admission() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use std::sync::atomic::Ordering;
+
+    // Control — an unarmed resolvability query admits the verdict.
+    let control = build_route_only_reexport_host();
+    assert!(control.ensure_indexed_ready("/m4_src/index.ts").is_some());
+    let control_db = control.project_type_store().resolvable_db();
+    let control_before = control_db.live_count();
+    {
+        let rctx = RequestContext::new(1, Arc::from("/m4_src/index.ts"), false, None);
+        let _guard = RequestContextGuard::install(rctx);
+        let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
+        assert!(
+            engine.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None),
+            "fixture invariant: the route-only symbol resolves",
+        );
+    }
+    assert!(
+        control_db.live_count() > control_before,
+        "control: an unarmed resolvability query admits the verdict into ResolvabilityDb \
+         (fixture invariant — otherwise the overflow assertion is vacuous)",
+    );
+
+    // Overflowed — the compute's tracer observes above the cap, so no signature can
+    // root the verdict.
+    let host = build_route_only_reexport_host();
+    assert!(host.ensure_indexed_ready("/m4_src/index.ts").is_some());
+    let db = host.project_type_store().resolvable_db();
+    let before = db.live_count();
+    {
+        let rctx = RequestContext::new(1, Arc::from("/m4_src/index.ts"), false, None);
+        let _guard = RequestContextGuard::install(rctx);
+        let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
+        host.test_force
+            .force_fact_tracer_overflow_observations
+            .store(
+                crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+                Ordering::Relaxed,
+            );
+        let resolvable =
+            engine.can_resolve_registry_symbol("/m4_src/index.ts", "ButtonProps", None);
+        host.test_force
+            .force_fact_tracer_overflow_observations
+            .store(0, Ordering::Relaxed);
+        // The verdict still flows to THIS caller (overflow is cache-only).
+        assert!(
+            resolvable,
+            "an overflowed resolvability compute still SERVES its verdict to the caller — \
+             overflow refuses cache admission, it does not degrade the answer",
+        );
+        // Orthogonality: overflow is non-cacheable, NOT partial.
+        assert!(
+            !crate::request_context::current_request_result_is_partial(),
+            "a tracer overflow is non-cacheable, NOT partial — it must never raise the \
+             request partial sticky",
+        );
+    }
+    assert_eq!(
+        db.live_count(),
+        before,
+        "POISON: a signature-OVERFLOWED resolvability compute admitted its verdict into \
+         ResolvabilityDb — an observation set above FACT_SIGNATURE_CAP can be rooted by no \
+         signature, so the entry could never be revalidated on a warm read. Overflow must \
+         refuse INDEPENDENTLY at this tracer boundary (pre-fix the `_finalise` was discarded)",
     );
 }
 
@@ -2789,5 +3113,377 @@ fn scope_shadowing_is_built_once_per_scope_and_memoized() {
     assert!(
         !other.is_shadowing_lib("Pick"),
         "scope B declares no userland `Pick`; the builtin stays unshadowed there",
+    );
+}
+
+/// Inner-cache fenced-serve poison — the declaration-lookup cache must REFUSE
+/// admission when the declaration resolution it caches consumed a FENCED
+/// (ReturnOnly, `store_published == false`) `IndexedReady` serve.
+///
+/// `resolve_type_declaration` resolves through the prepared-decl read and the
+/// dep-resolution fallback, both of which ride `ensure_indexed_ready_serve`, so
+/// the resolved declaration can be derived from a served-without-publication
+/// (superseded) artifact. The entry it admits self-roots on
+/// `authoritative_current_content_hash(canonical_source)` — the LIVE hash, read
+/// BEFORE the compute — so its fact stamps validate against the live view while
+/// its payload came from the superseded basis: the exact shape the read-side
+/// fact rail cannot reject.
+///
+/// DISCRIMINATING: the unfenced control ADMITS (`live_count` grows — so the
+/// fenced assertion is not vacuous); the fenced request must NOT, while the
+/// declaration still resolves for THIS caller.
+#[test]
+fn fenced_serve_declaration_lookup_is_not_admitted() {
+    use std::sync::atomic::Ordering;
+
+    // Control — an UNFENCED declaration resolution admits its entry.
+    let control = build_route_only_reexport_host();
+    assert!(control.ensure_indexed_ready("/m4_src/types.ts").is_some());
+    let control_db = control.project_type_store().declaration_db();
+    let control_before = control_db.live_count();
+    let control_resolved = {
+        let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
+        engine
+            .resolve_type_declaration("/m4_src/types.ts", "Props")
+            .declaration_id
+            .is_some()
+    };
+    assert!(
+        control_resolved,
+        "fixture invariant: the declaration resolves on an unfenced host",
+    );
+    assert!(
+        control_db.live_count() > control_before,
+        "fixture invariant: an unfenced resolution ADMITS its declaration-lookup entry \
+         (otherwise the fenced assertion is vacuous)",
+    );
+
+    // Fenced — every `ensure_indexed_ready_serve` the resolution drives is fenced at
+    // a STABLE generation (no bump, so a GenerationSuperseded gate cannot mask the
+    // refusal), while the served artifact still resolves the declaration.
+    let fenced = build_route_only_reexport_host();
+    assert!(fenced.ensure_indexed_ready("/m4_src/types.ts").is_some());
+    let fenced_db = fenced.project_type_store().declaration_db();
+    let fenced_before = fenced_db.live_count();
+    fenced
+        .test_force
+        .force_indexed_ready_serve_fence_for_tests
+        .store(true, Ordering::Relaxed);
+    let fenced_resolved = {
+        let mut engine = ComponentMetaQueryEngine::new(fenced.as_ref());
+        engine
+            .resolve_type_declaration("/m4_src/types.ts", "Props")
+            .declaration_id
+            .is_some()
+    };
+    fenced
+        .test_force
+        .force_indexed_ready_serve_fence_for_tests
+        .store(false, Ordering::Relaxed);
+
+    // The value still answers THIS caller (ReturnOnly) — refusal is CACHE-ONLY and
+    // must never fabricate a miss.
+    assert!(
+        fenced_resolved,
+        "a fenced serve refuses the CACHE WRITE, never the value: the declaration must still \
+         resolve for this caller",
+    );
+    assert_eq!(
+        fenced_db.live_count(),
+        fenced_before,
+        "POISON: a fenced (non-cacheable) declaration resolution admitted its entry into the \
+         declaration-lookup cache. The entry self-roots on the LIVE content hash while its \
+         payload came from a served-without-publication artifact, so no read-side rail can \
+         reject it and a later same-generation warm read inherits the stale declaration. The \
+         WHOLE compute must run inside a cacheability tracer whose verdict refuses the write",
+    );
+}
+
+/// Inner-cache fenced-serve poison — [`ImportedRegistryDb`] must REFUSE
+/// admission when the cross-file symbol resolution it caches consumed a FENCED
+/// (ReturnOnly, `store_published == false`) `IndexedReady` serve.
+///
+/// `resolve_imported_registry_symbol` walks the import route and rides
+/// `ensure_indexed_ready_serve`, so its resolved value can be derived from a
+/// served-without-publication (superseded) artifact. The entry it admits
+/// self-roots on `authoritative_current_content_hash(canonical_id)` — the LIVE
+/// hash, read BEFORE the compute — so the entry's fact stamps validate against
+/// the live view while its payload came from the superseded basis. That is
+/// exactly the shape the read-side fact rail cannot reject, and a later
+/// same-generation warm peek inherits it.
+///
+/// The sibling `ResolvabilityDb`, which caches the BOOL derived from this SAME
+/// resolution, already traces its compute and refuses. This cache — which caches
+/// the resolution's VALUE — did not.
+///
+/// DISCRIMINATING: the unfenced control ADMITS (`live_count` grows — so the
+/// fenced assertion is not vacuous); the fenced request must NOT, while the
+/// symbol still resolves for THIS caller (refusal is cache-only, never a
+/// fabricated miss).
+#[test]
+fn fenced_serve_imported_registry_symbol_is_not_admitted() {
+    use std::sync::atomic::Ordering;
+
+    // Control — an UNFENCED resolution admits its entry.
+    let control = build_route_only_reexport_host();
+    assert!(control.ensure_indexed_ready("/m4_src/index.ts").is_some());
+    let control_db = control.project_type_store().imported_registry_db();
+    let control_before = control_db.live_count();
+    let control_resolved = {
+        let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
+        engine
+            .resolve_imported_registry_symbol("/m4_src/index.ts", "ButtonProps")
+            .is_some()
+    };
+    assert!(
+        control_resolved,
+        "fixture invariant: the re-exported symbol resolves on an unfenced host",
+    );
+    assert!(
+        control_db.live_count() > control_before,
+        "fixture invariant: an unfenced resolution ADMITS its ImportedRegistryDb entry \
+         (otherwise the fenced assertion is vacuous)",
+    );
+
+    // Fenced — every `ensure_indexed_ready_serve` the route walk drives is fenced
+    // at a STABLE generation (no bump, so a GenerationSuperseded gate cannot mask
+    // the refusal), while the served artifact still resolves the symbol.
+    let fenced = build_route_only_reexport_host();
+    assert!(fenced.ensure_indexed_ready("/m4_src/index.ts").is_some());
+    let fenced_db = fenced.project_type_store().imported_registry_db();
+    let fenced_before = fenced_db.live_count();
+    fenced
+        .test_force
+        .force_indexed_ready_serve_fence_for_tests
+        .store(true, Ordering::Relaxed);
+    let fenced_resolved = {
+        let mut engine = ComponentMetaQueryEngine::new(fenced.as_ref());
+        engine
+            .resolve_imported_registry_symbol("/m4_src/index.ts", "ButtonProps")
+            .is_some()
+    };
+    fenced
+        .test_force
+        .force_indexed_ready_serve_fence_for_tests
+        .store(false, Ordering::Relaxed);
+
+    // The value still answers THIS caller (ReturnOnly) — refusal is CACHE-ONLY and
+    // must never fabricate a miss.
+    assert!(
+        fenced_resolved,
+        "a fenced serve refuses the CACHE WRITE, never the value: the symbol must still \
+         resolve for this caller",
+    );
+    assert_eq!(
+        fenced_db.live_count(),
+        fenced_before,
+        "POISON: a fenced (non-cacheable) cross-file symbol resolution admitted its entry into \
+         ImportedRegistryDb. The entry self-roots on the LIVE content hash while its payload \
+         came from a served-without-publication artifact, so no read-side rail can reject it \
+         and a later same-generation warm peek inherits the stale resolution. The WHOLE compute \
+         must run inside a cacheability tracer whose verdict downgrades the admission to \
+         ReturnOnly — the same rail the sibling ResolvabilityDb (which caches the BOOL derived \
+         from this SAME resolution) already carries",
+    );
+}
+
+/// A two-declaration owner: `Pin` exists so a test can acquire the file's
+/// retained decl-body lease with a demand that is NOT the one under test
+/// (`Collection`), leaving `Collection`'s write-once prepared-decl slot VACANT.
+fn build_owner_collection_host() -> Arc<VerterHost> {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/oc_src/types.ts".to_string(),
+        Arc::from(
+            "export interface Pin { p: number }\n\
+             export interface Collection { primary: string }\n",
+        ),
+    );
+    let host = Arc::new(VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    ));
+    assert!(host.ensure_loaded("/oc_src/types.ts"));
+    host
+}
+
+/// Inner-cache LEASE-MISS poison — [`OwnerCollectionDb`] must REFUSE admission
+/// when the prepared-decl read it caches consumed a BROKEN DECL-BODY LEASE.
+///
+/// This is a CONTENT-NEUTRAL non-cacheable reason, and that is the whole point.
+/// A `LeaseMiss` does not supersede the artifact and does not move the owner's
+/// content hash: the file stays published and content-current. So the cached
+/// `None` locator self-roots on the LIVE hash, its fact stamps validate against
+/// the live view on every subsequent warm read, and NO read-side rail can ever
+/// reject it — the recoverable declaration is shadowed as a permanent absence at
+/// that content version. "Safe by rooting" is a category error here.
+///
+/// `PreparedDeclBundle::get` deliberately leaves its write-once slot VACANT on a
+/// `LeaseMiss` precisely so a later demand under a live lease recovers; the
+/// `OwnerCollectionDb` one level up must not undo that care by publishing the
+/// resulting `None` with a valid root.
+///
+/// The lease miss happens inside `observed_prepared_type_decl`, which runs
+/// BEFORE the cache funnel's compute closure — so a cacheability scope opened
+/// INSIDE the closure would miss it. The scope has to be the outermost bracket
+/// of the producer.
+///
+/// DISCRIMINATING: the live-lease control ADMITS (`live_count` grows, locator is
+/// `Some` — so the broken-lease assertion is not vacuous); the broken-lease
+/// request must NOT admit.
+#[test]
+fn broken_decl_body_lease_owner_collection_is_not_admitted() {
+    // Control — a LIVE-lease owner-collection read admits its entry.
+    let control = build_owner_collection_host();
+    let control_db = control.project_type_store().owner_collection_db();
+    let control_before = control_db.live_count();
+    let control_locator = {
+        let mut engine = ComponentMetaQueryEngine::new(control.as_ref());
+        engine.owner_collection_expr("/oc_src/types.ts", "Collection")
+    };
+    assert!(
+        control_locator.is_some(),
+        "fixture invariant: the collection locator resolves under a live decl-body lease",
+    );
+    assert!(
+        control_db.live_count() > control_before,
+        "fixture invariant: a live-lease read ADMITS its OwnerCollectionDb entry \
+         (otherwise the broken-lease assertion is vacuous)",
+    );
+
+    // Broken lease — pin the owner's retained parse snapshot with a demand for a
+    // DIFFERENT symbol (`Pin`), then release it out-of-band. `Collection`'s
+    // prepared-decl slot is still VACANT, so its next demand lease-misses while
+    // the artifact stays published and content-current (no hash movement).
+    let broken = build_owner_collection_host();
+    let serve = broken
+        .ensure_indexed_ready_serve("/oc_src/types.ts")
+        .expect("the owner indexes");
+    assert!(
+        serve.store_published,
+        "fixture invariant: the artifact is PUBLISHED and content-current — the poison this \
+         test pins is content-NEUTRAL, so a fenced serve must not be what refuses it",
+    );
+    let state = Arc::clone(&serve.indexed.shallow_state);
+    assert!(
+        state.decl_bodies().type_decl("Pin").is_some(),
+        "fixture invariant: the pin demand must acquire the owner's retained-snapshot lease",
+    );
+    state.decl_bodies().release_retained_snapshot_for_test();
+
+    let broken_db = broken.project_type_store().owner_collection_db();
+    let broken_before = broken_db.live_count();
+    let broken_locator = {
+        let mut engine = ComponentMetaQueryEngine::new(broken.as_ref());
+        engine.owner_collection_expr("/oc_src/types.ts", "Collection")
+    };
+    assert!(
+        broken_locator.is_none(),
+        "fixture invariant: the broken lease must actually produce the degraded `None` locator \
+         — otherwise this test observes no poison to refuse",
+    );
+    assert_eq!(
+        broken_db.live_count(),
+        broken_before,
+        "POISON: a broken-lease (`LeaseMiss`) prepared-decl read admitted its degraded `None` \
+         locator into OwnerCollectionDb. The lease miss is CONTENT-NEUTRAL — the owner stays \
+         published and content-current — so the entry roots on the LIVE hash and validates on \
+         every warm read forever, permanently shadowing a recoverable declaration. The whole \
+         producer (INCLUDING the `observed_prepared_type_decl` read, which is where the lease \
+         miss is consumed) must run inside a cacheability tracer whose verdict refuses the write",
+    );
+}
+
+/// Engine SCRATCH-memo LEASE-MISS shadow — the per-request
+/// `prepared_type_decls` memo must NOT persist a degraded `None`.
+///
+/// `ComponentMetaQueryEngine::prepared_type_decl` memoizes its lookup for the
+/// engine's whole lifetime. That `None` has TWO indistinguishable causes: an
+/// honest absence (no such declaration), and a broken decl-body lease
+/// (`PreparedDeclBundle::get` fans `LeaseMiss` and returns `None`). Every layer
+/// BELOW deliberately keeps the degraded miss RECOVERABLE — the prepared-decl
+/// bundle leaves its write-once slot VACANT, the decl-body memo evicts its
+/// poisoned cell — precisely so a later demand under a live lease recovers.
+/// A scratch memo that persists the degraded `None` undoes that care for the
+/// engine's whole scope: the recoverable declaration is shadowed as a permanent
+/// absence for every subsequent lookup in the same request.
+///
+/// DISCRIMINATING: the CONTROL (a fresh engine after the same recovery) proves
+/// the host really did recover the declaration, so the second-lookup assertion
+/// is not vacuous; the shadowed engine must reach the SAME declaration.
+#[test]
+fn broken_decl_body_lease_prepared_decl_scratch_memo_does_not_shadow_recovery() {
+    let host = build_owner_collection_host();
+
+    // Break the owner's decl-body lease: pin the retained parse snapshot with a
+    // demand for a DIFFERENT symbol (`Pin`), then release it out-of-band.
+    // `Collection`'s prepared-decl slot is still VACANT, so its next demand
+    // lease-misses while the artifact stays published and content-current.
+    let serve = host
+        .ensure_indexed_ready_serve("/oc_src/types.ts")
+        .expect("the owner indexes");
+    assert!(
+        serve.store_published,
+        "fixture invariant: the artifact is PUBLISHED and content-current — the shadow this \
+         test pins is content-NEUTRAL",
+    );
+    let state = Arc::clone(&serve.indexed.shallow_state);
+    assert!(
+        state.decl_bodies().type_decl("Pin").is_some(),
+        "fixture invariant: the pin demand must acquire the owner's retained-snapshot lease",
+    );
+    state.decl_bodies().release_retained_snapshot_for_test();
+
+    let mut engine = ComponentMetaQueryEngine::new(host.as_ref());
+    let degraded = engine.prepared_type_decl("/oc_src/types.ts", "Collection");
+    assert!(
+        degraded.is_none(),
+        "fixture invariant: the broken lease must actually degrade the prepared-decl read to \
+         `None` — otherwise this test observes no shadow to refuse",
+    );
+
+    // Recover: a content edit republishes the owner from a FRESH parse whose
+    // decl-body lease is live, so `Collection` prepares again.
+    host.upsert(crate::UpsertRequest {
+        canonical_id: Some("/oc_src/types.ts".to_string()),
+        input_id: "/oc_src/types.ts".to_string(),
+        source: Arc::from(
+            "export interface Pin { p: number }\n\
+             export interface Collection { primary: string; secondary: string }\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/oc_src/types.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    })
+    .expect("the owner re-upserts");
+    assert!(host.ensure_loaded("/oc_src/types.ts"));
+
+    // CONTROL — a fresh engine (no scratch entry) reaches the recovered
+    // declaration, so the host-side recovery is real.
+    let control = {
+        let mut fresh = ComponentMetaQueryEngine::new(host.as_ref());
+        fresh.prepared_type_decl("/oc_src/types.ts", "Collection")
+    };
+    assert!(
+        control.is_some(),
+        "fixture invariant: the declaration must be recoverable after the content edit \
+         (otherwise the shadow assertion below is vacuous)",
+    );
+
+    let recovered = engine.prepared_type_decl("/oc_src/types.ts", "Collection");
+    assert!(
+        recovered.is_some(),
+        "SHADOW: the engine's per-request prepared-decl scratch memo persisted a \
+         LEASE-MISS-degraded `None`, so a declaration that is recoverable — and that a fresh \
+         engine resolves — stays a permanent absence for the rest of this engine's scope. The \
+         layers below leave the degraded miss RECOVERABLE (the prepared-decl bundle's slot stays \
+         VACANT, the decl-body cell is evicted); the scratch memo must mirror them and leave its \
+         slot vacant on a non-cacheable read instead of caching the degraded `None`",
     );
 }

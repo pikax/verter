@@ -421,23 +421,6 @@ pub(crate) fn display_type_node(
             let f = display_type_node(store, *false_branch_ref, needs, child_depth, visited).0;
             format!("{check} extends {extends} ? {t} : {f}")
         }
-        // The Vue-macro carrier holds the parser's `ResolvedElements` struct,
-        // which is NOT a `SemanticNodeData` surface. Display renders a concise
-        // structural summary derived from the live payload (prop / emit counts
-        // plus callability) — reading its shape shallowly, never re-resolving it
-        // into the graph (that would require a dispatch).
-        SemanticNodeData::VueMacroElements(elements) => {
-            let mut s = format!(
-                "<vue-macro props={} emits={}",
-                elements.props.len(),
-                elements.call_signatures.len()
-            );
-            if elements.has_call_signature {
-                s.push_str(" callable");
-            }
-            s.push('>');
-            s
-        }
         SemanticNodeData::Function {
             params,
             return_type,
@@ -968,7 +951,6 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         | SemanticNodeData::Mapped { .. }
         | SemanticNodeData::TypeOf(_)
         | SemanticNodeData::TypeParam { .. }
-        | SemanticNodeData::VueMacroElements(_)
         | SemanticNodeData::MergedDecl { .. }
         | SemanticNodeData::DeclRef { .. }
         | SemanticNodeData::InstantiationRef { .. }

@@ -12,7 +12,6 @@ TypeOf | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,Normali
 NormalizeUnion | Live | TypeNode | T L J | — | (members) | — | Singleflight
 NormalizeIntersection | Live | TypeNode | T L J | — | (members) | — | Singleflight
 ProjectPath | Live | TypeNode | T L J | Path,Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop,Provenance,MergeRole | ProjectionReductionContext | — | Singleflight
-ResolvedNamedType | Live | TypeNode | R T L J | — | HostResolvedNamedTypeKey | — | ReadDominantNoExecute
 Relate | Live | Relation | R T L J | — | (source,target,relation,policy,source_freshness,inference_context,context) | — | RelationMemo
 ResolveMacroPayload | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | MacroPayloadContext | resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit | Singleflight
 ResolveClassSurface | Live | TypeNode | P R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ClassSurfaceContext | resolve_class_surface_do_not_warm_hit | Singleflight

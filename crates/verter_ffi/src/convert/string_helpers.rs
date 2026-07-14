@@ -122,10 +122,11 @@ pub(super) fn expansion_stop_reason_to_string(
 }
 pub(super) fn accepted_prop_to_ffi(
     prop: verter_semantic::analysis::component_meta::AcceptedPropAnalysis,
+    r#type: verter_type_expr::TypeExpr,
 ) -> FfiAcceptedPropMeta {
     FfiAcceptedPropMeta {
         name: prop.name,
-        r#type: prop.type_expr,
+        r#type,
         raw_type: prop.raw_type,
         required: prop.required,
         provenance: member_provenance_to_ffi(prop.provenance),
@@ -136,10 +137,11 @@ pub(super) fn accepted_prop_to_ffi(
 
 pub(super) fn accepted_event_to_ffi(
     event: verter_semantic::analysis::component_meta::AcceptedEventAnalysis,
+    payload: verter_type_expr::TypeExpr,
 ) -> FfiAcceptedEventMeta {
     FfiAcceptedEventMeta {
         name: event.name,
-        payload: event.payload,
+        payload,
         raw_signature: event.raw_signature,
         provenance: member_provenance_to_ffi(event.provenance),
         availability: member_availability_to_ffi(event.availability),
@@ -355,11 +357,13 @@ pub(super) fn public_instance_member_kind_to_string(
         }
     }
 }
-pub(super) fn member_visibility_to_string(visibility: host::ResolvedMemberVisibility) -> String {
+pub(super) fn member_visibility_to_string(
+    visibility: verter_type_expr::MemberVisibility,
+) -> String {
     match visibility {
-        host::ResolvedMemberVisibility::Public => "public".to_string(),
-        host::ResolvedMemberVisibility::Protected => "protected".to_string(),
-        host::ResolvedMemberVisibility::Private => "private".to_string(),
+        verter_type_expr::MemberVisibility::Public => "public".to_string(),
+        verter_type_expr::MemberVisibility::Protected => "protected".to_string(),
+        verter_type_expr::MemberVisibility::Private => "private".to_string(),
     }
 }
 pub(super) fn host_block_type_to_string(bt: host::PreprocessorBlockType) -> String {

@@ -368,10 +368,21 @@ fn decl_body_lowering_keeps_member_value_refs_as_carriers() {
     let snapshot = guard.end();
     let (meta, resolution) = resolved.expect("web-heritage SFC must resolve");
 
+    // The budget-trip discriminator is the BUDGET-SPECIFIC diagnostic scan
+    // (`ExpansionStopReason::BudgetExceeded` over the evaluated types), NOT
+    // the general suppress flag: a member-value position with no faithful
+    // source suppresses warm admission through the typed required-source
+    // fail-close, which is orthogonal to the eagerness storm this guard
+    // discriminates.
     assert!(
-        !resolution.synthesis_should_suppress,
+        !crate::meta::component_meta_expansion_budget_exceeded(
+            resolution
+                .evaluated_types
+                .as_ref()
+                .expect("web-heritage SFC publishes evaluated types"),
+        ),
         "carrier-preserving Shallow lowering must complete WITHOUT a budget trip \
-         (synthesis_should_suppress=true means the eager member-value lowering storm \
+         (a BudgetExceeded diagnostic means the eager member-value lowering storm \
          tripped the {TIGHT_PROJECTION_BUDGET}-op fuse)"
     );
 
@@ -407,13 +418,21 @@ fn decl_body_lowering_keeps_member_value_refs_as_carriers() {
         .iter()
         .find(|p| p.name == "features")
         .expect("features prop present");
+    let features_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/workspace/src/Comp.vue",
+        features
+            .type_source
+            .present()
+            .expect("features prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("features prop's published source must shell-materialize"));
     assert!(
         matches!(
-            &features.type_expr,
+            &features_type,
             TypeExpr::Ref { name, .. } if name.as_ref() == "Feat"
         ),
-        "inherited member value must publish as the `Feat` reference carrier, got {:?}",
-        features.type_expr
+        "inherited member value must publish as the `Feat` reference carrier, got {features_type:?}"
     );
 
     // Lowering-eagerness ceiling: the demanded heritage spine costs a
@@ -433,7 +452,13 @@ fn decl_body_lowering_keeps_member_value_refs_as_carriers() {
     let warm = host.get_component_meta_with_resolution("/workspace/src/Comp.vue");
     let warm_snapshot = warm_guard.end();
     let (_, warm_resolution) = warm.expect("warm resolve must succeed");
-    assert!(!warm_resolution.synthesis_should_suppress);
+    // Budget-specific discriminator (see the cold-pass assertion above).
+    assert!(!crate::meta::component_meta_expansion_budget_exceeded(
+        warm_resolution
+            .evaluated_types
+            .as_ref()
+            .expect("warm resolve publishes evaluated types"),
+    ));
     let warm_cold = cold_instantiate_dispatches(&warm_snapshot.dispatch_log);
     assert!(
         warm_cold <= 8,
@@ -549,14 +574,22 @@ fn tan_stack_selected_member_still_materialises_when_projected() {
         .expect("picked prop present");
     // `Opts<string>['core']['data']` terminal is `T[]` with
     // `T = string` — a concrete array of string.
+    let picked_type = crate::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/workspace/src/Picked.vue",
+        picked
+            .type_source
+            .present()
+            .expect("picked prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("picked prop's published source must demand-materialize"));
     assert!(
         matches!(
-            &picked.type_expr,
+            &picked_type,
             TypeExpr::Array { element, .. }
                 if matches!(element.as_ref(), TypeExpr::Primitive(p) if format!("{p:?}") == "String")
         ),
-        "path-projected terminal must materialise to string[], got {:?}",
-        picked.type_expr
+        "path-projected terminal must materialise to string[], got {picked_type:?}"
     );
 }
 
@@ -636,16 +669,23 @@ fn mapped_closed_keys_open_conditional_value_publishes_deferred_carrier() {
         .iter()
         .find(|b| b.name == "message")
         .expect("message binding present");
+    let message_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/workspace/src/Chat.vue",
+        message
+            .type_source
+            .present()
+            .expect("message binding must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("message binding's published source must shell-materialize"));
     assert!(
-        !matches!(&message.type_expr, TypeExpr::Union(_)),
-        "open-conditional mapped value must NOT publish as a both-branch union, got {:?}",
-        message.type_expr
+        !matches!(&message_type, TypeExpr::Union(_)),
+        "open-conditional mapped value must NOT publish as a both-branch union, got {message_type:?}"
     );
     assert!(
-        !matches!(&message.type_expr, TypeExpr::Object(_)),
+        !matches!(&message_type, TypeExpr::Object(_)),
         "open-conditional mapped value must NOT publish as a materialised object \
-         surface, got {:?}",
-        message.type_expr
+         surface, got {message_type:?}"
     );
 
     // Warm pass collapses cold dispatches.
@@ -706,14 +746,21 @@ fn indexed_access_terminal_publishes_shallow() {
         .iter()
         .find(|p| p.name == "cfg")
         .expect("cfg prop present");
+    let cfg_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/workspace/src/Themed.vue",
+        cfg.type_source
+            .present()
+            .expect("cfg prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("cfg prop's published source must shell-materialize"));
     assert!(
         matches!(
-            &cfg.type_expr,
+            &cfg_type,
             TypeExpr::Ref { name, type_arguments } if name.as_ref() == "HeaderCfg" && type_arguments.is_empty()
         ),
         "IndexedAccess terminal must publish the shallow `HeaderCfg` reference \
-         carrier (consumers re-resolve on demand), got {:?}",
-        cfg.type_expr
+         carrier (consumers re-resolve on demand), got {cfg_type:?}"
     );
 }
 
@@ -753,6 +800,44 @@ fn publication_routes_never_demand_expanded() {
         expanded.is_empty(),
         "publication recorded {} `Published(Expanded)` projection context(s); \
          publication demand is Navigate-only. Offending keys:\n{}",
+        expanded.len(),
+        expanded.join("\n")
+    );
+}
+
+/// The OUTPUT-boundary entries (the wire-envelope producers) keep the same
+/// bar: a full `get_component_meta_output` / audited
+/// `get_component_meta_output_with_resolution` — which additionally
+/// materializes ALL 11 wire type lanes at the terminal sink — records ZERO
+/// `Published(Expanded)` projection contexts. Output materialization is
+/// `Navigate` structural transit + plain shell, never the reduced/Expanded
+/// materializer.
+#[test]
+fn output_entry_routes_never_demand_expanded() {
+    let host = build_host(&[
+        ("/workspace/src/theme.ts", THEME_TYPES_TS),
+        ("/workspace/src/Guarded.vue", GUARD_SFC_VUE),
+    ]);
+
+    let guard = CaptureToken::start_for_query("output_publication_demand_guard");
+    let plain = host.get_component_meta_output("/workspace/src/Guarded.vue");
+    let audited = host.get_component_meta_output_with_resolution("/workspace/src/Guarded.vue");
+    let snapshot = guard.end();
+    assert!(
+        plain.expect("plain output entry ok").is_some(),
+        "guard SFC must resolve through the plain output entry"
+    );
+    assert!(
+        audited.expect("audited output entry ok").0.is_some(),
+        "guard SFC must resolve through the audited output entry"
+    );
+
+    let expanded = published_expanded_dispatches(&snapshot.dispatch_log);
+    assert!(
+        expanded.is_empty(),
+        "output materialization recorded {} `Published(Expanded)` projection \
+         context(s); the output boundary is Navigate structural-transit + plain \
+         shell only. Offending keys:\n{}",
         expanded.len(),
         expanded.join("\n")
     );
@@ -1219,10 +1304,17 @@ defineProps<{ user: Extended }>();
         .iter()
         .find(|p| p.name == "user")
         .expect("`user` prop published");
+    let user_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/workspace/src/IE.vue",
+        user.type_source
+            .present()
+            .expect("`user` prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("`user` prop's published source must shell-materialize"));
     assert!(
-        matches!(&user.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "Extended"),
-        "`user` publishes the shallow `Ref {{ Extended }}` carrier; got {:?}",
-        user.type_expr
+        matches!(&user_type, TypeExpr::Ref { name, .. } if name.as_ref() == "Extended"),
+        "`user` publishes the shallow `Ref {{ Extended }}` carrier; got {user_type:?}"
     );
 
     let entry = resolution
@@ -1230,11 +1322,16 @@ defineProps<{ user: Extended }>();
         .iter()
         .find(|entry| entry.name == "Extended")
         .expect("registry publishes the `Extended` sidecar entry");
-    let TypeExpr::Object(object) = &entry.type_expr else {
+    let entry_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/workspace/src/IE.vue",
+        entry.type_source.present().expect("present source"),
+    )
+    .unwrap_or_else(|| panic!("the `Extended` registry entry's source must shell-materialize"));
+    let TypeExpr::Object(object) = &entry_type else {
         panic!(
             "`Extended` registry entry must be the heritage-merged Object \
-             surface, not the raw heritage intersection; got {:?}",
-            entry.type_expr
+             surface, not the raw heritage intersection; got {entry_type:?}"
         );
     };
     let mut keys: Vec<&str> = Vec::new();

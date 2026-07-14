@@ -129,6 +129,27 @@ defineEmits<Emits>()
 <template><div /></template>
 "#;
 
+/// Demand-materialize the named prop's published type source through
+/// the ONE shared dispatch — the explicit consumer resolution step for
+/// a shallow-by-default publication.
+fn demand_prop_type(
+    host: &VerterHost,
+    owner: &str,
+    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+) -> verter_type_expr::TypeExpr {
+    let source = prop
+        .type_source
+        .present()
+        .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name));
+    verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
+        .unwrap_or_else(|| {
+            panic!(
+                "prop `{}`'s published source must demand-materialize",
+                prop.name
+            )
+        })
+}
+
 // ──────────────────────────────────────────────────────────────────
 // `getcomponentmeta_decomposes_through_dispatch_primitives`
 // ──────────────────────────────────────────────────────────────────
@@ -189,30 +210,24 @@ fn getcomponentmeta_decomposes_through_dispatch_primitives() {
         .iter()
         .find(|p| p.name == "message")
         .expect("`message` prop must be present");
+    let message_ty = demand_prop_type(&host, "/workspace/src/Comp.vue", message_prop);
     assert!(
-        matches!(
-            message_prop.type_expr,
-            TypeExpr::Primitive(PrimitiveName::String)
-        ),
-        "`message` prop must reduce to a `string` primitive; got {:?}. \
-         A non-primitive shape proves the projector did not resolve \
+        matches!(message_ty, TypeExpr::Primitive(PrimitiveName::String)),
+        "`message` prop must reduce to a `string` primitive; got {message_ty:?}. \
+         A non-primitive shape proves the shared engine did not resolve \
          the surface natively.",
-        message_prop.type_expr,
     );
     let count_prop = meta
         .props
         .iter()
         .find(|p| p.name == "count")
         .expect("`count` prop must be present");
+    let count_ty = demand_prop_type(&host, "/workspace/src/Comp.vue", count_prop);
     assert!(
-        matches!(
-            count_prop.type_expr,
-            TypeExpr::Primitive(PrimitiveName::Number)
-        ),
-        "`count` prop must reduce to a `number` primitive; got {:?}. \
-         A non-primitive shape proves the projector did not resolve \
+        matches!(count_ty, TypeExpr::Primitive(PrimitiveName::Number)),
+        "`count` prop must reduce to a `number` primitive; got {count_ty:?}. \
+         A non-primitive shape proves the shared engine did not resolve \
          the surface natively.",
-        count_prop.type_expr,
     );
 }
 
@@ -291,26 +306,27 @@ fn projector_self_reduces_nested_indexed_access_chain() {
             )
         });
 
-    // Negative assertions: the published shape must be concrete.
+    let size_ty = demand_prop_type(&host, "/workspace/src/Comp.vue", size_prop);
+
+    // Negative assertions: the resolved shape must be concrete.
     assert!(
-        !matches!(size_prop.type_expr, TypeExpr::IndexedAccess { .. }),
-        "`size` prop type must NOT be a symbolic IndexedAccess; got {:?}. \
-         A symbolic IndexedAccess proves the projector's \
-         `reduce_field_type_expr` was bypassed.",
-        size_prop.type_expr,
+        !matches!(size_ty, TypeExpr::IndexedAccess { .. }),
+        "`size` prop type must NOT be a symbolic IndexedAccess; got {size_ty:?}. \
+         A symbolic IndexedAccess proves the reduction step \
+         was bypassed.",
     );
-    if let TypeExpr::Unknown { raw } = &size_prop.type_expr {
+    if let TypeExpr::Unknown { raw } = &size_ty {
         panic!("`size` prop must NOT be Unknown; got Unknown {{ raw: {raw:?} }}");
     }
 
-    // Positive assertion: the published type is the literal union
+    // Positive assertion: the resolved type is the literal union
     // `"sm" | "md" | "lg"` — the structural result of
     // `ButtonStyles['variants']['size']`.
-    let union_members = match &size_prop.type_expr {
+    let union_members = match &size_ty {
         TypeExpr::Union(members) => members.clone(),
         other => panic!(
             "`size` prop must reduce to Union([\"sm\", \"md\", \"lg\"]); \
-             got {other:?}. A non-union shape proves the projector did \
+             got {other:?}. A non-union shape proves the shared engine did \
              not reduce the IndexedAccess chain natively."
         ),
     };
@@ -441,7 +457,6 @@ fn props_emits_slots_share_path_independent_cache() {
         .resolve_named_symbol(
             "/workspace/src/types.ts",
             "Props",
-            &[],
             Some(ProjectionMode::Expanded),
         )
         .expect("typeinfo must resolve `Props` to a node");

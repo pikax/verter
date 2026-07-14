@@ -1,34 +1,45 @@
 //! Core walker types and rewrite helpers.
 //!
 //! Hosts the `PolicyRegistry` / `PolicyCtx` / `DeclLookup` types that
-//! coordinate the policy walk and the structural-recursion `rewrite_*`
-//! helpers consumed by the entrypoint in `mod.rs`.
+//! coordinate the policy walk and the node-domain `rewrite_*` helpers
+//! consumed by the entrypoint in `mod.rs`.
+//!
+//! The policy operates on content-free SOURCES: every driver field is a
+//! [`SemanticTypeSource`], each decision raises the source to a
+//! semantic-graph node through the ONE shared dispatch bridge and
+//! classifies node-domain, and a fired rule publishes a REPLACEMENT source
+//! (never a materialized `TypeExpr` — materialization happens only at the
+//! sealed output sink).
 
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
-use verter_type_expr::{
-    FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
-    ObjectProperty, TupleElement, TypeExpr,
-};
+use verter_type_expr::facts::SemanticTypeSource;
 
 use crate::host_manage::component_meta_extract::resolve_ref_to_root_identity;
+use crate::project_semantic_dispatch::semantic_source::SourceRaiseContext;
+use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
+use crate::resolver_core::component_meta_registry::{
+    component_meta_registry_node_ref_head, source_bare_ref_name,
+};
 use crate::resolver_core::{ComponentMetaQueryEngine, ResolverContext};
-use crate::semantic_query::DeclIdentity;
+use crate::semantic_query::{
+    DeclIdentity, HotTypeRef, ProjectionMode, ProjectionReductionContext, SemanticNodeData,
+    SemanticNodeId,
+};
 use crate::VerterHost;
 
 use super::cycle_guard::NormalizedTypeArgs;
-use super::pick_omit::rewrite_pick_or_omit_for_package_backed;
 
 /// Build O(1)-lookup tables over the resolved type registry / meta.
 /// `resolved_type_registry` and `resolved_type_registry_meta` are aligned by
 /// `name` — the meta entry for `name` lives in the parallel meta vec.
 pub(super) struct PolicyRegistry<'a> {
-    /// `name → &TypeExpr` of the resolved registry entry.
-    type_by_name: FxHashMap<&'a str, &'a TypeExpr>,
+    /// `name → &SemanticTypeSource` of the resolved registry entry.
+    source_by_name: FxHashMap<&'a str, &'a SemanticTypeSource>,
     /// `name → canonical_source` of the declaration.
     canonical_source_by_name: FxHashMap<&'a str, &'a str>,
     /// Distinct, non-empty declaration scopes drawn from the registry meta.
@@ -43,9 +54,13 @@ impl<'a> PolicyRegistry<'a> {
         type_registry: &'a [ResolvedTypeAnalysis],
         type_registry_meta: &'a [ResolvedTypeRegistryMeta],
     ) -> Self {
-        let mut type_by_name = FxHashMap::default();
+        let mut source_by_name = FxHashMap::default();
         for entry in type_registry.iter() {
-            type_by_name.insert(entry.name.as_str(), &entry.type_expr);
+            // Registry rows resolve present sources by construction; a
+            // non-present position carries no policy-consultable body.
+            if let Some(source) = entry.type_source.present() {
+                source_by_name.insert(entry.name.as_str(), source);
+            }
         }
         let mut canonical_source_by_name = FxHashMap::default();
         let mut fallback_scopes: Vec<&'a str> = Vec::new();
@@ -57,14 +72,22 @@ impl<'a> PolicyRegistry<'a> {
             }
         }
         Self {
-            type_by_name,
+            source_by_name,
             canonical_source_by_name,
             fallback_scopes,
         }
     }
 
-    fn registry_body(&self, name: &str) -> Option<&'a TypeExpr> {
-        self.type_by_name.get(name).copied()
+    /// The registry entry's published body SOURCE, when it carries body
+    /// knowledge. A shallow SELF-referential seed (`Closed(Leaf(Ref(name)))`
+    /// for the entry's own name) carries none — the entry says "resolve me
+    /// on demand" — so the lookup falls through to the engine's
+    /// declaration-body route.
+    fn registry_body(&self, name: &str) -> Option<&'a SemanticTypeSource> {
+        self.source_by_name
+            .get(name)
+            .copied()
+            .filter(|source| source_bare_ref_name(source) != Some(name))
     }
 
     fn canonical_source(&self, name: &str) -> Option<&'a str> {
@@ -84,20 +107,20 @@ pub(super) struct PolicyCtx<'a, 'h> {
     /// type-role-bearing Vue SFC macros (`defineProps`, `defineEmits`,
     /// `defineModel`, `defineSlots`, `withDefaults`) on the owner SFC.
     ///
-    /// A type Ref is classified "role-bearing" — and thus kept symbolic
-    /// per Rules 2 / 4 + the raw-restoration helpers — IFF its resolved
-    /// root identity appears in this set. This is the §3.4
+    /// A type reference is classified "role-bearing" — and thus kept
+    /// symbolic per Rules 2 / 4 + the raw-restoration helpers — IFF its
+    /// resolved root identity appears in this set. This is the §3.4
     /// (Typed-IR-Only Resolver Rule) structural macro-participation
     /// classifier: type-role is conferred by macro consumption, not by
     /// nominal name suffix.
     ///
     /// Built once per `apply_component_meta_resolution_policy` call by
-    /// `build_policy_macro_role_identities` reading
-    /// `AnalyzedMacro.parsed_type_argument` (skeleton-only walk) and
-    /// `AnalyzedMacro.resolved_local_types[i].name` /
-    /// `.type_expr` (full-body walk for named alias closures). Names
-    /// resolve through `resolve_ref_to_root_identity` (scope-aware:
-    /// local declarations shadow imports, imports route through
+    /// `build_policy_macro_role_identities` raising
+    /// `AnalyzedMacro.parsed_type_argument` (skeleton-only node walk) and
+    /// `AnalyzedMacro.resolved_local_types[i].name` / `.shape` (full-body
+    /// node walk for named alias closures). Names resolve through
+    /// `resolve_ref_to_root_identity` (scope-aware: local declarations
+    /// shadow imports, imports route through
     /// `resolve_local_import_symbol_target`).
     pub(super) macro_participating_idents: &'a FxHashSet<ResolvedRootIdentity>,
     /// Cycle-guard active set keyed on `(DeclIdentity, NormalizedTypeArgs)`
@@ -107,7 +130,7 @@ pub(super) struct PolicyCtx<'a, 'h> {
     ///   keying — but they are distinct instantiations and must navigate
     ///   independently.
     /// * Anonymous-type cycles re-entering through identical structural
-    ///   shapes need an identity that is stable across syntactic clones.
+    ///   shapes need an identity that is stable across independent raises.
     pub(super) active_refs: FxHashSet<(DeclIdentity, NormalizedTypeArgs)>,
     /// Greatest observed depth of `active_refs` during the walk. Used
     /// to surface a `policy_active_refs_max_depth` counter under
@@ -116,20 +139,69 @@ pub(super) struct PolicyCtx<'a, 'h> {
 }
 
 impl<'a, 'h> PolicyCtx<'a, 'h> {
-    /// Locate `name`'s declaration body. The body lookup itself is the
-    /// authoritative signal for "this declaration exists" — registry-meta
-    /// `canonical_source` only tells us the macro arg's home, not whether a
-    /// transitively-referenced type is reachable.
+    /// The request-bound resolver context every raise / node read routes
+    /// through (overlay-aware under a session context).
+    pub(super) fn resolver_ctx(&self) -> &'h dyn ResolverContext {
+        self.engine.ctx
+    }
+
+    /// Raise a content-free source to a transient graph handle through the
+    /// ONE shared dispatch bridge, under the owner's name-resolution scope
+    /// (authored locators self-anchor; only producer-local empty anchors
+    /// absolutize against the scope).
+    pub(super) fn raise_source(&self, source: &SemanticTypeSource) -> Option<HotTypeRef> {
+        self.raise_source_in_scope(source, self.owner_canonical)
+    }
+
+    /// [`Self::raise_source`] under an explicit name-resolution scope — the
+    /// declaring file for a located declaration body.
+    pub(super) fn raise_source_in_scope(
+        &self,
+        source: &SemanticTypeSource,
+        scope_canonical_id: &str,
+    ) -> Option<HotTypeRef> {
+        let dispatch = ProjectSemanticDispatch::new(self.resolver_ctx());
+        dispatch.raise_semantic_type_source_to_hot(
+            source,
+            SourceRaiseContext {
+                scope_canonical_id,
+                context: ProjectionReductionContext::structural_transit_with_mode(
+                    ProjectionMode::Navigate,
+                ),
+                interior_failures: None,
+            },
+        )
+    }
+
+    /// Node data reader (the shared dispatch-owned arena read).
+    pub(super) fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+        crate::project_semantic_dispatch::node_data_for(self.resolver_ctx(), node)
+    }
+
+    /// The node's reference HEAD: `(name, type-argument nodes)` for the
+    /// three reference carriers.
+    pub(super) fn node_ref_head(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(String, Vec<SemanticNodeId>)> {
+        component_meta_registry_node_ref_head(self.resolver_ctx(), node)
+    }
+
+    /// Locate `name`'s declaration body SOURCE. The body lookup itself is
+    /// the authoritative signal for "this declaration exists" —
+    /// registry-meta `canonical_source` only tells us the macro arg's home,
+    /// not whether a transitively-referenced type is reachable.
     ///
-    /// Returns `(canonical_source, resolved_name, body)`. The first scope
-    /// that produces a body wins; the resolver scopes are the owner first
-    /// then registry-meta declaration sources. This mirrors the multi-scope
-    /// iteration the deleted `rematerialize` helper performed: `Status` is
-    /// referenced from `ExternalProps.status` whose declaration lives in
-    /// `/types.ts`, so resolving `Status` in `/App.vue` returns nothing but
-    /// resolving in `/types.ts` succeeds.
+    /// Returns `(canonical_source, body source)`. The first scope that
+    /// produces a body wins; the resolver scopes are the owner first then
+    /// registry-meta declaration sources — `Status` is referenced from
+    /// `ExternalProps.status` whose declaration lives in `/types.ts`, so
+    /// resolving `Status` in `/App.vue` returns nothing but resolving in
+    /// `/types.ts` succeeds.
     pub(super) fn locate_declaration(&mut self, name: &str) -> Option<DeclLookup> {
-        // Registry first — pre-resolved data, zero engine work.
+        // Registry first — pre-resolved data, zero engine work. A shallow
+        // self-referential seed carries no body knowledge and falls
+        // through to the engine's declaration-body route below.
         if let Some(body) = self.registry.registry_body(name) {
             let canonical = self
                 .registry
@@ -157,13 +229,13 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
             } else {
                 decl.resolved_name.clone()
             };
-            if let Some(body) = self
+            if let Some(locator) = self
                 .engine
                 .named_decl_body(&decl.canonical_source, &resolved_name)
             {
                 return Some(DeclLookup {
                     canonical_source: decl.canonical_source,
-                    body,
+                    body: SemanticTypeSource::Authored(locator),
                 });
             }
         }
@@ -216,9 +288,8 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
     /// the owner's type-role-bearing macros (`defineProps`,
     /// `defineEmits`, `defineModel`, `defineSlots`, `withDefaults`).
     ///
-    /// Replaces the legacy nominal `is_props_suffix(name) =
-    /// name.ends_with("Props")` check — type-role classification is
-    /// structural, not nominal.
+    /// Type-role classification is structural, not nominal — never a
+    /// name-suffix check.
     pub(super) fn is_macro_participating(&self, name: &str) -> bool {
         if let Some(identity) = resolve_ref_to_root_identity(self.host, self.owner_canonical, name)
         {
@@ -236,232 +307,89 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
 
 pub(super) struct DeclLookup {
     pub(super) canonical_source: String,
-    pub(super) body: TypeExpr,
+    pub(super) body: SemanticTypeSource,
 }
 
-/// Returns true if `expr` was mutated.
-pub(super) fn rewrite_in_place(expr: &mut TypeExpr, ctx: &mut PolicyCtx<'_, '_>) -> bool {
-    if let Some(next) = rewrite_expr(expr, ctx) {
-        *expr = next;
-        true
-    } else {
-        false
-    }
-}
-
-/// Walk `expr` and produce a rewritten clone if any rule fires; otherwise
-/// `None`. Caller owns the in-place swap.
-pub(super) fn rewrite_expr(expr: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>) -> Option<TypeExpr> {
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => rewrite_ref(name.as_ref(), type_arguments.as_ref(), ctx),
-
-        TypeExpr::IndexedAccess { object, index } => {
-            // Rule 2: member-path on a macro-participating type stays
-            // symbolic (e.g. `MyProps['avatar']`). Structural §3.4
-            // classification — the root must resolve to an identity
-            // consumed by one of the owner's role-bearing macros.
-            if indexed_access_targets_macro_participating(object, ctx) {
-                return None;
-            }
-            // Rule 5: recurse into both arms.
-            let new_obj = rewrite_expr(object, ctx);
-            let new_idx = rewrite_expr(index, ctx);
-            if new_obj.is_none() && new_idx.is_none() {
-                return None;
-            }
-            Some(TypeExpr::IndexedAccess {
-                object: new_obj.map(Arc::new).unwrap_or_else(|| object.clone()),
-                index: new_idx.map(Arc::new).unwrap_or_else(|| index.clone()),
-            })
-        }
-
-        // Rule 5: structural recursion.
-        TypeExpr::Array { element, readonly } => {
-            let new_element = rewrite_expr(element, ctx)?;
-            Some(TypeExpr::Array {
-                element: Arc::new(new_element),
-                readonly: *readonly,
-            })
-        }
-        TypeExpr::Tuple { elements, readonly } => {
-            let mut next: Option<Vec<TupleElement>> = None;
-            for (idx, element) in elements.iter().enumerate() {
-                if let Some(rewritten) = rewrite_expr(&element.ty, ctx) {
-                    let cloned = next.get_or_insert_with(|| elements.iter().cloned().collect());
-                    cloned[idx].ty = rewritten;
-                }
-            }
-            next.map(|elements| TypeExpr::Tuple {
-                elements: Arc::from(elements),
-                readonly: *readonly,
-            })
-        }
-        TypeExpr::Union(types) => rewrite_homogeneous(types, ctx).map(TypeExpr::Union),
-        TypeExpr::Intersection(types) => {
-            rewrite_homogeneous(types, ctx).map(TypeExpr::Intersection)
-        }
-        TypeExpr::Object(obj) => {
-            rewrite_object(obj, ctx).map(|next| TypeExpr::Object(Arc::new(next)))
-        }
-        TypeExpr::Function(func) => {
-            rewrite_function(func, ctx).map(|next| TypeExpr::Function(Arc::new(next)))
-        }
-        // A constructor type's signature is rewritten with the same
-        // `rewrite_function` helper as a function type, but is reconstructed as
-        // a `ConstructorType` so the constructor-ness is preserved (never
-        // flattened to a plain function).
-        TypeExpr::ConstructorType(func) => {
-            rewrite_function(func, ctx).map(|next| TypeExpr::ConstructorType(Arc::new(next)))
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            let new_check = rewrite_expr(check, ctx);
-            let new_extends = rewrite_expr(extends, ctx);
-            let new_true = rewrite_expr(true_type, ctx);
-            let new_false = rewrite_expr(false_type, ctx);
-            if new_check.is_none()
-                && new_extends.is_none()
-                && new_true.is_none()
-                && new_false.is_none()
-            {
-                return None;
-            }
-            Some(TypeExpr::Conditional {
-                check: new_check.map(Arc::new).unwrap_or_else(|| check.clone()),
-                extends: new_extends.map(Arc::new).unwrap_or_else(|| extends.clone()),
-                true_type: new_true.map(Arc::new).unwrap_or_else(|| true_type.clone()),
-                false_type: new_false
-                    .map(Arc::new)
-                    .unwrap_or_else(|| false_type.clone()),
-            })
-        }
-        TypeExpr::Mapped {
-            parameter,
-            source,
-            value,
-            optional,
-            readonly,
-            name_type,
-        } => {
-            let new_source = rewrite_expr(source, ctx);
-            let new_value = rewrite_expr(value, ctx);
-            let new_name_type = name_type.as_ref().and_then(|n| rewrite_expr(n, ctx));
-            if new_source.is_none() && new_value.is_none() && new_name_type.is_none() {
-                return None;
-            }
-            Some(TypeExpr::Mapped {
-                parameter: parameter.clone(),
-                source: new_source.map(Arc::new).unwrap_or_else(|| source.clone()),
-                value: new_value.map(Arc::new).unwrap_or_else(|| value.clone()),
-                optional: *optional,
-                readonly: *readonly,
-                name_type: match (new_name_type, name_type) {
-                    (Some(rewritten), _) => Some(Arc::new(rewritten)),
-                    (None, original) => original.clone(),
-                },
-            })
-        }
-        TypeExpr::KeyOf(inner) => {
-            let new_inner = rewrite_expr(inner, ctx)?;
-            Some(TypeExpr::KeyOf(Arc::new(new_inner)))
-        }
-        TypeExpr::Rest(inner) => {
-            let new_inner = rewrite_expr(inner, ctx)?;
-            Some(TypeExpr::Rest(Arc::new(new_inner)))
-        }
-        TypeExpr::Parenthesized(inner) => {
-            let new_inner = rewrite_expr(inner, ctx)?;
-            Some(TypeExpr::Parenthesized(Arc::new(new_inner)))
-        }
-        // Mirrors the `Ref` arm's recursion (Rule 5): `specifier`/`qualifier`
-        // are leaf strings (like a `Ref`'s `name`); the only nested exprs are
-        // `type_arguments`, which rewrite and rebuild the same carrier.
-        TypeExpr::ImportType {
-            specifier,
-            qualifier,
-            typeof_query,
-            type_arguments,
-        } => {
-            let mut next: Option<Vec<TypeExpr>> = None;
-            for (idx, arg) in type_arguments.iter().enumerate() {
-                if let Some(rewritten) = rewrite_expr(arg, ctx) {
-                    let cloned = next.get_or_insert_with(|| type_arguments.to_vec());
-                    cloned[idx] = rewritten;
-                }
-            }
-            next.map(|args| TypeExpr::ImportType {
-                specifier: specifier.clone(),
-                qualifier: qualifier.clone(),
-                typeof_query: *typeof_query,
-                type_arguments: Arc::from(args),
-            })
-        }
-
-        // Terminals — no rewrite possible.
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::TypeParameter(_)
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::TemplateLiteral { .. }
-        | TypeExpr::Infer { .. }
-        | TypeExpr::RecursiveRef { .. }
-        // Synthetic carriers are intrinsic terminals — never rewritten
-        // by the resolution policy (carrier identity is closed).
-        | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Unknown { .. } => None,
-    }
-}
-
-/// Rewrite a `TypeExpr::Ref { name, type_arguments }` per rules 1, 3, 4, 5.
-fn rewrite_ref(
-    name: &str,
-    type_arguments: &[TypeExpr],
+/// Returns true if the published source position was replaced. Only a
+/// PRESENT source is rule-walked: a proven absence and a typed failure pass
+/// through the policy untouched (the policy refines present sources; it
+/// never fabricates one and never launders a failure).
+pub(super) fn rewrite_source_in_place(
+    slot: &mut verter_type_expr::facts::SourcePosition,
     ctx: &mut PolicyCtx<'_, '_>,
-) -> Option<TypeExpr> {
-    // Rule 4: macro-participating bare alias / generic stays symbolic.
-    // Type-role classification is structural (the ref resolves to a type
-    // consumed by one of the owner's `defineProps` / `defineEmits` /
-    // `defineModel` / `defineSlots` / `withDefaults` macros), NOT
-    // nominal (the identifier ends in `"Props"`). See §3.4 of the
-    // Typed-IR-Only Resolver Rule.
-    if ctx.is_macro_participating(name) {
-        return rewrite_type_arguments(name, type_arguments, ctx, /*recurse*/ false);
-    }
-
-    // Selective `Pick<package_backed, K>` and symbolic
-    // `Omit<package_backed, K>`: when the target declaration's
-    // canonical source resolves under `/node_modules/`, the helper
-    // module owns the materialisation result. Workspace-owned targets
-    // fall through to the standard rewrite chain so the canonical
-    // reuse path keeps ownership.
-    if (name == "Pick" || name == "Omit") && type_arguments.len() == 2 {
-        if let Some(rewritten) = rewrite_pick_or_omit_for_package_backed(name, type_arguments, ctx)
-        {
-            return Some(rewritten);
-        }
-    }
-
-    // For non-Props refs, check whether the declaration is reachable. If
-    // not, leave the Ref alone (Rule 5 only recurses into type_arguments).
-    let lookup = ctx.locate_declaration(name);
-    let Some(DeclLookup {
-        canonical_source,
-        body,
-    }) = lookup
-    else {
-        return rewrite_type_arguments(name, type_arguments, ctx, /*recurse*/ true);
+) -> bool {
+    let Some(current) = slot.present() else {
+        return false;
     };
+    let Some(next) = rewrite_source(current, ctx) else {
+        return false;
+    };
+    if slot.present() == Some(&next) {
+        return false;
+    }
+    *slot = verter_type_expr::facts::SourcePosition::Present(next);
+    true
+}
 
-    // Rule 1: package-backed Refs stay symbolic.
-    if ctx.host.workspace_is_package_backed(&canonical_source) {
-        return rewrite_type_arguments(name, type_arguments, ctx, /*recurse*/ false);
+/// Decide a published source's replacement, node-domain: raise the source
+/// ONCE through the shared bridge and run the rule walk off the raised
+/// node. `None` = keep the existing published source (unraisable sources
+/// stay shallow verbatim — never a fabricated stand-in).
+pub(super) fn rewrite_source(
+    source: &SemanticTypeSource,
+    ctx: &mut PolicyCtx<'_, '_>,
+) -> Option<SemanticTypeSource> {
+    let hot = ctx.raise_source(source)?;
+    rewrite_node(hot.node(), ctx)
+}
+
+/// The node-domain rule walk over a raised published-source node. Returns
+/// `Some(replacement source)` when a rule fired; `None` keeps the existing
+/// published source.
+pub(super) fn rewrite_node(
+    node: SemanticNodeId,
+    ctx: &mut PolicyCtx<'_, '_>,
+) -> Option<SemanticTypeSource> {
+    if let Some((name, args)) = ctx.node_ref_head(node) {
+        return rewrite_ref_node(name.as_str(), &args, ctx);
+    }
+    // Rule 2: a member-path on a macro-participating type stays symbolic
+    // (e.g. `MyProps['avatar']`). Structural §3.4 classification — the
+    // root must resolve to an identity consumed by one of the owner's
+    // role-bearing macros. Every other structural root keeps its source:
+    // interior positions materialize shallow at the sealed output sink and
+    // consumers re-resolve them on demand.
+    None
+}
+
+/// Rewrite a reference-headed node per rules 1, 3, 4, 5.
+fn rewrite_ref_node(
+    name: &str,
+    arg_nodes: &[SemanticNodeId],
+    ctx: &mut PolicyCtx<'_, '_>,
+) -> Option<SemanticTypeSource> {
+    // Rule 4: macro-participating bare alias / generic stays symbolic.
+    // Type-role classification is structural (the reference resolves to a
+    // type consumed by one of the owner's `defineProps` / `defineEmits` /
+    // `defineModel` / `defineSlots` / `withDefaults` macros), NOT nominal
+    // (the identifier ends in `"Props"`). See §3.4 of the Typed-IR-Only
+    // Resolver Rule.
+    if ctx.is_macro_participating(name) {
+        return None;
+    }
+
+    // For non-participating refs, check whether the declaration is
+    // reachable. If not (builtin utilities like `Pick` / `Omit` included),
+    // the carrier stays symbolic — the sealed output sink's reducer owns
+    // path-precise selective materialization of utility carriers (L1).
+    let lookup = ctx.locate_declaration(name)?;
+
+    // Rule 1: package-backed refs stay symbolic.
+    if ctx
+        .host
+        .workspace_is_package_backed(&lookup.canonical_source)
+    {
+        return None;
     }
 
     // Build the `(DeclIdentity, NormalizedTypeArgs)` cycle-guard key. The
@@ -469,21 +397,19 @@ fn rewrite_ref(
     // name — two `Foo`s in different files produce different identities;
     // `Pick<X, 'a'>` and `Pick<X, 'b'>` produce different normalized
     // type-args so they navigate independently.
-    let decl_identity = ctx.decl_identity_for(&canonical_source, name);
-    let normalized_args = NormalizedTypeArgs::normalize(type_arguments, ctx);
+    let decl_identity = ctx.decl_identity_for(&lookup.canonical_source, name);
+    let normalized_args = NormalizedTypeArgs::normalize_nodes(arg_nodes, ctx);
     let guard_key = (decl_identity, normalized_args);
 
-    // Re-entry on the same key surfaces a `RecursiveRef`: the prior
-    // invocation is still resolving this declaration, and continuing
-    // would recurse forever. The recursive back-edge preserves the
-    // declaration name plus its instantiation arguments so consumers
-    // can render the recursion target (e.g. `Tree[]` whose element
-    // is a back-edge to `Tree` publishes `RecursiveRef("Tree", [])`).
-    // Generic substitutions are part of identity — `Foo<A>` and
-    // `Foo<B>` are distinct guard keys and only collapse to a back
-    // edge when the *same* substitution recurs.
+    // Re-entry on the same key keeps the symbolic carrier: the prior
+    // invocation is still resolving this declaration, and continuing would
+    // recurse forever. The preserved shallow carrier IS the recursion
+    // back-edge — the consumer re-resolves it on demand and reaches the
+    // same shallow published form. Generic substitutions are part of
+    // identity — `Foo<A>` and `Foo<B>` are distinct guard keys and only
+    // stop on a back edge when the *same* substitution recurs.
     if ctx.active_refs.contains(&guard_key) {
-        return Some(TypeExpr::recursive_ref(name, type_arguments.to_vec()));
+        return None;
     }
 
     ctx.active_refs.insert(guard_key.clone());
@@ -495,247 +421,127 @@ fn rewrite_ref(
         });
     }
 
-    let result = rewrite_ref_body_with_guard(&body, name, type_arguments, ctx);
+    let result = rewrite_ref_body_with_guard(&lookup, arg_nodes, ctx);
 
     ctx.active_refs.remove(&guard_key);
     result
 }
 
-/// Body-chase logic invoked under the active-refs cycle guard. Consumes
-/// the resolved declaration body and either returns the rewritten shape
-/// (Rule 3 / project-local non-Props) or falls through to type-argument
-/// recursion (Rule 5).
+/// Body-chase logic invoked under the active-refs cycle guard. Raises the
+/// located declaration body and either publishes it (Rule 3 /
+/// project-local non-participating bare alias with a structurally
+/// resolvable body) or descends the alias SPINE one reference at a time
+/// (Rule 5) — each hop re-enters [`rewrite_ref_node`] under the guard, so a
+/// self-referential alias (`type Self = Pick<Self>`, `type A = B; type B =
+/// A`) registers on the active set and terminates on the back-edge.
 fn rewrite_ref_body_with_guard(
-    body: &TypeExpr,
-    name: &str,
-    type_arguments: &[TypeExpr],
+    lookup: &DeclLookup,
+    arg_nodes: &[SemanticNodeId],
     ctx: &mut PolicyCtx<'_, '_>,
-) -> Option<TypeExpr> {
-    // Rule 3: project-local non-Props with empty type_arguments → chase to
-    // body if the body is structurally resolvable (not just another Ref).
-    if type_arguments.is_empty() && body_is_resolvable(body, ctx) {
-        // The body itself may contain other Refs that need policy treatment
-        // (e.g. an Object whose property is `Ref(OtherImported)`). Apply
-        // the policy to the body before publishing.
-        let cloned = match rewrite_expr(body, ctx) {
-            Some(rewritten) => rewritten,
-            None => body.clone(),
-        };
-        return Some(cloned);
-    }
-
-    // Rule 5: recurse into type_arguments only.
-    rewrite_type_arguments(name, type_arguments, ctx, /*recurse*/ true)
-}
-
-/// If `recurse` is true, rewrite each type argument and rebuild the Ref when
-/// any change occurred. If false, return None (Ref kept as-is).
-fn rewrite_type_arguments(
-    name: &str,
-    type_arguments: &[TypeExpr],
-    ctx: &mut PolicyCtx<'_, '_>,
-    recurse: bool,
-) -> Option<TypeExpr> {
-    if !recurse || type_arguments.is_empty() {
+) -> Option<SemanticTypeSource> {
+    // Rule 3 applies only to BARE references: a generic instantiation's
+    // published carrier keeps the substitution (publishing the uninstantiated
+    // declaration body would lose it).
+    if !arg_nodes.is_empty() {
         return None;
     }
-    let mut next: Option<Vec<TypeExpr>> = None;
-    for (idx, arg) in type_arguments.iter().enumerate() {
-        if let Some(rewritten) = rewrite_expr(arg, ctx) {
-            let cloned = next.get_or_insert_with(|| type_arguments.to_vec());
-            cloned[idx] = rewritten;
-        }
+    let body_hot = ctx.raise_source_in_scope(&lookup.body, &lookup.canonical_source)?;
+    let body_node = body_hot.node();
+    if body_root_is_resolvable(body_node, ctx) {
+        // Publish the located declaration's body SOURCE. Nested positions
+        // stay shallow: the sealed output sink materializes the body and
+        // consumers re-resolve interior references on demand.
+        return Some(lookup.body.clone());
     }
-    next.map(|args| TypeExpr::Ref {
-        name: Arc::from(name),
-        type_arguments: Arc::from(args),
-    })
-}
-
-/// Apply rewrite to each element of `types`. Returns `Some(new arc-slice)` if
-/// any element rewrote, else `None`.
-fn rewrite_homogeneous(
-    types: &Arc<[TypeExpr]>,
-    ctx: &mut PolicyCtx<'_, '_>,
-) -> Option<Arc<[TypeExpr]>> {
-    let mut next: Option<Vec<TypeExpr>> = None;
-    for (idx, ty) in types.iter().enumerate() {
-        if let Some(rewritten) = rewrite_expr(ty, ctx) {
-            let cloned = next.get_or_insert_with(|| types.to_vec());
-            cloned[idx] = rewritten;
-        }
+    // Alias-spine descent: `type A = B` / `type A = Pick<Self, 'x'>` — the
+    // body root is itself a reference head. Descend the DECISION through
+    // the guard so a cyclic spine terminates on the back-edge, and adopt
+    // the inner chase's publication when one resolves.
+    if let Some((inner_name, inner_args)) = ctx.node_ref_head(body_node) {
+        return rewrite_ref_node(inner_name.as_str(), &inner_args, ctx);
     }
-    next.map(Arc::from)
-}
-
-/// Apply rewrite to each member's type. Returns `Some(new ObjectExpr)` if any
-/// changed, else `None`.
-fn rewrite_object(obj: &Arc<ObjectExpr>, ctx: &mut PolicyCtx<'_, '_>) -> Option<ObjectExpr> {
-    let mut next: Option<Vec<ObjectMember>> = None;
-    for (idx, member) in obj.properties.iter().enumerate() {
-        if let Some(rewritten) = rewrite_object_member(member, ctx) {
-            let cloned = next.get_or_insert_with(|| obj.properties.clone());
-            cloned[idx] = rewritten;
-        }
-    }
-    next.map(|properties| ObjectExpr { properties })
-}
-
-fn rewrite_object_member(
-    member: &ObjectMember,
-    ctx: &mut PolicyCtx<'_, '_>,
-) -> Option<ObjectMember> {
-    match member {
-        ObjectMember::Property(prop) => {
-            let new_ty = rewrite_expr(&prop.ty, ctx)?;
-            // PRESERVE the member's declared accessibility: this rebuilds an
-            // EXISTING property (only its child type changed), so it must carry
-            // `prop.visibility` via `with_visibility`. `with_spans` would default
-            // it to Public, upgrading a non-public member.
-            Some(ObjectMember::Property(ObjectProperty::with_visibility(
-                prop.name.clone(),
-                new_ty,
-                prop.optional,
-                prop.readonly,
-                prop.visibility,
-                prop.spans,
-            )))
-        }
-        ObjectMember::IndexSignature(sig) => {
-            let new_key = rewrite_expr(&sig.key_type, ctx);
-            let new_value = rewrite_expr(&sig.value_type, ctx);
-            if new_key.is_none() && new_value.is_none() {
-                return None;
-            }
-            Some(ObjectMember::IndexSignature(IndexSignature::with_spans(
-                sig.key_name.clone(),
-                new_key.unwrap_or_else(|| sig.key_type.clone()),
-                new_value.unwrap_or_else(|| sig.value_type.clone()),
-                sig.readonly,
-                sig.spans,
-            )))
-        }
-        ObjectMember::CallSignature(func) => {
-            rewrite_function(func, ctx).map(ObjectMember::CallSignature)
-        }
-        ObjectMember::ConstructSignature(func) => {
-            rewrite_function(func, ctx).map(ObjectMember::ConstructSignature)
-        }
-        ObjectMember::Method(method) => {
-            let new_func = rewrite_function(&method.function, ctx)?;
-            // PRESERVE the method's declared accessibility (rebuild of an
-            // existing method — see the property arm).
-            Some(ObjectMember::Method(MethodSignature::with_visibility(
-                method.name.clone(),
-                new_func,
-                method.optional,
-                method.visibility,
-                method.spans,
-            )))
-        }
-    }
-}
-
-fn rewrite_function(func: &FunctionExpr, ctx: &mut PolicyCtx<'_, '_>) -> Option<FunctionExpr> {
-    let mut next_params: Option<Vec<FunctionParam>> = None;
-    for (idx, param) in func.parameters.iter().enumerate() {
-        if let Some(rewritten) = rewrite_expr(&param.ty, ctx) {
-            let cloned = next_params.get_or_insert_with(|| func.parameters.clone());
-            cloned[idx].ty = rewritten;
-        }
-    }
-    let new_return = func
-        .return_type
-        .as_ref()
-        .and_then(|rt| rewrite_expr(rt, ctx));
-    if next_params.is_none() && new_return.is_none() {
-        return None;
-    }
-    Some(FunctionExpr::with_spans(
-        next_params.unwrap_or_else(|| func.parameters.clone()),
-        match (new_return, &func.return_type) {
-            (Some(rewritten), _) => Some(Arc::new(rewritten)),
-            (None, original) => original.clone(),
-        },
-        func.type_parameters.clone(),
-        func.spans,
-    ))
+    None
 }
 
 // ---------------------------------------------------------------------------
 // Predicates
 // ---------------------------------------------------------------------------
 
-/// Walk through `Parenthesized` / Union / Intersection wrappers; return
-/// true if any leaf is a Ref whose resolved root identity participates
-/// in one of the owner's type-role-bearing Vue SFC macros.
+/// Walk through wrapper nodes; return true if any leaf is a reference whose
+/// resolved root identity participates in one of the owner's
+/// type-role-bearing Vue SFC macros.
 ///
-/// Structural §3.4 classification — replaces the legacy nominal
-/// `name.ends_with("Props")` filter.
+/// Structural §3.4 classification — never a nominal name-suffix filter.
 pub(super) fn indexed_access_targets_macro_participating(
-    object: &TypeExpr,
+    object: SemanticNodeId,
     ctx: &PolicyCtx<'_, '_>,
 ) -> bool {
-    match object {
-        TypeExpr::Parenthesized(inner) => indexed_access_targets_macro_participating(inner, ctx),
-        TypeExpr::Ref { name, .. } => ctx.is_macro_participating(name.as_ref()),
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+    if let Some((name, _)) = ctx.node_ref_head(object) {
+        return ctx.is_macro_participating(name.as_str());
+    }
+    match ctx.node_data(object).as_deref() {
+        Some(SemanticNodeData::Alias(target)) => {
+            indexed_access_targets_macro_participating(*target, ctx)
+        }
+        Some(SemanticNodeData::Union(arms)) | Some(SemanticNodeData::Intersection(arms)) => arms
             .iter()
-            .any(|ty| indexed_access_targets_macro_participating(ty, ctx)),
+            .any(|arm| indexed_access_targets_macro_participating(*arm, ctx)),
         _ => false,
     }
 }
 
-/// A registry body is "resolvable" if it is a structural shape (Object /
-/// Union / Intersection / Array / Tuple / Function / Primitive / Literal /
-/// Conditional / Mapped / TemplateLiteral / KeyOf / etc.) — anything other
-/// than a bare Ref (which would just chase to another symbolic).
+/// A located declaration body is "resolvable" if its raised ROOT is a
+/// structural shape (Object / Union / Intersection / Array / Tuple /
+/// Function / Primitive / Literal / Conditional / Mapped / TemplateLiteral
+/// / KeyOf / merged declaration / etc.) — anything other than a reference
+/// head (which would just chase to another symbolic; the alias-spine
+/// descent owns that hop).
 ///
-/// Bodies that are themselves IndexedAccess on a macro-participating
-/// alias should NOT resolve eagerly — they are kept symbolic because
-/// that is the registry authoritative form.
-pub(super) fn body_is_resolvable(body: &TypeExpr, ctx: &PolicyCtx<'_, '_>) -> bool {
-    match body {
-        TypeExpr::Parenthesized(inner) => body_is_resolvable(inner, ctx),
-        TypeExpr::Ref { .. } => false,
-        // An import-type is a cross-file symbolic reference (like a bare
-        // `Ref`), not a concrete structural shape — chasing it would just
-        // resolve to another symbolic, so it is NOT resolvable here.
-        TypeExpr::ImportType { .. } => false,
-        TypeExpr::IndexedAccess { object, .. } => {
-            !indexed_access_targets_macro_participating(object, ctx)
-        }
-        TypeExpr::Unknown { .. } | TypeExpr::Infer { .. } | TypeExpr::TypeParameter(_) => false,
-        // Synthetic carriers are intrinsic terminals — they are NOT a
-        // type alias body to resolve; the projector/registry treat them
-        // as the published leaf.
-        TypeExpr::SyntheticSlotBinding(_) => false,
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Union(_)
-        | TypeExpr::Intersection(_)
-        | TypeExpr::Array { .. }
-        | TypeExpr::Tuple { .. }
-        | TypeExpr::Object(_)
-        | TypeExpr::Function(_)
-        // A constructor type is a concrete structural shape, resolvable like a
-        // function/object type.
-        | TypeExpr::ConstructorType(_)
-        | TypeExpr::KeyOf(_)
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::Conditional { .. }
-        | TypeExpr::Mapped { .. }
-        | TypeExpr::TemplateLiteral { .. }
-        | TypeExpr::Rest(_)
-        | TypeExpr::RecursiveRef { .. } => true,
+/// Bodies that are themselves an IndexedAccess on a macro-participating
+/// alias should NOT resolve eagerly — they are kept symbolic because that
+/// is the registry authoritative form.
+pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> bool {
+    if ctx.node_ref_head(body).is_some() {
+        return false;
     }
-}
-
-/// Strip leading `Parenthesized` wrappers; mirror the convention used
-/// throughout this module.
-pub(super) fn peel_paren(expr: &TypeExpr) -> &TypeExpr {
-    match expr {
-        TypeExpr::Parenthesized(inner) => peel_paren(inner),
-        _ => expr,
+    match ctx.node_data(body).as_deref() {
+        Some(SemanticNodeData::Alias(target)) => body_root_is_resolvable(*target, ctx),
+        Some(SemanticNodeData::IndexedAccess { object, .. }) => {
+            !indexed_access_targets_macro_participating(*object, ctx)
+        }
+        // A cross-file import carrier is a symbolic reference (like a bare
+        // reference head), an opaque / raw-fallback node carries no
+        // publishable shape, and open type structure (type parameters /
+        // infer placeholders / synthetic bindings) is not a body to chase.
+        Some(SemanticNodeData::ImportType(_))
+        | Some(SemanticNodeData::Opaque(_))
+        | Some(SemanticNodeData::RawFallback { .. })
+        | Some(SemanticNodeData::TypeParam { .. })
+        | Some(SemanticNodeData::Infer { .. })
+        | Some(SemanticNodeData::SyntheticBinding { .. })
+        | None => false,
+        Some(
+            SemanticNodeData::Object(_)
+            | SemanticNodeData::Union(_)
+            | SemanticNodeData::Intersection(_)
+            | SemanticNodeData::Primitive(_)
+            | SemanticNodeData::Literal(_)
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::KeyOf { .. }
+            | SemanticNodeData::Mapped { .. }
+            | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::Conditional { .. }
+            | SemanticNodeData::Function { .. }
+            | SemanticNodeData::ConstructorType { .. }
+            | SemanticNodeData::MergedDecl { .. },
+        ) => true,
+        // Reference carriers are rejected by the head check above.
+        Some(
+            SemanticNodeData::BareRef(_)
+            | SemanticNodeData::DeclRef { .. }
+            | SemanticNodeData::InstantiationRef { .. },
+        ) => false,
     }
 }

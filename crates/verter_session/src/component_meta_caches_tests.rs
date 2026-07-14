@@ -854,15 +854,16 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
     let db = host.project_type_store().shape_cache_db();
 
     // Baseline: a COMPLETE value admits.
-    let complete_key = ShapeCacheKey::type_expr_whole(
+    let complete_key = ShapeCacheKey::member_value_node_whole_for_test(
         Arc::from("/m3_shape.ts"),
-        Arc::new(verter_type_expr::TypeExpr::named("Complete")),
+        crate::semantic_query::SemanticNodeId(8101),
         ProjectionMode::Expanded,
     );
     let (complete_value, complete_sig) =
         shape_value_and_fact_sig_for_scope(ctx, "/m3_shape.ts", false);
     let live_before_complete = db.live_count();
-    let returned_complete = db.admit_computed(&complete_key, ctx, complete_value, complete_sig);
+    let returned_complete =
+        db.admit_computed_traced_for_test(&complete_key, ctx, complete_value, complete_sig);
     assert_eq!(
         returned_complete.type_expr_for_test(),
         &verter_type_expr::TypeExpr::string_literal("ok".to_string()),
@@ -880,15 +881,16 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
     );
 
     // The fix: a PARTIAL value is refused.
-    let partial_key = ShapeCacheKey::type_expr_whole(
+    let partial_key = ShapeCacheKey::member_value_node_whole_for_test(
         Arc::from("/m3_shape.ts"),
-        Arc::new(verter_type_expr::TypeExpr::named("Partial")),
+        crate::semantic_query::SemanticNodeId(8102),
         ProjectionMode::Expanded,
     );
     let (partial_value, partial_sig) =
         shape_value_and_fact_sig_for_scope(ctx, "/m3_shape.ts", true);
     let live_before_partial = db.live_count();
-    let returned_partial = db.admit_computed(&partial_key, ctx, partial_value, partial_sig);
+    let returned_partial =
+        db.admit_computed_traced_for_test(&partial_key, ctx, partial_value, partial_sig);
     assert_eq!(
         returned_partial.type_expr_for_test(),
         &verter_type_expr::TypeExpr::string_literal("ok".to_string()),
@@ -921,7 +923,7 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
 /// `shape_cache_db_refuses_partial_admit_but_admits_complete`.
 ///
 /// MUTATION CHECK: re-introducing the
-/// `current_materialization_cache_suppress()` OR-in inside
+/// `current_request_result_is_partial()` OR-in inside
 /// `refuse_result_cache_admission_if_partial` (the retired sticky bridge)
 /// would refuse this value-complete admission while the sticky is set —
 /// the "MUST admit / MUST be peekable" assertions then fail.
@@ -939,9 +941,9 @@ fn shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky() {
     let ctx: &dyn crate::resolver_core::ResolverContext = host;
     let db = host.project_type_store().shape_cache_db();
 
-    let key = ShapeCacheKey::type_expr_whole(
+    let key = ShapeCacheKey::member_value_node_whole_for_test(
         Arc::from("/m3_int.ts"),
-        Arc::new(verter_type_expr::TypeExpr::named("Member")),
+        crate::semantic_query::SemanticNodeId(8103),
         ProjectionMode::Expanded,
     );
 
@@ -953,9 +955,9 @@ fn shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky() {
     {
         let rctx = RequestContext::new(7, Arc::from("/m3_int.ts"), false, None);
         let _guard = RequestContextGuard::install(rctx);
-        crate::request_context::mark_request_materialization_cache_suppress();
+        crate::request_context::mark_request_result_partial();
         let (value, sig) = shape_value_and_fact_sig_for_scope(ctx, "/m3_int.ts", false);
-        let _ = db.admit_computed(&key, ctx, value, sig);
+        let _ = db.admit_computed_traced_for_test(&key, ctx, value, sig);
     }
     assert_eq!(
         db.live_count(),
@@ -967,6 +969,274 @@ fn shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky() {
     assert!(
         db.peek(&key, ctx).is_some(),
         "the value-complete shape MUST be peekable after admission despite the sticky",
+    );
+}
+
+/// TEMPORAL HOLE — the cacheability verdict must be sampled AFTER `compute()`
+/// returns, never at funnel entry.
+///
+/// `compute()` runs INSIDE the cold winner's flight, so a verdict read when the
+/// funnel is ENTERED sits before every read the compute performs. A
+/// non-cacheable read consumed inside the compute lands after such a check and
+/// is published as `Cacheable` — the check is necessary but not sufficient.
+///
+/// The non-cacheable read this test drives is CONTENT-NEUTRAL: a BROKEN
+/// DECL-BODY LEASE (`LeaseMiss`), not a fence. Nothing is superseded and the
+/// owner's content hash does NOT move, so the admitted entry would root on the
+/// LIVE hash and keep validating on every warm read — "it re-resolves anyway"
+/// is not available as a defence.
+///
+/// DISCRIMINATING: the control admits the same shape through the same funnel
+/// (live_count grows), so the refusal below is not vacuous; and the refused
+/// compute's value is still RETURNED (refusal is cache-only). Sampling the
+/// probe only at funnel entry — the pre-change shape — admits the poisoned
+/// entry.
+#[test]
+fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
+    use crate::component_meta_caches::ShapeCacheKey;
+    use crate::types::ProjectionMode;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/m3_hole.ts",
+            "export type Pin = { p: number };\nexport type Probe = { q: string };",
+        )
+        .unwrap();
+    let host = project.host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let db = host.project_type_store().shape_cache_db();
+
+    // CONTROL — the same funnel, the same shape, a LIVE decl-body lease: admits.
+    let control_key = ShapeCacheKey::member_value_node_whole_for_test(
+        Arc::from("/m3_hole.ts"),
+        crate::semantic_query::SemanticNodeId(8201),
+        ProjectionMode::Expanded,
+    );
+    let (control_value, control_sig) =
+        shape_value_and_fact_sig_for_scope(ctx, "/m3_hole.ts", false);
+    let control_before = db.live_count();
+    let control_returned =
+        db.get_or_compute_traced_for_test(&control_key, ctx, || Some((control_value, control_sig)));
+    assert!(
+        control_returned.is_some(),
+        "fixture invariant: the control compute produces a value",
+    );
+    assert_eq!(
+        db.live_count(),
+        control_before + 1,
+        "fixture invariant: an unpoisoned compute ADMITS through this funnel (otherwise the \
+         refusal below is vacuous)",
+    );
+
+    // Build the poisoned request's value + signature BEFORE breaking the lease, so
+    // the ONLY difference between the two computes is the non-cacheable read taken
+    // INSIDE the closure.
+    let poison_key = ShapeCacheKey::member_value_node_whole_for_test(
+        Arc::from("/m3_hole.ts"),
+        crate::semantic_query::SemanticNodeId(8202),
+        ProjectionMode::Expanded,
+    );
+    let (poison_value, poison_sig) = shape_value_and_fact_sig_for_scope(ctx, "/m3_hole.ts", false);
+
+    // Pin the owner's retained parse snapshot with a demand for a DIFFERENT symbol,
+    // then release it out-of-band: `Probe`'s body demand now lease-misses while the
+    // artifact stays PUBLISHED and content-current.
+    let serve = ctx
+        .ensure_indexed_ready_serve("/m3_hole.ts")
+        .expect("the owner indexes");
+    assert!(
+        serve.store_published,
+        "fixture invariant: the artifact stays PUBLISHED — the poison under test is \
+         content-neutral, so a fenced serve must not be what refuses it",
+    );
+    let state = Arc::clone(&serve.indexed.shallow_state);
+    assert!(
+        state.decl_bodies().type_decl("Pin").is_some(),
+        "fixture invariant: the pin demand must acquire the retained-snapshot lease",
+    );
+    state.decl_bodies().release_retained_snapshot_for_test();
+
+    let poison_before = db.live_count();
+    let poison_returned = db.get_or_compute_traced_for_test(&poison_key, ctx, || {
+        // The non-cacheable read happens HERE — inside `compute()`, i.e. AFTER a
+        // funnel-entry check would have run and passed.
+        let leased = state.decl_bodies().type_decl("Probe");
+        assert!(
+            leased.is_none(),
+            "fixture invariant: the broken lease must actually miss (a `Some` here means the \
+             compute consumed no non-cacheable read and the test proves nothing)",
+        );
+        Some((poison_value, poison_sig))
+    });
+
+    assert!(
+        poison_returned.is_some(),
+        "refusal is CACHE-ONLY: the computed shape must still be returned to the winner \
+         through `ReturnOnly`, never dropped and never re-computed",
+    );
+    assert_eq!(
+        db.live_count(),
+        poison_before,
+        "POISON: a compute that consumed a BROKEN DECL-BODY LEASE inside its closure admitted \
+         its shape into `ShapeCacheDb`. The lease miss is content-neutral — the owner stays \
+         published and content-current — so the entry roots on the LIVE hash and validates on \
+         every warm read forever. Sampling the cacheability verdict at FUNNEL ENTRY is not \
+         enough: `compute()` runs later, inside the flight",
+    );
+    assert!(
+        db.peek(&poison_key, ctx).is_none(),
+        "the refused shape MUST NOT be peekable — nothing was published",
+    );
+}
+
+/// REFUSAL IS CACHE-ONLY, AND IT COSTS NO SECOND COMPUTE.
+///
+/// A declaration the cache cannot ROOT (an overflowed signature, an
+/// unobservable keyed content version, a request-partial resolution) is still a
+/// declaration the caller asked for and the producer already resolved. The
+/// funnel must refuse the WRITE and hand the value back through `ReturnOnly`.
+/// Collapsing that into a `None` forces the producer to re-run the entire
+/// resolution to recover what it just computed — a second compute whose result
+/// nothing guarantees to match the first.
+///
+/// DISCRIMINATING: the control proves this funnel really does admit and really
+/// does serve warm (so `live_count` and the compute counter are meaningful),
+/// and the subject's counter would read 0 computes for a warm hit and 2 for a
+/// discard-and-re-resolve. Mapping the `Unrooted` arm to `Failed` — the
+/// pre-change shape — makes the value assertion fail (`None` returned) and the
+/// second-read assertion read a re-compute rather than a preserved value.
+#[test]
+fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
+    use crate::component_meta_caches::ComputedEntry;
+    use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
+    use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
+    use std::cell::Cell;
+
+    let project = make_project();
+    project
+        .upsert_base("/m6_refusal.ts", "export type Probe = { q: string };")
+        .unwrap();
+    let host = project.host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let db = host.project_type_store().declaration_db();
+
+    let declaration = |text: &str| ResolvedTypeDeclaration {
+        requested_name: "Probe".to_string(),
+        declaration_id: None,
+        resolved_name: "Probe".to_string(),
+        canonical_source: "/m6_refusal.ts".to_string(),
+        span: verter_span::Span::default(),
+        kind: ResolvedDeclarationKind::Interface,
+        text: Some(text.to_string()),
+    };
+
+    // A REAL fact signature for the owner — the control's `Rooted` arm.
+    ctx.ensure_indexed_ready_serve("/m6_refusal.ts")
+        .expect("fixture invariant: the owner indexes");
+    let observed = ctx
+        .authoritative_current_content_hash("/m6_refusal.ts")
+        .expect("fixture invariant: the owner has an observable content version");
+    let facts =
+        match engine_fact_signature_for_exported_type(ctx, "/m6_refusal.ts", "Probe", observed) {
+            crate::cache_runtime::SignatureAdmission::Cacheable(sig) => sig.facts,
+            crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
+                panic!("fixture invariant: a real exported type must root, got {reason:?}")
+            }
+        };
+
+    // CONTROL — a rootable compute admits, and the SECOND read is served warm
+    // (its closure never runs).
+    let control_key = (
+        Arc::<str>::from("/m6_refusal.ts"),
+        Arc::<str>::from("Probe"),
+    );
+    let control_computes = Cell::new(0usize);
+    let control_before = db.live_count();
+    let control_first = db.get_or_compute_traced_for_test(&control_key, ctx, || {
+        control_computes.set(control_computes.get() + 1);
+        ComputedEntry::Rooted(declaration("rooted"), Arc::clone(&facts))
+    });
+    assert_eq!(
+        control_first.as_ref().and_then(|d| d.text.as_deref()),
+        Some("rooted"),
+        "fixture invariant: a rootable compute returns its value",
+    );
+    assert_eq!(
+        db.live_count(),
+        control_before + 1,
+        "fixture invariant: a rootable compute ADMITS through this funnel (otherwise the \
+         no-publication assertion below is vacuous)",
+    );
+    let control_second = db.get_or_compute_traced_for_test(&control_key, ctx, || {
+        control_computes.set(control_computes.get() + 1);
+        ComputedEntry::Rooted(declaration("recomputed"), Arc::clone(&facts))
+    });
+    assert_eq!(
+        control_computes.get(),
+        1,
+        "fixture invariant: the admitted entry serves the second read WARM (the compute \
+         counter is therefore a genuine oracle for 'the closure ran')",
+    );
+    assert_eq!(
+        control_second.as_ref().and_then(|d| d.text.as_deref()),
+        Some("rooted"),
+        "fixture invariant: the warm read serves the ADMITTED value",
+    );
+
+    // SUBJECT — the same funnel, an UNROOTABLE compute.
+    let key = (
+        Arc::<str>::from("/m6_refusal.ts"),
+        Arc::<str>::from("Unrootable"),
+    );
+    let computes = Cell::new(0usize);
+    let before = db.live_count();
+    let returned = db.get_or_compute_traced_for_test(&key, ctx, || {
+        computes.set(computes.get() + 1);
+        ComputedEntry::Unrooted(
+            declaration("computed-once"),
+            crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+        )
+    });
+    assert_eq!(
+        returned.as_ref().and_then(|d| d.text.as_deref()),
+        Some("computed-once"),
+        "REFUSAL IS CACHE-ONLY: an unrootable declaration must still be RETURNED to the \
+         winner through `ReturnOnly`. Dropping it (the `None` shape) forces the producer to \
+         re-resolve the declaration it had already computed",
+    );
+    assert_eq!(
+        computes.get(),
+        1,
+        "the winner must compute EXACTLY ONCE — a refusal that discards the value makes the \
+         producer run the whole resolution a second time",
+    );
+    assert_eq!(
+        db.live_count(),
+        before,
+        "an unrootable declaration MUST NOT be published: there is no signature to \
+         revalidate it against on a warm read",
+    );
+
+    // Nothing was published, so the next read is cold again — and it, too, gets
+    // its own computed value back.
+    let again = db.get_or_compute_traced_for_test(&key, ctx, || {
+        computes.set(computes.get() + 1);
+        ComputedEntry::Unrooted(
+            declaration("computed-again"),
+            crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+        )
+    });
+    assert_eq!(
+        computes.get(),
+        2,
+        "the refused entry must not serve a warm hit (a `1` here would mean the unrootable \
+         value was published after all)",
+    );
+    assert_eq!(
+        again.as_ref().and_then(|d| d.text.as_deref()),
+        Some("computed-again"),
+        "the second cold read is served ITS OWN computed value, not the refused one",
     );
 }
 

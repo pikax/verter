@@ -282,7 +282,8 @@ fn parent_generic_field_must_take_slow_path() {
     use verter_type_expr::{PrimitiveName, TypeExpr};
 
     let host = build_hermetic_host(&[("/c.vue", COMPOUND_CARRIER_VUE)]);
-    let (analysis, _resolution, _record) = resolve_under_audit(host, "/c.vue");
+    let (analysis, _resolution, _record) =
+        resolve_under_audit(std::sync::Arc::clone(&host), "/c.vue");
 
     let prop_names: Vec<String> = analysis.props.iter().map(|p| p.name.clone()).collect();
     assert!(
@@ -309,17 +310,23 @@ fn parent_generic_field_must_take_slow_path() {
         .iter()
         .find(|p| p.name == "value")
         .expect("value prop must surface");
-    let value_is_number = matches!(
-        &value_field.type_expr,
-        TypeExpr::Primitive(PrimitiveName::Number),
-    );
+    let value_source = value_field
+        .type_source
+        .present()
+        .expect("value prop must publish a typed source");
+    let value_ty = verter_session::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/c.vue",
+        value_source,
+    )
+    .unwrap_or_else(|| panic!("`value`'s published source must demand-materialize"));
+    let value_is_number = matches!(value_ty, TypeExpr::Primitive(PrimitiveName::Number));
     assert!(
         value_is_number,
         "Compound-carrier counterfixture: `value`'s evaluated type must be \
-         Primitive(Number). Got {:?} — if the slow-path Expanded carrier lower \
+         Primitive(Number). Got {value_ty:?} — if the slow-path Expanded carrier lower \
          regresses to unconditional Navigate, the field body's primitive type \
          is not preserved.",
-        value_field.type_expr,
     );
 }
 

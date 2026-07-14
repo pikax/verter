@@ -212,7 +212,7 @@ where
     /// memo's per-canonical drain, which runs inside the `entries`
     /// `Mutex` hold — the exact lock domain `record_family_admission_locked`
     /// records under and `invalidate_all` clears under. Identity-scoped
-    /// caches (`BoundedCandidateMap`, `BudgetedNamedTypeIndex`, the
+    /// caches (`BoundedCandidateMap`, the
     /// `component_meta_caches` DBs) use `forget_seq` and never call this.
     pub fn forget_key_under_exclusive_lock(&self, key: &K) {
         let mut ledger = self.ledger.lock();

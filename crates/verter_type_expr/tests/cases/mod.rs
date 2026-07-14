@@ -7,4 +7,5 @@ mod deep_drop_is_iterative;
 mod hash_byte_stream_contract;
 mod member_visibility_discrimination;
 mod member_visibility_json_roundtrip;
+mod source_self_anchoring;
 mod synthetic_slot_binding_discrimination;

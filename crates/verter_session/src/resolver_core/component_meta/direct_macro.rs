@@ -3,7 +3,6 @@ use std::borrow::Cow;
 use verter_semantic::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
-use verter_type_expr::TypeExpr;
 
 use crate::resolver_core::ResolvedTypeDeclaration;
 
@@ -15,11 +14,15 @@ pub(super) fn should_ignore_external_macro_type(dep: &MacroTypeDep) -> bool {
         && dep.type_name == "Slot"
 }
 
-pub(super) fn is_direct_macro_type_reference(
+pub(super) fn is_direct_macro_type_reference<H>(
+    host: &H,
+    owner_canonical: &str,
     macros: &[AnalyzedMacro],
     dep: &MacroTypeDep,
-    _owner_source: Option<&str>,
-) -> bool {
+) -> bool
+where
+    H: super::ComponentMetaResolverHost,
+{
     let Some(mac) = macros.get(dep.macro_index) else {
         return false;
     };
@@ -31,22 +34,18 @@ pub(super) fn is_direct_macro_type_reference(
         return false;
     }
 
-    // graph-native gate. The parsed type argument (cached
-    // once during shallow analysis per the Shallow File Processing
-    // Core Invariant) is the authoritative shape of the macro's first
-    // type arg. When present, the dep is "direct" only if the parsed
-    // expression carries a top-level (non-Object-property) reference
-    // to `dep.type_name` reachable through Ref / Array / Tuple /
-    // Intersection / Union / Conditional etc. — never through Object
-    // members, which encode "nested" deps.
+    // Graph-native gate. The parsed type-argument payload (captured once
+    // during shallow analysis per the Shallow File Processing Core
+    // Invariant) is the authoritative shape of the macro's first type arg.
+    // The host classifies it NODE-DOMAIN off the authored payload locator:
+    // the dep is "direct" only if the raised payload carries a top-level
+    // (non-Object-member) reference to `dep.type_name` reachable through
+    // Ref / Array / Tuple / Intersection / Union / Conditional etc. —
+    // never through Object members, which encode "nested" deps.
     //
-    // When `parsed_type_argument` is `None` (the macro has no type
-    // arguments OR shallow parsing failed), fall back to the
-    // `mac.type_references` membership we already proved above
-    // (`unwrap_or(true)` semantics preserved).
-    mac.parsed_type_argument
-        .as_deref()
-        .map(|expr| type_expr_has_direct_macro_reference(expr, dep.type_name.as_str()))
+    // `None` (no parsed payload OR no live graph representation) falls
+    // back to the `mac.type_references` membership we already proved above.
+    host.macro_type_arg_has_direct_reference(owner_canonical, mac, dep.type_name.as_str())
         .unwrap_or(true)
 }
 
@@ -56,17 +55,21 @@ pub(super) fn is_direct_macro_type_reference(
 /// This carves out the `defineProps<ImportedVueProps>()` case: the imported
 /// component's surface is the authoritative one and must be kept in
 /// `resolved_macros`, otherwise the owner's local projection would replace it.
-pub(super) fn keep_direct_imported_vue_macro(
+pub(super) fn keep_direct_imported_vue_macro<H>(
+    host: &H,
+    owner_canonical: &str,
     projectable_owner_local: bool,
     purpose: ComponentMetaResolutionPurpose,
     macros: &[AnalyzedMacro],
     dep: &MacroTypeDep,
-    owner_source: Option<&str>,
     declaration: &ResolvedTypeDeclaration,
-) -> bool {
+) -> bool
+where
+    H: super::ComponentMetaResolverHost,
+{
     projectable_owner_local
         && purpose == ComponentMetaResolutionPurpose::Full
-        && is_direct_macro_type_reference(macros, dep, owner_source)
+        && is_direct_macro_type_reference(host, owner_canonical, macros, dep)
         && dep.macro_kind == AnalyzedMacroKind::DefineProps
         && declaration.canonical_source.ends_with(".vue")
 }
@@ -77,112 +80,6 @@ pub(super) fn keep_direct_imported_vue_macro(
 // span-extraction path for cross-file `defineProps<T>()` macros before
 // the dispatch-backed resolver took over. Removed in the
 // clippy cleanup; the dispatch path is the sole canonical resolution.
-
-fn type_expr_has_direct_macro_reference(expr: &TypeExpr, needle: &str) -> bool {
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            name.as_ref() == needle
-                || type_arguments
-                    .iter()
-                    .any(|arg| type_expr_has_direct_macro_reference(arg, needle))
-        }
-        TypeExpr::Intersection(types) | TypeExpr::Union(types) => types
-            .iter()
-            .any(|inner| type_expr_has_direct_macro_reference(inner, needle)),
-        TypeExpr::Array { element, .. } => type_expr_has_direct_macro_reference(element, needle),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .any(|element| type_expr_has_direct_macro_reference(&element.ty, needle)),
-        TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) | TypeExpr::KeyOf(inner) => {
-            type_expr_has_direct_macro_reference(inner, needle)
-        }
-        TypeExpr::TypeOf(value_ref) => value_ref.path.iter().any(|segment| segment == needle),
-        TypeExpr::IndexedAccess { object, index } => {
-            type_expr_has_direct_macro_reference(object, needle)
-                || type_expr_has_direct_macro_reference(index, needle)
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            type_expr_has_direct_macro_reference(check, needle)
-                || type_expr_has_direct_macro_reference(extends, needle)
-                || type_expr_has_direct_macro_reference(true_type, needle)
-                || type_expr_has_direct_macro_reference(false_type, needle)
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            type_expr_has_direct_macro_reference(source, needle)
-                || type_expr_has_direct_macro_reference(value, needle)
-                || name_type
-                    .as_deref()
-                    .is_some_and(|expr| type_expr_has_direct_macro_reference(expr, needle))
-        }
-        // A constructor type's signature is searched identically to a function
-        // type's (same `FunctionExpr` payload).
-        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
-            function
-                .parameters
-                .iter()
-                .any(|param| type_expr_has_direct_macro_reference(&param.ty, needle))
-                || function
-                    .return_type
-                    .as_deref()
-                    .is_some_and(|expr| type_expr_has_direct_macro_reference(expr, needle))
-                || function.type_parameters.iter().any(|param| {
-                    param
-                        .constraint
-                        .as_deref()
-                        .is_some_and(|expr| type_expr_has_direct_macro_reference(expr, needle))
-                        || param
-                            .default
-                            .as_deref()
-                            .is_some_and(|expr| type_expr_has_direct_macro_reference(expr, needle))
-                })
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => expressions
-            .iter()
-            .any(|expr| type_expr_has_direct_macro_reference(expr, needle)),
-        TypeExpr::RecursiveRef {
-            name,
-            type_arguments,
-            conditional_context,
-        } => {
-            name.as_ref() == needle
-                || type_arguments
-                    .iter()
-                    .any(|arg| type_expr_has_direct_macro_reference(arg, needle))
-                || conditional_context.iter().any(|ctx| {
-                    type_expr_has_direct_macro_reference(&ctx.check, needle)
-                        || type_expr_has_direct_macro_reference(&ctx.extends, needle)
-                })
-        }
-        TypeExpr::TypeParameter(param) => param.name == needle,
-        TypeExpr::Infer { name } => name == needle,
-        // Mirrors the `Ref` arm's recursion into `type_arguments`. The
-        // `specifier`/`qualifier` are a module path, not the workspace macro
-        // symbol `needle`, so only the nested type-argument exprs are searched.
-        TypeExpr::ImportType { type_arguments, .. } => type_arguments
-            .iter()
-            .any(|arg| type_expr_has_direct_macro_reference(arg, needle)),
-        TypeExpr::Object(_)
-        | TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        // Synthetic carriers are intrinsic terminals; they reference no
-        // workspace macro symbol.
-        | TypeExpr::SyntheticSlotBinding(_)
-        | TypeExpr::Unknown { .. } => false,
-    }
-}
 
 pub(super) fn is_direct_local_macro_type_reference(
     mac: &AnalyzedMacro,
@@ -332,11 +229,12 @@ pub(crate) fn imported_declaration_surface_is_authoritative(
 pub(crate) fn imported_registry_seed_can_skip_refresh(
     owner_canonical: &str,
     declaration: &ResolvedTypeDeclaration,
-    existing_expr: &TypeExpr,
+    existing_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> bool {
     !declaration.canonical_source.is_empty()
         && declaration.canonical_source != owner_canonical
         && imported_declaration_surface_is_authoritative(declaration)
-        && crate::resolver_core::component_meta_registry::component_meta_registry_has_explicit_object_surface(existing_expr)
-        && !crate::resolver_core::component_meta_registry::component_meta_registry_has_non_object_top_level_surface(existing_expr)
+        && crate::resolver_core::component_meta_registry::source_has_explicit_object_surface_fact(
+            existing_source,
+        )
 }

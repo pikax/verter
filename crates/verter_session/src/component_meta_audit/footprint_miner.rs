@@ -460,9 +460,6 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
             name: Arc::from("Infer"),
         },
         SemanticNodeData::Conditional { .. } => SemanticNodeKind::Conditional,
-        SemanticNodeData::VueMacroElements(_) => SemanticNodeKind::Other {
-            name: Arc::from("VueMacroElements"),
-        },
         SemanticNodeData::Function { .. } => SemanticNodeKind::Other {
             name: Arc::from("Function"),
         },
@@ -531,7 +528,6 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
         } else {
             "Conditional"
         }),
-        SemanticNodeData::VueMacroElements(_) => Arc::from("VueMacroElements"),
         SemanticNodeData::Function { params, .. } => {
             Arc::from(format!("Function[{} params]", params.len()))
         }
@@ -662,7 +658,8 @@ enum VariantTag {
     TypeParam = 15,
     Infer = 16,
     Conditional = 17,
-    VueMacroElements = 18,
+    // Tag 18 is retired and stays unassigned so surviving variants keep
+    // stable tag values.
     Function = 19,
     DeclRef = 20,
     InstantiationRef = 21,
@@ -1129,38 +1126,6 @@ impl StructuralEncoder<'_> {
                 // at a different ordinal hash IDENTICALLY (the cross-run
                 // byte-identity contract this encoder establishes).
                 self.encode_child(SemanticNodeId(*value_node), depth);
-            }
-            SemanticNodeData::VueMacroElements(elements) => {
-                self.buf.push(VariantTag::VueMacroElements as u8);
-                // `ResolvedElements` is parser-built and provably never carries a
-                // `TypeExpr::SyntheticSlotBinding` (the sole ordinal-bearing
-                // `TypeExpr` variant — its `SyntheticCarrierKey.value_node: u64` is
-                // a store/generation-relative `SemanticNodeId` arena ordinal).
-                // ENFORCED at the single construction site by the runtime checked
-                // invariant in `SemanticGraphStore::insert_resolved_named_type`,
-                // which scans every incoming member `type_expr` recursively (via
-                // `type_expr_contains_synthetic_slot_binding`) and hard-fails before
-                // interning the `VueMacroElements` node — it checks the real value,
-                // so it holds regardless of how a carrier could be spelled or
-                // threaded. The coarse producer-surface guard
-                // `vue_macro_elements_ordinal_leak_is_producer_unreachable`
-                // (parser/compiler carrier-free + single `insert_resolved_named_type`
-                // caller + single `VueMacroElements` producer) remains a cheap
-                // static tripwire over the same surface. Therefore the `Debug` of
-                // `ResolvedElements` here folds NO `SemanticNodeId` ordinal — its
-                // rendering is content-only and is the stable identity available at
-                // this arm (the type exposes no structural-hash accessor).
-                //
-                // The "lower crate" relationship is NOT the guarantee — a lower
-                // crate can still carry a raw `u64` ordinal on a payload (as
-                // `SyntheticBinding.value_node` does). The guarantee is the pinned
-                // producer surface. If that producer invariant ever changes (e.g.
-                // `ResolvedElements` is ever retained beyond the
-                // single-resolution-engine consolidation, or a session-origin
-                // carrier is ever threaded into it), the guard FIRES and this
-                // arm MUST move to an explicit ordinal-free child-descending
-                // encoder (like `SyntheticBinding`), not a `Debug` of the ordinal.
-                self.push_str(&format!("{elements:?}"));
             }
         }
     }

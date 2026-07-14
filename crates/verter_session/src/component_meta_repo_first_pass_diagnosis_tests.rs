@@ -293,18 +293,18 @@ fn repo_first_pass_diagnosis_emits_capture_curves() {
 
 /// Mint a fresh distinct interned node for the `record_origin_edge`
 /// dedup unit tests below.
-/// Uses [`SemanticNodeData::VueMacroElements`] which is sidecar-exempt
-/// and bypasses the sharded dedup (see `NodeArena::push_impl` —
-/// VueMacroElements always allocates a fresh slot), so each call
-/// returns a distinct `SemanticNodeId`.
+/// Interns a string-literal node with a process-unique payload so each
+/// call structurally dedups to a DISTINCT `SemanticNodeId`.
 fn mint_distinct_node(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
 ) -> crate::semantic_query::SemanticNodeId {
-    use crate::semantic_query::SemanticNodeData;
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-    graph.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
-        ResolvedElements::default(),
-    )))
+    use crate::semantic_query::{LiteralValue, SemanticNodeData};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+    graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+        "__mint_distinct_node_{unique}"
+    ))))
 }
 
 // =====================================================================

@@ -3,26 +3,14 @@
 
 use std::sync::Arc;
 
-use verter_compiler::utils::oxc::script::type_surface::{
-    analyze_external_type_source, AnalyzedExternalTypeSource,
-};
 use verter_semantic::analysis::type_eval::ValueDeclKind;
-use verter_semantic::analysis::type_eval_build::parse_and_build_env;
-use verter_semantic::analysis::Hash16;
 
 use super::*;
-
-fn make_analysis(source: &str) -> Arc<AnalyzedExternalTypeSource> {
-    let alloc = oxc_allocator::Allocator::new();
-    Arc::new(analyze_external_type_source(source, &alloc))
-}
 
 #[test]
 fn prepares_local_exported_type_decl_from_shallow_file_state() {
     let source = "export interface Props { label: string }";
-    let analysis = make_analysis(source);
-    let env = parse_and_build_env(source);
-    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+    let state = ShallowFileState::service_backed_for_test(source);
 
     let prepared = prepare_exported_type_decl("/src/types.ts", &state, "Props", None)
         .expect("Props should prepare");
@@ -44,9 +32,7 @@ fn prepares_local_value_decl_from_shallow_file_state() {
 export interface Props { label: string }
 export const defaults: Props = { label: 'ok' }
 "#;
-    let analysis = make_analysis(source);
-    let env = parse_and_build_env(source);
-    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+    let state = ShallowFileState::service_backed_for_test(source);
 
     let prepared = prepare_exported_value_decl("/src/types.ts", &state, "defaults", None)
         .expect("defaults should prepare");
@@ -55,7 +41,10 @@ export const defaults: Props = { label: 'ok' }
     assert_eq!(prepared.root_identity.symbol_name, "defaults");
     assert_eq!(prepared.exported_name.as_deref(), Some("defaults"));
     assert_eq!(prepared.kind, ValueDeclKind::Const);
-    assert!(prepared.type_annotation.is_some());
+    assert!(!matches!(
+        prepared.type_annotation.classification,
+        verter_type_expr::facts::ValueAnnotationClass::Absent
+    ));
 }
 
 #[test]
@@ -66,9 +55,7 @@ import { theme } from './theme'
 
 export type Button = ComponentConfig<typeof theme>
 "#;
-    let analysis = make_analysis(source);
-    let env = parse_and_build_env(source);
-    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+    let state = ShallowFileState::service_backed_for_test(source);
     let dep_edges = FxHashMap::from_iter([
         ("./types".to_string(), "/src/types.ts".to_string()),
         ("./theme".to_string(), "/src/theme.ts".to_string()),
@@ -96,9 +83,7 @@ import theme from './theme.ts'
 
 export type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
 "#;
-    let analysis = make_analysis(source);
-    let env = parse_and_build_env(source);
-    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+    let state = ShallowFileState::service_backed_for_test(source);
 
     let prepared = prepare_exported_type_decl("/src/Button.vue", &state, "Button", None)
         .expect("Button should prepare");
@@ -133,9 +118,7 @@ import type { Theme } from './theme.ts'
 
 export const defaults: Theme = {} as Theme
 "#;
-    let analysis = make_analysis(source);
-    let env = parse_and_build_env(source);
-    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+    let state = ShallowFileState::service_backed_for_test(source);
 
     let prepared = prepare_exported_value_decl("/src/Button.vue", &state, "defaults", None)
         .expect("defaults should prepare");
@@ -152,9 +135,7 @@ export const defaults: Theme = {} as Theme
 #[test]
 fn does_not_prepare_reexport_without_frontier_routing() {
     let source = r#"export { Props } from "./inner""#;
-    let analysis = make_analysis(source);
-    let env = parse_and_build_env(source);
-    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+    let state = ShallowFileState::service_backed_for_test(source);
 
     assert!(prepare_exported_type_decl("/src/barrel.ts", &state, "Props", None).is_none());
 }
@@ -166,9 +147,7 @@ import { Inner } from "./inner"
 type Local = { x: number }
 export interface Props { child: Inner; data: Local }
 "#;
-    let analysis = make_analysis(source);
-    let env = parse_and_build_env(source);
-    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+    let state = ShallowFileState::service_backed_for_test(source);
 
     let prepared = prepare_exported_type_decl("/src/types.ts", &state, "Props", None)
         .expect("Props should prepare");
@@ -190,19 +169,17 @@ fn builds_local_prepared_decl_caches_from_shallow_file_state() {
 export interface Props { label: string }
 export const defaults: Props = { label: 'ok' }
 "#;
-    let analysis = make_analysis(source);
-    let env = parse_and_build_env(source);
-    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+    let state = ShallowFileState::service_backed_for_test(source);
 
     let type_cache = build_prepared_type_decl_cache(
         "/src/types.ts",
-        Arc::new(state.clone()),
+        Arc::clone(&state),
         Arc::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
     );
     let value_cache = build_prepared_value_decl_cache(
         "/src/types.ts",
-        Arc::new(state),
+        state,
         Arc::new(FxHashMap::default()),
         Arc::new(ImportCanonicalization::default()),
     );
@@ -216,9 +193,7 @@ fn prepared_type_decl_build_counter_is_thread_local() {
     reset_prepared_type_decl_build_count_for_tests();
 
     let source = "export interface Props { label: string }";
-    let analysis = make_analysis(source);
-    let env = parse_and_build_env(source);
-    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+    let state = ShallowFileState::service_backed_for_test(source);
 
     let prepared = prepare_exported_type_decl("/src/types.ts", &state, "Props", None)
         .expect("Props should prepare");
@@ -255,9 +230,7 @@ export {};
 declare global { namespace NS { type GlobalOnly = { g: string } } }
 declare module "ext" { namespace NS { interface Foo { x: GlobalOnly } } }
 "#;
-    let analysis = make_analysis(source);
-    let env = parse_and_build_env(source);
-    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+    let state = ShallowFileState::service_backed_for_test(source);
 
     // Harness invariant the leak depends on: the module namespace member is
     // retained under `(Module("ext"), "NS.Foo")` and a global sibling under
@@ -294,9 +267,7 @@ declare global { namespace JSX {
   interface El { x: Common }
 } }
 "#;
-    let analysis = make_analysis(source);
-    let env = parse_and_build_env(source);
-    let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+    let state = ShallowFileState::service_backed_for_test(source);
 
     let prepared = prepare_local_type_decl(
         "/src/aug.ts",

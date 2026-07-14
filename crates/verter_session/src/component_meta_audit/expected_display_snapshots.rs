@@ -64,7 +64,7 @@ pub const EXPECTED_MATERIALIZE_STRUCTURE_DEPTH_FUSE_TRIPPED: &str =
     "MaterializeStructureDepthFuseTripped(Object#7, Nested, Expanded, depth=4096)";
 pub const EXPECTED_CUSTOM: &str = "Custom(test_name, key=value)";
 pub const EXPECTED_CACHE_DRAINED_AT_UPSERT: &str =
-    "CacheDrainedAtUpsert(resolved_type_cache, /probe.vue)";
+    "CacheDrainedAtUpsert(dependency_cache, /probe.vue)";
 pub const EXPECTED_FACT_SIGNATURE_OVERFLOW: &str = "FactSignatureOverflow(size=1100, cap=1024)";
 pub const EXPECTED_FACT_SIGNATURE_ADMISSION_REFUSED: &str =
     "FactSignatureAdmissionRefused(materialize_structure, EmptySignature)";
@@ -319,7 +319,7 @@ pub fn fixture_custom() -> Event {
 
 pub fn fixture_cache_drained_at_upsert() -> Event {
     Event::CacheDrainedAtUpsert {
-        layer: Arc::from("resolved_type_cache"),
+        layer: Arc::from("dependency_cache"),
         canonical_id: Arc::from("/probe.vue"),
     }
 }

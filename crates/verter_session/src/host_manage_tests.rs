@@ -1412,6 +1412,112 @@ fn prepared_type_decl_canonicalizes_imported_extends_base() {
     );
 }
 
+#[test]
+fn prepared_type_decl_mints_content_free_class_heritage_base_facts() {
+    // The class-heritage candidates are PRODUCER-MINTED content-free facts on
+    // the prepared decl (minted once at lazy decl-body lowering from the class
+    // body's Intersection fold) — never a query-time TypeExpr walk. Each fact
+    // carries the authored base NAME (also the `name_resolution` routing key
+    // the dispatch head-resolution uses) plus one content-free
+    // `TypeArgLocator` per authored heritage type argument. The fact stores no
+    // resolved identity and no embedded body: the head resolves at dispatch
+    // time, the arguments deref + lower on demand.
+    use verter_type_expr::locators::{LocatorSymbolSpace, TypeBodyPathStep};
+
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/base.ts",
+        "export class Base<T, U> { static tag: string = ''; constructor(x: T, y: U) {} }\n",
+    );
+    ws.inject_file(
+        "/src/derived.ts",
+        "import { Base } from './base'\n\
+         export class Derived extends Base<string, number> {}\n\
+         export class Plain { static own: number = 1 }\n\
+         interface LocalIface { y: number }\n\
+         export interface NotAClass extends LocalIface { x: string }\n\
+         export type AliasIx = LocalIface & { z: boolean }\n",
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    let prepared = host
+        .prepared_type_decl("/src/derived.ts", "Derived")
+        .expect("prepared decl should materialize the derived class");
+    assert_eq!(
+        prepared.heritage_bases.len(),
+        1,
+        "one heritage base fact for `extends Base<string, number>`, got {:?}",
+        prepared.heritage_bases
+    );
+    let fact = &prepared.heritage_bases[0];
+    assert_eq!(fact.name, "Base", "the authored base name");
+    assert_eq!(
+        fact.name_resolution_ref, "Base",
+        "the name_resolution routing key is the authored head name"
+    );
+    // Dispatch head-resolution: the fact's routing key resolves CROSS-FILE
+    // through the prepared decl's own name_resolution — the fact itself never
+    // stores the resolved identity.
+    let head = prepared
+        .name_resolution
+        .get(fact.name_resolution_ref.as_str())
+        .expect("the heritage head routes through name_resolution");
+    assert_eq!(head.canonical_id, "/src/base.ts");
+    assert_eq!(head.symbol_name, "Base");
+    // One content-free locator per authored type argument, addressing the
+    // heritage Ref arm of the class body's Intersection fold; `arg_index`
+    // selects the authored argument.
+    assert_eq!(fact.type_args.len(), 2, "two authored type arguments");
+    for (index, arg) in fact.type_args.iter().enumerate() {
+        assert_eq!(arg.arg_index, index as u32, "source-order arg ordinal");
+        assert_eq!(arg.anchor.canonical_id.as_ref(), "/src/derived.ts");
+        assert_eq!(arg.anchor.symbol.as_ref(), "Derived");
+        assert_eq!(arg.anchor.space, LocatorSymbolSpace::Type);
+        assert_eq!(
+            arg.path.as_ref(),
+            &[TypeBodyPathStep::IntersectionArm { ordinal: 0 }],
+            "the arg-bearing position is the heritage Ref arm (arm 0, before \
+             the own Object arm)"
+        );
+    }
+
+    // A heritage-free class mints no facts.
+    let plain = host
+        .prepared_type_decl("/src/derived.ts", "Plain")
+        .expect("prepared decl should materialize the plain class");
+    assert!(
+        plain.heritage_bases.is_empty(),
+        "a heritage-free class carries no heritage base facts: {:?}",
+        plain.heritage_bases
+    );
+
+    // A NON-class Intersection body must NOT mint class-heritage facts: an
+    // interface's extends fold and an alias's authored intersection are not
+    // class heritage.
+    let iface = host
+        .prepared_type_decl("/src/derived.ts", "NotAClass")
+        .expect("prepared decl should materialize the interface");
+    assert!(
+        iface.heritage_bases.is_empty(),
+        "an interface extends fold mints no CLASS heritage facts: {:?}",
+        iface.heritage_bases
+    );
+    let alias = host
+        .prepared_type_decl("/src/derived.ts", "AliasIx")
+        .expect("prepared decl should materialize the alias");
+    assert!(
+        alias.heritage_bases.is_empty(),
+        "an alias intersection is authored composition, not heritage: {:?}",
+        alias.heritage_bases
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn prepared_type_decl_reuses_indexed_package_shallow_state_without_reread() {
@@ -2691,7 +2797,7 @@ import { shared } from './shared'
 }
 
 /// Typed-completeness gate: a NON-budget partial (a fuse / semantic-miss class
-/// signal folded via `mark_request_materialization_cache_suppress`) gates BOTH
+/// signal folded via `mark_request_result_partial`) gates BOTH
 /// fallthrough cache-admission sites — `store_node` and
 /// `cache_fallthrough_result` — EVEN THOUGH the projection budget is NOT
 /// exhausted. This proves the gate keys on the typed cold-compute completeness,
@@ -2726,7 +2832,7 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
 
     // Fold a NON-budget partial (fuse / semantic-miss class) WITHOUT touching
     // the projection budget.
-    crate::request_context::mark_request_materialization_cache_suppress();
+    crate::request_context::mark_request_result_partial();
 
     // The discriminating precondition split: the partial is typed completeness,
     // NOT budget exhaustion. The deleted ad-hoc gate would NOT fire here.
@@ -2740,13 +2846,25 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
     );
 
     // (a) `store_node` refuses a cacheable node on the typed-completeness gate.
+    //
+    // The cacheability probe is CLEAN here (no fenced serve, no overflow), which
+    // is what isolates the rail under test: the ONLY thing that can refuse this
+    // admission is the typed cold-compute completeness.
     let (anchor, generation) = host.project_intrinsic_cache_anchor(canonical);
     let key = intrinsic_surface_key(&anchor, generation, "div");
     let members = host.intrinsic_members_for_tag("div");
     let node = host.build_runtime_intrinsic_surface_node(&members);
-    host.resolver_runtime()
-        .fallthrough
-        .store_node(key.clone(), node);
+    let ((), probe_non_cacheable) =
+        crate::fact_signature_helpers::with_cacheability_scope(&host, |probe| {
+            host.resolver_runtime()
+                .fallthrough
+                .store_node(key.clone(), node, probe);
+        });
+    assert!(
+        !probe_non_cacheable,
+        "isolation: the probe must be CLEAN, so the refusal below is attributable to the \
+         typed-completeness gate alone"
+    );
     let view = FallthroughRequestHost::snapshot_store_view(&host);
     assert!(
         host.resolver_runtime()
@@ -2768,7 +2886,9 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
         },
         fact_versions: Vec::new(),
     };
-    host.cache_fallthrough_result(canonical, None, &result);
+    crate::fact_signature_helpers::with_cacheability_scope(&host, |probe| {
+        host.cache_fallthrough_result(canonical, None, &result, probe);
+    });
     let mirror_present = host
         .derived_raw_cache()
         .get(canonical)
@@ -4423,7 +4543,12 @@ fn hm_prop_names(
         owner,
         state,
         verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
-        |d| d.prop_fields().iter().map(|p| p.name.clone()).collect(),
+        |d| {
+            d.prop_fields()
+                .iter()
+                .map(|p| p.analysis.name.clone())
+                .collect()
+        },
     )
 }
 
@@ -4465,7 +4590,7 @@ defineProps<ButtonProps>()
     let props: Vec<&str> = dtos
         .prop_fields()
         .iter()
-        .map(|prop| prop.name.as_str())
+        .map(|prop| prop.analysis.name.as_str())
         .collect();
 
     assert!(
@@ -4517,7 +4642,7 @@ fn resolve_imported_type_from_vue_dep() {
     let props: Vec<&str> = dtos
         .prop_fields()
         .iter()
-        .map(|prop| prop.name.as_str())
+        .map(|prop| prop.analysis.name.as_str())
         .collect();
     assert!(
         props.contains(&"label"),
@@ -4555,7 +4680,7 @@ fn resolve_imported_type_from_dual_script_vue_dep() {
     let props: Vec<&str> = dtos
         .prop_fields()
         .iter()
-        .map(|prop| prop.name.as_str())
+        .map(|prop| prop.analysis.name.as_str())
         .collect();
     assert!(
         props.contains(&"title"),
@@ -4593,7 +4718,7 @@ fn resolve_imported_type_from_vue_dep_without_vue_suffix_uses_file_kind() {
     let props: Vec<&str> = dtos
         .prop_fields()
         .iter()
-        .map(|prop| prop.name.as_str())
+        .map(|prop| prop.analysis.name.as_str())
         .collect();
     assert!(
         props.contains(&"label"),
@@ -4651,7 +4776,7 @@ fn resolve_component_meta_uses_workspace_type_resolution_for_package_declaration
     let props: Vec<&str> = dtos
         .prop_fields()
         .iter()
-        .map(|prop| prop.name.as_str())
+        .map(|prop| prop.analysis.name.as_str())
         .collect();
     assert!(
         props.contains(&"open"),
@@ -4770,9 +4895,14 @@ defineEmits<Events>()
         .iter()
         .flat_map(|d| d.emit_fields().iter())
         .collect();
-    let change = emits.iter().find(|e| e.name == "change");
+    let change = emits.iter().find(|e| e.analysis.name == "change");
     assert!(change.is_some(), "should have 'change' emit");
-    let payload = change.unwrap().payload_type.as_deref().unwrap_or("");
+    let payload = change
+        .unwrap()
+        .analysis
+        .payload_type
+        .as_deref()
+        .unwrap_or("");
     assert!(
         payload.starts_with('[') && payload.ends_with(']'),
         "call-signature payload should be wrapped in brackets, got: {payload}"
@@ -6502,8 +6632,7 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
     }
     let make_artifact = |shape: EdgeShape| {
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
-            ),
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
         );
         let mut exports = FxHashMap::default();
         let mut wildcard_reexports = Vec::new();
@@ -6547,7 +6676,7 @@ fn edge_currency_oracle_stales_wildcard_surface_after_generation_advance() {
                 );
             }
         }
-        let shallow = ShallowFileState::new_for_test_with_routing(
+        let shallow = ShallowFileState::routing_tables_only_for_test(
             [7u8; 16],
             exports,
             wildcard_reexports,
@@ -7573,61 +7702,6 @@ export interface Props extends Base {
 }
 
 #[test]
-fn resolve_external_type_from_indexed_ready_keeps_local_type_resolution_shallow() {
-    let ws = Arc::new(CountingWorkspace::new());
-    ws.inject_file(
-        "/src/types.ts",
-        "export interface Props { label: string }\n",
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws.clone(),
-    );
-
-    let shallow = host
-        .ensure_indexed_ready("/src/types.ts")
-        .expect("types dependency should seed shallow imported state");
-    // snapshot is Arc<FileAnalysisSnapshot> (non-optional); check it's default/empty
-    assert!(
-        shallow.snapshot.bindings.is_empty() && shallow.snapshot.imports.is_empty(),
-        "shallow imported state should stay export-only before local type resolution",
-    );
-
-    ws.reset_reads();
-    let resolved = host
-        .resolve_external_type_from_indexed_ready(
-            "/src/types.ts",
-            "Props",
-            &rustc_hash::FxHashMap::default(),
-        )
-        .expect("local type resolution should succeed from shallow imported state");
-
-    assert!(
-        resolved
-            .props
-            .iter()
-            .any(|prop| prop.key_name.as_deref() == Some("label")),
-        "resolved props should include the local interface member, got {:?}",
-        resolved.props,
-    );
-
-    let cached = host
-        .ensure_indexed_ready("/src/types.ts")
-        .expect("types dependency should remain cached after local type resolution");
-    // In the new IndexedReady DB, ensure_indexed_ready eagerly builds full facts.
-    // The shallowness constraint applies to the internal resolution path, not to
-    // the post-hoc facts query. Verify the facts are present and correct.
-    assert!(
-        !cached.raw_source.is_empty(),
-        "types dependency should have source content after local type resolution",
-    );
-}
-
-#[test]
 fn external_type_analysis_preserves_vue_tsx_source_type() {
     let host = make_host();
     upsert_vue(
@@ -7757,41 +7831,39 @@ export interface ChipProps {
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
 
+    // The replacement semantic query for the retired frontier element
+    // payload: the component-meta macro-elements rail resolves the routed
+    // root's declaration carrier through the ONE shared dispatch and
+    // projects its one-level Shallow surface (member values stay carriers).
     let resolved = host
-        .resolve_external_type_from_loaded_files(
+        .resolve_component_meta_macro_elements(
             "/src/App.vue",
             "./useComponentIcons",
             "UseComponentIconsProps",
             &mut tracked_deps,
             &mut resolution_deps,
             &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
         )
-        .expect("external type resolution should complete")
         .expect("UseComponentIconsProps should resolve");
 
     assert!(
         resolved
+            .elements
             .props
             .iter()
             .any(|prop| prop.key_name.as_deref() == Some("icon")),
         "Icon-backed props should still resolve through structural indexed access, got {:?}",
-        resolved.props
+        resolved.elements.props
     );
     assert!(
         resolved
+            .elements
             .props
             .iter()
             .any(|prop| prop.key_name.as_deref() == Some("avatar")),
         "leaf imported prop aliases should remain present without resolving the companion body, got {:?}",
-        resolved.props
+        resolved.elements.props
     );
     assert!(
         ws.read_count("/src/Avatar.vue") <= 1,
@@ -8068,13 +8140,28 @@ export const defaults: Props = { label: 'ok' }
     let prepared_value = host
         .prepared_value_decl("/src/types.ts", "defaults")
         .expect("prepared value decl should materialize on demand");
+    let annotation_source = prepared_value
+        .type_annotation
+        .annotation
+        .as_ref()
+        .unwrap_or_else(|| {
+            panic!(
+                "on-demand prepared value materialization should retain the annotation source, got {:?}",
+                prepared_value.type_annotation
+            )
+        });
+    let annotation_ty = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/src/types.ts",
+        annotation_source,
+    )
+    .unwrap_or_else(|| panic!("the prepared value annotation source must shell-materialize"));
     assert!(
         matches!(
-            prepared_value.type_annotation.as_ref(),
-            Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Props"
+            &annotation_ty,
+            TypeExpr::Ref { name, .. } if name.as_ref() == "Props"
         ),
-        "on-demand prepared value materialization should retain the shallow type annotation, got {:?}",
-        prepared_value.type_annotation
+        "on-demand prepared value materialization should retain the shallow type annotation, got {annotation_ty:?}",
     );
 
     assert!(
@@ -9981,6 +10068,17 @@ export interface UnusedProps {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_macro_elements_keeps_leaf_object_prop_imports_symbolic() {
+    // The leaf imported object prop (`avatar?: AvatarProps`) is published as
+    // a shallow reference carrier: resolving it builds the versioned root
+    // identity through AT MOST ONE canonical cold shallow materialization of
+    // `/src/Avatar.vue` (the permitted first read — the canonical shallow
+    // inventory is what warm identities and invalidation facts root on),
+    // NEVER a declaration-body execution. Avatar's decl body importing
+    // `ChipProps` from `/src/Chip.vue` is the body-execution discriminator:
+    // lowering Avatar's body would demand Chip.vue, so `Chip.vue == 0 reads`
+    // proves the member value stayed a carrier. A repeat resolution performs
+    // ZERO new workspace reads (warm identities re-serve from the canonical
+    // caches).
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/Consumer.vue",
@@ -10006,9 +10104,21 @@ export interface Props {
     ws.inject_file(
         "/src/Avatar.vue",
         r#"<script lang="ts">
+import type { ChipProps } from './Chip.vue'
+
 export interface AvatarProps {
   src?: string
   alt?: string
+  chip?: ChipProps
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Chip.vue",
+        r#"<script lang="ts">
+export interface ChipProps {
+  tone?: string
 }
 </script>
 <template><div /></template>"#,
@@ -10047,6 +10157,10 @@ export interface IconProps {
             exact_dependency("./Icon.vue", "/src/Icon.vue"),
         ],
     );
+    host.set_import_dependencies(
+        "/src/Avatar.vue",
+        vec![exact_dependency("./Chip.vue", "/src/Chip.vue")],
+    );
 
     let _view = host.resolver_store_view_read().into_owned_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
@@ -10067,21 +10181,83 @@ export interface IconProps {
         resolved.is_some(),
         "component-meta macro resolution should still resolve Props",
     );
-    assert_eq!(
-        ws.read_count("/src/Avatar.vue"),
-        0,
-        "whole-route macro resolution should keep direct imported object props symbolic instead of materializing their files",
+    // The resolved surface publishes BOTH members: the leaf imported object
+    // prop stays a shallow carrier but is still a published row.
+    let elements = &resolved.as_ref().unwrap().elements;
+    assert!(
+        elements
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("avatar")),
+        "the leaf imported object prop publishes its row, got {:?}",
+        elements.props,
+    );
+    assert!(
+        elements
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("icon")),
+        "the indexed-access member publishes its row, got {:?}",
+        elements.props,
+    );
+    // At most ONE canonical cold shallow materialization of the leaf import:
+    // the versioned root identity needs Avatar's canonical shallow inventory
+    // exactly once per content generation.
+    let avatar_cold_reads = ws.read_count("/src/Avatar.vue");
+    assert!(
+        avatar_cold_reads <= 1,
+        "the leaf imported object prop performs at most ONE canonical cold \
+         shallow materialization (got {avatar_cold_reads} reads)",
     );
     assert!(
         ws.read_count("/src/Icon.vue") > 0,
         "actionable indexed member routes should still resolve the imported file they actually need",
     );
+    // NO declaration-body execution for the leaf import: Avatar's body
+    // imports ChipProps, so a body lowering would demand Chip.vue.
+    assert_eq!(
+        ws.read_count("/src/Chip.vue"),
+        0,
+        "keeping the leaf member value a carrier must not execute Avatar's \
+         declaration body (its transitive Chip.vue import stays untouched)",
+    );
+    // The canonical shallow artifact EXISTS — the first materialization is
+    // the permitted canonical shallow read, stored once on the shared store.
     assert!(
         host.project_type_store
             .indexed()
             .get_any("/src/Avatar.vue")
-            .is_none(),
-        "symbolic imported object props should stay off FileArtifactStore",
+            .is_some(),
+        "the leaf import's canonical shallow artifact exists after the cold \
+         materialization (shallow inventory, not a body store)",
+    );
+
+    // A REPEAT resolution performs ZERO new workspace reads for the leaf
+    // import — warm identities re-serve from the canonical caches.
+    let mut tracked_deps_warm = std::collections::BTreeSet::new();
+    let mut resolution_deps_warm = std::collections::BTreeSet::new();
+    let mut cache_warm = crate::resolver_core::ExternalTypeBodyCache::default();
+    let resolved_warm = host.resolve_component_meta_macro_elements(
+        "/src/Consumer.vue",
+        "./types",
+        "Props",
+        &mut tracked_deps_warm,
+        &mut resolution_deps_warm,
+        &mut cache_warm,
+    );
+    assert!(
+        resolved_warm.is_some(),
+        "the warm repeat resolution should still resolve Props",
+    );
+    assert_eq!(
+        ws.read_count("/src/Avatar.vue"),
+        avatar_cold_reads,
+        "the warm repeat performs ZERO new Avatar.vue workspace reads",
+    );
+    assert_eq!(
+        ws.read_count("/src/Chip.vue"),
+        0,
+        "the warm repeat still executes no Avatar declaration body",
     );
 }
 
@@ -10187,8 +10363,7 @@ export interface ButtonProps {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolve_component_meta_macro_elements_stays_off_resolved_type_cache_across_requests_for_package_targets(
-) {
+fn resolve_component_meta_macro_elements_tracks_routed_package_targets_across_requests() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/Consumer.vue",
@@ -10261,17 +10436,6 @@ const emit = defineEmits<PackageEmits>()
         resolved_first.is_some(),
         "the first imported macro lookup should resolve the package emits surface",
     );
-    let after_first = host.provenance().snapshot();
-    assert_eq!(
-        after_first.resolved_external_type_cache_misses, 0,
-        "component-meta package lookups should not populate the legacy resolved-type cache, got {:?}",
-        after_first,
-    );
-    assert_eq!(
-        after_first.resolved_external_type_cache_hits, 0,
-        "component-meta package lookups should not read the legacy resolved-type cache, got {:?}",
-        after_first,
-    );
     assert!(
         tracked_deps_first.contains("/workspace/node_modules/pkg/dist/index3.d.ts"),
         "the first lookup should track the routed package target canonical",
@@ -10296,17 +10460,6 @@ const emit = defineEmits<PackageEmits>()
         resolved_second.is_some(),
         "the second imported macro lookup should still resolve the package emits surface",
     );
-    let after_second = host.provenance().snapshot();
-    assert_eq!(
-        after_second.resolved_external_type_cache_hits, 0,
-        "component-meta package lookups should stay off the legacy resolved-type cache on repeat requests, got {:?}",
-        after_second,
-    );
-    assert_eq!(
-        after_second.resolved_external_type_cache_misses, 0,
-        "component-meta package lookups should stay off the legacy resolved-type cache on repeat requests, got {:?}",
-        after_second,
-    );
     assert!(
         tracked_deps_second.contains("/workspace/node_modules/pkg/dist/index3.d.ts"),
         "the warm lookup must keep tracking the routed package target canonical",
@@ -10326,98 +10479,6 @@ const emit = defineEmits<PackageEmits>()
             .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
             .is_some(),
         "the actively resolved package target owns exactly one canonical IndexedReady built by the unified cold path",
-    );
-    assert!(
-        host.resolved_type_cache().is_empty(),
-        "component-meta package lookups should leave the legacy resolved-type cache empty",
-    );
-}
-
-/// The legacy `ResolvedElements` engine (`resolve_external_type_from_loaded_files`,
-/// driven in production ONLY by [`HostExternalMacroTypeCollector`]) must NOT
-/// admit into the persistent host-owned `ResolvedTypeCacheDb`. A broken
-/// decl-body lease pin reaches this soon-deleted engine and would become a
-/// `ResolvedSymbol { body: None, status: Resolved }` written into the
-/// content-keyed cache as a FALSE-WARM "resolved but empty" entry the read-side
-/// fact rail cannot reject (a lease-miss never advances the key's
-/// `dep_source_hash`). Rather than thread a no-warm rail through soon-deleted
-/// code, the legacy path's persistent admission is disabled at the collector
-/// (`use_host_cache = false`); request-local caching stays.
-///
-/// Behavioral fail-closed guard: driving the PRODUCTION legacy collector for a
-/// macro type with `profile_hash = None` (the write-eligible arm) leaves the
-/// `ResolvedTypeCacheDb` EMPTY. Pre-fix the collector passed
-/// `use_host_cache = true` and a successful resolve wrote one entry
-/// (`is_empty()` FAILS → RED); post-fix no persistent entry is admitted (GREEN).
-/// Anti-vacuity: the resolve must actually succeed, else the write path is never
-/// reached.
-#[test]
-fn legacy_external_macro_collector_does_not_populate_persistent_resolved_type_cache() {
-    let ws = Arc::new(CountingWorkspace::new());
-    ws.inject_file(
-        "/workspace/src/Consumer.vue",
-        r#"<script setup lang="ts">
-import type { Props } from './types'
-const props = defineProps<Props>()
-</script>
-<template><div /></template>"#,
-    );
-    ws.inject_file(
-        "/workspace/src/types.ts",
-        "export interface Props { label: string }\n",
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws.clone(),
-    );
-    assert!(host.ensure_loaded("/workspace/src/Consumer.vue"));
-    host.set_import_dependencies(
-        "/workspace/src/Consumer.vue",
-        vec![exact_dependency("./types", "/workspace/src/types.ts")],
-    );
-
-    assert!(
-        host.resolved_type_cache().is_empty(),
-        "precondition: the persistent resolved-type cache starts empty",
-    );
-
-    let dep = verter_semantic::analysis::MacroTypeDep {
-        macro_index: 0,
-        import_source: "./types".to_string(),
-        type_name: "Props".to_string(),
-        macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps,
-        macro_span: verter_span::Span::new(0, 0),
-    };
-    let import = verter_semantic::analysis::AnalyzedImport {
-        source: "./types".to_string(),
-        is_type_only: true,
-        bindings: Vec::new(),
-        span: verter_span::Span::new(0, 0),
-        resolved_canonical_id: None,
-    };
-
-    // `profile_hash = None` is the write-eligible arm of the legacy engine.
-    let (resolved, _diags, _tracked) = host.collect_external_types_from_loaded_files_for_test(
-        "/workspace/src/Consumer.vue",
-        std::slice::from_ref(&dep),
-        std::slice::from_ref(&import),
-        None,
-    );
-    assert!(
-        resolved.is_some(),
-        "the legacy collector must actually resolve the workspace macro surface \
-         (else the write path is never reached and this test is vacuous)",
-    );
-
-    assert!(
-        host.resolved_type_cache().is_empty(),
-        "the legacy ResolvedElements engine must NOT populate the persistent \
-         ResolvedTypeCacheDb — a lease-miss-derived empty result would otherwise \
-         become a false-warm 'resolved' entry the read-side fact rail cannot reject",
     );
 }
 
@@ -10817,7 +10878,7 @@ export interface IconProps {
     );
     assert_eq!(
         routes.get("IconProps"),
-        Some(&crate::resolver_core::RouteDemand::MemberPath(vec![
+        Some(&crate::resolver_core::RouteDemand::member_path(vec![
             "name".to_string()
         ])),
         "whole-route imported closure should preserve the requested member tail instead of widening to Whole",
@@ -11280,11 +11341,14 @@ defineProps<{ ui: typeof importedTheme }>()
     );
     // Negative: prop type should not be Unknown
     let ui_prop = meta.props.iter().find(|p| p.name == "ui").unwrap();
+    let ui_ty = crate::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/App.vue",
+        ui_prop.type_source.present().expect("typed ui prop"),
+    )
+    .unwrap_or_else(|| panic!("ui's published source must demand-materialize"));
     assert!(
-        !matches!(
-            ui_prop.type_expr,
-            verter_type_expr::TypeExpr::Unknown { .. }
-        ),
+        !matches!(ui_ty, verter_type_expr::TypeExpr::Unknown { .. }),
         "typeof imported value prop type should not be Unknown",
     );
 }
@@ -11768,18 +11832,18 @@ fn bundle_fact_validation_round_trip() {
         .expect("Props should prepare after content change");
     assert_eq!(updated.root_identity.symbol_name, "Props");
 
-    // Negative: the old symbol shape should be gone (the body should have changed).
-    // We verify the bundle was invalidated by checking the prepared decl reflects new content.
-    let body_debug = format!("{:?}", updated.body);
+    // Negative: the old symbol shape should be gone (the surface should have
+    // changed). We verify the bundle was invalidated by checking the prepared
+    // decl's member index reflects the new content.
     assert!(
-        body_debug.contains("title"),
-        "updated prepared decl body should contain the new property 'title', got: {}",
-        body_debug
+        updated.member_index.contains_key("title"),
+        "updated prepared decl should contain the new property 'title', got: {:?}",
+        updated.member_index.keys().collect::<Vec<_>>()
     );
     assert!(
-        !body_debug.contains("label"),
-        "updated prepared decl body should NOT contain the old property 'label', got: {}",
-        body_debug
+        !updated.member_index.contains_key("label"),
+        "updated prepared decl should NOT contain the old property 'label', got: {:?}",
+        updated.member_index.keys().collect::<Vec<_>>()
     );
 }
 
@@ -12349,47 +12413,6 @@ fn workspace_vfs_source_kind_includes_layer_detail_when_present() {
     assert_eq!(super::workspace_vfs_source_kind(None), "workspace-vfs");
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn external_type_analysis_repeated_lookup_collapses_onto_host_cache() {
-    // External-type resolution looks up against the project-global
-    // `FileArtifactStore` directly — no per-request `external_inputs_memo`
-    // layer. Repeated resolutions for the same canonical go through that
-    // host-owned cache.
-    //
-    // The observable invariant is that repeated lookups return identical
-    // `Arc`-backed external-type analysis payloads so downstream consumers
-    // still collapse onto one cached entry.
-    let host = make_host();
-    upsert_non_sfc(
-        &host,
-        "/src/types.ts",
-        "export interface Props { label?: string; count?: number }\n",
-    );
-
-    let first = host
-        .resolve_external_type_from_indexed_ready(
-            "/src/types.ts",
-            "Props",
-            &rustc_hash::FxHashMap::default(),
-        )
-        .expect("first external-type resolution must succeed");
-
-    let second = host
-        .resolve_external_type_from_indexed_ready(
-            "/src/types.ts",
-            "Props",
-            &rustc_hash::FxHashMap::default(),
-        )
-        .expect("second external-type resolution must succeed");
-
-    assert_eq!(
-        first.props.len(),
-        second.props.len(),
-        "repeated resolution must return the same shape without reparsing"
-    );
-}
-
 // `request_store_view_extends_across_mid_request_ensure_loaded` is
 // intentionally not part of this suite: the `RequestStoreView` type
 // and its captured-view-plus-extension semantics are not part of the
@@ -12430,58 +12453,6 @@ fn ensure_loaded_reload_with_identical_content_does_not_bump_epoch() {
         host.current_store_view_epoch(),
         post_evict_epoch,
         "reload with identical content must NOT bump the epoch"
-    );
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn host_owned_resolved_named_types_serves_cross_request_lookups() {
-    // Cross-request cache-reuse invariant:
-    //
-    // Two separate queries for components that share the same imported interface
-    // `(canonical, whole_hash, type_name, surface, type_param_bindings)` must
-    // reuse the cached `Arc<ResolvedElements>` from the host-owned cache.
-    //
-    // A regression that scoped `resolved_named_types` to a per-context
-    // `Rc<RefCell<FxHashMap>>` would drop the cache at the end of each
-    // `build_type_context` invocation; cross-request reuse would be impossible
-    // and every request would pay the same resolution cost again.
-    //
-    // `VerterHost::host_owned_resolved_named_types` (DashMap) must survive
-    // across requests within one workspace generation; the adapter injected
-    // into `TypeResolutionContext` hits the cache on the second request.
-    let host = make_host();
-    let props_src = r#"<script setup lang="ts">
-import type { SharedProps } from './shared'
-defineProps<SharedProps>()
-</script>
-<template><div /></template>"#;
-    upsert_vue(&host, "/src/A.vue", props_src);
-    upsert_vue(&host, "/src/B.vue", props_src);
-    upsert_non_sfc(
-        &host,
-        "/src/shared.ts",
-        "export interface SharedProps {\n  label?: string\n  count?: number\n}\n",
-    );
-
-    // Resolve A first, then B. Both consume SharedProps from /src/shared.ts.
-    let _a = host.resolve_external_type_from_indexed_ready(
-        "/src/shared.ts",
-        "SharedProps",
-        &rustc_hash::FxHashMap::default(),
-    );
-    // After B's lookup, the host-owned cache should contain one entry keyed on
-    // `(/src/shared.ts, whole_hash, "SharedProps", None, empty bindings)`.
-    let _b = host.resolve_external_type_from_indexed_ready(
-        "/src/shared.ts",
-        "SharedProps",
-        &rustc_hash::FxHashMap::default(),
-    );
-
-    let cache_len = host.host_owned_resolved_named_types_len_for_test();
-    assert!(
-        cache_len >= 1,
-        "host-owned named type cache should carry at least one entry after cross-request reuse, got {cache_len}"
     );
 }
 

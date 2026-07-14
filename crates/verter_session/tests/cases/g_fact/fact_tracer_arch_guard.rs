@@ -101,20 +101,29 @@ fn r18_carve_out_documented_for_tls_installer() {
     );
 
     // Also verify the carve-out enumerates the three invariants
-    // that make the thread-local safe: per-compute scope, nested
-    // installer panic, trait-method-only readership.
+    // that make the thread-local safe: per-compute scope, the
+    // nesting-supported fan-out-to-all-levels mechanism, and
+    // trait-method-only readership. The nesting invariant is the
+    // ratified Bug B mechanism (nesting IS supported — an
+    // evaluator-scoped nested observer requires it), which INVERTED
+    // the earlier "nested installers panic" wording; the phrases below
+    // pin the current mechanism (per-thread `ACTIVE_TRACERS` stack,
+    // observations fan out to ALL active levels), so reverting to the
+    // old panic-on-nest rationale — or dropping the nesting story —
+    // reddens the guard.
     let block_starts = src
         .find("Why this is NOT an R18 violation")
         .expect("carve-out present");
     let block = &src[block_starts..block_starts + 2048.min(src.len() - block_starts)];
     assert!(
-        block.contains("Nested installers panic")
-            || block.contains("Nested scopes panic")
-            || block.contains("Nested installer panics")
-            || block.contains("nested installers panic")
-            || block.contains("Nested installers panic"),
-        "R18 carve-out must state the nested-installer-panics invariant; \
-         observations must never silently route to a sibling tracer."
+        block.contains("Nesting IS supported")
+            && block.contains("ACTIVE_TRACERS")
+            && block.contains("fans out to ALL active levels"),
+        "R18 carve-out must state the nesting-supported invariant — the ratified Bug B \
+         mechanism: nested `with_fact_tracer` scopes push onto the per-thread \
+         `ACTIVE_TRACERS` stack and every observation fans out to ALL active levels, so an \
+         inner (evaluator-scoped) observer's reads reach every enclosing tracer instead of \
+         silently routing to only one."
     );
     assert!(
         block.contains("trait method"),

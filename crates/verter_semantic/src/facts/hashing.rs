@@ -41,12 +41,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use verter_type_expr::facts::{EnumPrimitiveDomain, EnumScalar};
 use verter_type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, LiteralValue, MappedModifier, MethodSignature,
     ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TupleElement, TypeExpr, TypeParam,
     ValueRef,
 };
 
+use crate::analysis::type_eval::{EnumMemberValue, FunctionSignature, ValueDeclKind};
 use crate::analysis::types::hash_16;
 use crate::facts::registry::{FactHash, MemberKind, SymbolSpace};
 
@@ -54,6 +56,14 @@ use crate::facts::registry::{FactHash, MemberKind, SymbolSpace};
 /// `Opaque(BudgetExceeded)` and the cache entry is admitted as
 /// `NonCacheable`.
 pub const MAX_HASH_DEPTH: usize = 64;
+
+/// Inert cycle-detection identity for the value-body encoder's synthetic enum
+/// object root. The enum body is always the walk root (entered against an empty
+/// `visited` map) and its only descendants are leaf literals, so this key can
+/// never collide with a real node identity (those begin with a `0xA0`–`0xBF`
+/// variant tag). It exists solely to keep the root frame's `visited` / `depth`
+/// bookkeeping identical to the legacy `walk_node(Object)` root.
+const SYNTHETIC_ENUM_OBJECT_IDENTITY: &[u8] = b"verter:synthetic-enum-object-root";
 
 /// Identity of a cross-decl reference appearing inside a fact body.
 ///
@@ -144,10 +154,16 @@ pub trait CrossDeclLens {
     fn resolve(&self, name: &str, space: SymbolSpace) -> Option<CrossDeclRef>;
 }
 
-/// No-op lens used by tests that don't care about cross-decl edges —
-/// every reference becomes `Unresolved(name, space)`. Production
-/// callers MUST supply a real lens; the shallow walk has all the
-/// information needed.
+/// No-op lens — every reference becomes `Unresolved(name, space)`.
+///
+/// Used by tests that don't care about cross-decl edges, and by SYNTAX-ONLY
+/// producers that are FORBIDDEN from resolving imports (the framework
+/// script-fact capture half): there the fingerprint is a content
+/// DISCRIMINATOR for a content-addressed candidate slot, so hashing every
+/// reference as an unresolved reference-shape edge (name + space) is exactly
+/// the discrimination needed — resolved reference identity stays the fact
+/// rail's job. A production caller that HAS resolution information MUST
+/// supply a real lens (the shallow walk has all the information needed).
 #[derive(Debug, Default)]
 pub struct UnresolvedLens;
 
@@ -190,6 +206,178 @@ pub fn compute_semantic_hash(
 ) -> HashOutcome {
     let mut walker = Walker::new(lens, space);
     walker.walk(body);
+    walker.finish()
+}
+
+/// The borrowed TRANSIENT view of one TYPE declaration group's body at the
+/// moment the fingerprint is produced — the input to [`type_body_fingerprint`].
+///
+/// This is a fingerprint-input carrier (analogous to
+/// [`ValueBodyFingerprintInput`]), NOT a second body representation: the caller
+/// borrows the transient lowered contributor bodies it is already holding
+/// (before they are narrowed away to locators) and never persists an assembled
+/// `TypeExpr` view.
+pub enum TransientTypeBody<'a> {
+    /// A single declaration's transient lowered body, hashed as-is.
+    Single(&'a TypeExpr),
+    /// Ordered same-name contributor bodies of a merged declaration
+    /// (source/binder order). The fingerprint folds every contributor's DIRECT
+    /// object members into one object view — the shallow-index fold, never the
+    /// semantic merge.
+    Merged(&'a [TypeExpr]),
+    /// The enum TYPE-space union arms: every member's projected scalar,
+    /// already deduplicated by the caller (the
+    /// `ValueDeclGroup::enum_type_union` arm set).
+    EnumUnion(&'a [EnumScalar]),
+}
+
+/// Compute the body fingerprint of one TYPE declaration group from its borrowed
+/// [`TransientTypeBody`] view — the producer entry point for the TYPE-space
+/// body fact, run at lazy decl-body lowering time while the transient lowered
+/// bodies are still in hand.
+///
+/// The folded view is derived and hashed HERE via the unchanged
+/// [`compute_semantic_hash`] grammar, byte-identical to the legacy folded-body
+/// read: `Single` hashes the body directly; `Merged` unions every contributor's
+/// direct object members into one object view; `EnumUnion` builds the projected
+/// scalar union (folded literals plus degraded primitive-domain arms). Every
+/// internally assembled `TypeExpr` view is a fact-production intermediate,
+/// immediately dropped — never a returned/persisted body.
+pub fn type_body_fingerprint(
+    body: TransientTypeBody<'_>,
+    space: SymbolSpace,
+    lens: &dyn CrossDeclLens,
+) -> HashOutcome {
+    match body {
+        TransientTypeBody::Single(body) => compute_semantic_hash(body, space, lens),
+        TransientTypeBody::Merged(contributors) => {
+            let mut properties = Vec::new();
+            for contributor in contributors {
+                collect_direct_object_members(contributor, &mut properties);
+            }
+            let folded = TypeExpr::Object(Arc::new(ObjectExpr { properties }));
+            compute_semantic_hash(&folded, space, lens)
+        }
+        TransientTypeBody::EnumUnion(scalars) => {
+            let arms: Vec<TypeExpr> = scalars.iter().map(scalar_to_type_expr).collect();
+            let union = TypeExpr::union(arms);
+            compute_semantic_hash(&union, space, lens)
+        }
+    }
+}
+
+/// Collect the DIRECT object members of `body` into `out`, descending
+/// `Intersection`/`Parenthesized` arms. Object arms contribute their members;
+/// every other arm (notably a heritage `Ref` from `extends`/`implements`)
+/// carries no direct member and is skipped — inherited members surface only
+/// through the semantic reducer, never this shallow fold.
+fn collect_direct_object_members(body: &TypeExpr, out: &mut Vec<ObjectMember>) {
+    match body {
+        TypeExpr::Object(object) => out.extend(object.properties.iter().cloned()),
+        TypeExpr::Intersection(parts) => {
+            for part in parts.iter() {
+                collect_direct_object_members(part, out);
+            }
+        }
+        TypeExpr::Parenthesized(inner) => collect_direct_object_members(inner, out),
+        _ => {}
+    }
+}
+
+/// The SINGLE scalar → projected-`TypeExpr` mapping, shared by the enum
+/// TYPE-space union ([`TransientTypeBody::EnumUnion`]) and the enum VALUE-space
+/// folded object ([`Walker::emit_folded_enum_object`]) so the two spaces can
+/// never diverge on a member's projected type.
+///
+/// A folded numeric scalar stores the EXACT canonical `f64` display string, so
+/// parsing it back recovers the exact bits — the number-literal fact bytes are
+/// `f64::to_bits().to_le_bytes()`, and a raw string-byte emission would change
+/// the fingerprint of every numeric enum member. A deferred member's primitive
+/// DOMAIN maps to its degraded sound arm (`number` / `string` /
+/// `number | string` / `unknown`).
+fn scalar_to_type_expr(scalar: &EnumScalar) -> TypeExpr {
+    match scalar {
+        EnumScalar::String(s) => TypeExpr::string_literal(s.as_str()),
+        EnumScalar::Number(s) => TypeExpr::number_literal(
+            s.parse::<f64>()
+                .expect("EnumScalar::Number stores the canonical f64 display string"),
+        ),
+        EnumScalar::Primitive(domain) => match domain {
+            EnumPrimitiveDomain::Number => TypeExpr::Primitive(PrimitiveName::Number),
+            EnumPrimitiveDomain::String => TypeExpr::Primitive(PrimitiveName::String),
+            EnumPrimitiveDomain::NumberOrString => TypeExpr::union(vec![
+                TypeExpr::Primitive(PrimitiveName::Number),
+                TypeExpr::Primitive(PrimitiveName::String),
+            ]),
+            EnumPrimitiveDomain::Unknown => TypeExpr::Primitive(PrimitiveName::Unknown),
+        },
+    }
+}
+
+/// The closed input to [`value_body_fingerprint`] — the pieces of a lowered
+/// VALUE declaration group a body fingerprint reads, borrowed in place. Replaces
+/// the session assembling a `TypeExpr` value body: the caller passes the decl's
+/// annotation / signatures / kind / object shape / folded enum members and never
+/// holds an assembled `TypeExpr`.
+///
+/// The borrowed `&TypeExpr` / `&ObjectExpr` components are PRIVATE: they are read
+/// transiently during fingerprint production (through [`ValueBodyFingerprintInput::new`]
+/// at the prep/fact boundary) and are never exposed as public fields or handed
+/// back out, so the carrier owns no public `TypeExpr` contract.
+pub struct ValueBodyFingerprintInput<'a> {
+    /// The declaration's explicit type annotation, if any.
+    type_annotation: Option<&'a TypeExpr>,
+    /// The merged overload signature set, in source order.
+    signatures: &'a [FunctionSignature],
+    /// The value declaration kind.
+    kind: ValueDeclKind,
+    /// The declaration's object literal shape, if any.
+    object_shape: Option<&'a ObjectExpr>,
+    /// The ordered enum member inventory (`Some` exactly for an enum).
+    enum_members: Option<&'a [(String, EnumMemberValue)]>,
+}
+
+impl<'a> ValueBodyFingerprintInput<'a> {
+    /// Construct the closed value-body fingerprint input at the prep/fact
+    /// boundary. Borrowing `&TypeExpr` / `&ObjectExpr` INTO the carrier is a
+    /// transient read used only by [`value_body_fingerprint`]; the components
+    /// are never re-exposed as public fields or returned.
+    #[must_use]
+    pub fn new(
+        type_annotation: Option<&'a TypeExpr>,
+        signatures: &'a [FunctionSignature],
+        kind: ValueDeclKind,
+        object_shape: Option<&'a ObjectExpr>,
+        enum_members: Option<&'a [(String, EnumMemberValue)]>,
+    ) -> Self {
+        Self {
+            type_annotation,
+            signatures,
+            kind,
+            object_shape,
+            enum_members,
+        }
+    }
+}
+
+/// Compute the body fingerprint of one VALUE declaration group from its closed
+/// [`ValueBodyFingerprintInput`] — the no-`TypeExpr` producer entry point for the
+/// VALUE-space body fact.
+///
+/// The fingerprint bytes are emitted DIRECTLY from the borrowed value-decl
+/// components through the shared byte-emission helpers — no synthetic `TypeExpr`
+/// body is ever constructed. The stream is byte-identical to the legacy
+/// `value_body_for_hash` + [`compute_semantic_hash`] read: an enum with foldable
+/// members folds to the object member stream; else a present annotation is walked
+/// in place; else a signature-bearing decl (and the final kind/object-shape
+/// fallback) degrade to the same `Unknown` carrier bytes.
+pub fn value_body_fingerprint(
+    input: &ValueBodyFingerprintInput<'_>,
+    space: SymbolSpace,
+    lens: &dyn CrossDeclLens,
+) -> HashOutcome {
+    let mut walker = Walker::new(lens, space);
+    walker.emit_value_body(input);
     walker.finish()
 }
 
@@ -298,33 +486,15 @@ impl<'a> Walker<'a> {
     }
 
     fn walk_node(&mut self, node: &TypeExpr) {
-        if self.budget_exceeded {
-            return;
-        }
-        self.depth += 1;
-        if self.depth > MAX_HASH_DEPTH {
-            self.budget_exceeded = true;
-            self.buf.extend_from_slice(b"BUDGET_EXCEEDED");
-            self.depth -= 1;
-            return;
-        }
-
         // Cycle detection: a node's *identity* (variant tag + Arc
         // pointer addresses of any owned sub-nodes) is recorded once
-        // per visit. A re-entry through the same node emits a
-        // `CycleRef(visit_index)` placeholder rather than recursing.
+        // per visit through the shared frame prologue. A re-entry through
+        // the same node emits a `CycleRef(visit_index)` placeholder rather
+        // than recursing.
         let identity_key = self.node_identity_key(node);
-        if let Some(&first_index) = self.visited.get(&identity_key) {
-            self.buf.push(0xCC); // CycleRef tag
-            self.buf
-                .extend_from_slice(&(first_index as u32).to_le_bytes());
-            self.buf.push(0xFF);
-            self.depth -= 1;
+        if !self.enter_frame(identity_key) {
             return;
         }
-        self.visit_counter += 1;
-        let my_index = self.visit_counter;
-        self.visited.insert(identity_key, my_index);
 
         match node {
             TypeExpr::Primitive(p) => self.write_primitive(*p),
@@ -553,7 +723,129 @@ impl<'a> Walker<'a> {
             }
         }
 
+        self.exit_frame();
+    }
+
+    /// Shared per-node ENTER bookkeeping: budget guard, depth accounting, and
+    /// cycle registration under `identity`. Returns `false` (having emitted the
+    /// budget / cycle-ref bytes and unwound the depth) when the caller must emit
+    /// no body; `true` to proceed and emit the node body followed by
+    /// [`Self::exit_frame`]. Both the real `TypeExpr` walk and the value-body
+    /// encoder's synthetic root frames enter through this ONE path, so there is a
+    /// single hash grammar and byte stream.
+    fn enter_frame(&mut self, identity: Vec<u8>) -> bool {
+        if self.budget_exceeded {
+            return false;
+        }
+        self.depth += 1;
+        if self.depth > MAX_HASH_DEPTH {
+            self.budget_exceeded = true;
+            self.buf.extend_from_slice(b"BUDGET_EXCEEDED");
+            self.depth -= 1;
+            return false;
+        }
+        if let Some(&first_index) = self.visited.get(&identity) {
+            self.buf.push(0xCC); // CycleRef tag
+            self.buf
+                .extend_from_slice(&(first_index as u32).to_le_bytes());
+            self.buf.push(0xFF);
+            self.depth -= 1;
+            return false;
+        }
+        self.visit_counter += 1;
+        let my_index = self.visit_counter;
+        self.visited.insert(identity, my_index);
+        true
+    }
+
+    /// Shared per-node EXIT bookkeeping, paired with a successful
+    /// [`Self::enter_frame`].
+    fn exit_frame(&mut self) {
         self.depth -= 1;
+    }
+
+    /// Emit the value-body fingerprint bytes DIRECTLY from the borrowed value
+    /// decl components — no synthetic `TypeExpr` body is constructed. The byte
+    /// stream is identical to the folded value-body view fed to
+    /// [`compute_semantic_hash`]:
+    /// - an enum with foldable members folds to the object member stream;
+    /// - else a present annotation is walked in place (borrowed);
+    /// - else a signature-bearing decl degrades to the legacy `Unknown` debug
+    ///   carrier bytes, and the final fallback degrades to the kind/object-shape
+    ///   `Unknown` carrier bytes.
+    fn emit_value_body(&mut self, input: &ValueBodyFingerprintInput<'_>) {
+        if input.kind == ValueDeclKind::Enum {
+            if let Some(members) = input.enum_members {
+                self.emit_folded_enum_object(members);
+                return;
+            }
+        }
+        if let Some(annotation) = input.type_annotation {
+            self.walk_node(annotation);
+            return;
+        }
+        if !input.signatures.is_empty() {
+            self.emit_unknown_raw(&format!("{:?}", input.signatures));
+            return;
+        }
+        self.emit_unknown_raw(&format!("{:?}::{:?}", input.kind, input.object_shape));
+    }
+
+    /// Reproduce `walk_node(TypeExpr::Object(<folded enum members>))`
+    /// byte-for-byte WITHOUT allocating the object / its properties: enter a
+    /// synthetic object frame, emit the sorted foldable member stream (member
+    /// NAME → folded literal; readonly + non-optional + public), then exit.
+    /// Foldable members only ([`EnumMemberValue::folded_literal`]); deferred
+    /// members are projected out (their name/count change rides the presence
+    /// rail). Each member's literal node is minted transiently from its stored
+    /// scalar through the ONE shared [`scalar_to_type_expr`] mapping (the same
+    /// mapping the enum TYPE-space union uses) and dropped immediately — a
+    /// fact-production intermediate, never a persisted body. The numeric
+    /// parse-back recovers the exact `f64` bits the fact grammar emits
+    /// (`to_bits().to_le_bytes()`).
+    fn emit_folded_enum_object(&mut self, members: &[(String, EnumMemberValue)]) {
+        if !self.enter_frame(SYNTHETIC_ENUM_OBJECT_IDENTITY.to_vec()) {
+            return;
+        }
+        // Foldable members only, in `walk_object`'s member-sort order. For an
+        // all-property object `member_sort_key` is `"prop:{name}"`, which sorts
+        // byte-identically to `name` (shared `"prop:"` prefix), so sorting the
+        // borrowed `(name, scalar)` pairs by name reproduces the exact order.
+        let mut folded: Vec<(&str, &EnumScalar)> = members
+            .iter()
+            .filter_map(|(name, value)| value.folded_literal().map(|lit| (name.as_str(), lit)))
+            .collect();
+        folded.sort_by(|a, b| a.0.cmp(b.0));
+        self.buf.push(0x50);
+        self.buf
+            .extend_from_slice(&(folded.len() as u32).to_le_bytes());
+        for (name, scalar) in folded {
+            self.emit_property(
+                name,
+                false,
+                true,
+                verter_type_expr::MemberVisibility::Public,
+                &scalar_to_type_expr(scalar),
+            );
+        }
+        self.exit_frame();
+    }
+
+    /// Reproduce `walk_node(TypeExpr::Unknown { raw })` byte-for-byte WITHOUT
+    /// allocating the node: enter a synthetic frame keyed by the same identity
+    /// the legacy `Unknown` node carries (`0xBF` + raw), emit the `Unknown` body
+    /// bytes, then exit.
+    fn emit_unknown_raw(&mut self, raw: &str) {
+        let mut identity = Vec::with_capacity(1 + raw.len());
+        identity.push(0xBF);
+        identity.extend_from_slice(raw.as_bytes());
+        if !self.enter_frame(identity) {
+            return;
+        }
+        self.buf.push(0x3F);
+        self.buf.extend_from_slice(raw.as_bytes());
+        self.buf.push(0xFF);
+        self.exit_frame();
     }
 
     fn walk_ref(&mut self, name: &str, type_arguments: &[TypeExpr]) {
@@ -647,13 +939,34 @@ impl<'a> Walker<'a> {
     }
 
     fn write_property(&mut self, prop: &ObjectProperty) {
+        self.emit_property(
+            &prop.name,
+            prop.optional,
+            prop.readonly,
+            prop.visibility,
+            &prop.ty,
+        );
+    }
+
+    /// Emit one object-property's fact bytes. Shared by the object-member walk
+    /// ([`Self::write_property`]) and the value-body enum-fold encoder
+    /// ([`Self::emit_folded_enum_object`]), which never allocates an
+    /// `ObjectProperty`.
+    fn emit_property(
+        &mut self,
+        name: &str,
+        optional: bool,
+        readonly: bool,
+        visibility: verter_type_expr::MemberVisibility,
+        ty: &TypeExpr,
+    ) {
         self.buf.push(0x60);
-        self.buf.extend_from_slice(prop.name.as_bytes());
+        self.buf.extend_from_slice(name.as_bytes());
         self.buf.push(0xFF);
-        self.buf.push(u8::from(prop.optional));
-        self.buf.push(u8::from(prop.readonly));
-        self.write_member_visibility(prop.visibility);
-        self.walk_node(&prop.ty);
+        self.buf.push(u8::from(optional));
+        self.buf.push(u8::from(readonly));
+        self.write_member_visibility(visibility);
+        self.walk_node(ty);
         self.buf.push(0xFD);
     }
 
@@ -1033,438 +1346,5 @@ impl<'a> Walker<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
-
-    fn prim(p: PrimitiveName) -> TypeExpr {
-        TypeExpr::Primitive(p)
-    }
-
-    fn name_ref(name: &str) -> TypeExpr {
-        TypeExpr::Ref {
-            name: Arc::from(name),
-            type_arguments: Arc::from(Vec::new()),
-        }
-    }
-
-    fn make_object(members: Vec<(&str, TypeExpr)>) -> TypeExpr {
-        let properties: Vec<ObjectMember> = members
-            .into_iter()
-            .map(|(name, ty)| {
-                ObjectMember::Property(ObjectProperty::synthetic_public(
-                    name.to_string(),
-                    ty,
-                    false,
-                    false,
-                ))
-            })
-            .collect();
-        TypeExpr::Object(Arc::new(ObjectExpr { properties }))
-    }
-
-    #[test]
-    fn primitive_is_stable_under_reuse() {
-        let h1 = compute_semantic_hash(
-            &prim(PrimitiveName::String),
-            SymbolSpace::Type,
-            &UnresolvedLens,
-        );
-        let h2 = compute_semantic_hash(
-            &prim(PrimitiveName::String),
-            SymbolSpace::Type,
-            &UnresolvedLens,
-        );
-        assert_eq!(h1.hash, h2.hash, "primitive must hash identically");
-        assert!(!h1.budget_exceeded);
-        assert_ne!(h1.visited_nodes, 0);
-    }
-
-    #[test]
-    fn constructor_type_and_function_with_same_signature_hash_differently() {
-        // A constructor type `new (...) => R` and the function type `(...) => R`
-        // are DISTINCT types — they must never collide in a content-addressed
-        // cache key, even when they carry an identical `FunctionExpr`. The
-        // walker emits a distinct discriminator (`0x73`) for `ConstructorType`
-        // before the shared function body, so the two semantic hashes differ.
-        // Pre-fix (no dedicated variant / no discriminator) the two would hash
-        // identically; this test FAILS on that regression.
-        let signature = verter_type_expr::FunctionExpr::synthetic(
-            vec![],
-            Some(Arc::new(name_ref("Foo"))),
-            vec![],
-        );
-        let function = TypeExpr::Function(Arc::new(signature.clone()));
-        let constructor = TypeExpr::ConstructorType(Arc::new(signature));
-
-        let function_hash = compute_semantic_hash(&function, SymbolSpace::Type, &UnresolvedLens);
-        let constructor_hash =
-            compute_semantic_hash(&constructor, SymbolSpace::Type, &UnresolvedLens);
-
-        assert_ne!(
-            function_hash.hash, constructor_hash.hash,
-            "a constructor type and a function type with the same signature must hash differently",
-        );
-        // Both must hash deterministically (re-hash matches).
-        assert_eq!(
-            constructor_hash.hash,
-            compute_semantic_hash(&constructor, SymbolSpace::Type, &UnresolvedLens).hash,
-            "constructor-type hash must be deterministic",
-        );
-    }
-
-    #[test]
-    fn object_member_order_does_not_affect_hash() {
-        // R16: alpha-normalised — member declaration order MUST NOT
-        // change the semantic_hash.
-        let obj_ab = make_object(vec![
-            ("a", prim(PrimitiveName::Number)),
-            ("b", prim(PrimitiveName::String)),
-        ]);
-        let obj_ba = make_object(vec![
-            ("b", prim(PrimitiveName::String)),
-            ("a", prim(PrimitiveName::Number)),
-        ]);
-        let h_ab = compute_semantic_hash(&obj_ab, SymbolSpace::Type, &UnresolvedLens);
-        let h_ba = compute_semantic_hash(&obj_ba, SymbolSpace::Type, &UnresolvedLens);
-        assert_eq!(
-            h_ab.hash, h_ba.hash,
-            "object member order MUST not change semantic_hash (alpha-normalised R16)"
-        );
-    }
-
-    #[test]
-    fn property_value_edit_changes_hash() {
-        // Discrimination: a real semantic edit DOES change the hash.
-        let a = make_object(vec![("a", prim(PrimitiveName::String))]);
-        let b = make_object(vec![("a", prim(PrimitiveName::Number))]);
-        let h_a = compute_semantic_hash(&a, SymbolSpace::Type, &UnresolvedLens);
-        let h_b = compute_semantic_hash(&b, SymbolSpace::Type, &UnresolvedLens);
-        assert_ne!(
-            h_a.hash, h_b.hash,
-            "editing property body MUST change semantic_hash"
-        );
-    }
-
-    #[test]
-    fn name_ref_emits_cross_decl_edge() {
-        // R14 path-precision: a `Ref(Foo)` cross-decl reference
-        // must be observable as a reference-shape edge, not by
-        // inlining Foo's body.
-        let ref_foo = name_ref("Foo");
-        let ref_bar = name_ref("Bar");
-        let h_foo = compute_semantic_hash(&ref_foo, SymbolSpace::Type, &UnresolvedLens);
-        let h_bar = compute_semantic_hash(&ref_bar, SymbolSpace::Type, &UnresolvedLens);
-        assert_ne!(
-            h_foo.hash, h_bar.hash,
-            "different ref names produce different hashes"
-        );
-    }
-
-    #[test]
-    fn stack_safe_deep_chain_does_not_overflow() {
-        // Build a left-leaning Union 200 deep — much deeper than
-        // the default thread stack would tolerate via recursion.
-        // The worklist hasher MUST terminate (it may set
-        // `budget_exceeded` once depth ≥ 64).
-        let mut node = prim(PrimitiveName::String);
-        for _ in 0..200 {
-            node = TypeExpr::Union(Arc::from(vec![node, prim(PrimitiveName::Number)]));
-        }
-        let result = compute_semantic_hash(&node, SymbolSpace::Type, &UnresolvedLens);
-        assert!(
-            result.budget_exceeded,
-            "200-deep nesting MUST trigger budget_exceeded (limit = {})",
-            MAX_HASH_DEPTH
-        );
-    }
-
-    #[test]
-    fn shallow_object_does_not_exceed_budget() {
-        // A small object that stays under 64 depth MUST NOT trip
-        // budget_exceeded.
-        let obj = make_object(vec![
-            ("a", prim(PrimitiveName::String)),
-            ("b", prim(PrimitiveName::Number)),
-            ("c", prim(PrimitiveName::Boolean)),
-        ]);
-        let r = compute_semantic_hash(&obj, SymbolSpace::Type, &UnresolvedLens);
-        assert!(
-            !r.budget_exceeded,
-            "shallow tree MUST stay under MAX_HASH_DEPTH"
-        );
-    }
-
-    #[test]
-    fn cross_decl_lens_emits_distinct_shapes() {
-        // Provide a lens that maps `Foo` → `LocalDecl(Foo, Type)`
-        // and `Bar` → `ImportRef("./bar", "Bar", Type)`.
-        struct MyLens;
-        impl CrossDeclLens for MyLens {
-            fn resolve(&self, name: &str, _space: SymbolSpace) -> Option<CrossDeclRef> {
-                match name {
-                    "Foo" => Some(CrossDeclRef::LocalDecl {
-                        name: Arc::from("Foo"),
-                        space: SymbolSpace::Type,
-                    }),
-                    "Bar" => Some(CrossDeclRef::ImportRef {
-                        specifier: Arc::from("./bar"),
-                        binding: Arc::from("Bar"),
-                        space: SymbolSpace::Type,
-                    }),
-                    _ => None,
-                }
-            }
-        }
-        let ref_foo = name_ref("Foo");
-        let ref_bar = name_ref("Bar");
-        let h_foo = compute_semantic_hash(&ref_foo, SymbolSpace::Type, &MyLens);
-        let h_bar = compute_semantic_hash(&ref_bar, SymbolSpace::Type, &MyLens);
-        // Different cross-decl shapes produce different hashes.
-        assert_ne!(h_foo.hash, h_bar.hash);
-        // Unresolved lens produces a third distinct hash for `Foo`.
-        let h_foo_unresolved = compute_semantic_hash(&ref_foo, SymbolSpace::Type, &UnresolvedLens);
-        assert_ne!(
-            h_foo.hash, h_foo_unresolved.hash,
-            "LocalDecl(Foo) and Unresolved(Foo) MUST differ"
-        );
-    }
-
-    #[test]
-    fn member_presence_hash_independent_of_siblings() {
-        // R28 two-fact model: `MemberPresence(Foo, "a")` MUST be
-        // invariant under adding sibling `b`. Both formations of
-        // `compute_member_presence_hash("Foo", "a", ...)` produce
-        // the same fingerprint regardless of what else exists.
-        let kind = MemberKind::Property {
-            readonly: false,
-            optional: false,
-        };
-        let h1 = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
-        let h2 = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
-        assert_eq!(h1, h2, "presence hash MUST be deterministic");
-        let h3 = compute_member_presence_hash("Foo", "b", kind, SymbolSpace::Type);
-        assert_ne!(h1, h3, "different member name MUST hash distinctly");
-        // Exporter salt distinguishes same-named members across
-        // exporters in the same file.
-        let h_foo_a = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
-        let h_bar_a = compute_member_presence_hash("Bar", "a", kind, SymbolSpace::Type);
-        assert_ne!(
-            h_foo_a, h_bar_a,
-            "exporter qualifier salt MUST disambiguate same-named members"
-        );
-    }
-
-    #[test]
-    fn member_presence_hash_changes_under_modifier_flip() {
-        // R28: a property switching from required to optional MUST
-        // change the presence hash (the consumer's view shifts).
-        let required = MemberKind::Property {
-            readonly: false,
-            optional: false,
-        };
-        let optional = MemberKind::Property {
-            readonly: false,
-            optional: true,
-        };
-        let h_r = compute_member_presence_hash("Foo", "a", required, SymbolSpace::Type);
-        let h_o = compute_member_presence_hash("Foo", "a", optional, SymbolSpace::Type);
-        assert_ne!(h_r, h_o);
-    }
-
-    #[test]
-    fn member_shape_hash_invariant_under_member_reorder() {
-        // R28 `MemberShape`: order-insensitive at top level. Sorted
-        // by name.
-        let kind = MemberKind::Property {
-            readonly: false,
-            optional: false,
-        };
-        let members_ab: Vec<(Arc<str>, MemberKind)> =
-            vec![(Arc::from("a"), kind), (Arc::from("b"), kind)];
-        let members_ba: Vec<(Arc<str>, MemberKind)> =
-            vec![(Arc::from("b"), kind), (Arc::from("a"), kind)];
-        let h_ab = compute_member_shape_hash("Foo", &members_ab, SymbolSpace::Type);
-        let h_ba = compute_member_shape_hash("Foo", &members_ba, SymbolSpace::Type);
-        assert_eq!(h_ab, h_ba, "member_shape MUST be order-insensitive");
-    }
-
-    #[test]
-    fn member_shape_hash_changes_when_member_added() {
-        // R28: adding a member changes `MemberShape` but NOT each
-        // existing `MemberPresence`.
-        let kind = MemberKind::Property {
-            readonly: false,
-            optional: false,
-        };
-        let just_a: Vec<(Arc<str>, MemberKind)> = vec![(Arc::from("a"), kind)];
-        let a_and_b: Vec<(Arc<str>, MemberKind)> =
-            vec![(Arc::from("a"), kind), (Arc::from("b"), kind)];
-        let h_a = compute_member_shape_hash("Foo", &just_a, SymbolSpace::Type);
-        let h_ab = compute_member_shape_hash("Foo", &a_and_b, SymbolSpace::Type);
-        assert_ne!(h_a, h_ab, "adding a member MUST change MemberShape");
-        // And each MemberPresence is unchanged.
-        let p_a_before = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
-        let p_a_after = compute_member_presence_hash("Foo", "a", kind, SymbolSpace::Type);
-        assert_eq!(
-            p_a_before, p_a_after,
-            "MemberPresence(a) MUST be unchanged when sibling added"
-        );
-    }
-
-    // ------------------------------------------------------------------
-    // Discrimination tests for the `TypeExpr::SyntheticSlotBinding`
-    // variant. The fact-hash walker must use a DISTINCT discriminator
-    // tag from `Ref` so that a synthetic carrier with
-    // `binding_name = "x"` does NOT collide with a workspace
-    // `TypeExpr::Ref { name: "x", type_arguments: [] }`.
-    // ------------------------------------------------------------------
-
-    fn synthetic_carrier(scope: &str, binding_name: &str, value_node: u64) -> TypeExpr {
-        use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind};
-        TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
-            scope_canonical_id: Arc::from(scope),
-            surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-            slot_name: Some(Arc::from("default")),
-            binding_name: Arc::from(binding_name),
-            value_node,
-        })
-    }
-
-    #[test]
-    fn synthetic_carrier_fact_hash_differs_from_ref_with_same_name() {
-        let carrier = synthetic_carrier("/abs/Foo.vue", "controls", 42);
-        let plain_ref = name_ref("controls");
-
-        let carrier_hash = compute_semantic_hash(&carrier, SymbolSpace::Type, &UnresolvedLens).hash;
-        let ref_hash = compute_semantic_hash(&plain_ref, SymbolSpace::Type, &UnresolvedLens).hash;
-
-        assert_ne!(
-            carrier_hash, ref_hash,
-            "synthetic carrier and workspace Ref with the same `name` MUST hash distinctly"
-        );
-    }
-
-    #[test]
-    fn synthetic_carrier_fact_hash_value_node_discriminates() {
-        // Same scope + binding_name, different value_node => distinct
-        // hashes. Guards the rule that two same-binding-name carriers
-        // in different slots of the same component are distinct
-        // identities.
-        let a = synthetic_carrier("/abs/Foo.vue", "controls", 1);
-        let b = synthetic_carrier("/abs/Foo.vue", "controls", 2);
-
-        let a_hash = compute_semantic_hash(&a, SymbolSpace::Type, &UnresolvedLens).hash;
-        let b_hash = compute_semantic_hash(&b, SymbolSpace::Type, &UnresolvedLens).hash;
-
-        assert_ne!(
-            a_hash, b_hash,
-            "synthetic carriers differing only in value_node MUST hash distinctly"
-        );
-    }
-
-    fn object_with_property_visibility(vis: verter_type_expr::MemberVisibility) -> TypeExpr {
-        TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::with_visibility(
-                "x".to_string(),
-                prim(PrimitiveName::Number),
-                false,
-                false,
-                vis,
-                verter_type_expr::MemberSpans::default(),
-            ))],
-        }))
-    }
-
-    fn object_with_method_visibility(vis: verter_type_expr::MemberVisibility) -> TypeExpr {
-        TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Method(MethodSignature::with_visibility(
-                "m".to_string(),
-                FunctionExpr::synthetic(vec![], None, vec![]),
-                false,
-                vis,
-                verter_type_expr::MemberSpans::default(),
-            ))],
-        }))
-    }
-
-    /// Two object types identical except a PROPERTY member's visibility must
-    /// produce DISTINCT fact hashes — `TypeExpr` node identity already
-    /// distinguishes them, so omitting visibility from the fact hasher would be
-    /// a cache-correctness gap (public/protected/private collide).
-    ///
-    /// Discrimination: against the tree where `write_property` omits visibility,
-    /// all three hashes are EQUAL and every `assert_ne!` FAILS.
-    #[test]
-    fn property_visibility_discriminates_fact_hash() {
-        use verter_type_expr::MemberVisibility::{Private, Protected, Public};
-        let pub_h = compute_semantic_hash(
-            &object_with_property_visibility(Public),
-            SymbolSpace::Type,
-            &UnresolvedLens,
-        )
-        .hash;
-        let prot_h = compute_semantic_hash(
-            &object_with_property_visibility(Protected),
-            SymbolSpace::Type,
-            &UnresolvedLens,
-        )
-        .hash;
-        let priv_h = compute_semantic_hash(
-            &object_with_property_visibility(Private),
-            SymbolSpace::Type,
-            &UnresolvedLens,
-        )
-        .hash;
-        assert_ne!(pub_h, prot_h, "public vs protected property must differ");
-        assert_ne!(pub_h, priv_h, "public vs private property must differ");
-        assert_ne!(prot_h, priv_h, "protected vs private property must differ");
-    }
-
-    /// Two object types identical except a METHOD member's visibility must
-    /// produce DISTINCT fact hashes (same rationale as the property case).
-    #[test]
-    fn method_visibility_discriminates_fact_hash() {
-        use verter_type_expr::MemberVisibility::{Private, Protected, Public};
-        let pub_h = compute_semantic_hash(
-            &object_with_method_visibility(Public),
-            SymbolSpace::Type,
-            &UnresolvedLens,
-        )
-        .hash;
-        let prot_h = compute_semantic_hash(
-            &object_with_method_visibility(Protected),
-            SymbolSpace::Type,
-            &UnresolvedLens,
-        )
-        .hash;
-        let priv_h = compute_semantic_hash(
-            &object_with_method_visibility(Private),
-            SymbolSpace::Type,
-            &UnresolvedLens,
-        )
-        .hash;
-        assert_ne!(pub_h, prot_h, "public vs protected method must differ");
-        assert_ne!(pub_h, priv_h, "public vs private method must differ");
-        assert_ne!(prot_h, priv_h, "protected vs private method must differ");
-    }
-
-    /// Two all-public objects built via DIFFERENT public constructors
-    /// (`synthetic` vs explicit `Public`) hash identically — the marker is
-    /// only-for-non-public, so public fact identity is unchanged.
-    #[test]
-    fn all_public_object_fact_hash_is_marker_free() {
-        use verter_type_expr::MemberVisibility::Public;
-        let via_synthetic = make_object(vec![("x", prim(PrimitiveName::Number))]);
-        let via_explicit_public = object_with_property_visibility(Public);
-        // The two only differ in how visibility was constructed (both Public)
-        // and the property name/type match, so their fact hashes are equal.
-        let a = compute_semantic_hash(&via_synthetic, SymbolSpace::Type, &UnresolvedLens).hash;
-        let b =
-            compute_semantic_hash(&via_explicit_public, SymbolSpace::Type, &UnresolvedLens).hash;
-        assert_eq!(
-            a, b,
-            "an all-public object's fact hash must not depend on how Public was constructed",
-        );
-    }
-}
+#[path = "hashing_tests.rs"]
+mod tests;

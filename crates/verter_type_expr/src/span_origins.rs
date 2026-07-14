@@ -24,7 +24,18 @@ use verter_no_typeexpr::NoTypeExpr;
 /// Which authored top-level statement (contributor) in the producing snapshot
 /// holds the decl body an origin addresses. Producer-emitted; indexes
 /// `program.body[contributor_index]`. A small named index, never a byte span.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
 pub struct DeclContributorAnchor {
     /// Index into the retained `Program` body identifying the contributing
     /// statement whose declaration body this origin descends from.
@@ -36,12 +47,33 @@ pub struct DeclContributorAnchor {
 /// never a fabricated byte-0 span. Permitted ONLY where a producer genuinely
 /// synthesizes a node (documented per site), never as a fallback for an authored
 /// node whose origin locator was omitted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
 pub struct SourceSynthetic;
 
 /// Origin sufficient to recover a `MemberSpans` (declaration / name /
 /// type-annotation spans) for a property or method member.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
 pub enum MemberSpansOrigin {
     /// An authored member reached by descending `member_path` member-ordinals
     /// from the decl body at `anchor`. Each ordinal selects a member of the
@@ -58,7 +90,17 @@ pub enum MemberSpansOrigin {
 
 /// Origin sufficient to recover an `IndexSignatureSpans` (declaration / key /
 /// value spans) for an index-signature member.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
 pub enum IndexSignatureSpansOrigin {
     /// The index-signature member reached by `member_path` from the decl body.
     Authored {
@@ -71,7 +113,17 @@ pub enum IndexSignatureSpansOrigin {
 
 /// Origin sufficient to recover a `FunctionSpans` (signature / return-type
 /// spans) for a function-like node.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
 pub enum FunctionSpansOrigin {
     /// The decl body at `anchor` is itself a bare function type
     /// (`type F = (..) => ..`). No member path.
@@ -87,7 +139,18 @@ pub enum FunctionSpansOrigin {
 }
 
 /// Selects one parameter of a located function for `FunctionParam.span` recovery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
 pub enum FunctionParamSelector {
     /// A positional parameter (`params.items[ordinal]`).
     Positional { ordinal: u32 },
@@ -98,7 +161,17 @@ pub enum FunctionParamSelector {
 /// Origin sufficient to recover a `FunctionParam.span` (which participates in the
 /// hand-written `FunctionParam` identity). Locates the enclosing function, then
 /// selects one parameter.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
 pub struct FunctionParamSpanOrigin {
     /// Origin of the enclosing function.
     pub function: FunctionSpansOrigin,

@@ -24,10 +24,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use verter_type_expr::{ObjectMember, TypeExpr};
+use verter_type_expr::facts::{
+    FactOrLocator, LeafTypeFact, ResolvedLocalShape, SemanticTypeSource,
+};
 
 use crate::framework::api_projector::{ComponentApiProjector, ComponentApiProjectorCtx};
-use crate::resolver_core::surface_projector::render_type_expr_display;
 use crate::types::{PublicApiMode, TscResponse};
 
 /// The F13 derived-callback-event helper types rendered into every Svelte
@@ -93,55 +94,54 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         if !default_symbol.is_synthesised_component_default {
             return None;
         }
-        // The construct-signature instance shape lives on the synthesized BODY
-        // (`LoweredValueDecl`), not the slim header symbol.
+        // The instance shape rides the synthesized BODY's annotation-borne
+        // closed SOURCE (`LoweredValueDecl.type_annotation.annotation` =
+        // `Synthesized(Object(members))`); the synth's construct signature
+        // deliberately carries no authored return position (`return_ty` is an
+        // honest `None`), so the annotation source is the shape authority.
         let default_body = shallow.value_decl("default")?;
-        let instance_shape = default_body
-            .signatures
-            .first()
-            .and_then(|sig| sig.return_type.as_ref())?;
-        let TypeExpr::Object(instance_obj) = instance_shape else {
+        let instance_source = default_body.type_annotation.annotation.as_ref()?;
+        let SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(instance_members)) =
+            instance_source
+        else {
             return None;
         };
 
-        // Split the instance shape into the `$props` member type, the synthesized
+        // Split the instance shape into the `$props` member fact, the synthesized
         // `$events` (legacy dispatcher map) / `$slots` (snippet member keys)
         // surfaces, and the instance-script export members.
-        let mut props_type: Option<&TypeExpr> = None;
-        let mut events_type: Option<&TypeExpr> = None;
+        let mut props_type: Option<&FactOrLocator> = None;
+        let mut events_type: Option<&FactOrLocator> = None;
         let mut slot_keys: Vec<&str> = Vec::new();
-        let mut export_members: Vec<(&str, &TypeExpr)> = Vec::new();
-        for member in &instance_obj.properties {
-            if let ObjectMember::Property(prop) = member {
-                match prop.name.as_str() {
-                    "$props" => props_type = Some(&prop.ty),
-                    "$events" => events_type = Some(&prop.ty),
-                    "$slots" => {
-                        if let TypeExpr::Object(slots_obj) = &prop.ty {
-                            for slot in &slots_obj.properties {
-                                if let ObjectMember::Property(s) = slot {
-                                    slot_keys.push(s.name.as_str());
-                                }
-                            }
+        let mut export_members: Vec<(&str, &FactOrLocator)> = Vec::new();
+        for member in instance_members.iter() {
+            match member.name.as_str() {
+                "$props" => props_type = Some(&member.ty),
+                "$events" => events_type = Some(&member.ty),
+                "$slots" => {
+                    if let FactOrLocator::LeafObject(slots) = &member.ty {
+                        for slot in slots.iter() {
+                            slot_keys.push(slot.name.as_str());
                         }
                     }
-                    _ => export_members.push((prop.name.as_str(), &prop.ty)),
                 }
+                _ => export_members.push((member.name.as_str(), &member.ty)),
             }
         }
 
-        // Collect the PRESERVED type-reference names (top-level refs in the
-        // props type + the dispatcher event-map type + export member types) so
-        // the prelude imports ONLY the referenced types (unused imports dropped).
+        // Collect the PRESERVED type-reference names (leaf refs in the props
+        // fact + the dispatcher event-map fact + export member facts) so the
+        // prelude imports ONLY the referenced types (unused imports dropped).
+        // Locator-backed facts carry no name — honestly nothing to import.
         let mut referenced: BTreeSet<String> = BTreeSet::new();
         if let Some(props) = props_type {
-            collect_top_level_refs(props, &mut referenced);
+            collect_fact_refs(props, &mut referenced);
         }
         if let Some(events) = events_type {
-            collect_top_level_refs(events, &mut referenced);
+            collect_fact_refs(events, &mut referenced);
         }
         for (_, ty) in &export_members {
-            collect_top_level_refs(ty, &mut referenced);
+            collect_fact_refs(ty, &mut referenced);
         }
 
         let mut out = ShimBuilder::default();
@@ -158,10 +158,12 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             out.blank();
         }
 
-        // 2. `type __VerterProps = <props type>` — refs preserved verbatim,
-        //    object surfaces rendered shallowly (member refs un-inlined).
+        // 2. `type __VerterProps = <props type>` — leaf refs preserved
+        //    verbatim, leaf-object surfaces rendered shallowly (member refs
+        //    un-inlined). An authored-payload LOCATOR carries no display text
+        //    — it renders the honest `unknown`, never a fabricated shape.
         let props_text = props_type
-            .map(render_shim_type)
+            .map(render_shim_fact)
             .unwrap_or_else(|| "{}".to_string());
         out.line(&format!("type __VerterProps = {props_text};"));
 
@@ -183,7 +185,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             // callback-prop handlers so `$events[K]` is always a handler type.
             Some(events) => format!(
                 "__VerterCallbackEvents<__VerterProps> & __VerterDispatcherEvents<{}>",
-                render_shim_type(events)
+                render_shim_fact(events)
             ),
             None => "__VerterCallbackEvents<__VerterProps>".to_string(),
         };
@@ -270,29 +272,53 @@ impl ShimBuilder {
 
 /// Render a `$props()` type for the shim, SHALLOWLY: a named ref renders as its
 /// name (un-inlined), an object surface renders its members one level (each
-/// member value via [`render_type_expr_display`], which itself preserves refs).
-/// A type the display renderer cannot represent falls back to `unknown` — never
-/// a silent inline.
-fn render_shim_type(ty: &TypeExpr) -> String {
+/// member value via [`render_leaf_display`], which itself preserves refs).
+/// A locator-backed fact carries no display text — it renders the honest
+/// `unknown`, never a fabricated shape and never a resolve.
+fn render_shim_fact(ty: &FactOrLocator) -> String {
     match ty {
-        TypeExpr::Object(obj) => {
-            if obj.properties.is_empty() {
+        FactOrLocator::LeafObject(members) => {
+            if members.is_empty() {
                 return "{}".to_string();
             }
             let mut parts: Vec<String> = Vec::new();
-            for member in &obj.properties {
-                if let ObjectMember::Property(prop) = member {
-                    let value =
-                        render_type_expr_display(&prop.ty).unwrap_or_else(|| "unknown".to_string());
-                    let opt = if prop.optional { "?" } else { "" };
-                    parts.push(format!("{}{opt}: {value}", prop.name));
-                }
+            for member in members.iter() {
+                let value = render_leaf_display(&member.ty);
+                let opt = if member.optional { "?" } else { "" };
+                parts.push(format!("{}{opt}: {value}", member.name));
             }
             format!("{{ {} }}", parts.join("; "))
         }
-        // Refs / primitives / unions / etc. render through the display renderer
-        // (which preserves refs un-inlined).
-        _ => render_type_expr_display(ty).unwrap_or_else(|| "unknown".to_string()),
+        FactOrLocator::Leaf(leaf) => render_leaf_display(leaf),
+        // A closed union of leaves renders each arm's leaf display, joined as
+        // the authored union syntax (an empty union has no display text — the
+        // honest render is `unknown`).
+        FactOrLocator::LeafUnion(leaves) => {
+            if leaves.is_empty() {
+                return "unknown".to_string();
+            }
+            leaves
+                .iter()
+                .map(render_leaf_display)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        }
+        // An authored payload / body position is a content-free LOCATOR: no
+        // display text exists here, and this projector never resolves — the
+        // honest render is `unknown`.
+        FactOrLocator::Locator(_) | FactOrLocator::MacroPayload(_) => "unknown".to_string(),
+    }
+}
+
+/// Render a closed LEAF fact for the shim: primitives by canonical name,
+/// literals verbatim, bare refs by name (un-inlined).
+fn render_leaf_display(leaf: &LeafTypeFact) -> String {
+    match leaf {
+        LeafTypeFact::Primitive(name) => name.as_str().to_string(),
+        LeafTypeFact::StringLiteral(text) => format!("\"{text}\""),
+        LeafTypeFact::NumberLiteral(text) => text.clone(),
+        LeafTypeFact::BooleanLiteral(flag) => flag.to_string(),
+        LeafTypeFact::Ref(name) => name.clone(),
     }
 }
 
@@ -320,49 +346,32 @@ fn render_type_only_import(
     }
 }
 
-/// Collect the TOP-LEVEL named-reference identifiers of a type expression — the
-/// names that may resolve to an import (so the prelude imports only them). It
-/// does NOT recurse into object member values (those stay shallow); it walks
-/// unions/intersections/arrays/refs' type arguments shallowly.
-fn collect_top_level_refs(expr: &TypeExpr, out: &mut BTreeSet<String>) {
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            out.insert(name.to_string());
-            for arg in type_arguments.iter() {
-                collect_top_level_refs(arg, out);
-            }
+/// Collect the named-reference identifiers of a member FACT — the names that
+/// may resolve to an import (so the prelude imports only them). A leaf-object
+/// props surface (`{ row: Snippet }`, the legacy export-let map) is rendered
+/// ONE level into the shim, so its member value refs are preserved references
+/// the prelude must import. A locator-backed fact carries no name — honestly
+/// nothing to import (the consumer re-resolves the authored position).
+fn collect_fact_refs(fact: &FactOrLocator, out: &mut BTreeSet<String>) {
+    match fact {
+        FactOrLocator::Leaf(LeafTypeFact::Ref(name)) => {
+            out.insert(name.clone());
         }
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            for ty in types.iter() {
-                collect_top_level_refs(ty, out);
-            }
-        }
-        TypeExpr::Array { element, .. } => collect_top_level_refs(element, out),
-        TypeExpr::Object(obj) => {
-            // An object props surface (`{ row: Snippet }`, the legacy
-            // export-let object) is rendered ONE level into the shim, so its
-            // member value refs are preserved references that the prelude must
-            // import. The walk stays one level — it does NOT recurse into a
-            // member's own object body (that stays shallow / re-resolved).
-            for member in &obj.properties {
-                if let ObjectMember::Property(prop) = member {
-                    if let TypeExpr::Ref {
-                        name,
-                        type_arguments,
-                    } = &prop.ty
-                    {
-                        out.insert(name.to_string());
-                        for arg in type_arguments.iter() {
-                            collect_top_level_refs(arg, out);
-                        }
-                    }
+        // A closed union of leaves contributes each leaf `Ref` name.
+        FactOrLocator::LeafUnion(leaves) => {
+            for leaf in leaves.iter() {
+                if let LeafTypeFact::Ref(name) = leaf {
+                    out.insert(name.clone());
                 }
             }
         }
-        // Every other node kind carries no top-level import reference.
-        _ => {}
+        FactOrLocator::LeafObject(members) => {
+            for member in members.iter() {
+                if let LeafTypeFact::Ref(name) = &member.ty {
+                    out.insert(name.clone());
+                }
+            }
+        }
+        FactOrLocator::Leaf(_) | FactOrLocator::Locator(_) | FactOrLocator::MacroPayload(_) => {}
     }
 }

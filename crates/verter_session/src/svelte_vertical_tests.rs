@@ -89,27 +89,17 @@ fn svelte_shallow_state_carries_synthesised_default_and_exports() {
     );
 
     // The instance shape carries `$props` + the exported instance members.
-    // The construct signature lives on the synthesized BODY.
+    // The construct signature lives on the synthesized BODY; the instance
+    // members ride the annotation-borne synthesized source.
     let default_decl = indexed
         .shallow_state
         .value_decl("default")
         .expect("the synthesized default body carries its construct signature");
-    let sig = default_decl
+    default_decl
         .signatures
         .first()
         .expect("construct signature");
-    let return_type = sig.return_type.as_ref().expect("instance return type");
-    let members: Vec<String> = match return_type {
-        verter_type_expr::TypeExpr::Object(obj) => obj
-            .properties
-            .iter()
-            .filter_map(|m| match m {
-                verter_type_expr::ObjectMember::Property(p) => Some(p.name.clone()),
-                _ => None,
-            })
-            .collect(),
-        other => panic!("expected an object instance shape, got {other:?}"),
-    };
+    let members = instance_member_names(&default_decl);
     assert!(
         members.contains(&"$props".to_string()),
         "instance carries $props"
@@ -186,23 +176,15 @@ fn module_script_export_is_not_an_instance_member() {
 
 /// The instance member names of a synthesized component default.
 ///
-/// The construct signature lives on the synthesized BODY (`LoweredValueDecl`),
-/// fetched via `shallow_state.value_decl("default")`.
+/// The synthesized BODY (`LoweredValueDecl`, fetched via
+/// `shallow_state.value_decl("default")`) carries the instance members on its
+/// annotation-borne synthesized source.
 fn instance_member_names(default_decl: &crate::decl_body_memo::LoweredValueDecl) -> Vec<String> {
-    match default_decl
-        .signatures
-        .first()
-        .and_then(|s| s.return_type.as_ref())
-    {
-        Some(verter_type_expr::TypeExpr::Object(obj)) => obj
-            .properties
-            .iter()
-            .filter_map(|m| match m {
-                verter_type_expr::ObjectMember::Property(p) => Some(p.name.clone()),
-                _ => None,
-            })
-            .collect(),
-        other => panic!("expected object instance, got {other:?}"),
+    match default_decl.type_annotation.annotation.as_ref() {
+        Some(verter_type_expr::facts::SemanticTypeSource::Synthesized(
+            verter_type_expr::facts::ResolvedLocalShape::Object(members),
+        )) => members.iter().map(|m| m.name.clone()).collect(),
+        other => panic!("expected a synthesized object instance source, got {other:?}"),
     }
 }
 
@@ -359,7 +341,7 @@ fn real_svelte_snippet_is_classified_snippet_typed() {
     if let Some(facts) = facts {
         assert!(
             facts.validated_snippet_members.is_empty()
-                || facts.validated_snippet_members == vec!["row".to_string()],
+                || facts.validated_snippet_members.as_ref() == ["row".to_string()].as_slice(),
             "the only validatable snippet member is `row` (or none when `svelte` did not resolve), got {:?}",
             facts.validated_snippet_members
         );
@@ -635,6 +617,11 @@ fn svelte_get_public_api_renders_the_declaration_shim() {
     );
 }
 
+// Integration confirm for the `$props()` annotation-payload hydration route
+// (`MacroPayloadPosition::TypeAnnotation` deref → `transient_props_annotation_body`):
+// the precise `__VerterProps`-derived `$events`/`$slots` surface depends on the
+// annotation-carried props type resolving through that route. RUN once the
+// verter_session lib compiles.
 #[test]
 fn svelte_get_public_api_renders_the_events_and_slots_shim_members() {
     // F13 + F9: the `.svelte.ts` shim renders precise `$events` and `$slots`
@@ -760,22 +747,10 @@ fn svelte_synth_is_identical_with_real_vs_fake_svelte_package() {
             .shallow_state
             .value_decl("default")
             .expect("the synthesized default body carries its construct signature");
-        let sig = default_decl.signatures.first().expect("signature");
-        match sig.return_type.as_ref().expect("return type") {
-            verter_type_expr::TypeExpr::Object(obj) => {
-                let mut names: Vec<String> = obj
-                    .properties
-                    .iter()
-                    .filter_map(|m| match m {
-                        verter_type_expr::ObjectMember::Property(p) => Some(p.name.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                names.sort();
-                names
-            }
-            other => panic!("expected object shape, got {other:?}"),
-        }
+        default_decl.signatures.first().expect("signature");
+        let mut names = instance_member_names(&default_decl);
+        names.sort();
+        names
     };
 
     assert_eq!(
@@ -783,5 +758,111 @@ fn svelte_synth_is_identical_with_real_vs_fake_svelte_package() {
         members_of(&host_b),
         "synth output must be identical regardless of the svelte package presence \
          (parse-domain pure)"
+    );
+}
+
+// ── Producer-side locator absolutization ────────────────────────────────
+
+/// The session absolutizes the analyzer's EMPTY-sentinel macro-payload
+/// anchors to the PRODUCING canonical before facts enter host-owned storage —
+/// for BOTH capture shapes (the Vue `ScriptAnalysisSnapshot.macros` and the
+/// svelte `FrameworkScriptCandidates` envelope) — so a stored locator derefs
+/// through its own file's memo without a canonical mismatch.
+///
+/// DISCRIMINATES the producer-side fill: with the capture's empty sentinel
+/// stored instead, the Vue deref below returns `CanonicalMismatch` (checked
+/// BEFORE the position-routing arm) and the svelte facts carry an empty
+/// anchor whose deref rejects the same way.
+#[test]
+fn stored_macro_payload_locator_anchors_absolutize_to_the_producing_canonical() {
+    use verter_type_expr::locators::{
+        AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadPosition,
+    };
+    let host = host();
+
+    // Vue shape — the analysis snapshot's stamped locators.
+    upsert(
+        &host,
+        "/App.vue",
+        "<script setup lang=\"ts\">defineProps<{ msg: string }>();</script>\n",
+        FileLanguage::vue(),
+    );
+    let analysis = host.get_analysis("/App.vue").expect("vue analysis");
+    let type_arg = analysis
+        .macros
+        .iter()
+        .find_map(|m| m.parsed_type_argument.clone())
+        .expect("the defineProps type argument stamps a payload locator");
+    assert_eq!(
+        type_arg.anchor.canonical_id.as_ref(),
+        "/App.vue",
+        "the stored Vue locator carries the ABSOLUTE producing canonical, not the sentinel"
+    );
+    let indexed = host
+        .ensure_indexed_ready("/App.vue")
+        .expect("vue owner materialises");
+    let deref = indexed
+        .shallow_state
+        .decl_bodies()
+        .deref_locator_body(&AuthoredBodyLocator::MacroPayload(type_arg));
+    assert_eq!(
+        deref.expect_err("the TypeArgument position keeps its sole hot producer"),
+        crate::decl_body_memo::LocatorBodyDerefError::MacroTypeArgumentHasSoleHotMirrorProducer,
+        "the anchor-canonical gate (checked first) passes — never CanonicalMismatch"
+    );
+
+    // Svelte shape — the resolved facts' payload ref, validated from the
+    // absolutized candidate envelope.
+    upsert_svelte(
+        &host,
+        "/Widget.svelte",
+        "<script lang=\"ts\">let { name }: { name: string } = $props();</script>\n",
+    );
+    let registration = host
+        .framework_registry()
+        .get(&verter_language::FrameworkAdapterId::svelte())
+        .expect("the svelte adapter registers");
+    let facts = crate::framework::script_facts::resolve_script_facts::<
+        verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+    >(&host, registration, "/Widget.svelte")
+    .expect("the runes component resolves script facts");
+    let props_ref = facts
+        .props_type
+        .as_ref()
+        .expect("the annotation payload ref");
+    let AuthoredBodyLocator::MacroPayload(locator) = &props_ref.locator else {
+        panic!("the capture emits a MacroPayload locator");
+    };
+    assert_eq!(
+        locator.anchor.canonical_id.as_ref(),
+        "/Widget.svelte",
+        "the stored svelte locator carries the ABSOLUTE producing canonical, not the sentinel"
+    );
+    assert_eq!(locator.payload, MacroPayloadPosition::TypeAnnotation);
+    assert_eq!(locator.anchor.space, LocatorSymbolSpace::Value);
+
+    // The stored locator derefs through its OWN file's memo: no canonical
+    // mismatch, and the annotation position HYDRATES to the authored body.
+    let indexed = host
+        .ensure_indexed_ready("/Widget.svelte")
+        .expect("svelte owner materialises");
+    let derefed = indexed
+        .shallow_state
+        .decl_bodies()
+        .deref_locator_body(&props_ref.locator)
+        .expect("the absolute-anchored annotation payload derefs clean");
+    let crate::decl_body_memo::DerefedBodyShape::Single(verter_type_expr::TypeExpr::Object(obj)) =
+        &derefed.shape
+    else {
+        panic!(
+            "the annotation payload derefs to its Single object body, got {:?}",
+            derefed.shape
+        );
+    };
+    assert!(
+        obj.properties
+            .iter()
+            .any(|m| matches!(m, verter_type_expr::ObjectMember::Property(p) if p.name == "name")),
+        "the hydrated body is the authored `{{ name: string }}` annotation"
     );
 }

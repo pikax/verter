@@ -77,6 +77,8 @@ mod compile_template_slot_admission_tests;
 pub mod component_meta_audit;
 #[cfg(test)]
 mod component_meta_cache_discipline_tests;
+#[cfg(test)]
+mod fallthrough_admission_tests;
 pub mod host_audit_runtime;
 #[cfg(test)]
 mod host_lifecycle_cascade_tests;
@@ -98,6 +100,8 @@ mod raw_snapshot_template_source_move_tests;
 mod request_store_view_derived_hash_tests;
 #[cfg(test)]
 mod template_slot_generation_rail_tests;
+#[cfg(test)]
+mod unrootable_route_admission_tests;
 // tests/cases/g_misc0/invalidation_perf.rs — InvalidationByCanonical impl on
 // ImportedRegistryDb is exercised by the §12.A12 perf gate.
 pub(crate) mod bounded_query_retention;
@@ -154,8 +158,6 @@ pub(crate) mod decl_body_memo;
 pub(crate) mod decl_lowering;
 pub mod fact_emission;
 pub mod framework;
-#[cfg(test)]
-mod hot_prepared_tests;
 #[cfg(test)]
 mod materialized_structure_equivalence_tests;
 #[cfg(test)]
@@ -271,6 +273,8 @@ pub mod host_resolve_type_audit;
 mod host_semantic;
 #[cfg(test)]
 pub(crate) mod host_test_audit;
+#[cfg(test)]
+pub(crate) mod host_test_force;
 mod host_upsert;
 mod host_views;
 mod host_workspace_audit;
@@ -299,6 +303,7 @@ pub(crate) mod project_semantic_dispatch;
 pub mod project_type_store;
 #[cfg(test)]
 mod project_type_store_tests;
+pub mod query_host_port;
 mod request_budget;
 pub mod request_context;
 pub mod resolver_core;
@@ -399,7 +404,6 @@ pub use resolver_store::{
 // so the batch regression gate measures only its own host's overlay COWs.
 
 // Re-export for the LSP: standalone @verter/types .d.ts content.
-pub use verter_compiler::utils::oxc::script::type_surface::ResolvedMemberVisibility;
 pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
 
 // Re-export CompileTarget so downstream crates (LSP, MCP, FFI) can use it
@@ -409,7 +413,7 @@ pub use verter_compiler::compile::CompileTarget;
 use std::sync::Arc;
 
 pub use id::resolve_external;
-pub(crate) use parsed_eval_program::{ParsedEvalProgram, ParsedTypeResolutionContext};
+pub(crate) use parsed_eval_program::ParsedEvalProgram;
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use shared::default_shared;
@@ -762,7 +766,7 @@ pub struct VerterHost {
     /// the cold-compute closure folds a partial into the active
     /// [`crate::request_context::ColdComputeCompletenessScope`] via the
     /// EXACT production rail a budget-tripped child read uses
-    /// ([`crate::request_context::mark_request_materialization_cache_suppress`]),
+    /// ([`crate::request_context::mark_request_result_partial`]),
     /// so the per-cold-compute completeness goes `Partial` and the
     /// `MaterializeStructureDb` admission gate
     /// (`refuse_result_cache_admission_if_partial`) must refuse the
@@ -804,19 +808,17 @@ pub struct VerterHost {
     /// production.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool,
-    /// Per-host test-injection knob for the carrier-subject normalization
-    /// prelude. When `true`, the traced carrier-normalization prelude
-    /// (`trace_carrier_subject_normalization_if_needed`) fans a synthetic
-    /// FENCED (ReturnOnly) serve onto its active tracer, so the prelude
-    /// finalises with `fenced_serve_observed = true` and forces
-    /// `cache_suppress` — exercising the prelude's no-poison suppress wiring
-    /// (a carrier rewrite computed from a served-without-publication artifact
-    /// must refuse warm admission) without a superseded-artifact fixture. Set
-    /// directly in the inline carrier-normalization test. `#[cfg(test)]`-gated:
-    /// the only reader is the `#[cfg(test)]` fence injection in
-    /// `trace_carrier_subject_normalization_if_needed`.
+    /// Test-only force-injection knobs, grouped so the root struct stays thin;
+    /// `#[cfg(test)]`-gated. See [`crate::host_test_force::TestForceKnobs`].
     #[cfg(test)]
-    pub(crate) carrier_normalization_force_fence_for_tests: std::sync::atomic::AtomicBool,
+    pub(crate) test_force: crate::host_test_force::TestForceKnobs,
+    /// Per-host count of macro-hot-mirror COLD builds (`build_macro_hot_ref`
+    /// entries). The per-slot singleflight guarantee is that concurrent first
+    /// demands of ONE macro collapse onto ONE cold build; a test asserts this
+    /// counter is `1` after a barrier-synchronised concurrent demand burst.
+    /// `#[cfg(test)]`-gated: no production reader.
+    #[cfg(test)]
+    pub(crate) macro_hot_lowering_count: std::sync::atomic::AtomicUsize,
     /// Per-host invocation counter for
     /// [`VerterHost::prefetch_compile_tier_observation_targets`].
     /// Incremented once per actual call to the prefetch. The cold-compute

@@ -10,7 +10,7 @@
 //!
 //! This guard drives the ACTUAL `class Foo` lowering / shallow-analysis
 //! path end-to-end (`analyze_external_type_source` →
-//! `parse_and_build_env` → `ShallowFileState::from_analysis` →
+//! `parse_and_build_env` → `ShallowFileState::from_analysis_with_resolver` →
 //! `emit_parse_facts`) and asserts both `Export` facts serve under
 //! distinct spaces on first observation through the lazy body fact
 //! path (`FileFacts::lookup_or_compute` — the publish-time registry
@@ -24,8 +24,6 @@
 
 use std::sync::Arc;
 
-use verter_compiler::utils::oxc::script::type_surface::analyze_external_type_source;
-use verter_semantic::analysis::type_eval_build::parse_and_build_env;
 use verter_semantic::facts::{FactKey, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedName;
@@ -33,20 +31,19 @@ use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
 /// Build a real `IndexedReady` from `source` by driving the actual
-/// shallow-analysis lowering path (no hand-built `ShallowFileState`).
+/// service-backed shallow-analysis lowering path (no hand-built
+/// `ShallowFileState`).
 fn indexed_from_source(source: &str) -> Arc<IndexedReady> {
-    let alloc = oxc_allocator::Allocator::new();
-    let analysis = Arc::new(analyze_external_type_source(source, &alloc));
-    let env = parse_and_build_env(source);
-    let shallow = ShallowFileState::from_analysis([0u8; 16], analysis, Some(&env));
+    let shallow =
+        ShallowFileState::service_backed_for_test_with_hash("/dual-space.ts", source, [0u8; 16]);
 
     let empty_external = Arc::new(
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
     );
 
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
-        Arc::new(shallow),
+        shallow,
         Arc::from(source),
         Arc::from(source),
         empty_external,

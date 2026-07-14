@@ -1,21 +1,16 @@
-//! Borrowed-form eval-program parse cells.
+//! Borrowed-form eval-program parse cell.
 //!
 //! `ParsedEvalProgram` owns an OXC allocator + source and the `Program`
-//! AST parsed from them; `ParsedTypeResolutionContext` layers a borrowed
-//! `TypeResolutionContext` over a shared `Rc<ParsedEvalProgram>`. Both
-//! are `self_cell` owner/dependent pairs so the borrowed AST never
-//! outlives its arena. `ParsedEvalProgram::parse` is the scheduler-bound
-//! parse entry for the borrowed lowering input (see the
-//! `no_direct_oxc_parser_calls_outside_scheduler_path` architecture
-//! guard); consumers reach both cells through the crate-root
-//! re-exports (`crate::ParsedEvalProgram`, `crate::ParsedTypeResolutionContext`).
+//! AST parsed from them, as a `self_cell` owner/dependent pair so the
+//! borrowed AST never outlives its arena. `ParsedEvalProgram::parse` is
+//! the scheduler-bound parse entry for the borrowed lowering input (see
+//! the `no_direct_oxc_parser_calls_outside_scheduler_path` architecture
+//! guard); consumers reach the cell through the crate-root re-export
+//! (`crate::ParsedEvalProgram`).
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 type CachedEvalProgramAst<'a> = oxc_ast::ast::Program<'a>;
-type CachedTypeResolutionContext<'a> =
-    verter_compiler::utils::oxc::script::type_surface::TypeResolutionContext<'a, 'a>;
 
 struct ParsedEvalProgramOwner {
     allocator: oxc_allocator::Allocator,
@@ -29,15 +24,6 @@ self_cell::self_cell!(
 
         #[covariant]
         dependent: CachedEvalProgramAst,
-    }
-);
-
-self_cell::self_cell!(
-    pub(crate) struct ParsedTypeResolutionContext {
-        owner: Rc<ParsedEvalProgram>,
-
-        #[covariant]
-        dependent: CachedTypeResolutionContext,
     }
 );
 

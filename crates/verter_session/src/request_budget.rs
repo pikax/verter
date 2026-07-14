@@ -46,7 +46,7 @@ use std::sync::Arc;
 /// `cache_suppress=true`, which propagates through the
 /// reducer/materializer pipeline (see
 /// `MaterializedOutputTypeExpr.cache_suppress` and
-/// `RequestContext::materialization_cache_suppress`) into
+/// `RequestContext::request_result_is_partial`) into
 /// `ResolvedComponentMetaState.synthesis_should_suppress`. The
 /// `ComponentMetaResultDb` admission gate refuses to warm the
 /// partial, so a subsequent identical request re-runs the cold

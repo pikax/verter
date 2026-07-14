@@ -70,10 +70,15 @@ fn family_a_entries_carry_fact_dep_signature() {
     //    The walker cluster's `PreparedTargetEntry` / `PreparedSurfaceEntry`
     //    / `PreparedMemberEntry` / `RoutedExprSurfaceEntry` are DELETED;
     //    their absence is guarded by `no_legacy_walker.rs::RETIRED_SYMBOLS`.
+    // The `OwnerCollectionDb` value migrated from the body-bearing
+    // `Option<Arc<TypeExpr>>` to the content-free
+    // `Option<AuthoredBodyLocator>` (a VALUE migration only — key and
+    // validity oracle unchanged); its declaration wraps across lines, so the
+    // pin matches the wrapped form.
     const SINGLE_ENTRY_STORES: &[&str] = &[
         "entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<Arc<ResolvedTypeDeclaration>>>>",
         "entries: DashMap<ResolvabilityKey, Arc<CacheEntry<bool>>>",
-        "entries: DashMap<OwnerCollectionKey, Arc<CacheEntry<Option<Arc<TypeExpr>>>>>",
+        "entries: DashMap<\n        OwnerCollectionKey,\n        Arc<CacheEntry<Option<verter_type_expr::locators::AuthoredBodyLocator>>>,\n    >",
         "entries: DashMap<ShapeCacheKey, Arc<CacheEntry<MaterializedOutputTypeExpr>>>",
     ];
     for store in SINGLE_ENTRY_STORES {
@@ -198,11 +203,41 @@ fn family_a_producers_call_new_fact_helpers() {
         "registry_decl.rs must NOT call engine_dep_signature_for_canonical after the R28 \
          migration — use engine_fact_signature_for_exported_type instead."
     );
+
+    // The four (canonical, name)-keyed shared-cache producers live in the
+    // sibling `registry_cache_producers` module (they share one admission
+    // discipline). Anti-vacuity first: the file this asserts on must really
+    // own all four, so a producer that moved away can never leave the helper
+    // assertion satisfied by an empty file.
+    let producers = read_session_source(
+        "resolver_core/component_meta_query_engine/registry_cache_producers.rs",
+    );
+    for producer in [
+        "fn resolve_imported_registry_symbol(",
+        "fn resolve_type_declaration(",
+        "fn can_resolve_registry_symbol(",
+        "fn owner_collection_expr(",
+    ] {
+        assert!(
+            producers.contains(producer),
+            "registry_cache_producers.rs must own the 4 (canonical, name)-keyed cache \
+             producers (imported_registry_db, declaration_lookup_db, resolvability_db, \
+             owner_collection_db); `{producer}` is missing. If a producer moved, this \
+             guard must follow it — its fact-helper assertion is only meaningful on the \
+             file that actually admits the entries."
+        );
+    }
     assert!(
-        registry.contains("engine_fact_signature_for_exported_type("),
-        "registry_decl.rs must call engine_fact_signature_for_exported_type for its 4 \
-         (canonical, name)-keyed cache producers (imported_registry_db, declaration_lookup_db, \
-         resolvability_db, owner_collection_db) — these track top-level type identity."
+        !producers.contains("engine_dep_signature_for_canonical("),
+        "registry_cache_producers.rs must NOT call engine_dep_signature_for_canonical \
+         after the R28 migration — use engine_fact_signature_for_exported_type instead."
+    );
+    assert!(
+        producers.contains("engine_fact_signature_for_exported_type("),
+        "registry_cache_producers.rs must call engine_fact_signature_for_exported_type for \
+         its 4 (canonical, name)-keyed cache producers (imported_registry_db, \
+         declaration_lookup_db, resolvability_db, owner_collection_db) — these track \
+         top-level type identity."
     );
 
     let materialize = read_session_source("meta_resolve/materialize/field_types.rs");

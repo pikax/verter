@@ -11,8 +11,6 @@
 //!   `RequestStatus`).
 //! - [`prepared`] — prepared declaration bodies consumed by dispatch and
 //!   component-meta's query engine.
-//! - [`query_engine`] — projection result carriers (`ProjectedSurface`,
-//!   `ProjectedMember`, `ProjectedKeyspace`).
 //! - [`result`] — solver result exactness / execution status (used by the
 //!   expansion pipeline and FFI).
 
@@ -20,7 +18,6 @@ pub mod arena;
 pub mod builtin;
 pub mod host;
 pub mod prepared;
-pub mod query_engine;
 pub mod result;
 
 // ---------------------------------------------------------------------------
@@ -29,7 +26,6 @@ pub mod result;
 
 pub use host::{BareRefOrigin, RequestStatus, ResolvedRootIdentity, UtilitySource};
 pub use prepared::{PreparedTypeDecl, PreparedValueDecl};
-pub use query_engine::{ProjectedKeyspace, ProjectedMember, ProjectedSurface};
 pub use result::{
     ExecutionStatus, IncompleteReason, SolverDiagnostic, SolverExactness, SolverResult,
 };

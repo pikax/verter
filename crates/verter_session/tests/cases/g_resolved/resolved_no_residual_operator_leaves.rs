@@ -203,29 +203,41 @@ fn contains_free_type_parameter(expr: &TypeExpr) -> bool {
 ///   forms — they encode the cycle).
 /// - (c) Operators whose operands transitively contain a free
 ///   `TypeParameter` are skipped (open-deferred form).
-fn find_residual_operator_leaves(meta: &ComponentMetaAnalysis) -> Vec<String> {
+fn find_residual_operator_leaves(
+    host: &verter_session::VerterHost,
+    owner: &str,
+    meta: &ComponentMetaAnalysis,
+) -> Vec<String> {
+    // Demand-materialize each published source through the ONE shared
+    // dispatch (the raise -> reduce step whose output this gate walks).
+    // A payload-less source (`None`) carries no operator leaves.
+    let demand = |source: &verter_type_expr::facts::SemanticTypeSource, what: &str| {
+        verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
+            .unwrap_or_else(|| panic!("{what}'s published source must demand-materialize"))
+    };
     let mut violations = Vec::new();
     for prop in &meta.props {
-        walk(
-            &prop.type_expr,
-            &format!("prop:{}", prop.name),
-            &mut violations,
-        );
+        if let Some(source) = prop.type_source.present() {
+            let ty = demand(source, &format!("prop:{}", prop.name));
+            walk(&ty, &format!("prop:{}", prop.name), &mut violations);
+        }
     }
     for event in &meta.events {
-        walk(
-            &event.payload,
-            &format!("event:{}", event.name),
-            &mut violations,
-        );
+        if let Some(source) = event.payload.present() {
+            let ty = demand(source, &format!("event:{}", event.name));
+            walk(&ty, &format!("event:{}", event.name), &mut violations);
+        }
     }
     for slot in &meta.slots {
         for binding in &slot.bindings {
-            walk(
-                &binding.type_expr,
-                &format!("slot:{}.{}", slot.name, binding.name),
-                &mut violations,
-            );
+            if let Some(source) = binding.type_source.present() {
+                let ty = demand(source, &format!("slot:{}.{}", slot.name, binding.name));
+                walk(
+                    &ty,
+                    &format!("slot:{}.{}", slot.name, binding.name),
+                    &mut violations,
+                );
+            }
         }
     }
     violations
@@ -357,7 +369,7 @@ fn avatar_concrete_inline_props_have_no_residual_operator_leaves() {
         .get_component_meta("/Avatar.vue")
         .expect("Avatar.vue must produce component meta");
 
-    let violations = find_residual_operator_leaves(&meta);
+    let violations = find_residual_operator_leaves(&host, "/Avatar.vue", &meta);
     assert!(
         violations.is_empty(),
         "umbrella gate (Avatar.vue): resolved type_expr \
@@ -380,7 +392,7 @@ fn card_pick_utility_has_no_residual_operator_leaves() {
         .get_component_meta("/Card.vue")
         .expect("Card.vue must produce component meta");
 
-    let violations = find_residual_operator_leaves(&meta);
+    let violations = find_residual_operator_leaves(&host, "/Card.vue", &meta);
     assert!(
         violations.is_empty(),
         "umbrella gate (Card.vue Pick<...>): resolved \

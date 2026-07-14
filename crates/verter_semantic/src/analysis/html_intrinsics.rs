@@ -6,32 +6,31 @@
 //! list and tag mapping. Hosts may also materialize project-local intrinsic
 //! surfaces from the consumer project's installed TypeScript/Vue JSX
 //! entrypoints.
+//!
+//! Member TYPE shapes live in the deterministic static catalog
+//! ([`html_intrinsic_catalog`]): a member carries only a content-free
+//! [`StaticIntrinsicTypeId`] into the id ↔ shape table, never an embedded type
+//! body. The table is built ONCE from the generated member tables in generated
+//! order (dedup interning), so ids are deterministic and reproducible across
+//! processes; hosts lower ids/shapes into graph handles on demand.
 
-use verter_type_expr::{PrimitiveName, TypeExpr};
+use std::sync::OnceLock;
 
-/// Kind of intrinsic member.
+use verter_type_expr::intrinsics::{
+    IntrinsicMemberFact, StaticIntrinsicTable, StaticIntrinsicTypeId,
+};
+use verter_type_expr::PrimitiveName;
+
+pub use verter_type_expr::intrinsics::IntrinsicMemberKind;
+
+/// A single intrinsic member (attr or listener) for an HTML element. The
+/// member's type SHAPE is recovered from [`html_intrinsic_catalog`] by
+/// `type_id`, never stored on the member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IntrinsicMemberKind {
-    /// HTML attribute (e.g., `id`, `disabled`, `placeholder`).
-    Attr,
-    /// Event listener (e.g., `click`, `focus`). Name is the event name, not `onXxx`.
-    Listener,
-}
-
-/// A single intrinsic member (attr or listener) for an HTML element.
-#[derive(Debug, Clone)]
 pub struct IntrinsicMember {
     pub name: &'static str,
     pub kind: IntrinsicMemberKind,
-    pub type_expr: TypeExpr,
-}
-
-/// Owned intrinsic member used by host/runtime intrinsic surfaces.
-#[derive(Debug, Clone)]
-pub struct OwnedIntrinsicMember {
-    pub name: String,
-    pub kind: IntrinsicMemberKind,
-    pub type_expr: TypeExpr,
+    pub type_id: StaticIntrinsicTypeId,
 }
 
 #[derive(Clone, Copy)]
@@ -49,23 +48,95 @@ pub(crate) enum RawIntrinsicMemberKind {
 
 include!("html_intrinsics_data.rs");
 
-fn raw_type_to_type_expr(kind: RawIntrinsicMemberKind, raw_type: &str) -> TypeExpr {
+/// The static type SHAPE of one intrinsic catalog entry — table-resident data
+/// recovered from a [`StaticIntrinsicTypeId`], never carried on a member fact.
+/// Display text is preserved verbatim from the generated table so a host can
+/// lower it into its own type representation on demand.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IntrinsicTypeShape {
+    /// A primitive attr type (`string` / `number` / `boolean`).
+    Primitive(PrimitiveName),
+    /// A non-primitive attr type — the generated display text, verbatim.
+    AttrDisplay(String),
+    /// A listener function type — the generated display text normalized to a
+    /// function form (a bare event payload type renders as
+    /// `(payload: T) => void`).
+    ListenerFunction(String),
+}
+
+/// The deterministic static HTML intrinsic catalog: the id ↔ shape interner
+/// built ONCE from every generated member table in generated order (dedup by
+/// shape), so an id is stable for the life of the catalog data and identical
+/// across processes running the same build.
+pub struct HtmlIntrinsicCatalog {
+    table: StaticIntrinsicTable<IntrinsicTypeShape>,
+}
+
+impl HtmlIntrinsicCatalog {
+    /// Build the catalog from the generated member tables in generated order.
+    fn build() -> Self {
+        let mut table = StaticIntrinsicTable::new();
+        for members in ALL_MEMBER_TABLES {
+            for raw in *members {
+                table.intern(raw_type_shape(raw.kind, raw.raw_type));
+            }
+        }
+        Self { table }
+    }
+
+    /// The shape for a catalog id (`None` for a fabricated / out-of-range id).
+    #[must_use]
+    pub fn shape(&self, id: StaticIntrinsicTypeId) -> Option<&IntrinsicTypeShape> {
+        self.table.shape(id)
+    }
+
+    /// The interned id for an EQUAL shape (`None` when no generated member
+    /// produced that shape).
+    #[must_use]
+    pub fn id_for(&self, shape: &IntrinsicTypeShape) -> Option<StaticIntrinsicTypeId> {
+        self.table.id_for(shape)
+    }
+
+    /// Number of distinct interned shapes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.table.len()
+    }
+
+    /// Whether the catalog is empty (never true for the generated data).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.table.is_empty()
+    }
+}
+
+/// The process-global deterministic intrinsic catalog.
+pub fn html_intrinsic_catalog() -> &'static HtmlIntrinsicCatalog {
+    static CATALOG: OnceLock<HtmlIntrinsicCatalog> = OnceLock::new();
+    CATALOG.get_or_init(HtmlIntrinsicCatalog::build)
+}
+
+/// The catalog shape of one generated raw member. Primitive attr types fold to
+/// [`IntrinsicTypeShape::Primitive`]; every other generated display text is
+/// preserved verbatim in the table (listener payload types normalize to a
+/// function form). This mirrors the generated-data boundary exactly — the raw
+/// type IS display text from the generated table, so text inspection here is
+/// the producer boundary, not a resolver heuristic.
+fn raw_type_shape(kind: RawIntrinsicMemberKind, raw_type: &str) -> IntrinsicTypeShape {
     match kind {
         RawIntrinsicMemberKind::Attr => match raw_type {
-            "string" => TypeExpr::Primitive(PrimitiveName::String),
-            "number" => TypeExpr::Primitive(PrimitiveName::Number),
-            "boolean" => TypeExpr::Primitive(PrimitiveName::Boolean),
-            other => TypeExpr::Unknown {
-                raw: other.to_string(),
-            },
+            "string" => IntrinsicTypeShape::Primitive(PrimitiveName::String),
+            "number" => IntrinsicTypeShape::Primitive(PrimitiveName::Number),
+            "boolean" => IntrinsicTypeShape::Primitive(PrimitiveName::Boolean),
+            other => IntrinsicTypeShape::AttrDisplay(other.to_string()),
         },
         RawIntrinsicMemberKind::Listener => {
-            let raw = if raw_type.contains("=>") {
+            let display = if raw_type.contains("=>") {
                 raw_type.to_string()
             } else {
                 format!("(payload: {raw_type}) => void")
             };
-            TypeExpr::Unknown { raw }
+            IntrinsicTypeShape::ListenerFunction(display)
         }
     }
 }
@@ -87,21 +158,26 @@ fn convert_member(raw: &RawIntrinsicMember) -> IntrinsicMember {
         RawIntrinsicMemberKind::Listener => IntrinsicMemberKind::Listener,
     };
 
+    let type_id = html_intrinsic_catalog()
+        .id_for(&raw_type_shape(raw.kind, raw.raw_type))
+        .expect("every generated member's shape is interned at catalog build");
     IntrinsicMember {
         name: raw.name,
         kind,
-        type_expr: raw_type_to_type_expr(raw.kind, raw.raw_type),
+        type_id,
     }
 }
 
-/// Convert the built-in fallback catalog into owned members for host-side use.
-pub fn owned_intrinsic_members_for_tag(tag: &str) -> Vec<OwnedIntrinsicMember> {
+/// Convert the built-in fallback catalog into owned member FACTS for host-side
+/// use (the fact carries the content-free catalog id; the shape is recovered
+/// from [`html_intrinsic_catalog`]).
+pub fn owned_intrinsic_members_for_tag(tag: &str) -> Vec<IntrinsicMemberFact> {
     intrinsic_members_for_tag(tag)
         .into_iter()
-        .map(|member| OwnedIntrinsicMember {
+        .map(|member| IntrinsicMemberFact {
             name: member.name.to_string(),
             kind: member.kind,
-            type_expr: member.type_expr,
+            type_id: member.type_id,
         })
         .collect()
 }

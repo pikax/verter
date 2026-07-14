@@ -718,6 +718,93 @@ fn class_features_nested_mapped_indexed_access_private_key_is_miss() {
 }
 
 #[test]
+fn class_features_heritage_base_identities_and_args_resolve_same_file_and_cross_file() {
+    // Static-heritage base resolution over BOTH base kinds in one consumer:
+    //
+    //   * `CrossDerived` is ctor-LESS and extends the IMPORTED
+    //     `WideBase<string>` — the Static composer resolves the heritage base
+    //     CROSS-FILE (through the class decl's `name_resolution`), lowers the
+    //     heritage type-argument on demand, and the inherited constructor's
+    //     `value: T` parameter surfaces with `T = string` substituted.
+    //   * `LocalDerived` extends the SAME-FILE userland `LocalBase` — the
+    //     same-file base identity resolves through the same rail and its
+    //     static `local: number` folds onto the derived static surface.
+    //
+    // Discrimination:
+    //   * `CrossTag = string` FAILS if the cross-file base head does not
+    //     resolve (the inherited static would be a miss).
+    //   * `CrossCtorParams[0] = string` FAILS if the heritage type-argument
+    //     is not lowered/substituted (an unbound `T` cannot produce `string`);
+    //     `[1] = number` pins the base's own second parameter.
+    //   * `LocalStatic = number` FAILS if the same-file base head resolution
+    //     regresses.
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        "/fixtures/heritage_wide_base.ts",
+        r#"export class WideBase<T> {
+  static tag: string = "";
+  constructor(value: T, count: number) {}
+}
+"#,
+    );
+    upsert_ts(
+        &host,
+        "/fixtures/heritage_consumer.ts",
+        r#"import { WideBase } from "./heritage_wide_base";
+class LocalBase {
+  static local: number = 1;
+}
+export class CrossDerived extends WideBase<string> {}
+export class LocalDerived extends LocalBase {}
+export type CrossCtorParams = ConstructorParameters<typeof CrossDerived>;
+export type CrossTag = typeof CrossDerived.tag;
+export type LocalStatic = typeof LocalDerived.local;
+"#,
+    );
+
+    // Cross-file base statics fold into the derived static surface.
+    let (tag_expr, _record) = resolve_expr(
+        &host,
+        "/fixtures/heritage_consumer.ts",
+        "CrossTag",
+        &[],
+        ProjectionMode::Expanded,
+    );
+    assert_primitive(&tag_expr, PrimitiveName::String);
+
+    // The ctor-less subclass inherits the base constructor's parameters with
+    // the heritage type-argument substituted: `[value: string, count: number]`.
+    let (params_expr, _record) = resolve_expr(
+        &host,
+        "/fixtures/heritage_consumer.ts",
+        "CrossCtorParams",
+        &[],
+        ProjectionMode::Expanded,
+    );
+    let TypeExpr::Tuple { elements, .. } = &params_expr else {
+        panic!("expected tuple of inherited constructor parameters, got {params_expr:?}");
+    };
+    assert_eq!(
+        elements.len(),
+        2,
+        "expected the base ctor's two params, got {elements:?}"
+    );
+    assert_primitive(&elements[0].ty, PrimitiveName::String);
+    assert_primitive(&elements[1].ty, PrimitiveName::Number);
+
+    // Same-file userland base identity resolves through the same rail.
+    let (local_expr, _record) = resolve_expr(
+        &host,
+        "/fixtures/heritage_consumer.ts",
+        "LocalStatic",
+        &[],
+        ProjectionMode::Expanded,
+    );
+    assert_primitive(&local_expr, PrimitiveName::Number);
+}
+
+#[test]
 fn class_features_union_common_member_folds_to_most_restrictive_visibility() {
     // TS member-access surface of an ordinary (non-macro) union `UnionA | UnionB`
     // is the COMMON members only, and each common member's accessibility folds to

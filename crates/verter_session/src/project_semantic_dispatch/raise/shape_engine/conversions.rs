@@ -7,7 +7,7 @@ use verter_type_expr::{MappedModifier, PrimitiveName};
 
 use crate::semantic_query::{OptionalityMod, ReadonlyMod};
 
-pub(super) fn semantic_primitive_to_primitive_name(
+pub(crate) fn semantic_primitive_to_primitive_name(
     kind: crate::semantic_query::PrimitiveKind,
 ) -> PrimitiveName {
     use crate::semantic_query::PrimitiveKind as K;

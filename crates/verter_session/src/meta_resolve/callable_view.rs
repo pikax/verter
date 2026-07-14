@@ -147,7 +147,6 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
         | SemanticNodeData::TypeOf(_)
         | SemanticNodeData::Opaque(_)
         | SemanticNodeData::RawFallback { .. }
-        | SemanticNodeData::VueMacroElements(_)
         | SemanticNodeData::SyntheticBinding { .. } => SnippetParamsArg::Unresolved,
     }
 }
@@ -184,13 +183,18 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     /// via the shared `ResolveDecl` / `Instantiate` queries, re-evaluate. The
     /// view NEVER resolves declaration slots or instantiates bases itself — it
     /// calls this one shared primitive (no second resolver lives here).
+    ///
+    /// `None` on a PARTIAL demand outcome: a truncated/faulted resolution
+    /// exposes no node, so every view recursion built on this helper fails
+    /// closed rather than classifying an operationally-incomplete carrier.
     fn normalized_fact_node(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-    ) -> SemanticNodeId {
+    ) -> Option<SemanticNodeId> {
         self.dispatch
             .normalize_node_for_structural_fact_demand(node, context)
+            .into_complete_node()
     }
 
     fn intern(&self, data: SemanticNodeData) -> SemanticNodeId {
@@ -242,8 +246,9 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         // shared primitive, so a `type MaybeFn = ((r) => void) | undefined`
         // member (`DeclRef(MaybeFn)`) becomes `Union(Function, undefined)` HERE,
         // letting the view strip the nullish arm the strict whole-composite
-        // `realize_callable_member` rule would otherwise fail on.
-        let normalized = self.normalized_fact_node(node, context);
+        // `realize_callable_member` rule would otherwise fail on. A PARTIAL
+        // demand refuses the whole classification (fail-closed).
+        let normalized = self.normalized_fact_node(node, context)?;
         let data = self.data(normalized)?;
         match data.as_ref() {
             // A realized callable — return verbatim.
@@ -268,8 +273,9 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 let mut callable: Option<SemanticNodeId> = None;
                 for arm in arms.iter() {
                     // Normalize the arm enough to detect a nullish arm
-                    // (`undefined` / `null`), incl. one behind a carrier.
-                    let arm_norm = self.normalized_fact_node(*arm, context);
+                    // (`undefined` / `null`), incl. one behind a carrier. A
+                    // PARTIAL arm normalization refuses the whole composite.
+                    let arm_norm = self.normalized_fact_node(*arm, context)?;
                     if self.node_is_nullish_primitive(arm_norm) {
                         // `Fn & undefined` = `never` ⇒ the whole intersection is
                         // non-callable; refuse (do NOT strip-and-keep). A `Union`
@@ -420,8 +426,12 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         }
         // Carrier-resolve before EVERY structural match — a `DeclRef` /
         // `InstantiationRef` event-name union resolves to its `Union` here, and
-        // each union arm is normalized again on recursion.
-        let normalized = self.normalized_fact_node(node, context);
+        // each union arm is normalized again on recursion. A PARTIAL demand
+        // fails the WHOLE enumeration (a truncated resolution could hide a
+        // string literal), matching the fail-closed-whole contract.
+        let Some(normalized) = self.normalized_fact_node(node, context) else {
+            return false;
+        };
         // ACTIVE-PATH cycle guard keyed by the NORMALIZED node id. An INDIRECT
         // (mutual) union cycle — `type A = 'a' | B; type B = 'b' | A` — re-yields
         // the SAME hash-consed union node on the back-edge (`normalize` walks
@@ -513,8 +523,6 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 //   - `Opaque(_)` general (non-RecursiveRef): `Miss` /
                 //     `DeclPlaceholder` / `BudgetExceeded` / …
                 //   ambiguous / unrepresentable artifacts:
-                //   - `VueMacroElements` — a macro-resolution artifact we cannot
-                //     prove does not hide event-name literals
                 //   - `RawFallback`      — raw unrepresentable text, could be anything
                 //   - `SyntheticBinding` — a synthetic binding carrier, ambiguous
                 SemanticNodeData::Alias(_)
@@ -533,10 +541,9 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 | SemanticNodeData::BareRef(_)
                 | SemanticNodeData::ImportType(_)
                 | SemanticNodeData::Opaque(_)
-                | SemanticNodeData::VueMacroElements(_)
                 | SemanticNodeData::RawFallback { .. }
                 | SemanticNodeData::SyntheticBinding { .. } => false,
-                // ── FUTURE-VARIANT DEFAULT ── every one of the 27 known
+                // ── FUTURE-VARIANT DEFAULT ── every one of the 26 known
                 // `SemanticNodeData` variants is classified explicitly above, so
                 // this catch-all is currently unreachable; it is KEPT so a variant
                 // added later fails closed by default (no-poison) rather than
@@ -604,12 +611,14 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
 
     /// All positional params of the realized callable — leading `this` skipped,
     /// a rest-tuple param expanded into one entry per tuple element. `None` when
-    /// the root does not realize to a single `Function`.
+    /// the root does not realize to a single `Function`, or when a rest param's
+    /// structural-fact demand is PARTIAL (the whole positional read fails —
+    /// never a silent short vector).
     pub(crate) fn positional_params(
         &self,
         context: ProjectionReductionContext,
     ) -> Option<Vec<PositionalParamNode>> {
-        Some(self.signature(context)?.positional_params_expanded(context))
+        self.signature(context)?.positional_params_expanded(context)
     }
 
     /// The validated Svelte-snippet positional params — the node-domain reader
@@ -680,10 +689,12 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         // Carrier-PRESERVING peel: unwrap `Alias` / resolve `DeclRef`, but STOP
         // at an `InstantiationRef` so its `Params` `args` stay readable (the
         // ordinary instantiate-first demand primitive would consume them — the
-        // snippet gap).
+        // snippet gap). A PARTIAL peel fails the whole snippet read closed —
+        // never a present slot presented off a truncated resolution.
         let peeled = self
             .dispatch
-            .peel_node_for_uninstantiated_carrier_fact_demand(node, context);
+            .peel_node_for_uninstantiated_carrier_fact_demand(node, context)
+            .into_complete_node()?;
         let data = self.data(peeled)?;
         match data.as_ref() {
             // A `Snippet<Params>` carrier — read the un-instantiated `Params`.
@@ -698,7 +709,10 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                         // (a `DeclRef`-to-tuple `Params` alias RESOLVES to its
                         // `Tuple` here), then classify it EXHAUSTIVELY (no `_`
                         // wildcard) into Tuple / resolved-non-tuple / unresolved.
-                        let arg_norm = self.normalized_fact_node(args[0], context);
+                        // A PARTIAL demand fails closed BEFORE classification:
+                        // a truncated `Params` could still be a tuple we could
+                        // not reach — `None`, never a binding-less `Some([])`.
+                        let arg_norm = self.normalized_fact_node(args[0], context)?;
                         let arg_data = self.data(arg_norm);
                         match classify_snippet_params_arg(arg_data.as_deref()) {
                             // A tuple `Params` — one positional binding per element.
@@ -837,7 +851,8 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         if depth > CALLABLE_VIEW_DEPTH_FUSE {
             return None;
         }
-        let normalized = self.normalized_fact_node(node, context);
+        // A PARTIAL demand refuses the whole slot-callable collection.
+        let normalized = self.normalized_fact_node(node, context)?;
         let data = self.data(normalized)?;
         match data.as_ref() {
             SemanticNodeData::Function { .. } => {
@@ -852,7 +867,8 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 let arms = Arc::clone(arms);
                 drop(data);
                 for arm in arms.iter() {
-                    let arm_norm = self.normalized_fact_node(*arm, context);
+                    // A PARTIAL arm normalization refuses the whole collection.
+                    let arm_norm = self.normalized_fact_node(*arm, context)?;
                     // Nullish arms (`undefined` / `null`), incl. one behind a
                     // carrier: a `Union` strips them; an `Intersection` is `never`.
                     if self.node_is_nullish_primitive(arm_norm) {
@@ -1018,22 +1034,26 @@ impl SignatureNodeView<'_, '_> {
 
     /// All positional params — the LEADING `this` param skipped and a rest-tuple
     /// param expanded into one [`PositionalParamNode`] per tuple element. A rest
-    /// param whose type is NOT a tuple (an open generic / `unknown[]`) carries
-    /// no enumerable positional bindings.
+    /// param whose type COMPLETELY resolves to a non-tuple (an open generic /
+    /// `unknown[]`) carries no enumerable positional bindings.
     ///
     /// `context` is the demand identity used to carrier-resolve a rest param's
     /// type before checking for `Tuple`: rest expansion is a genuine structural
     /// fact (`type Args = [item: Item, index: number]` — a `DeclRef` — must
     /// resolve to its `Tuple` to enumerate), so it routes through the shared
-    /// structural-fact demand primitive. A rest param that does not resolve to a
-    /// `Tuple` contributes no positional entries (fail-closed).
+    /// structural-fact demand primitive.
+    ///
+    /// `None` when a rest param's demand outcome is PARTIAL: a truncated rest
+    /// resolution fails the WHOLE positional read — a silent short vector
+    /// (the other params without the rest expansion) would present an
+    /// incomplete positional contract as complete.
     pub(crate) fn positional_params_expanded(
         &self,
         context: ProjectionReductionContext,
-    ) -> Vec<PositionalParamNode> {
+    ) -> Option<Vec<PositionalParamNode>> {
         let params = match self.data(self.function).as_deref() {
             Some(SemanticNodeData::Function { params, .. }) => Arc::clone(params),
-            _ => return Vec::new(),
+            _ => return Some(Vec::new()),
         };
         let mut out = Vec::new();
         for (idx, param) in params.iter().enumerate() {
@@ -1046,10 +1066,13 @@ impl SignatureNodeView<'_, '_> {
             }
             if param.rest {
                 // A rest-tuple param spreads its tuple element-wise — resolve the
-                // carrier to its concrete `Tuple` body at this genuine demand.
+                // carrier to its concrete `Tuple` body at this genuine demand. A
+                // PARTIAL demand fails the WHOLE read (no silent short vector);
+                // a COMPLETE non-tuple contributes no entries (fail-closed skip).
                 let resolved = self
                     .dispatch
-                    .normalize_node_for_structural_fact_demand(param.ty, context);
+                    .normalize_node_for_structural_fact_demand(param.ty, context)
+                    .into_complete_node()?;
                 if let Some(SemanticNodeData::Tuple { elements, .. }) =
                     self.data(resolved).as_deref()
                 {
@@ -1067,7 +1090,7 @@ impl SignatureNodeView<'_, '_> {
                 ty: param.ty,
             });
         }
-        out
+        Some(out)
     }
 }
 

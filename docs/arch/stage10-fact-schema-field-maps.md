@@ -252,7 +252,7 @@ display-only default-value passthrough, not a semantic fact.
 
 | source field | disposition |
 |---|---|
-| `parameters: Vec<FunctionParam>` | fact field `parameters: Arc<[FunctionParamFact]>` (each: name/optional/rest/has_ts_annotation facts + `ty` locator + `FunctionParamSpanOrigin`) |
+| `parameters: Vec<FunctionParam>` | fact field `parameters: Arc<[FunctionParamFact]>` (each: name/optional/rest/has_ts_annotation facts + `ty: Option<TypeBodySlot>` locator — `Some` only for an addressable authored positional TS annotation; an unannotated or rest parameter stores the explicit typed miss `None` — + `FunctionParamSpanOrigin`) |
 | `return_type: Option<TypeExpr>` | body locator `return_ty: Option<TypeBodySlot>` |
 | `type_parameters: Vec<TypeParam>` | fact field `type_parameters: Arc<[NarrowTypeParam]>` |
 | `has_implementation_body: bool` | fact field `has_implementation_body` |
@@ -399,10 +399,95 @@ are witnessed in B1; their real PRODUCERS are named below.
 | `ClosednessRecipe` | cheap decidable-from-syntax body shapes (object/intersection/mapped) | B6 (graph-native closedness) |
 | `KeyDomainFact` | the key-domain axis of a wrapper subject | B6 (graph-native key-domain) |
 | `NarrowFrontierBody` | `external_type_frontier::ResolvedSymbol.body` narrowing | B5 (Surface B frontier) |
-| `ShallowRouteFacts` (+ `MemberNamesRoute`, `MemberDependencyEdge`) | `ShallowFileState` route/closure walks | B5 (Surface B shallow) |
+| `ShallowRouteFacts` (+ `MemberNamesRoute`, `MemberDependencyEdge`, `WholeRouteEdgeFact`, `WholeRouteContextFact`, `MemberPathSeedEdge`, `MemberPathSeedTarget`, `DeferredKeyUtilityEdge`, `DeferredKeyUtilityKind`) | `ShallowFileState` route/closure walks | B5R (LANDED — see the amended field map below) |
 | `ValueTypeAnnotationFact` (+ `typeof_alias_target`) | the `eval_env` `TypeOf` peel | B5 (Surface B eval-env) |
 | `NarrowTypeParam` / `TypeParamDeclFact` | `Vec<TypeParam>` on decls/frontier | B3 / B5 |
 
 Every other family in `facts.rs` narrows a fixed source struct enumerated in
 sections A–E above; the demo producer in section D exercises the exhaustive-
 destructure obligation that the B3–B7 producers inherit.
+
+## Amended `ShallowRouteFacts` field map (B5R, landed)
+
+Produced GRAPH-FREE per decl at the lazy lowering hook
+(`produce_shallow_route_facts(dep_bodies, &dyn RouteFactLens)`); the same-file
+transitive closure reads these downstream (`route_closure_over_facts`).
+
+| field | type | semantics |
+|---|---|---|
+| `member_names` | `MemberNamesRoute` | `Closed(names)` = direct-object property names in enumeration order (first-contributor precedence); `Closed(∅)` = not a direct object (the downstream Omit arm falls back to the plain local closure); `OpenKeyDomain` reserved for the genuine L1 class (never produced here) |
+| `member_path_seed_edges` | `Arc<[MemberPathSeedEdge]>` | own-object prefix enumeration: `path` + `TerminalDeps(deps)` (matches `query_path == path` EXACTLY) or `ForwardBoundary(target)` (`path` a strict prefix through a BARE ref carrier — local/import `Ref`, no type args, parens-transparent — the downstream walk forwards `query_path[path.len()..]`); union/conditional/mapped/indexed/generic terminals produce NO edge (fail-closed MISS) |
+| `member_dependency_edges` | `Arc<[MemberDependencyEdge]>` | per ref-carrying direct property: `depends_on` in collect order, classified local-first (`RouteDependencyRefFact::Local{name, route}` / `External(ExternalRouteRefFact)`) |
+| `whole_route_edges` | `Arc<[WholeRouteEdgeFact]>` | the decl's own body walked ONCE from `Root`, edges in legacy depth-first emission order: `Local{name, route, context}` (deferred follow — `Whole` plain refs, `Pick`/`Omit`/`MemberPath` routed follows), `External{external_ref, context}` (direct emit — `route == Whole` ⟺ context-gated Ref/TypeOf import; `route != Whole` ⟺ ungated utility/indexed), `DeferredKeyUtility(edge)` (V3) |
+
+Cross-cutting invariants:
+
+- `WholeRouteContextFact{Root, CallableParam, LeafProperty}` rides on EVERY
+  whole-route edge (both `Local` and `External` arms): a `LeafProperty` follow
+  processes ONLY stored-`Root` (fully transparent) sites — where the
+  import-emit gate re-applies (`Whole` externals drop, ungated utility/indexed
+  emits keep) and local follows compose to a `LeafProperty` walk. The
+  decider-literal Local-only-context shape is byte-parity-INSUFFICIENT
+  (`type B = Pick<Q,'a'>` vs `type B = { y: Pick<Q,'a'> }` store the identical
+  external ref yet need opposite leaf-follow behavior) — oracle-discriminated
+  in `route_facts_tests.rs`.
+- Emitting-only carrier positions (`Partial`/`Required`/`Readonly`/
+  `NonNullable` type arguments) normalize stored `Root` → `CallableParam`
+  (behaviorally identical at every legacy gate; correctly dropped under a
+  leaf follow).
+- `DeferredKeyUtilityEdge{kind, base, base_path, key_source, empty_keys_fallback, context}`:
+  the V3 cross-decl key-source RECIPE (`KeyDomainFact::FollowSlot` of the bare
+  local key alias) — enumerated DOWNSTREAM with a TRI-STATE, CONTENT-FREE
+  outcome (`KeySourceLookup` via `RouteClosureProvider::key_source_lookup`:
+  the provider owns the engine-side alias-graph fold over per-decl normalized
+  `KeySourceFact`s, so the closure core never receives a declaration body): an
+  UNAVAILABLE hand-off (decl-body demand miss / broken lease / unresolved
+  alias hop) fails closed WITHOUT firing the fallback; a
+  RESOLVED-empty enumeration applies the legacy `utility → None` fall-through;
+  a resolved non-empty enumeration applies the route. `base` is the bare-ref
+  utility source shell (`None` = complex base, contributes nothing);
+  `empty_keys_fallback` carries the userland local `Pick`/`Omit` decl name for
+  the legacy empty-keys fall-through. The recipe is SINGLE-SYMBOL by
+  construction: composite key expressions (`K | 'c'`, `K1 | K2`) and
+  non-outermost deferred indexes poison at produce time (no edge, nothing
+  emitted — safe-direction under-production that persists past B8 until a
+  richer recipe lands; characterized in
+  `characterize_composite_key_alias_under_production_vs_legacy`).
+- The canonical `verter_type_expr::RouteDemand` (sub-fork A): `Pick`/`Omit`
+  carry the PRIVATE normalized `RouteKeySet` (sorted + deduped at construction
+  AND serde decode — derived `Eq`/`Hash` agree, order-independent);
+  `MemberPath` stays an ordered `Arc<[String]>`; `Default = Whole`;
+  `merge_route_demands` lives beside the type; `resolver_core::route_demand`
+  re-exports both.
+
+## Amended `FactOrLocator` vocabulary + the resolved emit payload carrier (landed)
+
+**`FactOrLocator::LeafUnion(Arc<[LeafTypeFact]>)`** — the nested
+member/element/param-position mirror of the top-level
+`ClosedTypeFact::LeafUnion`: a closed, finite, ORDERED union of leaves
+(`string | number` as a realized emit-payload tuple element). Leaf members
+only, so the arm stays non-recursive and complete by itself — never a union of
+unions, never a locator arm (design-forbidden). Serde / `Eq` / `Hash` /
+`NoTypeExpr` / `NoStoredSpan` clean like every sibling arm (witnessed in
+`fact_witnesses.rs::fact_or_locator_leaf_union_is_a_closed_ordered_carrier`).
+The exhaustive raise route (`raise_fact_or_locator`) interns the ordered
+`SemanticNodeData::Union` with each leaf lowered through the shared in-scope
+lowerer — the same shape as the top-level `Closed(LeafUnion)` source arm. The
+shared node→closed-fact projections live on `ProjectSemanticDispatch`
+(`node_leaf_union_fact` / `node_leaf_fact_or_union` /
+`closed_params_tuple_source`) — never re-derived per surface.
+
+**`ResolvedEmitField` (session-owned, `typeinfo/framework_surface/results.rs`)**
+— the resolved emit row `EmitsSurface.fields` carries:
+
+| field | disposition |
+|---|---|
+| `analysis: AnalyzedEmitField` | the emit ANALYSIS row (name, display `payload_type`, JSDoc, authored `payload` locator) — the lower-crate `ResolvedMacroInput.emits` input maps from this field |
+| `payload_source: Option<SemanticTypeSource>` | the payload's published SOURCE: `Authored(MacroPayload(..))` for a LOCAL authored property event (the analyzer-stamped byte-precise locator, carried on the analysis row's `payload` too); the graph-native closed/use-site source for an INHERITED / substituted property event — the complete closed leaf / leaf-union / tuple fact projected from the member's value node, or the arg-preserving authored use-site body slot (`Authored(DeclBody(..))`); `Closed(Tuple(..))` for a realized call signature — the post-event-name params projected in the node domain (label / optionality / rest / ORDER preserved; leaf and leaf-union element facts); `None` only when no faithful source exists (a partial or fabricated fact is never published — the consumer degrades honestly) |
+
+`define_emits_shape` publishes `payload_source` into `ExpandedProperty.ty`
+(fallback chain: evaluated field → payload source → honest Unknown leaf; ONE
+decided chain — the authored-locator mapping lives in the producer), and the
+existing `expanded_define_emit_events` route carries it into
+`EventAnalysis.payload`. The union materializes to `TypeExpr::Union` only at
+the sealed output boundary; the wire DTO shape is unchanged.

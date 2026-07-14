@@ -179,7 +179,16 @@ fn concrete_slots_object_props_skip_define_props_member_route_projection() {
     // ButtonSlots declaration and publishes the reference carrier —
     // NOT an eagerly flattened object surface, and NOT the unresolved
     // `Button['slots']` indexed-access (the hop itself must resolve).
-    match &ui_prop.type_expr {
+    let ui_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/workspace/src/Button.vue",
+        ui_prop
+            .type_source
+            .present()
+            .expect("the `ui` prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("`ui`'s published source must shell-materialize"));
+    match &ui_type {
         TypeExpr::Ref {
             name,
             type_arguments,

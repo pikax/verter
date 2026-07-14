@@ -13,9 +13,8 @@ use crate::semantic_query::demand::{
     cached_satisfies, Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
 };
 use crate::semantic_query::{
-    DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment, ProjectionMode,
-    ProjectionReductionContext, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeId,
-    SemanticQueryKey,
+    DepSignature, IndexKey, MapperKey, PathSegment, ProjectionMode, ProjectionReductionContext,
+    QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeId, SemanticQueryKey,
 };
 
 #[derive(Clone)]
@@ -258,12 +257,6 @@ pub(super) enum FamilyKey {
         /// `(base, path)`, so they MUST NOT collide on one family slot.
         merge_role: crate::semantic_query::MemberMergeRole,
     },
-    /// Included for completeness so `family_and_slot` is total, but
-    /// [`SemanticQueryKey::ResolvedNamedType`] bypasses the family memo at
-    /// admission and never lands in the warm map.
-    ResolvedNamedType {
-        key: Arc<HostResolvedNamedTypeKey>,
-    },
     /// Mode-erased ResolveMacroPayload identity. `owner` is the
     /// env-bearing, content-free
     /// [`crate::semantic_query::ResolvedDeclSlotIdentity`] (R6 — carries
@@ -362,8 +355,7 @@ pub(super) enum FamilyKey {
     /// `Relate` keys differing in any relation-identity axis map to distinct
     /// family identities.
     ///
-    /// The `RelateMemoKey` payload is BOXED (mirroring
-    /// [`Self::ResolvedNamedType`]'s `Arc<HostResolvedNamedTypeKey>`): a Rust
+    /// The `RelateMemoKey` payload is BOXED: a Rust
     /// enum is sized to its largest variant, and `RelateMemoKey` is 144B, so
     /// embedding it BY VALUE would inflate EVERY entry key of the hot
     /// single-node `FamilyKey → FamilySlots` keyspace — for a variant that is
@@ -489,7 +481,6 @@ impl FamilyKey {
             FamilyKey::NormalizeUnion { .. } => "NormalizeUnion",
             FamilyKey::NormalizeIntersection { .. } => "NormalizeIntersection",
             FamilyKey::ProjectPath { .. } => "ProjectPath",
-            FamilyKey::ResolvedNamedType { .. } => "ResolvedNamedType",
             FamilyKey::ResolveMacroPayload { .. } => "ResolveMacroPayload",
             FamilyKey::ResolveClassSurface { .. } => "ResolveClassSurface",
             FamilyKey::ResolveAmbientNamespace { .. } => "ResolveAmbientNamespace",
@@ -1255,12 +1246,6 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 merge_role: context.merge_role,
             },
             context_to_slot(*context),
-        ),
-        SemanticQueryKey::ResolvedNamedType { key } => (
-            FamilyKey::ResolvedNamedType {
-                key: Arc::clone(key),
-            },
-            ModeSlot::Single,
         ),
         // `Relate` maps to a DEDICATED, non-aliasing `FamilyKey::Relate`
         // carrying the FULL relation identity. No production code constructs a

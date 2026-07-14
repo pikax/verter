@@ -111,6 +111,31 @@ pub trait ScriptFactProvider: Send + Sync {
     /// imports or read capability bits. Returns `None` when the program carries
     /// no candidates for this provider.
     fn capture(&self, cx: ScriptCandidateCx<'_>) -> Option<FrameworkScriptCandidates>;
+    /// Re-anchor this provider's captured candidates to the PRODUCING
+    /// canonical.
+    ///
+    /// Capture is path-agnostic (syntax-only), so an authored-type payload REF
+    /// a provider captures carries the local-file EMPTY-sentinel anchor
+    /// (`canonical_id == ""`). The SESSION drives this re-anchor with the
+    /// canonical it is currently materializing — passed as DATA, never
+    /// threaded into the capture API — before the candidates enter any
+    /// content-addressed store or synthesis input; the PROVIDER owns the typed
+    /// payload downcast plus a COHERENT `stable_hash` recompute (the candidate
+    /// hash folds the payload refs, so a filled anchor changes it — the
+    /// envelope must never carry a hash that disagrees with its payload).
+    ///
+    /// Contract: fill ONLY empty anchors (a non-empty anchor may be a
+    /// cross-file resolver's canonical and is never rewritten — idempotent by
+    /// construction). The default is the IDENTITY: a provider whose candidate
+    /// payload carries no authored-type payload refs has no anchors to fill,
+    /// so its envelope passes through untouched.
+    fn absolutize_candidates(
+        &self,
+        candidates: FrameworkScriptCandidates,
+        _canonical: &str,
+    ) -> FrameworkScriptCandidates {
+        candidates
+    }
     /// Validate this provider's captured candidates against resolved import
     /// sources + derived capability bits, producing the typed resolved payload.
     ///

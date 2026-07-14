@@ -12,131 +12,47 @@
 //!   declaration or member produces a new hash.
 //!
 //! `parse_stable_hash` is built from `IndexedReady.shallow_state`.
-//! These tests synthesise `ShallowFileState` directly (the same way
-//! `IndexedReady::new_for_test` does) so we can vary the inventory
-//! programmatically without invoking the full parser pipeline.
+//! These tests author REAL source variants and construct through the
+//! production-shaped service-backed path (parse → header index → lazy
+//! decl-body memo), so the inventory the hash walks is the real one.
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
 use verter_session::parse_stable_hash::compute_parse_stable_hash;
 use verter_session::project_type_store::IndexedReady;
+use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
-    )
+) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
 }
 
-fn build_indexed(
-    type_symbols: Vec<(
-        &str,
-        verter_semantic::analysis::type_eval::TypeDeclKind,
-        Vec<&str>,
-    )>,
-    value_symbols: Vec<(&str, verter_semantic::analysis::type_eval::ValueDeclKind)>,
-    exports: Vec<(
-        &str,
-        verter_session::resolver_core::shallow_file_state::ExportTarget,
-    )>,
-) -> Arc<IndexedReady> {
-    // Env-seeded construction: member names become the symbol's direct
-    // syntactic member headers (the inventory `parse_stable_hash` walks).
-    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
-    for (name, kind, members) in type_symbols {
-        let body = verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-            properties: members
-                .iter()
-                .map(|m| {
-                    verter_type_expr::ObjectMember::Property(
-                        verter_type_expr::ObjectProperty::synthetic_public(
-                            (*m).to_string(),
-                            verter_type_expr::TypeExpr::Primitive(
-                                verter_type_expr::PrimitiveName::String,
-                            ),
-                            false,
-                            false,
-                        ),
-                    )
-                })
-                .collect(),
-        }));
-        env.add_type(verter_semantic::analysis::type_eval::TypeDeclInfo {
-            name: name.to_string(),
-            declaration_id: 0,
-            kind,
-            type_parameters: Vec::new(),
-            body,
-        });
-    }
-    for (name, kind) in value_symbols {
-        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
-            name: name.to_string(),
-            declaration_id: 0,
-            kind,
-            type_annotation: None,
-            signatures: Vec::new(),
-            object_shape: None,
-            enum_members: None,
-        });
-    }
-    let mut exports_map: FxHashMap<
-        String,
-        verter_session::resolver_core::shallow_file_state::ExportTarget,
-    > = FxHashMap::default();
-    for (name, target) in exports {
-        exports_map.insert(name.to_string(), target);
-    }
-    let mut shallow =
-        verter_session::resolver_core::shallow_file_state::ShallowFileState::from_analysis(
-            [0u8; 16],
-            empty_external(),
-            Some(&env),
-        );
-    shallow.exports = exports_map;
+/// Build a real `IndexedReady` from authored source through the
+/// service-backed construction path. `parse_stable_hash` walks ONLY the
+/// shallow inventory, so the raw source rides along untouched.
+fn indexed_from_source(source: &str) -> Arc<IndexedReady> {
+    let shallow = ShallowFileState::service_backed_for_test_with_hash("/psh.ts", source, [0u8; 16]);
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
-        Arc::new(shallow),
-        Arc::from(""),
-        Arc::from(""),
+        shallow,
+        Arc::from(source),
+        Arc::from(source),
         empty_external(),
     ))
 }
 
 #[test]
 fn whitespace_edit_does_not_change_parse_stable_hash() {
-    // Two IndexedReady artifacts with the same decl inventory (the
-    // shallow-state has identical symbols/exports). A whitespace edit
-    // does not change the inventory — it only changes raw_source.
-    // The hash MUST be identical because we hash the inventory, not the
-    // raw text.
-    use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
-    use verter_session::resolver_core::shallow_file_state::ExportTarget;
-
-    let a = build_indexed(
-        vec![("Foo", TypeDeclKind::Interface, vec!["x", "y"])],
-        vec![("greet", ValueDeclKind::Function)],
-        vec![(
-            "Foo",
-            ExportTarget::Local {
-                symbol_name: "Foo".to_string(),
-            },
-        )],
+    // Two artifacts from sources that differ ONLY in whitespace and a
+    // comment: the shallow inventory (symbols/members/exports) is
+    // identical, so the hash MUST be identical — we hash the inventory,
+    // not the raw text.
+    let a = indexed_from_source(
+        "export interface Foo { x: string; y: number }\nfunction greet(): void {}\n",
     );
-    let b = build_indexed(
-        vec![("Foo", TypeDeclKind::Interface, vec!["x", "y"])],
-        vec![("greet", ValueDeclKind::Function)],
-        vec![(
-            "Foo",
-            ExportTarget::Local {
-                symbol_name: "Foo".to_string(),
-            },
-        )],
+    let b = indexed_from_source(
+        "// cosmetic comment\nexport interface Foo {\n  x: string;\n  y: number;\n}\n\nfunction greet(): void {}\n",
     );
-    // Note: `raw_source` differs between a and b in a real edit, but
-    // since parse_stable_hash walks ONLY shallow_state, this is
-    // equivalent to a whitespace-only edit producing the same inventory.
     assert_eq!(
         compute_parse_stable_hash(&a),
         compute_parse_stable_hash(&b),
@@ -146,24 +62,8 @@ fn whitespace_edit_does_not_change_parse_stable_hash() {
 
 #[test]
 fn decl_reorder_does_not_change_parse_stable_hash() {
-    use verter_semantic::analysis::type_eval::TypeDeclKind;
-
-    let a = build_indexed(
-        vec![
-            ("Alpha", TypeDeclKind::Interface, vec!["a"]),
-            ("Beta", TypeDeclKind::Interface, vec!["b"]),
-        ],
-        vec![],
-        vec![],
-    );
-    let b = build_indexed(
-        vec![
-            ("Beta", TypeDeclKind::Interface, vec!["b"]),
-            ("Alpha", TypeDeclKind::Interface, vec!["a"]),
-        ],
-        vec![],
-        vec![],
-    );
+    let a = indexed_from_source("interface Alpha { a: string }\ninterface Beta { b: string }\n");
+    let b = indexed_from_source("interface Beta { b: string }\ninterface Alpha { a: string }\n");
     assert_eq!(
         compute_parse_stable_hash(&a),
         compute_parse_stable_hash(&b),
@@ -173,18 +73,8 @@ fn decl_reorder_does_not_change_parse_stable_hash() {
 
 #[test]
 fn member_reorder_does_not_change_parse_stable_hash() {
-    use verter_semantic::analysis::type_eval::TypeDeclKind;
-
-    let a = build_indexed(
-        vec![("Foo", TypeDeclKind::Interface, vec!["a", "b", "c"])],
-        vec![],
-        vec![],
-    );
-    let b = build_indexed(
-        vec![("Foo", TypeDeclKind::Interface, vec!["c", "a", "b"])],
-        vec![],
-        vec![],
-    );
+    let a = indexed_from_source("interface Foo { a: string; b: string; c: string }\n");
+    let b = indexed_from_source("interface Foo { c: string; a: string; b: string }\n");
     assert_eq!(
         compute_parse_stable_hash(&a),
         compute_parse_stable_hash(&b),
@@ -196,21 +86,8 @@ fn member_reorder_does_not_change_parse_stable_hash() {
 
 #[test]
 fn added_decl_changes_parse_stable_hash() {
-    use verter_semantic::analysis::type_eval::TypeDeclKind;
-
-    let a = build_indexed(
-        vec![("Foo", TypeDeclKind::Interface, vec!["a"])],
-        vec![],
-        vec![],
-    );
-    let b = build_indexed(
-        vec![
-            ("Foo", TypeDeclKind::Interface, vec!["a"]),
-            ("Bar", TypeDeclKind::Interface, vec!["b"]),
-        ],
-        vec![],
-        vec![],
-    );
+    let a = indexed_from_source("interface Foo { a: string }\n");
+    let b = indexed_from_source("interface Foo { a: string }\ninterface Bar { b: string }\n");
     assert_ne!(
         compute_parse_stable_hash(&a),
         compute_parse_stable_hash(&b),
@@ -220,18 +97,8 @@ fn added_decl_changes_parse_stable_hash() {
 
 #[test]
 fn renamed_decl_changes_parse_stable_hash() {
-    use verter_semantic::analysis::type_eval::TypeDeclKind;
-
-    let a = build_indexed(
-        vec![("Foo", TypeDeclKind::Interface, vec!["x"])],
-        vec![],
-        vec![],
-    );
-    let b = build_indexed(
-        vec![("Bar", TypeDeclKind::Interface, vec!["x"])],
-        vec![],
-        vec![],
-    );
+    let a = indexed_from_source("interface Foo { x: string }\n");
+    let b = indexed_from_source("interface Bar { x: string }\n");
     assert_ne!(
         compute_parse_stable_hash(&a),
         compute_parse_stable_hash(&b),
@@ -241,18 +108,8 @@ fn renamed_decl_changes_parse_stable_hash() {
 
 #[test]
 fn renamed_member_changes_parse_stable_hash() {
-    use verter_semantic::analysis::type_eval::TypeDeclKind;
-
-    let a = build_indexed(
-        vec![("Foo", TypeDeclKind::Interface, vec!["x"])],
-        vec![],
-        vec![],
-    );
-    let b = build_indexed(
-        vec![("Foo", TypeDeclKind::Interface, vec!["y"])],
-        vec![],
-        vec![],
-    );
+    let a = indexed_from_source("interface Foo { x: string }\n");
+    let b = indexed_from_source("interface Foo { y: string }\n");
     assert_ne!(
         compute_parse_stable_hash(&a),
         compute_parse_stable_hash(&b),
@@ -262,18 +119,8 @@ fn renamed_member_changes_parse_stable_hash() {
 
 #[test]
 fn kind_change_changes_parse_stable_hash() {
-    use verter_semantic::analysis::type_eval::TypeDeclKind;
-
-    let a = build_indexed(
-        vec![("Foo", TypeDeclKind::Interface, vec!["x"])],
-        vec![],
-        vec![],
-    );
-    let b = build_indexed(
-        vec![("Foo", TypeDeclKind::Alias, vec!["x"])],
-        vec![],
-        vec![],
-    );
+    let a = indexed_from_source("interface Foo { x: string }\n");
+    let b = indexed_from_source("type Foo = { x: string }\n");
     assert_ne!(
         compute_parse_stable_hash(&a),
         compute_parse_stable_hash(&b),
@@ -283,19 +130,8 @@ fn kind_change_changes_parse_stable_hash() {
 
 #[test]
 fn added_export_changes_parse_stable_hash() {
-    use verter_session::resolver_core::shallow_file_state::ExportTarget;
-
-    let a = build_indexed(vec![], vec![], vec![]);
-    let b = build_indexed(
-        vec![],
-        vec![],
-        vec![(
-            "Foo",
-            ExportTarget::Local {
-                symbol_name: "Foo".to_string(),
-            },
-        )],
-    );
+    let a = indexed_from_source("const Foo = 1;\n");
+    let b = indexed_from_source("export const Foo = 1;\n");
     assert_ne!(
         compute_parse_stable_hash(&a),
         compute_parse_stable_hash(&b),
@@ -305,13 +141,7 @@ fn added_export_changes_parse_stable_hash() {
 
 #[test]
 fn deterministic_across_calls() {
-    use verter_semantic::analysis::type_eval::TypeDeclKind;
-
-    let indexed = build_indexed(
-        vec![("Foo", TypeDeclKind::Interface, vec!["x", "y"])],
-        vec![],
-        vec![],
-    );
+    let indexed = indexed_from_source("interface Foo { x: string; y: number }\n");
     let h0 = compute_parse_stable_hash(&indexed);
     let h1 = compute_parse_stable_hash(&indexed);
     assert_eq!(h0, h1, "compute_parse_stable_hash MUST be deterministic");

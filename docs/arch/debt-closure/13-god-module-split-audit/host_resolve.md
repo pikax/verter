@@ -71,7 +71,6 @@ Frontier-engine BFS uncached path (`*_uncached`) calls back into the cached shim
 - `pub(crate) fn resolve_prepared_decl_target` — line 2609 (span 2609-2626)
 - `pub(crate) fn resolve_decl_in_scope_with_reexport_chain` — line 2650 (span 2650-2682)
 - `pub(crate) fn resolve_named_type_export_target` — line 2684 (span 2684-2700)
-- `pub(crate) fn read_dep_source_for_type_resolution` — line 2708 (span 2708-2751)
 - `pub fn resolve` — line 2794 (span 2794-2829)
 - `pub fn ensure_compiled` — line 2919 (span 2919-2973)
 - `pub(crate) fn compile_slot_is_warm` — line 2993 (span 2993-3033)

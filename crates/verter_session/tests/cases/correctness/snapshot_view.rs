@@ -21,6 +21,8 @@ use verter_semantic::analysis::component_meta::{
     FallthroughPropEntry, FallthroughSurface, InheritedSource, ModelAnalysis, NoFallthroughReason,
     PropAnalysis, SlotAnalysis, SlotBindingAnalysis,
 };
+use verter_session::VerterHost;
+use verter_type_expr::facts::SemanticTypeSource;
 use verter_type_expr::{LiteralValue, MappedModifier, ObjectMember, PrimitiveName, TypeExpr};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -85,26 +87,46 @@ pub struct FlagsView {
 }
 
 impl SnapshotView {
-    pub fn from_analysis(analysis: &ComponentMetaAnalysis) -> Self {
+    pub fn from_analysis(host: &VerterHost, analysis: &ComponentMetaAnalysis) -> Self {
         let component_name = derive_component_name(&analysis.file_path);
+        let owner = analysis.file_path.as_str();
 
-        let mut props: Vec<PropView> = analysis.props.iter().map(prop_view_from).collect();
+        let mut props: Vec<PropView> = analysis
+            .props
+            .iter()
+            .map(|prop| prop_view_from(host, owner, prop))
+            .collect();
         props.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let mut events: Vec<EventView> = analysis.events.iter().map(event_view_from).collect();
+        let mut events: Vec<EventView> = analysis
+            .events
+            .iter()
+            .map(|event| event_view_from(host, owner, event))
+            .collect();
         events.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let mut slots: Vec<SlotView> = analysis.slots.iter().map(slot_view_from).collect();
+        let mut slots: Vec<SlotView> = analysis
+            .slots
+            .iter()
+            .map(|slot| slot_view_from(host, owner, slot))
+            .collect();
         slots.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let mut models: Vec<ModelView> = analysis.models.iter().map(model_view_from).collect();
+        let mut models: Vec<ModelView> = analysis
+            .models
+            .iter()
+            .map(|model| model_view_from(host, owner, model))
+            .collect();
         models.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let mut exposed: Vec<ExposedView> =
-            analysis.exposed.iter().map(exposed_view_from).collect();
+        let mut exposed: Vec<ExposedView> = analysis
+            .exposed
+            .iter()
+            .map(|exposed| exposed_view_from(host, owner, exposed))
+            .collect();
         exposed.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let fallthrough = build_fallthrough_view(analysis);
+        let fallthrough = build_fallthrough_view(host, analysis);
 
         SnapshotView {
             component_name,
@@ -144,10 +166,34 @@ fn pascalize(input: &str) -> String {
     out
 }
 
-fn prop_view_from(prop: &PropAnalysis) -> PropView {
+/// Demand-render a published `SemanticTypeSource` through the shared SHALLOW
+/// probe — the published (shallow-by-default) shape, rendered canonically.
+///
+/// A `None` source or a raise miss renders a LOUD marker that can never
+/// silently equal a pinned snapshot signature, so a dropped source surfaces
+/// as a snapshot diff instead of a silent pass.
+fn render_source_signature(
+    host: &VerterHost,
+    owner: &str,
+    source: Option<&SemanticTypeSource>,
+) -> String {
+    let Some(source) = source else {
+        return "/*no published source*/".to_string();
+    };
+    match verter_session::test_only::semantic_source_probe::shallow_type_expr(host, owner, source) {
+        Some(expr) => render_type_signature(&expr),
+        None => "/*source raise miss*/".to_string(),
+    }
+}
+
+/// Native prop projection: the published `SemanticTypeSource` carrier is
+/// rendered BARE (shallow-by-default). Optionality is carried by the TYPED
+/// flags (`required` / `has_default`) — the `T | undefined` optional-model
+/// display is a compat-layer projection, never native snapshot truth.
+fn prop_view_from(host: &VerterHost, owner: &str, prop: &PropAnalysis) -> PropView {
     PropView {
         name: prop.name.clone(),
-        type_signature: render_type_signature(&prop.type_expr),
+        type_signature: render_source_signature(host, owner, prop.type_source.present()),
         required: prop.required,
         has_default: prop.has_default,
         default_signature: prop.default_value.clone(),
@@ -155,22 +201,26 @@ fn prop_view_from(prop: &PropAnalysis) -> PropView {
     }
 }
 
-fn event_view_from(event: &EventAnalysis) -> EventView {
+fn event_view_from(host: &VerterHost, owner: &str, event: &EventAnalysis) -> EventView {
     let params = event
         .raw_signature
         .clone()
-        .unwrap_or_else(|| render_type_signature(&event.payload));
+        .unwrap_or_else(|| render_source_signature(host, owner, event.payload.present()));
     EventView {
         name: event.name.clone(),
         params_signature: params,
     }
 }
 
-fn slot_view_from(slot: &SlotAnalysis) -> SlotView {
+fn slot_view_from(host: &VerterHost, owner: &str, slot: &SlotAnalysis) -> SlotView {
     let payload = if slot.bindings.is_empty() {
         slot.return_type.clone().unwrap_or_else(|| "{}".to_string())
     } else {
-        let mut entries: Vec<String> = slot.bindings.iter().map(slot_binding_signature).collect();
+        let mut entries: Vec<String> = slot
+            .bindings
+            .iter()
+            .map(|binding| slot_binding_signature(host, owner, binding))
+            .collect();
         entries.sort();
         format!("{{ {} }}", entries.join("; "))
     };
@@ -180,29 +230,47 @@ fn slot_view_from(slot: &SlotAnalysis) -> SlotView {
     }
 }
 
-fn slot_binding_signature(binding: &SlotBindingAnalysis) -> String {
-    format!(
-        "{}: {}",
-        binding.name,
-        render_type_signature(&binding.type_expr)
-    )
+fn slot_binding_signature(host: &VerterHost, owner: &str, binding: &SlotBindingAnalysis) -> String {
+    // A graph-raised binding row publishes the first-class SYNTHETIC
+    // carrier (its shallow identity); the binding's VALUE is read through
+    // the ONE sanctioned explicit-deepen demand route
+    // (`project_slot_binding_member`'s 3-hop composition behind the
+    // synthetic raise) — the snapshot renders the resolved value
+    // (`item: string`), never the carrier's opaque identity. Every other
+    // published source renders its shallow-by-default shape.
+    let rendered = match binding.type_source.present() {
+        Some(source @ SemanticTypeSource::SyntheticSlotBinding(_)) => {
+            match verter_session::test_only::semantic_source_probe::demand_type_expr(
+                host, owner, source,
+            ) {
+                Some(expr) => render_type_signature(&expr),
+                None => "/*source raise miss*/".to_string(),
+            }
+        }
+        other => render_source_signature(host, owner, other),
+    };
+    format!("{}: {}", binding.name, rendered)
 }
 
-fn model_view_from(model: &ModelAnalysis) -> ModelView {
+fn model_view_from(host: &VerterHost, owner: &str, model: &ModelAnalysis) -> ModelView {
     ModelView {
         name: model.name.clone(),
-        type_signature: render_type_signature(&model.type_expr),
+        type_signature: render_source_signature(host, owner, model.type_source.present()),
     }
 }
 
-fn exposed_view_from(exposed: &ExposedAnalysis) -> ExposedView {
+fn exposed_view_from(host: &VerterHost, owner: &str, exposed: &ExposedAnalysis) -> ExposedView {
     ExposedView {
         name: exposed.name.clone(),
-        type_signature: render_type_signature(&exposed.type_expr),
+        type_signature: render_source_signature(host, owner, exposed.type_source.present()),
     }
 }
 
-fn build_fallthrough_view(analysis: &ComponentMetaAnalysis) -> Option<FallthroughView> {
+fn build_fallthrough_view(
+    host: &VerterHost,
+    analysis: &ComponentMetaAnalysis,
+) -> Option<FallthroughView> {
+    let owner = analysis.file_path.as_str();
     // Projection rule: the fallthrough view
     // is emitted ONLY when the SFC's fallthrough surface is
     // *meaningful* for component-meta semantics — that is, either
@@ -264,11 +332,11 @@ fn build_fallthrough_view(analysis: &ComponentMetaAnalysis) -> Option<Fallthroug
             }
             let mut entries: Vec<String> = props_by_name
                 .values()
-                .map(fallthrough_prop_entry_signature)
+                .map(|prop| fallthrough_prop_entry_signature(host, owner, prop))
                 .chain(
                     events_by_name
                         .values()
-                        .map(fallthrough_event_entry_signature),
+                        .map(|event| fallthrough_event_entry_signature(host, owner, event)),
                 )
                 .collect();
             entries.sort();
@@ -281,21 +349,29 @@ fn build_fallthrough_view(analysis: &ComponentMetaAnalysis) -> Option<Fallthroug
     }
 }
 
-fn fallthrough_prop_entry_signature(prop: &FallthroughPropEntry) -> String {
+fn fallthrough_prop_entry_signature(
+    host: &VerterHost,
+    owner: &str,
+    prop: &FallthroughPropEntry,
+) -> String {
     format!(
         "{}{}: {}{}",
         prop.name,
         "",
-        render_type_signature(&prop.type_expr),
+        render_source_signature(host, owner, prop.type_source.present()),
         format_inherited_sources(&prop.sources),
     )
 }
 
-fn fallthrough_event_entry_signature(event: &FallthroughEventEntry) -> String {
+fn fallthrough_event_entry_signature(
+    host: &VerterHost,
+    owner: &str,
+    event: &FallthroughEventEntry,
+) -> String {
     format!(
         "@{}: {}{}",
         event.name,
-        render_type_signature(&event.payload),
+        render_source_signature(host, owner, event.payload.present()),
         format_inherited_sources(&event.sources),
     )
 }

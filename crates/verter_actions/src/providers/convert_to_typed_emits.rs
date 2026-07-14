@@ -106,7 +106,7 @@ mod tests {
             payload_type: None,
             description: None,
             tags: vec![],
-            payload_expr: None,
+            payload: None,
             payload_expr_scope: None,
         }
     }

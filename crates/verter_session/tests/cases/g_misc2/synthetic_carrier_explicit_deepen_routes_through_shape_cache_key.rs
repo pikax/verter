@@ -49,15 +49,22 @@
 //!   `SemanticNodeId(x.value_node)`, so it is structurally unmatched by
 //!   the scanner and unaffected.
 //!
-//!   Currently zero workspace consumers exercise the explicit-deepen
-//!   route — the carrier is always shallow in every projector,
-//!   reducer, registry, and graph-builder site. The
+//!   The route's ONE production consumer is the terminal-demand raise
+//!   of the synthetic-binding source arm:
+//!   `raise_synthetic_binding_source_to_hot` ->
+//!   `deepen_synthetic_binding_to_hot`
+//!   (`src/project_semantic_dispatch/semantic_source.rs`) — shell /
+//!   carrier callers intern the terminal
+//!   `SemanticNodeData::SyntheticBinding` node (shallow-by-default),
+//!   while terminal-demand callers (`Expanded` / `Identity`) deepen
+//!   through the content-free `ShapeCacheKey::synthetic_binding_whole*`
+//!   identity via `ShapeCacheDb`. The carrier stays shallow in every
+//!   OTHER projector, reducer, registry, and graph-builder site. The
 //!   `tests/cases/g_misc0/synthetic_carrier_explicit_deepen_proof.rs` integration
 //!   test exercises the content-free cache-key identity via the
 //!   `ShapeCacheDb::insert_synthetic_carrier_deep_for_test` /
 //!   `get_synthetic_carrier_deep_for_test` `#[cfg(any(test,
-//!   debug_assertions))]` helpers, proving the route is well-defined
-//!   for any future consumer that needs it.
+//!   debug_assertions))]` helpers.
 //!
 //! GUARD-LOCAL SCANNER RECORD (this is a bounded residual SYNTACTIC
 //! supplement, NOT a structural assert):

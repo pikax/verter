@@ -1,78 +1,72 @@
-//! Shallow preservation, imported-route fast paths, and deep slot/type
-//! ref resolution methods on `ComponentMetaQueryEngine<'a>`.
+//! Shallow-preservation fast paths for the macro-field expander, decided in
+//! NODE DOMAIN on `ComponentMetaQueryEngine<'a>`.
 //!
-//! Private inherent methods that classify how shallowly an
-//! imported / package-backed type expression should be preserved
-//! (without crossing the import boundary), and resolve transitive
-//! references inside slot / function bodies during deep walks.
+//! The classifier methods decide how shallowly a macro field's value
+//! publishes (without crossing the import boundary) off the shared graph
+//! carriers: the field's structural mirror member / authored member position
+//! raises ONCE through the shared dispatch bridge, and the imported-route /
+//! alias-unwrap / parent-parameter predicates walk `SemanticNodeData`
+//! directly. They read the engine's scope-routing caches via `&mut self` and
+//! have no engine-state references beyond what the parent module declares.
 //!
-//! The methods cross-call each other (`should_preserve_*`,
-//! `deep_resolve_*`) and read the engine's caches via `&self` /
-//! `&mut self`. They have no engine-state references beyond what the
-//! parent module already declares.
-//!
-//! Visibility:
-//! - `pub fn should_preserve_shallow_field_expr` (re-exported via
-//!   `mod.rs`'s engine surface; used by external callers in
-//!   `meta_resolve.rs`).
-//! - `pub fn deep_resolve_slot_function_refs` (used internally; kept
-//!   `pub` to match prior signature).
-//! - All other methods stay private (no visibility qualifier) and are
-//!   visible inside the `component_meta_query_engine` folder via the
-//!   parent-private locality rule (Rust child modules see parent
-//!   privates).
+//! Visibility: the fast-path classifier trio
+//! (`field_needs_parent_projection` / `macro_field_value_node` /
+//! `try_fast_shallow_field_expr`) is `pub(crate)` for the eval_env macro
+//! expander; the node predicates stay private and are visible inside the
+//! `component_meta_query_engine` folder via the parent-private locality rule
+//! (Rust child modules see parent privates).
 
-use rustc_hash::FxHashSet;
-use verter_type_expr::TypeExpr;
-
-use super::helpers::{is_package_canonical, strip_parens_expr, type_expr_references_type_params};
+use super::helpers::is_package_canonical;
 use super::{ComponentMetaQueryEngine, FastShallowFieldExpr, FastShallowFieldExprExactness};
+use rustc_hash::FxHashSet;
 
 impl<'a> ComponentMetaQueryEngine<'a> {
-    /// Field-level fast path predicate (Issue #3).
+    /// Field-level fast path predicate (node-domain).
     ///
-    /// Returns `true` when the macro field expression `parsed` MUST
-    /// take the slow parent-projection path; returns `false` when the
-    /// fast path applies and the closure can short-circuit to
-    /// `ExpansionResult::exact_concrete(parsed)` without dispatching
-    /// the macro's parent shell.
+    /// Returns `true` when the macro field at `output_path` MUST take the
+    /// slow parent-projection path; returns `false` when the fast path
+    /// applies and the closure can short-circuit to publishing the field's
+    /// authored source without dispatching the macro's parent shell.
     ///
-    /// The decision is "the field's parsed `TypeExpr` does not
-    /// transitively reference any name in the parent shell's prepared
-    /// `type_parameters`" — modulo shadowing introduced by mapped
-    /// types and function-type parameter lists. The shadow-aware
-    /// walk is delegated to
-    /// [`verter_semantic::analysis::type_expr_refs::field_references_type_params`].
+    /// The decision is "the field's authored value does not transitively
+    /// reference any name in the parent shell's prepared `type_parameters`",
+    /// decided in NODE DOMAIN off the shared graph carriers:
     ///
-    /// Returns `true` (slow path) on any of:
-    /// - `macro_type_arg` does not resolve to a `Ref` after stripping
-    ///   parens (anonymous parent shell — no type params to compare,
-    ///   but the slow path remains the safe default for compound
-    ///   shapes like `Pick<X, K>` whose type-argument substitution
-    ///   matters);
-    /// - the parent shell's name does not resolve to a known root
-    ///   identity in the owner scope (defensive fallback);
-    /// - the prepared type decl is missing (cache miss → slow path);
-    /// - the prepared decl has a non-empty type-parameter list AND
-    ///   the field expression references at least one of those names.
-    ///
-    /// Returns `false` (fast path) when the prepared decl exists and
-    /// has either:
-    /// - an empty type-parameter list (no params to reference); or
-    /// - a non-empty list whose names are all absent from the field
-    ///   expression (modulo shadowing).
+    /// - a non-reference parent shell (inline literal, compound shape) keeps
+    ///   the slow path (type-argument substitution matters there);
+    /// - an unresolvable / unprepared shell keeps the slow path (defensive);
+    /// - an EMPTY prepared type-parameter list is always the fast path;
+    /// - a non-empty list checks the field's authored member body node (the
+    ///   member value position raised through the one shared dispatch, where
+    ///   the declaration's own parameters are bound as `TypeParam` shells)
+    ///   for a `TypeParam` shell naming one of the parent's parameters. A
+    ///   member body that cannot be raised keeps the slow path.
     pub(crate) fn field_needs_parent_projection(
         &mut self,
         scope_canonical_id: &str,
-        parsed: &TypeExpr,
-        macro_type_arg: &TypeExpr,
+        macro_index: usize,
+        output_path: &[verter_semantic::analysis::type_eval_build::PathSegment],
     ) -> bool {
-        // Strip outer parens to expose the carrier shape.
-        let carrier = strip_parens_expr(macro_type_arg);
-        let TypeExpr::Ref { name, .. } = carrier else {
-            // Anonymous / compound carrier — keep the slow path.
+        use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
+
+        let Some(mirror) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+            self.ctx,
+            scope_canonical_id,
+            macro_index,
+        ) else {
             return true;
         };
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, mirror.node())
+        else {
+            return true;
+        };
+        // Anonymous / compound carrier - keep the slow path (parity with the
+        // former "carrier is not a Ref" rule; parens are structurally
+        // transparent in the mirror).
+        let Some((name, _)) = data.bare_ref_head() else {
+            return true;
+        };
+        let name = std::sync::Arc::clone(name);
         let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name.as_ref())
         else {
             return true;
@@ -82,1115 +76,632 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         else {
             return true;
         };
-        // Empty parameter list — no parent-param references possible.
-        // The fast path always applies.
+        // Empty parameter list - no parent-param references possible. The
+        // fast path always applies.
         if prepared.type_parameters.is_empty() {
             return false;
         }
-        // Predicate-correct walk with shadowing semantics.
-        verter_semantic::analysis::type_expr_refs::field_references_type_params(
-            parsed,
-            &prepared.type_parameters,
-        )
+        // Non-empty parameters: prove the FIELD's authored member body does
+        // not reference them, off the member value node raised through the
+        // one dispatch (declaration parameters are bound as `TypeParam`
+        // shells there). Only a single-member path has a directly
+        // addressable member slot; deeper paths keep the slow path.
+        let [MacroPathSegment::Member(field_name)] = output_path else {
+            return true;
+        };
+        let Some(member) = prepared.member_index.get(field_name.as_ref()) else {
+            return true;
+        };
+        let param_names: FxHashSet<&str> = prepared
+            .type_parameters
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect();
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+        let Some(member_node) = dispatch.raise_authored_locator_to_hot(
+            &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        ) else {
+            return true;
+        };
+        node_references_type_param_names(self.ctx, member_node.node(), &param_names, 0)
     }
 
-    /// Symbolic-preservation predicate for the define-props member rescue
-    /// path (replacement for
-    /// `TypeQueryEngine::should_preserve_shallow_field_expr`).
+    /// Node-domain fast-path classifier for one macro field: decide whether
+    /// the field's value can publish SHALLOW (its authored / resolved source)
+    /// without dispatching the macro's parent-shell projection.
     ///
-    /// Returns `true` when `expr` references a package-backed imported
-    /// type surface that the component-meta pipeline should keep in
-    /// symbolic form (as a bare `Ref` / `IndexedAccess`) instead of
-    /// materialising through dispatch. Routes through
-    /// `bare_name_resolve::resolve_bare_name_in_scope` +
-    /// `ctx.prepared_type_decl` — no `SessionSolverHost`/`TypeSolverHost`
-    /// dependency.
-    pub fn should_preserve_shallow_field_expr(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> bool {
-        // Cycle-detection set keyed on the borrowed address of each
-        // `TypeExpr` rather than a deep value clone. `TypeExpr` is an
-        // enum whose `clone()` recursively duplicates the entire
-        // subtree; storing each visited expression as a value made
-        // every recursion node's insert O(subtree-size) and combined
-        // with the recursion turned the predicate into O(N^2) on tree
-        // size. ChatMessage's `UIMessage<TMetadata, TDataParts, TTools>`
-        // surface produces deep enough trees that the quadratic blew
-        // up to >1 minute per field. Address-based dedup is O(1) per
-        // node and preserves the original cycle-break contract: the
-        // recursion only re-enters a node if the SAME borrow (same
-        // address) is reached, which is what value-equality was
-        // approximating. A different `TypeExpr` value at a different
-        // address still recurses normally — there is no cross-call
-        // reuse expectation since each call originates from a unique
-        // root.
-        let mut active_exprs = rustc_hash::FxHashSet::<usize>::default();
-        let mut active_refs = rustc_hash::FxHashSet::<String>::default();
-        self.should_preserve_shallow_field_expr_inner(
-            scope_canonical_id,
-            expr,
-            &mut active_exprs,
-            &mut active_refs,
-        )
-    }
-
-    fn should_preserve_shallow_field_expr_inner(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-        active_exprs: &mut rustc_hash::FxHashSet<usize>,
-        active_refs: &mut rustc_hash::FxHashSet<String>,
-    ) -> bool {
-        use verter_type_expr::ObjectMember;
-
-        let expr_addr = expr as *const TypeExpr as usize;
-        if !active_exprs.insert(expr_addr) {
-            return false;
-        }
-        let preserve = if self.should_preserve_imported_bare_ref(scope_canonical_id, expr)
-            || self.should_preserve_imported_member_path(scope_canonical_id, expr)
-            || self.should_preserve_imported_utility_route(scope_canonical_id, expr)
-            || self.should_preserve_package_member_path(scope_canonical_id, expr)
-        {
-            true
-        } else {
-            match expr {
-                TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
-                    members.iter().any(|member| {
-                        self.should_preserve_shallow_field_expr_inner(
-                            scope_canonical_id,
-                            member,
-                            active_exprs,
-                            active_refs,
-                        )
-                    })
-                }
-                TypeExpr::Array { element, .. }
-                | TypeExpr::KeyOf(element)
-                | TypeExpr::Rest(element)
-                | TypeExpr::Parenthesized(element) => self
-                    .should_preserve_shallow_field_expr_inner(
-                        scope_canonical_id,
-                        element,
-                        active_exprs,
-                        active_refs,
-                    ),
-                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
-                    self.should_preserve_shallow_field_expr_inner(
-                        scope_canonical_id,
-                        &element.ty,
-                        active_exprs,
-                        active_refs,
-                    )
-                }),
-                TypeExpr::Object(object) => {
-                    object.properties.iter().any(|member| match member {
-                        ObjectMember::Property(property) => self
-                            .should_preserve_shallow_field_expr_inner(
-                                scope_canonical_id,
-                                &property.ty,
-                                active_exprs,
-                                active_refs,
-                            ),
-                        ObjectMember::IndexSignature(signature) => {
-                            self.should_preserve_shallow_field_expr_inner(
-                                scope_canonical_id,
-                                &signature.key_type,
-                                active_exprs,
-                                active_refs,
-                            ) || self.should_preserve_shallow_field_expr_inner(
-                                scope_canonical_id,
-                                &signature.value_type,
-                                active_exprs,
-                                active_refs,
-                            )
-                        }
-                        ObjectMember::CallSignature(function)
-                        | ObjectMember::ConstructSignature(function) => {
-                            function.parameters.iter().any(|parameter| {
-                                self.should_preserve_shallow_field_expr_inner(
-                                    scope_canonical_id,
-                                    &parameter.ty,
-                                    active_exprs,
-                                    active_refs,
-                                )
-                            }) || function.return_type.as_deref().is_some_and(|return_type| {
-                                self.should_preserve_shallow_field_expr_inner(
-                                    scope_canonical_id,
-                                    return_type,
-                                    active_exprs,
-                                    active_refs,
-                                )
-                            })
-                        }
-                        ObjectMember::Method(method) => {
-                            method.function.parameters.iter().any(|parameter| {
-                                self.should_preserve_shallow_field_expr_inner(
-                                    scope_canonical_id,
-                                    &parameter.ty,
-                                    active_exprs,
-                                    active_refs,
-                                )
-                            }) || method.function.return_type.as_deref().is_some_and(
-                                |return_type| {
-                                    self.should_preserve_shallow_field_expr_inner(
-                                        scope_canonical_id,
-                                        return_type,
-                                        active_exprs,
-                                        active_refs,
-                                    )
-                                },
-                            )
-                        }
-                    })
-                }
-                // A constructor type's signature is checked identically to a
-                // function type's (same `FunctionExpr` payload).
-                TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
-                    function.parameters.iter().any(|parameter| {
-                        self.should_preserve_shallow_field_expr_inner(
-                            scope_canonical_id,
-                            &parameter.ty,
-                            active_exprs,
-                            active_refs,
-                        )
-                    }) || function.return_type.as_deref().is_some_and(|return_type| {
-                        self.should_preserve_shallow_field_expr_inner(
-                            scope_canonical_id,
-                            return_type,
-                            active_exprs,
-                            active_refs,
-                        )
-                    })
-                }
-                TypeExpr::Ref {
-                    name,
-                    type_arguments,
-                } => {
-                    let utility_with_args = !type_arguments.is_empty()
-                        && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name.as_ref()).is_some();
-                    if utility_with_args
-                        && type_arguments.iter().any(|argument| {
-                            self.should_preserve_shallow_field_expr_inner(
-                                scope_canonical_id,
-                                argument,
-                                active_exprs,
-                                active_refs,
-                            )
-                        })
-                    {
-                        true
-                    } else {
-                        self.should_preserve_transitive_ref(
-                            scope_canonical_id,
-                            name.as_ref(),
-                            active_exprs,
-                            active_refs,
-                        )
-                    }
-                }
-                TypeExpr::IndexedAccess { object, index } => {
-                    self.should_preserve_shallow_field_expr_inner(
-                        scope_canonical_id,
-                        object,
-                        active_exprs,
-                        active_refs,
-                    ) || self.should_preserve_shallow_field_expr_inner(
-                        scope_canonical_id,
-                        index,
-                        active_exprs,
-                        active_refs,
-                    )
-                }
-                _ => false,
-            }
-        };
-        active_exprs.remove(&expr_addr);
-        preserve
-    }
-
-    fn should_preserve_imported_bare_ref(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> bool {
-        let stripped = strip_parens_expr(expr);
-        let TypeExpr::Ref {
-            name,
-            type_arguments,
-        } = stripped
-        else {
-            return false;
-        };
-        if !type_arguments.is_empty() {
-            return false;
-        }
-        if self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
-            != verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
-        {
-            return false;
-        }
-        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name.as_ref())
-        else {
-            return false;
-        };
-        let prepared = self
-            .ctx
-            .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name);
-        // Issue #11 / delegate the symbolic-vs-materialize
-        // decision to the shared helper. The helper consumes
-        // `WorkspaceRead::is_workspace_owned` / `is_package_backed`
-        // (NOT path-substring `node_modules` checks), so package-backed
-        // refs (including pnpm-symlink + workspace-package-inside-
-        // node_modules edge cases) classify correctly.
-        let policy_ctx = crate::component_meta_resolution_policy::policy_helpers::PolicyContext {
-            is_workspace_owned: &|canonical| self.ctx.workspace_is_workspace_owned(canonical),
-            is_package_backed: &|canonical| self.ctx.workspace_is_package_backed(canonical),
-            route_preservation_context: false,
-            cycle_active_for_target: false,
-            shallow_preserve_list_entry: false,
-        };
-        if crate::component_meta_resolution_policy::policy_helpers::imported_ref_must_materialize_canonically(
-            &root_identity.canonical_id,
-            prepared.as_deref(),
-            &policy_ctx,
-        ) {
-            return false;
-        }
-        // Helper said "may preserve symbolic". Apply the legacy
-        // post-helper checks: package-backed refs (helper short-
-        // circuits, but the legacy site's `is_package_canonical`
-        // covered cases the helper rejects when it has no prepared
-        // body) and direct-member shapes for non-workspace-owned
-        // targets.
-        if self
-            .ctx
-            .workspace_is_package_backed(&root_identity.canonical_id)
-        {
-            return true;
-        }
-        let Some(prepared) = prepared else {
-            return false;
-        };
-        !prepared.member_index.is_empty()
-            || matches!(
-                prepared.projection_class,
-                verter_semantic::analysis::type_solver::prepared::PreparedProjectionClass::DirectMembers
-            )
-            || matches!(
-                prepared.kind,
-                verter_semantic::analysis::type_eval::TypeDeclKind::Class
-            )
-    }
-
-    fn should_preserve_imported_member_path(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> bool {
-        fn root_import_name(expr: &TypeExpr) -> Option<&str> {
-            match strip_parens_expr(expr) {
-                TypeExpr::IndexedAccess { object, .. } => root_import_name(object),
-                TypeExpr::Ref { name, .. } => Some(name.as_ref()),
-                _ => None,
-            }
-        }
-
-        let stripped = strip_parens_expr(expr);
-        let TypeExpr::IndexedAccess { object, .. } = stripped else {
-            return false;
-        };
-        let Some(name) = root_import_name(object) else {
-            return false;
-        };
-        if self.bare_ref_origin_in_scope(scope_canonical_id, name)
-            != verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
-        {
-            return false;
-        }
-        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name) else {
-            return false;
-        };
-        is_package_canonical(self.ctx, &root_identity.canonical_id)
-    }
-
-    fn should_preserve_imported_utility_route(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> bool {
-        let stripped = strip_parens_expr(expr);
-        let TypeExpr::Ref {
-            name,
-            type_arguments,
-        } = stripped
-        else {
-            return false;
-        };
-        if type_arguments.is_empty()
-            || verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
-                name.as_ref(),
-            )
-            .is_none()
-        {
-            return false;
-        }
-        type_arguments.iter().any(|argument| {
-            self.should_preserve_imported_bare_ref(scope_canonical_id, argument)
-                || self.should_preserve_imported_utility_route(scope_canonical_id, argument)
-                || self.should_preserve_package_member_path(scope_canonical_id, argument)
-                || matches!(
-                    strip_parens_expr(argument),
-                    TypeExpr::TypeOf(value_ref)
-                        if value_ref.path.first().is_some_and(|root| {
-                            self.bare_ref_origin_in_scope(scope_canonical_id, root)
-                                == verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
-                        })
-                )
-        })
-    }
-
-    fn should_preserve_package_member_path(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> bool {
-        fn root_import_name(expr: &TypeExpr) -> Option<&str> {
-            match strip_parens_expr(expr) {
-                TypeExpr::IndexedAccess { object, .. } => root_import_name(object),
-                TypeExpr::Ref { name, .. } => Some(name.as_ref()),
-                _ => None,
-            }
-        }
-
-        let Some(name) = root_import_name(expr) else {
-            return false;
-        };
-        if self.bare_ref_origin_in_scope(scope_canonical_id, name)
-            != verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
-        {
-            return false;
-        }
-        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name) else {
-            return false;
-        };
-        is_package_canonical(self.ctx, &root_identity.canonical_id)
-    }
-
-    fn should_preserve_transitive_ref(
-        &mut self,
-        scope_canonical_id: &str,
-        name: &str,
-        active_exprs: &mut rustc_hash::FxHashSet<usize>,
-        active_refs: &mut rustc_hash::FxHashSet<String>,
-    ) -> bool {
-        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name) else {
-            return false;
-        };
-        let cache_key = format!(
-            "{}::{}",
-            root_identity.canonical_id, root_identity.symbol_name
-        );
-        if is_package_canonical(self.ctx, &root_identity.canonical_id) {
-            return true;
-        }
-        if !active_refs.insert(cache_key.clone()) {
-            return false;
-        }
-        let result = self
-            .ctx
-            .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
-            .is_some_and(|prepared| {
-                if matches!(prepared.body, TypeExpr::TypeParameter(_)) {
-                    true
-                } else {
-                    self.should_preserve_shallow_field_expr_inner(
-                        root_identity.canonical_id.as_str(),
-                        &prepared.body,
-                        active_exprs,
-                        active_refs,
-                    )
-                }
-            });
-        active_refs.remove(&cache_key);
-        result
-    }
-
+    /// `field_value` is the field's value node — the structural mirror member
+    /// for an inline-literal shell, or the member value position raised
+    /// through the one dispatch for a named shell (see
+    /// [`Self::macro_field_value_node`]). The routes mirror the former
+    /// `TypeExpr`-shape classifier one-for-one, decided off
+    /// [`crate::semantic_query::SemanticNodeData`] carriers:
+    ///
+    /// 1. a direct imported utility route anywhere under the field value
+    ///    (a builtin utility applied over an imported argument) stays the
+    ///    SYMBOLIC authored carrier;
+    /// 2. an imported generic reference root stays the SYMBOLIC authored
+    ///    carrier;
+    /// 3. a single-member import path (`ImportedRoot['member']`): a
+    ///    package-backed root stays symbolic; a workspace-owned root
+    ///    materialises ONLY that member's authored position (path-precise) —
+    ///    unless the member references the root's type parameters (slow
+    ///    path);
+    /// 4. a bare workspace-owned no-param alias publishes the alias
+    ///    DECLARATION's authored body as the source, classified through the
+    ///    shared [`crate::meta_resolve::exactness::classify_node`];
+    /// 5. an imported generic route reached through containers / local alias
+    ///    hops stays the SYMBOLIC authored carrier.
     pub(crate) fn try_fast_shallow_field_expr(
         &mut self,
         scope_canonical_id: &str,
-        expr: &TypeExpr,
+        payload: &verter_type_expr::locators::MacroPayloadLocator,
+        field_value: crate::semantic_query::HotTypeRef,
     ) -> Option<FastShallowFieldExpr> {
         use verter_semantic::analysis::type_solver::host::BareRefOrigin;
 
-        fn single_member_import_root(expr: &TypeExpr) -> Option<(&str, &str)> {
-            let TypeExpr::IndexedAccess { object, index } = strip_parens_expr(expr) else {
-                return None;
-            };
-            let TypeExpr::Ref {
-                name,
-                type_arguments,
-            } = strip_parens_expr(object)
-            else {
-                return None;
-            };
-            if !type_arguments.is_empty() {
-                return None;
-            }
-            let TypeExpr::Literal(verter_type_expr::LiteralValue::String(member_name)) =
-                strip_parens_expr(index)
-            else {
-                return None;
-            };
-            Some((name.as_ref(), member_name.as_str()))
-        }
-
-        fn fast_symbolic_imported_generic_route(
-            engine: &mut ComponentMetaQueryEngine<'_>,
-            scope_canonical_id: &str,
-            expr: &TypeExpr,
-            active_locals: &mut FxHashSet<String>,
-        ) -> bool {
-            match strip_parens_expr(expr) {
-                TypeExpr::Ref {
-                    name,
-                    type_arguments,
-                } => match engine.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()) {
-                    BareRefOrigin::Imported => !type_arguments.is_empty(),
-                    BareRefOrigin::Local if type_arguments.is_empty() => {
-                        let Some(root_identity) =
-                            engine.root_identity_in_scope(scope_canonical_id, name.as_ref())
-                        else {
-                            return false;
-                        };
-                        let active_key = format!(
-                            "{}::{}",
-                            root_identity.canonical_id, root_identity.symbol_name
-                        );
-                        if !active_locals.insert(active_key.clone()) {
-                            return false;
-                        }
-                        let preserve = engine
-                            .prepared_type_decl(
-                                &root_identity.canonical_id,
-                                &root_identity.symbol_name,
-                            )
-                            .is_some_and(|prepared| {
-                                fast_symbolic_imported_generic_route(
-                                    engine,
-                                    root_identity.canonical_id.as_str(),
-                                    &prepared.body,
-                                    active_locals,
-                                )
-                            });
-                        active_locals.remove(&active_key);
-                        preserve
-                    }
-                    _ => false,
-                },
-                TypeExpr::IndexedAccess { object, .. }
-                | TypeExpr::Array {
-                    element: object, ..
-                }
-                | TypeExpr::KeyOf(object)
-                | TypeExpr::Rest(object)
-                | TypeExpr::Parenthesized(object) => fast_symbolic_imported_generic_route(
-                    engine,
-                    scope_canonical_id,
-                    object,
-                    active_locals,
-                ),
-                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
-                    fast_symbolic_imported_generic_route(
-                        engine,
-                        scope_canonical_id,
-                        &element.ty,
-                        active_locals,
-                    )
-                }),
-                TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
-                    members.iter().any(|member| {
-                        fast_symbolic_imported_generic_route(
-                            engine,
-                            scope_canonical_id,
-                            member,
-                            active_locals,
-                        )
-                    })
-                }
-                _ => false,
-            }
-        }
-
-        fn collapse_same_file_imported_alias_chain(
-            engine: &mut ComponentMetaQueryEngine<'_>,
-            canonical_id: &str,
-            expr: &TypeExpr,
-        ) -> TypeExpr {
-            let mut current = expr.clone();
-            let mut visited = FxHashSet::<String>::default();
-
-            loop {
-                let TypeExpr::Ref {
-                    name,
-                    type_arguments,
-                } = strip_parens_expr(&current)
-                else {
-                    return current;
-                };
-                if !type_arguments.is_empty() || !visited.insert(name.to_string()) {
-                    return current;
-                }
-                let Some(root_identity) =
-                    engine.root_identity_in_scope(canonical_id, name.as_ref())
-                else {
-                    return current;
-                };
-                if root_identity.canonical_id != canonical_id {
-                    return current;
-                }
-                let Some(prepared) = engine
-                    .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
-                else {
-                    return current;
-                };
-                current = prepared.body.clone();
-            }
-        }
-
-        fn imported_value_route_arg(
-            engine: &mut ComponentMetaQueryEngine<'_>,
-            scope_canonical_id: &str,
-            expr: &TypeExpr,
-        ) -> bool {
-            match strip_parens_expr(expr) {
-                TypeExpr::TypeOf(verter_type_expr::ValueRef { path, .. }) => {
-                    path.first().is_some_and(|root| {
-                        engine.bare_ref_origin_in_scope(scope_canonical_id, root)
-                            == BareRefOrigin::Imported
-                    })
-                }
-                TypeExpr::Parenthesized(inner) => {
-                    imported_value_route_arg(engine, scope_canonical_id, inner)
-                }
-                _ => false,
-            }
-        }
-
-        fn contains_direct_imported_utility_route(
-            engine: &mut ComponentMetaQueryEngine<'_>,
-            scope_canonical_id: &str,
-            expr: &TypeExpr,
-        ) -> bool {
-            fn imported_route_arg(
-                engine: &mut ComponentMetaQueryEngine<'_>,
-                scope_canonical_id: &str,
-                expr: &TypeExpr,
-            ) -> bool {
-                match strip_parens_expr(expr) {
-                    TypeExpr::Ref {
-                        name,
-                        type_arguments,
-                    } => {
-                        (type_arguments.is_empty()
-                            && engine.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
-                                == BareRefOrigin::Imported)
-                            || imported_value_route_arg(engine, scope_canonical_id, expr)
-                            || contains_direct_imported_utility_route(
-                                engine,
-                                scope_canonical_id,
-                                expr,
-                            )
-                    }
-                    TypeExpr::IndexedAccess { object, .. } => {
-                        imported_route_arg(engine, scope_canonical_id, object)
-                    }
-                    TypeExpr::TypeOf(_) => {
-                        imported_value_route_arg(engine, scope_canonical_id, expr)
-                    }
-                    TypeExpr::Parenthesized(inner) => {
-                        imported_route_arg(engine, scope_canonical_id, inner)
-                    }
-                    _ => contains_direct_imported_utility_route(engine, scope_canonical_id, expr),
-                }
-            }
-
-            match strip_parens_expr(expr) {
-                TypeExpr::Union(members) | TypeExpr::Intersection(members) => members.iter().any(
-                    |member| {
-                        contains_direct_imported_utility_route(engine, scope_canonical_id, member)
-                    },
-                ),
-                TypeExpr::Array { element, .. }
-                | TypeExpr::Rest(element)
-                | TypeExpr::Parenthesized(element) => {
-                    contains_direct_imported_utility_route(engine, scope_canonical_id, element)
-                }
-                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
-                    contains_direct_imported_utility_route(
-                        engine,
-                        scope_canonical_id,
-                        &element.ty,
-                    )
-                }),
-                TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
-                    verter_type_expr::ObjectMember::Property(property) => {
-                        contains_direct_imported_utility_route(
-                            engine,
-                            scope_canonical_id,
-                            &property.ty,
-                        )
-                    }
-                    verter_type_expr::ObjectMember::Method(method) => {
-                        method.function.parameters.iter().any(|parameter| {
-                            contains_direct_imported_utility_route(
-                                engine,
-                                scope_canonical_id,
-                                &parameter.ty,
-                            )
-                        }) || method
-                            .function
-                            .return_type
-                            .as_deref()
-                            .is_some_and(|return_type| {
-                                contains_direct_imported_utility_route(
-                                    engine,
-                                    scope_canonical_id,
-                                    return_type,
-                                )
-                            })
-                    }
-                    verter_type_expr::ObjectMember::CallSignature(function)
-                    | verter_type_expr::ObjectMember::ConstructSignature(
-                        function,
-                    ) => function.parameters.iter().any(|parameter| {
-                        contains_direct_imported_utility_route(
-                            engine,
-                            scope_canonical_id,
-                            &parameter.ty,
-                        )
-                    }) || function.return_type.as_deref().is_some_and(|return_type| {
-                        contains_direct_imported_utility_route(
-                            engine,
-                            scope_canonical_id,
-                            return_type,
-                        )
-                    }),
-                    verter_type_expr::ObjectMember::IndexSignature(index) => {
-                        contains_direct_imported_utility_route(
-                            engine,
-                            scope_canonical_id,
-                            &index.key_type,
-                        ) || contains_direct_imported_utility_route(
-                            engine,
-                            scope_canonical_id,
-                            &index.value_type,
-                        )
-                    }
-                }),
-                // A constructor type's signature is searched identically to a
-                // function type's (same `FunctionExpr` payload).
-                TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => function
-                    .parameters
-                    .iter()
-                    .any(|parameter| {
-                        contains_direct_imported_utility_route(
-                            engine,
-                            scope_canonical_id,
-                            &parameter.ty,
-                        )
-                    })
-                    || function.return_type.as_deref().is_some_and(|return_type| {
-                        contains_direct_imported_utility_route(
-                            engine,
-                            scope_canonical_id,
-                            return_type,
-                        )
-                    }),
-                TypeExpr::Ref {
-                    name,
-                    type_arguments,
-                } if !type_arguments.is_empty()
-                    && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
-                        name.as_ref(),
-                    )
-                    .is_some() =>
-                {
-                    type_arguments.iter().any(|argument| {
-                        imported_route_arg(engine, scope_canonical_id, argument)
-                    })
-                }
-                _ => false,
-            }
-        }
-
-        if contains_direct_imported_utility_route(self, scope_canonical_id, expr) {
-            return Some(FastShallowFieldExpr {
-                expr: expr.clone(),
+        let authored_source = || {
+            verter_type_expr::facts::SemanticTypeSource::Authored(
+                verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload.clone()),
+            )
+        };
+        let symbolic_preserve = |hot: crate::semantic_query::HotTypeRef| {
+            Some(FastShallowFieldExpr {
+                hot,
+                semantic_source: authored_source(),
                 exactness: FastShallowFieldExprExactness::Symbolic,
-            });
+            })
+        };
+
+        // (1) Direct imported utility route anywhere under the field value.
+        if self.node_contains_imported_utility_route(scope_canonical_id, field_value.node(), 0) {
+            return symbolic_preserve(field_value);
         }
 
-        // Note: a prior `fast_symbolic_imported_bare_ref_route` branch lived
-        // here and short-circuited bare imported Refs whose name ended with
-        // "Props". That predicate was a nominal heuristic — the Typed-IR-Only
-        // Resolver Rule (CLAUDE.md §3.4) bans suffix-based role classification.
-        // The standard projector path below handles bare imported Refs
-        // correctly without the shortcut.
+        let root_data =
+            crate::project_semantic_dispatch::node_data_for(self.ctx, field_value.node())?;
 
-        if let TypeExpr::Ref {
-            name,
-            type_arguments,
-        } = strip_parens_expr(expr)
-        {
-            if !type_arguments.is_empty()
+        // (2) Imported generic reference root.
+        if let Some((name, _)) = root_data.bare_ref_head() {
+            if !root_data.carrier_type_args().is_empty()
                 && self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
                     == BareRefOrigin::Imported
             {
+                let name = std::sync::Arc::clone(name);
                 let _ = self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
-                return Some(FastShallowFieldExpr {
-                    expr: expr.clone(),
-                    exactness: FastShallowFieldExprExactness::Symbolic,
-                });
+                return symbolic_preserve(field_value);
             }
         }
-
-        if let Some((root_name, member_name)) = single_member_import_root(expr) {
-            if self.bare_ref_origin_in_scope(scope_canonical_id, root_name)
-                == BareRefOrigin::Imported
+        if let crate::semantic_query::SemanticNodeData::InstantiationRef { base, .. } =
+            root_data.as_ref()
+        {
+            // A pre-resolved generic application whose base lives outside the
+            // owner scope is the imported-generic class.
+            if base.canonical_id.as_ref() != scope_canonical_id
+                && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                    base.decl_name.as_ref(),
+                )
+                .is_none()
             {
-                let root_identity = self.root_identity_in_scope(scope_canonical_id, root_name)?;
-                if is_package_canonical(self.ctx, &root_identity.canonical_id) {
-                    return Some(FastShallowFieldExpr {
-                        expr: expr.clone(),
-                        exactness: FastShallowFieldExprExactness::Symbolic,
-                    });
-                }
-                let prepared = self
-                    .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)?;
-                let member = prepared.member(member_name)?;
-                if type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
-                    return None;
-                }
-                let collapsed = collapse_same_file_imported_alias_chain(
-                    self,
-                    &root_identity.canonical_id,
-                    &member.ty,
-                );
-                return Some(FastShallowFieldExpr {
-                    expr: collapsed,
-                    exactness: FastShallowFieldExprExactness::Concrete,
-                });
+                return symbolic_preserve(field_value);
             }
         }
 
-        if let Some(expanded) = self.try_fast_expand_shallow_alias_body(scope_canonical_id, expr) {
-            // Classify the unwrapped alias body via the shared
-            // [`crate::meta_resolve::exactness::classify_type_expr`]
-            // predicate. `type MyStr = string` then publishes
-            // `Concrete` instead of `Symbolic`; nested or open shapes
-            // (Ref, IndexedAccess, KeyOf, Conditional, TypeParameter,
-            // Mapped, …) stay symbolic. The slot-binding synthesis
-            // path uses the graph-native sibling
-            // [`crate::meta_resolve::exactness::classify_node`] so
-            // both surfaces share identical alias-unwrap + closed-object
-            // semantics.
-            let exactness = match crate::meta_resolve::exactness::classify_type_expr(&expanded) {
-                verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
-                    FastShallowFieldExprExactness::Concrete
+        // (3) Single-member import path: `ImportedRoot['member']`.
+        if let crate::semantic_query::SemanticNodeData::IndexedAccess { object, index } =
+            root_data.as_ref()
+        {
+            if let crate::semantic_query::IndexKey::String(member_name) = index {
+                let object_data =
+                    crate::project_semantic_dispatch::node_data_for(self.ctx, *object);
+                let root_name = object_data.as_deref().and_then(|data| {
+                    data.bare_ref_head().and_then(|(name, _)| {
+                        data.carrier_type_args()
+                            .is_empty()
+                            .then(|| std::sync::Arc::clone(name))
+                    })
+                });
+                if let Some(root_name) = root_name {
+                    if self.bare_ref_origin_in_scope(scope_canonical_id, root_name.as_ref())
+                        == BareRefOrigin::Imported
+                    {
+                        let root_identity =
+                            self.root_identity_in_scope(scope_canonical_id, root_name.as_ref())?;
+                        if is_package_canonical(self.ctx, &root_identity.canonical_id) {
+                            return symbolic_preserve(field_value);
+                        }
+                        let member_name = std::sync::Arc::clone(member_name);
+                        let prepared = self.prepared_type_decl(
+                            &root_identity.canonical_id,
+                            &root_identity.symbol_name,
+                        )?;
+                        let member = prepared.member_index.get(member_name.as_ref())?.clone();
+                        let param_names: FxHashSet<&str> = prepared
+                            .type_parameters
+                            .iter()
+                            .map(|param| param.name.as_str())
+                            .collect();
+                        let dispatch =
+                            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                                self.ctx,
+                            );
+                        let member_node = dispatch.raise_authored_locator_to_hot(
+                            &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                                member.ty.clone(),
+                            ),
+                            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                                crate::semantic_query::ProjectionMode::Navigate,
+                            ),
+                        )?;
+                        if node_references_type_param_names(
+                            self.ctx,
+                            member_node.node(),
+                            &param_names,
+                            0,
+                        ) {
+                            return None;
+                        }
+                        let exactness = match crate::meta_resolve::exactness::classify_node(
+                            &dispatch,
+                            member_node.node(),
+                        ) {
+                            verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+                                FastShallowFieldExprExactness::Concrete
+                            }
+                            _ => FastShallowFieldExprExactness::Symbolic,
+                        };
+                        return Some(FastShallowFieldExpr {
+                            hot: member_node,
+                            semantic_source: verter_type_expr::facts::SemanticTypeSource::Authored(
+                                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                                    member.ty,
+                                ),
+                            ),
+                            exactness,
+                        });
+                    }
                 }
-                _ => FastShallowFieldExprExactness::Symbolic,
-            };
-            return Some(FastShallowFieldExpr {
-                expr: expanded,
-                exactness,
-            });
+            }
         }
 
+        // (4) Bare workspace-owned no-param alias: publish the alias
+        // DECLARATION's authored body as the source (the one engine lowers it
+        // on demand), classified through the shared exactness predicate.
+        if let Some((name, _)) = root_data.bare_ref_head() {
+            if root_data.carrier_type_args().is_empty()
+                && matches!(
+                    self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()),
+                    BareRefOrigin::Imported | BareRefOrigin::Local
+                )
+            {
+                let name = std::sync::Arc::clone(name);
+                if let Some(root_identity) =
+                    self.root_identity_in_scope(scope_canonical_id, name.as_ref())
+                {
+                    if !is_package_canonical(self.ctx, &root_identity.canonical_id) {
+                        if let Some(prepared) = self.prepared_type_decl(
+                            &root_identity.canonical_id,
+                            &root_identity.symbol_name,
+                        ) {
+                            if prepared.type_parameters.is_empty() {
+                                let body_slot = prepared.body_facts.body_slot.clone();
+                                let dispatch =
+                                    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                                        self.ctx,
+                                    );
+                                if let Some(body_node) = dispatch.raise_authored_locator_to_hot(
+                                    &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                                        body_slot.clone(),
+                                    ),
+                                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                                        crate::semantic_query::ProjectionMode::Navigate,
+                                    ),
+                                ) {
+                                    let exactness =
+                                        match crate::meta_resolve::exactness::classify_node(
+                                            &dispatch,
+                                            body_node.node(),
+                                        ) {
+                                            verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+                                                FastShallowFieldExprExactness::Concrete
+                                            }
+                                            _ => FastShallowFieldExprExactness::Symbolic,
+                                        };
+                                    return Some(FastShallowFieldExpr {
+                                        hot: body_node,
+                                        semantic_source:
+                                            verter_type_expr::facts::SemanticTypeSource::Authored(
+                                                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                                                    body_slot,
+                                                ),
+                                            ),
+                                        exactness,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // (5) Imported generic route through containers / local alias hops.
         let mut active_locals = FxHashSet::default();
-        fast_symbolic_imported_generic_route(self, scope_canonical_id, expr, &mut active_locals)
-            .then(|| FastShallowFieldExpr {
-                expr: expr.clone(),
-                exactness: FastShallowFieldExprExactness::Symbolic,
-            })
+        self.node_has_imported_generic_route(
+            scope_canonical_id,
+            field_value.node(),
+            &mut active_locals,
+            0,
+        )
+        .then(|| FastShallowFieldExpr {
+            hot: field_value,
+            semantic_source: authored_source(),
+            exactness: FastShallowFieldExprExactness::Symbolic,
+        })
     }
 
-    fn try_fast_expand_shallow_alias_body(
+    /// Resolve the value NODE for the macro field at `output_path` —
+    /// the fast-path classification subject:
+    ///
+    /// - an inline-literal shell serves the field's structural mirror member
+    ///   (a pure carrier-data read of the interned macro type-argument
+    ///   graph);
+    /// - a named workspace-owned shell raises the field's authored member
+    ///   value position through the one dispatch (the memoized
+    ///   `LowerLocator` query).
+    ///
+    /// `None` = no directly addressable field value (compound shells,
+    /// package-backed roots, deep paths) — the caller skips the fast paths.
+    pub(crate) fn macro_field_value_node(
         &mut self,
         scope_canonical_id: &str,
-        expr: &TypeExpr,
-    ) -> Option<TypeExpr> {
-        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+        macro_index: usize,
+        output_path: &[verter_semantic::analysis::type_eval_build::PathSegment],
+    ) -> Option<crate::semantic_query::HotTypeRef> {
+        use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
 
-        let TypeExpr::Ref {
-            name,
-            type_arguments,
-        } = strip_parens_expr(expr)
-        else {
+        let [MacroPathSegment::Member(field_name)] = output_path else {
             return None;
         };
-        if !type_arguments.is_empty() {
+        let mirror = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+            self.ctx,
+            scope_canonical_id,
+            macro_index,
+        )?;
+        let data = crate::project_semantic_dispatch::node_data_for(self.ctx, mirror.node())?;
+        if let crate::semantic_query::SemanticNodeData::Object(surface) = data.as_ref() {
+            return surface
+                .members
+                .iter()
+                .find(|member| member.name.as_ref() == field_name.as_ref())
+                .map(|member| crate::semantic_query::HotTypeRef::new(member.value));
+        }
+        let (name, _) = data.bare_ref_head()?;
+        if !data.carrier_type_args().is_empty() {
             return None;
         }
-        if !matches!(
-            self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()),
-            BareRefOrigin::Imported | BareRefOrigin::Local
-        ) {
-            return None;
-        }
+        let name = std::sync::Arc::clone(name);
         let root_identity = self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
         if is_package_canonical(self.ctx, &root_identity.canonical_id) {
             return None;
         }
         let prepared =
             self.prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)?;
-        if !prepared.type_parameters.is_empty() {
-            return None;
-        }
-        let mut active_aliases = FxHashSet::default();
-        let expanded = self.rewrite_fast_shallow_alias_body(
-            root_identity.canonical_id.as_str(),
-            &prepared.body,
-            &mut active_aliases,
-        )?;
-        (expanded != *expr).then_some(expanded)
+        let member = prepared.member_index.get(field_name.as_ref())?;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+        dispatch.raise_authored_locator_to_hot(
+            &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        )
     }
 
-    fn rewrite_fast_shallow_alias_body(
+    /// Whether any node under `node` is a builtin utility application over an
+    /// imported argument — the node-domain mirror of the former
+    /// `contains_direct_imported_utility_route` `TypeExpr` walk.
+    fn node_contains_imported_utility_route(
         &mut self,
         scope_canonical_id: &str,
-        expr: &TypeExpr,
-        active_aliases: &mut FxHashSet<String>,
-    ) -> Option<TypeExpr> {
+        node: crate::semantic_query::SemanticNodeId,
+        depth: u32,
+    ) -> bool {
+        use crate::semantic_query::SemanticNodeData;
+
+        if depth > 256 {
+            return false;
+        }
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node) else {
+            return false;
+        };
+        let utility_over_imported_arg =
+            |engine: &mut Self, args: &[crate::semantic_query::SemanticNodeId]| {
+                args.iter().any(|&arg| {
+                    engine.node_is_imported_utility_arg(scope_canonical_id, arg, depth + 1)
+                })
+            };
+        match data.as_ref() {
+            data_ref if data_ref.bare_ref_head().is_some() => {
+                let args = data_ref.carrier_type_args();
+                let is_utility = data_ref.bare_ref_head().is_some_and(|(name, _)| {
+                    verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                        name.as_ref(),
+                    )
+                    .is_some()
+                });
+                if is_utility && !args.is_empty() && utility_over_imported_arg(self, args) {
+                    return true;
+                }
+                args.iter().any(|&arg| {
+                    self.node_contains_imported_utility_route(scope_canonical_id, arg, depth + 1)
+                })
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let is_utility =
+                    verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                        base.decl_name.as_ref(),
+                    )
+                    .is_some();
+                if is_utility && !args.is_empty() && utility_over_imported_arg(self, args) {
+                    return true;
+                }
+                args.iter().any(|&arg| {
+                    self.node_contains_imported_utility_route(scope_canonical_id, arg, depth + 1)
+                })
+            }
+            SemanticNodeData::Union(members)
+            | SemanticNodeData::Intersection(members)
+            | SemanticNodeData::MergedDecl {
+                contributors: members,
+            } => members.iter().any(|&member| {
+                self.node_contains_imported_utility_route(scope_canonical_id, member, depth + 1)
+            }),
+            SemanticNodeData::Array { element, .. } => {
+                self.node_contains_imported_utility_route(scope_canonical_id, *element, depth + 1)
+            }
+            SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|element| {
+                self.node_contains_imported_utility_route(
+                    scope_canonical_id,
+                    element.value,
+                    depth + 1,
+                )
+            }),
+            SemanticNodeData::Object(surface) => {
+                surface.members.iter().any(|member| {
+                    self.node_contains_imported_utility_route(
+                        scope_canonical_id,
+                        member.value,
+                        depth + 1,
+                    )
+                }) || surface.index_signatures.iter().any(|signature| {
+                    self.node_contains_imported_utility_route(
+                        scope_canonical_id,
+                        signature.key_type,
+                        depth + 1,
+                    ) || self.node_contains_imported_utility_route(
+                        scope_canonical_id,
+                        signature.value_type,
+                        depth + 1,
+                    )
+                }) || surface.call_signatures.iter().any(|&signature| {
+                    self.node_contains_imported_utility_route(
+                        scope_canonical_id,
+                        signature,
+                        depth + 1,
+                    )
+                }) || surface.construct_signatures.iter().any(|&signature| {
+                    self.node_contains_imported_utility_route(
+                        scope_canonical_id,
+                        signature,
+                        depth + 1,
+                    )
+                })
+            }
+            SemanticNodeData::Function {
+                params,
+                return_type,
+                ..
+            } => {
+                params.iter().any(|param| {
+                    self.node_contains_imported_utility_route(
+                        scope_canonical_id,
+                        param.ty,
+                        depth + 1,
+                    )
+                }) || self.node_contains_imported_utility_route(
+                    scope_canonical_id,
+                    *return_type,
+                    depth + 1,
+                )
+            }
+            SemanticNodeData::ConstructorType { signature } => {
+                self.node_contains_imported_utility_route(scope_canonical_id, *signature, depth + 1)
+            }
+            SemanticNodeData::Alias(inner) => {
+                self.node_contains_imported_utility_route(scope_canonical_id, *inner, depth + 1)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether one utility ARGUMENT node is imported-routed: an imported bare
+    /// reference, an imported `typeof` root, an indexed access over an
+    /// imported root, a foreign resolved reference, or (recursively) another
+    /// imported utility route.
+    fn node_is_imported_utility_arg(
+        &mut self,
+        scope_canonical_id: &str,
+        node: crate::semantic_query::SemanticNodeId,
+        depth: u32,
+    ) -> bool {
+        use crate::semantic_query::SemanticNodeData;
+
+        if depth > 256 {
+            return false;
+        }
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node) else {
+            return false;
+        };
+        if let Some((name, _)) = data.bare_ref_head() {
+            let name = std::sync::Arc::clone(name);
+            if data.carrier_type_args().is_empty()
+                && self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
+                    == verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
+            {
+                return true;
+            }
+            return self.node_contains_imported_utility_route(scope_canonical_id, node, depth);
+        }
+        if let Some((value_root, _)) = data.typeof_head() {
+            return self.bare_ref_origin_in_scope(scope_canonical_id, value_root.name.as_ref())
+                == verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported;
+        }
+        match data.as_ref() {
+            SemanticNodeData::IndexedAccess { object, .. } => {
+                self.node_is_imported_utility_arg(scope_canonical_id, *object, depth + 1)
+            }
+            SemanticNodeData::DeclRef { identity } => {
+                identity.canonical_id.as_ref() != scope_canonical_id
+            }
+            SemanticNodeData::InstantiationRef { base, .. } => {
+                base.canonical_id.as_ref() != scope_canonical_id
+            }
+            _ => self.node_contains_imported_utility_route(scope_canonical_id, node, depth),
+        }
+    }
+
+    /// Whether the field value reaches an IMPORTED GENERIC reference through
+    /// containers or workspace-local alias hops — the node-domain mirror of
+    /// the former `fast_symbolic_imported_generic_route` walk. Local alias
+    /// hops raise the alias declaration's authored body through the one
+    /// dispatch (the memoized `LowerLocator` query), guarded by an active-set.
+    fn node_has_imported_generic_route(
+        &mut self,
+        scope_canonical_id: &str,
+        node: crate::semantic_query::SemanticNodeId,
+        active_locals: &mut FxHashSet<String>,
+        depth: u32,
+    ) -> bool {
+        use crate::semantic_query::SemanticNodeData;
         use verter_semantic::analysis::type_solver::host::BareRefOrigin;
 
-        match expr {
-            TypeExpr::Primitive(_)
-            | TypeExpr::Literal(_)
-            | TypeExpr::TypeOf(_)
-            | TypeExpr::Infer { .. }
-            | TypeExpr::RecursiveRef { .. }
-            | TypeExpr::Unknown { .. }
-            // Synthetic carriers are intrinsic terminals — they are NOT
-            // a parent-shell Ref and pass through verbatim from the fast
-            // shallow-alias rewriter (the carrier is never resolved as a
-            // type alias).
-            | TypeExpr::SyntheticSlotBinding(_)
-            // An import-type is a cross-file symbolic carrier — like the
-            // `Unknown` terminal, the fast shallow-alias rewriter passes it
-            // through verbatim rather than resolving it as a type alias.
-            | TypeExpr::ImportType { .. }
-            | TypeExpr::TypeParameter(_) => Some(expr.clone()),
-            TypeExpr::Parenthesized(inner) => Some(TypeExpr::Parenthesized(std::sync::Arc::new(
-                self.rewrite_fast_shallow_alias_body(scope_canonical_id, inner, active_aliases)?,
-            ))),
-            TypeExpr::KeyOf(inner) => Some(TypeExpr::KeyOf(std::sync::Arc::new(
-                self.rewrite_fast_shallow_alias_body(scope_canonical_id, inner, active_aliases)?,
-            ))),
-            TypeExpr::Rest(inner) => Some(TypeExpr::Rest(std::sync::Arc::new(
-                self.rewrite_fast_shallow_alias_body(scope_canonical_id, inner, active_aliases)?,
-            ))),
-            TypeExpr::Array { element, readonly } => Some(TypeExpr::Array {
-                element: std::sync::Arc::new(self.rewrite_fast_shallow_alias_body(
-                    scope_canonical_id,
-                    element,
-                    active_aliases,
-                )?),
-                readonly: *readonly,
-            }),
-            TypeExpr::Tuple { elements, readonly } => {
-                let elements = elements
-                    .iter()
-                    .map(|element| {
-                        Some(verter_type_expr::TupleElement {
-                            label: element.label.clone(),
-                            ty: self.rewrite_fast_shallow_alias_body(
-                                scope_canonical_id,
-                                &element.ty,
-                                active_aliases,
-                            )?,
-                            optional: element.optional,
-                            rest: element.rest,
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                Some(TypeExpr::Tuple {
-                    elements: std::sync::Arc::from(elements),
-                    readonly: *readonly,
-                })
-            }
-            TypeExpr::Union(members) => Some(TypeExpr::Union(std::sync::Arc::from(
-                members
-                    .iter()
-                    .map(|member| {
-                        self.rewrite_fast_shallow_alias_body(
-                            scope_canonical_id,
-                            member,
-                            active_aliases,
-                        )
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-            ))),
-            TypeExpr::Intersection(members) => Some(TypeExpr::Intersection(std::sync::Arc::from(
-                members
-                    .iter()
-                    .map(|member| {
-                        self.rewrite_fast_shallow_alias_body(
-                            scope_canonical_id,
-                            member,
-                            active_aliases,
-                        )
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-            ))),
-            TypeExpr::TemplateLiteral {
-                quasis,
-                expressions,
-            } => Some(TypeExpr::TemplateLiteral {
-                quasis: quasis.clone(),
-                expressions: std::sync::Arc::from(
-                    expressions
-                        .iter()
-                        .map(|expression| {
-                            self.rewrite_fast_shallow_alias_body(
-                                scope_canonical_id,
-                                expression,
-                                active_aliases,
-                            )
-                        })
-                        .collect::<Option<Vec<_>>>()?,
-                ),
-            }),
-            // Both a function type and a constructor type carry the same
-            // `FunctionExpr` payload and rewrite their signature identically;
-            // the constructor-ness is preserved by reconstructing the matching
-            // variant at the end (a `ConstructorType` is never flattened to a
-            // plain `Function`).
-            TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
-                let is_constructor = matches!(expr, TypeExpr::ConstructorType(_));
-                // Structure-preserving alias rewrite: keep the function's OXC
-                // signature spans and each parameter's span verbatim.
-                let parameters = function
-                    .parameters
-                    .iter()
-                    .map(|parameter| {
-                        let ty = self.rewrite_fast_shallow_alias_body(
-                            scope_canonical_id,
-                            &parameter.ty,
-                            active_aliases,
-                        )?;
-                        Some(verter_type_expr::FunctionParam::with_span(
-                            parameter.name.clone(),
-                            ty,
-                            parameter.optional,
-                            parameter.rest,
-                            parameter.span,
-                            parameter.has_ts_annotation,
-                        ))
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                let return_type = match function.return_type.as_deref() {
-                    Some(return_type) => Some(std::sync::Arc::new(
-                        self.rewrite_fast_shallow_alias_body(
-                            scope_canonical_id,
-                            return_type,
-                            active_aliases,
-                        )?,
-                    )),
-                    None => None,
-                };
-                let type_parameters = function
-                    .type_parameters
-                    .iter()
-                    .map(|parameter| {
-                        Some(verter_type_expr::TypeParam {
-                            name: parameter.name.clone(),
-                            constraint: match parameter.constraint.as_deref() {
-                                Some(constraint) => Some(std::sync::Arc::new(
-                                    self.rewrite_fast_shallow_alias_body(
-                                        scope_canonical_id,
-                                        constraint,
-                                        active_aliases,
-                                    )?,
-                                )),
-                                None => None,
-                            },
-                            default: match parameter.default.as_deref() {
-                                Some(default) => Some(std::sync::Arc::new(
-                                    self.rewrite_fast_shallow_alias_body(
-                                        scope_canonical_id,
-                                        default,
-                                        active_aliases,
-                                    )?,
-                                )),
-                                None => None,
-                            },
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                let rewritten = std::sync::Arc::new(verter_type_expr::FunctionExpr::with_spans(
-                    parameters,
-                    return_type,
-                    type_parameters,
-                    function.spans,
-                ));
-                Some(if is_constructor {
-                    TypeExpr::ConstructorType(rewritten)
-                } else {
-                    TypeExpr::Function(rewritten)
-                })
-            }
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } => {
-                if !type_arguments.is_empty() {
-                    return None;
-                }
-                match self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()) {
-                    BareRefOrigin::Imported | BareRefOrigin::Local => {
-                        let root_identity =
-                            self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
-                        if is_package_canonical(self.ctx, &root_identity.canonical_id) {
-                            return Some(expr.clone());
-                        }
-                        let active_key = format!(
-                            "{}::{}",
-                            root_identity.canonical_id, root_identity.symbol_name
-                        );
-                        if !active_aliases.insert(active_key.clone()) {
-                            return None;
-                        }
-                        let rewritten = self
-                            .prepared_type_decl(
-                                &root_identity.canonical_id,
-                                &root_identity.symbol_name,
-                            )
-                            .and_then(|prepared| {
-                                prepared.type_parameters.is_empty().then_some(prepared)
-                            })
-                            .and_then(|prepared| {
-                                self.rewrite_fast_shallow_alias_body(
-                                    root_identity.canonical_id.as_str(),
-                                    &prepared.body,
-                                    active_aliases,
-                                )
-                            });
-                        active_aliases.remove(&active_key);
-                        rewritten
+        if depth > 256 {
+            return false;
+        }
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(self.ctx, node) else {
+            return false;
+        };
+        if let Some((name, _)) = data.bare_ref_head() {
+            let name = std::sync::Arc::clone(name);
+            let args_empty = data.carrier_type_args().is_empty();
+            return match self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()) {
+                BareRefOrigin::Imported => !args_empty,
+                BareRefOrigin::Local if args_empty => {
+                    let Some(root_identity) =
+                        self.root_identity_in_scope(scope_canonical_id, name.as_ref())
+                    else {
+                        return false;
+                    };
+                    let active_key = format!(
+                        "{}::{}",
+                        root_identity.canonical_id, root_identity.symbol_name
+                    );
+                    if !active_locals.insert(active_key.clone()) {
+                        return false;
                     }
-                    _ => None,
+                    let preserve = self
+                        .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+                        .map(|prepared| prepared.body_facts.body_slot.clone())
+                        .and_then(|body_slot| {
+                            let dispatch =
+                                crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                                    self.ctx,
+                                );
+                            dispatch.raise_authored_locator_to_hot(
+                                &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                                    body_slot,
+                                ),
+                                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                                    crate::semantic_query::ProjectionMode::Navigate,
+                                ),
+                            )
+                        })
+                        .is_some_and(|body_node| {
+                            self.node_has_imported_generic_route(
+                                root_identity.canonical_id.as_str(),
+                                body_node.node(),
+                                active_locals,
+                                depth + 1,
+                            )
+                        });
+                    active_locals.remove(&active_key);
+                    preserve
                 }
+                _ => false,
+            };
+        }
+        match data.as_ref() {
+            SemanticNodeData::InstantiationRef { base, args } => {
+                (base.canonical_id.as_ref() != scope_canonical_id
+                    && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                        base.decl_name.as_ref(),
+                    )
+                    .is_none())
+                    || args.iter().any(|&arg| {
+                        self.node_has_imported_generic_route(
+                            scope_canonical_id,
+                            arg,
+                            active_locals,
+                            depth + 1,
+                        )
+                    })
             }
-            TypeExpr::Object(object) => object
-                .properties
-                .is_empty()
-                .then(|| TypeExpr::Object(object.clone())),
-            TypeExpr::IndexedAccess { .. }
-            | TypeExpr::Conditional { .. }
-            | TypeExpr::Mapped { .. } => None,
+            SemanticNodeData::IndexedAccess { object, .. } => self.node_has_imported_generic_route(
+                scope_canonical_id,
+                *object,
+                active_locals,
+                depth + 1,
+            ),
+            SemanticNodeData::Array { element, .. } => self.node_has_imported_generic_route(
+                scope_canonical_id,
+                *element,
+                active_locals,
+                depth + 1,
+            ),
+            SemanticNodeData::KeyOf { base } => self.node_has_imported_generic_route(
+                scope_canonical_id,
+                *base,
+                active_locals,
+                depth + 1,
+            ),
+            SemanticNodeData::Alias(inner) => self.node_has_imported_generic_route(
+                scope_canonical_id,
+                *inner,
+                active_locals,
+                depth + 1,
+            ),
+            SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|element| {
+                self.node_has_imported_generic_route(
+                    scope_canonical_id,
+                    element.value,
+                    active_locals,
+                    depth + 1,
+                )
+            }),
+            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                members.iter().any(|&member| {
+                    self.node_has_imported_generic_route(
+                        scope_canonical_id,
+                        member,
+                        active_locals,
+                        depth + 1,
+                    )
+                })
+            }
+            _ => false,
         }
     }
 
@@ -1268,4 +779,88 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     //   - `project_emits_unresolved_import_publishes_diagnostic`
     //     (locked-down): Class A Expanded still surfaces unresolved-
     //     import diagnostics; only the post-pass is removed.
+}
+
+/// Whether any node under `node` is a `TypeParam` shell naming one of
+/// `param_names` — the node-domain mirror of the former
+/// `field_references_type_params` `TypeExpr` walk (declaration parameters are
+/// bound as `TypeParam` shells by the locator-shape lowering, so a name hit
+/// IS a parent-parameter reference). Bounded and purely carrier-data-driven.
+fn node_references_type_param_names(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: crate::semantic_query::SemanticNodeId,
+    param_names: &FxHashSet<&str>,
+    depth: u32,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+
+    if depth > 256 || param_names.is_empty() {
+        return false;
+    }
+    let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
+        return false;
+    };
+    let recur = |n: crate::semantic_query::SemanticNodeId| {
+        node_references_type_param_names(ctx, n, param_names, depth + 1)
+    };
+    match data.as_ref() {
+        SemanticNodeData::TypeParam {
+            display_name,
+            constraint,
+            default,
+            ..
+        } => {
+            param_names.contains(display_name.as_ref())
+                || constraint.is_some_and(recur)
+                || default.is_some_and(recur)
+        }
+        SemanticNodeData::Alias(inner) => recur(*inner),
+        SemanticNodeData::Array { element, .. } => recur(*element),
+        SemanticNodeData::KeyOf { base } => recur(*base),
+        SemanticNodeData::IndexedAccess { object, index } => {
+            recur(*object)
+                || matches!(index, crate::semantic_query::IndexKey::TypeNode(inner) if recur(*inner))
+        }
+        SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
+        SemanticNodeData::Union(members)
+        | SemanticNodeData::Intersection(members)
+        | SemanticNodeData::MergedDecl {
+            contributors: members,
+        } => members.iter().any(|&m| recur(m)),
+        SemanticNodeData::Object(surface) => {
+            surface.members.iter().any(|m| recur(m.value))
+                || surface
+                    .index_signatures
+                    .iter()
+                    .any(|sig| recur(sig.key_type) || recur(sig.value_type))
+                || surface.call_signatures.iter().any(|&c| recur(c))
+                || surface.construct_signatures.iter().any(|&c| recur(c))
+        }
+        SemanticNodeData::Function {
+            params,
+            return_type,
+            ..
+        } => params.iter().any(|p| recur(p.ty)) || recur(*return_type),
+        SemanticNodeData::ConstructorType { signature } => recur(*signature),
+        SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            ..
+        } => {
+            recur(*check) || recur(*extends) || recur(*true_branch_ref) || recur(*false_branch_ref)
+        }
+        SemanticNodeData::Mapped { .. } => {
+            // A mapped type's binder shadows same-named outer parameters
+            // inside its value; the conservative answer keeps the SLOW path
+            // for a mapped shape referencing anything (parity with the
+            // shadow-aware walk's caution).
+            !param_names.is_empty()
+        }
+        d if d.bare_ref_head().is_some() || d.typeof_head().is_some() => {
+            d.carrier_type_args().iter().any(|&arg| recur(arg))
+        }
+        _ => false,
+    }
 }

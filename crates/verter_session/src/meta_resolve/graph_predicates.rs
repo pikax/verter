@@ -161,9 +161,9 @@ pub(crate) fn extract_pick_omit_route(
         return None;
     }
     let route = if base.decl_name.as_ref() == "Pick" {
-        RouteDemand::Pick(keys)
+        RouteDemand::pick(keys)
     } else {
-        RouteDemand::Omit(keys)
+        RouteDemand::omit(keys)
     };
     Some(RouteExtraction {
         root_identity,
@@ -241,7 +241,7 @@ pub(crate) fn extract_indexed_access_route(
                 return Some(RouteExtraction {
                     root_identity: identity.clone(),
                     root_args: Arc::from(Vec::new().into_boxed_slice()),
-                    route: RouteDemand::MemberPath(hops_reverse),
+                    route: RouteDemand::member_path(hops_reverse),
                 });
             }
             SemanticNodeData::InstantiationRef { base, args } => {
@@ -251,7 +251,7 @@ pub(crate) fn extract_indexed_access_route(
                 return Some(RouteExtraction {
                     root_identity: base.clone(),
                     root_args: Arc::clone(args),
-                    route: RouteDemand::MemberPath(hops_reverse),
+                    route: RouteDemand::member_path(hops_reverse),
                 });
             }
             _ => return None,
@@ -1069,10 +1069,9 @@ fn node_root_identity(
 /// head resolution) and feeds it through the SHARED identity + object-like + fence
 /// tail
 /// ([`crate::meta_resolve::materialize::package_backed_object_like_root_identity_with_fence`])
-/// — so the verdict + fence are computed by the SAME body as the `TypeExpr` front
-/// over the SAME root identity. A node with no extractable root identity is not
-/// package-backed (empty fence — admittable, like the `TypeExpr` front's `None`
-/// root arm).
+/// — so the verdict + fence are computed by the one shared identity tail over the
+/// resolved root identity. A node with no extractable root identity is not
+/// package-backed (empty fence — admittable).
 pub(crate) fn node_package_backed_object_like_root_with_fence(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
@@ -1092,18 +1091,15 @@ pub(crate) fn node_package_backed_object_like_root_with_fence(
     )
 }
 
-/// Collect the SURFACE root declaration identities of a graph `node`, mirroring
-/// `collect_root_decl_identities` in the `TypeExpr` front
-/// ([`crate::meta_resolve::lowered_root_reaches_transitive_cycle_with_fence`]):
+/// Collect the SURFACE root declaration identities of a graph `node`:
 /// the outer carrier's identity plus every type-argument's identity, descending
 /// only `Alias` / `IndexedAccess.object` / `InstantiationRef.args`. The node
 /// carrier already holds the RESOLVED `DeclIdentity` (`DeclRef.identity` /
 /// `InstantiationRef.base`); a `BareRef` head is resolved through the carrier
 /// resolver ([`ProjectSemanticDispatch::resolve_carrier_subject_node`] under
 /// `Published(Navigate)`) and the resolved `DeclRef`/`InstantiationRef` identity
-/// is collected (matching the `TypeExpr` front's `Ref`-name resolution — a
-/// generic carrier `A<string>` must NOT bypass the cycle gate). A real miss
-/// collects no root. `MAX_*` caps mirror the `TypeExpr` front.
+/// is collected (a generic carrier `A<string>` must NOT bypass the cycle gate).
+/// A real miss collects no root. `MAX_*` caps bound the collection.
 fn collect_node_root_identities(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: crate::semantic_query::SemanticNodeId,
@@ -1172,14 +1168,11 @@ fn collect_node_root_identities(
 
 /// Node-domain front for the transitive-cycle gate. Collects the surface root
 /// identities of `node` ([`collect_node_root_identities`]) and ORs the shared
-/// cached BFS ([`ref_root_reaches_transitive_cycle_node`]) over each, merging the
-/// fence exactly as the `TypeExpr` front
-/// ([`crate::meta_resolve::lowered_root_reaches_transitive_cycle_with_fence`])
-/// does — `raise(node)` raises each carrier to its `Ref`, whose
-/// `collect_root_decl_identities` resolves the SAME identity the node already
-/// carries, so the per-root BFS verdicts (and the BFS-visited fence) match by
-/// construction. Takes `ctx` (the node carries resolved identities, so no
-/// name-resolution engine is needed).
+/// cached BFS ([`ref_root_reaches_transitive_cycle_node`]) over each, merging
+/// each root's cross-file fence entry (the scope self-entry and `__builtin__`
+/// roots are skipped) into the BFS-visited fence, which is dual-emitted via
+/// `emit_dispatch_dep_signature_facts`. Takes `ctx` (the node carries resolved
+/// identities, so no name-resolution engine is needed).
 pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,

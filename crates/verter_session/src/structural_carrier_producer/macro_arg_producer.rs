@@ -92,11 +92,14 @@
 //! macro mirrors (the cell table is unallocated until first demand). The
 //! mirror is a lazy DENSE table: an outer [`OnceLock`] lazily allocates a
 //! per-macro-count cell table ONCE on first demand (race-safe via
-//! `get_or_init`); each per-slot [`OnceLock`] (indexed by `macro_index`) is
-//! the singleflight unit — its `get_or_init` collapses concurrent first-touch
-//! of one macro onto one lowering, and waiters block cooperatively on the
-//! cell. Two threads racing the TABLE allocation also singleflight on the
-//! outer cell.
+//! `get_or_init`); each per-slot `MacroSlot` (indexed by `macro_index`) is
+//! the singleflight unit — its per-slot build lock collapses concurrent
+//! first-touch of one macro onto one lowering, waiters block cooperatively on
+//! that lock and then read the lock-free committed `OnceLock`. The build lock
+//! (NOT the cell's `get_or_init`) is the serializer because a transient
+//! `LeaseMiss` must leave the slot VACANT for a later retry, never commit a
+//! permanent negative. Two threads racing the TABLE allocation also
+//! singleflight on the outer cell.
 //!
 //! ## Script-setup generic seeding
 //!
@@ -1244,12 +1247,29 @@ fn build_script_setup_seed_frames(
 #[derive(Default)]
 pub struct MacroHotMirror {
     /// Lazily allocated once on first demand, sized to the owner's macro
-    /// count. `cells[macro_index]` is a per-slot [`OnceLock`]: `Some(HotTypeRef)`
-    /// = lowered, `None` = stable negative (no `parsed_type_argument` / not
-    /// structurally lowerable). The outer [`OnceLock`] stays EMPTY until the
-    /// first `macro_type_arg_hot_ref` demand, so publishing an artifact
-    /// allocates ZERO.
-    cells: OnceLock<Box<[OnceLock<Option<HotTypeRef>>]>>,
+    /// count. `cells[macro_index]` is a per-slot [`MacroSlot`]:
+    /// `committed = Some(HotTypeRef)` = lowered, `committed = None` = stable
+    /// negative (no `parsed_type_argument` / not structurally lowerable). The
+    /// outer [`OnceLock`] stays EMPTY until the first `macro_type_arg_hot_ref`
+    /// demand, so publishing an artifact allocates ZERO.
+    cells: OnceLock<Box<[MacroSlot]>>,
+}
+
+/// One per-macro mirror slot.
+///
+/// `committed` is the lock-free [`OnceLock`] warm read: `Some(HotTypeRef)` =
+/// lowered, `None` = stable negative. `build_lock` is the SINGLEFLIGHT unit for
+/// the COLD lowering — it collapses concurrent first-touch of one macro onto a
+/// single [`build_macro_hot_ref`]. The `OnceLock` alone cannot serialize the
+/// build: a transient broken decl-body lease (`LeaseMiss`) must leave the slot
+/// VACANT so a later live-lease demand retries, which rules out
+/// `OnceLock::get_or_init` (it would commit the transient negative
+/// permanently). The build lock therefore does the serialization and is held
+/// ONLY across the cold build, NEVER on the warm read path.
+#[derive(Default)]
+struct MacroSlot {
+    committed: OnceLock<Option<HotTypeRef>>,
+    build_lock: parking_lot::Mutex<()>,
 }
 
 impl std::fmt::Debug for MacroHotMirror {
@@ -1260,7 +1280,7 @@ impl std::fmt::Debug for MacroHotMirror {
                 &self
                     .cells
                     .get()
-                    .map(|c| c.iter().filter(|x| x.get().is_some()).count())
+                    .map(|c| c.iter().filter(|x| x.committed.get().is_some()).count())
                     .unwrap_or(0),
             )
             .finish()
@@ -1277,18 +1297,6 @@ impl Clone for MacroHotMirror {
         Self {
             cells: OnceLock::new(),
         }
-    }
-}
-
-impl MacroHotMirror {
-    /// Number of demanded (filled) macro cells — test observability only,
-    /// never a validity signal. A freshly published artifact reports `0`.
-    #[cfg(test)]
-    pub(crate) fn demanded_count(&self) -> usize {
-        self.cells
-            .get()
-            .map(|c| c.iter().filter(|cell| cell.get().is_some()).count())
-            .unwrap_or(0)
     }
 }
 
@@ -1319,7 +1327,7 @@ pub(crate) fn macro_type_arg_hot_ref(
             .map(|s| s.macros.len())
             .unwrap_or(0);
         (0..n)
-            .map(|_| OnceLock::new())
+            .map(|_| MacroSlot::default())
             .collect::<Vec<_>>()
             .into_boxed_slice()
     });
@@ -1332,13 +1340,72 @@ pub(crate) fn macro_type_arg_hot_ref(
     // dispatch over this handle and the subquery read signatures (`TypeOf`
     // import-route facts, `ResolveDecl`/`Instantiate` file whole-hashes)
     // bubble into the consuming result's `ReadSetSignature`.
-    *cell.get_or_init(|| build_macro_hot_ref(ctx, owner_canonical, &indexed, macro_index))
+    //
+    // Preserve the typed lowering outcome across the write-once mirror-slot
+    // admission: a transient broken decl-body lease (`LeaseMiss`) must NOT be
+    // committed as a permanent negative — leave the slot VACANT, mark the
+    // generalized non-cacheability rail, and let the next demand retry. Only a
+    // built ref OR a genuine (cacheable) absence commits.
+    //
+    // Lock-free warm read first.
+    if let Some(committed) = cell.committed.get() {
+        return *committed;
+    }
+    // Test-only rendezvous between the lock-free warm MISS and the build lock: when
+    // armed it holds every thread that has just missed until ALL of them have, which
+    // is the precise interleaving the per-slot build lock exists to serialise (see
+    // `TestForceKnobs::macro_hot_post_warm_miss_barrier`, whose NON-RE-ENTRANCY
+    // invariant this cold path upholds: the builder below produces inert carrier
+    // nodes and resolves nothing, so it never re-enters this demand).
+    #[cfg(test)]
+    ctx.host_for_fact_tracer_install()
+        .test_force
+        .wait_macro_hot_post_warm_miss_barrier();
+    // Cold path: SINGLEFLIGHT the lowering under the per-slot build lock so
+    // concurrent first demands of ONE macro collapse onto a single
+    // `build_macro_hot_ref` (the `OnceLock` alone cannot serialize — a
+    // `LeaseMiss` leaves the slot vacant for retry, which forbids
+    // `get_or_init`). Re-check under the lock: a racing builder may have
+    // committed while this thread waited on the lock.
+    let _build_guard = cell.build_lock.lock();
+    if let Some(committed) = cell.committed.get() {
+        return *committed;
+    }
+    match build_macro_hot_ref(ctx, owner_canonical, &indexed, macro_index) {
+        MacroHotRefOutcome::Ready(result) => {
+            // First-writer commit under the build lock: `set` cannot race a
+            // second committer (all commits take this lock), so it succeeds and
+            // `result` IS the committed value.
+            let _ = cell.committed.set(result);
+            result
+        }
+        MacroHotRefOutcome::LeaseMiss => {
+            // Transient broken lease: leave the slot VACANT (the build lock is
+            // released on scope exit, so the next demand re-enters the cold path
+            // and retries), and mark the generalized non-cacheability rail.
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+            );
+            None
+        }
+    }
+}
+
+/// Outcome of [`build_macro_hot_ref`]: a committable result (a built
+/// [`HotTypeRef`] OR a genuine, cacheable absence) versus a TRANSIENT broken
+/// decl-body lease pin (`LeaseMiss`). Kept distinct so the mirror-slot
+/// admission commits `Ready` but leaves the slot VACANT on `LeaseMiss` (a
+/// later live-lease demand retries), never persisting a transient negative.
+enum MacroHotRefOutcome {
+    Ready(Option<HotTypeRef>),
+    LeaseMiss,
 }
 
 /// Build the structural [`HotTypeRef`] for one macro index — the
-/// `get_or_init` body. Lowers the macro's `parsed_type_argument` once
-/// through the shared query-free structural lowerer under a script-setup
-/// seed binder frame.
+/// mirror-slot cold-compute body. Lowers the macro's `parsed_type_argument`
+/// once through the shared query-free structural lowerer under a script-setup
+/// seed binder frame. Returns a [`MacroHotRefOutcome`] so the caller can
+/// distinguish a committable result from a transient broken-lease miss.
 ///
 /// PRIVATE: it names [`lower_type_expr_structural`] and
 /// [`build_script_setup_seed_frames`] DIRECTLY — both are module-private, so
@@ -1348,10 +1415,44 @@ fn build_macro_hot_ref(
     owner_canonical: &str,
     indexed: &crate::project_type_store::IndexedReady,
     macro_index: usize,
-) -> Option<HotTypeRef> {
-    let snapshot = indexed.script_analysis.as_ref()?;
-    let mac = snapshot.macros.get(macro_index)?;
-    let parsed_arg = mac.parsed_type_argument.as_ref()?;
+) -> MacroHotRefOutcome {
+    // Singleflight probe: count each COLD build entry. The per-slot build lock
+    // must collapse concurrent first demands of one macro onto ONE entry.
+    #[cfg(test)]
+    ctx.host_for_fact_tracer_install()
+        .macro_hot_lowering_count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Genuine, cacheable absences (no script analysis, no macro at the index,
+    // no authored type argument): commit `Ready(None)`.
+    let Some(snapshot) = indexed.script_analysis.as_ref() else {
+        return MacroHotRefOutcome::Ready(None);
+    };
+    let Some(mac) = snapshot.macros.get(macro_index) else {
+        return MacroHotRefOutcome::Ready(None);
+    };
+    // The analyzer records the authored type-argument POSITION (a content-free
+    // locator); the typed IR hydrates transiently from the memo's retained
+    // snapshot at the macro call's span — the mirror is the position's sole
+    // producer, and the lease-only re-borrow never re-parses.
+    if mac.parsed_type_argument.as_ref().is_none() {
+        return MacroHotRefOutcome::Ready(None);
+    }
+    let parsed_arg = match indexed
+        .shallow_state
+        .decl_bodies()
+        .transient_macro_type_argument(mac.span)
+    {
+        crate::decl_body_memo::DemandOutcome::Ready(Some(expr)) => expr,
+        // A genuine, cacheable absence: the position lowered to no argument.
+        crate::decl_body_memo::DemandOutcome::Ready(None) => {
+            return MacroHotRefOutcome::Ready(None)
+        }
+        // A TRANSIENT broken decl-body lease: DO NOT commit a permanent
+        // negative — surface the distinct outcome so the caller leaves the
+        // mirror slot vacant, marks non-cacheability, and retries later.
+        crate::decl_body_memo::DemandOutcome::LeaseMiss => return MacroHotRefOutcome::LeaseMiss,
+    };
+    let parsed_arg = parsed_arg.as_ref();
 
     let graph = ctx.project_type_store().semantic_graph();
     let scope = NodeScopeId::File {
@@ -1378,7 +1479,8 @@ fn build_macro_hot_ref(
     let seed_frames = build_script_setup_seed_frames(indexed, graph, &scope);
     let lower_ctx = StructuralLowerContext::new(&seed_frames).with_macro_own_body(macro_own_body);
 
-    lower_type_expr_structural(graph, parsed_arg, scope, &lower_ctx).ok()
+    // A lowering failure is a genuine (cacheable) absence — commit `Ready(None)`.
+    MacroHotRefOutcome::Ready(lower_type_expr_structural(graph, parsed_arg, scope, &lower_ctx).ok())
 }
 
 #[cfg(test)]

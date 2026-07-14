@@ -1,6 +1,8 @@
 ﻿use sha2::{Digest, Sha256};
 use verter_span::Span;
-use verter_type_expr::{TypeExpr, TypeExprScope};
+use verter_type_expr::facts::ResolvedLocalShape;
+use verter_type_expr::locators::MacroPayloadLocator;
+use verter_type_expr::TypeExprScope;
 
 /// Truncated SHA-256 hash (first 16 bytes). Used for content-based change detection.
 pub type Hash16 = [u8; 16];
@@ -999,17 +1001,23 @@ pub struct AnalyzedPropField {
     /// Only populated for type-based `defineProps` with inline type literals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
-    /// Lowered typed form of the prop's type annotation. Populated by the
-    /// producer that has the OXC `TSType<'_>` AST node in scope (analyzer or
-    /// cross-file external resolver). Authoritative for resolver / projector /
-    /// registry / policy / materialiser consumers — `type_annotation` is
-    /// display-only.
+    /// Content-free locator of the prop's authored type-annotation payload.
+    /// Emitted by the producer that has the OXC `TSType<'_>` AST node in scope
+    /// (analyzer or cross-file external resolver); consumers demand the typed
+    /// body through the shared dispatch from this locator — `type_annotation`
+    /// is display-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub type_expr: Option<TypeExpr>,
-    /// Scope of `type_expr`: canonical_id of the file whose OXC parse produced
-    /// the typed expression. Required so consumers walking nested
-    /// `TypeExpr::Ref` nodes resolve them in the file where the annotation was
-    /// written. Pairing invariant: `type_expr.is_some() <=> type_expr_scope.is_some()`.
+    pub payload: Option<MacroPayloadLocator>,
+    /// Resolution scope of the published type: canonical_id of the file whose
+    /// OXC parse produced the authored annotation (the producing canonical
+    /// the locator anchor mirrors; the analyzer's local-file convention is
+    /// the empty scope) when `payload` carries a locator, or the file the
+    /// display `type_annotation`'s references resolve in (the member's
+    /// VALUE-NODE file) for a resolver-published display-only value. Pairing
+    /// invariant: `payload.is_some() => type_expr_scope.is_some()`, and a
+    /// published display value is paired with its scope
+    /// (`type_annotation.is_some() <=> type_expr_scope.is_some()` on
+    /// resolver-published fields).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_expr_scope: Option<TypeExprScope>,
     /// JSDoc description extracted from the leading `/** ... */` comment.
@@ -1059,15 +1067,21 @@ pub struct AnalyzedEmitField {
     /// `None` for runtime emits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_type: Option<String>,
-    /// Lowered typed form of the emit's payload type. Populated by the
-    /// producer that has the OXC `TSType<'_>` AST node in scope (analyzer or
-    /// cross-file external resolver). Authoritative for resolver / projector /
-    /// registry / policy / materialiser consumers — `payload_type` is display-only.
+    /// Content-free locator of the emit's authored payload type. Emitted by
+    /// the producer that has the OXC `TSType<'_>` AST node in scope (analyzer
+    /// or cross-file external resolver); consumers demand the typed body
+    /// through the shared dispatch — `payload_type` is display-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload_expr: Option<TypeExpr>,
-    /// Scope of `payload_expr`: canonical_id of the file whose OXC parse
-    /// produced the typed expression. Pairing invariant:
-    /// `payload_expr.is_some() <=> payload_expr_scope.is_some()`.
+    pub payload: Option<MacroPayloadLocator>,
+    /// Resolution scope of the published payload: canonical_id of the file
+    /// whose OXC parse produced the authored payload (when `payload` carries a
+    /// locator), or the file the display `payload_type`'s references resolve
+    /// in (a call signature's declaration-origin file, a property member's
+    /// value-node file) for a resolver-published display-only value. Pairing
+    /// invariant: `payload.is_some() => payload_expr_scope.is_some()`, and a
+    /// published display value is paired with its scope
+    /// (`payload_type.is_some() <=> payload_expr_scope.is_some()` on
+    /// resolver-published fields).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_expr_scope: Option<TypeExprScope>,
     /// JSDoc description extracted from the leading `/** ... */` comment.
@@ -1096,19 +1110,17 @@ pub struct AnalyzedSlotField {
     /// Used by strict slots to validate slot children types.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_type: Option<String>,
-    /// Lowered typed form of the slot's return type. Parser/analyzer
-    /// producers lower the OXC `TSType<'_>` AST node they hold; framework-
-    /// surface RESOLVER producers raise the slot's semantic graph node and
-    /// may normalize an absent or unraisable published value to
-    /// `TypeExpr::Unknown` (the Vue slot resolver always does — its
-    /// published `return_expr` is never `None`). Authoritative for resolver /
-    /// projector / registry / policy / materialiser consumers —
-    /// `return_type` is display-only.
+    /// Content-free locator of the slot's authored return-type payload.
+    /// Parser/analyzer producers emit the authored macro-payload position;
+    /// resolver producers emit the defining component's payload position (an
+    /// unraisable published value is an honest `None`, never a fabricated
+    /// placeholder). Consumers demand the typed body through the shared
+    /// dispatch — `return_type` is display-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub return_expr: Option<TypeExpr>,
-    /// Scope of `return_expr`: canonical_id of the file whose OXC parse
-    /// produced the typed expression. Pairing invariant:
-    /// `return_expr.is_some() <=> return_expr_scope.is_some()`.
+    pub payload: Option<MacroPayloadLocator>,
+    /// Scope of `payload`: canonical_id of the file whose parse produced the
+    /// authored return type. Pairing invariant:
+    /// `payload.is_some() <=> return_expr_scope.is_some()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_expr_scope: Option<TypeExprScope>,
     /// JSDoc description extracted from the leading `/** ... */` comment.
@@ -1128,20 +1140,22 @@ pub struct AnalyzedSlotFieldBinding {
     /// Type annotation text extracted from source (e.g., `"string"`, `"MyItem"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
-    /// Lowered typed form of the binding's type (typically
-    /// `TypeExpr::IndexedAccess` against the slot parameter object).
-    /// Parser/analyzer producers lower the OXC `TSType<'_>` AST node they
-    /// hold; framework-surface RESOLVER producers raise the binding's
-    /// semantic graph node and normalize an unraisable published value to
-    /// `TypeExpr::Unknown` (a resolver-published binding never carries
-    /// `binding_expr: None`). Authoritative for resolver / projector /
-    /// registry / policy / materialiser consumers — `type_annotation` is
-    /// display-only.
+    /// Content-free locator of the binding's authored type payload (the slot
+    /// function's parameter member position). Parser/analyzer producers emit
+    /// the authored position; an unraisable resolver value is an honest
+    /// `None`. Consumers demand the typed body through the shared dispatch —
+    /// `type_annotation` is display-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binding_expr: Option<TypeExpr>,
-    /// Scope of `binding_expr`: canonical_id of the file whose OXC parse
-    /// produced the typed expression. Pairing invariant:
-    /// `binding_expr.is_some() <=> binding_expr_scope.is_some()`.
+    pub payload: Option<MacroPayloadLocator>,
+    /// Resolution scope of the published binding: canonical_id of the file
+    /// whose OXC parse produced the authored binding type (when `payload`
+    /// carries a locator), or the file the display `type_annotation`'s
+    /// references resolve in (the owning slot member's value-node file) for a
+    /// resolver-published display-only value. Pairing invariant:
+    /// `payload.is_some() => binding_expr_scope.is_some()`, and a published
+    /// display value is paired with its scope
+    /// (`type_annotation.is_some() <=> binding_expr_scope.is_some()` on
+    /// resolver-published snippet bindings).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding_expr_scope: Option<TypeExprScope>,
     /// SFC-absolute byte span of the binding key in `defineSlots` type.
@@ -1211,19 +1225,20 @@ pub struct AnalyzedOptionsProp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_value: Option<String>,
     /// Type annotation from `PropType<T>` (e.g., `"HTMLCanvasElement"`).
-    /// Display-only — typed consumers MUST read `type_expr` (typed sidecar).
+    /// Display-only — typed consumers MUST read the typed `payload` locator
+    /// (below) and demand the body through the shared dispatch, never this text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
-    /// Lowered typed form of the `PropType<T>` annotation. Populated by the
-    /// analyzer when an OXC `TSType<'_>` for `T` is in scope (i.e., the prop
-    /// is defined as `{ type: <ctor> as PropType<T> }`). Authoritative for
-    /// resolver / projector / registry / policy / materialiser consumers —
+    /// Content-free locator of the authored `PropType<T>` annotation payload.
+    /// Emitted by the analyzer when an OXC `TSType<'_>` for `T` is in scope
+    /// (i.e., the prop is defined as `{ type: <ctor> as PropType<T> }`);
+    /// consumers demand the typed body through the shared dispatch —
     /// `type_annotation` is display-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub type_expr: Option<TypeExpr>,
-    /// Scope of `type_expr`: canonical_id of the file whose OXC parse
-    /// produced the typed expression. Pairing invariant:
-    /// `type_expr.is_some() <=> type_expr_scope.is_some()`.
+    pub payload: Option<MacroPayloadLocator>,
+    /// Scope of `payload`: canonical_id of the file whose OXC parse produced
+    /// the authored annotation. Pairing invariant:
+    /// `payload.is_some() <=> type_expr_scope.is_some()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_expr_scope: Option<TypeExprScope>,
     /// JSDoc description (e.g., `"The display label"`).
@@ -1270,16 +1285,16 @@ pub struct AnalyzedExposeField {
     /// arrives pre-sliced on `description`/`tags`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<Span>,
-    /// Lowered typed form of the exposed member's type. Populated by the
-    /// producer that resolved the member's type surface (the typeinfo macro
-    /// DTO normalizer raising the `defineExpose<T>()` surface member value);
+    /// Content-free locator of the exposed member's authored type payload.
+    /// Emitted by the producer that resolved the member's type surface (the
+    /// typeinfo macro DTO normalizer for the `defineExpose<T>()` surface);
     /// `None` for analyzer object-literal fields, whose type comes from
     /// binding / evaluation lookups downstream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub type_expr: Option<TypeExpr>,
-    /// Scope of `type_expr`: canonical_id of the file whose parse produced
-    /// the typed expression. Pairing invariant:
-    /// `type_expr.is_some() <=> type_expr_scope.is_some()`.
+    pub payload: Option<MacroPayloadLocator>,
+    /// Scope of `payload`: canonical_id of the file whose parse produced the
+    /// authored member type. Pairing invariant:
+    /// `payload.is_some() <=> type_expr_scope.is_some()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_expr_scope: Option<TypeExprScope>,
     /// JSDoc description from the leading `/** ... */` block on the field
@@ -1305,7 +1320,15 @@ pub enum TypeResolutionSource {
 }
 
 /// A default value extracted from `withDefaults()` second argument.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzedDefaultValue {
     /// The prop name this default applies to.
@@ -1324,10 +1347,10 @@ pub struct ResolvedLocalType {
     pub name: String,
     /// The expanded type text (e.g., `"{ count: number; label?: string }"`).
     pub expanded: String,
-    /// Structured expanded object form retained for consumers that need
-    /// canonical IR instead of reparsing `expanded`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub type_expr: Option<verter_type_expr::TypeExpr>,
+    /// The synthesized closed shape of the resolved local type: a primitive
+    /// folds to a leaf fact; every other body stays a shallow named-reference
+    /// locator resolved on demand (`expanded` is display-only text).
+    pub shape: ResolvedLocalShape,
     /// SFC-absolute byte span of the type declaration.
     pub span: Span,
 }
@@ -1336,7 +1359,7 @@ impl PartialEq for ResolvedLocalType {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.expanded == other.expanded
-            && self.type_expr == other.type_expr
+            && self.shape == other.shape
             && self.span == other.span
     }
 }
@@ -1377,22 +1400,16 @@ pub struct AnalyzedMacro {
     pub expose_fields: Vec<AnalyzedExposeField>,
     /// Locally resolved type expansions referenced by macro type parameters.
     pub resolved_local_types: Vec<ResolvedLocalType>,
-    /// First type argument of the macro call (the parent shell), parsed
-    /// once during shallow analysis (plan Step 1 / D1.2). For
-    /// `defineProps<Props<T>>()` this is `Props<T>`. For
-    /// `defineEmits<Emits>()` this is `Emits`. `None` when the macro
-    /// has no type arguments or when parsing the source slice fails.
+    /// Content-free locator of the macro call's first authored type argument
+    /// (the parent shell). For `defineProps<Props<T>>()` this addresses
+    /// `Props<T>`; for `defineEmits<Emits>()` it addresses `Emits`. `None`
+    /// when the macro has no type arguments.
     ///
-    /// Cache-owned per the Shallow File Processing Core Invariant
-    /// (rule 1: capture once during single read/parse, never re-parse
-    /// per call). Used by the host-side closure
-    /// (`compute_evaluated_types_from_owner_context`) to drive
+    /// Captured once during shallow analysis (Shallow File Processing Core
+    /// Invariant rule 1); the host-side closure demands the typed body
+    /// through the shared dispatch from this locator to drive
     /// dispatch-mediated projection of macro fields.
-    ///
-    /// `Arc<TypeExpr>` rather than `Box<TypeExpr>` so the closure +
-    /// dispatch lower call clone a single refcount instead of deep-copying
-    /// the full expression tree (R6).
-    pub parsed_type_argument: Option<std::sync::Arc<verter_type_expr::TypeExpr>>,
+    pub parsed_type_argument: Option<MacroPayloadLocator>,
     /// Scope of `parsed_type_argument`: canonical_id of the file whose
     /// OXC parse produced the typed expression. Pairing invariant:
     /// `parsed_type_argument.is_some() <=> parsed_type_argument_scope.is_some()`.
@@ -1454,8 +1471,7 @@ impl serde::Serialize for AnalyzedMacro {
         // argument). Field name is camelCase to match the Wire struct's
         // `#[serde(rename_all = "camelCase")]` deserialization.
         if let Some(arg) = self.parsed_type_argument.as_ref() {
-            let inner: &verter_type_expr::TypeExpr = arg.as_ref();
-            s.serialize_field("parsedTypeArgument", inner)?;
+            s.serialize_field("parsedTypeArgument", arg)?;
         }
         if let Some(scope) = self.parsed_type_argument_scope.as_ref() {
             s.serialize_field("parsedTypeArgumentScope", scope)?;
@@ -1493,12 +1509,12 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             expose_fields: Vec<AnalyzedExposeField>,
             #[serde(default)]
             resolved_local_types: Vec<ResolvedLocalType>,
-            // D1.2 back-compat: old payloads (no parsedTypeArgument
-            // key) deserialize with `None`; manual-serde edits don't
-            // pick up `#[serde(default)]` on the outer struct so the
-            // attribute lives on the Wire deserialization helper.
+            // Absent-key back-compat: payloads with no parsedTypeArgument
+            // key deserialize with `None`; manual-serde impls don't pick up
+            // `#[serde(default)]` on the outer struct so the attribute lives
+            // on the Wire deserialization helper.
             #[serde(default)]
-            parsed_type_argument: Option<verter_type_expr::TypeExpr>,
+            parsed_type_argument: Option<MacroPayloadLocator>,
             #[serde(default)]
             parsed_type_argument_scope: Option<TypeExprScope>,
             #[serde(default)]
@@ -1521,7 +1537,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             default_values: w.default_values,
             expose_fields: w.expose_fields,
             resolved_local_types: w.resolved_local_types,
-            parsed_type_argument: w.parsed_type_argument.map(std::sync::Arc::new),
+            parsed_type_argument: w.parsed_type_argument,
             parsed_type_argument_scope: w.parsed_type_argument_scope,
             span: Span::new(w.span_start, w.span_end),
         })
@@ -1963,7 +1979,21 @@ mod analyzed_macro_serde_tests {
     use super::{AnalyzedMacro, AnalyzedMacroKind};
     use std::sync::Arc;
     use verter_span::Span;
-    use verter_type_expr::TypeExpr;
+    use verter_type_expr::locators::{
+        AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
+    };
+
+    fn sample_payload_locator(symbol: &str) -> MacroPayloadLocator {
+        MacroPayloadLocator {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from(""),
+                symbol: Arc::from(symbol),
+                space: LocatorSymbolSpace::Value,
+            },
+            macro_index: 0,
+            payload: MacroPayloadPosition::TypeArgument,
+        }
+    }
 
     fn empty_macro() -> AnalyzedMacro {
         AnalyzedMacro {
@@ -1989,10 +2019,7 @@ mod analyzed_macro_serde_tests {
     #[test]
     fn serializes_parsed_type_argument_field_name_exactly() {
         let mut m = empty_macro();
-        m.parsed_type_argument = Some(Arc::new(TypeExpr::Ref {
-            name: Arc::from("Sentinel"),
-            type_arguments: Arc::from(Vec::<TypeExpr>::new()),
-        }));
+        m.parsed_type_argument = Some(sample_payload_locator("Sentinel"));
         let json = serde_json::to_string(&m).unwrap();
         // Field name appears EXACTLY (catches typo in manual serialize_field).
         assert!(
@@ -2045,21 +2072,21 @@ mod analyzed_macro_serde_tests {
     }
 
     #[test]
-    fn roundtrip_preserves_arc_typeexpr_payload_structure() {
+    fn roundtrip_preserves_payload_locator_structure() {
         let mut m = empty_macro();
-        // Construct a non-trivial TypeExpr (Ref with nested args) so the
+        // Construct a non-trivial locator (a field payload position) so the
         // round-trip test exercises the non-empty serialization path.
-        m.parsed_type_argument = Some(Arc::new(TypeExpr::Ref {
-            name: Arc::from("Props"),
-            type_arguments: Arc::from(vec![TypeExpr::Ref {
-                name: Arc::from("T"),
-                type_arguments: Arc::from(Vec::<TypeExpr>::new()),
-            }]),
-        }));
+        m.parsed_type_argument = Some(MacroPayloadLocator {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from(""),
+                symbol: Arc::from("default"),
+                space: LocatorSymbolSpace::Value,
+            },
+            macro_index: 2,
+            payload: MacroPayloadPosition::Field { field_index: 5 },
+        });
         let json = serde_json::to_string(&m).unwrap();
         let back: AnalyzedMacro = serde_json::from_str(&json).unwrap();
-        // Arc identity isn't preserved across deserialization (fresh
-        // allocation), but the structural equality is.
         assert_eq!(m.parsed_type_argument, back.parsed_type_argument);
     }
 }

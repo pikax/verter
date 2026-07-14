@@ -1007,8 +1007,13 @@ impl WasmVerterHost {
         catch_panic(AssertUnwindSafe(move || {
             let arc_args: Vec<std::sync::Arc<verter_type_expr::TypeExpr>> =
                 exprs.into_iter().map(std::sync::Arc::new).collect();
+            // Wire-boundary resolution: the symbolic `TypeExpr` payloads
+            // lower to semantic-graph node ids INSIDE the audited request,
+            // under the SAME store view the resolution runs against (the
+            // transient symbolic IR stops at this boundary). A lowering miss
+            // surfaces as a `null` typeExpr WITH its audit record.
             let (outcome, record) = host
-                .resolve_named_symbol_with_audit(
+                .resolve_named_symbol_wire_with_audit(
                     &canonical_id_owned,
                     &name_owned,
                     &arc_args,
@@ -1556,14 +1561,15 @@ impl WasmMetaSession {
             let (outcome, record) = session
                 .get_component_meta_with_audit(canonical_or_alias)
                 .into_parts();
-            let Some((analysis, resolution)) = outcome.map_err(ffi_err)? else {
+            let Some(output) = outcome.map_err(ffi_err)? else {
                 return Ok(JsValue::NULL);
             };
-            let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
-                analysis,
-                Some(&resolution),
-            );
-            let ffi_resolution = verter_ffi::convert::component_meta_resolution_to_ffi(&resolution);
+            let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
+            let Some(ffi_resolution) = ffi.resolution.clone() else {
+                return Err(ffi_err(
+                    "audited component-meta output carries no resolution sidecar",
+                ));
+            };
             let bundle = WasmAuditBundle {
                 analysis: ffi,
                 resolution: ffi_resolution,
@@ -1575,18 +1581,24 @@ impl WasmMetaSession {
 
     /// Component metadata as a JS object (FFI projection), or `null`
     /// when the canonical does not resolve.
+    ///
+    /// This lane runs WITHOUT a type-resolution seed: the payload's typed
+    /// `resolutionStatus` field reports
+    /// `{ kind: "unavailable", reason: "resolutionProviderAbsent" }` so the
+    /// un-overlaid registry is never mistaken for an exact resolved
+    /// surface. The type-resolution-seeded payload is
+    /// `getComponentMetaWithAudit` (`resolutionStatus.kind == "resolved"`).
     #[wasm_bindgen(js_name = "getComponentMeta")]
     pub fn get_component_meta(&self, canonical_or_alias: &str) -> Result<JsValue, JsValue> {
         let session = self.session()?;
         catch_panic(AssertUnwindSafe(|| {
-            let Some(analysis) = session
-                .get_component_meta(canonical_or_alias)
+            let Some(output) = session
+                .get_component_meta_output(canonical_or_alias)
                 .map_err(ffi_err)?
             else {
                 return Ok(JsValue::NULL);
             };
-            let ffi =
-                verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(analysis, None);
+            let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
             to_wasm_value(&ffi)
         }))?
     }
@@ -1598,9 +1610,13 @@ impl WasmMetaSession {
     /// batch (skipped for an empty batch). Returns one
     /// slot per input in input order as a JS array; each slot is the FFI
     /// projection of the
-    /// analysis, or `null` for a missing canonical / per-id failure.
+    /// analysis, or `null` EXCLUSIVELY for a genuinely missing canonical.
     ///
-    /// Throws only on project-level shutdown.
+    /// Throws on project-level shutdown AND on a real per-id failure (a
+    /// budget overrun or a fail-closed output-materialization failure) —
+    /// batch failure semantics match the scalar `getComponentMeta` throw
+    /// (scalar ≡ batch); a real failure is never collapsed onto the
+    /// missing `null` sentinel.
     #[wasm_bindgen(js_name = "getComponentMetaBatch")]
     pub fn get_component_meta_batch(
         &self,
@@ -1609,18 +1625,11 @@ impl WasmMetaSession {
         let session = self.session()?;
         catch_panic(AssertUnwindSafe(|| {
             let results = session
-                .get_component_meta_batch(&canonicals_or_aliases)
+                .get_component_meta_output_batch(&canonicals_or_aliases)
                 .map_err(ffi_err)?;
             let ffi_results: Vec<Option<FfiComponentMeta>> = results
                 .into_iter()
-                .map(|slot| match slot {
-                    Ok(Some(analysis)) => Some(
-                        verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
-                            analysis, None,
-                        ),
-                    ),
-                    Ok(None) | Err(_) => None,
-                })
+                .map(|slot| slot.map(verter_ffi::convert::component_meta_output_to_ffi))
                 .collect();
             to_wasm_value(&ffi_results)
         }))?

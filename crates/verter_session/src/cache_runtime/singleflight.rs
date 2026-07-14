@@ -21,7 +21,13 @@
 //!     project-generation reset occurred during the cold compute window:
 //!     the entry's dep-signature / generation is no longer valid against
 //!     host state, so the publish is skipped and waiters fall through to
-//!     retry.
+//!     retry. The WINNER'S VALUE IS DROPPED TOO — it returns `None`. That
+//!     is deliberate and is the ONE path on which a caller recomputes what
+//!     the winner just built: a compute the view moved under has reads that
+//!     STRADDLE the mutation, so its value is a consistent snapshot of no
+//!     view at all and the caller must re-derive against fresh state. It is
+//!     the opposite of a `ReturnOnly`, whose value IS a consistent snapshot
+//!     (merely unrootable) and is therefore handed back.
 //!   - **Value projection.** Three callbacks separate concerns:
 //!     - `validate(&Entry) -> Option<V>`: read-side validation. Runs on the
 //!       warm-hit fast path AND on every cooperative joiner that wakes onto

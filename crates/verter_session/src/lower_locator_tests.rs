@@ -20,12 +20,13 @@
 use std::sync::Arc;
 
 use verter_type_expr::locators::{
-    AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadLocator,
-    MacroPayloadPosition, TypeBodyPathStep, TypeBodySlot, TypeParamBoundPosition,
+    AuthoredAnchor, AuthoredBodyLocator, JsdocTypedefBodyLocator, LocatorSymbolSpace,
+    MacroPayloadLocator, MacroPayloadPosition, TypeBodyPathStep, TypeBodySlot,
+    TypeParamBoundPosition,
 };
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
-use crate::decl_body_memo::LocatorBodyDerefError;
+use crate::decl_body_memo::{DerefedBodyShape, LocatorBodyDerefError};
 use crate::project_semantic_dispatch::locator_shape::{LocatorBinderFrame, LocatorShapeCtx};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -56,6 +57,11 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
 }
 
 const OWNER_ID: &str = "/w/locator/owner.ts";
+/// Owner fixture for the annotation-carried macro-payload deref: one
+/// `$props()` declarator carrying a binding annotation at macro ordinal 0.
+const ANNOTATION_OWNER_ID: &str = "/w/locator/annotation-owner.ts";
+/// Owner fixture for the JSDoc `@typedef` body locator lowering.
+const TYPEDEF_OWNER_ID: &str = "/w/locator/typedef-owner.ts";
 const OWNER: &str = "\
 export type Base = { x: string; y: number };\n\
 export type Wide = { tag: string };\n\
@@ -423,6 +429,112 @@ fn lower_locator_rejects_macro_type_argument_payload() {
     );
 }
 
+/// An ANNOTATION-carried macro payload (`MacroPayloadPosition::TypeAnnotation`
+/// — the svelte `$props()` binding-annotation payload,
+/// `let {..}: {..} = $props();`) HYDRATES from the memo's retained snapshot:
+/// the deref replays the capture's shared macro-ordinal walk
+/// (`transient_props_annotation_body`), lowers the authored annotation, and
+/// returns it as a `Single` body with NO header type parameters — never the
+/// former `MacroPayloadPositionUnrouted` miss, never a fabricated body. An
+/// ordinal addressing no `$props()` call stays a TYPED path miss.
+#[test]
+fn annotation_carried_macro_payload_deref_hydrates_from_snapshot() {
+    let host = host();
+    upsert_ts(
+        &host,
+        ANNOTATION_OWNER_ID,
+        "let { row }: { row: string } = $props();\n",
+    );
+
+    let annotation_locator = |macro_index: u32| {
+        AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from(ANNOTATION_OWNER_ID),
+                symbol: Arc::from("default"),
+                space: LocatorSymbolSpace::Value,
+            },
+            macro_index,
+            payload: MacroPayloadPosition::TypeAnnotation,
+        })
+    };
+
+    let indexed = host
+        .ensure_indexed_ready(ANNOTATION_OWNER_ID)
+        .expect("owner must materialise");
+    let derefed = indexed
+        .shallow_state
+        .decl_bodies()
+        .deref_locator_body(&annotation_locator(0))
+        .expect("the annotation payload hydrates — not an unrouted miss");
+    let DerefedBodyShape::Single(TypeExpr::Object(obj)) = &derefed.shape else {
+        panic!(
+            "the authored annotation derefs to its Single object body, got {:?}",
+            derefed.shape
+        );
+    };
+    assert!(
+        obj.properties
+            .iter()
+            .any(|m| matches!(m, ObjectMember::Property(p) if p.name == "row")),
+        "the hydrated body is the authored `{{ row: string }}` annotation"
+    );
+    assert!(
+        derefed.type_parameters.is_empty(),
+        "a binding annotation declares no header type parameters"
+    );
+
+    // An ordinal addressing no `$props()` call stays a TYPED miss.
+    assert_eq!(
+        indexed
+            .shallow_state
+            .decl_bodies()
+            .deref_locator_body(&annotation_locator(1))
+            .expect_err("an out-of-range ordinal fails typed"),
+        LocatorBodyDerefError::PathUnresolved,
+        "never a fabricated body"
+    );
+}
+
+/// A JSDoc `@typedef {…} Name` alias body lowers through the shape query via
+/// its `AuthoredBodyLocator::JsdocTypedefBody` locator: the comment-derived
+/// payload re-derives lease-only and graph-lowers to the authored object
+/// members — not an error, not an empty surface. The locator kind
+/// participates in the FULL lowering identity chain (the R6 key witness, the
+/// `new_unsubstituted` anchor gate, the shape build's anchor extraction and
+/// its no-binder-frame prepared-anchor row).
+#[test]
+fn jsdoc_typedef_body_locator_lowers_through_the_shape_query() {
+    let host = host();
+    upsert_ts(
+        &host,
+        TYPEDEF_OWNER_ID,
+        "/** @typedef {{ a: number, b: string }} FromDoc */\ntype Real = { r: 1 };\n",
+    );
+
+    let locator = AuthoredBodyLocator::JsdocTypedefBody(JsdocTypedefBodyLocator {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(TYPEDEF_OWNER_ID),
+            symbol: Arc::from("FromDoc"),
+            space: LocatorSymbolSpace::Type,
+        },
+        path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+    });
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let node = match dispatch.lower_locator(locator) {
+        QueryResult::Value(node) => node,
+        other => panic!("the typedef locator must lower, got {other:?}"),
+    };
+    let surface = object_surface(&host, node);
+    let mut names: Vec<&str> = surface.members.iter().map(|m| m.name.as_ref()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["a", "b"],
+        "the lowered shape is the authored `@typedef` object payload"
+    );
+}
+
 /// A broken-lease `LowerLocator` deref is a TRANSIENT ReturnOnly, not a
 /// genuine miss: the child build SUPPRESSES admission (`cache_suppress`) so
 /// the enclosing `Instantiate` / `LowerLocator` query does NOT warm-publish
@@ -664,21 +776,21 @@ fn lower_locator_derefs_a_member_value_sub_position() {
 }
 
 /// A type-parameter bound lowered through the PRODUCTION `lower_locator` /
-/// dispatch path binds ONLY the prior-sibling prefix as `TypeParam` shells: the
-/// deref's lexical-prefix env flows through so a bound at ordinal `i` sees the
-/// params declared before it, never the full list.
+/// dispatch path binds the TS-exact lexical frame: every sibling name is
+/// predeclared before any bound lowers, and a CONSTRAINT sees the full
+/// sibling frame — later siblings included.
 ///
 /// Positive (`U extends keyof T`, ordinal 1): `keyof T` lowers to a deferred
 /// `KeyOf` whose base is the prior sibling `T` bound as a `TypeParam` shell.
 ///
-/// Discriminating (`T extends U`, ordinal 0 — a forward reference): T's
-/// constraint `U` is an out-of-prefix reference. With the correct EMPTY prefix
-/// env it stays an unbound `BareRef` carrier; an over-binding deref that
-/// returned the FULL parameter list would bind `U` as a shell, flipping the
-/// node to a `TypeParam`. A non-`TypeParam` node here is the RED/GREEN
-/// discriminator that the prefix env — not the full list — reaches the graph.
+/// Discriminating (`T extends U`, ordinal 0 — a legal TS forward reference):
+/// T's constraint `U` binds the PREDECLARED later-sibling shell — a
+/// `TypeParam` node, never an unbound `BareRef` and never an outer capture.
+/// A prefix-truncated frame leaves `U` out of scope (a `BareRef`), so the
+/// `TypeParam` assertion is the RED/GREEN discriminator that the full
+/// sibling frame — not a prior-sibling prefix — reaches the graph.
 #[test]
-fn lower_locator_type_param_bound_binds_only_prior_sibling_prefix() {
+fn lower_locator_constraint_binds_full_sibling_frame() {
     let host = host();
     upsert_ts(
         &host,
@@ -713,8 +825,9 @@ fn lower_locator_type_param_bound_binds_only_prior_sibling_prefix() {
         other => panic!("U's constraint must lower to a deferred KeyOf carrier, got {other:?}"),
     }
 
-    // Discriminating: T's `U` forward-reference constraint (ordinal 0) has an
-    // EMPTY prefix, so `U` is out of scope and must NOT bind as a shell.
+    // Discriminating: T's constraint `U` (ordinal 0) forward-references the
+    // LATER sibling — legal in TS — and must bind the predeclared sibling
+    // shell, never stay an unbound BareRef.
     let bar_t = match dispatch.lower_locator(type_param_bound_locator(
         OWNER_ID,
         "Bar",
@@ -725,19 +838,339 @@ fn lower_locator_type_param_bound_binds_only_prior_sibling_prefix() {
         other => panic!("lower_locator must produce a value, got {other:?}"),
     };
     let bar_t_data = graph.node_data(bar_t);
+    match bar_t_data.as_deref() {
+        Some(SemanticNodeData::TypeParam {
+            display_name,
+            param_index,
+            constraint,
+            default,
+            ..
+        }) => {
+            assert_eq!(
+                display_name.as_ref(),
+                "U",
+                "T's constraint must bind the later sibling `U`"
+            );
+            assert_eq!(
+                *param_index, 1,
+                "the forward reference binds `U`'s declared ordinal-1 identity"
+            );
+            assert!(
+                constraint.is_none() && default.is_none(),
+                "the forward reference binds the predeclared bound-free SHELL"
+            );
+        }
+        other => panic!(
+            "T's forward-reference constraint `U` must bind the predeclared \
+             sibling shell as a TypeParam — a prefix-truncated frame leaves it \
+             a BareRef; got {other:?}"
+        ),
+    }
+}
+
+/// Sibling shadowing: with an outer `type U = string` in the SAME file, a
+/// constraint's later-sibling reference `U` still binds the SIBLING type
+/// parameter — the predeclared sibling name shadows the outer declaration.
+/// A frame that predeclared nothing resolves `U` through the bare-name
+/// resolver to the outer decl's `DeclRef` identity — the wrong symbol.
+#[test]
+fn lower_locator_constraint_sibling_shadows_outer_same_named_decl() {
+    let host = host();
+    upsert_ts(
+        &host,
+        OWNER_ID,
+        "export type U = string;\n\
+         export type Foo<T extends U, U> = { x: T; y: U };\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    let foo_t = match dispatch.lower_locator(type_param_bound_locator(
+        OWNER_ID,
+        "Foo",
+        0,
+        TypeParamBoundPosition::Constraint,
+    )) {
+        QueryResult::Value(id) => id,
+        other => panic!("lower_locator must produce a value, got {other:?}"),
+    };
+    let foo_t_data = graph.node_data(foo_t);
     assert!(
         !matches!(
-            bar_t_data.as_deref(),
-            Some(SemanticNodeData::TypeParam { .. })
+            foo_t_data.as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
         ),
-        "T's constraint `U` (ordinal 0, EMPTY prefix) must NOT bind `U` as a \
-         TypeParam shell — an over-binding deref returning the full param list \
-         would, flipping this to a TypeParam; got {:?}",
-        bar_t_data.as_deref()
+        "T's constraint `U` must NOT capture the outer `type U = string` — \
+         the sibling parameter shadows it; got {:?}",
+        foo_t_data.as_deref()
+    );
+    match foo_t_data.as_deref() {
+        Some(SemanticNodeData::TypeParam {
+            display_name,
+            param_index,
+            ..
+        }) => {
+            assert_eq!(display_name.as_ref(), "U");
+            assert_eq!(
+                *param_index, 1,
+                "the reference binds the SIBLING parameter's ordinal-1 identity"
+            );
+        }
+        other => panic!("T's constraint must bind the sibling shell, got {other:?}"),
+    }
+}
+
+/// Default shadow barrier: a DEFAULT's forward / self reference is illegal
+/// in TS and must resolve unbound-within-frame — never fall through to an
+/// outer same-named declaration, never bind the sibling.
+#[test]
+fn lower_locator_default_forward_and_self_refs_are_shadow_forbidden() {
+    let host = host();
+    upsert_ts(
+        &host,
+        OWNER_ID,
+        "export type U = string;\n\
+         export type Fwd<T = U, U = string> = { x: T; y: U };\n\
+         export type Slf<T = T> = { x: T };\n\
+         export type Prior<T, V = T> = { x: T; y: V };\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    // Forward reference: T's default `U` names the LATER sibling while an
+    // outer `type U = string` exists. The sibling name shadows the outer
+    // decl but is forbidden as a default reference — the lowering is the
+    // fail-closed Opaque, never the outer DeclRef, never the sibling shell.
+    let fwd_t = match dispatch.lower_locator(type_param_bound_locator(
+        OWNER_ID,
+        "Fwd",
+        0,
+        TypeParamBoundPosition::Default,
+    )) {
+        QueryResult::Value(id) => id,
+        other => panic!("lower_locator must produce a value, got {other:?}"),
+    };
+    let fwd_t_data = graph.node_data(fwd_t);
+    assert!(
+        !matches!(
+            fwd_t_data.as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "a default's forward reference must NOT capture the outer \
+         `type U = string`; got {:?}",
+        fwd_t_data.as_deref()
     );
     assert!(
-        matches!(bar_t_data.as_deref(), Some(SemanticNodeData::BareRef(_))),
-        "the out-of-prefix `U` must stay an unbound BareRef carrier; got {:?}",
-        bar_t_data.as_deref()
+        !matches!(
+            fwd_t_data.as_deref(),
+            Some(SemanticNodeData::TypeParam { .. })
+        ),
+        "a default's forward reference must NOT bind the later sibling; got {:?}",
+        fwd_t_data.as_deref()
     );
+    assert!(
+        matches!(fwd_t_data.as_deref(), Some(SemanticNodeData::Opaque(_))),
+        "the illegal forward default reference resolves unbound-within-frame \
+         (the fail-closed Opaque); got {:?}",
+        fwd_t_data.as_deref()
+    );
+
+    // Self reference: `type Slf<T = T>` — the default's `T` is the
+    // parameter itself, equally forbidden.
+    let slf_t = match dispatch.lower_locator(type_param_bound_locator(
+        OWNER_ID,
+        "Slf",
+        0,
+        TypeParamBoundPosition::Default,
+    )) {
+        QueryResult::Value(id) => id,
+        other => panic!("lower_locator must produce a value, got {other:?}"),
+    };
+    let slf_t_data = graph.node_data(slf_t);
+    assert!(
+        matches!(slf_t_data.as_deref(), Some(SemanticNodeData::Opaque(_))),
+        "the illegal SELF default reference resolves unbound-within-frame; \
+         got {:?}",
+        slf_t_data.as_deref()
+    );
+
+    // Control: a default's PRIOR-sibling reference stays usable.
+    let prior_v = match dispatch.lower_locator(type_param_bound_locator(
+        OWNER_ID,
+        "Prior",
+        1,
+        TypeParamBoundPosition::Default,
+    )) {
+        QueryResult::Value(id) => id,
+        other => panic!("lower_locator must produce a value, got {other:?}"),
+    };
+    match graph.node_data(prior_v).as_deref() {
+        Some(SemanticNodeData::TypeParam { display_name, .. }) => {
+            assert_eq!(
+                display_name.as_ref(),
+                "T",
+                "a default's prior-sibling reference binds the prior binder"
+            );
+        }
+        other => panic!("V's default `T` must bind the prior sibling, got {other:?}"),
+    }
+}
+
+/// Mutual circular constraints (`<T extends U, U extends T>`) create graph
+/// EDGES without eager evaluation: both bound positions lower to sibling
+/// binders (termination by construction — the predeclared shells break the
+/// node-data cycle), never an outer capture, never a hang.
+#[test]
+fn lower_locator_mutual_circular_constraints_terminate_without_outer_capture() {
+    let host = host();
+    upsert_ts(
+        &host,
+        OWNER_ID,
+        "export type T = string;\n\
+         export type U = number;\n\
+         export type Foo<T extends U, U extends T> = { x: T; y: U };\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    // T's constraint forward-references U → the predeclared sibling SHELL.
+    let t_bound = match dispatch.lower_locator(type_param_bound_locator(
+        OWNER_ID,
+        "Foo",
+        0,
+        TypeParamBoundPosition::Constraint,
+    )) {
+        QueryResult::Value(id) => id,
+        other => panic!("lower_locator must produce a value, got {other:?}"),
+    };
+    match graph.node_data(t_bound).as_deref() {
+        Some(SemanticNodeData::TypeParam {
+            display_name,
+            constraint,
+            ..
+        }) => {
+            assert_eq!(display_name.as_ref(), "U");
+            assert!(
+                constraint.is_none(),
+                "the forward reference binds U's bound-free shell — the shell \
+                 break is what keeps the mutual cycle out of node data"
+            );
+        }
+        other => panic!(
+            "T's constraint must bind sibling `U`, never the outer \
+             `type U = number`; got {other:?}"
+        ),
+    }
+
+    // U's constraint back-references T → T's final binder, whose own
+    // constraint edge points at U's shell. The chain terminates there.
+    let u_bound = match dispatch.lower_locator(type_param_bound_locator(
+        OWNER_ID,
+        "Foo",
+        1,
+        TypeParamBoundPosition::Constraint,
+    )) {
+        QueryResult::Value(id) => id,
+        other => panic!("lower_locator must produce a value, got {other:?}"),
+    };
+    match graph.node_data(u_bound).as_deref() {
+        Some(SemanticNodeData::TypeParam {
+            display_name,
+            constraint,
+            ..
+        }) => {
+            assert_eq!(display_name.as_ref(), "T");
+            let t_constraint = constraint.expect("T's binder carries its constraint edge");
+            match graph.node_data(t_constraint).as_deref() {
+                Some(SemanticNodeData::TypeParam {
+                    display_name,
+                    constraint,
+                    ..
+                }) => {
+                    assert_eq!(display_name.as_ref(), "U");
+                    assert!(
+                        constraint.is_none(),
+                        "the constraint chain terminates at U's shell — no \
+                         infinite node-data cycle"
+                    );
+                }
+                other => panic!("T's constraint edge must reach U's shell, got {other:?}"),
+            }
+        }
+        other => panic!(
+            "U's constraint must bind sibling `T`, never the outer \
+             `type T = string`; got {other:?}"
+        ),
+    }
+
+    // The whole declaration body (which builds every final binder) still
+    // lowers — the cycle never hangs the frame constructor.
+    match dispatch.lower_locator(decl_body_locator(OWNER_ID, "Foo")) {
+        QueryResult::Value(_) => {}
+        other => panic!("the mutually-constrained decl body must lower, got {other:?}"),
+    }
+}
+
+/// F-bounded constraints TS accepts stay accepted: `T extends Box<T>` binds
+/// the SELF reference to the predeclared shell (never an outer decl, never
+/// a BareRef leak) and the declaration keeps lowering.
+#[test]
+fn lower_locator_f_bounded_constraint_binds_self_shell() {
+    let host = host();
+    upsert_ts(
+        &host,
+        OWNER_ID,
+        "export type Box<V> = { value: V };\n\
+         export type Foo<T extends Box<T>> = { x: T };\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    let t_bound = match dispatch.lower_locator(type_param_bound_locator(
+        OWNER_ID,
+        "Foo",
+        0,
+        TypeParamBoundPosition::Constraint,
+    )) {
+        QueryResult::Value(id) => id,
+        other => panic!("lower_locator must produce a value, got {other:?}"),
+    };
+    match graph.node_data(t_bound).as_deref() {
+        Some(SemanticNodeData::InstantiationRef { base, args }) => {
+            assert_eq!(
+                base.decl_name.as_ref(),
+                "Box",
+                "the F-bounded constraint keeps its applied-reference carrier"
+            );
+            assert_eq!(args.len(), 1);
+            match graph.node_data(args[0]).as_deref() {
+                Some(SemanticNodeData::TypeParam {
+                    display_name,
+                    constraint,
+                    ..
+                }) => {
+                    assert_eq!(
+                        display_name.as_ref(),
+                        "T",
+                        "`Box<T>`'s argument binds the parameter ITSELF"
+                    );
+                    assert!(
+                        constraint.is_none(),
+                        "the self reference binds the bound-free shell"
+                    );
+                }
+                other => panic!("the self reference must bind T's shell, got {other:?}"),
+            }
+        }
+        other => panic!(
+            "the F-bounded constraint must stay an InstantiationRef carrier, \
+             got {other:?}"
+        ),
+    }
+
+    // The declaration body still lowers (accepted, no hang).
+    match dispatch.lower_locator(decl_body_locator(OWNER_ID, "Foo")) {
+        QueryResult::Value(_) => {}
+        other => panic!("the F-bounded decl body must lower, got {other:?}"),
+    }
 }

@@ -1,62 +1,82 @@
-use verter_compiler::utils::oxc::script::type_surface::{
-    ResolvedElements, ResolvedMemberVisibility,
-};
-use verter_semantic::analysis::types::AnalyzedMacroKind;
-use verter_type_expr::TypeExpr;
+use verter_parser::utils::oxc::script::type_surface::ResolvedElements;
+use verter_type_expr::{MemberVisibility, TypeExpr};
 
+use crate::typeinfo::surface::TypeInfoSurfaceMember;
+
+/// One keep-all class-member visibility row published to the
+/// `@verter/component-meta` `nativeProps` consumer (FFI/proto/JS).
+///
+/// Built DIRECTLY from the shared-dispatch one-level surface members
+/// ([`TypeInfoSurfaceMember`]) by `ResolvedNativeProp::from_surface_member`
+/// (below), invoked from the vue_exec projection terminal
+/// `macro_elements_from_surface`
+/// (`typeinfo/framework_surface/vue_exec/imported_elements.rs`) — never
+/// from a parser DTO round-trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedNativeProp {
     pub name: String,
     pub is_optional: bool,
     pub type_annotation: Option<String>,
-    pub visibility: ResolvedMemberVisibility,
+    /// The member's declared accessibility, carried VERBATIM from the
+    /// surface member's canonical `verter_type_expr::MemberVisibility` —
+    /// every visibility is retained (public AND protected AND private);
+    /// this surface never applies the publication-boundary `Public`-only
+    /// filter.
+    pub visibility: MemberVisibility,
+    /// Always `Span::default()`. The FFI/proto wire row
+    /// (`FfiResolvedNativeProp` / proto `ResolvedNativeProp`) emits only
+    /// `span_start` / `span_end` with NO declaration-file id, and an
+    /// inherited member's declaration site lives in ITS OWN file — a bare
+    /// byte offset would be an unanchored index into an unnamed file,
+    /// misleading rather than useful. The honest 0,0 default is the wire
+    /// contract; real span fidelity requires the wire to carry a
+    /// declaration-file anchor alongside the offsets.
     pub span: verter_span::Span,
 }
 
-/// The native-only macro surface carrier.
+/// The dispatch-resolved macro-elements payload for one imported macro type:
+/// the legacy compile-facing [`ResolvedElements`] DTO plus the keep-all
+/// `native_props` rows, BOTH projected from the SAME one-level
+/// `TypeInfoSurface` resolution (one resolution, two projections — the
+/// native rows are never re-derived from the elements DTO and never come
+/// from a separate re-resolve).
 ///
-/// Holds the private/protected class-member visibility surface
-/// (`native_props`) projected from the eager OXC [`ResolvedElements`] for an
-/// imported macro type. This is the SOLE responsibility of the surface
-/// projector: the published
-/// props/emits/slots/exposed surface is owned exclusively by the typeinfo
-/// macro-surface path ([`crate::VerterHost::vue_macro_dtos`] → the
-/// `props/emits/slots/exposed_from_typeinfo_surface` normalizers).
-/// `native_props` has a
-/// real FFI/proto/JS consumer (`@verter/component-meta` `nativeProps`) that the
-/// typeinfo surface does NOT cover, so it stays here as a native-only carrier.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProjectedMacroSurfaces {
+/// `native_props` has a real FFI/proto/JS consumer
+/// (`@verter/component-meta` `nativeProps`) that the published typeinfo
+/// surface does NOT cover: it is the class-member visibility surface
+/// (public AND protected AND private, visibility carried, not filtered).
+#[derive(Debug, Clone)]
+pub struct ResolvedMacroElements {
+    pub elements: ResolvedElements,
     pub native_props: Vec<ResolvedNativeProp>,
 }
 
-pub fn project_macro_surfaces(
-    source: Option<&str>,
-    macro_kind: AnalyzedMacroKind,
-    elements: &ResolvedElements,
-) -> ProjectedMacroSurfaces {
-    project_macro_surfaces_with_owner(source, None, macro_kind, elements)
-}
-
-/// Project the native-only macro surface ([`ProjectedMacroSurfaces`]) from the
-/// eager OXC [`ResolvedElements`].
-///
-/// This projector is responsible for ONLY
-/// `native_props` (the private/protected class-member visibility surface). The
-/// published props/emits/slots/exposed are owned exclusively by the typeinfo
-/// macro-surface path; `source`, `owner_canonical`, and `macro_kind` no longer
-/// participate in the projection and are retained on the signature for the
-/// existing caller ([`project_macro_surfaces`], reached from
-/// `component_meta::cold_resolver`) without behavioural effect.
-pub fn project_macro_surfaces_with_owner(
-    source: Option<&str>,
-    owner_canonical: Option<&str>,
-    macro_kind: AnalyzedMacroKind,
-    elements: &ResolvedElements,
-) -> ProjectedMacroSurfaces {
-    let _ = (source, owner_canonical, macro_kind);
-    ProjectedMacroSurfaces {
-        native_props: collect_native_props(elements),
+impl ResolvedNativeProp {
+    /// Build one keep-all row DIRECTLY from a resolved surface member — the
+    /// SOLE production constructor for `native_props` rows.
+    ///
+    /// Every visibility maps verbatim (this constructor never coerces or
+    /// filters accessibility), and there is no macro-kind input
+    /// (kind-independence is structural: the member is the whole input).
+    /// `type_annotation` is supplied by the caller, rendered ONCE from the
+    /// member's raised value at the vue_exec projection terminal
+    /// (`macro_elements_from_surface`) so both the elements DTO and the
+    /// native row read the same rendered text — a display publication the
+    /// constructor stores, never reads. `span` is unconditionally
+    /// `Span::default()` — see the field doc: the wire carries no
+    /// declaration-file anchor, so declaration-site offsets would be
+    /// unanchored.
+    pub(crate) fn from_surface_member(
+        member: &TypeInfoSurfaceMember,
+        type_annotation: Option<String>,
+    ) -> Self {
+        Self {
+            name: member.name.as_ref().to_string(),
+            is_optional: member.optional,
+            type_annotation,
+            visibility: member.visibility,
+            span: verter_span::Span::default(),
+        }
     }
 }
 
@@ -180,46 +200,4 @@ fn render_type_expr_display_inner(expr: &TypeExpr, depth_budget: usize) -> Optio
         )),
         _ => None,
     }
-}
-
-fn collect_native_props(elements: &ResolvedElements) -> Vec<ResolvedNativeProp> {
-    elements
-        .props
-        .iter()
-        .map(|prop| ResolvedNativeProp {
-            name: prop
-                .key_name
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            is_optional: prop.optional,
-            type_annotation: raw_prop_type_text(None, prop),
-            visibility: prop.visibility,
-            span: verter_span::Span::new(prop.span.start, prop.span.end),
-        })
-        .collect()
-}
-
-fn raw_prop_type_text(
-    source: Option<&str>,
-    prop: &verter_compiler::utils::oxc::script::type_surface::ResolvedProp,
-) -> Option<String> {
-    prop.type_text.clone().or_else(|| {
-        prop.type_span
-            .and_then(|span| slice_source_span(source, span))
-    })
-}
-
-fn slice_source_span(source: Option<&str>, span: verter_span::Span) -> Option<String> {
-    let source = source?;
-    let start = span.start as usize;
-    let end = span.end as usize;
-    if start >= end || end > source.len() {
-        return None;
-    }
-    let text = source[start..end]
-        .trim()
-        .trim_end_matches([';', ','])
-        .trim()
-        .to_string();
-    (!text.is_empty()).then_some(text)
 }

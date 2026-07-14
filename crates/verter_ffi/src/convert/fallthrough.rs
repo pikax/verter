@@ -4,6 +4,7 @@
 
 use crate::types::*;
 
+use super::component_meta::require_lane_aligned;
 use super::string_helpers::inherited_source_to_ffi;
 
 pub(super) fn root_reachability_to_ffi(
@@ -174,20 +175,80 @@ pub(super) fn unresolved_root_target_reason_to_ffi(
     }
 }
 
+/// Positional-lane fallthrough conversion: `prop_lanes[i]` / `event_lanes[i]`
+/// carry the materialized types for `branches[i]`'s rows, inner-aligned with
+/// each branch's `props` / `events` vectors (the session envelope guarantees
+/// the alignment; a `None` surface carries empty lanes).
+///
+/// HARD wire-boundary alignment guards (the [`require_lane_aligned`] class,
+/// active in EVERY build profile) validate every dimension BEFORE any zip:
+/// the outer branch count against both lanes, each branch's inner prop/event
+/// counts 1:1, and the `None`-surface empty-lane invariant — a mismatch means
+/// the envelope is torn, and the positional `zip`s below would SILENTLY
+/// TRUNCATE the wire payload. A debug-only assert would let a release build
+/// ship the truncated payload.
 pub(super) fn fallthrough_surface_to_ffi(
     surface: verter_semantic::analysis::component_meta::FallthroughSurface,
+    prop_lanes: Vec<Vec<verter_type_expr::TypeExpr>>,
+    event_lanes: Vec<Vec<verter_type_expr::TypeExpr>>,
 ) -> FfiFallthroughSurface {
     match surface {
         verter_semantic::analysis::component_meta::FallthroughSurface::None { reason } => {
+            assert!(
+                prop_lanes.is_empty() && event_lanes.is_empty(),
+                "component-meta FFI conversion refused: a `None` fallthrough surface must \
+                 carry EMPTY `fallthrough-props`/`fallthrough-event-payloads` lanes; got \
+                 {props} prop lane(s) and {events} event lane(s) — materialized values for \
+                 branches that do not exist mean the envelope is torn",
+                props = prop_lanes.len(),
+                events = event_lanes.len(),
+            );
             FfiFallthroughSurface::None {
                 reason: no_fallthrough_reason_to_ffi(reason),
             }
         }
         verter_semantic::analysis::component_meta::FallthroughSurface::Branches { branches } => {
+            require_lane_aligned("fallthrough-props", branches.len(), prop_lanes.len());
+            require_lane_aligned(
+                "fallthrough-event-payloads",
+                branches.len(),
+                event_lanes.len(),
+            );
+            for (index, (branch, (props, events))) in branches
+                .iter()
+                .zip(prop_lanes.iter().zip(event_lanes.iter()))
+                .enumerate()
+            {
+                assert_eq!(
+                    branch.props.len(),
+                    props.len(),
+                    "component-meta FFI conversion refused: fallthrough branch #{index} \
+                     (`{key}`) carries {lane_len} materialized prop value(s) for \
+                     {analysis_len} analysis prop row(s) — inner prop lanes are positional \
+                     1:1 and a zip would silently truncate",
+                    key = branch.branch_key,
+                    lane_len = props.len(),
+                    analysis_len = branch.props.len(),
+                );
+                assert_eq!(
+                    branch.events.len(),
+                    events.len(),
+                    "component-meta FFI conversion refused: fallthrough branch #{index} \
+                     (`{key}`) carries {lane_len} materialized event payload(s) for \
+                     {analysis_len} analysis event row(s) — inner event lanes are \
+                     positional 1:1 and a zip would silently truncate",
+                    key = branch.branch_key,
+                    lane_len = events.len(),
+                    analysis_len = branch.events.len(),
+                );
+            }
             FfiFallthroughSurface::Branches {
                 branches: branches
                     .into_iter()
-                    .map(fallthrough_branch_to_ffi)
+                    .zip(prop_lanes.into_iter().zip(event_lanes))
+                    .map(|(branch, (props, events))| {
+                        fallthrough_branch_to_ffi(branch, props, events)
+                    })
                     .collect(),
             }
         }
@@ -196,6 +257,8 @@ pub(super) fn fallthrough_surface_to_ffi(
 
 pub(super) fn fallthrough_branch_to_ffi(
     branch: verter_semantic::analysis::component_meta::FallthroughBranch,
+    prop_types: Vec<verter_type_expr::TypeExpr>,
+    event_payloads: Vec<verter_type_expr::TypeExpr>,
 ) -> FfiFallthroughBranch {
     FfiFallthroughBranch {
         branch_key: branch.branch_key,
@@ -203,9 +266,10 @@ pub(super) fn fallthrough_branch_to_ffi(
         props: branch
             .props
             .into_iter()
-            .map(|p| FfiFallthroughPropEntry {
+            .zip(prop_types)
+            .map(|(p, r#type)| FfiFallthroughPropEntry {
                 name: p.name,
-                r#type: p.type_expr,
+                r#type,
                 raw_type: p.raw_type,
                 sources: p.sources.into_iter().map(inherited_source_to_ffi).collect(),
             })
@@ -213,9 +277,10 @@ pub(super) fn fallthrough_branch_to_ffi(
         events: branch
             .events
             .into_iter()
-            .map(|e| FfiFallthroughEventEntry {
+            .zip(event_payloads)
+            .map(|(e, payload)| FfiFallthroughEventEntry {
                 name: e.name,
-                payload: e.payload,
+                payload,
                 raw_signature: e.raw_signature,
                 sources: e.sources.into_iter().map(inherited_source_to_ffi).collect(),
             })

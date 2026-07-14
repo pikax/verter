@@ -2301,7 +2301,7 @@ defineProps<Props>()
     checker.close();
   });
 
-  it("preserves inherited imported emits through Omit chains", async () => {
+  it("fails typed on inherited imported call-signature emits through Omit chains", async () => {
     const projectRoot = resolve(
       process.env.TEMP ?? "/tmp",
       `verter-test-imported-inherited-emits-${nextProjectRootId++}`,
@@ -2335,22 +2335,16 @@ defineEmits<ContextMenuContentEmits>()
 <template><div /></template>`,
     );
 
-    const meta = await checker.getComponentMeta("App.vue");
-    const events = Object.fromEntries(meta.events.map((event) => [event.name, event.type]));
-
-    expect(Object.keys(events)).toEqual(
-      expect.arrayContaining([
-        "escapeKeyDown",
-        "pointerDownOutside",
-        "focusOutside",
-        "interactOutside",
-        "closeAutoFocus",
-      ]),
+    // The surviving imported call-signature emits carry composite params
+    // (\`event: Event\`) whose REQUIRED payload tuple has no faithful source
+    // yet — the native query surfaces the typed output-materialization
+    // failure instead of a completed result with fabricated \`unknown\`
+    // payloads. When the callable-parameter projection lands
+    // (docs/arch/stage10-b6-p4b-debt-rows.md DEBT ROW #1) this flips back
+    // to the positive Omit-surface assertion with REAL payload tuples.
+    await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(
+      /REQUIRED payload|materialization failed/,
     );
-    expect(Object.keys(events)).not.toEqual(
-      expect.arrayContaining(["openAutoFocus", "entryFocus"]),
-    );
-    expect(events.escapeKeyDown).toContain("Event");
 
     checker.close();
   });

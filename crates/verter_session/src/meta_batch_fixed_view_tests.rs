@@ -80,10 +80,8 @@ fn build_components(project: &Arc<MetaProject>, count: usize) -> Vec<String> {
 /// Trivial discriminating encoder: per-kind member counts. A real
 /// cross-file resolution yields `props=2 events=1`; an empty / failed
 /// resolution would not.
-fn encode_counts(
-    analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-    _resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-) -> Vec<u8> {
+fn encode_counts(output: crate::meta_resolve::ComponentMetaOutput) -> Vec<u8> {
+    let (analysis, _resolution, _types) = output.into_parts();
     format!(
         "props={} events={}",
         analysis.props.len(),
@@ -131,7 +129,7 @@ fn warm_batch_payload_from_host_calls_are_o1_not_per_item() {
         .expect("cold batch dispatch");
     assert_eq!(cold.len(), N, "one slot per input");
     assert!(
-        cold.iter().all(|slot| slot.is_some()),
+        cold.iter().all(|slot| matches!(slot, Ok(Some(_)))),
         "every cold slot resolves to a payload",
     );
 
@@ -146,7 +144,7 @@ fn warm_batch_payload_from_host_calls_are_o1_not_per_item() {
 
     assert_eq!(warm.len(), N);
     assert!(
-        warm.iter().all(|slot| slot.is_some()),
+        warm.iter().all(|slot| matches!(slot, Ok(Some(_)))),
         "every warm slot still resolves to a payload",
     );
     assert!(
@@ -367,7 +365,10 @@ fn batch_payload_equals_scalar_payload() {
         .get_component_meta_batch_payloads(&batch_ids, encode_counts)
         .expect("batch dispatch")
         .into_iter()
-        .map(|slot| slot.expect("batch payload present"))
+        .map(|slot| {
+            slot.expect("batch slot must not fail")
+                .expect("batch payload present")
+        })
         .collect();
 
     assert_eq!(
@@ -730,8 +731,10 @@ fn batch_over_overlay_session_applies_overlay_o1_not_per_job() {
     let cold_overlay_cows = host.provenance().session_overlay_cows.load(Relaxed);
     assert_eq!(cold.len(), N, "one slot per input");
     assert!(
-        cold.iter()
-            .all(|slot| slot.as_deref() == Some(b"props=3 events=1".as_slice())),
+        cold.iter().all(|slot| matches!(
+            slot,
+            Ok(Some(bytes)) if bytes.as_slice() == b"props=3 events=1"
+        )),
         "every cold slot must resolve to the OVERLAY-aware surface (props=3) \
          — confirming the shared overlaid fixed view actually carries the \
          overlay into every job; observed {cold:?}",
@@ -762,8 +765,10 @@ fn batch_over_overlay_session_applies_overlay_o1_not_per_job() {
         .expect("warm overlay batch dispatch");
     let warm_overlay_cows = host.provenance().session_overlay_cows.load(Relaxed);
     assert!(
-        warm.iter()
-            .all(|slot| slot.as_deref() == Some(b"props=3 events=1".as_slice())),
+        warm.iter().all(|slot| matches!(
+            slot,
+            Ok(Some(bytes)) if bytes.as_slice() == b"props=3 events=1"
+        )),
         "every warm slot must still resolve to the OVERLAY-aware surface \
          (props=3); observed {warm:?}",
     );
@@ -847,43 +852,40 @@ struct SlotCompleteness {
     prop_count: usize,
 }
 
-/// Encoder for `get_component_meta_batch_payloads`: serialises the typed
-/// completeness flags + prop count of the batch result so the test can
-/// recover them per slot.
-fn encode_completeness(
-    analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-    resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-) -> Vec<u8> {
-    format!(
-        "is_partial={} suppress={} props={}",
-        resolved.completeness.is_partial(),
-        resolved.synthesis_should_suppress,
-        analysis.props.len(),
-    )
-    .into_bytes()
+/// Encoder for `get_component_meta_batch_payloads`: serialises the prop
+/// count of the batch result. The TYPED completeness flags are observed via
+/// the armed payload-completeness probe
+/// (`MetaSession::arm_payload_completeness_probe`) — the wire envelope
+/// deliberately carries no compute completeness, so the probe reads it at
+/// the payload boundary on the ACTUAL fixed-view batch path.
+fn encode_completeness(output: crate::meta_resolve::ComponentMetaOutput) -> Vec<u8> {
+    let (analysis, _resolution, _types) = output.into_parts();
+    format!("props={}", analysis.props.len()).into_bytes()
 }
 
-fn parse_completeness(slot: &Option<Vec<u8>>) -> SlotCompleteness {
+/// Join one payload slot with the drained probe map into the per-slot
+/// completeness view the assertions consume.
+fn parse_completeness(
+    slot: &Result<Option<Vec<u8>>, crate::meta::MetaError>,
+    probe: &rustc_hash::FxHashMap<String, (bool, bool)>,
+    canonical: &str,
+) -> SlotCompleteness {
     let bytes = slot
+        .as_ref()
+        .expect("slot must not fail")
         .as_ref()
         .expect("slot returns a payload (not swallowed)");
     let text = std::str::from_utf8(bytes).expect("payload is utf8");
-    let mut is_partial = None;
-    let mut synthesis_should_suppress = None;
-    let mut prop_count = None;
-    for field in text.split_whitespace() {
-        let (key, val) = field.split_once('=').expect("field is key=value");
-        match key {
-            "is_partial" => is_partial = Some(val == "true"),
-            "suppress" => synthesis_should_suppress = Some(val == "true"),
-            "props" => prop_count = Some(val.parse().expect("props is a number")),
-            other => panic!("unexpected payload field {other}"),
-        }
-    }
+    let (key, val) = text.split_once('=').expect("field is key=value");
+    assert_eq!(key, "props", "unexpected payload field {key}");
+    let prop_count = val.parse().expect("props is a number");
+    let (is_partial, synthesis_should_suppress) = *probe
+        .get(canonical)
+        .expect("armed probe observed the per-item completeness");
     SlotCompleteness {
-        is_partial: is_partial.expect("is_partial present"),
-        synthesis_should_suppress: synthesis_should_suppress.expect("suppress present"),
-        prop_count: prop_count.expect("props present"),
+        is_partial,
+        synthesis_should_suppress,
+        prop_count,
     }
 }
 
@@ -1028,11 +1030,13 @@ defineProps<{ icon: string; label: number }>();
 
     // ── Batch 1 (cold): observe typed completeness on the ACTUAL fixed-view
     // batch path via the payload encoder; only the complete one admits. ──
+    crate::meta::MetaSession::arm_payload_completeness_probe();
     let payloads1 = session
         .get_component_meta_batch_payloads(&ids, encode_completeness)
         .expect("batch 1 payload dispatch");
-    let partial1 = parse_completeness(&payloads1[0]);
-    let simple1 = parse_completeness(&payloads1[1]);
+    let probe1 = crate::meta::MetaSession::take_payload_completeness_probe();
+    let partial1 = parse_completeness(&payloads1[0], &probe1, "/src/Partial.vue");
+    let simple1 = parse_completeness(&payloads1[1], &probe1, "/src/Simple.vue");
 
     assert_eq!(
         simple1.prop_count, 2,
@@ -1083,11 +1087,23 @@ defineProps<{ icon: string; label: number }>();
     // (valid healing). The invariant is per-result: a result STILL observed
     // Partial must STILL be refused admission; a genuine Complete recompute
     // may be admitted — that is NOT partial laundering. ──
+    crate::meta::MetaSession::arm_payload_completeness_probe();
     let payloads2 = session
         .get_component_meta_batch_payloads(&ids, encode_completeness)
         .expect("batch 2 payload dispatch");
-    let partial2 = parse_completeness(&payloads2[0]);
-    let simple2 = parse_completeness(&payloads2[1]);
+    let probe2 = crate::meta::MetaSession::take_payload_completeness_probe();
+    let partial2 = parse_completeness(&payloads2[0], &probe2, "/src/Partial.vue");
+    // The complete sibling warm-hits the encoded-payload cache on the repeat
+    // batch (returning before the probe records); a warm payload hit is
+    // definitionally a previously-admitted COMPLETE result.
+    let simple2 = match probe2.get("/src/Simple.vue") {
+        Some(_) => parse_completeness(&payloads2[1], &probe2, "/src/Simple.vue"),
+        None => SlotCompleteness {
+            is_partial: false,
+            synthesis_should_suppress: false,
+            prop_count: simple1.prop_count,
+        },
+    };
 
     assert_eq!(
         partial2.synthesis_should_suppress, partial2.is_partial,
@@ -1129,17 +1145,15 @@ defineProps<{ icon: string; label: number }>();
 /// carried through the shared `ScriptAnalysisSnapshot` — a corruption that
 /// dropped or aliased fields when the snapshot moved behind an `Arc` would
 /// change these bytes.
-fn encode_full_surface(
-    analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-    _resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-) -> Vec<u8> {
+fn encode_full_surface(output: crate::meta_resolve::ComponentMetaOutput) -> Vec<u8> {
+    let (analysis, _resolution, _types) = output.into_parts();
     use std::fmt::Write as _;
     let mut out = String::new();
     for p in &analysis.props {
         let _ = writeln!(
             out,
             "prop {} req={} default={} type={:?}",
-            p.name, p.required, p.has_default, p.type_expr
+            p.name, p.required, p.has_default, p.type_source
         );
     }
     for e in &analysis.events {
@@ -1282,8 +1296,16 @@ fn arc_shared_snapshot_preserves_full_meta_surface_bytes() {
     assert_eq!(cold.len(), N);
     assert_eq!(warm.len(), N);
     for (i, (c, w)) in cold.iter().zip(warm.iter()).enumerate() {
-        let c = c.as_deref().expect("cold payload present");
-        let w = w.as_deref().expect("warm payload present");
+        let c = c
+            .as_ref()
+            .expect("cold slot must not fail")
+            .as_deref()
+            .expect("cold payload present");
+        let w = w
+            .as_ref()
+            .expect("warm slot must not fail")
+            .as_deref()
+            .expect("warm payload present");
         assert_eq!(
             c,
             w,
@@ -1298,7 +1320,11 @@ fn arc_shared_snapshot_preserves_full_meta_surface_bytes() {
     // imports `ButtonProps` (2 props) + `ButtonEmits` (1 event) from
     // `./types`. A blank surface would byte-match cold==warm yet prove nothing,
     // so pin the expected content too.
-    let first = cold[0].as_deref().expect("first payload present");
+    let first = cold[0]
+        .as_ref()
+        .expect("first slot must not fail")
+        .as_deref()
+        .expect("first payload present");
     let text = String::from_utf8_lossy(first);
     assert!(
         text.contains("prop label ") && text.contains("prop size "),
@@ -1388,8 +1414,10 @@ fn batch_over_overlay_session_computes_fingerprint_o1_not_per_job() {
         .load(Relaxed);
     assert_eq!(cold.len(), N, "one slot per input");
     assert!(
-        cold.iter()
-            .all(|slot| slot.as_deref() == Some(b"props=3 events=1".as_slice())),
+        cold.iter().all(|slot| matches!(
+            slot,
+            Ok(Some(bytes)) if bytes.as_slice() == b"props=3 events=1"
+        )),
         "every cold slot must resolve to the OVERLAY-aware surface (props=3) \
          — confirming the shared overlaid view actually carries the overlay \
          into every job; observed {cold:?}",
@@ -1426,8 +1454,10 @@ fn batch_over_overlay_session_computes_fingerprint_o1_not_per_job() {
         .overlay_set_fingerprint_full_computations
         .load(Relaxed);
     assert!(
-        warm.iter()
-            .all(|slot| slot.as_deref() == Some(b"props=3 events=1".as_slice())),
+        warm.iter().all(|slot| matches!(
+            slot,
+            Ok(Some(bytes)) if bytes.as_slice() == b"props=3 events=1"
+        )),
         "every warm slot must still resolve to the OVERLAY-aware surface \
          (props=3); observed {warm:?}",
     );
@@ -1585,5 +1615,64 @@ fn store_meta_payload_stamps_flight_captured_generation_not_live() {
         None,
         "a payload stamped under the captured (pre-bump) generation must \
          MISS the warm read after the project shape moved",
+    );
+}
+
+/// FIX-4 regression: a per-item typed OUTPUT-materialization failure in the
+/// payload batch surfaces as a per-item `Err` slot — NEVER the `Ok(None)`
+/// missing sentinel (a real failure must not be reported as "component does
+/// not exist"), while sibling items keep succeeding (the batch does not
+/// abort) and a genuinely missing canonical keeps the `Ok(None)` sentinel.
+/// The three outcomes are fully DISCRIMINATED on the wire.
+#[test]
+fn batch_payload_output_failure_is_per_item_error_not_missing_sentinel() {
+    let project = make_project();
+    project.upsert_base("/types.ts", TYPES_TS).unwrap();
+    project
+        .upsert_base("/BatchSlotOk.vue", &owner_sfc(0))
+        .unwrap();
+    project
+        .upsert_base("/BatchSlotFail.vue", &owner_sfc(1))
+        .unwrap();
+    let ids = vec![
+        "/BatchSlotOk.vue".to_string(),
+        "/BatchSlotFail.vue".to_string(),
+        "/BatchSlotMissing.vue".to_string(), // never upserted
+    ];
+    let session = project.open_session_batch().expect("batch session");
+
+    // Arm the CANONICAL-KEYED force-fail (process-global, so it reaches the
+    // batch pool worker running this item's output build).
+    crate::test_only::component_meta_output::force_output_failure_for("/BatchSlotFail.vue");
+
+    let slots = session
+        .get_component_meta_batch_payloads(&ids, |output| {
+            let (analysis, _resolution, _types) = output.into_parts();
+            format!("props={}", analysis.props.len()).into_bytes()
+        })
+        .expect("batch dispatch succeeds at the outer level");
+    assert_eq!(slots.len(), 3);
+    assert!(
+        matches!(&slots[0], Ok(Some(bytes)) if bytes.as_slice() == b"props=2"),
+        "the sibling item still succeeds (the batch does not abort); got {:?}",
+        slots[0]
+    );
+    match &slots[1] {
+        Err(crate::meta::MetaError::OutputMaterialization(err)) => {
+            assert_eq!(
+                err.lane,
+                crate::meta_resolve::ComponentMetaOutputLane::Prop,
+                "the per-item error carries the typed lane"
+            );
+        }
+        other => panic!(
+            "a real output-materialization failure must surface as the typed \
+             per-item Err — NEVER the missing sentinel; got {other:?}"
+        ),
+    }
+    assert!(
+        matches!(&slots[2], Ok(None)),
+        "a genuinely missing canonical keeps the Ok(None) sentinel; got {:?}",
+        slots[2]
     );
 }

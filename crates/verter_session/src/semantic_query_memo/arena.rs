@@ -25,16 +25,6 @@
 //! to route per-base-scope lookups through the correct
 //! [`SessionSolverHost`](crate::resolver_core::solver_host::SessionSolverHost)
 //! without threading scope through every call.
-//!
-//! **Exempt variants.** `SemanticNodeData::VueMacroElements` nodes store
-//! `None` in the sidecar slot — they live on the parser's refcount-only hot
-//! path and are never consumed by dispatch builders that walk `node_scope`.
-//! The exemption is enforced structurally inside `push_impl` so callers
-//! can't accidentally populate a sidecar entry for a vue-macro node, even
-//! via [`super::SemanticGraphStore::intern_node_with_scope`].
-//! `VueMacroElements` short-circuits: it bypasses both the shard index
-//! and the shard Mutex entirely, acquiring only `inner.write()` for the
-//! sequential id allocation.
 
 use std::sync::Arc;
 
@@ -62,10 +52,9 @@ pub(super) struct ShardIndex {
 pub(super) struct ArenaInner {
     nodes: Vec<Arc<SemanticNodeData>>,
     /// Origin-scope sidecar. Index-aligned with `nodes`.
-    /// `None` marks an exempt slot (`VueMacroElements`); `Some(scope)`
-    /// records the scope the node was first interned in (`Global` for
-    /// scope-less structural nodes, `File { .. }` for declaration-origin
-    /// nodes).
+    /// `Some(scope)` records the scope the node was first interned in
+    /// (`Global` for scope-less structural nodes, `File { .. }` for
+    /// declaration-origin nodes).
     scopes: Vec<Option<NodeScopeId>>,
 }
 
@@ -128,34 +117,14 @@ impl NodeArena {
     }
 
     fn push_impl(&self, data: SemanticNodeData, scope: NodeScopeId) -> SemanticNodeId {
-        // `VueMacroElements` is exempt — record `None` so
-        // `node_scope` returns `None` rather than `Some(Global)` for
-        // those nodes. The exemption is structural so even
-        // `intern_node_with_scope(VueMacroElements, Some(scope))`
-        // yields `None` in the sidecar slot. The sharded dedup is
-        // also short-circuited — identity-carriers must allocate a
-        // fresh slot on every insert so the `NamedTypeCache`
-        // latest-insert-wins contract stays observable.
-        let is_vue_macro = matches!(data, SemanticNodeData::VueMacroElements(_));
-
         // Capture the discriminant before moving `data` so the
         // contention instrumentation can bucket per-variant pushes.
         let discriminant = data.discriminant_index();
 
-        // Sharded dedup hot path. `VueMacroElements` bypasses the
-        // shard index entirely (fresh slot every call). Other
-        // variants route to their shard and check for an existing
-        // id; the miss path acquires `inner.write()` briefly to push
-        // the new slot.
-        let (id, is_miss, write_wait_ns) = if is_vue_macro {
-            let write_start = Instant::now();
-            let mut inner = self.inner.write();
-            let wait = write_start.elapsed().as_nanos() as u64;
-            let id = SemanticNodeId(inner.nodes.len() as u64);
-            inner.nodes.push(Arc::new(data));
-            inner.scopes.push(None);
-            (id, true, wait)
-        } else {
+        // Sharded dedup hot path. Variants route to their shard and
+        // check for an existing id; the miss path acquires
+        // `inner.write()` briefly to push the new slot.
+        let (id, is_miss, write_wait_ns) = {
             let shard_idx = shard_index_for(&data, &scope);
             let key = (data, scope);
             // Fast path: shard-hit. Shard Mutex is short-lived; parallel
@@ -234,9 +203,8 @@ impl NodeArena {
         inner.nodes.get(id.0 as usize).cloned()
     }
 
-    /// Return the recorded origin scope for `id` — `None` for exempt nodes
-    /// (or invalid ids), `Some(scope)` for everything else. Exempt slots
-    /// are `VueMacroElements` nodes.
+    /// Return the recorded origin scope for `id` — `None` for invalid
+    /// ids, `Some(scope)` for everything else.
     pub(super) fn scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
         let inner = self.inner.read();
         inner.scopes.get(id.0 as usize).cloned().flatten()

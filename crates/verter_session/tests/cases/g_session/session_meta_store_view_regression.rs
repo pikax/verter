@@ -111,10 +111,8 @@ fn session_payload_cross_file_macros_resolve_via_real_ctx() {
 
     // Encode just the per-kind member counts so we can assert the
     // cross-file surface resolved (and not via an always-true predicate).
-    fn encode(
-        analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-        _resolved: &ResolvedComponentMetaState,
-    ) -> Vec<u8> {
+    fn encode(output: verter_session::meta_resolve::ComponentMetaOutput) -> Vec<u8> {
+        let (analysis, _resolution, _types) = output.into_parts();
         format!(
             "props={} events={} slots={}",
             analysis.props.len(),

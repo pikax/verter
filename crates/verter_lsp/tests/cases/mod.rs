@@ -10,6 +10,8 @@ mod lsp_audit_diagnostics_completion;
 mod lsp_audit_hover_record;
 mod lsp_audit_query_methods;
 mod lsp_audit_tls_propagation;
+mod lsp_component_meta_output_error;
+mod lsp_component_meta_wire_equivalence;
 mod position_mapper_strict;
 mod repro_autoimport_additional_edits;
 mod repro_external_defn_line;

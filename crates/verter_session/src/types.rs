@@ -2465,11 +2465,8 @@ pub(crate) struct StyleOverrideWithAnalysis {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ResolvedExternalTypeCache — host-level shared resolved type cache
+// External type resolution limits
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Maximum entries in the host-level resolved external type cache.
-pub(crate) const RESOLVED_TYPE_CACHE_CAP: usize = 4096;
 
 /// Maximum recursion depth for external type resolution.
 ///
@@ -2503,36 +2500,6 @@ pub enum ExternalTypeResolveError {
         type_name: String,
         last_dep: String,
     },
-}
-
-/// Key for the host-level resolved external type cache.
-///
-/// Includes the dependency's source hash to guarantee freshness — when a
-/// dependency file changes, its hash changes and stale entries are never hit.
-///
-/// Includes `view_fingerprint` so per-session overlay slots co-exist with the
-/// base slot (`view_fingerprint = 0`). Concurrent sessions and base reads do
-/// not alias on the same `ResolvedElements` value, and overlay-aware
-/// dependency reads never reuse the unsound base-cache entry.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ResolvedTypeCacheKey {
-    pub dep_canonical_id: String,
-    pub dep_source_hash: Hash16,
-    pub type_name: String,
-    pub resolve_kind: verter_workspace::ResolveRequestKind,
-    /// Session-view fingerprint of the active overlay set. `0` means no
-    /// active overlay (base host call). Non-zero values discriminate
-    /// per-session candidates so base and session entries co-exist.
-    pub view_fingerprint: u64,
-}
-
-/// A resolved external type entry in the host-level cache.
-#[derive(Debug, Clone)]
-pub(crate) struct ResolvedTypeCacheEntry {
-    pub resolved: Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
-    /// Canonical IDs traversed during resolution. Replayed into the caller's
-    /// `tracked_deps` on cache hit so the eval path knows which sources to read.
-    pub tracked_deps: Vec<String>,
 }
 
 /// Cached host-owned component-meta resolved state.
@@ -2748,7 +2715,7 @@ pub struct MetaProvenance {
     /// — the dual-emit helper invoked by the six dispatch reads that
     /// have no result cache of their own (three projector sites,
     /// `materialize_component_meta_type_expr_until_stable_full`,
-    /// `lowered_root_reaches_transitive_cycle`, and
+    /// `node_root_reaches_transitive_cycle_with_fence`, and
     /// `materialize_member_surface_expr`). The helper bumps this
     /// counter on every `observe_fact_signature` call. Used by tests
     /// to discriminate the fact-tracer channel from the legacy
@@ -3506,7 +3473,7 @@ pub struct MetaProvenanceSnapshot {
     /// `meta_resolve::dep_signature::emit_dispatch_dep_signature_facts`
     /// (three projector sites,
     /// `materialize_component_meta_type_expr_until_stable_full`,
-    /// `lowered_root_reaches_transitive_cycle`, and
+    /// `node_root_reaches_transitive_cycle_with_fence`, and
     /// `materialize_member_surface_expr`). Used by behavioural tests
     /// to discriminate the fact-tracer path from the legacy
     /// accumulator path.

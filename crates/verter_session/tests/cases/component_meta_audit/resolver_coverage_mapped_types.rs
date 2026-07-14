@@ -34,27 +34,36 @@ fn resolver_coverage_mapped_types_exclude_distributes() {
         &[("/c.vue", MAPPED_EXCLUDE_VUE)],
         &[("lib.es5.d.ts", STUB_LIB_ES5)],
     );
-    let (analysis, _resolution, _record) = resolve_under_audit(host, "/c.vue");
+    let (analysis, _resolution, _record) =
+        resolve_under_audit(std::sync::Arc::clone(&host), "/c.vue");
 
     let kind = analysis
         .props
         .iter()
         .find(|p| p.name == "kind")
         .expect("Source.kind must surface as a prop");
+    let kind_source = kind
+        .type_source
+        .present()
+        .expect("Source.kind must publish a typed source");
+    let kind_ty = verter_session::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/c.vue",
+        kind_source,
+    )
+    .unwrap_or_else(|| panic!("`kind`'s published source must demand-materialize"));
 
-    // Discriminating: pre-fix, type_expr is Unknown; post-fix, it is a
-    // Union of two string literals. assert_eq! over collected literals
+    // Discriminating: pre-fix, the resolved type is Unknown; post-fix, it
+    // is a Union of two string literals. assert_eq! over collected literals
     // would fail on an `Unknown` variant outright (no String literals
     // produced) AND on a wrong-arity Union (1 or 3 members).
-    let literals = collect_string_literals(&kind.type_expr);
+    let literals = collect_string_literals(&kind_ty);
     let mut sorted = literals.clone();
     sorted.sort();
     assert_eq!(
         sorted,
         vec!["a".to_string(), "c".to_string()],
-        "Exclude<'a'|'b'|'c', 'b'> must evaluate to literal union 'a' | 'c'; got {:?} from {:#?}",
-        literals,
-        kind.type_expr
+        "Exclude<'a'|'b'|'c', 'b'> must evaluate to literal union 'a' | 'c'; got {literals:?} from {kind_ty:#?}"
     );
 
     // Negative: 'b' MUST NOT appear (not "filtered out" if still present).

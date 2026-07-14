@@ -103,6 +103,9 @@ pub(crate) mod raise;
 pub(crate) mod raise_sentinel;
 pub(crate) mod relation;
 pub(crate) mod relation_predicates;
+pub(crate) mod semantic_source;
+mod semantic_source_compose;
+pub(crate) mod semantic_source_leaf_facts;
 pub(crate) mod substitute;
 pub(crate) mod walk;
 
@@ -153,6 +156,13 @@ mod body_source_witness {
     }
 }
 pub(crate) use body_source_witness::BodySourceWitness;
+// Module-level alias for the demand primitives' typed outcome (returned by the
+// `pub(crate)` structural-fact demand methods). Production callers consume it
+// through `StructuralFactDemandOutcome::into_complete_node` without naming the
+// type; crate-local tests name the arms directly, so the alias is referenced
+// only under the test cfg.
+#[allow(unused_imports)]
+pub(crate) use evaluate::StructuralFactDemandOutcome;
 
 /// Declaration identity used for in-flight instantiation tracking
 /// ( recursive-ref back-edge detection during body
@@ -196,6 +206,19 @@ pub struct ProjectSemanticDispatch<'a> {
     /// the active-instantiation back-edge are the PRIMARY termination mechanism,
     /// this is only the pre-memo guard). NOT an arbitrary depth budget.
     pub(super) carrier_normalizing: std::cell::RefCell<smallvec::SmallVec<[SemanticNodeId; 8]>>,
+    /// In-flight KEY-DOMAIN closedness decl evaluations rooted at this
+    /// dispatcher — the DISPATCH-WIDE cycle guard of the fact-native
+    /// closedness evaluator (`raise::prepared_decl_body_is_closed` /
+    /// `raise::prepared_instantiation_key_domain_is_closed`). The recipe
+    /// escapes shallow-lower authored positions, and a lowering-time
+    /// execution (a literal indexed access, a decidable conditional) can
+    /// consult the enumeration/mapped key-domain gates, whose walks re-enter
+    /// the closedness evaluator with FRESH walk budgets — a per-chain
+    /// visited set cannot see across that re-entry, so a genuinely recursive
+    /// decl would recurse with unbounded stack. A back-edge on THIS
+    /// dispatch-wide in-flight set refuses (`Unavailable` — never a proof),
+    /// while sibling diamonds stay fine (entries pop on exit).
+    pub(super) closedness_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
     /// Cold-build-LOCAL taint accumulator stack (universal read-boundary
     /// fold).
     ///
@@ -217,7 +240,7 @@ pub struct ProjectSemanticDispatch<'a> {
     /// naturally no-ops (the stack is empty).
     ///
     /// Distinct from the broad per-request sticky
-    /// ([`crate::request_context::current_materialization_cache_suppress`]):
+    /// ([`crate::request_context::current_request_result_is_partial`]):
     /// the request sticky records ONLY genuine partials (§1) and
     /// outlives the build; this stack is scoped to the active cold build so
     /// a benign non-cacheable nested read taints only THIS build's
@@ -322,6 +345,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ctx,
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
         }
     }
@@ -363,7 +387,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// build-local fold (the stack is empty); the sticky mark still fires.
     pub(super) fn fold_cache_read_rails(&self, result_is_partial: bool, cache_suppress: bool) {
         if result_is_partial {
-            crate::request_context::mark_request_materialization_cache_suppress();
+            crate::request_context::mark_request_result_partial();
         }
         self.fold_into_top_build_local_taint(result_is_partial, cache_suppress);
     }
@@ -631,6 +655,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
         active.pop();
     }
 
+    /// Push `identity` onto the in-flight closedness-evaluation stack.
+    /// Returns `true` when the identity was not already present (caller
+    /// MUST pair with [`Self::pop_closedness_active`]); `false` = a genuine
+    /// back-edge on the current closedness chain — the caller refuses
+    /// (`Unavailable`) and must NOT pop.
+    pub(super) fn push_closedness_active(&self, identity: InstantiateIdentity) -> bool {
+        let mut active = self.closedness_active.borrow_mut();
+        if active.iter().any(|existing| {
+            existing.0.as_ref() == identity.0.as_ref() && existing.1.as_ref() == identity.1.as_ref()
+        }) {
+            return false;
+        }
+        active.push(identity);
+        true
+    }
+
+    /// Pop the most-recent in-flight closedness entry. Caller MUST only
+    /// call this after a successful `push_closedness_active`.
+    pub(super) fn pop_closedness_active(&self) {
+        let mut active = self.closedness_active.borrow_mut();
+        active.pop();
+    }
+
     /// Check whether `identity` is currently being instantiated on this
     /// dispatcher's call chain without taking ownership.
     pub(super) fn is_instantiate_active(&self, canonical_id: &str, name: &str) -> bool {
@@ -663,24 +710,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         arg: SemanticNodeId,
     ) -> SemanticNodeId {
         self.substitute_semantic_type_param(node, parameter_node, arg)
-    }
-
-    /// Integration-test shim for
-    /// [`Self::evaluate_deferred_semantic_node_with_context`]. Same
-    /// rationale as `substitute_semantic_type_param_for_tests`:
-    /// the helper is `pub(super)` and unreachable from integration
-    /// test crates.
-    ///
-    /// `cfg`-gated to `test` / `debug_assertions`: the method is
-    /// absent from release builds, so the production crate surface
-    /// is unchanged.
-    #[cfg(any(test, debug_assertions))]
-    pub(crate) fn evaluate_deferred_semantic_node_with_context_for_tests(
-        &self,
-        node: SemanticNodeId,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        self.evaluate_deferred_semantic_node_with_context(node, context)
     }
 
     /// Intern an opaque node carrying the supplied query error. Used as the
@@ -819,10 +848,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expr: &verter_type_expr::TypeExpr,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
-        let shallow = self.ctx.shallow_file_state(scope_canonical_id)?;
+        // A scope whose file is not (yet) materialised still lowers: the
+        // lowering is a pure typed-IR → carrier-graph mapping, and every
+        // reference that cannot resolve NOW stays a scoped `BareRef`
+        // carrier the demand points retry against the live view. Bailing
+        // here would destroy the authored head (name / args / scope) at
+        // raise time — `None` from this entry means "no lowering exists",
+        // never "the scope file is not loaded yet". The unknown file
+        // contributes a default content hash to the scope (the honest
+        // value for a file with no content generation); the carriers
+        // resolve by canonical id at demand, so nothing stale is baked in.
+        let whole_hash = self
+            .ctx
+            .shallow_file_state(scope_canonical_id)
+            .map(|shallow| shallow.whole_hash)
+            .unwrap_or_default();
         let scope = NodeScopeId::File {
             canonical_id: Arc::from(scope_canonical_id),
-            whole_hash: shallow.whole_hash,
+            whole_hash,
             local_scope: None,
         };
         let env = rustc_hash::FxHashMap::default();
@@ -1188,7 +1231,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return (key, CarrierNormalizationPrelude::none());
         }
         let host = self.ctx.host_for_fact_tracer_install();
-        let (normalized, finalise, fenced_serve_observed) =
+        let (normalized, finalise, non_cacheable_read_observed) =
             crate::fact_signature_helpers::install_fact_tracer(host, || {
                 let normalized = self.normalize_carrier_subject_key(key);
                 // Test-only: force a fenced (ReturnOnly) serve observation onto
@@ -1196,10 +1239,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // without a superseded-artifact fixture. Zero-cost when unset.
                 #[cfg(test)]
                 if host
+                    .test_force
                     .carrier_normalization_force_fence_for_tests
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                        crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                    );
                 }
                 normalized
             });
@@ -1210,7 +1256,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // resolving the carrier head means the rewrite's value basis came
                 // from a served-without-publication artifact — refuse warm
                 // admission of any enclosing entry that rode this rewrite.
-                cache_suppress: fenced_serve_observed,
+                cache_suppress: non_cacheable_read_observed,
             },
             crate::resolver_core::FactReadSetFinalise::Overflow => CarrierNormalizationPrelude {
                 // An overflowed prelude yields no bounded fact list — the rewrite
@@ -1510,9 +1556,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::NormalizeIntersection { members } => {
                     self.build_normalize_intersection(members)
                 }
-                SemanticQueryKey::ResolvedNamedType { key } => {
-                    self.build_resolved_named_type(key).into()
-                }
                 // The relation engine routes through its dedicated
                 // `SemanticGraphStore::relation_memo` (keyed on the full
                 // `RelateMemoKey`) via `relate_nodes`, not the family memo.
@@ -1632,13 +1675,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // panic / early-return too (panic-safe pop), so an unwinding
             // cold build never leaks a stale frame onto the stack.
             let taint_guard = BuildLocalTaintGuard::push(&self.build_local_taint);
-            let (mut output, finalise, fenced_serve_observed) =
+            let (mut output, finalise, non_cacheable_read_observed) =
                 crate::fact_signature_helpers::install_fact_tracer(host, || {
                     // Test-only fact-injection hook. When the
                     // `dispatch_test_inject_parse_fact` slot is non-None,
                     // observe the recorded `Parse(...)` fact onto the
                     // active tracer cell BEFORE running the inner build.
                     dispatch_test_inject_parse_fact_if_set();
+                    // Test-only per-host forced-fenced-serve knob. When set, note
+                    // a FENCED (ReturnOnly) serve onto the active tracer BEFORE
+                    // the inner build runs, so this build finalises
+                    // `cache_suppress = true` (deterministic in-process
+                    // equivalent of a mid-flight-supersession fenced serve — the
+                    // only clean way to force `cache_suppress` on a nested read
+                    // whose subject is NOT a carrier, e.g. the ImportType
+                    // qualified-path `ProjectPath`). Per-host, so concurrent
+                    // tests on distinct hosts never contaminate one another.
+                    #[cfg(test)]
+                    if host
+                        .test_force
+                        .force_fenced_serve_for_tests
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                            crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                        );
+                    }
+                    // Test-only per-host forced-result-partial knob. When set,
+                    // taint THIS build's frame `result_is_partial` BEFORE the
+                    // inner build runs (deterministic in-process equivalent of a
+                    // budget-/recursion-truncated nested read). Folds inline
+                    // because it needs the dispatch's taint frame. Per-host.
+                    #[cfg(test)]
+                    if host
+                        .test_force
+                        .force_result_partial_for_tests
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        self.fold_into_top_build_local_taint(true, false);
+                    }
                     raw_build()
                 });
             let build_local = taint_guard.finish();
@@ -1652,7 +1727,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // project generation; the traced facts validate against a
             // fresh view) cannot be rejected read-side. The value still
             // flows to the caller; the memo refuses admission.
-            output.cache_suppress |= fenced_serve_observed;
+            output.cache_suppress |= non_cacheable_read_observed;
             provenance
                 .memo_entry_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1721,8 +1796,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
                 // ResolveDecl, NormalizeUnion, NormalizeIntersection,
-                // ResolvedNamedType, Relate, ResolveMacroPayload —
-                // not in the focused counter set.
+                // Relate, ResolveMacroPayload — not in the focused
+                // counter set.
                 _ => None,
             };
             if let Some(event) = event {
@@ -2713,9 +2788,6 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
 mod tests;
 
 #[cfg(test)]
-mod stage10_parity_oracle;
-
-#[cfg(test)]
 mod carrier_materialize_tests;
 
 #[cfg(test)]
@@ -2724,6 +2796,8 @@ mod carrier_reduction_tests;
 #[cfg(test)]
 mod carrier_head_resolution_tests;
 
+#[cfg(test)]
+mod closedness_evaluator_tests;
 #[cfg(test)]
 mod mapped_key_domain_carrier_tests;
 

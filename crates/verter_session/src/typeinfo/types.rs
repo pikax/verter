@@ -14,9 +14,7 @@
 
 use std::sync::Arc;
 
-use verter_type_expr::TypeExpr;
-
-use crate::semantic_query::ProjectionMode;
+use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 
 // ---------------------------------------------------------------------------
 // Query level
@@ -224,9 +222,13 @@ pub enum NamedImport {
 // ---------------------------------------------------------------------------
 
 /// Type-arguments slice accepted by the public `resolve_named_symbol`
-/// host methods. Aliased to a slice of [`TypeExpr`] for clarity at the
-/// call site — the lowering happens inside the host method.
-pub type TypeArgList<'a> = &'a [Arc<TypeExpr>];
+/// host methods: ALREADY-LOWERED semantic-graph node ids. A wire caller
+/// holding symbolic `TypeExpr` payloads enters through
+/// `VerterHost::resolve_named_symbol_wire_with_audit`, which lowers them
+/// to node ids INSIDE its one audited request (under the request's single
+/// store view) before resolving — the semantic surface itself never
+/// accepts raw symbolic IR.
+pub type TypeArgList<'a> = &'a [SemanticNodeId];
 
 // ---------------------------------------------------------------------------
 // Level-aware surface requests

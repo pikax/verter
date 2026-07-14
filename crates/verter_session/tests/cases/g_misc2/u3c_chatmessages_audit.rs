@@ -63,15 +63,14 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 /// higher value means new eager expansion crept in; a lower value means the
 /// bounded residual changed shape and the gate is re-derived deliberately.
 ///
-/// The value is 1: the single CARRIER-STOPPED Expanded `Instantiate` of the
-/// route/mode-independent L1 open-domain carrier-stop. `build_instantiate`
-/// counts the dispatch BEFORE the carrier early-return, so the fixture's open
-/// `Pick` (object-filter utility over an open argument, base `__builtin__::
-/// Pick`) that stays a shallow `InstantiationRef` carrier (NO source
-/// materialisation) still increments the request-wide counter once. It is NOT
-/// eager expansion: the `synthesis_expanded_instantiate_calls == 0` and
-/// frontier/materialisation assertions below remain the eager-regression
-/// guards and stay green.
+/// The value is 0: the node-domain publication reduce resolves the fixture's
+/// open `Pick` (object-filter utility over an open argument) as a shallow
+/// `InstantiationRef` carrier WITHOUT dispatching an Expanded `Instantiate`
+/// at all — the formerly counted single carrier-stopped dispatch (counted by
+/// `build_instantiate` before its carrier early-return) no longer fires, so
+/// the bounded residual re-derived from 1 to 0. The
+/// `synthesis_expanded_instantiate_calls == 0` and frontier/materialisation
+/// assertions below remain the eager-regression guards and stay green.
 ///
 /// The canonical-owner surface contributes ZERO Expanded instantiates:
 ///  - the eager macro-object materialiser is absent from the production
@@ -111,7 +110,7 @@ const CHAT_MESSAGES_SYNTHESIS_EXPANDED_INSTANTIATE_CEILING: u64 = 0;
 ///  6. `synthesis_expanded_instantiate_calls == 0`: asserted directly above
 ///     (the eager-path signal stays 0 — the carrier-stopped dispatch is not
 ///     synthesis-attributed).
-const CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE: u64 = 1;
+const CHAT_MESSAGES_EXPANDED_INSTANTIATE_VALUE: u64 = 0;
 
 /// The declared-dependency ROOTS the audited ChatMessages resolve is allowed to
 /// touch — the SFC's own RELATIVE import targets plus the owner. Every

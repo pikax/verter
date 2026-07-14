@@ -97,6 +97,54 @@ fn slot_binding<'a>(
         .find(|b| b.name == binding)
 }
 
+/// Shell-materialize a published slot-binding `type_source` WITHOUT a
+/// resolution demand — the shallow published shape the binding carries.
+fn shallow_binding_type(
+    host: &VerterHost,
+    owner: &str,
+    binding: &verter_semantic::analysis::component_meta::SlotBindingAnalysis,
+) -> TypeExpr {
+    crate::test_only::semantic_source_probe::shallow_type_expr(
+        host,
+        owner,
+        binding
+            .type_source
+            .present()
+            .unwrap_or_else(|| panic!("binding `{}` must publish a typed source", binding.name)),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "binding `{}`'s published source must shell-materialize",
+            binding.name
+        )
+    })
+}
+
+/// Demand-materialize a published slot-binding `type_source` — the explicit
+/// consumer walk (`Published(Expanded)` through the one dispatch). For a
+/// shallow synthetic carrier this is the terminal-demand deepen through the
+/// content-free synthetic-binding identity.
+fn demand_binding_type(
+    host: &VerterHost,
+    owner: &str,
+    binding: &verter_semantic::analysis::component_meta::SlotBindingAnalysis,
+) -> TypeExpr {
+    crate::test_only::semantic_source_probe::demand_type_expr(
+        host,
+        owner,
+        binding
+            .type_source
+            .present()
+            .unwrap_or_else(|| panic!("binding `{}` must publish a typed source", binding.name)),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "binding `{}`'s published source must demand-materialize",
+            binding.name
+        )
+    })
+}
+
 // Recursive op-node count helper. Counts every TypeExpr recursive
 // child node, used to bound binding `r#type` shapes against runaway
 // expansion.
@@ -273,7 +321,8 @@ defineSlots<Slots>()
     for slot in &meta.slots {
         for binding in &slot.bindings {
             any_binding = true;
-            total_nodes += count_type_expr_nodes(&binding.type_expr);
+            total_nodes +=
+                count_type_expr_nodes(&shallow_binding_type(&host, "/src/Comp.vue", binding));
         }
     }
     assert!(
@@ -536,11 +585,12 @@ defineSlots<Slots>()
 // ---------------------------------------------------------------------------
 //
 // An unresolvable carrier (lazy binding) must produce zero binding
-// rows; a resolvable inline carrier must produce a concrete binding
-// shape. The discriminating contract: the graph-native synthesis must
-// raise to an `IndexedAccess` shell on unresolved hops (no synthetic
-// `string` binding leaked) AND publish a concrete `Primitive` for the
-// inline `row: string` annotation.
+// rows; a resolvable inline carrier must produce a real binding row.
+// The discriminating contract: the graph-native synthesis publishes
+// the row as a shallow `SyntheticSlotBinding` carrier (never a leaked
+// synthetic `string` binding, never an eager expansion), and the
+// explicit terminal-demand walk deepens `default.row` to the concrete
+// `string` through the content-free synthetic-binding identity.
 //
 // TODO(follow-up): a multi-hop unresolvable carrier (e.g. `import type
 // { Slots } from './a'; export type { Slots } from './missing'`) would
@@ -592,10 +642,11 @@ defineSlots<{ default(props: { row: string }): any }>()
         "unresolvable carrier must publish zero bindings; observed={unresolvable_bindings:?}",
     );
 
-    // Resolvable: the `row` binding's type_expr should be a concrete
-    // primitive (string), not an Unknown / IndexedAccess shell. A
-    // naive synthesis that doesn't enter the inline arm would publish
-    // a shell here.
+    // Resolvable: the `row` binding PUBLISHES the shallow first-class
+    // SyntheticSlotBinding carrier (shallow-by-default — a graph-native
+    // no-payload row never eagerly expands at publication). A naive
+    // synthesis that doesn't enter the inline arm would publish no
+    // binding row at all.
     let resolvable_bindings = slot_bindings(&resolvable_meta, "default");
     assert_eq!(
         resolvable_bindings,
@@ -604,11 +655,26 @@ defineSlots<{ default(props: { row: string }): any }>()
     );
     let row_binding = slot_binding(&resolvable_meta, "default", "row")
         .expect("default.row must exist on resolvable");
-    let is_concrete_primitive = matches!(&row_binding.type_expr, TypeExpr::Primitive(_));
+    let row_type = shallow_binding_type(&host, "/src/Resolvable.vue", row_binding);
+    let TypeExpr::SyntheticSlotBinding(carrier) = &row_type else {
+        panic!(
+            "resolvable inline `row` binding must publish the shallow \
+             SyntheticSlotBinding carrier; observed type_expr={row_type:?}",
+        );
+    };
+    assert_eq!(carrier.slot_name.as_deref(), Some("default"));
+    assert_eq!(carrier.binding_name.as_ref(), "row");
+    // Explicit deepening/demand: the terminal-demand walk resolves the
+    // carrier through the content-free synthetic-binding identity to the
+    // concrete inline annotation (`row: string`).
+    let demanded = demand_binding_type(&host, "/src/Resolvable.vue", row_binding);
     assert!(
-        is_concrete_primitive,
-        "resolvable inline `row` binding must publish a concrete Primitive; observed type_expr={:?}",
-        row_binding.type_expr,
+        matches!(
+            demanded,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "explicit demand must materialize default.row to the concrete `string`; \
+         observed {demanded:?}",
     );
 }
 
@@ -949,7 +1015,7 @@ defineSlots<Slots>()
     // a single `TypeExpr` per binding would exceed this budget.
     for slot in &meta.slots {
         for binding in &slot.bindings {
-            let n = count_type_expr_nodes(&binding.type_expr);
+            let n = count_type_expr_nodes(&shallow_binding_type(&host, "/src/Comp.vue", binding));
             assert!(
                 n <= 32,
                 "30-level heritage binding {}.{} type_expr op-node count must stay <= 32 \
@@ -1014,7 +1080,8 @@ defineSlots<Slots>()
     // that retained the full heritage TypeExpr per binding.
     for slot in &meta.slots {
         for binding in &slot.bindings {
-            let depth = count_type_expr_nodes(&binding.type_expr);
+            let depth =
+                count_type_expr_nodes(&shallow_binding_type(&host, "/src/Comp.vue", binding));
             assert!(
                 depth <= 32,
                 "raise depth proxy: binding {}.{} type_expr op-node count must stay <= 32; \
@@ -1194,11 +1261,14 @@ defineSlots<Slots>()
 //
 // Parser-path metadata (`raw_type` from `AnalyzedSlotFieldBinding`)
 // must be merged with the graph-native binding type. The published
-// `default.x` row must carry a concrete `TypeExpr::Primitive`, not a
-// `TypeExpr::Unknown` shell. A naive synthesis that emitted the
+// `default.x` row keeps the parser-side display `raw_type` AND the
+// shallow first-class `SyntheticSlotBinding` carrier as its typed
+// source (graph-native no-payload rows publish shallow-by-default);
+// the concrete `string` materializes ONLY through the explicit
+// terminal-demand walk. A naive synthesis that emitted the
 // parser-side `AnalyzedSlotFieldBinding` without walking the inline
-// `{ x: string }` annotation would publish an `Unknown` shape and
-// fail the `matches!(... Primitive)` discriminator below.
+// `{ x: string }` annotation would publish no graph-native row (and
+// the demand below could never resolve `string`).
 //
 // TODO(follow-up): once `SlotBindingSource` is exposed on
 // `SlotBindingAnalysis`, this test should additionally assert
@@ -1225,14 +1295,36 @@ defineSlots<{
         .get_component_meta("/src/Comp.vue")
         .expect("component meta");
     let row = slot_binding(&meta, "default", "x").expect("default.x binding must publish");
-    // Graph-native path produces a concrete TypeExpr (Primitive). A
-    // naive synthesis that fell back to the parser-side raw_type or
-    // emitted an Unknown shell would fail this discriminator.
-    let has_concrete_type = matches!(row.type_expr, TypeExpr::Primitive(_));
+    // Parser-path display metadata must survive the merge onto the
+    // graph-native row.
+    assert_eq!(
+        row.raw_type.as_deref(),
+        Some("string"),
+        "parser-path raw_type must be preserved on the merged row; observed {:?}",
+        row.raw_type,
+    );
+    // The published typed source stays the shallow SyntheticSlotBinding
+    // carrier (shallow-by-default for graph-native no-payload rows).
+    let row_type = shallow_binding_type(&host, "/src/Comp.vue", row);
+    let TypeExpr::SyntheticSlotBinding(carrier) = &row_type else {
+        panic!(
+            "graph-native no-payload row must publish the shallow \
+             SyntheticSlotBinding carrier; observed type_expr={row_type:?}",
+        );
+    };
+    assert_eq!(carrier.slot_name.as_deref(), Some("default"));
+    assert_eq!(carrier.binding_name.as_ref(), "x");
+    // The concrete value materializes ONLY under explicit demand: the
+    // terminal-demand walk deepens through the content-free
+    // synthetic-binding identity to the inline `x: string` annotation.
+    let demanded = demand_binding_type(&host, "/src/Comp.vue", row);
     assert!(
-        has_concrete_type,
-        "parser-path + graph-native merge must publish a concrete TypeExpr; observed type_expr={:?}",
-        row.type_expr,
+        matches!(
+            demanded,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "explicit demand must materialize default.x to the concrete `string`; \
+         observed {demanded:?}",
     );
 }
 
@@ -1817,6 +1909,111 @@ defineSlots<Slots>()
     assert!(
         logs_contain(trace_id),
         "audit record trace_id={trace_id} must appear in captured tracing logs",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test #29 — CHARACTERIZATION (Q10 arg-preserving publication)
+// ---------------------------------------------------------------------------
+//
+// A graph-raised binding row whose VALUE is a generic INSTANTIATION
+// (`message: MessageBase<string>`, declared on a named NON-GENERIC param
+// type) must publish an ARG-PRESERVING shallow carrier: the authored
+// use-site body slot (the `SlotProps.message` member-value position),
+// whose deref through the one shared dispatch replays the instantiation
+// WITH its type arguments. A bare argument-less
+// `Closed(Leaf(Ref("MessageBase")))` destroys BOTH the substitution
+// (`string`) and the declaring canonical scope.
+//
+// Discriminating: shell-materializing the published source must yield
+// `Ref { name: "MessageBase", type_arguments: [string] }` — a lossy
+// argument-less carrier shell-materializes with EMPTY type_arguments and
+// fails. The carrier stays SHALLOW: publication performs no Instantiate
+// execution (the shallow probe is the consumer-side demand).
+#[test]
+fn slot_binding_generic_instantiation_publishes_arg_preserving_use_site_carrier() {
+    let host = build_test_host();
+    upsert_ts(
+        &host,
+        "/src/types.ts",
+        r#"
+        export interface MessageBase<T> { content: T }
+        export interface SlotProps { message: MessageBase<string> }
+        "#,
+    );
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        r#"<script setup lang="ts">
+import type { SlotProps } from './types'
+defineSlots<{ default(props: SlotProps): any }>()
+</script>
+<template><div /></template>
+"#,
+    );
+
+    let meta = host
+        .get_component_meta("/src/Comp.vue")
+        .expect("component meta");
+    let row = slot_binding(&meta, "default", "message")
+        .expect("default.message binding must publish from the named param surface");
+
+    // Canonical identity is preserved on the published carrier: the
+    // authored use-site slot anchors on the DECLARING file + symbol.
+    let source = row
+        .type_source
+        .present()
+        .expect("default.message must publish a typed source");
+    let verter_type_expr::facts::SemanticTypeSource::Authored(
+        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot),
+    ) = source
+    else {
+        panic!(
+            "an instantiation-valued binding must publish the authored use-site \
+             DeclBody carrier (arg-preserving, re-resolvable); observed {source:?}",
+        );
+    };
+    assert_eq!(
+        slot.anchor.canonical_id.as_ref(),
+        "/src/types.ts",
+        "the use-site slot must anchor on the declaring canonical",
+    );
+    assert_eq!(
+        slot.anchor.symbol.as_ref(),
+        "SlotProps",
+        "the use-site slot must anchor on the declaring symbol",
+    );
+
+    // Shell-materializing WITHOUT a resolution demand replays the authored
+    // instantiation: the base name AND the concrete `string` argument
+    // survive to the shallow published shape.
+    let shallow = shallow_binding_type(&host, "/src/Comp.vue", row);
+    let TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = &shallow
+    else {
+        panic!(
+            "default.message must shell-materialize to the MessageBase reference \
+             carrier; observed {shallow:?}",
+        );
+    };
+    assert_eq!(name.as_ref(), "MessageBase");
+    assert_eq!(
+        type_arguments.len(),
+        1,
+        "the instantiation's type argument must be PRESERVED on the published \
+         carrier (bare `Ref` drops the `string` substitution); observed \
+         {type_arguments:?}",
+    );
+    assert!(
+        matches!(
+            &type_arguments[0],
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "the preserved argument must be the concrete authored `string`; observed \
+         {:?}",
+        type_arguments[0],
     );
 }
 

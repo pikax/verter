@@ -83,13 +83,13 @@ fn pick_and_my_pick_produce_identical_props() {
         &[("/pick.vue", PICK_VUE)],
         &[("lib.es5.d.ts", STUB_LIB_ES5)],
     );
-    let (analysis_a, _, _) = resolve_under_audit(host_a, "/pick.vue");
+    let (analysis_a, _, _) = resolve_under_audit(std::sync::Arc::clone(&host_a), "/pick.vue");
 
     let host_b = build_hermetic_host_with_lib(
         &[("/my_pick.vue", MY_PICK_VUE)],
         &[("lib.es5.d.ts", STUB_LIB_ES5)],
     );
-    let (analysis_b, _, _) = resolve_under_audit(host_b, "/my_pick.vue");
+    let (analysis_b, _, _) = resolve_under_audit(std::sync::Arc::clone(&host_b), "/my_pick.vue");
 
     let mut names_a: Vec<String> = analysis_a.props.iter().map(|p| p.name.clone()).collect();
     let mut names_b: Vec<String> = analysis_b.props.iter().map(|p| p.name.clone()).collect();
@@ -122,8 +122,16 @@ fn pick_and_my_pick_produce_identical_props() {
     // beta is `number` in both. The contract is structural identity,
     // so we project to (name, render(type_expr)) tuples and compare.
     use self::render_pair;
-    let mut pairs_a: Vec<(String, String)> = analysis_a.props.iter().map(render_pair).collect();
-    let mut pairs_b: Vec<(String, String)> = analysis_b.props.iter().map(render_pair).collect();
+    let mut pairs_a: Vec<(String, String)> = analysis_a
+        .props
+        .iter()
+        .map(|p| render_pair(&host_a, "/pick.vue", p))
+        .collect();
+    let mut pairs_b: Vec<(String, String)> = analysis_b
+        .props
+        .iter()
+        .map(|p| render_pair(&host_b, "/my_pick.vue", p))
+        .collect();
     pairs_a.sort();
     pairs_b.sort();
     assert_eq!(
@@ -177,12 +185,28 @@ fn shadowed_pick_is_userland_not_intrinsic() {
     );
 }
 
-/// Render `(name, type_signature)` tuple for a [`PropAnalysis`]. Used
-/// to compare structural identity of props across the parity hosts.
+/// Render `(name, type_signature)` tuple for a [`PropAnalysis`] by
+/// demand-materializing its published source through the ONE shared
+/// dispatch. Used to compare structural identity of props across the
+/// parity hosts.
 pub(crate) fn render_pair(
+    host: &verter_session::VerterHost,
+    owner: &str,
     prop: &verter_semantic::analysis::component_meta::PropAnalysis,
 ) -> (String, String) {
-    (prop.name.clone(), render_type(&prop.type_expr))
+    let source = prop
+        .type_source
+        .present()
+        .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name));
+    let ty =
+        verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
+            .unwrap_or_else(|| {
+                panic!(
+                    "prop `{}`'s published source must demand-materialize",
+                    prop.name
+                )
+            });
+    (prop.name.clone(), render_type(&ty))
 }
 
 /// Minimal type renderer for the parity tests. Matches the canonical

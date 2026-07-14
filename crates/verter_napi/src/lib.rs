@@ -2457,8 +2457,13 @@ impl NapiVerterHost {
     /// "skeleton"`). Pass `null` to take the host's default per §5.2.
     ///
     /// `typeExpr` is `null` when the symbol could not be resolved
-    /// (unknown decl, lowering miss, suppressed by host policy).
-    /// `auditRecord` is `null` when `auditEnabled = false`.
+    /// (unknown decl, boundary lowering miss, suppressed by host
+    /// policy). `auditRecord` is `null` when `auditEnabled = false`;
+    /// a boundary lowering miss resolves INSIDE the audited request,
+    /// so it still carries the audit record — an absent record is
+    /// reserved for failures before a semantic request exists (a
+    /// malformed wire payload fails decoding and surfaces as an
+    /// error, not a result).
     #[napi(js_name = "resolveSymbolWithAudit")]
     pub fn resolve_symbol_with_audit(
         &self,
@@ -2473,8 +2478,13 @@ impl NapiVerterHost {
         catch_panic(std::panic::AssertUnwindSafe(move || {
             let arc_args: Vec<std::sync::Arc<TypeExpr>> =
                 exprs.into_iter().map(std::sync::Arc::new).collect();
+            // Wire-boundary resolution: the symbolic `TypeExpr` payloads
+            // lower to semantic-graph node ids INSIDE the audited request,
+            // under the SAME store view the resolution runs against (the
+            // transient symbolic IR stops at this boundary). A lowering miss
+            // surfaces as a `null` typeExpr WITH its audit record.
             let (outcome, record) = host
-                .resolve_named_symbol_with_audit(&canonical_id, &name, &arc_args, resolve_mode)
+                .resolve_named_symbol_wire_with_audit(&canonical_id, &name, &arc_args, resolve_mode)
                 .into_parts();
             let (resolved, error) = typeinfo::split_resolve_outcome(outcome);
             // The session-owned bytes facade encodes the `TypeExpr` to wire

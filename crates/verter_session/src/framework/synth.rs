@@ -115,10 +115,11 @@ mod tests {
     use std::sync::Arc;
     use verter_semantic::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
     use verter_span::Span;
+    use verter_type_expr::locators::{
+        AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
+    };
 
-    fn type_based_props_macro(type_text: &str) -> AnalyzedMacro {
-        let parsed =
-            verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(type_text, None);
+    fn type_based_props_macro() -> AnalyzedMacro {
         AnalyzedMacro {
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
@@ -133,7 +134,15 @@ mod tests {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
-            parsed_type_argument: Some(Arc::new(parsed)),
+            parsed_type_argument: Some(MacroPayloadLocator {
+                anchor: AuthoredAnchor {
+                    canonical_id: Arc::from("/App.vue"),
+                    symbol: Arc::from("default"),
+                    space: LocatorSymbolSpace::Value,
+                },
+                macro_index: 0,
+                payload: MacroPayloadPosition::TypeArgument,
+            }),
             parsed_type_argument_scope: Some(verter_type_expr::TypeExprScope::new("")),
             span: Span::new(0, 0),
         }
@@ -141,7 +150,7 @@ mod tests {
 
     #[test]
     fn vue_synth_produces_default_for_type_based_props() {
-        let macros = vec![type_based_props_macro("{ msg: string }")];
+        let macros = vec![type_based_props_macro()];
         let candidates = FrameworkScriptCandidateSet::default();
         let cx = ComponentDefaultSynthCtx {
             canonical_id: "/App.vue",

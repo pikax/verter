@@ -993,7 +993,7 @@ fn make_macro(
                 tags: vec![],
                 resolution_source: TypeResolutionSource::Rust,
                 resolution_error: None,
-                type_expr: None,
+                payload: None,
                 type_expr_scope: None,
                 declared_in_macro_type_arg: false,
             })

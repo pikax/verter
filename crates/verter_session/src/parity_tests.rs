@@ -50,6 +50,28 @@ fn prop_by_name<'a>(
         .unwrap_or_else(|| panic!("expected prop `{name}` in resolved meta"))
 }
 
+/// Demand-materialize a published prop's `type_source` through the one shared
+/// dispatch — the explicit consumer resolution step the matrix walks.
+fn demand_prop_type(
+    project: &Arc<MetaProject>,
+    owner: &str,
+    prop: &PropAnalysis,
+) -> verter_type_expr::TypeExpr {
+    crate::test_only::semantic_source_probe::demand_type_expr(
+        project.host(),
+        owner,
+        prop.type_source
+            .present()
+            .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name)),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "prop `{}`'s published source must demand-materialize",
+            prop.name
+        )
+    })
+}
+
 fn assert_no_unresolved_ref(type_expr: &verter_type_expr::TypeExpr, forbidden_name: &str) {
     use verter_type_expr::TypeExpr;
     fn walk(expr: &TypeExpr, forbidden: &str, hits: &mut Vec<String>) {
@@ -171,8 +193,14 @@ defineProps<OwnerProps>()
 
     // Dispatch must resolve `OwnerProps`'s `size` and `label` to their
     // concrete types, not leave a symbolic Ref.
-    assert_no_unresolved_ref(&size.type_expr, "OwnerProps");
-    assert_no_unresolved_ref(&label.type_expr, "OwnerProps");
+    assert_no_unresolved_ref(
+        &demand_prop_type(&project, "/Owner.vue", size),
+        "OwnerProps",
+    );
+    assert_no_unresolved_ref(
+        &demand_prop_type(&project, "/Owner.vue", label),
+        "OwnerProps",
+    );
 }
 
 // ============================================================================
@@ -227,10 +255,12 @@ defineProps<Pick<HelperProps, 'size' | 'label'>>()
     // or HelperProps Ref shells.
     let size = prop_by_name(&meta, "size");
     let label = prop_by_name(&meta, "label");
-    assert_no_unresolved_ref(&size.type_expr, "HelperProps");
-    assert_no_unresolved_ref(&label.type_expr, "HelperProps");
-    assert_no_unresolved_ref(&size.type_expr, "Pick");
-    assert_no_unresolved_ref(&label.type_expr, "Pick");
+    let size_type = demand_prop_type(&project, "/Owner.vue", size);
+    let label_type = demand_prop_type(&project, "/Owner.vue", label);
+    assert_no_unresolved_ref(&size_type, "HelperProps");
+    assert_no_unresolved_ref(&label_type, "HelperProps");
+    assert_no_unresolved_ref(&size_type, "Pick");
+    assert_no_unresolved_ref(&label_type, "Pick");
 }
 
 // ============================================================================
@@ -279,7 +309,10 @@ defineProps<{ color: ButtonConfig['variants']['color'] }>()
     let color = prop_by_name(&meta, "color");
     // Dispatch must resolve the member-route to a Union of literals, not
     // leave a symbolic IndexedAccess or ButtonConfig Ref.
-    assert_no_unresolved_ref(&color.type_expr, "ButtonConfig");
+    assert_no_unresolved_ref(
+        &demand_prop_type(&project, "/Owner.vue", color),
+        "ButtonConfig",
+    );
 }
 
 // ============================================================================
@@ -347,9 +380,11 @@ defineProps<MiddleProps>()
     // type_expr — proves dispatch resolved through the extends chain.
     let count = prop_by_name(&meta, "count");
     let label = prop_by_name(&meta, "label");
-    assert_no_unresolved_ref(&count.type_expr, "LeafProps");
-    assert_no_unresolved_ref(&count.type_expr, "MiddleProps");
-    assert_no_unresolved_ref(&label.type_expr, "MiddleProps");
+    let count_type = demand_prop_type(&project, "/Owner.vue", count);
+    let label_type = demand_prop_type(&project, "/Owner.vue", label);
+    assert_no_unresolved_ref(&count_type, "LeafProps");
+    assert_no_unresolved_ref(&count_type, "MiddleProps");
+    assert_no_unresolved_ref(&label_type, "MiddleProps");
 }
 
 // ============================================================================
@@ -407,5 +442,8 @@ defineProps<{ defaults: typeof ENGINE_DEFAULTS }>()
     // an object whose properties match the const's value shape. A
     // surviving symbolic `typeof` or a Ref to ENGINE_DEFAULTS would
     // mean direct symbol resolution failed.
-    assert_no_unresolved_ref(&defaults.type_expr, "ENGINE_DEFAULTS");
+    assert_no_unresolved_ref(
+        &demand_prop_type(&project, "/Owner.vue", defaults),
+        "ENGINE_DEFAULTS",
+    );
 }

@@ -110,47 +110,38 @@ fn rune_ambient_inventory() -> &'static RuneAmbientInventory {
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
             oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
-        let env =
-            verter_semantic::analysis::type_eval_build::build_eval_env(&parsed.program, source);
+        // The prelude has NO canonical id — the empty anchor canonical makes
+        // every minted body locator fail the deref's canonical-coherence gate
+        // closed (ambient bodies are served from THIS inventory, never a
+        // memo re-borrow).
+        let build_ctx = verter_semantic::analysis::type_eval_build::BuildEvalEnvContext::new("");
+        let env = verter_semantic::analysis::type_eval_build::build_eval_env(
+            &parsed.program,
+            source,
+            &build_ctx,
+        );
 
         // Convert the folded value/type groups into the per-name lowered
-        // records the graph-native readers consume. `primary()` is the
-        // last-wins representative the per-symbol lazy memo also hands out
-        // for a single-contributor (or overload) group; the merged
-        // signature set carries the overloads.
-        let mut value_decls: FxHashMap<String, Arc<LoweredValueDecl>> = FxHashMap::default();
-        for (name, group) in &env.value_symbols {
-            let primary = group.primary();
-            value_decls.insert(
-                name.clone(),
-                Arc::new(LoweredValueDecl {
-                    kind: primary.kind,
-                    type_annotation: primary.type_annotation.clone(),
-                    signatures: group.merged_signatures(),
-                    object_shape: primary.object_shape.clone(),
-                    enum_members: primary.enum_members.clone(),
-                }),
-            );
-        }
-
-        let mut type_decls: FxHashMap<String, Arc<LoweredTypeDecl>> = FxHashMap::default();
-        for (name, group) in &env.type_symbols {
-            let primary = group.primary();
-            type_decls.insert(
-                name.clone(),
-                Arc::new(LoweredTypeDecl {
-                    kind: primary.kind,
-                    body: verter_semantic::analysis::type_eval::TypeDeclBody::Single(
-                        primary.body.clone(),
-                    ),
-                    type_parameters: primary.type_parameters.clone(),
-                    dep_names: rustc_hash::FxHashSet::default(),
-                    structural_dep_names: rustc_hash::FxHashSet::default(),
-                    member_deps: FxHashMap::default(),
-                    typeof_root_names: Vec::new(),
-                }),
-            );
-        }
+        // records the graph-native readers consume, through the SAME shared
+        // per-symbol fold the lazy declaration-body memo uses
+        // ([`crate::decl_body_memo::lowered_decls_from_env_and_program`] —
+        // transients re-lowered from the one prelude parse) so the ambient
+        // records can never diverge from the memo-served shape. Ambient
+        // records never enter the parse fact rail, so the lens-free
+        // fingerprints are inert there.
+        let (types, values) = crate::decl_body_memo::lowered_decls_from_env_and_program(
+            &env,
+            &parsed.program,
+            source,
+        );
+        let value_decls: FxHashMap<String, Arc<LoweredValueDecl>> = values
+            .into_iter()
+            .map(|(name, lowered)| (name, Arc::new(lowered)))
+            .collect();
+        let type_decls: FxHashMap<String, Arc<LoweredTypeDecl>> = types
+            .into_iter()
+            .map(|(name, lowered)| (name, Arc::new(lowered)))
+            .collect();
 
         RuneAmbientInventory {
             value_decls,
@@ -313,10 +304,15 @@ mod tests {
             name: "$state".to_string(),
             declaration_id: 0,
             kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
-            type_annotation: None,
+            type_annotation: verter_type_expr::facts::ValueTypeAnnotationFact {
+                typeof_alias_target: None,
+                classification: verter_type_expr::facts::ValueAnnotationClass::Absent,
+                annotation: None,
+            },
             signatures: Vec::new(),
             object_shape: None,
             enum_members: None,
+            enum_member_names: None,
         };
         env.add_value(user);
         let before = env

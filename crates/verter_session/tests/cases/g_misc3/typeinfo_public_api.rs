@@ -70,7 +70,7 @@ fn resolve_named_symbol_with_audit_returns_record() {
     });
 
     let (node, record) = host
-        .resolve_named_symbol_with_audit("/types.ts", "T", &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol_with_audit("/types.ts", "T", Some(ProjectionMode::Expanded))
         .into_parts();
     let _node = node.ok().flatten().expect("non-generic decl resolves");
     // record is always present now (carrier `audit` field is mandatory).

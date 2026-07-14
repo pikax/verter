@@ -7,8 +7,10 @@ use verter_type_expr::{
 };
 
 use crate::graph::schema;
+use crate::graph::snapshot::PersistedGraphNode;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, verter_no_typeexpr::NoTypeExpr)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum GraphNode {
     Primitive {
         primitive: u32,
@@ -123,7 +125,8 @@ pub enum GraphNode {
 }
 
 /// A conditional branch frame in the graph transport.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, verter_no_typeexpr::NoTypeExpr)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphConditionalFrame {
     /// 1 = true, 2 = false
     pub branch: u32,
@@ -132,7 +135,8 @@ pub struct GraphConditionalFrame {
     pub extends: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, verter_no_typeexpr::NoTypeExpr)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphTupleElement {
     pub label: u32,
     pub ty: u32,
@@ -140,7 +144,8 @@ pub struct GraphTupleElement {
     pub rest: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, verter_no_typeexpr::NoTypeExpr)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphObjectMember {
     pub kind: u32,
     pub name: u32,
@@ -168,7 +173,8 @@ fn object_member_is_public(member: &ObjectMember) -> bool {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, verter_no_typeexpr::NoTypeExpr)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphFunctionParam {
     pub name: u32,
     pub ty: u32,
@@ -707,6 +713,79 @@ impl GraphBuilder {
         &self.nodes
     }
 
+    /// Consume the builder into its raw `(strings, nodes)` tables — the
+    /// snapshot-capture accessor
+    /// ([`crate::graph::snapshot::ResolvedTypeGraphSnapshot::from_builder`]).
+    /// Ids in both tables are 1-BASED (id 0 = absent), matching
+    /// [`Self::string_id`] / [`Self::node_id`].
+    #[must_use]
+    pub fn into_tables(self) -> (Vec<String>, Vec<GraphNode>) {
+        (self.strings, self.nodes)
+    }
+
+    /// Intern an ALREADY-BUILT wire node by VALUE, deduplicating against the
+    /// existing node table — exactly the terminal dedup step of
+    /// [`Self::node_id`] without the `TypeExpr` memo layers (there is no
+    /// source expression here).
+    fn intern_node(&mut self, node: GraphNode) -> u32 {
+        if let Some(id) = self.node_ids.get(&node) {
+            return *id;
+        }
+        let id = self
+            .nodes
+            .len()
+            .checked_add(1)
+            .and_then(|index| u32::try_from(index).ok())
+            .expect("node table overflow");
+        self.nodes.push(node.clone());
+        self.node_ids.insert(node, id);
+        id
+    }
+
+    /// Append a producer-captured
+    /// [`ResolvedTypeGraphSnapshot`](crate::graph::snapshot::ResolvedTypeGraphSnapshot)
+    /// into this live builder, remapping the snapshot's arena-local string /
+    /// node ids into this builder's tables, and return the REMAPPED root node
+    /// id (0 when the snapshot has no root).
+    ///
+    /// WIRE-IDENTICAL to the legacy direct `node_id(&TypeExpr)` walk: a
+    /// snapshot captured from a `GraphBuilder` stores its nodes in
+    /// children-before-parents order (the recursive `node_id` interns every
+    /// child before pushing its parent), so one in-order pass has every
+    /// referenced id already remapped; each remapped node then interns through
+    /// the SAME value-level dedup ([`Self::intern_node`]) the direct walk
+    /// bottoms out in, so identical structural nodes collapse onto identical
+    /// ids whether they arrived via a snapshot or a direct walk. A snapshot is
+    /// well-formed by construction (the sealed module-private
+    /// `ResolvedTypeGraphSnapshot::try_new` validated root and reference
+    /// ranges up front), so the remap's fail-close-to-0 id lookups are pure
+    /// defense-in-depth that a captured snapshot never triggers.
+    pub fn append_snapshot(
+        &mut self,
+        snapshot: &crate::graph::snapshot::ResolvedTypeGraphSnapshot,
+    ) -> u32 {
+        if snapshot.root_node_id() == 0 {
+            return 0;
+        }
+        // Old 1-based string id -> new string id; index 0 stays the absent 0.
+        let mut string_map: Vec<u32> = Vec::with_capacity(snapshot.strings().len() + 1);
+        string_map.push(0);
+        for s in snapshot.strings() {
+            string_map.push(self.string_id(s));
+        }
+        // Old 1-based node id -> new node id; index 0 stays the absent 0.
+        let mut node_map: Vec<u32> = Vec::with_capacity(snapshot.nodes().len() + 1);
+        node_map.push(0);
+        for node in snapshot.nodes() {
+            let remapped = remap_snapshot_node(node, &string_map, &node_map);
+            node_map.push(self.intern_node(remapped));
+        }
+        node_map
+            .get(snapshot.root_node_id() as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
     #[cfg(test)]
     pub(crate) fn debug_graph_node_build_count(&self) -> usize {
         self.graph_node_build_count
@@ -773,7 +852,7 @@ impl GraphBuilder {
             // dedicated constructor-type kind, and the constructor-vs-function
             // distinction that matters for Vue runtime inference is carried by
             // the `TypeExpr::ConstructorType` variant itself and consumed by the
-            // session-side `runtime_ctor` reducer + the semantic dispatch BEFORE
+            // session-side semantic dispatch BEFORE
             // wire serialisation. Emitting the function node here is therefore
             // the contract-correct final-state shape — no schema-version bump or
             // new wire kind is required. The erasure is pinned (not accidental)
@@ -1072,349 +1151,182 @@ fn mapped_modifier_tag(modifier: MappedModifier) -> u32 {
     schema::mapped_modifier_to_tag(modifier)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use verter_type_expr::{
-        LiteralValue, PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame,
-        TypeExpr,
-    };
-
-    #[test]
-    fn graph_builder_encodes_recursive_ref_not_unknown() {
-        let expr = TypeExpr::RecursiveRef {
-            name: std::sync::Arc::from("Tree"),
-            type_arguments: std::sync::Arc::from(vec![TypeExpr::Primitive(PrimitiveName::String)]),
-            conditional_context: std::sync::Arc::from(vec![RecursiveConditionalFrame {
-                branch: RecursiveConditionalBranch::True,
-                decided: true,
-                check: std::sync::Arc::new(TypeExpr::named("T")),
-                extends: std::sync::Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
-            }]),
-        };
-
-        let mut builder = GraphBuilder::new();
-        let node_id = builder.node_id(&expr);
-        let nodes = builder.nodes();
-        let node = &nodes[(node_id - 1) as usize];
-
-        assert!(
-            matches!(node, GraphNode::RecursiveRef { .. }),
-            "graph builder must produce GraphNode::RecursiveRef, got {:?}",
-            std::mem::discriminant(node)
-        );
-
-        if let GraphNode::RecursiveRef {
+/// Widen one PERSISTED snapshot node back to a live wire node while
+/// remapping its arena-local ids into a live builder's tables — the single
+/// widening + remap pass [`GraphBuilder::append_snapshot`] re-interns
+/// through.
+///
+/// `string_map` / `node_map` are 1-based old→new id maps whose index 0 carries
+/// the absent id 0, so absent (`0`) fields round-trip unchanged through the
+/// same lookup as present ones. A captured snapshot is validated in-range and
+/// children-before-parents by construction
+/// ([`crate::graph::snapshot::ResolvedTypeGraphSnapshot::try_new`]), so the
+/// fail-close-to-0 lookups are defense-in-depth only.
+///
+/// EXHAUSTIVE over [`PersistedGraphNode`] (no wildcard): adding a persisted
+/// node variant fails compilation here until its widening semantics (string
+/// id vs node id vs copied tag) are stated explicitly. The live-wire-only
+/// `SyntheticSlotBinding` carrier has no arm because the persisted
+/// vocabulary structurally excludes it.
+fn remap_snapshot_node(
+    node: &PersistedGraphNode,
+    string_map: &[u32],
+    node_map: &[u32],
+) -> GraphNode {
+    let sid = |id: u32| -> u32 { string_map.get(id as usize).copied().unwrap_or(0) };
+    let nid = |id: u32| -> u32 { node_map.get(id as usize).copied().unwrap_or(0) };
+    match node {
+        PersistedGraphNode::Primitive { primitive } => GraphNode::Primitive {
+            primitive: *primitive,
+        },
+        PersistedGraphNode::LiteralString { value } => {
+            GraphNode::LiteralString { value: sid(*value) }
+        }
+        PersistedGraphNode::LiteralNumber { bits } => GraphNode::LiteralNumber { bits: *bits },
+        PersistedGraphNode::LiteralBoolean { value } => GraphNode::LiteralBoolean { value: *value },
+        PersistedGraphNode::LiteralBigInt { value } => {
+            GraphNode::LiteralBigInt { value: sid(*value) }
+        }
+        PersistedGraphNode::Union { types } => GraphNode::Union {
+            types: types.iter().map(|ty| nid(*ty)).collect(),
+        },
+        PersistedGraphNode::Intersection { types } => GraphNode::Intersection {
+            types: types.iter().map(|ty| nid(*ty)).collect(),
+        },
+        PersistedGraphNode::Array { element, readonly } => GraphNode::Array {
+            element: nid(*element),
+            readonly: *readonly,
+        },
+        PersistedGraphNode::Tuple { readonly, elements } => GraphNode::Tuple {
+            readonly: *readonly,
+            elements: elements
+                .iter()
+                .map(|element| GraphTupleElement {
+                    label: sid(element.label),
+                    ty: nid(element.ty),
+                    optional: element.optional,
+                    rest: element.rest,
+                })
+                .collect(),
+        },
+        PersistedGraphNode::Object { members } => GraphNode::Object {
+            members: members
+                .iter()
+                .map(|member| GraphObjectMember {
+                    kind: member.kind,
+                    name: sid(member.name),
+                    ty: nid(member.ty),
+                    optional: member.optional,
+                    readonly: member.readonly,
+                    key_name: sid(member.key_name),
+                    key_type: nid(member.key_type),
+                    value_type: nid(member.value_type),
+                    function: nid(member.function),
+                })
+                .collect(),
+        },
+        PersistedGraphNode::Function {
+            parameters,
+            return_type,
+            type_parameters,
+        } => GraphNode::Function {
+            parameters: parameters
+                .iter()
+                .map(|param| GraphFunctionParam {
+                    name: sid(param.name),
+                    ty: nid(param.ty),
+                    optional: param.optional,
+                    rest: param.rest,
+                })
+                .collect(),
+            return_type: nid(*return_type),
+            type_parameters: type_parameters.iter().map(|param| nid(*param)).collect(),
+        },
+        PersistedGraphNode::Ref {
+            name,
+            type_arguments,
+        } => GraphNode::Ref {
+            name: sid(*name),
+            type_arguments: type_arguments.iter().map(|arg| nid(*arg)).collect(),
+        },
+        PersistedGraphNode::TypeParameter {
+            name,
+            constraint,
+            default,
+        } => GraphNode::TypeParameter {
+            name: sid(*name),
+            constraint: nid(*constraint),
+            default: nid(*default),
+        },
+        PersistedGraphNode::KeyOf { operand } => GraphNode::KeyOf {
+            operand: nid(*operand),
+        },
+        PersistedGraphNode::TypeOf { path } => GraphNode::TypeOf {
+            path: path.iter().map(|segment| sid(*segment)).collect(),
+        },
+        PersistedGraphNode::IndexedAccess { object, index } => GraphNode::IndexedAccess {
+            object: nid(*object),
+            index: nid(*index),
+        },
+        PersistedGraphNode::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => GraphNode::Conditional {
+            check: nid(*check),
+            extends: nid(*extends),
+            true_type: nid(*true_type),
+            false_type: nid(*false_type),
+        },
+        PersistedGraphNode::Mapped {
+            parameter,
+            source,
+            value,
+            optional,
+            readonly,
+            name_type,
+        } => GraphNode::Mapped {
+            parameter: sid(*parameter),
+            source: nid(*source),
+            value: nid(*value),
+            optional: *optional,
+            readonly: *readonly,
+            name_type: nid(*name_type),
+        },
+        PersistedGraphNode::TemplateLiteral {
+            quasis,
+            expressions,
+        } => GraphNode::TemplateLiteral {
+            quasis: quasis.iter().map(|quasi| sid(*quasi)).collect(),
+            expressions: expressions.iter().map(|expr| nid(*expr)).collect(),
+        },
+        PersistedGraphNode::Parenthesized { inner } => {
+            GraphNode::Parenthesized { inner: nid(*inner) }
+        }
+        PersistedGraphNode::Unknown { raw } => GraphNode::Unknown { raw: sid(*raw) },
+        PersistedGraphNode::Infer { name } => GraphNode::Infer { name: sid(*name) },
+        PersistedGraphNode::Rest { inner } => GraphNode::Rest { inner: nid(*inner) },
+        PersistedGraphNode::RecursiveRef {
             name,
             type_arguments,
             conditional_context,
-        } = node
-        {
-            assert!(*name > 0, "name string ID should be set");
-            assert_eq!(type_arguments.len(), 1, "should have 1 type argument");
-            assert_eq!(
-                conditional_context.len(),
-                1,
-                "should have 1 conditional frame"
-            );
-            assert_eq!(conditional_context[0].branch, 1, "branch=true should be 1");
-            assert!(conditional_context[0].decided);
-        }
-    }
-
-    /// Pins the INTENTIONAL constructor-type wire erasure: a
-    /// `TypeExpr::ConstructorType` serialises to a `GraphNode::Function` (the
-    /// closed `GraphTypeNode.kind` taxonomy has no dedicated constructor kind).
-    /// The constructor-vs-function distinction is consumed in the session
-    /// `runtime_ctor` reducer + semantic dispatch before serialisation, so
-    /// function-like is the contract-correct wire shape.
-    ///
-    /// Discriminating in two directions:
-    ///
-    /// * A builder that left the constructor type unhandled (or emitted some
-    ///   non-function node) fails the `GraphNode::Function` assertion, and the
-    ///   byte-equal check fails if the constructor type ever diverged from the
-    ///   same-payload function wire shape.
-    /// * The memo layer stays distinct: `ExprMemoKey::from_expr` of a
-    ///   constructor type must NOT equal that of a function carrying the same
-    ///   `Arc<FunctionExpr>` — if the `ConstructorType` memo arm were ever
-    ///   collapsed into `Self::Function`, this assertion fails. (The final wire
-    ///   *node id* legitimately dedups, because byte-identical `GraphNode`s
-    ///   share a node-id slot — the erasure is wire-shape-identical by design;
-    ///   the test pins that fact rather than asserting the opposite.)
-    #[test]
-    fn constructor_type_serialises_to_function_wire_node() {
-        use verter_type_expr::{FunctionExpr, FunctionParam};
-
-        // `new (x: string) => Foo` — one named param + a ref return.
-        let function = Arc::new(FunctionExpr::synthetic(
-            vec![FunctionParam::synthetic(
-                Some("x".to_string()),
-                TypeExpr::Primitive(PrimitiveName::String),
-                false,
-                false,
-            )],
-            Some(Arc::new(TypeExpr::named("Foo"))),
-            Vec::new(),
-        ));
-        let ctor = TypeExpr::ConstructorType(Arc::clone(&function));
-
-        let mut builder = GraphBuilder::new();
-        let ctor_id = builder.node_id(&ctor);
-        let nodes = builder.nodes();
-        let node = &nodes[(ctor_id - 1) as usize];
-
-        // (1) The wire node is a Function (erasure) carrying the parameter.
-        match node {
-            GraphNode::Function { parameters, .. } => {
-                assert_eq!(
-                    parameters.len(),
-                    1,
-                    "constructor-type parameter must survive the function-node erasure",
-                );
-            }
-            other => panic!(
-                "constructor type must serialise to GraphNode::Function (intentional \
-                 erasure), got {:?}",
-                std::mem::discriminant(other)
-            ),
-        }
-
-        // (2) The wire node is BYTE-IDENTICAL to a plain function with the SAME
-        // payload — the erasure is structural, not just same-discriminant.
-        let plain = TypeExpr::Function(Arc::clone(&function));
-        let mut fn_builder = GraphBuilder::new();
-        let fn_id = fn_builder.node_id(&plain);
-        let fn_node = fn_builder.nodes()[(fn_id - 1) as usize].clone();
-        assert_eq!(
-            node, &fn_node,
-            "constructor type and same-payload function must produce the same wire \
-             node (GraphNode::Function) — the erasure is wire-shape-identical",
-        );
-
-        // (3) The MEMO key stays distinct so a constructor type and a function
-        // carrying the same `Arc<FunctionExpr>` never share an `expr_ids` entry.
-        // This is the invariant the dedicated `ExprMemoKey::ConstructorType`
-        // variant exists to enforce: collapsing it into `Self::Function` would
-        // make these equal and is a cache-collision bug.
-        assert_ne!(
-            ExprMemoKey::from_expr(&ctor),
-            ExprMemoKey::from_expr(&plain),
-            "ExprMemoKey::ConstructorType must stay distinct from \
-             ExprMemoKey::Function for the same Arc<FunctionExpr>",
-        );
-
-        // (4) The final wire NODE id legitimately dedups: because the two wire
-        // nodes are byte-identical (claim 2), `node_ids` collapses them onto one
-        // slot. The erasure is wire-shape-identical by design — pin that fact so
-        // a future change that diverged the shapes (re-introducing a distinct
-        // node id) is caught and re-justified here.
-        let mut shared_builder = GraphBuilder::new();
-        let ctor_node_id = shared_builder.node_id(&ctor);
-        let fn_node_id = shared_builder.node_id(&plain);
-        assert_eq!(
-            ctor_node_id, fn_node_id,
-            "byte-identical constructor/function wire nodes must share one node id \
-             (wire erasure is shape-identical)",
-        );
-    }
-
-    #[test]
-    fn ptr_cache_fast_path_avoids_memo_key_on_pointer_based_variants() {
-        // Build an expression tree with pointer-based variants (Union, Object,
-        // Function, IndexedAccess, Array) and verify that repeat lookups hit
-        // the ptr cache without building ExprMemoKey or GraphNode.
-        let inner_obj = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
-            properties: vec![],
-        }));
-        let union = TypeExpr::Union(Arc::from(vec![
-            inner_obj.clone(),
-            TypeExpr::Primitive(PrimitiveName::String),
-        ]));
-        let array = TypeExpr::Array {
-            element: Arc::new(union.clone()),
-            readonly: false,
-        };
-
-        let mut builder = GraphBuilder::new();
-
-        // First pass: builds everything.
-        let id1 = builder.node_id(&array);
-        let builds_after_first = builder.debug_graph_node_build_count();
-        assert!(
-            builds_after_first > 0,
-            "first pass should build graph nodes"
-        );
-        assert_eq!(
-            builder.debug_expr_ptr_cache_hits(),
-            0,
-            "first pass should have zero ptr cache hits"
-        );
-
-        // Second pass: should hit the ptr cache for the top-level Array.
-        let id2 = builder.node_id(&array);
-        assert_eq!(id1, id2, "same expression must return same node id");
-        assert_eq!(
-            builder.debug_expr_ptr_cache_hits(),
-            1,
-            "second lookup on a pointer-based variant should hit the ptr cache"
-        );
-        assert_eq!(
-            builder.debug_graph_node_build_count(),
-            builds_after_first,
-            "ptr cache hit should not build any new graph nodes"
-        );
-
-        // Also verify that value-based variants (Literal) still work correctly.
-        let lit = TypeExpr::Literal(LiteralValue::String("hello".to_string()));
-        let lit_id1 = builder.node_id(&lit);
-        let lit_id2 = builder.node_id(&lit);
-        assert_eq!(
-            lit_id1, lit_id2,
-            "value-based variant should still deduplicate via ExprMemoKey"
-        );
-    }
-
-    #[test]
-    fn graph_builder_reuses_same_expr_reference_without_rewalking_subgraph() {
-        let shared = TypeExpr::IndexedAccess {
-            object: Arc::new(TypeExpr::named("Accordion")),
-            index: Arc::new(TypeExpr::Literal(LiteralValue::String("slots".to_string()))),
-        };
-        let expr = TypeExpr::Array {
-            element: Arc::new(TypeExpr::Union(Arc::from(vec![shared.clone(), shared]))),
-            readonly: false,
-        };
-
-        let mut builder = GraphBuilder::new();
-        let first_id = builder.node_id(&expr);
-        let builds_after_first = builder.debug_graph_node_build_count();
-
-        let second_id = builder.node_id(&expr);
-        let builds_after_second = builder.debug_graph_node_build_count();
-
-        assert_eq!(
-            first_id, second_id,
-            "same expression should reuse one node id"
-        );
-        assert_eq!(
-            builds_after_second, builds_after_first,
-            "repeat node_id() on the same expression should hit the front cache instead of rebuilding the graph node"
-        );
-    }
-
-    /// The graph wire is a public surface and `GraphObjectMember` carries no
-    /// visibility field, so a non-public class member must never be encoded onto
-    /// it. The object-node sanitizer drops non-public Property / Method members
-    /// (recursively, since nested member value types serialize through the same
-    /// path); index signatures (no accessibility) are kept.
-    ///
-    /// Discrimination: FAILS on a tree where the object-node builder encodes
-    /// every member — the protected `b` / private `c` members (and the nested
-    /// private member) would appear in the emitted `GraphNode::Object` member
-    /// list.
-    #[test]
-    fn object_node_wire_omits_non_public_members() {
-        use verter_type_expr::{
-            FunctionExpr, MemberVisibility, MethodSignature, ObjectExpr, ObjectMember,
-            ObjectProperty,
-        };
-
-        // Inner object surface with a non-public member, used as the value type
-        // of the public outer member `a` — exercises recursive sanitisation.
-        let inner = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![
-                ObjectMember::Property(ObjectProperty::with_visibility(
-                    "pub_inner".to_string(),
-                    TypeExpr::Primitive(PrimitiveName::String),
-                    false,
-                    false,
-                    MemberVisibility::Public,
-                    Default::default(),
-                )),
-                ObjectMember::Property(ObjectProperty::with_visibility(
-                    "priv_inner".to_string(),
-                    TypeExpr::Primitive(PrimitiveName::Number),
-                    false,
-                    false,
-                    MemberVisibility::Private,
-                    Default::default(),
-                )),
-            ],
-        }));
-
-        let outer = TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![
-                ObjectMember::Property(ObjectProperty::with_visibility(
-                    "a".to_string(),
-                    inner,
-                    false,
-                    false,
-                    MemberVisibility::Public,
-                    Default::default(),
-                )),
-                ObjectMember::Property(ObjectProperty::with_visibility(
-                    "b".to_string(),
-                    TypeExpr::Primitive(PrimitiveName::Number),
-                    false,
-                    false,
-                    MemberVisibility::Protected,
-                    Default::default(),
-                )),
-                ObjectMember::Method(MethodSignature::with_visibility(
-                    "c".to_string(),
-                    FunctionExpr::synthetic(Vec::new(), None, Vec::new()),
-                    false,
-                    MemberVisibility::Private,
-                    Default::default(),
-                )),
-            ],
-        }));
-
-        let mut builder = GraphBuilder::new();
-        let outer_id = builder.node_id(&outer);
-        let nodes = builder.nodes();
-
-        // Resolve a string id back to its source string for name assertions.
-        let strings = builder.strings();
-        let name_of = |id: u32| -> Option<&str> {
-            if id == 0 {
-                None
-            } else {
-                strings.get((id - 1) as usize).map(String::as_str)
-            }
-        };
-
-        let GraphNode::Object { members } = &nodes[(outer_id - 1) as usize] else {
-            panic!("outer must encode to GraphNode::Object");
-        };
-        let outer_member_names: Vec<&str> =
-            members.iter().filter_map(|m| name_of(m.name)).collect();
-        assert_eq!(
-            outer_member_names,
-            vec!["a"],
-            "outer object wire must carry ONLY the public member `a` \
-             (protected `b` / private method `c` dropped): {outer_member_names:?}"
-        );
-
-        // The nested object (value type of `a`) must also be sanitised.
-        let inner_member = &members[0];
-        let GraphNode::Object {
-            members: inner_members,
-        } = &nodes[(inner_member.ty - 1) as usize]
-        else {
-            panic!("the value type of `a` must encode to GraphNode::Object");
-        };
-        let inner_member_names: Vec<&str> = inner_members
-            .iter()
-            .filter_map(|m| name_of(m.name))
-            .collect();
-        assert_eq!(
-            inner_member_names,
-            vec!["pub_inner"],
-            "nested object wire must carry ONLY `pub_inner` (private `priv_inner` \
-             dropped recursively): {inner_member_names:?}"
-        );
+        } => GraphNode::RecursiveRef {
+            name: sid(*name),
+            type_arguments: type_arguments.iter().map(|arg| nid(*arg)).collect(),
+            conditional_context: conditional_context
+                .iter()
+                .map(|frame| GraphConditionalFrame {
+                    branch: frame.branch,
+                    decided: frame.decided,
+                    check: nid(frame.check),
+                    extends: nid(frame.extends),
+                })
+                .collect(),
+        },
     }
 }
+
+#[cfg(test)]
+#[path = "builder_tests.rs"]
+mod tests;

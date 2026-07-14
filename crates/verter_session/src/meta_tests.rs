@@ -94,19 +94,52 @@ fn resolved_macro_prop_names(
             })
             .prop_fields()
             .iter()
-            .map(|p| p.name.clone())
+            .map(|p| p.analysis.name.clone())
             .collect::<Vec<_>>()
         })
         .collect()
 }
 
-fn evaluated_prop_type<'a>(types: &'a ExpandedComponentTypes, name: &str) -> &'a TypeExpr {
-    &types
+fn evaluated_prop_type(
+    project: &MetaProject,
+    owner_canonical: &str,
+    types: &ExpandedComponentTypes,
+    name: &str,
+) -> TypeExpr {
+    let field = types
         .props
         .iter()
         .find(|field| field.name == name)
-        .unwrap_or_else(|| panic!("missing evaluated prop {name}"))
-        .r#type
+        .unwrap_or_else(|| panic!("missing evaluated prop {name}"));
+    crate::test_only::semantic_source_probe::demand_type_expr(
+        project.host(),
+        owner_canonical,
+        field.r#type.present().expect("present source"),
+    )
+    .unwrap_or_else(|| panic!("evaluated prop {name}'s published source must demand-materialize"))
+}
+
+/// Shallow companion of [`evaluated_prop_type`]: shell-materializes the
+/// published source WITHOUT a resolution demand, so shallow published
+/// carriers (`Ref { .. }`, utility carriers) survive for assertions that
+/// pin the published shape itself.
+fn evaluated_prop_shallow_type(
+    project: &MetaProject,
+    owner_canonical: &str,
+    types: &ExpandedComponentTypes,
+    name: &str,
+) -> TypeExpr {
+    let field = types
+        .props
+        .iter()
+        .find(|field| field.name == name)
+        .unwrap_or_else(|| panic!("missing evaluated prop {name}"));
+    crate::test_only::semantic_source_probe::shallow_type_expr(
+        project.host(),
+        owner_canonical,
+        field.r#type.present().expect("present source"),
+    )
+    .unwrap_or_else(|| panic!("evaluated prop {name}'s published source must shell-materialize"))
 }
 
 /// `open_session()` defaults to interactive mode; `open_session_batch()`
@@ -191,14 +224,87 @@ fn get_component_meta_batch_dispatches_through_scheduler() {
     );
 }
 
-fn evaluated_define_props_type<'a>(types: &'a ExpandedComponentTypes, name: &str) -> &'a TypeExpr {
-    &types
+fn evaluated_define_props_type(
+    project: &MetaProject,
+    owner_canonical: &str,
+    types: &ExpandedComponentTypes,
+    name: &str,
+) -> TypeExpr {
+    let prop = types
         .define_props
         .iter()
         .flat_map(|entry| entry.result.value.properties.iter())
         .find(|prop| prop.name == name)
-        .unwrap_or_else(|| panic!("missing defineProps property {name}"))
-        .ty
+        .unwrap_or_else(|| panic!("missing defineProps property {name}"));
+    crate::test_only::semantic_source_probe::demand_type_expr(
+        project.host(),
+        owner_canonical,
+        prop.ty.present().expect("present source"),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "defineProps property {name}'s published source must demand-materialize: {:?}",
+            prop.ty
+        )
+    })
+}
+
+/// Shallow companion of [`evaluated_define_props_type`]: shell-materializes
+/// the published source WITHOUT a resolution demand, so shallow published
+/// carriers (`Ref { .. }`, symbolic indexed accesses) survive for assertions
+/// that pin the published shape itself.
+fn evaluated_define_props_shallow_type(
+    project: &MetaProject,
+    owner_canonical: &str,
+    types: &ExpandedComponentTypes,
+    name: &str,
+) -> TypeExpr {
+    let prop = types
+        .define_props
+        .iter()
+        .flat_map(|entry| entry.result.value.properties.iter())
+        .find(|prop| prop.name == name)
+        .unwrap_or_else(|| panic!("missing defineProps property {name}"));
+    crate::test_only::semantic_source_probe::shallow_type_expr(
+        project.host(),
+        owner_canonical,
+        prop.ty.present().expect("present source"),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "defineProps property {name}'s published source must shell-materialize: {:?}",
+            prop.ty
+        )
+    })
+}
+
+/// Demand-materializes a published `SemanticTypeSource` through the shared
+/// dispatch. Panics loudly when no typed source was published or the demand
+/// yields nothing — a runtime `None` must fail the test, never soften it.
+fn demand_published_type(
+    host: &VerterHost,
+    owner_canonical: &str,
+    source: Option<&verter_type_expr::facts::SemanticTypeSource>,
+    what: &str,
+) -> TypeExpr {
+    let source = source.unwrap_or_else(|| panic!("{what} must publish a typed source"));
+    crate::test_only::semantic_source_probe::demand_type_expr(host, owner_canonical, source)
+        .unwrap_or_else(|| panic!("{what}'s published source must demand-materialize: {source:?}"))
+}
+
+/// Shallow companion of [`demand_published_type`]: shell-materializes the
+/// published source WITHOUT a resolution demand, so shallow published
+/// carriers (`Ref`, utility carriers, symbolic indexed accesses) survive
+/// for assertions that pin the published shape itself.
+fn shallow_published_type(
+    host: &VerterHost,
+    owner_canonical: &str,
+    source: Option<&verter_type_expr::facts::SemanticTypeSource>,
+    what: &str,
+) -> TypeExpr {
+    let source = source.unwrap_or_else(|| panic!("{what} must publish a typed source"));
+    crate::test_only::semantic_source_probe::shallow_type_expr(host, owner_canonical, source)
+        .unwrap_or_else(|| panic!("{what}'s published source must shell-materialize: {source:?}"))
 }
 
 fn assert_union_string_literals(expr: &TypeExpr, expected: &[&str]) {
@@ -1500,8 +1606,8 @@ defineProps<{
     let evaluated = session.evaluate_types("Comp.vue").unwrap().unwrap();
 
     assert_eq!(
-        evaluated_prop_type(&evaluated, "label"),
-        &TypeExpr::Primitive(PrimitiveName::String)
+        evaluated_prop_type(&project, "Comp.vue", &evaluated, "label"),
+        TypeExpr::Primitive(PrimitiveName::String)
     );
     assert!(
         evaluated.props.iter().all(|field| field.name != "missing"),
@@ -1621,8 +1727,8 @@ fn evaluate_types_reuses_cached_results_until_the_file_changes() {
     let session = project.open_session_batch().unwrap();
     let first = session.evaluate_types("Comp.vue").unwrap().unwrap();
     assert_eq!(
-        evaluated_prop_type(&first, "count"),
-        &TypeExpr::Primitive(PrimitiveName::Number)
+        evaluated_prop_type(&project, "Comp.vue", &first, "count"),
+        TypeExpr::Primitive(PrimitiveName::Number)
     );
 
     let first_cache =
@@ -3220,7 +3326,7 @@ defineProps<Props>()
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("Comp.vue").unwrap().unwrap();
 
-    match evaluated_prop_type(&evaluated, "ui") {
+    match &evaluated_prop_type(&project, "Comp.vue", &evaluated, "ui") {
         TypeExpr::Object(obj) => {
             let names: Vec<&str> = obj
                 .properties
@@ -3281,7 +3387,7 @@ defineProps<{
     );
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
 
-    match evaluated_prop_type(&evaluated, "ui") {
+    match &evaluated_prop_type(&project, "/Comp.vue", &evaluated, "ui") {
         TypeExpr::Object(obj) => {
             let names: Vec<&str> = obj
                 .properties
@@ -3318,7 +3424,10 @@ defineProps<{
     let session = project.open_session_batch().unwrap();
     let initial = session.evaluate_types("/Comp.vue").unwrap().unwrap();
     assert!(
-        !matches!(evaluated_prop_type(&initial, "ui"), TypeExpr::Object(_)),
+        !matches!(
+            evaluated_prop_type(&project, "/Comp.vue", &initial, "ui"),
+            TypeExpr::Object(_)
+        ),
         "missing dependency should not resolve imported typeof exactly"
     );
 
@@ -3343,7 +3452,7 @@ defineProps<{
     );
 
     let reevaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
-    match evaluated_prop_type(&reevaluated, "ui") {
+    match &evaluated_prop_type(&project, "/Comp.vue", &reevaluated, "ui") {
         TypeExpr::Object(obj) => {
             let names: Vec<&str> = obj
                 .properties
@@ -3399,7 +3508,10 @@ defineProps<{
     let session = project.open_session_batch().unwrap();
     let initial = session.evaluate_types("/Comp.vue").unwrap().unwrap();
     assert!(
-        !matches!(evaluated_prop_type(&initial, "ui"), TypeExpr::Object(_)),
+        !matches!(
+            evaluated_prop_type(&project, "/Comp.vue", &initial, "ui"),
+            TypeExpr::Object(_)
+        ),
         "missing dependency should not resolve imported typeof exactly"
     );
 
@@ -3424,7 +3536,7 @@ defineProps<{
         .unwrap();
 
     let reevaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
-    match evaluated_prop_type(&reevaluated, "ui") {
+    match &evaluated_prop_type(&project, "/Comp.vue", &reevaluated, "ui") {
         TypeExpr::Object(obj) => {
             let names: Vec<&str> = obj
                 .properties
@@ -3480,7 +3592,7 @@ defineProps<{
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
 
-    match evaluated_prop_type(&evaluated, "user") {
+    match &evaluated_prop_type(&project, "/Comp.vue", &evaluated, "user") {
         TypeExpr::Object(obj) => {
             let names: Vec<&str> = obj
                 .properties
@@ -3531,7 +3643,7 @@ defineProps<{ root: TreeNode }>()
     // chain through `./index`). Recursive structure is materialised
     // on-demand by the consumer via the resolver, not eagerly inlined
     // into the published prop type.
-    match evaluated_prop_type(&evaluated, "root") {
+    match &evaluated_prop_shallow_type(&project, "/Comp.vue", &evaluated, "root") {
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -3595,8 +3707,8 @@ defineProps<UsedProps>()
     let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
 
     assert_eq!(
-        evaluated_define_props_type(&evaluated, "title"),
-        &TypeExpr::Primitive(PrimitiveName::String)
+        evaluated_define_props_type(&project, "/App.vue", &evaluated, "title"),
+        TypeExpr::Primitive(PrimitiveName::String)
     );
 
     // Dependency tracking assertions removed — the legacy walker is deleted.
@@ -3639,11 +3751,11 @@ defineProps<Props>()
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
 
-    match evaluated_define_props_type(&evaluated, "id") {
+    match evaluated_define_props_type(&project, "/App.vue", &evaluated, "id") {
         TypeExpr::Primitive(PrimitiveName::String) => {}
         other => panic!("expected inherited prop 'id' to resolve to string, got {other:?}"),
     }
-    match evaluated_define_props_type(&evaluated, "label") {
+    match evaluated_define_props_type(&project, "/App.vue", &evaluated, "label") {
         TypeExpr::Primitive(PrimitiveName::String) => {}
         other => panic!("expected direct prop 'label' to resolve to string, got {other:?}"),
     }
@@ -3678,7 +3790,7 @@ defineProps<Props<T>>()
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Generic.vue").unwrap().unwrap();
 
-    match evaluated_define_props_type(&evaluated, "items") {
+    match &evaluated_define_props_type(&project, "/Generic.vue", &evaluated, "items") {
         TypeExpr::Array { element, .. } => match element.as_ref() {
             TypeExpr::TypeParameter(param) => {
                 assert_eq!(param.name, "T");
@@ -3698,7 +3810,7 @@ defineProps<Props<T>>()
         other => panic!("expected items prop to be an array, got {other:?}"),
     }
 
-    match evaluated_define_props_type(&evaluated, "selected") {
+    match &evaluated_define_props_type(&project, "/Generic.vue", &evaluated, "selected") {
         TypeExpr::TypeParameter(param) => {
             assert_eq!(param.name, "T");
             assert!(matches!(
@@ -3755,15 +3867,25 @@ defineProps<{ [key: string]: string }>()
         shape.index_signatures.len(),
     );
     let sig = &shape.index_signatures[0];
-    assert!(
-        matches!(sig.key_type, TypeExpr::Primitive(PrimitiveName::String)),
-        "index signature key type is `string`, got {:?}",
-        sig.key_type,
+    let key_ty = demand_published_type(
+        project.host(),
+        "/IndexProps.vue",
+        sig.key_type.present(),
+        "index signature key",
     );
     assert!(
-        matches!(sig.value_type, TypeExpr::Primitive(PrimitiveName::String)),
-        "index signature value type is `string`, got {:?}",
-        sig.value_type,
+        matches!(key_ty, TypeExpr::Primitive(PrimitiveName::String)),
+        "index signature key type is `string`, got {key_ty:?}",
+    );
+    let value_ty = demand_published_type(
+        project.host(),
+        "/IndexProps.vue",
+        sig.value_type.present(),
+        "index signature value",
+    );
+    assert!(
+        matches!(value_ty, TypeExpr::Primitive(PrimitiveName::String)),
+        "index signature value type is `string`, got {value_ty:?}",
     );
     assert!(
         !sig.readonly,
@@ -3819,17 +3941,27 @@ defineEmits<{ [event: string]: [v: number] }>()
         shape.index_signatures.len(),
     );
     let sig = &shape.index_signatures[0];
+    let key_ty = demand_published_type(
+        project.host(),
+        "/IndexEmits.vue",
+        sig.key_type.present(),
+        "emit index signature key",
+    );
     assert!(
-        matches!(sig.key_type, TypeExpr::Primitive(PrimitiveName::String)),
-        "emit index signature key type is `string`, got {:?}",
-        sig.key_type,
+        matches!(key_ty, TypeExpr::Primitive(PrimitiveName::String)),
+        "emit index signature key type is `string`, got {key_ty:?}",
     );
     // The value `[v: number]` is the emit payload tuple — a concrete typed form,
     // not an opaque/unknown carrier.
+    let value_ty = demand_published_type(
+        project.host(),
+        "/IndexEmits.vue",
+        sig.value_type.present(),
+        "emit index signature value",
+    );
     assert!(
-        matches!(sig.value_type, TypeExpr::Tuple { .. }),
-        "emit index signature value type is the `[v: number]` payload tuple, got {:?}",
-        sig.value_type,
+        matches!(value_ty, TypeExpr::Tuple { .. }),
+        "emit index signature value type is the `[v: number]` payload tuple, got {value_ty:?}",
     );
 }
 
@@ -3882,10 +4014,15 @@ defineProps<Props>()
         shape.index_signatures.len(),
     );
     let sig = &shape.index_signatures[0];
+    let value_ty = demand_published_type(
+        project.host(),
+        "/OwnerLocalIndex.vue",
+        sig.value_type.present(),
+        "index signature value",
+    );
     assert!(
-        matches!(sig.value_type, TypeExpr::Primitive(PrimitiveName::Number)),
-        "index signature value type is `number`, got {:?}",
-        sig.value_type,
+        matches!(value_ty, TypeExpr::Primitive(PrimitiveName::Number)),
+        "index signature value type is `number`, got {value_ty:?}",
     );
 }
 
@@ -4298,11 +4435,14 @@ defineProps<Props>()
         .find(|prop| prop.name == "items")
         .expect("items prop should exist");
 
-    let TypeExpr::Array { element, .. } = &items.type_expr else {
-        panic!(
-            "expected items to resolve to an array, got {:?}",
-            items.type_expr
-        );
+    let items_ty = demand_published_type(
+        project.host(),
+        "/Generic.vue",
+        items.type_source.present(),
+        "items prop",
+    );
+    let TypeExpr::Array { element, .. } = &items_ty else {
+        panic!("expected items to resolve to an array, got {items_ty:?}");
     };
     let TypeExpr::Object(shape) = element.as_ref() else {
         panic!(
@@ -4386,7 +4526,7 @@ defineProps<{
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
 
-    match evaluated_prop_type(&evaluated, "ui") {
+    match &evaluated_prop_type(&project, "/App.vue", &evaluated, "ui") {
         TypeExpr::Object(obj) => {
             let names: Vec<&str> = obj
                 .properties
@@ -4461,7 +4601,7 @@ defineProps<{
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
 
-    match evaluated_prop_type(&evaluated, "ui") {
+    match &evaluated_prop_type(&project, "/App.vue", &evaluated, "ui") {
         TypeExpr::Object(obj) => {
             let names: Vec<&str> = obj
                 .properties
@@ -4511,8 +4651,8 @@ defineProps<{
     let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
 
     assert_eq!(
-        evaluated_define_props_type(&evaluated, "value"),
-        &TypeExpr::Primitive(PrimitiveName::String),
+        evaluated_define_props_type(&project, "/App.vue", &evaluated, "value"),
+        TypeExpr::Primitive(PrimitiveName::String),
         "indexed access through an imported shallow alias should still resolve via the source env"
     );
 }
@@ -4764,7 +4904,16 @@ defineProps<{
     // (e.g., ChatMessages reaches `Tool` only through inference-time
     // binding, which the demand-driven reducer `StructuralTransit` relation-
     // engine plug closes).
-    match &search_tool.type_expr {
+    match &crate::test_only::semantic_source_probe::shallow_type_expr(
+        project.host(),
+        "/Comp.vue",
+        search_tool
+            .type_source
+            .present()
+            .expect("searchTool must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("searchTool's published source must shell-materialize"))
+    {
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -4813,8 +4962,9 @@ defineProps<{
     // or Object — whichever the dispatch produced for the props slot.
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
-    let mirror = evaluated_define_props_type(&evaluated, "searchTool");
-    match mirror {
+    let mirror =
+        evaluated_define_props_shallow_type(&project, "/Comp.vue", &evaluated, "searchTool");
+    match &mirror {
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -4969,7 +5119,12 @@ defineProps<ExternalProps>()
         .expect("status prop should be present");
 
     assert_eq!(
-        status.type_expr,
+        demand_published_type(
+            project.host(),
+            "/App.vue",
+            status.type_source.present(),
+            "status prop",
+        ),
         TypeExpr::union(vec![
             TypeExpr::string_literal("idle"),
             TypeExpr::string_literal("busy"),
@@ -5699,7 +5854,12 @@ defineProps<TableProps<T>>()
         .iter()
         .find(|p| p.name == "options")
         .expect("`options` prop must publish");
-    match &options.type_expr {
+    match &shallow_published_type(
+        project.host(),
+        "/Table.vue",
+        options.type_source.present(),
+        "options prop",
+    ) {
         TypeExpr::Ref { name, .. } => assert_eq!(
             name.as_ref(),
             "Omit",
@@ -5712,11 +5872,14 @@ defineProps<TableProps<T>>()
     // No published field may carry a budget-tripped partial sentinel — the
     // result must be COMPLETE, not a degraded budget partial.
     for p in &meta.props {
+        let Some(source) = p.type_source.present() else {
+            continue;
+        };
+        let published = shallow_published_type(project.host(), "/Table.vue", Some(source), &p.name);
         assert!(
-            !type_expr_is_budget_exceeded_sentinel(&p.type_expr),
-            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {:?}",
+            !type_expr_is_budget_exceeded_sentinel(&published),
+            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {published:?}",
             p.name,
-            p.type_expr
         );
     }
 }
@@ -5806,11 +5969,15 @@ defineProps<ChatProps<T>>()
 
     // No published field may carry a budget-tripped partial sentinel.
     for p in &meta.props {
+        let Some(source) = p.type_source.present() else {
+            continue;
+        };
+        let published =
+            shallow_published_type(project.host(), "/ChatMessages.vue", Some(source), &p.name);
         assert!(
-            !type_expr_is_budget_exceeded_sentinel(&p.type_expr),
-            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {:?}",
+            !type_expr_is_budget_exceeded_sentinel(&published),
+            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {published:?}",
             p.name,
-            p.type_expr
         );
     }
 }
@@ -5884,22 +6051,38 @@ defineSlots<OpenMappedSlots<T>>()
     // sentinel — the open mapped slots surface carrier-stopped to a
     // shallow shell instead of materialising the per-key value loop.
     for p in &meta.props {
+        let Some(source) = p.type_source.present() else {
+            continue;
+        };
+        let published = shallow_published_type(
+            project.host(),
+            "/OpenMappedSlots.vue",
+            Some(source),
+            &p.name,
+        );
         assert!(
-            !type_expr_is_budget_exceeded_sentinel(&p.type_expr),
-            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {:?}",
+            !type_expr_is_budget_exceeded_sentinel(&published),
+            "no published prop may carry a BudgetExceeded sentinel; `{}` did: {published:?}",
             p.name,
-            p.type_expr
         );
     }
     for slot in &meta.slots {
         for binding in &slot.bindings {
+            let Some(source) = binding.type_source.present() else {
+                continue;
+            };
+            let published = shallow_published_type(
+                project.host(),
+                "/OpenMappedSlots.vue",
+                Some(source),
+                &binding.name,
+            );
             assert!(
-                !type_expr_is_budget_exceeded_sentinel(&binding.type_expr),
+                !type_expr_is_budget_exceeded_sentinel(&published),
                 "no slot binding may carry a BudgetExceeded sentinel; slot `{}` binding `{}` \
-                 did: {:?} — the open mapped slots value body was materialised (the storm)",
+                 did: {published:?} — the open mapped slots value body was materialised (the storm)",
                 slot.name,
                 binding.name,
-                binding.type_expr
             );
         }
     }
@@ -5933,7 +6116,12 @@ defineSlots<OpenMappedSlots<T>>()
                     slot.bindings.iter().map(|b| &b.name).collect::<Vec<_>>()
                 )
             });
-        match &message.type_expr {
+        match &shallow_published_type(
+            project.host(),
+            "/OpenMappedSlots.vue",
+            message.type_source.present(),
+            "message binding",
+        ) {
             verter_type_expr::TypeExpr::Object(obj) => panic!(
                 "slot `{}`'s `message` binding must stay the MessageBase<T> carrier — it \
                  flattened into an object surface: {obj:?}",
@@ -6058,6 +6246,109 @@ defineSlots<OpenMappedSlots<T>>()
         "instantiating OpenMappedSlots<T> through the shared dispatch must preserve the \
          `Mapped` carrier shell (the published value), got {:?}",
         graph.node_data(node)
+    );
+}
+
+/// Q10 arg-preserving publication for a PAYLOAD-LESS resolved-surface member:
+/// `defineProps<PropsBase>()` where the imported `PropsBase` declares
+/// `message: MessageBase<string>`. The member has NO flat authored
+/// macro-payload position (`shallow_payload` is `None`), so its publication
+/// previously took the LOSSY `InstantiationRef` upgrade
+/// (`Synthesized(Ref(SymbolBodyLocator))` — scope kept, type arguments
+/// DROPPED). The published source must instead be the authored USE-SITE
+/// body slot (`PropsBase.message`'s member-value position): content-free,
+/// non-executed, and arg-preserving — its deref through the one shared
+/// dispatch replays `MessageBase<string>` with the substitution intact.
+///
+/// Discriminating: shell-materializing the published source must yield
+/// `Ref { name: "MessageBase", type_arguments: [string] }` — the lossy
+/// carrier shell-materializes with EMPTY type_arguments and fails.
+#[test]
+fn get_component_meta_payloadless_member_publishes_arg_preserving_instantiation_source() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export interface MessageBase<T> { content: T }
+export interface PropsBase { message: MessageBase<string> }
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import type { PropsBase } from './types'
+defineProps<PropsBase>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/Comp.vue");
+    let prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "message")
+        .expect("the imported PropsBase surface must publish the `message` prop");
+    let source = prop
+        .type_source
+        .present()
+        .expect("`message` must publish a typed source");
+
+    // Canonical identity: the authored use-site slot anchors on the
+    // DECLARING file + symbol (never a bare name re-resolved in the owner
+    // scope, never an argument-less symbol ref).
+    let verter_type_expr::facts::SemanticTypeSource::Authored(
+        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot),
+    ) = source
+    else {
+        panic!(
+            "a payload-less instantiation-valued member must publish the authored \
+             use-site DeclBody carrier (arg-preserving, re-resolvable); observed \
+             {source:?}",
+        );
+    };
+    assert_eq!(
+        slot.anchor.canonical_id.as_ref(),
+        "/types.ts",
+        "the use-site slot must anchor on the declaring canonical",
+    );
+    assert_eq!(
+        slot.anchor.symbol.as_ref(),
+        "PropsBase",
+        "the use-site slot must anchor on the declaring symbol",
+    );
+
+    // Arg preservation: the shallow (non-demanded) shape replays the
+    // authored instantiation with its concrete `string` argument.
+    let shallow = shallow_published_type(project.host(), "/Comp.vue", Some(source), "message");
+    let TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = &shallow
+    else {
+        panic!(
+            "`message` must shell-materialize to the MessageBase reference carrier; \
+             observed {shallow:?}",
+        );
+    };
+    assert_eq!(name.as_ref(), "MessageBase");
+    assert_eq!(
+        type_arguments.len(),
+        1,
+        "the instantiation's type argument must be PRESERVED on the published \
+         source (the lossy Synthesized(Ref) upgrade drops it); observed \
+         {type_arguments:?}",
+    );
+    assert!(
+        matches!(
+            &type_arguments[0],
+            TypeExpr::Primitive(PrimitiveName::String)
+        ),
+        "the preserved argument must be the concrete authored `string`; observed {:?}",
+        type_arguments[0],
     );
 }
 
@@ -7882,12 +8173,12 @@ defineProps<{
 
     assert!(
         matches!(
-            evaluated_prop_type(&first, "user"),
+            &evaluated_prop_shallow_type(&project, "/Comp.vue", &first, "user"),
             TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "ImportedUser" && type_arguments.is_empty()
         ),
         "evaluate_types should keep imported object-like fields symbolic in expanded evaluated types, got {:?}",
-        evaluated_prop_type(&first, "user")
+        evaluated_prop_shallow_type(&project, "/Comp.vue", &first, "user")
     );
     // §3.4 structural classification: `ImportedUser` is consumed by the
     // owner SFC's `defineProps<{ user: ImportedUser }>()` macro (it
@@ -7900,12 +8191,19 @@ defineProps<{
     // Shallow-By-Default Rule). Consumers (zod/json-schema/storybook/
     // histoire adapters, compat layer) re-resolve the alias through
     // the registry on demand rather than seeing it inlined here.
-    match &first_meta
-        .props
-        .iter()
-        .find(|prop| prop.name == "user")
-        .expect("component meta should keep the imported user prop")
-        .type_expr
+    match &crate::test_only::semantic_source_probe::shallow_type_expr(
+        project.host(),
+        "/Comp.vue",
+        first_meta
+            .props
+            .iter()
+            .find(|prop| prop.name == "user")
+            .expect("component meta should keep the imported user prop")
+            .type_source
+            .present()
+            .expect("user prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("user prop's published source must shell-materialize"))
     {
         TypeExpr::Ref {
             name,
@@ -7946,12 +8244,12 @@ defineProps<{
     );
     assert!(
         matches!(
-            evaluated_prop_type(&second, "user"),
+            &evaluated_prop_shallow_type(&project, "/Comp.vue", &second, "user"),
             TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "ImportedUser" && type_arguments.is_empty()
         ),
         "evaluate_types should keep imported object-like fields symbolic after cache invalidation too, got {:?}",
-        evaluated_prop_type(&second, "user")
+        evaluated_prop_shallow_type(&project, "/Comp.vue", &second, "user")
     );
     // §3.4: after dep change, the published surface still carries the
     // symbolic `Ref { name: "ImportedUser" }`. The cache invalidation
@@ -7959,12 +8257,19 @@ defineProps<{
     // second_cache)` assertion above; the registry's body has been
     // updated to include the new `label` member, which consumers
     // observe by re-resolving the alias on demand.
-    match &second_meta
-        .props
-        .iter()
-        .find(|prop| prop.name == "user")
-        .expect("component meta should keep the imported user prop after invalidation")
-        .type_expr
+    match &crate::test_only::semantic_source_probe::shallow_type_expr(
+        project.host(),
+        "/Comp.vue",
+        second_meta
+            .props
+            .iter()
+            .find(|prop| prop.name == "user")
+            .expect("component meta should keep the imported user prop after invalidation")
+            .type_source
+            .present()
+            .expect("user prop must publish a typed source after invalidation"),
+    )
+    .unwrap_or_else(|| panic!("user prop's published source must shell-materialize"))
     {
         TypeExpr::Ref {
             name,
@@ -8097,12 +8402,12 @@ fn evaluate_types_works_independently_of_prior_get_analysis_call() {
 
     // Assert+: types are properly resolved
     assert_eq!(
-        evaluated_prop_type(&evaluated, "count"),
-        &TypeExpr::Primitive(PrimitiveName::Number),
+        evaluated_prop_type(&project, "/App.vue", &evaluated, "count"),
+        TypeExpr::Primitive(PrimitiveName::Number),
     );
     assert_eq!(
-        evaluated_prop_type(&evaluated, "label"),
-        &TypeExpr::Primitive(PrimitiveName::String),
+        evaluated_prop_type(&project, "/App.vue", &evaluated, "label"),
+        TypeExpr::Primitive(PrimitiveName::String),
     );
 
     // Assert-: only the expected props
@@ -8136,9 +8441,18 @@ fn evaluate_types_returns_consistent_results_for_repeated_calls() {
         second.props.len(),
         "repeated evaluate_types calls should return the same number of props"
     );
+    let published_source_of = |types: &ExpandedComponentTypes, name: &str| {
+        types
+            .props
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| panic!("missing evaluated prop {name}"))
+            .r#type
+            .clone()
+    };
     assert_eq!(
-        evaluated_prop_type(&first, "a"),
-        evaluated_prop_type(&second, "a"),
+        published_source_of(&first, "a"),
+        published_source_of(&second, "a"),
         "repeated calls should return the same type for prop 'a'"
     );
 
@@ -9049,13 +9363,15 @@ defineProps<FancyProps>()
     assert_eq!(meta.props.len(), 1, "should extract the imported prop");
     assert_eq!(meta.props[0].name, "open");
     assert_eq!(meta.props[0].raw_type.as_deref(), Some("boolean"));
+    let open_ty = demand_published_type(
+        project.host(),
+        "/workspace/src/Consumer.vue",
+        meta.props[0].type_source.present(),
+        "open prop",
+    );
     assert!(
-        matches!(
-            meta.props[0].type_expr,
-            TypeExpr::Primitive(PrimitiveName::Boolean),
-        ),
-        "expanded prop type should come from the declaration entrypoint, got: {:?}",
-        meta.props[0].type_expr
+        matches!(open_ty, TypeExpr::Primitive(PrimitiveName::Boolean)),
+        "expanded prop type should come from the declaration entrypoint, got: {open_ty:?}"
     );
 }
 
@@ -9116,7 +9432,12 @@ defineProps<FancyProps>()
         .find(|p| p.name == "open")
         .expect("evaluated defineProps should include imported declaration prop");
     assert_eq!(
-        open_prop.type_expr,
+        demand_published_type(
+            project.host(),
+            "/src/Consumer.vue",
+            open_prop.type_source.present(),
+            "open prop",
+        ),
         TypeExpr::Primitive(PrimitiveName::Boolean),
         "declaration-entrypoint prop type should resolve through re-export chain"
     );
@@ -9192,7 +9513,12 @@ defineProps<FancyProps>()
         .find(|p| p.name == "open")
         .expect("evaluated defineProps should include imported helper prop");
     assert_eq!(
-        open_prop.type_expr,
+        demand_published_type(
+            project.host(),
+            "/src/Consumer.vue",
+            open_prop.type_source.present(),
+            "open prop",
+        ),
         TypeExpr::Primitive(PrimitiveName::Boolean),
         "nested helper type imports must resolve through declaration entrypoints instead of JS companions"
     );
@@ -9268,7 +9594,15 @@ defineProps<FancyProps>()
         .find(|p| p.name == "open")
         .expect("evaluated defineProps should include imported helper prop");
     assert_eq!(
-        open_prop.type_expr,
+        crate::test_only::semantic_source_probe::demand_type_expr(
+            project.host(),
+            "/src/Consumer.vue",
+            open_prop
+                .type_source
+                .present()
+                .expect("open prop must publish a typed source"),
+        )
+        .unwrap_or_else(|| panic!("open prop's published source must demand-materialize")),
         TypeExpr::Primitive(PrimitiveName::Boolean),
         "plain helper imports in declaration files must resolve through declaration entrypoints instead of JS companions"
     );
@@ -9342,8 +9676,21 @@ defineProps<Props>()
         .unwrap()
         .expect("evaluate_types should return a result");
 
-    let _ = evaluated_define_props_type(&evaluated, "type");
-    let _ = evaluated_define_props_type(&evaluated, "mirror");
+    let define_props_has = |name: &str| {
+        evaluated
+            .define_props
+            .iter()
+            .flat_map(|entry| entry.result.value.properties.iter())
+            .any(|prop| prop.name == name)
+    };
+    assert!(
+        define_props_has("type"),
+        "missing defineProps property type"
+    );
+    assert!(
+        define_props_has("mirror"),
+        "missing defineProps property mirror"
+    );
 
     let meta = session
         .get_component_meta("/src/App.vue")
@@ -9361,8 +9708,8 @@ defineProps<Props>()
         .expect("mirror prop should exist");
 
     // Both props must be present (projector must not drop them).
-    let _ = &type_prop.type_expr;
-    let _ = &mirror_prop.type_expr;
+    let _ = &type_prop.type_source;
+    let _ = &mirror_prop.type_source;
 }
 
 #[test]
@@ -9443,15 +9790,21 @@ defineProps<Props>()
     // through the package registry). The `href` prop publishes its
     // `IndexedAccess` route — the route stays symbolic because the
     // root resolves to a package-backed declaration.
-    let to_ty = evaluated_define_props_type(&evaluated, "to");
+    let to_ty =
+        evaluated_define_props_shallow_type(&project, "/workspace/src/Link.vue", &evaluated, "to");
     assert!(
         matches!(
-            to_ty,
+            &to_ty,
             TypeExpr::Ref { name, .. } if name.as_ref() == "RouteLocationRaw"
         ),
         "to prop should publish the bare RouteLocationRaw ref, got {to_ty:?}"
     );
-    let href_ty = evaluated_define_props_type(&evaluated, "href");
+    let href_ty = evaluated_define_props_shallow_type(
+        &project,
+        "/workspace/src/Link.vue",
+        &evaluated,
+        "href",
+    );
     assert!(
         matches!(
             href_ty,
@@ -9475,21 +9828,31 @@ defineProps<Props>()
         .find(|prop| prop.name == "href")
         .expect("href prop should exist");
 
-    assert!(
-        matches!(
-            &to_prop.type_expr,
-            TypeExpr::Ref { name, .. } if name.as_ref() == "RouteLocationRaw"
-        ),
-        "package re-exported route alias should publish the bare RouteLocationRaw ref: {:?}",
-        to_prop.type_expr
+    let to_prop_ty = shallow_published_type(
+        project.host(),
+        "/workspace/src/Link.vue",
+        to_prop.type_source.present(),
+        "to prop",
     );
     assert!(
         matches!(
-            &href_prop.type_expr,
+            &to_prop_ty,
+            TypeExpr::Ref { name, .. } if name.as_ref() == "RouteLocationRaw"
+        ),
+        "package re-exported route alias should publish the bare RouteLocationRaw ref: {to_prop_ty:?}"
+    );
+    let href_prop_ty = shallow_published_type(
+        project.host(),
+        "/workspace/src/Link.vue",
+        href_prop.type_source.present(),
+        "href prop",
+    );
+    assert!(
+        matches!(
+            &href_prop_ty,
             TypeExpr::IndexedAccess { .. } | TypeExpr::Ref { .. } | TypeExpr::Unknown { .. }
         ),
-        "self indexed access through a package alias should publish the symbolic shape: {:?}",
-        href_prop.type_expr
+        "self indexed access through a package alias should publish the symbolic shape: {href_prop_ty:?}"
     );
 }
 
@@ -9813,11 +10176,14 @@ defineProps<{
         .iter()
         .find(|entry| entry.name == "ImportedHelper")
         .expect("ImportedHelper should stay published");
-    let TypeExpr::Object(helper_shape) = &helper_entry.type_expr else {
-        panic!(
-            "ImportedHelper should materialize as an object, got {:?}",
-            helper_entry.type_expr
-        );
+    let helper_entry_ty = demand_published_type(
+        project.host(),
+        "/workspace/src/App.vue",
+        Some(helper_entry.type_source.present().expect("present source")),
+        "ImportedHelper registry entry",
+    );
+    let TypeExpr::Object(helper_shape) = &helper_entry_ty else {
+        panic!("ImportedHelper should materialize as an object, got {helper_entry_ty:?}");
     };
     let current_member = helper_shape
         .properties
@@ -10040,18 +10406,20 @@ defineProps<LinkProps>()
         .iter()
         .find(|entry| entry.name == "RouteLocationRaw")
         .expect("owner-local route helper should be published in the type registry");
-    let TypeExpr::Union(route_variants) = &route.type_expr else {
-        panic!(
-            "owner-local route helper should remain a route union, got {:?}",
-            route.type_expr
-        );
+    let route_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(route.type_source.present().expect("present source")),
+        "RouteLocationRaw registry entry",
+    );
+    let TypeExpr::Union(route_variants) = &route_ty else {
+        panic!("owner-local route helper should remain a route union, got {route_ty:?}");
     };
     assert!(
         route_variants
             .iter()
             .any(|variant| matches!(variant, TypeExpr::Primitive(PrimitiveName::String))),
-        "owner-local route helper should preserve its string branch, got {:?}",
-        route.type_expr
+        "owner-local route helper should preserve its string branch, got {route_ty:?}"
     );
     assert!(
         route_variants.iter().any(|variant| {
@@ -10062,8 +10430,7 @@ defineProps<LinkProps>()
                         if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "path")),
                 )
         }),
-        "owner-local route helper should preserve its object branch, got {:?}",
-        route.type_expr
+        "owner-local route helper should preserve its object branch, got {route_ty:?}"
     );
     // RouteLocationObject is not published as a separate registry entry;
     // it is inlined into RouteLocationRaw's union.
@@ -10080,11 +10447,14 @@ defineProps<LinkProps>()
         .iter()
         .find(|entry| entry.name == "NuxtLinkProps")
         .expect("owner-local helper interface should be published in the type registry");
-    let TypeExpr::Object(shape) = &nuxt_link.type_expr else {
-        panic!(
-            "NuxtLinkProps should project as an object type, got {:?}",
-            nuxt_link.type_expr
-        );
+    let nuxt_link_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(nuxt_link.type_source.present().expect("present source")),
+        "NuxtLinkProps registry entry",
+    );
+    let TypeExpr::Object(shape) = &nuxt_link_ty else {
+        panic!("NuxtLinkProps should project as an object type, got {nuxt_link_ty:?}");
     };
     let member_names: Vec<&str> = shape
         .properties
@@ -10162,10 +10532,15 @@ defineProps<Props>()
         .iter()
         .find(|entry| entry.name == "Button")
         .expect("owner-local Button helper should be published in the type registry");
-    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+    let button_entry_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(button_entry.type_source.present().expect("present source")),
+        "Button registry entry",
+    );
+    let TypeExpr::Object(button_shape) = &button_entry_ty else {
         panic!(
-            "owner-local helper alias should be evaluated against imported generic helpers, got {:?}",
-            button_entry.type_expr
+            "owner-local helper alias should be evaluated against imported generic helpers, got {button_entry_ty:?}"
         );
     };
     let button_member_names: Vec<&str> = button_shape
@@ -10514,10 +10889,15 @@ defineProps<{
         .iter()
         .find(|entry| entry.name == "Button")
         .expect("Button helper should be published in the resolved type registry");
-    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+    let button_entry_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(button_entry.type_source.present().expect("present source")),
+        "Button registry entry",
+    );
+    let TypeExpr::Object(button_shape) = &button_entry_ty else {
         panic!(
-            "owner-local Button helper should materialize as an object, got {:?}",
-            button_entry.type_expr
+            "owner-local Button helper should materialize as an object, got {button_entry_ty:?}"
         );
     };
 
@@ -10640,10 +11020,15 @@ defineProps<{
     // load-bearing discriminator against the wrong Shape-A port that
     // raises the lowered `InstantiationRef` carrier directly without
     // executing the `Instantiate` query.
-    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+    let button_entry_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(button_entry.type_source.present().expect("present source")),
+        "Button registry entry",
+    );
+    let TypeExpr::Object(button_shape) = &button_entry_ty else {
         panic!(
-            "owner-local Button registry alias should materialize as an object, got {:?}",
-            button_entry.type_expr
+            "owner-local Button registry alias should materialize as an object, got {button_entry_ty:?}"
         );
     };
 
@@ -10972,10 +11357,15 @@ defineProps<{
         .iter()
         .find(|entry| entry.name == "Button")
         .expect("Button helper should be published in the resolved type registry");
-    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+    let button_entry_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(button_entry.type_source.present().expect("present source")),
+        "Button registry entry",
+    );
+    let TypeExpr::Object(button_shape) = &button_entry_ty else {
         panic!(
-            "owner-local multi-arg Button alias should materialize as an object, got {:?}",
-            button_entry.type_expr
+            "owner-local multi-arg Button alias should materialize as an object, got {button_entry_ty:?}"
         );
     };
 
@@ -11090,10 +11480,15 @@ defineProps<{
         .iter()
         .find(|entry| entry.name == "Button")
         .expect("Button helper should be published in the resolved type registry");
-    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+    let button_entry_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(button_entry.type_source.present().expect("present source")),
+        "Button registry entry",
+    );
+    let TypeExpr::Object(button_shape) = &button_entry_ty else {
         panic!(
-            "owner-local default-param Button alias should materialize as an object, got {:?}",
-            button_entry.type_expr
+            "owner-local default-param Button alias should materialize as an object, got {button_entry_ty:?}"
         );
     };
 
@@ -11304,10 +11699,15 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|entry| entry.name == "Button")
         .expect("Button helper should be published in the resolved type registry");
-    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+    let button_entry_ty = demand_published_type(
+        project.host(),
+        "/src/Button.vue",
+        Some(button_entry.type_source.present().expect("present source")),
+        "Button registry entry",
+    );
+    let TypeExpr::Object(button_shape) = &button_entry_ty else {
         panic!(
-            "imported ComponentConfig alias should materialize as an object, got {:?}",
-            button_entry.type_expr
+            "imported ComponentConfig alias should materialize as an object, got {button_entry_ty:?}"
         );
     };
 
@@ -11438,10 +11838,15 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|entry| entry.name == "Button")
         .expect("Button helper should be published in the resolved type registry");
-    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+    let button_entry_ty = demand_published_type(
+        project.host(),
+        "/src/Button.vue",
+        Some(button_entry.type_source.present().expect("present source")),
+        "Button registry entry",
+    );
+    let TypeExpr::Object(button_shape) = &button_entry_ty else {
         panic!(
-            "imported Button helper should materialize as an object surface, got {:?}",
-            button_entry.type_expr
+            "imported Button helper should materialize as an object surface, got {button_entry_ty:?}"
         );
     };
     let member_names: std::collections::BTreeSet<_> = button_shape
@@ -11537,10 +11942,15 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|entry| entry.name == "Button")
         .expect("Button helper should be published in the resolved type registry");
-    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+    let button_entry_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(button_entry.type_source.present().expect("present source")),
+        "Button registry entry",
+    );
+    let TypeExpr::Object(button_shape) = &button_entry_ty else {
         panic!(
-            "imported Button helper should materialize as an object surface, got {:?}",
-            button_entry.type_expr
+            "imported Button helper should materialize as an object surface, got {button_entry_ty:?}"
         );
     };
 
@@ -11651,15 +12061,19 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|entry| entry.name == "ButtonSlots")
         .expect("ButtonSlots should be published in the resolved type registry");
-    assert!(
-        matches!(&button_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
-        "imported registry helper should stay a shallow Ref (shallow-by-default), got {:?}",
-        button_slots.type_expr
+    let button_slots_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(button_slots.type_source.present().expect("present source")),
+        "ButtonSlots registry entry",
     );
     assert!(
-        !matches!(&button_slots.type_expr, TypeExpr::Object(_)),
-        "registry entry must NOT eagerly materialize to an object, got {:?}",
-        button_slots.type_expr
+        matches!(&button_slots_ty, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
+        "imported registry helper should stay a shallow Ref (shallow-by-default), got {button_slots_ty:?}"
+    );
+    assert!(
+        !matches!(&button_slots_ty, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize to an object, got {button_slots_ty:?}"
     );
 
     // Published-surface contract (path-precise materialization): the default
@@ -11686,10 +12100,15 @@ defineSlots<ButtonSlots>()
         "nested slot helpers must stay on the requested member path, got {:?}",
         ui_binding.raw_type
     );
+    let ui_binding_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        ui_binding.type_source.present(),
+        "default slot ui binding",
+    );
     assert!(
-        matches!(&ui_binding.type_expr, TypeExpr::IndexedAccess { .. }),
-        "default slot ui binding must stay a symbolic IndexedAccess, got {:?}",
-        ui_binding.type_expr
+        matches!(&ui_binding_ty, TypeExpr::IndexedAccess { .. }),
+        "default slot ui binding must stay a symbolic IndexedAccess, got {ui_binding_ty:?}"
     );
 }
 
@@ -11756,15 +12175,19 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|entry| entry.name == "ButtonSlots")
         .expect("ButtonSlots should be published in the resolved type registry");
-    assert!(
-        matches!(&button_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
-        "imported registry helper should stay a shallow Ref (shallow-by-default), got {:?}",
-        button_slots.type_expr
+    let button_slots_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(button_slots.type_source.present().expect("present source")),
+        "ButtonSlots registry entry",
     );
     assert!(
-        !matches!(&button_slots.type_expr, TypeExpr::Object(_)),
-        "registry entry must NOT eagerly materialize the function-valued member, got {:?}",
-        button_slots.type_expr
+        matches!(&button_slots_ty, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
+        "imported registry helper should stay a shallow Ref (shallow-by-default), got {button_slots_ty:?}"
+    );
+    assert!(
+        !matches!(&button_slots_ty, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize the function-valued member, got {button_slots_ty:?}"
     );
 
     // Published-surface contract: the default slot's `ui` binding stays
@@ -11790,10 +12213,15 @@ defineSlots<ButtonSlots>()
         "function-valued projected members must keep the helper on the requested member path, got {:?}",
         ui_binding.raw_type
     );
+    let ui_binding_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        ui_binding.type_source.present(),
+        "default slot ui binding",
+    );
     assert!(
-        matches!(&ui_binding.type_expr, TypeExpr::IndexedAccess { .. }),
-        "default slot ui binding must stay a symbolic IndexedAccess, got {:?}",
-        ui_binding.type_expr
+        matches!(&ui_binding_ty, TypeExpr::IndexedAccess { .. }),
+        "default slot ui binding must stay a symbolic IndexedAccess, got {ui_binding_ty:?}"
     );
 }
 
@@ -12154,10 +12582,15 @@ defineProps<ButtonProps>()
         .iter()
         .find(|entry| entry.name == "Button")
         .expect("Button helper should be published in the resolved type registry");
-    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+    let button_entry_ty = demand_published_type(
+        project.host(),
+        "/src/Button.vue",
+        Some(button_entry.type_source.present().expect("present source")),
+        "Button registry entry",
+    );
+    let TypeExpr::Object(button_shape) = &button_entry_ty else {
         panic!(
-            "Button helper should materialize as an object despite the opaque sibling arg, got {:?}",
-            button_entry.type_expr
+            "Button helper should materialize as an object despite the opaque sibling arg, got {button_entry_ty:?}"
         );
     };
 
@@ -12341,13 +12774,18 @@ defineProps<ButtonProps>()
     // registry. The transitive `Avatar = ComponentConfig<typeof
     // avatarTheme>` chain is resolved on-demand via the resolver, not
     // eagerly inlined into the published prop type.
+    let avatar_ty = shallow_published_type(
+        project.host(),
+        "/src/Button.vue",
+        avatar.type_source.present(),
+        "avatar prop",
+    );
     assert!(
         matches!(
-            &avatar.type_expr,
+            &avatar_ty,
             TypeExpr::Ref { name, .. } if name.as_ref() == "AvatarProps"
         ),
-        "avatar prop should publish the bare AvatarProps ref, got {:?}",
-        avatar.type_expr
+        "avatar prop should publish the bare AvatarProps ref, got {avatar_ty:?}"
     );
 }
 
@@ -12398,18 +12836,20 @@ defineProps<ButtonProps>()
         .iter()
         .find(|entry| entry.name == "LocalConfig")
         .expect("renamed imported alias should be published in the resolved type registry");
-    let TypeExpr::Object(local_config_shape) = &local_config.type_expr else {
-        panic!(
-            "LocalConfig should materialize as an object, got {:?}",
-            local_config.type_expr
-        );
+    let local_config_ty = demand_published_type(
+        project.host(),
+        "/src/Button.vue",
+        Some(local_config.type_source.present().expect("present source")),
+        "LocalConfig registry entry",
+    );
+    let TypeExpr::Object(local_config_shape) = &local_config_ty else {
+        panic!("LocalConfig should materialize as an object, got {local_config_ty:?}");
     };
     assert!(
         local_config_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "slot"),
         ),
-        "LocalConfig should keep its slot member, got {:?}",
-        local_config.type_expr
+        "LocalConfig should keep its slot member, got {local_config_ty:?}"
     );
 }
 
@@ -12548,11 +12988,14 @@ defineProps<ButtonProps>()
         .iter()
         .find(|entry| entry.name == "ComponentConfig")
         .expect("ComponentConfig should be published in the resolved type registry");
-    let TypeExpr::Object(config_shape) = &config_entry.type_expr else {
-        panic!(
-            "ComponentConfig should materialize as an object, got {:?}",
-            config_entry.type_expr
-        );
+    let config_entry_ty = demand_published_type(
+        project.host(),
+        "/src/Button.vue",
+        Some(config_entry.type_source.present().expect("present source")),
+        "ComponentConfig registry entry",
+    );
+    let TypeExpr::Object(config_shape) = &config_entry_ty else {
+        panic!("ComponentConfig should materialize as an object, got {config_entry_ty:?}");
     };
 
     let ui_member = config_shape
@@ -13029,307 +13472,6 @@ const attrs = { label: 'Hello' }
         "component usage should preserve v-bind spread markers"
     );
 }
-
-// ===========================================================================
-// Phase 6: Resolved external type cache
-// ===========================================================================
-
-#[test]
-fn component_meta_avoids_legacy_resolved_type_cache_across_different_owners() {
-    let project = make_project();
-
-    // Shared dependency
-    project
-        .upsert_base(
-            "/src/types.ts",
-            r#"export interface SharedProps { shared: string }"#,
-        )
-        .unwrap();
-
-    // Two different SFCs importing the same type from the same dep
-    project
-        .upsert_base(
-            "/src/A.vue",
-            r#"<script setup lang="ts">
-import { SharedProps } from './types'
-defineProps<SharedProps>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/src/B.vue",
-            r#"<script setup lang="ts">
-import { SharedProps } from './types'
-defineProps<SharedProps>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    // Set up dep resolution for both owners
-    project.host().set_import_dependencies(
-        "/src/A.vue",
-        vec![crate::types::DependencyResolution {
-            specifier: "./types".to_string(),
-            resolved_canonical_id: Some("/src/types.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-    project.host().set_import_dependencies(
-        "/src/B.vue",
-        vec![crate::types::DependencyResolution {
-            specifier: "./types".to_string(),
-            resolved_canonical_id: Some("/src/types.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-
-    let session = project.open_session_batch().unwrap();
-
-    // First owner resolves the type without touching the legacy host cache.
-    project.host().provenance().reset();
-    let meta_a = session.get_component_meta("/src/A.vue").unwrap().unwrap();
-    let p1 = provenance(&project);
-
-    assert_eq!(meta_a.props.len(), 1, "A.vue should have the shared prop");
-    assert_eq!(
-        p1.resolved_external_type_cache_misses, 0,
-        "component-meta should not populate the legacy resolved type cache on first owner resolution"
-    );
-    assert_eq!(
-        p1.resolved_external_type_cache_hits, 0,
-        "component-meta should not hit the legacy resolved type cache on first owner resolution"
-    );
-    assert!(
-        project.host().resolved_type_cache().is_empty(),
-        "component-meta queries should leave the legacy host resolved type cache empty"
-    );
-
-    // Reset counters for second owner
-    project.host().provenance().reset();
-    let meta_b = session.get_component_meta("/src/B.vue").unwrap().unwrap();
-    let p2 = provenance(&project);
-
-    assert_eq!(meta_b.props.len(), 1, "B.vue should have the shared prop");
-    assert_eq!(meta_b.props[0].name, "shared");
-
-    assert_eq!(
-        p2.resolved_external_type_cache_hits, 0,
-        "component-meta should not hit the legacy host resolved type cache for a second owner"
-    );
-    assert_eq!(
-        p2.resolved_external_type_cache_misses, 0,
-        "component-meta should not miss the legacy host resolved type cache for a second owner"
-    );
-    assert!(
-        project.host().resolved_type_cache().is_empty(),
-        "component-meta queries should leave the legacy host resolved type cache empty"
-    );
-}
-
-#[test]
-fn component_meta_avoids_legacy_resolved_type_cache_for_workspace_only_package_dependencies() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/workspace/node_modules/fancy/package.json".to_string(),
-        Arc::from(
-            r#"{ "name": "fancy", "types": "./dist/index.d.ts", "exports": { ".": { "import": "./dist/index.js" } } }"#,
-        ),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/fancy/dist/index.d.ts".to_string(),
-        Arc::from("export interface SharedProps { shared: string }"),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/fancy/dist/index.js".to_string(),
-        Arc::from("export const runtimeOnly = true"),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: crate::types::AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    let project = MetaProject::new(host);
-    project
-        .configure_projects(vec![
-            verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-                "/workspace".to_string(),
-                "/workspace".to_string(),
-                Some("/workspace/tsconfig.json".to_string()),
-            ),
-        ])
-        .unwrap();
-    project
-        .upsert_base(
-            "/workspace/src/A.vue",
-            r#"<script setup lang="ts">
-import type { SharedProps } from 'fancy'
-defineProps<SharedProps>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/workspace/src/B.vue",
-            r#"<script setup lang="ts">
-import type { SharedProps } from 'fancy'
-defineProps<SharedProps>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    let session = project.open_session_batch().unwrap();
-
-    project.host().provenance().reset();
-    let meta_a = session
-        .get_component_meta("/workspace/src/A.vue")
-        .unwrap()
-        .unwrap();
-    let p1 = provenance(&project);
-    assert_eq!(
-        meta_a.props.len(),
-        1,
-        "A.vue should resolve the package prop"
-    );
-    assert_eq!(
-        p1.resolved_external_type_cache_misses, 0,
-        "component-meta should not miss the legacy resolved type cache for a workspace-only dep"
-    );
-    assert_eq!(
-        p1.resolved_external_type_cache_hits, 0,
-        "component-meta should not hit the legacy resolved type cache on first workspace-only dep resolution"
-    );
-    assert!(
-        project.host().resolved_type_cache().is_empty(),
-        "component-meta queries should leave the legacy host resolved type cache empty"
-    );
-
-    project.host().provenance().reset();
-    let meta_b = session
-        .get_component_meta("/workspace/src/B.vue")
-        .unwrap()
-        .unwrap();
-    let p2 = provenance(&project);
-    assert_eq!(
-        meta_b.props.len(),
-        1,
-        "B.vue should resolve the package prop"
-    );
-    assert_eq!(meta_b.props[0].name, "shared");
-    assert_eq!(
-        p2.resolved_external_type_cache_hits, 0,
-        "component-meta should not hit the legacy host resolved type cache for a second workspace-only owner"
-    );
-    assert_eq!(
-        p2.resolved_external_type_cache_misses, 0,
-        "component-meta should not miss the legacy host resolved type cache for a second workspace-only owner"
-    );
-    assert!(
-        project.host().resolved_type_cache().is_empty(),
-        "component-meta queries should leave the legacy host resolved type cache empty"
-    );
-}
-
-#[test]
-fn component_meta_queries_do_not_populate_legacy_resolved_type_cache() {
-    let project = make_project();
-    project
-        .upsert_base("/types.ts", r#"export interface Props { a: string }"#)
-        .unwrap();
-    project
-        .upsert_base(
-            "/App.vue",
-            r#"<script setup lang="ts">
-import { Props } from './types'
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-    project.host().set_import_dependencies(
-        "/App.vue",
-        vec![crate::types::DependencyResolution {
-            specifier: "./types".to_string(),
-            resolved_canonical_id: Some("/types.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-
-    let session = project.open_session_batch().unwrap();
-    let _ = session.get_component_meta("/App.vue").unwrap();
-
-    assert!(
-        project.host().resolved_type_cache().is_empty(),
-        "component-meta should no longer populate the legacy resolved type cache"
-    );
-
-    project.clear_caches().unwrap();
-
-    assert!(
-        project.host().resolved_type_cache().is_empty(),
-        "clear_caches should leave the legacy resolved type cache empty"
-    );
-}
-
-#[test]
-fn resolved_type_cache_is_bounded() {
-    // Verify that inserting beyond cap doesn't grow unbounded
-    let host = VerterHost::new_standalone(HostConfig {
-        ..HostConfig::default()
-    });
-
-    {
-        let cache = host.resolved_type_cache();
-        // Fill to cap. Each insert routes through the rehomed DB; the
-        // bounded clear-all-at-cap policy fires on the (cap+1)-th
-        // insert and the test only goes up to cap so the policy stays
-        // dormant.
-        for i in 0..crate::types::RESOLVED_TYPE_CACHE_CAP {
-            cache.insert(
-                crate::types::ResolvedTypeCacheKey {
-                    dep_canonical_id: format!("/dep_{i}.ts"),
-                    dep_source_hash: [0u8; 16],
-                    type_name: "T".to_string(),
-                    resolve_kind: verter_workspace::ResolveRequestKind::TypeImport,
-                    view_fingerprint: 0,
-                },
-                crate::types::ResolvedTypeCacheEntry {
-                    resolved: None,
-                    tracked_deps: Vec::new(),
-                },
-            );
-        }
-        assert_eq!(
-            cache.len(),
-            crate::types::RESOLVED_TYPE_CACHE_CAP,
-            "cache should be at cap"
-        );
-    }
-
-    // The eviction happens inside resolve_external_type_from_loaded_files,
-    // but we can verify the cap constant is reasonable.
-    #[allow(clippy::assertions_on_constants)]
-    {
-        assert!(
-            crate::types::RESOLVED_TYPE_CACHE_CAP >= 1024,
-            "cache cap should be at least 1024"
-        );
-        assert!(
-            crate::types::RESOLVED_TYPE_CACHE_CAP <= 16384,
-            "cache cap should not exceed 16384"
-        );
-    }
-}
-
 // ===========================================================================
 // Phase 8: Correctness — typeof, double script, interface extends imported
 // ===========================================================================
@@ -13371,16 +13513,26 @@ defineProps<typeof config>()
     // back to over-narrowed literals.
     use verter_type_expr::{PrimitiveName, TypeExpr};
     let x = meta.props.iter().find(|p| p.name == "x").unwrap();
+    let x_ty = demand_published_type(
+        project.host(),
+        "/App.vue",
+        x.type_source.present(),
+        "x prop",
+    );
     assert!(
-        matches!(x.type_expr, TypeExpr::Primitive(PrimitiveName::Number)),
-        "typeof config widens `x: 1` to `number`, got: {:?}",
-        x.type_expr
+        matches!(x_ty, TypeExpr::Primitive(PrimitiveName::Number)),
+        "typeof config widens `x: 1` to `number`, got: {x_ty:?}"
     );
     let y = meta.props.iter().find(|p| p.name == "y").unwrap();
+    let y_ty = demand_published_type(
+        project.host(),
+        "/App.vue",
+        y.type_source.present(),
+        "y prop",
+    );
     assert!(
-        matches!(y.type_expr, TypeExpr::Primitive(PrimitiveName::String)),
-        "typeof config widens `y: 'hello'` to `string`, got: {:?}",
-        y.type_expr
+        matches!(y_ty, TypeExpr::Primitive(PrimitiveName::String)),
+        "typeof config widens `y: 'hello'` to `string`, got: {y_ty:?}"
     );
 }
 
@@ -13609,40 +13761,46 @@ defineEmits<Emits>()
         .iter()
         .find(|prop| prop.name == "color")
         .expect("color prop should exist");
+    let color_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        color.type_source.present(),
+        "color prop",
+    );
     assert!(
         !matches!(
-            color.type_expr,
+            color_ty,
             TypeExpr::Unknown { .. } | TypeExpr::IndexedAccess { .. }
         ),
-        "component-config indexed access should not stay symbolic in component meta, got {:?}",
-        color.type_expr
+        "component-config indexed access should not stay symbolic in component meta, got {color_ty:?}"
     );
-    assert_union_string_literals(&color.type_expr, &["primary", "secondary"]);
+    assert_union_string_literals(&color_ty, &["primary", "secondary"]);
 
     let ui = meta
         .props
         .iter()
         .find(|prop| prop.name == "ui")
         .expect("ui prop should exist");
-    let TypeExpr::Object(ui_shape) = &ui.type_expr else {
-        panic!(
-            "component-config slots helper should materialize as an object, got {:?}",
-            ui.type_expr
-        );
+    let ui_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        ui.type_source.present(),
+        "ui prop",
+    );
+    let TypeExpr::Object(ui_shape) = &ui_ty else {
+        panic!("component-config slots helper should materialize as an object, got {ui_ty:?}");
     };
     assert!(
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "root"),
         ),
-        "ui helper should keep root, got {:?}",
-        ui.type_expr
+        "ui helper should keep root, got {ui_ty:?}"
     );
     assert!(
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "list"),
         ),
-        "ui helper should keep list, got {:?}",
-        ui.type_expr
+        "ui helper should keep list, got {ui_ty:?}"
     );
 
     let event = meta
@@ -13650,10 +13808,15 @@ defineEmits<Emits>()
         .iter()
         .find(|event| event.name == "update:modelValue")
         .expect("update:modelValue event should exist");
-    let TypeExpr::Tuple { elements, .. } = &event.payload else {
+    let event_payload_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        event.payload.present(),
+        "update:modelValue payload",
+    );
+    let TypeExpr::Tuple { elements, .. } = &event_payload_ty else {
         panic!(
-            "package-backed emits should materialize as a tuple payload, got {:?}",
-            event.payload
+            "package-backed emits should materialize as a tuple payload, got {event_payload_ty:?}"
         );
     };
     assert_eq!(
@@ -13665,13 +13828,11 @@ defineEmits<Emits>()
         TypeExpr::Union(members) => {
             assert!(
                 members.contains(&TypeExpr::Primitive(PrimitiveName::String)),
-                "event payload should include string, got {:?}",
-                event.payload
+                "event payload should include string, got {event_payload_ty:?}"
             );
             assert!(
                 members.contains(&TypeExpr::Primitive(PrimitiveName::Number)),
-                "event payload should include number, got {:?}",
-                event.payload
+                "event payload should include number, got {event_payload_ty:?}"
             );
         }
         other => panic!(
@@ -13863,32 +14024,39 @@ defineSlots<TabsSlots<T>>()
         .iter()
         .find(|prop| prop.name == "color")
         .expect("color prop should exist");
-    assert_union_string_literals(&color.type_expr, &["primary", "secondary"]);
+    let color_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        color.type_source.present(),
+        "color prop",
+    );
+    assert_union_string_literals(&color_ty, &["primary", "secondary"]);
 
     let ui = meta
         .props
         .iter()
         .find(|prop| prop.name == "ui")
         .expect("ui prop should exist");
-    let TypeExpr::Object(ui_shape) = &ui.type_expr else {
-        panic!(
-            "ui helper should materialize as an object, got {:?}",
-            ui.type_expr
-        );
+    let ui_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        ui.type_source.present(),
+        "ui prop",
+    );
+    let TypeExpr::Object(ui_shape) = &ui_ty else {
+        panic!("ui helper should materialize as an object, got {ui_ty:?}");
     };
     assert!(
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "root"),
         ),
-        "ui helper should keep root, got {:?}",
-        ui.type_expr
+        "ui helper should keep root, got {ui_ty:?}"
     );
     assert!(
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "list"),
         ),
-        "ui helper should keep list, got {:?}",
-        ui.type_expr
+        "ui helper should keep list, got {ui_ty:?}"
     );
 
     let value_key = meta
@@ -13896,13 +14064,15 @@ defineSlots<TabsSlots<T>>()
         .iter()
         .find(|prop| prop.name == "valueKey")
         .expect("valueKey prop should exist");
+    let value_key_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        value_key.type_source.present(),
+        "valueKey prop",
+    );
     assert!(
-        !matches!(
-            value_key.type_expr,
-            TypeExpr::Primitive(PrimitiveName::Never),
-        ),
-        "generic key helpers should not collapse to never, got {:?}",
-        value_key.type_expr
+        !matches!(value_key_ty, TypeExpr::Primitive(PrimitiveName::Never)),
+        "generic key helpers should not collapse to never, got {value_key_ty:?}"
     );
 
     let content_slot = meta
@@ -13927,10 +14097,15 @@ defineSlots<TabsSlots<T>>()
         .iter()
         .find(|event| event.name == "update:modelValue")
         .expect("update:modelValue event should exist");
-    let TypeExpr::Tuple { elements, .. } = &event.payload else {
+    let event_payload_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        event.payload.present(),
+        "update:modelValue payload",
+    );
+    let TypeExpr::Tuple { elements, .. } = &event_payload_ty else {
         panic!(
-            "generic package-backed emits should materialize as a tuple payload, got {:?}",
-            event.payload
+            "generic package-backed emits should materialize as a tuple payload, got {event_payload_ty:?}"
         );
     };
     assert_eq!(
@@ -13942,13 +14117,11 @@ defineSlots<TabsSlots<T>>()
         TypeExpr::Union(members) => {
             assert!(
                 members.contains(&TypeExpr::Primitive(PrimitiveName::String)),
-                "event payload should include string, got {:?}",
-                event.payload
+                "event payload should include string, got {event_payload_ty:?}"
             );
             assert!(
                 members.contains(&TypeExpr::Primitive(PrimitiveName::Number)),
-                "event payload should include number, got {:?}",
-                event.payload
+                "event payload should include number, got {event_payload_ty:?}"
             );
         }
         other => panic!(
@@ -13956,6 +14129,171 @@ defineSlots<TabsSlots<T>>()
             other
         ),
     }
+}
+
+/// POSITIVE source-level close for the two union-payload trackers above: an
+/// evaluated `defineEmits` call-signature payload whose element instantiates
+/// to the union `string | number` (the heritage instantiation
+/// `TabsRootEmits<string | number>`) publishes the EXACT closed tuple source —
+/// `Closed(Tuple([payload: LeafUnion([Primitive(String), Primitive(Number)])]))`
+/// — and demands to `Tuple([Union(String, Number)])` through the one shared
+/// dispatch.
+///
+/// Fail-closed negatives: the payload is NEVER the degraded Unknown leaf, a
+/// fabricated authored locator (a position the author never wrote), a
+/// synthesized shape, or a synthetic slot-binding carrier.
+#[test]
+fn evaluated_union_emit_payload_publishes_the_closed_tuple_leaf_union_source() {
+    use verter_type_expr::facts::{
+        ClosedTypeFact, FactOrLocator, LeafTypeFact, SemanticTypeSource,
+    };
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/reka-ui/index.d.ts",
+            r#"
+export interface TabsRootEmits<T> {
+  (e: 'update:modelValue', payload: T): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { TabsRootEmits } from 'reka-ui'
+
+export interface Emits extends TabsRootEmits<string | number> {}
+</script>
+<script setup lang="ts">
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "reka-ui".to_string(),
+            resolved_canonical_id: Some("/node_modules/reka-ui/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+        crate::host_manage::extract_component_meta_from_resolved(
+            project.host(),
+            "/src/App.vue",
+            &resolved,
+            true,
+            ctx,
+        )
+    })
+    .analysis;
+
+    let event = meta
+        .events
+        .iter()
+        .find(|event| event.name == "update:modelValue")
+        .expect("update:modelValue event should exist");
+    let payload = event
+        .payload
+        .present()
+        .expect("the union payload publishes a typed source");
+
+    // The EXACT closed tuple source: one labelled required non-rest element
+    // whose ty is the ORDERED leaf union `string | number`.
+    let SemanticTypeSource::Closed(ClosedTypeFact::Tuple(tuple)) = payload else {
+        panic!("the union emit payload must publish the closed tuple source, got {payload:?}");
+    };
+    assert!(!tuple.readonly, "the payload tuple is not readonly");
+    assert_eq!(tuple.elements.len(), 1, "one post-event-name payload param");
+    let element = &tuple.elements[0];
+    assert_eq!(
+        element.label.as_deref(),
+        Some("payload"),
+        "the param label must survive as the tuple element label"
+    );
+    assert!(!element.optional, "the payload param is required");
+    assert!(!element.rest, "the payload param is not a rest param");
+    let FactOrLocator::LeafUnion(leaves) = &element.ty else {
+        panic!(
+            "the tuple element must carry the closed leaf-union fact, got {:?}",
+            element.ty
+        );
+    };
+    assert_eq!(
+        leaves.as_ref(),
+        &[
+            LeafTypeFact::Primitive(PrimitiveName::String),
+            LeafTypeFact::Primitive(PrimitiveName::Number),
+        ],
+        "the leaf union must carry the ordered instantiated primitives"
+    );
+
+    // Fail-closed negatives: never the degraded Unknown leaf, never a
+    // fabricated authored locator / synthesized shape / synthetic carrier.
+    assert_ne!(
+        payload,
+        &SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
+            PrimitiveName::Unknown,
+        ))),
+        "the union payload must not degrade to the Unknown leaf"
+    );
+    assert!(
+        !matches!(
+            payload,
+            SemanticTypeSource::Authored(_)
+                | SemanticTypeSource::Synthesized(_)
+                | SemanticTypeSource::SyntheticSlotBinding(_)
+        ),
+        "the union payload must not be a fabricated authored locator or synthetic source, \
+         got {payload:?}"
+    );
+
+    // End-to-end: the demand materializes the tuple whose element is the
+    // union of the two instantiated primitives — never Unknown.
+    let demanded = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        event.payload.present(),
+        "update:modelValue payload",
+    );
+    let TypeExpr::Tuple { elements, readonly } = &demanded else {
+        panic!("the union payload must demand to a tuple, got {demanded:?}");
+    };
+    assert!(!readonly);
+    assert_eq!(elements.len(), 1, "one payload element");
+    assert_eq!(
+        elements[0].label.as_deref(),
+        Some("payload"),
+        "the demanded element keeps its label"
+    );
+    let TypeExpr::Union(members) = &elements[0].ty else {
+        panic!(
+            "the demanded element must be the union, got {:?}",
+            elements[0].ty
+        );
+    };
+    assert_eq!(members.len(), 2, "both union arms must materialize");
+    assert!(
+        members.contains(&TypeExpr::Primitive(PrimitiveName::String)),
+        "the demanded union must include string, got {demanded:?}"
+    );
+    assert!(
+        members.contains(&TypeExpr::Primitive(PrimitiveName::Number)),
+        "the demanded union must include number, got {demanded:?}"
+    );
+    assert!(
+        !members.contains(&TypeExpr::Primitive(PrimitiveName::Unknown)),
+        "the demanded union must not contain Unknown, got {demanded:?}"
+    );
 }
 
 #[test]
@@ -14128,25 +14466,33 @@ defineSlots<TabsSlots<T>>()
         .iter()
         .find(|prop| prop.name == "color")
         .expect("color prop should exist");
-    assert_union_string_literals(&color.type_expr, &["primary", "secondary"]);
+    let color_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        color.type_source.present(),
+        "color prop",
+    );
+    assert_union_string_literals(&color_ty, &["primary", "secondary"]);
 
     let ui = meta
         .props
         .iter()
         .find(|prop| prop.name == "ui")
         .expect("ui prop should exist");
-    let TypeExpr::Object(ui_shape) = &ui.type_expr else {
-        panic!(
-            "ui helper should materialize as an object, got {:?}",
-            ui.type_expr
-        );
+    let ui_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        ui.type_source.present(),
+        "ui prop",
+    );
+    let TypeExpr::Object(ui_shape) = &ui_ty else {
+        panic!("ui helper should materialize as an object, got {ui_ty:?}");
     };
     assert!(
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "root"),
         ),
-        "ui helper should keep root, got {:?}",
-        ui.type_expr
+        "ui helper should keep root, got {ui_ty:?}"
     );
 
     let value_key = meta
@@ -14154,13 +14500,15 @@ defineSlots<TabsSlots<T>>()
         .iter()
         .find(|prop| prop.name == "valueKey")
         .expect("valueKey prop should exist");
+    let value_key_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        value_key.type_source.present(),
+        "valueKey prop",
+    );
     assert!(
-        !matches!(
-            value_key.type_expr,
-            TypeExpr::Primitive(PrimitiveName::Never),
-        ),
-        "generic key helpers should not collapse to never, got {:?}",
-        value_key.type_expr
+        !matches!(value_key_ty, TypeExpr::Primitive(PrimitiveName::Never)),
+        "generic key helpers should not collapse to never, got {value_key_ty:?}"
     );
 
     let content_slot = meta
@@ -14797,14 +15145,19 @@ defineProps<{
         Some("GetItemKeys<T>"),
         "labelKey should preserve the source helper name"
     );
+    let label_key_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        label_key.type_source.present(),
+        "labelKey prop",
+    );
     assert!(
         matches!(
-            &label_key.type_expr,
+            &label_key_ty,
             verter_type_expr::TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "GetItemKeys" && type_arguments.len() == 1
         ),
-        "labelKey should stay symbolic at the prop surface, got {:?}",
-        label_key.type_expr
+        "labelKey should stay symbolic at the prop surface, got {label_key_ty:?}"
     );
 
     // Confirm contention-instrumentation counters are populated by an
@@ -15377,7 +15730,7 @@ defineProps<ChildProps>()
         button_dtos
             .prop_fields()
             .iter()
-            .any(|prop| prop.name == "loading"),
+            .any(|prop| prop.analysis.name == "loading"),
         "resolved ButtonProps should include inherited props, got: {:?}",
         button_dtos.props
     );
@@ -15385,7 +15738,7 @@ defineProps<ChildProps>()
         button_dtos
             .prop_fields()
             .iter()
-            .any(|prop| prop.name == "label"),
+            .any(|prop| prop.analysis.name == "label"),
         "resolved ButtonProps should include button props, got: {:?}",
         button_dtos.props
     );
@@ -15525,11 +15878,16 @@ defineSlots<{
     );
     // Public type_expr stays as the indexed access — no expansion
     // through the imported `[k: string]: any` index signature.
+    let avatar_binding_ty = shallow_published_type(
+        project.host(),
+        "/src/Comp.vue",
+        avatar_binding.type_source.present(),
+        "avatar slot binding",
+    );
     assert!(
-        matches!(&avatar_binding.type_expr, TypeExpr::IndexedAccess { .. }),
-        "slot binding type_expr must stay IndexedAccess (no widening through the imported index \
-         signature); got {:?}",
-        avatar_binding.type_expr
+        matches!(&avatar_binding_ty, TypeExpr::IndexedAccess { .. }),
+        "slot binding type must stay IndexedAccess (no widening through the imported index \
+         signature); got {avatar_binding_ty:?}"
     );
 }
 
@@ -15584,11 +15942,16 @@ defineSlots<{
     // with no imported index signature in the chain. Symbolic
     // preservation here would suppress the resolved literal union the
     // consumer expects.
+    let kind_binding_ty = shallow_published_type(
+        project.host(),
+        "/src/Comp.vue",
+        kind_binding.type_source.present(),
+        "kind slot binding",
+    );
     assert!(
-        !matches!(&kind_binding.type_expr, TypeExpr::IndexedAccess { .. }),
+        !matches!(&kind_binding_ty, TypeExpr::IndexedAccess { .. }),
         "purely-local slot binding without imported helpers must take the slow path \
-         (no symbolic IndexedAccess preservation); got {:?}",
-        kind_binding.type_expr
+         (no symbolic IndexedAccess preservation); got {kind_binding_ty:?}"
     );
 }
 
@@ -15668,15 +16031,19 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|entry| entry.name == "ButtonSlots")
         .expect("ButtonSlots should be published in the resolved type registry");
-    assert!(
-        matches!(&button_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
-        "imported registry helper should stay a shallow Ref (shallow-by-default), got {:?}",
-        button_slots.type_expr
+    let button_slots_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(button_slots.type_source.present().expect("present source")),
+        "ButtonSlots registry entry",
     );
     assert!(
-        !matches!(&button_slots.type_expr, TypeExpr::Object(_)),
-        "registry entry must NOT eagerly materialize to an object, got {:?}",
-        button_slots.type_expr
+        matches!(&button_slots_ty, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
+        "imported registry helper should stay a shallow Ref (shallow-by-default), got {button_slots_ty:?}"
+    );
+    assert!(
+        !matches!(&button_slots_ty, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize to an object, got {button_slots_ty:?}"
     );
 
     // Published-surface contract: the default slot's `ui` binding resolves to
@@ -15702,10 +16069,15 @@ defineSlots<ButtonSlots>()
         "indexed-access slot binding must stay on the requested member path, got {:?}",
         ui_binding.raw_type
     );
+    let ui_binding_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        ui_binding.type_source.present(),
+        "default slot ui binding",
+    );
     assert!(
-        matches!(&ui_binding.type_expr, TypeExpr::IndexedAccess { .. }),
-        "default slot ui binding must stay a symbolic IndexedAccess, got {:?}",
-        ui_binding.type_expr
+        matches!(&ui_binding_ty, TypeExpr::IndexedAccess { .. }),
+        "default slot ui binding must stay a symbolic IndexedAccess, got {ui_binding_ty:?}"
     );
 }
 
@@ -15783,15 +16155,19 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|entry| entry.name == "ButtonSlots")
         .expect("ButtonSlots should be published in the resolved type registry");
-    assert!(
-        matches!(&button_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
-        "imported registry helper should stay a shallow Ref (shallow-by-default), got {:?}",
-        button_slots.type_expr
+    let button_slots_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(button_slots.type_source.present().expect("present source")),
+        "ButtonSlots registry entry",
     );
     assert!(
-        !matches!(&button_slots.type_expr, TypeExpr::Object(_)),
-        "registry entry must NOT eagerly materialize to an object, got {:?}",
-        button_slots.type_expr
+        matches!(&button_slots_ty, TypeExpr::Ref { name, .. } if name.as_ref() == "ButtonSlots"),
+        "imported registry helper should stay a shallow Ref (shallow-by-default), got {button_slots_ty:?}"
+    );
+    assert!(
+        !matches!(&button_slots_ty, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize to an object, got {button_slots_ty:?}"
     );
 
     let meta = project
@@ -15823,10 +16199,15 @@ defineSlots<ButtonSlots>()
     // resolved registry's `ButtonSlots.default` params asserted above.
     // The `raw_type = "Button['ui']"` contract (line 12099) is the
     // canonical form consumers can re-resolve from.
+    let ui_binding_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        ui_binding.type_source.present(),
+        "default slot ui binding",
+    );
     assert!(
-        matches!(&ui_binding.type_expr, TypeExpr::IndexedAccess { .. }),
-        "post-Outcome-3: slot binding stays symbolic IndexedAccess, got {:?}",
-        ui_binding.type_expr
+        matches!(&ui_binding_ty, TypeExpr::IndexedAccess { .. }),
+        "post-Outcome-3: slot binding stays symbolic IndexedAccess, got {ui_binding_ty:?}"
     );
 }
 
@@ -15892,15 +16273,19 @@ defineSlots<MenuSlots>()
         .iter()
         .find(|entry| entry.name == "MenuSlots")
         .expect("MenuSlots should be published in the resolved type registry");
-    assert!(
-        matches!(&menu_slots.type_expr, TypeExpr::Ref { name, .. } if name.as_ref() == "MenuSlots"),
-        "imported intersection slot helper should stay a shallow Ref (shallow-by-default), got {:?}",
-        menu_slots.type_expr
+    let menu_slots_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(menu_slots.type_source.present().expect("present source")),
+        "MenuSlots registry entry",
     );
     assert!(
-        !matches!(&menu_slots.type_expr, TypeExpr::Object(_)),
-        "registry entry must NOT eagerly materialize the intersection surface, got {:?}",
-        menu_slots.type_expr
+        matches!(&menu_slots_ty, TypeExpr::Ref { name, .. } if name.as_ref() == "MenuSlots"),
+        "imported intersection slot helper should stay a shallow Ref (shallow-by-default), got {menu_slots_ty:?}"
+    );
+    assert!(
+        !matches!(&menu_slots_ty, TypeExpr::Object(_)),
+        "registry entry must NOT eagerly materialize the intersection surface, got {menu_slots_ty:?}"
     );
 
     // Published-surface contract: the explicit `default` and `item` slot
@@ -16003,7 +16388,9 @@ defineSlots<ButtonSlots>()
         .prepared_value_decl("/src/theme.ts", "theme")
         .expect("theme should have a prepared value declaration");
     assert!(
-        theme.type_annotation.is_some() || theme.object_shape.is_some(),
+        theme.type_annotation.classification
+            != verter_type_expr::facts::ValueAnnotationClass::Absent
+            || theme.object_shape.is_some(),
         "theme prepared value decl should expose an object surface for typeof"
     );
 }
@@ -16728,14 +17115,19 @@ defineProps<{
         .and_then(|types| types.props.iter().find(|field| field.name == "editor"))
         .expect("expanded evaluated types should keep the editor prop");
 
+    let editor_field_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(editor_field.r#type.present().expect("present source")),
+        "editor prop",
+    );
     assert!(
         matches!(
-            &editor_field.r#type,
+            &editor_field_ty,
             verter_type_expr::TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "Editor" && type_arguments.is_empty()
         ),
-        "package-backed prop expansion should keep the raw symbolic ref instead of expanding the package object, got {:?}",
-        editor_field.r#type
+        "package-backed prop expansion should keep the raw symbolic ref instead of expanding the package object, got {editor_field_ty:?}"
     );
 }
 
@@ -16787,9 +17179,15 @@ defineProps<{
         .and_then(|types| types.props.iter().find(|field| field.name == "editor"))
         .expect("expanded evaluated types should keep the editor prop");
 
+    let editor_field_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(editor_field.r#type.present().expect("present source")),
+        "editor prop",
+    );
     assert!(
         matches!(
-            &editor_field.r#type,
+            &editor_field_ty,
             verter_type_expr::TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "Omit"
                     && type_arguments.len() == 2
@@ -16801,8 +17199,7 @@ defineProps<{
                         } if name.as_ref() == "Editor" && type_arguments.is_empty()
                     )
         ),
-        "package-backed utility-wrapped props should keep the imported package ref symbolic instead of expanding the package object, got {:?}",
-        editor_field.r#type
+        "package-backed utility-wrapped props should keep the imported package ref symbolic instead of expanding the package object, got {editor_field_ty:?}"
     );
 }
 
@@ -16856,9 +17253,15 @@ defineProps<{
         .and_then(|types| types.props.iter().find(|field| field.name == "state"))
         .expect("expanded evaluated types should keep the state prop");
 
+    let state_field_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(state_field.r#type.present().expect("present source")),
+        "state prop",
+    );
     assert!(
         matches!(
-            &state_field.r#type,
+            &state_field_ty,
             verter_type_expr::TypeExpr::IndexedAccess { object, index }
                 if matches!(
                     object.as_ref(),
@@ -16871,8 +17274,7 @@ defineProps<{
                     ) if key == "state"
                 )
         ),
-        "package-backed indexed member paths should stay symbolic instead of expanding through package declarations, got {:?}",
-        state_field.r#type
+        "package-backed indexed member paths should stay symbolic instead of expanding through package declarations, got {state_field_ty:?}"
     );
 }
 
@@ -16978,9 +17380,15 @@ defineProps<{
         .and_then(|types| types.props.iter().find(|field| field.name == "groups"))
         .expect("expanded evaluated types should keep the groups prop");
 
+    let groups_field_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(groups_field.r#type.present().expect("present source")),
+        "groups prop",
+    );
     assert!(
         matches!(
-            &groups_field.r#type,
+            &groups_field_ty,
             verter_type_expr::TypeExpr::Array { element, .. }
                 if matches!(
                     element.as_ref(),
@@ -16995,8 +17403,7 @@ defineProps<{
                             )
                 )
         ),
-        "local generic wrappers should stay symbolic when they eventually flow into package-backed imported refs, got {:?}",
-        groups_field.r#type
+        "local generic wrappers should stay symbolic when they eventually flow into package-backed imported refs, got {groups_field_ty:?}"
     );
 }
 
@@ -17047,14 +17454,19 @@ defineProps<{
         .and_then(|types| types.props.iter().find(|field| field.name == "external"))
         .expect("expanded evaluated types should keep the imported external prop");
 
+    let external_field_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(external_field.r#type.present().expect("present source")),
+        "external prop",
+    );
     assert!(
         matches!(
-            &external_field.r#type,
+            &external_field_ty,
             verter_type_expr::TypeExpr::Ref { name, type_arguments }
                 if name.as_ref() == "ExternalProps" && type_arguments.is_empty()
         ),
-        "imported object-like prop expansion should keep the symbolic ref instead of expanding the imported object, got {:?}",
-        external_field.r#type
+        "imported object-like prop expansion should keep the symbolic ref instead of expanding the imported object, got {external_field_ty:?}"
     );
 }
 
@@ -17105,7 +17517,13 @@ defineProps<{
         .and_then(|types| types.props.iter().find(|field| field.name == "tooltip"))
         .expect("expanded evaluated types should keep the tooltip prop");
 
-    let has_symbolic_tooltip = match &tooltip_field.r#type {
+    let tooltip_field_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(tooltip_field.r#type.present().expect("present source")),
+        "tooltip prop",
+    );
+    let has_symbolic_tooltip = match &tooltip_field_ty {
         verter_type_expr::TypeExpr::Union(members) => members.iter().any(|member| {
             matches!(
                 member,
@@ -17118,8 +17536,7 @@ defineProps<{
 
     assert!(
         has_symbolic_tooltip,
-        "imported unions should keep imported object refs symbolic instead of expanding them in shallow field evaluation, got {:?}",
-        tooltip_field.r#type
+        "imported unions should keep imported object refs symbolic instead of expanding them in shallow field evaluation, got {tooltip_field_ty:?}"
     );
 }
 
@@ -17205,7 +17622,13 @@ defineProps<{
         .and_then(|types| types.props.iter().find(|field| field.name == "tooltip"))
         .expect("expanded evaluated types should keep the tooltip prop");
 
-    let has_symbolic_tooltip = match &tooltip_field.r#type {
+    let tooltip_field_ty = shallow_published_type(
+        project.host(),
+        "/App.vue",
+        Some(tooltip_field.r#type.present().expect("present source")),
+        "tooltip prop",
+    );
+    let has_symbolic_tooltip = match &tooltip_field_ty {
         verter_type_expr::TypeExpr::Union(members) => members.iter().any(|member| {
             matches!(
                 member,
@@ -17218,8 +17641,7 @@ defineProps<{
 
     assert!(
         has_symbolic_tooltip,
-        "barrel-imported vue unions should keep imported component prop refs symbolic in shallow field evaluation, got {:?}",
-        tooltip_field.r#type
+        "barrel-imported vue unions should keep imported component prop refs symbolic in shallow field evaluation, got {tooltip_field_ty:?}"
     );
 }
 
@@ -17280,14 +17702,19 @@ defineProps<{
             .iter()
             .find(|prop| prop.name == "tooltip")
             .expect("tooltip prop should exist");
+        let tooltip_ty = shallow_published_type(
+            project.host(),
+            "/src/App.vue",
+            tooltip.type_source.present(),
+            "tooltip prop",
+        );
         assert!(
             matches!(
-                &tooltip.type_expr,
+                &tooltip_ty,
                 verter_type_expr::TypeExpr::Ref { name, type_arguments }
                     if name.as_ref() == "TooltipProviderProps" && type_arguments.is_empty()
             ),
-            "{label} component meta should keep imported *Props refs symbolic instead of rematerializing them, got {:?}",
-            tooltip.type_expr
+            "{label} component meta should keep imported *Props refs symbolic instead of rematerializing them, got {tooltip_ty:?}"
         );
         assert_eq!(
             tooltip.raw_type.as_deref(),
@@ -17350,14 +17777,19 @@ defineProps<{
             .iter()
             .find(|prop| prop.name == "editor")
             .expect("editor prop should exist");
+        let editor_ty = shallow_published_type(
+            project.host(),
+            "/src/App.vue",
+            editor.type_source.present(),
+            "editor prop",
+        );
         assert!(
             matches!(
-                &editor.type_expr,
+                &editor_ty,
                 verter_type_expr::TypeExpr::Ref { name, type_arguments }
                     if name.as_ref() == "Editor" && type_arguments.is_empty()
             ),
-            "{label} component meta should keep imported object refs symbolic instead of rematerializing them, got {:?}",
-            editor.type_expr
+            "{label} component meta should keep imported object refs symbolic instead of rematerializing them, got {editor_ty:?}"
         );
         assert_eq!(
             editor.raw_type.as_deref(),
@@ -17505,14 +17937,19 @@ defineProps<{
             .iter()
             .find(|prop| prop.name == "avatar")
             .expect("avatar prop should exist");
+        let avatar_ty = shallow_published_type(
+            project.host(),
+            "/src/App.vue",
+            avatar.type_source.present(),
+            "avatar prop",
+        );
         assert!(
             matches!(
-                &avatar.type_expr,
+                &avatar_ty,
                 verter_type_expr::TypeExpr::Ref { name, type_arguments }
                     if name.as_ref() == "AvatarProps" && type_arguments.is_empty()
             ),
-            "{label} component meta should keep imported object refs symbolic, got {:?}",
-            avatar.type_expr
+            "{label} component meta should keep imported object refs symbolic, got {avatar_ty:?}"
         );
 
         let actions = meta
@@ -17520,9 +17957,15 @@ defineProps<{
             .iter()
             .find(|prop| prop.name == "actions")
             .expect("actions prop should exist");
+        let actions_ty = shallow_published_type(
+            project.host(),
+            "/src/App.vue",
+            actions.type_source.present(),
+            "actions prop",
+        );
         assert!(
             matches!(
-                &actions.type_expr,
+                &actions_ty,
                 verter_type_expr::TypeExpr::Array { element, .. }
                     if matches!(
                         element.as_ref(),
@@ -17530,8 +17973,7 @@ defineProps<{
                             if name.as_ref() == "ButtonProps" && type_arguments.is_empty()
                     )
             ),
-            "{label} component meta should keep imported array element refs symbolic, got {:?}",
-            actions.type_expr
+            "{label} component meta should keep imported array element refs symbolic, got {actions_ty:?}"
         );
 
         let close = meta
@@ -17539,10 +17981,15 @@ defineProps<{
             .iter()
             .find(|prop| prop.name == "close")
             .expect("close prop should exist");
+        let close_ty = shallow_published_type(
+            project.host(),
+            "/src/App.vue",
+            close.type_source.present(),
+            "close prop",
+        );
         assert!(
-            union_contains_utility_ref(&close.type_expr, "Omit", "ButtonProps"),
-            "{label} component meta should keep imported Omit wrappers symbolic, got {:?}",
-            close.type_expr
+            union_contains_utility_ref(&close_ty, "Omit", "ButtonProps"),
+            "{label} component meta should keep imported Omit wrappers symbolic, got {close_ty:?}"
         );
 
         let progress = meta
@@ -17550,10 +17997,15 @@ defineProps<{
             .iter()
             .find(|prop| prop.name == "progress")
             .expect("progress prop should exist");
+        let progress_ty = shallow_published_type(
+            project.host(),
+            "/src/App.vue",
+            progress.type_source.present(),
+            "progress prop",
+        );
         assert!(
-            union_contains_utility_ref(&progress.type_expr, "Pick", "ProgressProps"),
-            "{label} component meta should keep imported Pick wrappers symbolic, got {:?}",
-            progress.type_expr
+            union_contains_utility_ref(&progress_ty, "Pick", "ProgressProps"),
+            "{label} component meta should keep imported Pick wrappers symbolic, got {progress_ty:?}"
         );
     }
 }
@@ -17625,7 +18077,13 @@ defineProps<{
         .and_then(|types| types.props.iter().find(|field| field.name == "close"))
         .expect("expanded evaluated types should keep the close prop");
 
-    let has_symbolic_omit = match &close_field.r#type {
+    let close_field_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(close_field.r#type.present().expect("present source")),
+        "close prop",
+    );
+    let has_symbolic_omit = match &close_field_ty {
         verter_type_expr::TypeExpr::Union(members) => members.iter().any(|member| match member {
             verter_type_expr::TypeExpr::Ref {
                 name,
@@ -17646,8 +18104,7 @@ defineProps<{
 
     assert!(
         has_symbolic_omit,
-        "utility wrappers around imported object refs should stay symbolic in shallow field evaluation, got {:?}",
-        close_field.r#type
+        "utility wrappers around imported object refs should stay symbolic in shallow field evaluation, got {close_field_ty:?}"
     );
 }
 
@@ -17711,10 +18168,20 @@ defineProps<{
         .host()
         .prepared_type_decl("/src/types.ts", "StringOrVNode")
         .expect("StringOrVNode should be present in the shallow prepared declarations");
+    let prepared_body_source = verter_type_expr::facts::SemanticTypeSource::Authored(
+        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            prepared.body_facts.body_slot.clone(),
+        ),
+    );
+    let prepared_body_ty = shallow_published_type(
+        project.host(),
+        "/src/types.ts",
+        Some(&prepared_body_source),
+        "StringOrVNode prepared body",
+    );
     assert!(
-        matches!(&prepared.body, verter_type_expr::TypeExpr::Union(_),),
-        "shallow prepared declarations should keep imported non-object aliases symbolic, got {:?}",
-        prepared.body
+        matches!(&prepared_body_ty, verter_type_expr::TypeExpr::Union(_)),
+        "shallow prepared declarations should keep imported non-object aliases symbolic, got {prepared_body_ty:?}"
     );
 
     let resolved = project
@@ -17743,7 +18210,13 @@ defineProps<{
     // BOTH preserve the load-bearing invariant: the package-backed
     // `VNode` is NOT eagerly expanded into its `node_modules/` body
     // (which would defeat the symbolic-preservation contract).
-    let preserves_package_symbolic = match &title_field.r#type {
+    let title_field_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(title_field.r#type.present().expect("present source")),
+        "title prop",
+    );
+    let preserves_package_symbolic = match &title_field_ty {
         verter_type_expr::TypeExpr::Union(members) => members.iter().any(|member| {
             matches!(
                 member,
@@ -17760,8 +18233,7 @@ defineProps<{
         "local aliases that wrap package-backed refs must preserve the \
          package-backed symbol — either as a `Ref` to the local alias \
          or as a `Union` containing a symbolic `Ref {{ name: \"VNode\" }}`. \
-         Got {:?}",
-        title_field.r#type
+         Got {title_field_ty:?}"
     );
 }
 
@@ -17825,10 +18297,20 @@ defineProps<{
         .host()
         .prepared_type_decl("/src/types.ts", "StringOrVNode")
         .expect("StringOrVNode should be present in the shallow prepared declarations");
+    let prepared_body_source = verter_type_expr::facts::SemanticTypeSource::Authored(
+        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            prepared.body_facts.body_slot.clone(),
+        ),
+    );
+    let prepared_body_ty = shallow_published_type(
+        project.host(),
+        "/src/types.ts",
+        Some(&prepared_body_source),
+        "StringOrVNode prepared body",
+    );
     assert!(
-        matches!(&prepared.body, verter_type_expr::TypeExpr::Union(_),),
-        "shallow prepared declarations should keep imported non-object aliases symbolic, got {:?}",
-        prepared.body
+        matches!(&prepared_body_ty, verter_type_expr::TypeExpr::Union(_)),
+        "shallow prepared declarations should keep imported non-object aliases symbolic, got {prepared_body_ty:?}"
     );
 
     let resolved = project
@@ -17847,10 +18329,21 @@ defineProps<{
         .find(|entry| entry.name == "StringOrVNode")
         .expect("imported non-object alias should keep registry metadata");
 
-    let verter_type_expr::TypeExpr::Union(members) = &string_or_vnode.type_expr else {
+    let string_or_vnode_ty = shallow_published_type(
+        project.host(),
+        "/src/App.vue",
+        Some(
+            string_or_vnode
+                .type_source
+                .present()
+                .expect("present source"),
+        ),
+        "StringOrVNode registry entry",
+    );
+    let verter_type_expr::TypeExpr::Union(members) = &string_or_vnode_ty else {
         panic!(
             "StringOrVNode should stay a symbolic union in the registry, got {:?} with declaration {:?}",
-            string_or_vnode.type_expr,
+            string_or_vnode_ty,
             string_or_vnode_meta.declaration
         );
     };
@@ -17862,8 +18355,7 @@ defineProps<{
                     if name.as_ref() == "VNode" && type_arguments.is_empty()
             )
         }),
-        "imported non-object aliases should keep package-backed refs symbolic in the registry, got {:?}",
-        string_or_vnode.type_expr
+        "imported non-object aliases should keep package-backed refs symbolic in the registry, got {string_or_vnode_ty:?}"
     );
     assert!(
         resolved
@@ -18942,9 +19434,15 @@ defineSlots<ButtonSlots>()
             .iter()
             .find(|prop| prop.name == prop_name)
             .expect("variant prop should exist");
-        assert_union_string_literals(&prop.type_expr, &["primary", "secondary"]);
+        let prop_ty = demand_published_type(
+            project.host(),
+            "/src/Button.vue",
+            prop.type_source.present(),
+            prop_name,
+        );
+        assert_union_string_literals(&prop_ty, &["primary", "secondary"]);
         assert!(
-            !matches!(&prop.type_expr, TypeExpr::Unknown { .. }),
+            !matches!(&prop_ty, TypeExpr::Unknown { .. }),
             "variant prop should not degrade to Unknown"
         );
     }
@@ -18954,11 +19452,14 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|prop| prop.name == "ui")
         .expect("ui prop should exist");
-    let TypeExpr::Object(ui_shape) = &ui.type_expr else {
-        panic!(
-            "component-config slots helper should materialize as an object, got {:?}",
-            ui.type_expr
-        );
+    let ui_ty = demand_published_type(
+        project.host(),
+        "/src/Button.vue",
+        ui.type_source.present(),
+        "ui prop",
+    );
+    let TypeExpr::Object(ui_shape) = &ui_ty else {
+        panic!("component-config slots helper should materialize as an object, got {ui_ty:?}");
     };
     assert_eq!(
         ui_shape.properties.len(),
@@ -18969,15 +19470,13 @@ defineSlots<ButtonSlots>()
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
-        "ui helper should expose base, got {:?}",
-        ui.type_expr
+        "ui helper should expose base, got {ui_ty:?}"
     );
     assert!(
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
-        "ui helper should expose label, got {:?}",
-        ui.type_expr
+        "ui helper should expose label, got {ui_ty:?}"
     );
 
     assert_eq!(meta.slots.len(), 1, "should have exactly 1 slot (default)");
@@ -18996,11 +19495,14 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|binding| binding.name == "ui")
         .expect("default slot should expose ui");
-    let TypeExpr::Object(binding_shape) = &ui_binding.type_expr else {
-        panic!(
-            "slot ui binding should materialize as an object, got {:?}",
-            ui_binding.type_expr
-        );
+    let ui_binding_ty = demand_published_type(
+        project.host(),
+        "/src/Button.vue",
+        ui_binding.type_source.present(),
+        "default slot ui binding",
+    );
+    let TypeExpr::Object(binding_shape) = &ui_binding_ty else {
+        panic!("slot ui binding should materialize as an object, got {ui_binding_ty:?}");
     };
     assert_eq!(
         binding_shape.properties.len(),
@@ -19011,15 +19513,13 @@ defineSlots<ButtonSlots>()
         binding_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
-        "slot ui binding should expose base, got {:?}",
-        ui_binding.type_expr
+        "slot ui binding should expose base, got {ui_binding_ty:?}"
     );
     assert!(
         binding_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
-        "slot ui binding should expose label, got {:?}",
-        ui_binding.type_expr
+        "slot ui binding should expose label, got {ui_binding_ty:?}"
     );
 }
 
@@ -19179,9 +19679,15 @@ defineSlots<ButtonSlots>()
             .iter()
             .find(|prop| prop.name == prop_name)
             .expect("variant prop should exist");
-        assert_union_string_literals(&prop.type_expr, &["primary", "secondary", "neutral"]);
+        let prop_ty = demand_published_type(
+            project.host(),
+            "/src/Button.vue",
+            prop.type_source.present(),
+            prop_name,
+        );
+        assert_union_string_literals(&prop_ty, &["primary", "secondary", "neutral"]);
         assert!(
-            !matches!(&prop.type_expr, TypeExpr::Unknown { .. }),
+            !matches!(&prop_ty, TypeExpr::Unknown { .. }),
             "variant prop should not degrade to Unknown"
         );
     }
@@ -19191,11 +19697,14 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|prop| prop.name == "ui")
         .expect("ui prop should exist");
-    let TypeExpr::Object(ui_shape) = &ui.type_expr else {
-        panic!(
-            "component-config slots helper should materialize as an object, got {:?}",
-            ui.type_expr
-        );
+    let ui_ty = demand_published_type(
+        project.host(),
+        "/src/Button.vue",
+        ui.type_source.present(),
+        "ui prop",
+    );
+    let TypeExpr::Object(ui_shape) = &ui_ty else {
+        panic!("component-config slots helper should materialize as an object, got {ui_ty:?}");
     };
     assert_eq!(
         ui_shape.properties.len(),
@@ -19206,15 +19715,13 @@ defineSlots<ButtonSlots>()
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
-        "ui helper should expose base, got {:?}",
-        ui.type_expr
+        "ui helper should expose base, got {ui_ty:?}"
     );
     assert!(
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
-        "ui helper should expose label, got {:?}",
-        ui.type_expr
+        "ui helper should expose label, got {ui_ty:?}"
     );
 
     assert_eq!(meta.slots.len(), 1, "should have exactly 1 slot (default)");
@@ -19233,11 +19740,14 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|binding| binding.name == "ui")
         .expect("default slot should expose ui");
-    let TypeExpr::Object(binding_shape) = &ui_binding.type_expr else {
-        panic!(
-            "slot ui binding should materialize as an object, got {:?}",
-            ui_binding.type_expr
-        );
+    let ui_binding_ty = demand_published_type(
+        project.host(),
+        "/src/Button.vue",
+        ui_binding.type_source.present(),
+        "default slot ui binding",
+    );
+    let TypeExpr::Object(binding_shape) = &ui_binding_ty else {
+        panic!("slot ui binding should materialize as an object, got {ui_binding_ty:?}");
     };
     assert_eq!(
         binding_shape.properties.len(),
@@ -19248,15 +19758,13 @@ defineSlots<ButtonSlots>()
         binding_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
-        "slot ui binding should expose base, got {:?}",
-        ui_binding.type_expr
+        "slot ui binding should expose base, got {ui_binding_ty:?}"
     );
     assert!(
         binding_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
-        "slot ui binding should expose label, got {:?}",
-        ui_binding.type_expr
+        "slot ui binding should expose label, got {ui_binding_ty:?}"
     );
 }
 
@@ -19877,32 +20385,31 @@ export interface ProjectClickEvent {
         .iter()
         .find(|prop| prop.name == "projectOnly")
         .expect("project-local tag members must still be present");
+    let project_only_ty = demand_published_type(
+        project.host(),
+        "/workspace/src/App.vue",
+        project_only.type_source.present(),
+        "projectOnly accepted prop",
+    );
     // POSITIVE: the conflicting member is the value-intersection of both arms.
     assert!(
-        matches!(&project_only.type_expr, TypeExpr::Intersection(_)),
+        matches!(&project_only_ty, TypeExpr::Intersection(_)),
         "projectOnly must value-intersect the conflicting fallback (`number & \
-         string`), not override; got: {:?}",
-        project_only.type_expr
+         string`), not override; got: {project_only_ty:?}"
     );
     assert!(
-        intersection_contains_primitive(&project_only.type_expr, PrimitiveName::Number),
-        "projectOnly intersection must retain the fallback `number` arm; got: {:?}",
-        project_only.type_expr
+        intersection_contains_primitive(&project_only_ty, PrimitiveName::Number),
+        "projectOnly intersection must retain the fallback `number` arm; got: {project_only_ty:?}"
     );
     assert!(
-        intersection_contains_primitive(&project_only.type_expr, PrimitiveName::String),
-        "projectOnly intersection must retain the tag-local `string` arm; got: {:?}",
-        project_only.type_expr
+        intersection_contains_primitive(&project_only_ty, PrimitiveName::String),
+        "projectOnly intersection must retain the tag-local `string` arm; got: {project_only_ty:?}"
     );
     // NEGATIVE: it must NOT have collapsed to the old last-arm override `string`.
     assert!(
-        !matches!(
-            project_only.type_expr,
-            TypeExpr::Primitive(PrimitiveName::String)
-        ),
+        !matches!(project_only_ty, TypeExpr::Primitive(PrimitiveName::String)),
         "projectOnly must NOT collapse to the last-arm override `string` — that \
-         was the bug; got: {:?}",
-        project_only.type_expr
+         was the bug; got: {project_only_ty:?}"
     );
 
     // The conflicting listener `onClick` is likewise the intersection of the two
@@ -19913,28 +20420,32 @@ export interface ProjectClickEvent {
         .iter()
         .find(|event| event.name == "click")
         .expect("tag-specific listeners must still appear on the accepted event surface");
+    let click_payload_ty = demand_published_type(
+        project.host(),
+        "/workspace/src/App.vue",
+        click.payload.present(),
+        "click accepted event payload",
+    );
     // POSITIVE: the listener payload intersects both handlers' parameter types.
-    let payload_intersects = matches!(&click.payload, TypeExpr::Intersection(arms)
+    let payload_intersects = matches!(&click_payload_ty, TypeExpr::Intersection(arms)
         if arms.iter().any(|arm| payload_param_references(arm, "FallbackClickEvent"))
             && arms.iter().any(|arm| payload_param_references(arm, "ProjectClickEvent")));
     assert!(
         payload_intersects,
         "click listener payload must value-intersect both handler types \
-         (fallback + project), not override; got: {:?}",
-        click.payload
+         (fallback + project), not override; got: {click_payload_ty:?}"
     );
     // NEGATIVE: it must NOT be a single function overriding to the project-only
     // handler (the old override bug).
     assert!(
         !matches!(
-            &click.payload,
+            &click_payload_ty,
             TypeExpr::Function(function)
                 if function.parameters.len() == 1
                     && payload_ty_references(&function.parameters[0].ty, "ProjectClickEvent")
         ),
         "click listener payload must NOT be the last-arm override handler \
-         (`(payload: ProjectClickEvent) => void`) alone; got: {:?}",
-        click.payload
+         (`(payload: ProjectClickEvent) => void`) alone; got: {click_payload_ty:?}"
     );
 }
 
@@ -21404,7 +21915,13 @@ fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
         ExpandedComponentTypes {
             props: vec![verter_semantic::analysis::type_expand::ExpandedField {
                 name: "label".to_string(),
-                r#type: TypeExpr::Primitive(PrimitiveName::String),
+                r#type: verter_type_expr::facts::SourcePosition::Present(
+                    verter_type_expr::facts::SemanticTypeSource::Closed(
+                        verter_type_expr::facts::ClosedTypeFact::Leaf(
+                            verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::String),
+                        ),
+                    ),
+                ),
                 raw_type: None,
                 optional: false,
                 exactness: verter_semantic::analysis::type_expand::ExpansionExactness::Incomplete,
@@ -21415,8 +21932,7 @@ fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
                 context: "symbolic work limit reached".to_string(),
                 property_name: None,
             }],
-                shallow_type_expr: None,
-                shallow_type_expr_scope: None,
+                shallow_source: None,
                 declared_in_macro_type_arg: false,
             }],
             ..ExpandedComponentTypes::default()
@@ -21433,10 +21949,16 @@ fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
     let analysis = verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
         props: vec![verter_semantic::analysis::component_meta::PropAnalysis {
             name: "label".to_string(),
-            type_expr: TypeExpr::Primitive(PrimitiveName::String),
+            type_source: verter_type_expr::facts::SourcePosition::Present(
+                verter_type_expr::facts::SemanticTypeSource::Closed(
+                    verter_type_expr::facts::ClosedTypeFact::Leaf(
+                        verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::String),
+                    ),
+                ),
+            ),
             type_expansion: None,
             raw_type: Some("string".to_string()),
-            raw_type_expr: None,
+            raw_type_source: None,
             required: true,
             has_default: false,
             default_value: None,
@@ -21637,10 +22159,8 @@ defineProps<Props>()
 
 /// A simple encode function for tests: deterministic bytes from analysis+resolved.
 /// Uses the prop count + file path to produce reproducible output.
-fn test_encode_fn(
-    analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-    _resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-) -> Vec<u8> {
+fn test_encode_fn(output: crate::meta_resolve::ComponentMetaOutput) -> Vec<u8> {
+    let (analysis, _resolution, _types) = output.into_parts();
     // Produce deterministic bytes based on the analysis content.
     let marker = format!(
         "payload:{}:props={}:events={}",
@@ -22524,8 +23044,8 @@ defineProps<{
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
 
-    let user_ty = evaluated_prop_type(&evaluated, "user");
-    match user_ty {
+    let user_ty = evaluated_prop_shallow_type(&project, "/Comp.vue", &evaluated, "user");
+    match &user_ty {
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -22588,8 +23108,8 @@ defineProps<{
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
 
-    let user_ty = evaluated_prop_type(&evaluated, "user");
-    match user_ty {
+    let user_ty = evaluated_prop_shallow_type(&project, "/Comp.vue", &evaluated, "user");
+    match &user_ty {
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -22658,8 +23178,8 @@ defineProps<{
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
 
-    let k_ty = evaluated_prop_type(&evaluated, "k");
-    match k_ty {
+    let k_ty = evaluated_prop_type(&project, "/Comp.vue", &evaluated, "k");
+    match &k_ty {
         TypeExpr::Primitive(PrimitiveName::String) => {}
         TypeExpr::Ref { name, .. } if name.as_ref() == "Foo" => panic!(
             "FAIL (architectural rule): Pick<Foo,'a'>['a'] must reduce to \
@@ -22716,9 +23236,9 @@ defineProps<{
 
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
-    let picked_ty = evaluated_prop_type(&evaluated, "picked");
+    let picked_ty = evaluated_prop_type(&project, "/Comp.vue", &evaluated, "picked");
 
-    let TypeExpr::Object(obj) = picked_ty else {
+    let TypeExpr::Object(obj) = &picked_ty else {
         panic!("Pick<Foo, 'a' | 'b'> must materialise to an Object surface, got {picked_ty:?}");
     };
     let names: Vec<&str> = obj
@@ -22790,9 +23310,9 @@ defineProps<{
 
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
-    let trimmed_ty = evaluated_prop_type(&evaluated, "trimmed");
+    let trimmed_ty = evaluated_prop_type(&project, "/Comp.vue", &evaluated, "trimmed");
 
-    let TypeExpr::Object(obj) = trimmed_ty else {
+    let TypeExpr::Object(obj) = &trimmed_ty else {
         panic!("Omit<Foo, 'b'> must materialise to an Object surface, got {trimmed_ty:?}");
     };
     let names: Vec<&str> = obj
@@ -22853,7 +23373,7 @@ defineProps<{
 
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
-    let hop_ty = evaluated_prop_type(&evaluated, "hop");
+    let hop_ty = evaluated_prop_type(&project, "/Comp.vue", &evaluated, "hop");
 
     // The terminal path collapses to `string` (Inner.x's declared type).
     // The fixture deliberately uses different primitives at different
@@ -22918,7 +23438,7 @@ defineProps<{
 
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
-    let ui_ty = evaluated_prop_type(&evaluated, "ui");
+    let ui_ty = evaluated_prop_type(&project, "/Comp.vue", &evaluated, "ui");
 
     // Terminal collapses to `Inner.full`'s declared `string`. The fixture uses
     // distinct primitives at each hop (`Inner.full: string`, `Inner.bar:
@@ -22927,7 +23447,7 @@ defineProps<{
     // `boolean`; a `Primitive(_)` wildcard would not catch either.
     assert_eq!(
         ui_ty,
-        &TypeExpr::Primitive(PrimitiveName::String),
+        TypeExpr::Primitive(PrimitiveName::String),
         "C5 parity: `ButtonAlias['a']['full']` (imported-alias chain) must publish the \
          path-precise terminal `string`; got {ui_ty:?}"
     );
@@ -22935,7 +23455,7 @@ defineProps<{
     // hops) and NOT an `any`/`never`/`unknown`-shaped catch-all.
     assert_ne!(
         ui_ty,
-        &TypeExpr::Primitive(PrimitiveName::Number),
+        TypeExpr::Primitive(PrimitiveName::Number),
         "C5 parity: must not mis-route to the `bar: number` sibling hop"
     );
     assert!(
@@ -22981,13 +23501,13 @@ defineProps<{
 
     let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
-    let ui_ty = evaluated_prop_type(&evaluated, "ui");
+    let ui_ty = evaluated_prop_type(&project, "/Comp.vue", &evaluated, "ui");
 
     // CURRENT behaviour (pinned): `Button['ui']` = `FormApi<string>['ui']` =
     // `{ label: string; count: number }` — the generic `T=string` substitution
     // flows into the indexed-access terminal, and the sibling `meta` member is
     // excluded (path-precise: only the `['ui']` hop loads).
-    let TypeExpr::Object(obj) = ui_ty else {
+    let TypeExpr::Object(obj) = &ui_ty else {
         panic!(
             "C5 parity (button-ui): `Button['ui']` must publish a concrete Object surface \
              (not an `Unknown` shell / un-expanded `Ref` carrier); got {ui_ty:?}"
@@ -23037,112 +23557,6 @@ defineProps<{
         &TypeExpr::Primitive(PrimitiveName::Number),
         "C5 parity (button-ui): `count` must stay `number`; got {:?}",
         members[1].1
-    );
-}
-
-/// DISCRIMINATION: the live intrinsic-member route fixpoint
-/// (`solve_or_project_intrinsic_member_node_until_stable`, intrinsic_surface.rs)
-/// converges in NODE DOMAIN — every iteration projects through the node adapters
-/// and convergence compares successive admitted nodes by interned `RaisedShapeKey`
-/// (`route_projection_node_eq_to_expr` vs the input on iteration 1,
-/// `route_projection_nodes_eq` vs the prior node after), and returns the converged
-/// NODE directly: NO `TypeExpr` is materialised inside the fixpoint at all — the
-/// sole publication materialise happens later, at the caller's surface sink
-/// (`stabilize_intrinsic_member_surface`).
-///
-/// The two parity tests above pin the published OUTPUT, which a
-/// per-iteration-materialise fixpoint would ALSO satisfy. This test characterises
-/// the CONVERGENCE PATH itself, so it discriminates: it FAILS against a loop that
-/// materialises per iteration (a `materialize_route_projection_node` call inside
-/// the loop, or a `==`/`!=` compare on a materialised `TypeExpr` cursor) and
-/// PASSES against the node cursor.
-#[test]
-fn intrinsic_member_fixpoint_converges_in_node_domain_not_per_iteration_materialize() {
-    use std::collections::BTreeSet;
-    use syn::visit::Visit;
-
-    const FIXPOINT_SRC: &str =
-        include_str!("resolver_core/component_meta_query_engine/intrinsic_surface.rs");
-    let file = syn::parse_file(FIXPOINT_SRC).expect("intrinsic_surface.rs must parse");
-
-    #[derive(Default)]
-    struct FixpointCharacterization {
-        depth: usize,
-        found: bool,
-        eq_ne_binops: usize,
-        called: BTreeSet<String>,
-    }
-    impl<'ast> Visit<'ast> for FixpointCharacterization {
-        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
-            let is_target = f.sig.ident == "solve_or_project_intrinsic_member_node_until_stable";
-            if is_target {
-                self.found = true;
-                self.depth += 1;
-            }
-            syn::visit::visit_impl_item_fn(self, f);
-            if is_target {
-                self.depth -= 1;
-            }
-        }
-        fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
-            if self.depth > 0 && matches!(b.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
-                self.eq_ne_binops += 1;
-            }
-            syn::visit::visit_expr_binary(self, b);
-        }
-        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
-            if self.depth > 0 {
-                if let syn::Expr::Path(p) = c.func.as_ref() {
-                    if let Some(seg) = p.path.segments.last() {
-                        self.called.insert(seg.ident.to_string());
-                    }
-                }
-            }
-            syn::visit::visit_expr_call(self, c);
-        }
-    }
-
-    let mut characterization = FixpointCharacterization::default();
-    characterization.visit_file(&file);
-
-    // Anti-vacuity: the fixpoint fn must exist (a rename/removal must not pass).
-    assert!(
-        characterization.found,
-        "intrinsic member fixpoint `solve_or_project_intrinsic_member_node_until_stable` not \
-         found in intrinsic_surface.rs (renamed/removed?) — the characterization must not \
-         vacuously pass"
-    );
-
-    // POSITIVE — the node-domain projection + convergence path. The fixpoint
-    // returns the converged NODE; it does NOT materialise — the caller materialises once.
-    for ident in [
-        "project_expr_class_a_node_via_dispatch_threaded",
-        "project_admitted_node_to_expanded_node",
-        "route_projection_node_eq_to_expr",
-        "route_projection_nodes_eq",
-    ] {
-        assert!(
-            characterization.called.contains(ident),
-            "intrinsic member fixpoint must call `{ident}` (node-domain projection / convergence); \
-             calls seen: {:?}",
-            characterization.called
-        );
-    }
-    // NEGATIVE — the fixpoint returns the node and does NOT materialise; the sole
-    // publication materialise happens at the caller's surface sink.
-    assert!(
-        !characterization
-            .called
-            .contains("materialize_route_projection_node"),
-        "intrinsic member fixpoint must NOT materialise inside the loop — it returns the converged \
-         NODE and the caller materialises once at the surface sink; calls seen: {:?}",
-        characterization.called
-    );
-    // NEGATIVE — no per-iteration `TypeExpr` materialise compare inside the loop.
-    assert_eq!(
-        characterization.eq_ne_binops, 0,
-        "intrinsic member fixpoint must NOT converge by `==`/`!=` on a materialised `TypeExpr` \
-         cursor — re-introducing a per-iteration compare FAILS here"
     );
 }
 
@@ -23358,8 +23772,6 @@ fn output_sink_conversions_decide_in_node_domain_not_on_materialized_type_expr()
     for forbidden in [
         "shell_raise_to_type_expr",
         "seal_type_expr",
-        "type_expr_has_package_backed_object_like_root_with_fence",
-        "lowered_root_reaches_transitive_cycle_with_fence",
         "type_expr_contains_reducible_operator",
         "peek_member_shape_known",
     ] {
@@ -23382,83 +23794,101 @@ fn output_sink_conversions_decide_in_node_domain_not_on_materialized_type_expr()
         );
     }
 
-    // ── `reduce_field_type_expr_with_mode` — returns a CARRIER; the no-poison
-    //    sentinel gate reads the node-root-sentinel fact off the carrier NODE (not
-    //    a materialised TypeExpr), and the cold mint is routed through a terminal.
-    let reduce_field = output_sink_calls_in(OUTPUT_SINK_SRC, "reduce_field_type_expr_with_mode");
+    // ── `reduce_field_value_node` — the NODE-start per-field reducer: returns a
+    //    CARRIER; every gate (package-backed / cycle / reducibility / no-poison
+    //    sentinel) reads node facts off the OBSERVED input node — no TypeExpr is
+    //    materialised for a decision, no TypeExpr-start reducer runs, and nothing
+    //    admits into a shared cache slot from this publication path.
+    let reduce_field = output_sink_calls_in(OUTPUT_SINK_SRC, "reduce_field_value_node");
     for forbidden in [
-        // the deleted materialize-then-decide sentinel helper
+        // the retired materialize-then-decide sentinel helper
         "materialized_root_is_unmaterialized_sentinel",
         // the orchestrator never unwraps to a bare TypeExpr (it returns a carrier)
         "unwrap_materialized",
-        // the cold mint moved into the terminal `materialize_field_value_carrier`
+        // the retired TypeExpr-start reducer terminals
         "materialize_component_meta_type_expr_until_stable_full",
+        "materialize_field_value_carrier",
+        "seal_input_as_carrier",
+        "peek_member_shape_known",
+        // no shared-slot admission from the publication reduce path
+        "admit_type_expr_shape_if_possible",
+        "admit_computed",
     ] {
         assert!(
             !reduce_field.contains(forbidden),
-            "reduce_field_type_expr_with_mode must NOT call `{forbidden}`; calls seen: {reduce_field:?}"
+            "reduce_field_value_node must NOT call `{forbidden}`; calls seen: {reduce_field:?}"
         );
     }
     for required in [
         "node_root_is_unmaterialized_sentinel_with_dispatch",
-        "materialize_field_value_carrier",
-        "seal_input_as_carrier",
+        "node_contains_semantic_miss_with_dispatch",
+        "node_package_backed_object_like_root_with_fence",
+        "node_root_reaches_transitive_cycle_with_fence",
+        "classify_node_reduction_gates",
+        "reduce_member_value_graph_native_with_context",
+        "raise_node_to_sealed_carrier",
     ] {
         assert!(
             reduce_field.contains(required),
-            "reduce_field_type_expr_with_mode must call `{required}` (node-domain sentinel / \
-             carrier seal / terminal mint); calls seen: {reduce_field:?}"
+            "reduce_field_value_node must call `{required}` (node-domain gates / \
+             graph-native reduce / terminal seal); calls seen: {reduce_field:?}"
         );
     }
 
-    // ── `reduce_published_field_types` — the props shape selection is a NODE-domain
+    // ── the published-field finalize — the props shape selection is a NODE-domain
     //    comparison over the reduced carriers; the materialised-TypeExpr scorer is
-    //    gone.
-    let reduce_published = output_sink_calls_in(OUTPUT_SINK_SRC, "reduce_published_field_types");
+    //    gone. The finalize pass lives in the `published_finalize` CHILD module
+    //    of the sink (same capability mint scope); the per-position half is
+    //    `finalize_published_prop_source` (shared by the flat rows and the
+    //    `define_props` lane).
+    const PUBLISHED_FINALIZE_SRC: &str =
+        include_str!("meta_resolve/projectors/output_sink/published_finalize.rs");
+    let finalize_position =
+        output_sink_calls_in(PUBLISHED_FINALIZE_SRC, "finalize_published_prop_source");
     assert!(
-        !reduce_published.contains("compare_type_expr_improvement"),
-        "reduce_published_field_types must NOT score materialised TypeExprs via \
-         `compare_type_expr_improvement`; calls seen: {reduce_published:?}"
+        !finalize_position.contains("compare_type_expr_improvement"),
+        "finalize_published_prop_source must NOT score materialised TypeExprs via \
+         `compare_type_expr_improvement`; calls seen: {finalize_position:?}"
     );
     for required in [
         "compare_node_improvement",
         "node_root_is_explicit_selector_operator",
     ] {
         assert!(
-            reduce_published.contains(required),
-            "reduce_published_field_types must select the published shape in node domain via \
-             `{required}`; calls seen: {reduce_published:?}"
+            finalize_position.contains(required),
+            "finalize_published_prop_source must select the published shape in node domain via \
+             `{required}`; calls seen: {finalize_position:?}"
         );
     }
 }
 
-/// AUDIT-FOOTPRINT BOUND: `reduce_published_field_types` must stamp a lowered
-/// shallow `node_id` (`reduce_field_type_expr_with_mode(.., stamp_shallow_node_id =
-/// true)`) ONLY on the props loop — which node-compares the reduced carrier against
-/// the shallow form and so needs the shallow node lowered to score it. The emits /
-/// slot_bindings / bindings loops NEVER node-compare and pass `false`. Stamping on
-/// EVERY shallow seal lowered each field's expr, bloating the per-request audit
-/// footprint (>64 KiB on the 30-slot cyclic `defineSlots` fixture). This is the
-/// source-precise bound: flipping ANY non-props loop's stamp back to `true`
-/// re-introduces the per-field lowering bloat and changes the (true, false) tally,
-/// failing here.
+/// AUDIT-FOOTPRINT BOUND: within the per-position publication finalize
+/// (`finalize_published_prop_source` — the props half of
+/// `reduce_published_field_types`), the shallow authored-locator raise
+/// (`raise_authored_locator_to_hot` — the node the finalize node-compares
+/// against the reduced carrier) happens exactly once. The emits /
+/// slot_bindings / bindings loops NEVER
+/// node-compare a shallow form, so they must not raise one: raising every
+/// per-field shallow locator bloats the per-request audit footprint on wide
+/// cyclic surfaces (the bound the former per-loop `stamp_shallow_node_id`
+/// flag enforced).
 #[test]
-fn reduce_published_stamps_shallow_node_id_only_on_the_props_loop() {
+fn reduce_published_raises_the_shallow_form_only_in_the_props_loop() {
     use syn::visit::Visit;
 
-    const OUTPUT_SINK_SRC: &str = include_str!("meta_resolve/projectors/output_sink.rs");
+    const PUBLISHED_FINALIZE_SRC: &str =
+        include_str!("meta_resolve/projectors/output_sink/published_finalize.rs");
 
-    /// Within `reduce_published_field_types`, collect the LAST positional argument
-    /// (the `stamp_shallow_node_id` bool literal) of every
-    /// `reduce_field_type_expr_with_mode` call.
+    /// Within `reduce_published_field_types`, count the
+    /// `raise_authored_locator_to_hot` method calls.
     #[derive(Default)]
-    struct StampArgCollector {
+    struct ShallowRaiseCollector {
         depth: usize,
-        stamps: Vec<bool>,
+        raises: usize,
     }
-    impl<'ast> Visit<'ast> for StampArgCollector {
+    impl<'ast> Visit<'ast> for ShallowRaiseCollector {
         fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-            let hit = f.sig.ident == "reduce_published_field_types";
+            let hit = f.sig.ident == "finalize_published_prop_source";
             if hit {
                 self.depth += 1;
             }
@@ -23467,153 +23897,54 @@ fn reduce_published_stamps_shallow_node_id_only_on_the_props_loop() {
                 self.depth -= 1;
             }
         }
-        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
-            if self.depth > 0 {
-                if let syn::Expr::Path(p) = c.func.as_ref() {
-                    let is_target = p
-                        .path
-                        .segments
-                        .last()
-                        .is_some_and(|s| s.ident == "reduce_field_type_expr_with_mode");
-                    if is_target {
-                        if let Some(syn::Expr::Lit(lit)) = c.args.last() {
-                            if let syn::Lit::Bool(b) = &lit.lit {
-                                self.stamps.push(b.value);
-                            }
-                        }
-                    }
-                }
+        fn visit_expr_method_call(&mut self, c: &'ast syn::ExprMethodCall) {
+            if self.depth > 0 && c.method == "raise_authored_locator_to_hot" {
+                self.raises += 1;
             }
-            syn::visit::visit_expr_call(self, c);
+            syn::visit::visit_expr_method_call(self, c);
         }
     }
 
-    let file = syn::parse_file(OUTPUT_SINK_SRC).expect("parse output_sink.rs");
-    let mut collector = StampArgCollector::default();
+    let file = syn::parse_file(PUBLISHED_FINALIZE_SRC).expect("parse published_finalize.rs");
+    let mut collector = ShallowRaiseCollector::default();
     collector.visit_file(&file);
 
-    // props loop stamps `true` on BOTH the field reduction AND the shallow-form
-    // reduction (it node-compares them); emits / slot_bindings / bindings each pass
-    // `false`. ⇒ exactly 2 `true` and 3 `false`.
-    let trues = collector.stamps.iter().filter(|&&b| b).count();
-    let falses = collector.stamps.iter().filter(|&&b| !b).count();
     assert_eq!(
-        (trues, falses),
-        (2, 3),
-        "reduce_published_field_types must stamp `stamp_shallow_node_id = true` ONLY on the two \
-         props-loop reductions and `false` on the emits / slot_bindings / bindings loops (the \
-         audit-footprint bound); observed stamp args = {:?}",
-        collector.stamps
+        collector.raises, 1,
+        "reduce_published_field_types must raise the shallow authored form exactly once — in \
+         the props loop (the node-compare subject); the emits / slot_bindings / bindings loops \
+         never node-compare and must not raise per-field shallow forms (the audit-footprint \
+         bound)"
     );
 }
 
-/// §1a NO-CACHE-POISON characterization: `reduce_field_type_expr_with_mode`
-/// admits a `Leaf` (Primitive / Literal — a terminal shape whose shallow/expanded
-/// forms agree) to the shared `type_expr_whole` `ShapeCacheDb` slot, but a
-/// `BareCarrier` (a bare alias `Ref { type_arguments: [] }`) is published shallow
-/// WITHOUT admitting — that slot is shared with the whole-expression materialiser's
-/// pre-dispatch probe, so admitting the projector's shallow `Ref` would poison a
-/// later EXPANDED alias-body request.
-///
-/// Discrimination: the `Leaf` match arm MUST contain `admit_type_expr_shape_if_possible`
-/// and the `BareCarrier` arm MUST NOT — re-adding the admit to the `BareCarrier`
-/// arm (the cache-poisoning regression) FAILS this test.
+/// NO-CACHE-POISON characterization: the publication reduce path performs NO
+/// TypeExpr-subject `ShapeCacheDb` admission at all — the former
+/// `Leaf`-admit / `BareCarrier`-no-admit split is structurally gone with the
+/// TypeExpr-start reducer, so the shared TypeExpr-start whole-subject slot can
+/// no longer be poisoned from the publication loops. Discrimination: re-introducing ANY
+/// admission call (`admit_type_expr_shape_if_possible` / `admit_computed`)
+/// under `reduce_published_field_types` or `reduce_field_value_node` FAILS
+/// here (both idents were present on the pre-change tree's reduce path).
 #[test]
-fn reduce_field_bare_carrier_publishes_shallow_without_poisoning_shared_cache_slot() {
-    use syn::visit::Visit;
-
+fn publication_reduce_path_admits_nothing_into_the_shared_type_expr_slot() {
     const OUTPUT_SINK_SRC: &str = include_str!("meta_resolve/projectors/output_sink.rs");
+    const PUBLISHED_FINALIZE_SRC: &str =
+        include_str!("meta_resolve/projectors/output_sink/published_finalize.rs");
 
-    /// Within the target fn, find each `PeekedShape::Leaf` / `PeekedShape::BareCarrier`
-    /// match arm and record whether its body calls `admit_type_expr_shape_if_possible`.
-    #[derive(Default)]
-    struct ArmAdmitProbe {
-        in_reduce_field: usize,
-        leaf_admits: Option<bool>,
-        bare_carrier_admits: Option<bool>,
-    }
-    /// Whether an arm body (an `Expr`) contains a call to `target` ident.
-    fn body_calls(expr: &syn::Expr, target: &str) -> bool {
-        struct C<'a> {
-            target: &'a str,
-            hit: bool,
-        }
-        impl<'a, 'ast> Visit<'ast> for C<'a> {
-            fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
-                if let syn::Expr::Path(p) = c.func.as_ref() {
-                    if p.path
-                        .segments
-                        .last()
-                        .is_some_and(|s| s.ident == self.target)
-                    {
-                        self.hit = true;
-                    }
-                }
-                syn::visit::visit_expr_call(self, c);
-            }
-        }
-        let mut c = C { target, hit: false };
-        c.visit_expr(expr);
-        c.hit
-    }
-    /// The terminal path-segment ident of a `Pat::TupleStruct` / `Pat::Path`
-    /// pattern, e.g. `Leaf` / `BareCarrier` for `super::PeekedShape::Leaf(..)`.
-    fn arm_variant(pat: &syn::Pat) -> Option<String> {
-        let path = match pat {
-            syn::Pat::TupleStruct(ts) => &ts.path,
-            syn::Pat::Path(p) => &p.path,
-            syn::Pat::Struct(s) => &s.path,
-            _ => return None,
-        };
-        path.segments.last().map(|s| s.ident.to_string())
-    }
-    impl<'ast> Visit<'ast> for ArmAdmitProbe {
-        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-            let hit = f.sig.ident == "reduce_field_type_expr_with_mode";
-            if hit {
-                self.in_reduce_field += 1;
-            }
-            syn::visit::visit_item_fn(self, f);
-            if hit {
-                self.in_reduce_field -= 1;
-            }
-        }
-        fn visit_arm(&mut self, arm: &'ast syn::Arm) {
-            if self.in_reduce_field > 0 {
-                match arm_variant(&arm.pat).as_deref() {
-                    Some("Leaf") => {
-                        self.leaf_admits =
-                            Some(body_calls(&arm.body, "admit_type_expr_shape_if_possible"));
-                    }
-                    Some("BareCarrier") => {
-                        self.bare_carrier_admits =
-                            Some(body_calls(&arm.body, "admit_type_expr_shape_if_possible"));
-                    }
-                    _ => {}
-                }
-            }
-            syn::visit::visit_arm(self, arm);
+    for (source, target) in [
+        (PUBLISHED_FINALIZE_SRC, "reduce_published_field_types"),
+        (OUTPUT_SINK_SRC, "reduce_field_value_node"),
+    ] {
+        let calls = output_sink_calls_in(source, target);
+        for forbidden in ["admit_type_expr_shape_if_possible", "admit_computed"] {
+            assert!(
+                !calls.contains(forbidden),
+                "`{target}` must NOT admit into a shared cache slot via `{forbidden}` — the \
+                 publication reduce path is admission-free (no-poison); calls seen: {calls:?}"
+            );
         }
     }
-
-    let file = syn::parse_file(OUTPUT_SINK_SRC).expect("output_sink.rs must parse");
-    let mut probe = ArmAdmitProbe::default();
-    probe.visit_file(&file);
-
-    assert_eq!(
-        probe.leaf_admits,
-        Some(true),
-        "the `PeekedShape::Leaf` arm of reduce_field_type_expr_with_mode must admit to the \
-         shared cache slot (Primitive/Literal forms agree shallow/expanded) — arm not found or \
-         admit missing"
-    );
-    assert_eq!(
-        probe.bare_carrier_admits,
-        Some(false),
-        "the `PeekedShape::BareCarrier` arm MUST NOT admit to the shared `type_expr_whole` cache \
-         slot — admitting a shallow alias `Ref` there poisons a later EXPANDED alias-body request \
-         (re-adding the admit is the cache-poisoning regression this test guards)"
-    );
 }
 
 /// End-to-end discriminator for the dispatch-bridge `ProjectGeneration`
@@ -24032,10 +24363,15 @@ defineProps<NoInfer<Base>>()
         .iter()
         .find(|p| p.name == "label")
         .expect("NoInfer<Base> must publish the `label` prop through the macro surface");
+    let label_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        label.type_source.present(),
+        "label prop",
+    );
     assert!(
-        !matches!(label.type_expr, TypeExpr::Primitive(PrimitiveName::Never)),
-        "NoInfer<Base> prop must keep its resolved type, not collapse to never, got {:?}",
-        label.type_expr
+        !matches!(label_ty, TypeExpr::Primitive(PrimitiveName::Never)),
+        "NoInfer<Base> prop must keep its resolved type, not collapse to never, got {label_ty:?}"
     );
     let prop_names: BTreeSet<_> = meta.props.iter().map(|p| p.name.as_str()).collect();
     assert!(
@@ -24129,15 +24465,25 @@ defineProps<Props>()
 
     // Typed form: concrete primitives, NOT collapsed to `never` / left as an
     // opaque `Ref` — the alias + NoInfer wrappers resolved through to Base.
-    assert!(
-        matches!(label.type_expr, TypeExpr::Primitive(PrimitiveName::String)),
-        "alias-shell `label` must keep its `string` primitive type, got {:?}",
-        label.type_expr,
+    let label_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        label.type_source.present(),
+        "label prop",
     );
     assert!(
-        matches!(count.type_expr, TypeExpr::Primitive(PrimitiveName::Number)),
-        "alias-shell `count` must keep its `number` primitive type, got {:?}",
-        count.type_expr,
+        matches!(label_ty, TypeExpr::Primitive(PrimitiveName::String)),
+        "alias-shell `label` must keep its `string` primitive type, got {label_ty:?}",
+    );
+    let count_ty = demand_published_type(
+        project.host(),
+        "/src/App.vue",
+        count.type_source.present(),
+        "count prop",
+    );
+    assert!(
+        matches!(count_ty, TypeExpr::Primitive(PrimitiveName::Number)),
+        "alias-shell `count` must keep its `number` primitive type, got {count_ty:?}",
     );
 
     // Provenance: own-body is the WRITTEN macro type-arg declaration's direct
@@ -24849,11 +25195,19 @@ defineExpose<PanelApi>()
         "type-argument member's @public tag must publish, got {:?}",
         open.tags
     );
-    assert!(
-        !matches!(open.type_expr, TypeExpr::Unknown { .. }),
-        "surface member publishes its surface type, not an Unknown fallback: {:?}",
-        open.type_expr
-    );
+    // The method-typed member value is KNOWN structure: the structural
+    // member-source projection publishes the faithful PRESENT projected
+    // MEMBER-PATH replay route (the macro's stamped type-argument base +
+    // the member name) — never a fabricated `unknown` success and never a
+    // typed failure for a representable shape.
+    match open.type_source.present() {
+        Some(verter_type_expr::facts::SemanticTypeSource::Projected(
+            verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
+        )) => {
+            assert_eq!(path.as_ref(), ["open".to_string()], "one member hop");
+        }
+        other => panic!("the open member publishes the MemberPath replay source, got {other:?}"),
+    }
 
     // Negative: an undocumented exposed member publishes nothing fabricated.
     let close = meta
@@ -24924,11 +25278,19 @@ defineExpose<LocalApi>()
         "owner-local type-argument member's @public tag must publish, got {:?}",
         focus.tags
     );
-    assert!(
-        !matches!(focus.type_expr, TypeExpr::Unknown { .. }),
-        "surface member publishes its surface type, not an Unknown fallback: {:?}",
-        focus.type_expr
-    );
+    // The method-typed member value is KNOWN structure: the structural
+    // member-source projection publishes the faithful PRESENT projected
+    // MEMBER-PATH replay route (the macro's stamped type-argument base +
+    // the member name) — never a fabricated `unknown` success and never a
+    // typed failure for a representable shape.
+    match focus.type_source.present() {
+        Some(verter_type_expr::facts::SemanticTypeSource::Projected(
+            verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
+        )) => {
+            assert_eq!(path.as_ref(), ["focus".to_string()], "one member hop");
+        }
+        other => panic!("the focus member publishes the MemberPath replay source, got {other:?}"),
+    }
 
     // Negative: an undocumented exposed member publishes nothing fabricated.
     let blur = meta
@@ -25089,11 +25451,21 @@ defineExpose<LocalApi>({
         "type-argument-only member's @public tag must publish, got {:?}",
         select_all.tags
     );
-    assert!(
-        !matches!(select_all.type_expr, TypeExpr::Unknown { .. }),
-        "surface member publishes its surface type, not an Unknown fallback: {:?}",
-        select_all.type_expr
-    );
+    // The method-typed member value is KNOWN structure: the structural
+    // member-source projection publishes the faithful PRESENT projected
+    // MEMBER-PATH replay route (the macro's stamped type-argument base +
+    // the member name) — never a fabricated `unknown` success and never a
+    // typed failure for a representable shape.
+    match select_all.type_source.present() {
+        Some(verter_type_expr::facts::SemanticTypeSource::Projected(
+            verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
+        )) => {
+            assert_eq!(path.as_ref(), ["selectAll".to_string()], "one member hop");
+        }
+        other => {
+            panic!("the selectAll member publishes the MemberPath replay source, got {other:?}")
+        }
+    }
 
     // Negative: an undocumented type-argument-only member publishes nothing
     // fabricated.
@@ -25220,11 +25592,21 @@ defineExpose<ImportedApi>({
         "imported type-argument-only member's @public tag must publish, got {:?}",
         select_all.tags
     );
-    assert!(
-        !matches!(select_all.type_expr, TypeExpr::Unknown { .. }),
-        "surface member publishes its surface type, not an Unknown fallback: {:?}",
-        select_all.type_expr
-    );
+    // The method-typed member value is KNOWN structure: the structural
+    // member-source projection publishes the faithful PRESENT projected
+    // MEMBER-PATH replay route (the macro's stamped type-argument base +
+    // the member name) — never a fabricated `unknown` success and never a
+    // typed failure for a representable shape.
+    match select_all.type_source.present() {
+        Some(verter_type_expr::facts::SemanticTypeSource::Projected(
+            verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
+        )) => {
+            assert_eq!(path.as_ref(), ["selectAll".to_string()], "one member hop");
+        }
+        other => {
+            panic!("the selectAll member publishes the MemberPath replay source, got {other:?}")
+        }
+    }
 
     // Negative: an undocumented imported type-argument-only member publishes
     // nothing fabricated.
@@ -25327,4 +25709,4652 @@ defineExpose<WidgetApi>({ focus, blur })
         .expect("blur must be exposed");
     assert_eq!(blur.description.as_deref(), None);
     assert!(blur.tags.is_empty(), "got {:?}", blur.tags);
+}
+
+/// The imported-macro component-meta query path performs ZERO
+/// query-time parser-expander work: after the cold compute, a repeat
+/// query re-serves the result without a single additional eval-program
+/// parse. The retired per-query expander re-entered
+/// `parse_eval_program` on every resolution (one borrowed
+/// type-resolution context per call), so on that tree the second query
+/// grows `eval_program_parses` and this assertion FAILS; on the
+/// severed tree the imported surface is served through the shared
+/// typed-IR dispatch and the counter stays flat.
+#[test]
+fn imported_macro_query_path_runs_zero_parser_expander_parses() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/dep.ts",
+            "export interface DepProps { label?: string; count: number }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { DepProps } from './dep'
+defineProps<DepProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // Cold query — resolves the imported macro surface through dispatch.
+    // The published props keep the AUTHORED SOURCE ORDER of the imported
+    // interface (`label?` before `count`) — the shared dispatch projects
+    // ordered declaration groups, not a re-sorted member list.
+    let cold = get_meta(&project, "/App.vue");
+    let cold_names: Vec<&str> = cold.props.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        cold_names,
+        vec!["label", "count"],
+        "the imported macro surface must resolve through the shared dispatch, preserving \
+         authored member order"
+    );
+
+    // The parse budget after the cold compute: every live file parses
+    // once through the indexed-ready materialise funnel.
+    let parses_after_cold = project.host().provenance().snapshot().eval_program_parses;
+
+    // Repeat query — must NOT re-enter the eval-program parse funnel.
+    let warm = get_meta(&project, "/App.vue");
+    let warm_names: Vec<&str> = warm.props.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        warm_names, cold_names,
+        "warm serve returns the same surface"
+    );
+
+    let parses_after_warm = project.host().provenance().snapshot().eval_program_parses;
+    assert_eq!(
+        parses_after_warm, parses_after_cold,
+        "a repeat imported-macro query must perform ZERO additional eval-program \
+         parses — a per-query parser-expander context (one parse per resolution) \
+         cannot satisfy this"
+    );
+}
+
+/// The dispatch macro-surface projection equals the surface the former
+/// eager parser expander produced for the same fixture: prop set,
+/// per-prop requiredness, and the emit payload all match the expander's
+/// known-good output (hardcoded below from that engine's behaviour on
+/// this exact fixture). If a second engine were still live and drifted
+/// on any of these facts, this pin diverges.
+#[test]
+fn dispatch_macro_surface_matches_former_expander_output_on_real_fixture() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/shared.ts",
+            r#"export interface Base { id: string }
+export interface SharedProps extends Base {
+  label?: string
+  count: number
+}
+export interface SharedEmits {
+  (e: 'save', id: number): void
+  close: []
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { SharedProps, SharedEmits } from './shared'
+defineProps<SharedProps>()
+defineEmits<SharedEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    // Former-expander known-good facts for this fixture: the heritage
+    // closure flattens `Base.id` onto the surface; own-body members keep
+    // their authored optionality.
+    let mut props: Vec<(String, bool)> = meta
+        .props
+        .iter()
+        .map(|p| (p.name.clone(), p.required))
+        .collect();
+    props.sort();
+    assert_eq!(
+        props,
+        vec![
+            ("count".to_string(), true),
+            ("id".to_string(), true),
+            ("label".to_string(), false),
+        ],
+        "dispatch projection must equal the former eager-expander surface \
+         (heritage-flattened, authored optionality preserved)"
+    );
+
+    // Emits: both the call-signature form and the tuple shorthand form
+    // surface with their event names — byte-identical to the former
+    // expander's named-call-signature output for this fixture.
+    let mut emit_names: Vec<&str> = meta.events.iter().map(|e| e.name.as_str()).collect();
+    emit_names.sort();
+    assert_eq!(
+        emit_names,
+        vec!["close", "save"],
+        "dispatch emit projection must equal the former eager-expander emit set"
+    );
+}
+
+/// Generic substitution is SEMANTIC meaning on the published macro surface:
+/// `defineProps<Pair<string, number>>` over the imported
+/// `Pair<A, B> { first: A; second: B }` publishes `first` as the
+/// INSTANTIATED `string` and `second` as the INSTANTIATED `number`. The two
+/// type parameters are DISTINCT, so a dropped or swapped substitution env
+/// (A/B reversed, or `TypeParam` shells surviving to publication) fails on
+/// the exact primitive each member must carry.
+///
+/// ## Retired parity-oracle published-surface coverage map
+///
+/// The transitional dual-leg parity-oracle harness (its comparison leg read
+/// the deleted prepared-body `TypeExpr` seam, so the harness became
+/// definitionally unfulfillable and was removed) pinned eight
+/// published-surface cases. Each is covered by a surviving, un-ignored,
+/// discriminating test; the enforcement is those tests' greenness on the
+/// default gate:
+///
+/// | Retired oracle case | Surviving cover |
+/// |---|---|
+/// | `component_meta_payload_cross_file_props` | `getcomponentmeta_decomposes_through_dispatch_primitives` (`tests/cases/g_misc2/phase5_decomposition_tests.rs` — cross-file member PRIMITIVE types + emits) jointly with `dispatch_macro_surface_matches_former_expander_output_on_real_fixture` (this file — member set + authored OPTIONALITY + emit set) |
+/// | `fallthrough_single_native_root` | `single_native_root_inherits_intrinsic_surface` (this file — accepted declared prop + `FallthroughSurface::Branches` off a single native root) |
+/// | `macro_own_body_provenance_intersection` | `cross_file_omit_then_reintroduce_own_body_members_carry_declared_true` (`tests/cases/g_misc2/r21_c5_cross_file_provenance.rs` — the own-body arm publishes `declared_in_macro_type_arg == true` while the imported-reached member publishes `false`) |
+/// | `heritage_shadowing_own_body_wins` | `interface_heritage_duplicate_shadows` (`src/typeinfo/typeinfo_tests/shallow_surface_facts.rs` — own-body `dup: string` shadows the inherited `dup: number`, never an intersection; non-colliding inherited members survive) |
+/// | `authored_intersection_collision_intersects` | `authored_intersection_duplicate_does_not_shadow` (`src/typeinfo/typeinfo_tests/shallow_surface_facts.rs` — authored `Base & { dup: string }` publishes `dup` carrying BOTH primitive arms, never the shadow single-arm) |
+/// | `open_pick_publishes_shallow_carrier` | `chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier` (`src/component_meta_pick_omit_tests.rs` — an OPEN `Pick<PropsBase<T>, …>` over the SFC generic stays a `Pick` carrier ref with the open source arg preserved) |
+/// | `module_augmentation_merged_props` | `cross_file_module_augmentation_merge_surface_matches_oracle` (`src/cross_file_augmentation_merge_equivalence_tests.rs` — the stitched surface publishes `base: string` AND `fromAug: number` with their types) plus the `defineProps` publication form in `merged_decl_body_stitch_self_heals_rekeyed_augmenter` (`tests/cases/g_session/module_augmentation_body_rekey.rs`) |
+/// | `generic_pair_substitution` | THIS test — the only surviving cover of the two-DISTINCT-parameter instantiation on the published `defineProps` surface |
+#[test]
+fn imported_generic_pair_instantiates_distinct_member_primitives() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/pair.ts",
+            "export interface Pair<A, B> { first: A; second: B }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Pair } from './pair'
+defineProps<Pair<string, number>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    let first = meta
+        .props
+        .iter()
+        .find(|p| p.name == "first")
+        .expect("instantiated generic prop `first` must publish");
+    let first_ty = demand_published_type(
+        project.host(),
+        "/App.vue",
+        first.type_source.present(),
+        "prop `first`",
+    );
+    assert!(
+        matches!(first_ty, TypeExpr::Primitive(PrimitiveName::String)),
+        "`first` must instantiate A := string (never a TypeParam shell, never \
+         the swapped B arm); got {first_ty:?}"
+    );
+
+    let second = meta
+        .props
+        .iter()
+        .find(|p| p.name == "second")
+        .expect("instantiated generic prop `second` must publish");
+    let second_ty = demand_published_type(
+        project.host(),
+        "/App.vue",
+        second.type_source.present(),
+        "prop `second`",
+    );
+    assert!(
+        matches!(second_ty, TypeExpr::Primitive(PrimitiveName::Number)),
+        "`second` must instantiate B := number (never a TypeParam shell, never \
+         the swapped A arm); got {second_ty:?}"
+    );
+}
+
+// ===========================================================================
+// Events-payload output materialization (the session output envelope)
+// ===========================================================================
+
+/// Expected-shape helper for the output-envelope tests: a labeled,
+/// non-optional, non-rest tuple.
+fn labeled_tuple(elements: &[(&str, TypeExpr)]) -> TypeExpr {
+    TypeExpr::Tuple {
+        elements: elements
+            .iter()
+            .map(|(label, ty)| verter_type_expr::TupleElement {
+                label: Some((*label).to_string()),
+                ty: ty.clone(),
+                optional: false,
+                rest: false,
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        readonly: false,
+    }
+}
+
+/// (a) An authored `defineEmits` payload materializes to its exact SHALLOW
+/// `TypeExpr` in the output envelope's `events[].payload` lane.
+#[test]
+fn component_meta_output_materializes_authored_emit_payload_to_exact_shallow_tuple() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ change: [value: number] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("events-payload output materialization must succeed")
+        .expect("component must resolve");
+    let (analysis, resolution, types) = output.into_parts();
+
+    assert!(
+        resolution.is_none(),
+        "the plain cold entry carries no resolution sidecar"
+    );
+    assert_eq!(analysis.events.len(), 1, "fixture declares exactly 1 event");
+    assert_eq!(analysis.events[0].name, "change");
+    assert!(
+        analysis.events[0].payload.is_present(),
+        "fixture premise: the authored tuple payload must publish a typed source"
+    );
+
+    let payloads = types.into_lanes().event_payloads;
+    assert_eq!(
+        payloads.len(),
+        1,
+        "the events lane must align 1:1 with analysis.events"
+    );
+    let expected = labeled_tuple(&[("value", TypeExpr::Primitive(PrimitiveName::Number))]);
+    assert_eq!(
+        payloads[0], expected,
+        "authored `change: [value: number]` must materialize to exactly \
+         `[value: number]` (shallow shell), got {:?}",
+        payloads[0]
+    );
+}
+
+/// (b) A payload-less event (payload source `None`) materializes through the
+/// ONE centralized missing-source policy to the canonical typed
+/// `TypeExpr::Unknown` — decided in the session output sink, never at the
+/// wire.
+#[test]
+fn component_meta_output_missing_event_payload_source_follows_central_unknown_policy() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineEmits(['ping'])
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("events-payload output materialization must succeed")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+
+    assert_eq!(analysis.events.len(), 1, "fixture declares exactly 1 event");
+    assert_eq!(analysis.events[0].name, "ping");
+    assert!(
+        analysis.events[0].payload.present().is_none(),
+        "fixture premise: a runtime-array emit carries no typed payload source, got {:?}",
+        analysis.events[0].payload
+    );
+
+    let payloads = types.into_lanes().event_payloads;
+    assert_eq!(
+        payloads.len(),
+        1,
+        "the events lane must align 1:1 with analysis.events"
+    );
+    assert_eq!(
+        payloads[0],
+        TypeExpr::Unknown { raw: String::new() },
+        "a None payload source must materialize to the canonical typed Unknown \
+         via the central missing-source policy, got {:?}",
+        payloads[0]
+    );
+}
+
+/// (c) A PRESENT-but-unraisable payload source FAILS the output with the
+/// strict typed `ComponentMetaOutputError` (carrying the lane, the lane
+/// index, and the failed source) — it must NEVER silently materialize as
+/// `Unknown`.
+#[test]
+fn component_meta_output_unraisable_event_payload_source_fails_typed_never_silent_unknown() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ change: [value: number]; close: [] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let analysis = host
+        .get_component_meta("/App.vue")
+        .expect("component must resolve");
+    assert_eq!(
+        analysis.events.len(),
+        2,
+        "fixture declares exactly 2 events"
+    );
+
+    // Sanity: the UNTAMPERED analysis materializes cleanly — the typed
+    // failure asserted below is not unconditional.
+    let ok = crate::meta_resolve::projectors::build_component_meta_output(
+        host,
+        "/App.vue",
+        analysis.clone(),
+        None,
+    )
+    .expect("the untampered analysis must materialize");
+    let (_a, _r, ok_types) = ok.into_parts();
+    assert_eq!(ok_types.into_lanes().event_payloads.len(), 2);
+
+    // A present-but-unraisable source: an authored macro-payload locator
+    // addressing a macro ordinal that does not exist in the owner — the
+    // shared raise has no live graph representation for it.
+    let bad_source = verter_type_expr::facts::SemanticTypeSource::Authored(
+        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+            verter_type_expr::locators::MacroPayloadLocator {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: Arc::from("/App.vue"),
+                    symbol: Arc::from("default"),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                },
+                macro_index: 99,
+                payload: verter_type_expr::locators::MacroPayloadPosition::TypeArgument,
+            },
+        ),
+    );
+    let mut tampered = analysis;
+    tampered.events[1].payload =
+        verter_type_expr::facts::SourcePosition::Present(bad_source.clone());
+
+    let err = crate::meta_resolve::projectors::build_component_meta_output(
+        host, "/App.vue", tampered, None,
+    )
+    .expect_err(
+        "a present-but-unraisable payload source must FAIL the output with a typed \
+         error — it must NOT silently materialize as Unknown",
+    );
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::EventPayload,
+        "the error must name the failed lane"
+    );
+    assert_eq!(err.index, 1, "the error must carry the failed lane index");
+    assert_eq!(
+        *err.position,
+        verter_type_expr::facts::SourcePosition::Present(bad_source),
+        "the error must carry the failed source"
+    );
+    assert_eq!(
+        err.failure,
+        crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource,
+        "the failure class must be the raise miss, got {:?}",
+        err.failure
+    );
+}
+
+/// (d) The `events[].payload` lane is POSITIONAL: entries align 1:1 with
+/// `analysis.events` in order, and duplicate event names are preserved as
+/// distinct positional rows — a name-keyed output would collapse the two
+/// `dup` rows (len 3, not 4) and lose alignment.
+#[test]
+fn component_meta_output_event_payloads_align_positionally_with_duplicate_names() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ first: [id: number]; dup: [a: string]; dup: [b: boolean]; last: [] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("events-payload output materialization must succeed")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+
+    let names: Vec<&str> = analysis.events.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["first", "dup", "dup", "last"],
+        "fixture premise: the analysis preserves the duplicate `dup` rows in source order"
+    );
+
+    let payloads = types.into_lanes().event_payloads;
+    assert_eq!(
+        payloads.len(),
+        4,
+        "the lane must keep one entry PER analysis event — duplicate names \
+         preserved positionally, never collapsed name-keyed"
+    );
+    assert_eq!(
+        payloads[0],
+        labeled_tuple(&[("id", TypeExpr::Primitive(PrimitiveName::Number))]),
+        "index 0 must be `first`'s `[id: number]`, got {:?}",
+        payloads[0]
+    );
+    // Both `dup` rows carry the same analyzer-published field payload (the
+    // analyzer keys expanded fields by name), so each POSITION must still
+    // materialize — same value, two rows.
+    let dup_expected = labeled_tuple(&[("a", TypeExpr::Primitive(PrimitiveName::String))]);
+    assert_eq!(
+        payloads[1], dup_expected,
+        "index 1 must be the first `dup` row, got {:?}",
+        payloads[1]
+    );
+    assert_eq!(
+        payloads[2], dup_expected,
+        "index 2 must be the second `dup` row (duplicate preserved), got {:?}",
+        payloads[2]
+    );
+    assert_eq!(
+        payloads[3],
+        labeled_tuple(&[]),
+        "index 3 must be `last`'s empty tuple `[]`, got {:?}",
+        payloads[3]
+    );
+}
+
+// ===========================================================================
+// Full output-boundary conversion: all 11 wire lanes, view-fence equivalence,
+// cache rails, request-local dedupe, cross-owner effective scope
+// ===========================================================================
+
+/// A blank analysis carrier for the synthetic lane tests: every lane empty,
+/// no template, `Exact` accepted surface.
+fn blank_output_analysis() -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+    use verter_semantic::analysis::component_meta as cm;
+    cm::ComponentMetaAnalysis {
+        props: Vec::new(),
+        events: Vec::new(),
+        slots: Vec::new(),
+        models: Vec::new(),
+        exposed: Vec::new(),
+        public_instance: None,
+        sfc_blocks: None,
+        type_registry: Vec::new(),
+        components: Vec::new(),
+        template_refs: Vec::new(),
+        imports: Vec::new(),
+        bindings: Vec::new(),
+        vue_api_calls: Vec::new(),
+        styles: Vec::new(),
+        flags: cm::ComponentMetaFlags::default(),
+        root_reachability: cm::RootReachability::NoFallthrough {
+            reason: cm::NoFallthroughReason::NoTemplate,
+        },
+        accepted_props: Vec::new(),
+        accepted_events: Vec::new(),
+        accepted_surface_completeness: cm::AcceptedSurfaceCompleteness::Exact,
+        fallthrough_surface: cm::FallthroughSurface::None {
+            reason: cm::NoFallthroughReason::NoTemplate,
+        },
+        macro_expansion_diagnostics: Vec::new(),
+        options_api: false,
+        file_path: "/App.vue".to_string(),
+    }
+}
+
+/// A closed leaf-`Ref` source (the shallow name-as-written carrier).
+fn closed_ref_source(name: &str) -> verter_type_expr::facts::SemanticTypeSource {
+    verter_type_expr::facts::SemanticTypeSource::Closed(
+        verter_type_expr::facts::ClosedTypeFact::Leaf(verter_type_expr::facts::LeafTypeFact::Ref(
+            name.to_string(),
+        )),
+    )
+}
+
+/// An authored decl-body source anchored at `canonical`/`symbol` — raisable
+/// iff that declaration exists under the live view.
+fn authored_decl_body_source(
+    canonical: &str,
+    symbol: &str,
+) -> verter_type_expr::facts::SemanticTypeSource {
+    verter_type_expr::facts::SemanticTypeSource::Authored(
+        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            verter_type_expr::locators::TypeBodySlot {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: Arc::from(canonical),
+                    symbol: Arc::from(symbol),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                },
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            },
+        ),
+    )
+}
+
+/// The ALL-11-LANES sentinel fixture: one component populating every wire
+/// type lane — props (distinct middle element), DUPLICATE event names,
+/// nested slot bindings (repeated binding name across slots), models,
+/// exposed, public-instance members, merged type-registry rows, accepted
+/// props/events (declared + inherited), and MULTIPLE fallthrough branches —
+/// resolved through the audited output entry and asserted POSITIONALLY.
+///
+/// Discrimination: a name-keyed (map) lane loses the duplicate `dup` event
+/// row and collapses the repeated `row` binding across slots; an internal
+/// positional swap moves the DISTINCT middle prop sentinel (`middle:
+/// number`) onto a neighbour. Both fail the exact positional assertions.
+#[test]
+fn component_meta_output_materializes_all_eleven_lanes_positionally() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/ChildA.vue",
+            r#"<script setup lang="ts">
+defineProps<{ inheritedA: string }>()
+defineEmits<{ childEventA: [flag: boolean] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/ChildB.vue",
+            r#"<script setup lang="ts">
+defineProps<{ inheritedB: number }>()
+defineEmits<{ childEventB: [tag: string] }>()
+</script>
+<template><span /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import ChildA from './ChildA.vue'
+import ChildB from './ChildB.vue'
+type Named = { x: number }
+defineProps<{ first: string; middle: number; last: boolean; named: Named }>()
+defineEmits<{ first: [id: number]; dup: [a: string]; dup: [b: boolean] }>()
+defineSlots<{ default(props: { row: string; other: number }): any; second(props: { row: boolean }): any }>()
+const modelSentinel = defineModel<boolean>('modelSentinel')
+const exposedVal: string = 'x'
+defineExpose({ exposedVal })
+const cond = true
+</script>
+<template>
+  <ChildA v-if="cond" />
+  <ChildB v-else />
+</template>"#,
+        )
+        .unwrap();
+
+    let (output, _request_id) = {
+        let (output, request_id) = project
+            .host()
+            .get_component_meta_output_with_resolution("/App.vue")
+            .expect("all-lanes output materialization must succeed");
+        (output.expect("component must resolve"), request_id)
+    };
+    let (analysis, resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+
+    // ── Lane 1: props (positional; DISTINCT middle sentinel). ──
+    assert_eq!(analysis.props.len(), lanes.props.len(), "props lane 1:1");
+    let prop_names: Vec<&str> = analysis.props.iter().map(|p| p.name.as_str()).collect();
+    let first_idx = prop_names.iter().position(|n| *n == "first").unwrap();
+    let middle_idx = prop_names.iter().position(|n| *n == "middle").unwrap();
+    let last_idx = prop_names.iter().position(|n| *n == "last").unwrap();
+    assert_eq!(
+        lanes.props[first_idx],
+        TypeExpr::Primitive(PrimitiveName::String),
+        "props[first] materializes its own sentinel type"
+    );
+    assert_eq!(
+        lanes.props[middle_idx],
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the DISTINCT middle element keeps its own positional value (a swap moves it)"
+    );
+    assert_eq!(
+        lanes.props[last_idx],
+        TypeExpr::Primitive(PrimitiveName::Boolean)
+    );
+
+    // ── Lane 2: event payloads (DUPLICATE names preserved positionally). ──
+    assert_eq!(analysis.events.len(), lanes.event_payloads.len());
+    let event_names: Vec<&str> = analysis.events.iter().map(|e| e.name.as_str()).collect();
+    let dup_positions: Vec<usize> = event_names
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| (*n == "dup").then_some(i))
+        .collect();
+    assert_eq!(
+        dup_positions.len(),
+        2,
+        "duplicate event names are positional rows, never name-collapsed; got {event_names:?}"
+    );
+    // Both `dup` ROWS survive positionally; the analyzer's duplicate-key
+    // payload-source semantics (first authored payload wins per name — the
+    // upstream behavior the foundation events test pins) apply to BOTH rows'
+    // sources, and the lane transports each row's source faithfully.
+    assert_eq!(
+        lanes.event_payloads[dup_positions[0]],
+        labeled_tuple(&[("a", TypeExpr::Primitive(PrimitiveName::String))]),
+    );
+    assert_eq!(
+        lanes.event_payloads[dup_positions[1]],
+        labeled_tuple(&[("a", TypeExpr::Primitive(PrimitiveName::String))]),
+        "the duplicate row transports its analysis source 1:1 (never dropped)"
+    );
+    // The DISTINCT `first` event keeps its own payload — an internal
+    // positional swap moves it onto a `dup` row.
+    let first_event = event_names.iter().position(|n| *n == "first").unwrap();
+    assert_eq!(
+        lanes.event_payloads[first_event],
+        labeled_tuple(&[("id", TypeExpr::Primitive(PrimitiveName::Number))]),
+        "the distinct event keeps its own positional payload"
+    );
+
+    // ── Lane 3: slot bindings (nested topology; repeated `row` name). ──
+    assert_eq!(analysis.slots.len(), lanes.slot_bindings.len());
+    for (slot, binding_lane) in analysis.slots.iter().zip(lanes.slot_bindings.iter()) {
+        assert_eq!(
+            slot.bindings.len(),
+            binding_lane.len(),
+            "slot `{}` bindings inner-align 1:1",
+            slot.name
+        );
+    }
+    let default_idx = analysis
+        .slots
+        .iter()
+        .position(|s| s.name == "default")
+        .expect("default slot");
+    let second_idx = analysis
+        .slots
+        .iter()
+        .position(|s| s.name == "second")
+        .expect("second slot");
+    let default_row = analysis.slots[default_idx]
+        .bindings
+        .iter()
+        .position(|b| b.name == "row")
+        .expect("default.row binding");
+    let second_row = analysis.slots[second_idx]
+        .bindings
+        .iter()
+        .position(|b| b.name == "row")
+        .expect("second.row binding");
+    // Binding rows publish the shallow SyntheticSlotBinding carrier (the
+    // re-resolvable binding identity — shallow-by-default); the carrier key
+    // names BOTH the owning slot and the binding, so a cross-slot collapse
+    // of the repeated `row` name or a positional swap changes the key.
+    match &lanes.slot_bindings[default_idx][default_row] {
+        TypeExpr::SyntheticSlotBinding(key) => {
+            assert_eq!(key.slot_name.as_deref(), Some("default"));
+            assert_eq!(key.binding_name.as_ref(), "row");
+        }
+        other => panic!("default.row publishes its own binding carrier; got {other:?}"),
+    }
+    match &lanes.slot_bindings[second_idx][second_row] {
+        TypeExpr::SyntheticSlotBinding(key) => {
+            assert_eq!(
+                key.slot_name.as_deref(),
+                Some("second"),
+                "second.row keeps ITS OWN slot's carrier — the repeated name never                  collapses across slots"
+            );
+            assert_eq!(key.binding_name.as_ref(), "row");
+        }
+        other => panic!("second.row publishes its own binding carrier; got {other:?}"),
+    }
+
+    // ── Lane 4: models — exact sentinel VALUE (a deleted model
+    // materializer empties the lane; an Unknown-returning one fails the
+    // exact equality). ──
+    assert_eq!(analysis.models.len(), lanes.models.len());
+    let model_idx = analysis
+        .models
+        .iter()
+        .position(|m| m.name == "modelSentinel")
+        .expect("fixture premise: defineModel populates the models lane");
+    assert_eq!(
+        lanes.models[model_idx],
+        TypeExpr::Primitive(PrimitiveName::Boolean),
+        "the model lane materializes the defineModel type argument exactly"
+    );
+
+    // ── Lane 5: exposed — exact sentinel VALUE. ──
+    assert_eq!(analysis.exposed.len(), lanes.exposed.len());
+    let exposed_idx = analysis
+        .exposed
+        .iter()
+        .position(|x| x.name == "exposedVal")
+        .expect("fixture premise: defineExpose populates the exposed lane");
+    assert_eq!(
+        lanes.exposed[exposed_idx],
+        TypeExpr::Primitive(PrimitiveName::String),
+        "the exposed lane materializes the exposed binding's type exactly"
+    );
+
+    // ── Lane 6: public-instance members — exact sentinel VALUES (the
+    // exposed member AND the distinct middle prop, so a cross-lane or
+    // positional swap moves a wrong value here). ──
+    let public_instance = analysis
+        .public_instance
+        .as_ref()
+        .expect("fixture premise: props+slots+exposed populate the public-instance sidecar");
+    assert_eq!(
+        public_instance.members.len(),
+        lanes.public_instance_members.len()
+    );
+    let pi_exposed = public_instance
+        .members
+        .iter()
+        .position(|m| m.name == "exposedVal")
+        .expect("public-instance carries the exposed member");
+    assert_eq!(
+        lanes.public_instance_members[pi_exposed],
+        TypeExpr::Primitive(PrimitiveName::String),
+    );
+    let pi_middle = public_instance
+        .members
+        .iter()
+        .position(|m| m.name == "middle")
+        .expect("public-instance carries the middle prop member");
+    assert_eq!(
+        lanes.public_instance_members[pi_middle],
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the DISTINCT middle member keeps its own positional value"
+    );
+
+    // ── Lane 7: merged type-registry rows (overlay finalize is session-owned). ──
+    assert!(
+        resolution.is_some(),
+        "the audited output entry carries the narrowed resolution sidecar"
+    );
+    assert_eq!(
+        analysis.type_registry.len(),
+        lanes.type_registry_entries.len()
+    );
+    let named_idx = analysis
+        .type_registry
+        .iter()
+        .position(|e| e.name == "Named")
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture premise: the Named macro type reference enters the registry; got {:?}",
+                analysis
+                    .type_registry
+                    .iter()
+                    .map(|e| e.name.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+    match &lanes.type_registry_entries[named_idx] {
+        TypeExpr::Object(object) => {
+            assert_eq!(object.properties.len(), 1, "Named = {{ x: number }}");
+            match &object.properties[0] {
+                verter_type_expr::ObjectMember::Property(prop) => {
+                    assert_eq!(prop.name, "x");
+                    assert_eq!(
+                        prop.ty,
+                        TypeExpr::Primitive(PrimitiveName::Number),
+                        "the registry lane materializes the declaration body exactly"
+                    );
+                }
+                other => panic!("Named.x is a property; got {other:?}"),
+            }
+        }
+        other => panic!(
+            "the registry lane materializes Named's object body (never Unknown); got {other:?}"
+        ),
+    }
+
+    // ── Lanes 8-9: accepted props/events (declared + inherited). ──
+    assert_eq!(analysis.accepted_props.len(), lanes.accepted_props.len());
+    assert_eq!(
+        analysis.accepted_events.len(),
+        lanes.accepted_event_payloads.len()
+    );
+    let accepted_names: Vec<&str> = analysis
+        .accepted_props
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(
+        accepted_names.contains(&"first") && accepted_names.contains(&"inheritedA"),
+        "accepted props span declared AND inherited rows; got {accepted_names:?}"
+    );
+    let inherited_a = accepted_names
+        .iter()
+        .position(|n| *n == "inheritedA")
+        .unwrap();
+    assert_eq!(
+        lanes.accepted_props[inherited_a],
+        TypeExpr::Primitive(PrimitiveName::String),
+        "the INHERITED accepted prop materializes the child's own type under the child scope"
+    );
+    let declared_first = accepted_names.iter().position(|n| *n == "first").unwrap();
+    assert_eq!(
+        lanes.accepted_props[declared_first],
+        TypeExpr::Primitive(PrimitiveName::String),
+        "the DECLARED accepted prop materializes its own type exactly"
+    );
+    // Accepted-event payloads: BOTH children's inherited events carry their
+    // exact payload tuples (an Unknown-returning or deleted materializer
+    // fails these; a cross-child swap moves flag/tag onto the wrong row).
+    let accepted_event_names: Vec<&str> = analysis
+        .accepted_events
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    let child_a_event = accepted_event_names
+        .iter()
+        .position(|n| *n == "childEventA")
+        .expect("accepted events span the inherited child events");
+    assert_eq!(
+        lanes.accepted_event_payloads[child_a_event],
+        labeled_tuple(&[("flag", TypeExpr::Primitive(PrimitiveName::Boolean))]),
+        "childEventA's accepted payload materializes ChildA's exact tuple"
+    );
+    let child_b_event = accepted_event_names
+        .iter()
+        .position(|n| *n == "childEventB")
+        .expect("accepted events span BOTH children's inherited events");
+    assert_eq!(
+        lanes.accepted_event_payloads[child_b_event],
+        labeled_tuple(&[("tag", TypeExpr::Primitive(PrimitiveName::String))]),
+        "childEventB's accepted payload materializes ChildB's exact tuple (never ChildA's)"
+    );
+
+    // ── Lanes 10-11: MULTIPLE fallthrough branches, per-branch rows. ──
+    let verter_semantic::analysis::component_meta::FallthroughSurface::Branches { branches } =
+        &analysis.fallthrough_surface
+    else {
+        panic!("fixture premise: v-if/v-else roots produce fallthrough branches");
+    };
+    assert_eq!(branches.len(), 2, "two conditional root branches");
+    assert_eq!(branches.len(), lanes.fallthrough_props.len());
+    assert_eq!(branches.len(), lanes.fallthrough_event_payloads.len());
+    for (branch, (prop_lane, event_lane)) in branches.iter().zip(
+        lanes
+            .fallthrough_props
+            .iter()
+            .zip(lanes.fallthrough_event_payloads.iter()),
+    ) {
+        assert_eq!(branch.props.len(), prop_lane.len());
+        assert_eq!(branch.events.len(), event_lane.len());
+    }
+    // Branch 0 inherits from ChildA (string), branch 1 from ChildB (number)
+    // — a branch swap or a parent-scoped mis-raise moves/loses these.
+    let a_branch = branches
+        .iter()
+        .position(|b| b.props.iter().any(|p| p.name == "inheritedA"))
+        .expect("a branch inherits ChildA's prop");
+    let b_branch = branches
+        .iter()
+        .position(|b| b.props.iter().any(|p| p.name == "inheritedB"))
+        .expect("a branch inherits ChildB's prop");
+    assert_ne!(a_branch, b_branch, "each child contributes its OWN branch");
+    let a_row = branches[a_branch]
+        .props
+        .iter()
+        .position(|p| p.name == "inheritedA")
+        .unwrap();
+    assert_eq!(
+        lanes.fallthrough_props[a_branch][a_row],
+        TypeExpr::Primitive(PrimitiveName::String),
+    );
+    let b_row = branches[b_branch]
+        .props
+        .iter()
+        .position(|p| p.name == "inheritedB")
+        .unwrap();
+    assert_eq!(
+        lanes.fallthrough_props[b_branch][b_row],
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "branch B keeps ITS child's sentinel type (never ChildA's)"
+    );
+    // Per-branch EVENT payload rows: each branch carries ITS child's exact
+    // event tuple (a deleted fallthrough-event materializer empties the
+    // lane; an Unknown-returning one or a branch swap fails the equality).
+    let a_event_row = branches[a_branch]
+        .events
+        .iter()
+        .position(|e| e.name == "childEventA")
+        .expect("branch A inherits ChildA's event");
+    assert_eq!(
+        lanes.fallthrough_event_payloads[a_branch][a_event_row],
+        labeled_tuple(&[("flag", TypeExpr::Primitive(PrimitiveName::Boolean))]),
+        "branch A's event payload materializes ChildA's exact tuple"
+    );
+    let b_event_row = branches[b_branch]
+        .events
+        .iter()
+        .position(|e| e.name == "childEventB")
+        .expect("branch B inherits ChildB's event");
+    assert_eq!(
+        lanes.fallthrough_event_payloads[b_branch][b_event_row],
+        labeled_tuple(&[("tag", TypeExpr::Primitive(PrimitiveName::String))]),
+        "branch B's event payload materializes ChildB's exact tuple (never ChildA's)"
+    );
+}
+
+/// Closed shallow carriers survive to the wire UNexpanded: an imported alias
+/// published as `Closed(Leaf(Ref))` materializes to the bare `Ref` name AS
+/// WRITTEN (never the internal declaration body), and a closed literal union
+/// (`LeafUnion`) renders its ordered members directly.
+#[test]
+fn component_meta_output_closed_ref_alias_and_leaf_union_stay_shallow() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            "export type PublishedAlias = { deep: string; nested: { inner: number } }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { PublishedAlias } from './types'
+defineProps<{ aliased: PublishedAlias; lit: 'x' | 'y' }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("output materialization must succeed")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+
+    let aliased_idx = analysis
+        .props
+        .iter()
+        .position(|p| p.name == "aliased")
+        .expect("aliased prop");
+    match &lanes.props[aliased_idx] {
+        TypeExpr::Ref { name, .. } => assert_eq!(
+            name.as_ref(),
+            "PublishedAlias",
+            "the published alias keeps the name AS WRITTEN"
+        ),
+        other => panic!(
+            "a closed shallow alias carrier must materialize as the bare Ref, \
+             NOT the expanded declaration body (Shallow-By-Default); got {other:?}"
+        ),
+    }
+
+    let lit_idx = analysis
+        .props
+        .iter()
+        .position(|p| p.name == "lit")
+        .expect("lit prop");
+    match &lanes.props[lit_idx] {
+        TypeExpr::Union(members) => {
+            assert_eq!(members.len(), 2, "both literal arms render");
+            assert!(
+                matches!(&members[0], TypeExpr::Literal(LiteralValue::String(v)) if v == "x"),
+                "ordered union arm 0 is 'x'; got {:?}",
+                members[0]
+            );
+            assert!(
+                matches!(&members[1], TypeExpr::Literal(LiteralValue::String(v)) if v == "y"),
+                "ordered union arm 1 is 'y'"
+            );
+        }
+        other => panic!("a closed literal union renders directly; got {other:?}"),
+    }
+}
+
+/// Arm the test-only pre-resolve hook on the SHARED cold bodies: `hook`
+/// runs ONCE, inside the next cold component-meta entry, in exactly the
+/// capture→resolve window (after the entry captured its fixed store view,
+/// before the pinned resolve dispatches).
+fn arm_cold_body_pre_resolve_hook(hook: impl FnOnce() + 'static) {
+    crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+/// The FIX-1 torn-result fixture: `/dep.ts` publishes the whole props
+/// payload; a SIBLING owner pre-materializes the dep's artifacts under the
+/// ORIGINAL content so the pinned cold compute can read the captured view's
+/// candidates; the owner under test stays COLD.
+fn seed_pinned_view_fixture(project: &Arc<MetaProject>, owner: &str) {
+    project
+        .upsert_base("/dep.ts", "export interface DepProps { value: number }\n")
+        .unwrap();
+    let sfc = r#"<script setup lang="ts">
+import type { DepProps } from './dep'
+defineProps<DepProps>()
+</script>
+<template><div /></template>"#;
+    project.upsert_base("/PinSibling.vue", sfc).unwrap();
+    project.upsert_base(owner, sfc).unwrap();
+    let sibling = project
+        .host()
+        .get_component_meta("/PinSibling.vue")
+        .expect("sibling owner resolves");
+    assert_eq!(
+        sibling.props.len(),
+        1,
+        "fixture premise: the original dep publishes exactly one prop"
+    );
+}
+
+/// The dep mutation the hook lands inside the capture→resolve window: the
+/// NEW content grows a second prop and flips the first prop's type, so a
+/// resolve that opens its own fresh store view is unmistakable (2 props /
+/// string) versus the captured view's world (1 prop / number).
+fn mutate_pinned_view_dep(project: &Arc<MetaProject>) {
+    project
+        .upsert_base(
+            "/dep.ts",
+            "export interface DepProps { value: string; extra: boolean }\n",
+        )
+        .unwrap();
+}
+
+/// FIX-1 regression (audited / LSP-facing output route): the cold resolve
+/// inside `get_component_meta_output_with_resolution` is PINNED to the
+/// entry's ONE captured store view. A dependency mutation landing between
+/// the capture and the resolve must yield a view-CONSISTENT response —
+/// fully the captured (old) view's world — never a fresh-view analysis
+/// (2 props) paired with capture-bound materialization (the torn result).
+///
+/// Discrimination: an UNPINNED resolve (`resolve_component_meta` opening
+/// its own `snapshot_store_view_read()`) observes the mutated dep and
+/// returns 2 props — every `len == 1` assertion below fails RED.
+#[test]
+fn audited_output_cold_resolve_is_pinned_to_the_captured_store_view() {
+    let project = make_project();
+    seed_pinned_view_fixture(&project, "/PinAppOutput.vue");
+
+    let mutate = Arc::clone(&project);
+    arm_cold_body_pre_resolve_hook(move || mutate_pinned_view_dep(&mutate));
+
+    let (output, _request_id) = {
+        let (output, request_id) = project
+            .host()
+            .get_component_meta_output_with_resolution("/PinAppOutput.vue")
+            .expect("output materialization must not fail");
+        (output.expect("component must resolve"), request_id)
+    };
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+
+    assert_eq!(
+        analysis.props.len(),
+        1,
+        "view-consistency: the analysis is the CAPTURED view's world (1 prop), \
+         never the mutated view's (2 props) — an unpinned resolve tears here"
+    );
+    assert_eq!(analysis.props[0].name, "value");
+    assert_eq!(lanes.props.len(), 1, "the materialized lane aligns 1:1");
+    assert_eq!(
+        lanes.props[0],
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the materialized prop type is the CAPTURED view's `number` — the \
+         analysis and the materialization describe ONE snapshot"
+    );
+
+    // Recovery: with the mutation now live (and the superseded cold result
+    // fenced out of the warm cache), a fresh request serves the NEW world.
+    let (fresh, _request_id) = {
+        let (output, request_id) = project
+            .host()
+            .get_component_meta_output_with_resolution("/PinAppOutput.vue")
+            .expect("fresh output materialization must not fail");
+        (output.expect("component must resolve"), request_id)
+    };
+    let (fresh_analysis, _fresh_resolution, _fresh_types) = fresh.into_parts();
+    assert_eq!(
+        fresh_analysis.props.len(),
+        2,
+        "the next request observes the mutated dep — the fenced cold result \
+         was returned-only, never promoted as warm state"
+    );
+}
+
+/// FIX-1 regression (locator-only analysis entry): the cold resolve inside
+/// `get_component_meta` is PINNED to the entry's ONE captured store view —
+/// same barrier-controlled mutation, same view-consistency contract as the
+/// audited output route above.
+#[test]
+fn analysis_entry_cold_resolve_is_pinned_to_the_captured_store_view() {
+    let project = make_project();
+    seed_pinned_view_fixture(&project, "/PinAppAnalysis.vue");
+
+    let mutate = Arc::clone(&project);
+    arm_cold_body_pre_resolve_hook(move || mutate_pinned_view_dep(&mutate));
+
+    let analysis = project
+        .host()
+        .get_component_meta("/PinAppAnalysis.vue")
+        .expect("component must resolve");
+    assert_eq!(
+        analysis.props.len(),
+        1,
+        "view-consistency: the locator-only analysis is the CAPTURED view's \
+         world (1 prop) — an unpinned resolve observes the mutated dep (2)"
+    );
+    assert_eq!(analysis.props[0].name, "value");
+
+    // Recovery: the next request observes the mutated dep.
+    let fresh = project
+        .host()
+        .get_component_meta("/PinAppAnalysis.vue")
+        .expect("component must resolve");
+    assert_eq!(fresh.props.len(), 2);
+}
+
+/// FIX-1 regression (resolution-bearing locator entry): the cold resolve
+/// inside `get_component_meta_with_resolution` is PINNED to the entry's ONE
+/// captured store view.
+#[test]
+fn with_resolution_cold_resolve_is_pinned_to_the_captured_store_view() {
+    let project = make_project();
+    seed_pinned_view_fixture(&project, "/PinAppResolution.vue");
+
+    let mutate = Arc::clone(&project);
+    arm_cold_body_pre_resolve_hook(move || mutate_pinned_view_dep(&mutate));
+
+    let (analysis, _resolved) = project
+        .host()
+        .get_component_meta_with_resolution("/PinAppResolution.vue")
+        .expect("component must resolve");
+    assert_eq!(
+        analysis.props.len(),
+        1,
+        "view-consistency: the analysis is the CAPTURED view's world"
+    );
+    assert_eq!(analysis.props[0].name, "value");
+}
+
+/// `None` sources on EVERY optional-source lane follow the ONE centralized
+/// missing-source policy — the canonical typed `TypeExpr::Unknown` with an
+/// empty raw — while the adjacent raw display metadata (`raw_type` /
+/// `raw_signature`) is preserved verbatim on the analysis. (The registry
+/// lane is structurally excluded: its source is non-optional.)
+#[test]
+fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
+    use verter_semantic::analysis::component_meta as cm;
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", "<template><div /></template>")
+        .unwrap();
+    let host = project.host();
+
+    let mut analysis = blank_output_analysis();
+    analysis.props.push(cm::PropAnalysis {
+        name: "p".to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        type_expansion: None,
+        raw_type: Some("RawPropText".to_string()),
+        raw_type_source: None,
+        required: true,
+        has_default: false,
+        default_value: None,
+        description: None,
+        tags: Vec::new(),
+        declared_in_macro_type_arg: false,
+    });
+    analysis.events.push(cm::EventAnalysis {
+        name: "e".to_string(),
+        payload: verter_type_expr::facts::SourcePosition::unannotated(),
+        payload_expansion: None,
+        raw_signature: Some("(e: 'e') => void".to_string()),
+        description: None,
+        tags: Vec::new(),
+    });
+    analysis.slots.push(cm::SlotAnalysis {
+        name: "s".to_string(),
+        is_scoped: true,
+        bindings: vec![cm::SlotBindingAnalysis {
+            name: "b".to_string(),
+            type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+            type_expansion: None,
+            raw_type: Some("RawBindingText".to_string()),
+            raw_type_source: None,
+        }],
+        is_required: false,
+        return_type: None,
+        return_source: None,
+        return_source_scope: None,
+        description: None,
+        tags: Vec::new(),
+    });
+    analysis.models.push(cm::ModelAnalysis {
+        name: "m".to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+    });
+    analysis.exposed.push(cm::ExposedAnalysis {
+        name: "x".to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        type_expansion: None,
+        description: None,
+        tags: Vec::new(),
+    });
+    analysis.public_instance = Some(cm::PublicInstanceAnalysis {
+        members: vec![cm::PublicInstanceMemberAnalysis {
+            name: "pi".to_string(),
+            kind: cm::PublicInstanceMemberKind::Prop,
+            type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+            type_expansion: None,
+            raw_type: Some("RawMemberText".to_string()),
+            description: None,
+            tags: Vec::new(),
+        }],
+        completeness: cm::PublicInstanceCompleteness::Exact,
+    });
+    analysis.accepted_props.push(cm::AcceptedPropAnalysis {
+        name: "ap".to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        type_source_scope: None,
+        raw_type: Some("RawAcceptedText".to_string()),
+        raw_type_source: None,
+        required: false,
+        provenance: cm::MemberProvenance::Declared,
+        availability: cm::MemberAvailability::Always,
+        kind: cm::AcceptedPropKind::DeclaredProp,
+    });
+    analysis.accepted_events.push(cm::AcceptedEventAnalysis {
+        name: "ae".to_string(),
+        payload: verter_type_expr::facts::SourcePosition::unannotated(),
+        payload_scope: None,
+        raw_signature: Some("(e: 'ae') => void".to_string()),
+        provenance: cm::MemberProvenance::Declared,
+        availability: cm::MemberAvailability::Always,
+        kind: cm::AcceptedEventKind::DeclaredEmit,
+    });
+    analysis.fallthrough_surface = cm::FallthroughSurface::Branches {
+        branches: vec![cm::FallthroughBranch {
+            branch_key: "0".to_string(),
+            condition_text: None,
+            props: vec![cm::FallthroughPropEntry {
+                name: "fp".to_string(),
+                type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+                type_source_scope: None,
+                raw_type: Some("RawFallthroughText".to_string()),
+                sources: vec![cm::InheritedSource::NativeTag {
+                    tag: "div".to_string(),
+                }],
+            }],
+            events: vec![cm::FallthroughEventEntry {
+                name: "fe".to_string(),
+                payload: verter_type_expr::facts::SourcePosition::unannotated(),
+                payload_scope: None,
+                raw_signature: None,
+                sources: vec![cm::InheritedSource::NativeTag {
+                    tag: "div".to_string(),
+                }],
+            }],
+            root_chain: Vec::new(),
+            status: cm::BranchStatus::Resolved,
+        }],
+    };
+
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
+        host, "/App.vue", analysis, None,
+    )
+    .expect("None sources never fail materialization");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+
+    let unknown = TypeExpr::Unknown { raw: String::new() };
+    assert_eq!(
+        lanes.props,
+        vec![unknown.clone()],
+        "props None-policy golden"
+    );
+    assert_eq!(lanes.event_payloads, vec![unknown.clone()]);
+    assert_eq!(lanes.slot_bindings, vec![vec![unknown.clone()]]);
+    assert_eq!(lanes.models, vec![unknown.clone()]);
+    assert_eq!(lanes.exposed, vec![unknown.clone()]);
+    assert_eq!(lanes.public_instance_members, vec![unknown.clone()]);
+    assert_eq!(lanes.accepted_props, vec![unknown.clone()]);
+    assert_eq!(lanes.accepted_event_payloads, vec![unknown.clone()]);
+    assert_eq!(lanes.fallthrough_props, vec![vec![unknown.clone()]]);
+    assert_eq!(lanes.fallthrough_event_payloads, vec![vec![unknown]]);
+
+    // Raw display metadata is untouched by the type-lane policy.
+    assert_eq!(analysis.props[0].raw_type.as_deref(), Some("RawPropText"));
+    assert_eq!(
+        analysis.slots[0].bindings[0].raw_type.as_deref(),
+        Some("RawBindingText")
+    );
+    assert_eq!(
+        analysis.accepted_props[0].raw_type.as_deref(),
+        Some("RawAcceptedText")
+    );
+}
+
+/// A present-but-UNRAISABLE source on a NESTED lane fails the whole output
+/// with the typed error carrying the lane + BOTH positional indices — never
+/// a silent `Unknown`.
+#[test]
+fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", "<template><div /></template>")
+        .unwrap();
+    let host = project.host();
+    let bad_source = authored_decl_body_source("/definitely-missing.ts", "NoSuchType");
+
+    // Nested lane 1: slot bindings (outer = slot index, inner = binding row).
+    let mut analysis = blank_output_analysis();
+    analysis
+        .slots
+        .push(verter_semantic::analysis::component_meta::SlotAnalysis {
+            name: "s".to_string(),
+            is_scoped: true,
+            bindings: vec![
+                verter_semantic::analysis::component_meta::SlotBindingAnalysis {
+                    name: "ok".to_string(),
+                    type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+                    type_expansion: None,
+                    raw_type: None,
+                    raw_type_source: None,
+                },
+                verter_semantic::analysis::component_meta::SlotBindingAnalysis {
+                    name: "bad".to_string(),
+                    type_source: verter_type_expr::facts::SourcePosition::Present(
+                        bad_source.clone(),
+                    ),
+                    type_expansion: None,
+                    raw_type: None,
+                    raw_type_source: None,
+                },
+            ],
+            is_required: false,
+            return_type: None,
+            return_source: None,
+            return_source_scope: None,
+            description: None,
+            tags: Vec::new(),
+        });
+    let err = crate::meta_resolve::projectors::build_component_meta_output(
+        host, "/App.vue", analysis, None,
+    )
+    .expect_err("an unraisable present source must FAIL the output");
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::SlotBinding
+    );
+    assert_eq!(err.index, 0, "outer index = slot position");
+    assert_eq!(err.inner_index, Some(1), "inner index = binding row");
+    assert_eq!(
+        *err.position,
+        verter_type_expr::facts::SourcePosition::Present(bad_source.clone())
+    );
+    assert_eq!(
+        err.failure,
+        crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource
+    );
+
+    // Nested lane 2: fallthrough props (outer = branch, inner = row).
+    let mut analysis = blank_output_analysis();
+    analysis.fallthrough_surface =
+        verter_semantic::analysis::component_meta::FallthroughSurface::Branches {
+            branches: vec![
+                verter_semantic::analysis::component_meta::FallthroughBranch {
+                    branch_key: "0".to_string(),
+                    condition_text: None,
+                    props: Vec::new(),
+                    events: Vec::new(),
+                    root_chain: Vec::new(),
+                    status: verter_semantic::analysis::component_meta::BranchStatus::Resolved,
+                },
+                verter_semantic::analysis::component_meta::FallthroughBranch {
+                    branch_key: "1".to_string(),
+                    condition_text: None,
+                    props: vec![
+                        verter_semantic::analysis::component_meta::FallthroughPropEntry {
+                            name: "bad".to_string(),
+                            type_source: verter_type_expr::facts::SourcePosition::Present(
+                                bad_source.clone(),
+                            ),
+                            type_source_scope: None,
+                            raw_type: None,
+                            sources: Vec::new(),
+                        },
+                    ],
+                    events: Vec::new(),
+                    root_chain: Vec::new(),
+                    status: verter_semantic::analysis::component_meta::BranchStatus::Resolved,
+                },
+            ],
+        };
+    let err = crate::meta_resolve::projectors::build_component_meta_output(
+        host, "/App.vue", analysis, None,
+    )
+    .expect_err("an unraisable fallthrough source must FAIL the output");
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::FallthroughProp
+    );
+    assert_eq!(
+        err.index, 1,
+        "outer index = the FAILING branch, not branch 0"
+    );
+    assert_eq!(err.inner_index, Some(0));
+}
+
+/// RECOVERY: the same output succeeds once the missing dependency becomes
+/// available — the typed failure is a live-view condition, not a sticky
+/// poisoned state.
+#[test]
+fn component_meta_output_recovers_after_missing_dependency_is_available() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", "<template><div /></template>")
+        .unwrap();
+    let host = project.host();
+
+    let dep_source = authored_decl_body_source("/dep.ts", "DepType");
+    let mut analysis = blank_output_analysis();
+    analysis
+        .props
+        .push(verter_semantic::analysis::component_meta::PropAnalysis {
+            name: "p".to_string(),
+            type_source: verter_type_expr::facts::SourcePosition::Present(dep_source.clone()),
+            type_expansion: None,
+            raw_type: None,
+            raw_type_source: None,
+            required: true,
+            has_default: false,
+            default_value: None,
+            description: None,
+            tags: Vec::new(),
+            declared_in_macro_type_arg: false,
+        });
+
+    let err = crate::meta_resolve::projectors::build_component_meta_output(
+        host,
+        "/App.vue",
+        analysis.clone(),
+        None,
+    )
+    .expect_err("the dependency file does not exist yet — the output must fail typed");
+    assert_eq!(err.lane, crate::meta_resolve::ComponentMetaOutputLane::Prop);
+
+    project
+        .upsert_base("/dep.ts", "export type DepType = number\n")
+        .unwrap();
+
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
+        host, "/App.vue", analysis, None,
+    )
+    .expect("the SAME source succeeds once the dependency is available");
+    let lanes = output.into_parts().2.into_lanes();
+    assert_eq!(
+        lanes.props[0],
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the recovered raise materializes the dependency's actual body"
+    );
+}
+
+/// A `TypeBodySlot` locator anchored at a declaration that does not exist —
+/// the failed REQUIRED interior dereference every FIX-3 composite fixture
+/// embeds.
+fn missing_interior_slot() -> verter_type_expr::locators::TypeBodySlot {
+    verter_type_expr::locators::TypeBodySlot {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from("/definitely-missing.ts"),
+            symbol: Arc::from("NoSuchType"),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+        },
+        path: Arc::from(Vec::new().into_boxed_slice()),
+    }
+}
+
+/// Wrap a composite source into a one-prop analysis and build the output.
+fn build_output_with_prop_source(
+    host: &VerterHost,
+    source: verter_type_expr::facts::SemanticTypeSource,
+) -> Result<crate::meta_resolve::ComponentMetaOutput, crate::meta_resolve::ComponentMetaOutputError>
+{
+    let mut analysis = blank_output_analysis();
+    analysis
+        .props
+        .push(verter_semantic::analysis::component_meta::PropAnalysis {
+            name: "p".to_string(),
+            type_source: verter_type_expr::facts::SourcePosition::Present(source),
+            type_expansion: None,
+            raw_type: None,
+            raw_type_source: None,
+            required: true,
+            has_default: false,
+            default_value: None,
+            description: None,
+            tags: Vec::new(),
+            declared_in_macro_type_arg: false,
+        });
+    crate::meta_resolve::projectors::build_component_meta_output(host, "/App.vue", analysis, None)
+}
+
+/// FIX-3 regression: a failed INTERIOR required locator inside a
+/// successfully-composed root FAILS the output with the typed
+/// `InteriorSourceMiss` (carrying the nested position path) — never an
+/// `Ok` whose lane silently renders the interior miss as `Unknown`.
+/// Covers all four composite source families: object member, function
+/// parameter, tuple element, index-signature value.
+#[test]
+fn component_meta_output_failed_interior_locator_fails_closed_per_source_family() {
+    use verter_type_expr::facts as tf;
+    use verter_type_expr::span_origins::SourceSynthetic;
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", "<template><div /></template>")
+        .unwrap();
+    let host = project.host();
+    let bad = missing_interior_slot();
+
+    // (1) Closed OBJECT with a member whose value slot cannot deref.
+    let object_source =
+        tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Object(tf::ObjectShapeFact {
+            members: Arc::from(
+                vec![tf::ObjectMemberFact::Property(tf::ObjectPropertyFact {
+                    name: "member".to_string(),
+                    optional: false,
+                    readonly: false,
+                    visibility: verter_type_expr::MemberVisibility::Public,
+                    ty: bad.clone(),
+                    span_origin: verter_type_expr::span_origins::MemberSpansOrigin::Synthetic(
+                        SourceSynthetic,
+                    ),
+                })]
+                .into_boxed_slice(),
+            ),
+        }));
+    let err = build_output_with_prop_source(host, object_source)
+        .expect_err("a failed interior OBJECT-member locator must fail the output");
+    assert_eq!(err.lane, crate::meta_resolve::ComponentMetaOutputLane::Prop);
+    match &err.failure {
+        crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path } => {
+            assert_eq!(
+                path.as_ref(),
+                &[crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
+                    "member"
+                ))],
+                "the typed failure names the exact nested member position"
+            );
+        }
+        other => panic!("expected InteriorSourceMiss with the member path; got {other:?}"),
+    }
+
+    // (2) Closed FUNCTION with a PRESENT (annotated) parameter slot that
+    // cannot deref.
+    let function_source =
+        tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Function(tf::FunctionSignatureFact {
+            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            parameters: Arc::from(
+                vec![tf::FunctionParamFact {
+                    name: Some("arg".to_string()),
+                    optional: false,
+                    rest: false,
+                    has_ts_annotation: true,
+                    ty: Some(bad.clone()),
+                    span_origin: verter_type_expr::span_origins::FunctionParamSpanOrigin {
+                        function: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
+                            SourceSynthetic,
+                        ),
+                        param: verter_type_expr::span_origins::FunctionParamSelector::Positional {
+                            ordinal: 0,
+                        },
+                    },
+                }]
+                .into_boxed_slice(),
+            ),
+            return_ty: None,
+            has_implementation_body: false,
+            spans_origin: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
+                SourceSynthetic,
+            ),
+        }));
+    let err = build_output_with_prop_source(host, function_source)
+        .expect_err("a failed interior function-PARAMETER locator must fail the output");
+    match &err.failure {
+        crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path } => {
+            assert_eq!(
+                path.as_ref(),
+                &[crate::meta_resolve::InteriorSourceStep::Parameter { ordinal: 0 }],
+            );
+        }
+        other => panic!("expected InteriorSourceMiss with the parameter path; got {other:?}"),
+    }
+
+    // (3) Closed TUPLE with an element locator that cannot deref.
+    let tuple_source =
+        tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Tuple(tf::TuplePayloadFact {
+            readonly: false,
+            elements: Arc::from(
+                vec![tf::TupleElementFact {
+                    label: Some("payload".to_string()),
+                    optional: false,
+                    rest: false,
+                    ty: tf::FactOrLocator::Locator(bad.clone()),
+                }]
+                .into_boxed_slice(),
+            ),
+        }));
+    let err = build_output_with_prop_source(host, tuple_source)
+        .expect_err("a failed interior TUPLE-element locator must fail the output");
+    match &err.failure {
+        crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path } => {
+            assert_eq!(
+                path.as_ref(),
+                &[crate::meta_resolve::InteriorSourceStep::TupleElement { ordinal: 0 }],
+            );
+        }
+        other => panic!("expected InteriorSourceMiss with the tuple path; got {other:?}"),
+    }
+
+    // (4) Closed OBJECT with an INDEX-SIGNATURE value slot that cannot deref.
+    let index_source =
+        tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Object(tf::ObjectShapeFact {
+            members: Arc::from(
+                vec![tf::ObjectMemberFact::IndexSignature(
+                    tf::IndexSignatureFact {
+                        key_name: "k".to_string(),
+                        key_type: tf::KeyTypeShape::String,
+                        value_type: bad.clone(),
+                        readonly: false,
+                        span_origin:
+                            verter_type_expr::span_origins::IndexSignatureSpansOrigin::Synthetic(
+                                SourceSynthetic,
+                            ),
+                    },
+                )]
+                .into_boxed_slice(),
+            ),
+        }));
+    let err = build_output_with_prop_source(host, index_source)
+        .expect_err("a failed interior INDEX-SIGNATURE value locator must fail the output");
+    match &err.failure {
+        crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path } => {
+            assert_eq!(
+                path.as_ref(),
+                &[crate::meta_resolve::InteriorSourceStep::IndexSignatureValue { ordinal: 0 }],
+            );
+        }
+        other => panic!("expected InteriorSourceMiss with the index-signature path; got {other:?}"),
+    }
+}
+
+/// FIX-3 non-conflation control: a genuinely ABSENT schema position (an
+/// unannotated parameter, an inferred return — `ty: None` by SCHEMA) is NOT
+/// a failed dereference: the output SUCCEEDS and the position renders as
+/// typed `Unknown`, exactly as before. The absent-vs-failed split is the
+/// schema `Option`, never a heuristic over the materialized `TypeExpr`.
+#[test]
+fn component_meta_output_genuinely_absent_positions_stay_typed_unknown_not_failure() {
+    use verter_type_expr::facts as tf;
+    use verter_type_expr::span_origins::SourceSynthetic;
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", "<template><div /></template>")
+        .unwrap();
+    let host = project.host();
+
+    let unannotated_fn =
+        tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Function(tf::FunctionSignatureFact {
+            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            parameters: Arc::from(
+                vec![tf::FunctionParamFact {
+                    name: Some("arg".to_string()),
+                    optional: false,
+                    rest: false,
+                    has_ts_annotation: false,
+                    ty: None, // genuinely absent by schema
+                    span_origin: verter_type_expr::span_origins::FunctionParamSpanOrigin {
+                        function: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
+                            SourceSynthetic,
+                        ),
+                        param: verter_type_expr::span_origins::FunctionParamSelector::Positional {
+                            ordinal: 0,
+                        },
+                    },
+                }]
+                .into_boxed_slice(),
+            ),
+            return_ty: None, // inferred return — genuinely absent
+            has_implementation_body: false,
+            spans_origin: verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(
+                SourceSynthetic,
+            ),
+        }));
+    let output = build_output_with_prop_source(host, unannotated_fn)
+        .expect("a genuinely-absent schema position is NOT a materialization failure");
+    let lanes = output.into_parts().2.into_lanes();
+    match &lanes.props[0] {
+        TypeExpr::Function(function) => {
+            let param = function.parameters.first().expect("one parameter");
+            assert!(
+                matches!(param.ty, TypeExpr::Unknown { .. }),
+                "the unannotated parameter stays typed Unknown; got {:?}",
+                param.ty
+            );
+        }
+        other => panic!("the function source materializes as a function; got {other:?}"),
+    }
+}
+
+/// CACHE RAILS (invariants 10 + 11): an output-materialization failure
+/// suppresses ONLY the encoded-payload admission; the independently-complete
+/// ANALYSIS/resolved-meta cache entry published by the same request stays
+/// warm, and the next (unforced) request recovers AND warms the payload
+/// cache.
+#[test]
+fn output_failure_suppresses_only_encoded_payload_never_analysis_cache() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ p: string }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let session = project.open_session().expect("session");
+
+    // Force the FIRST output materialization to fail (typed, consumed flag).
+    crate::meta_resolve::projectors::OUTPUT_MATERIALIZE_FORCE_FAIL.with(|f| f.set(true));
+    let err = session
+        .get_component_meta_payload("/App.vue", |_output| Vec::new())
+        .expect_err("the forced output failure must surface as the typed MetaError");
+    assert!(
+        matches!(err, crate::meta::MetaError::OutputMaterialization(_)),
+        "typed passthrough, never a silent Unknown; got {err:?}"
+    );
+
+    // Invariant 10: the analysis/resolved-meta cache entry admitted BEFORE
+    // the output step is untouched by the failure.
+    assert!(
+        host.derived_raw_cache()
+            .get("/App.vue")
+            .map(|e| !e.value().cached_resolved_meta.is_empty())
+            .unwrap_or(false),
+        "the independently-complete resolved-meta admission must survive an output failure"
+    );
+    // Invariant 11 (suppression side): the encoded payload was NOT admitted.
+    assert!(
+        host.derived_raw_cache()
+            .get("/App.vue")
+            .map(|e| e.value().cached_meta_payload.is_none())
+            .unwrap_or(true),
+        "a failed output must never admit an encoded payload"
+    );
+
+    // RECOVERY: the next (unforced) request succeeds and admits the payload.
+    host.provenance().payload_encodes.store(0, Relaxed);
+    let payload = session
+        .get_component_meta_payload("/App.vue", |output| {
+            format!("{:?}", output.into_parts().2.into_lanes().props).into_bytes()
+        })
+        .expect("recovery: the unforced request succeeds")
+        .expect("component resolves");
+    assert!(!payload.is_empty());
+    assert!(
+        host.derived_raw_cache()
+            .get("/App.vue")
+            .map(|e| e.value().cached_meta_payload.is_some())
+            .unwrap_or(false),
+        "the recovered request admits the encoded payload (with output deps on its rail)"
+    );
+}
+
+/// BLK1 (inner-cache fenced-serve poison) — the ENCODED-payload cache
+/// (`store_meta_payload`) must REFUSE admission when the output-materialization
+/// tracer (`output_read_set`) observed a FENCED (ReturnOnly,
+/// `store_published == false`) serve. The output stays `Complete` (a fenced
+/// serve is non-cacheable, NOT partial), so the token fence + completeness rail
+/// both PASS; the ONLY rail that refuses the poisoned payload is
+/// `output_read_set.non_cacheable_read_observed()` — which pre-fix the
+/// `resolve_one_payload_item` gate never consulted, admitting a payload
+/// computed from a served-without-publication basis whose facts validate
+/// against the live view.
+///
+/// DISCRIMINATING: a LOCAL `BareRef` prop type (`type P = …; defineProps<P>()`)
+/// resolves through the DIRECT carrier serve during output materialization;
+/// `force_carrier_direct_serve_fence` fences that serve and fans a non-cacheable
+/// read onto `output_read_set` WITHOUT a generation bump (so the token fence
+/// stays admissible). Post-fix the payload is REFUSED (`cached_meta_payload`
+/// absent) and the caller still receives it; the unforced recovery admits it.
+/// RED-pre (gate not consulting the bit) the fenced payload LANDS in
+/// `cached_meta_payload` and a later request stale-serves it.
+#[test]
+fn output_materialization_fenced_serve_refuses_encoded_payload_and_recovers() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+type P = { p: string };
+defineProps<P>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let session = project.open_session().expect("session");
+
+    // Arm: every DIRECT carrier serve in this request is treated as FENCED
+    // (ReturnOnly), fanning a non-cacheable read onto the active tracer. The
+    // output-materialization reduce (resolving the local `P` carrier, traced
+    // under `output_read_set`) observes it, so the encoded payload was computed
+    // from a served-without-publication basis while its facts validate against
+    // the live view. No generation bump ⇒ the token fence stays admissible,
+    // isolating the non-cacheability rail.
+    host.test_force
+        .force_carrier_direct_serve_fence_for_tests
+        .store(true, Relaxed);
+    let payload = session
+        .get_component_meta_payload("/App.vue", |output| {
+            format!("{:?}", output.into_parts().2.into_lanes().props).into_bytes()
+        })
+        .expect("a fenced output serve still serves the caller (ReturnOnly)")
+        .expect("component resolves");
+    host.test_force
+        .force_carrier_direct_serve_fence_for_tests
+        .store(false, Relaxed);
+    assert!(
+        !payload.is_empty(),
+        "the refused-admission payload is still returned to THIS caller",
+    );
+
+    // THE PIN: a fenced (non-cacheable) output materialization must NOT admit
+    // the encoded payload — else a later request stale-serves it warm.
+    assert!(
+        host.derived_raw_cache()
+            .get("/App.vue")
+            .map(|e| e.value().cached_meta_payload.is_none())
+            .unwrap_or(true),
+        "POISON: a fenced output materialization admitted the encoded payload — \
+         `output_read_set.non_cacheable_read_observed()` must refuse the \
+         `store_meta_payload` admission (the token fence + completeness rail both \
+         pass for a fenced-but-Complete serve)",
+    );
+
+    // Recovery: an unforced request admits the payload — the refusal was the
+    // admission gate acting, not a broken payload path.
+    let payload2 = session
+        .get_component_meta_payload("/App.vue", |output| {
+            format!("{:?}", output.into_parts().2.into_lanes().props).into_bytes()
+        })
+        .expect("recovery: the unforced request succeeds")
+        .expect("component resolves");
+    assert_eq!(
+        payload, payload2,
+        "the unforced recovery payload equals the fenced-serve value (same content)"
+    );
+    assert!(
+        host.derived_raw_cache()
+            .get("/App.vue")
+            .map(|e| e.value().cached_meta_payload.is_some())
+            .unwrap_or(false),
+        "the unforced recovery admits the encoded payload — the fenced refusal was \
+         the admission gate, not a broken path",
+    );
+}
+
+/// COLD → WARM equivalence on the base output entry, plus overlay/session
+/// equivalence: the warm-path envelope (validated cache entry + SAME-capture
+/// materialization) is byte-identical to the cold envelope, and an overlay
+/// session sees ITS overlay content, never the base.
+#[test]
+fn component_meta_output_cold_warm_base_and_overlay_agree() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ p: string }>()
+defineEmits<{ e: [n: number] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+
+    let cold = host
+        .get_component_meta_output("/App.vue")
+        .expect("cold output ok")
+        .expect("resolves");
+    let (cold_analysis, _, cold_types) = cold.into_parts();
+    let cold_debug = format!("{:?}{:?}", cold_analysis, cold_types.into_lanes());
+
+    let warm = host
+        .get_component_meta_output("/App.vue")
+        .expect("warm output ok")
+        .expect("resolves");
+    let (warm_analysis, _, warm_types) = warm.into_parts();
+    let warm_debug = format!("{:?}{:?}", warm_analysis, warm_types.into_lanes());
+    assert_eq!(
+        cold_debug, warm_debug,
+        "warm-path output must equal the cold output byte-for-byte"
+    );
+
+    // Session with NO overlay agrees with base.
+    let session = project.open_session().expect("session");
+    let base_via_session = session
+        .get_component_meta_output("/App.vue")
+        .expect("session output ok")
+        .expect("resolves");
+    let (sa, _, st) = base_via_session.into_parts();
+    assert_eq!(
+        format!("{:?}{:?}", sa, st.into_lanes()),
+        warm_debug,
+        "an overlay-less session output equals the base output"
+    );
+
+    // Session WITH an overlay sees the overlay surface.
+    session
+        .upsert(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ p: boolean }>()
+</script>
+<template><div /></template>"#
+                .to_string(),
+        )
+        .expect("overlay upsert");
+    let overlaid = session
+        .get_component_meta_output("/App.vue")
+        .expect("overlay output ok")
+        .expect("resolves");
+    let (oa, _, ot) = overlaid.into_parts();
+    let olanes = ot.into_lanes();
+    let p_idx = oa.props.iter().position(|p| p.name == "p").unwrap();
+    assert_eq!(
+        olanes.props[p_idx],
+        TypeExpr::Primitive(PrimitiveName::Boolean),
+        "the overlay session materializes the OVERLAY's prop type"
+    );
+
+    // Base host remains unpolluted by the session overlay.
+    let base_after = host
+        .get_component_meta_output("/App.vue")
+        .expect("base output ok")
+        .expect("resolves");
+    let (ba, _, bt) = base_after.into_parts();
+    assert_eq!(
+        format!("{:?}{:?}", ba, bt.into_lanes()),
+        warm_debug,
+        "the base output is unchanged by a session overlay"
+    );
+}
+
+/// FIXED-VIEW batch: the output batch equals the scalar outputs slot-by-slot
+/// AND performs O(1) (not O(N)) store-view reads on the warm pass — the
+/// single `capture_batch_fixed_view` read is threaded into every per-job
+/// call (invariant 15: no extra per-item store-view reads).
+#[test]
+fn output_batch_equals_scalar_and_is_o1_store_view_reads_when_warm() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let project = make_project();
+    const N: usize = 8;
+    let mut ids = Vec::new();
+    for i in 0..N {
+        let id = format!("/Comp{i}.vue");
+        project
+            .upsert_base(
+                &id,
+                &format!(
+                    r#"<script setup lang="ts">
+defineProps<{{ p{i}: string }}>()
+</script>
+<template><div /></template>"#
+                ),
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    let host = project.host();
+    let session = project.open_session_batch().expect("batch session");
+
+    // Cold pass populates the caches.
+    let cold = session
+        .get_component_meta_output_batch(&ids)
+        .expect("cold output batch");
+    assert_eq!(cold.len(), N);
+
+    // Scalar reference outputs (warm).
+    let scalar_debug: Vec<String> = ids
+        .iter()
+        .map(|id| {
+            let output = session
+                .get_component_meta_output(id)
+                .expect("scalar ok")
+                .expect("resolves");
+            let (a, _, t) = output.into_parts();
+            format!("{:?}{:?}", a, t.into_lanes())
+        })
+        .collect();
+
+    // Warm batch: capture-only from_host reads on THIS host — the count is
+    // SIZE-INVARIANT (a per-item read implementation scales with N and
+    // fails the equality below) and pinned EXACTLY to the per-batch capture
+    // cost, not merely `< N`.
+    host.provenance()
+        .store_view_from_host_reads
+        .store(0, Relaxed);
+    let warm = session
+        .get_component_meta_output_batch(&ids)
+        .expect("warm output batch");
+    let reads_full = host.provenance().store_view_from_host_reads.load(Relaxed);
+    assert!(
+        reads_full >= 1,
+        "the batch capture's own read must be counted (live counter)"
+    );
+
+    // Second warm batch over HALF the inputs: the read count must be
+    // IDENTICAL — the per-batch capture is the only store-view read, so it
+    // cannot scale with the item count.
+    let half_ids: Vec<String> = ids[..N / 2].to_vec();
+    host.provenance()
+        .store_view_from_host_reads
+        .store(0, Relaxed);
+    let warm_half = session
+        .get_component_meta_output_batch(&half_ids)
+        .expect("warm half batch");
+    assert!(warm_half.len() == N / 2);
+    let reads_half = host.provenance().store_view_from_host_reads.load(Relaxed);
+    assert_eq!(
+        reads_full,
+        reads_half,
+        "the warm-batch store-view read count must be SIZE-INVARIANT \
+         (capture-only): {N} items took {reads_full} reads, {} items took \
+         {reads_half} — a per-item read path scales with the batch size",
+        N / 2
+    );
+    assert_eq!(
+        reads_full, 2,
+        "the warm output batch performs EXACTLY the per-batch capture-level \
+         constant of 2 store-view reads (the overlay pre-warm's read + the \
+         fixed-view capture) — any additional read is a per-item or \
+         per-stage regression"
+    );
+
+    for (slot, expected) in warm.into_iter().zip(scalar_debug.iter()) {
+        let output = slot.expect("slot ok").expect("resolves");
+        let (a, _, t) = output.into_parts();
+        assert_eq!(
+            &format!("{:?}{:?}", a, t.into_lanes()),
+            expected,
+            "batch slot output equals the scalar output for the same canonical"
+        );
+    }
+}
+
+/// WARM-arm view fence (invariant 14): a dependency mutation landing
+/// BETWEEN the warm-cache validation and the output materialization must
+/// not tear the response — the materialization runs under the SAME captured
+/// view the validation used (fully the captured world), never an
+/// old-analysis paired with a fresh-view materialization.
+///
+/// Discrimination: an implementation that materializes under a FRESH
+/// store-view read (instead of the entry's one capture) observes the
+/// mutated dep and the lane flips to `string` — the exact `number`
+/// assertion fails RED.
+#[test]
+fn warm_output_materializes_under_the_validated_capture_not_a_fresh_view() {
+    /// The materialized `x` member of the owner-local `Sentinel` registry
+    /// row — an AUTHORED decl-body source, so the materialization DEREFS
+    /// the declaration under the request view (view-dependent, unlike the
+    /// closed leaf carriers the prop lanes publish).
+    fn sentinel_registry_member(
+        analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+        lanes: &crate::meta_resolve::MaterializedComponentMetaTypeLanes,
+    ) -> TypeExpr {
+        let idx = analysis
+            .type_registry
+            .iter()
+            .position(|e| e.name == "Sentinel")
+            .expect("the owner-local Sentinel type enters the registry");
+        match &lanes.type_registry_entries[idx] {
+            TypeExpr::Object(object) => object
+                .properties
+                .iter()
+                .find_map(|member| match member {
+                    verter_type_expr::ObjectMember::Property(prop) if prop.name == "x" => {
+                        Some(prop.ty.clone())
+                    }
+                    _ => None,
+                })
+                .expect("Sentinel carries the `x` member"),
+            other => panic!("the registry row materializes Sentinel's body; got {other:?}"),
+        }
+    }
+
+    fn warm_fence_sfc(x_type: &str) -> String {
+        format!(
+            r#"<script setup lang="ts">
+type Sentinel = {{ x: {x_type} }}
+defineProps<{{ named: Sentinel }}>()
+</script>
+<template><div /></template>"#
+        )
+    }
+
+    let project = make_project();
+    project
+        .upsert_base("/WarmFence.vue", &warm_fence_sfc("number"))
+        .unwrap();
+
+    // Cold pass warms the analysis cache and materializes the owner's
+    // artifacts under the ORIGINAL content.
+    let cold = project
+        .host()
+        .get_component_meta_output("/WarmFence.vue")
+        .expect("cold output ok")
+        .expect("resolves");
+    let (cold_analysis, _cold_res, cold_types) = cold.into_parts();
+    let cold_lanes = cold_types.into_lanes();
+    assert_eq!(
+        sentinel_registry_member(&cold_analysis, &cold_lanes),
+        TypeExpr::Primitive(PrimitiveName::Number)
+    );
+
+    // Arm the warm-arm hook: the owner mutation lands AFTER the warm entry
+    // validated against the capture, BEFORE the output materializes.
+    let mutate = Arc::clone(&project);
+    crate::host_manage::component_meta_entry::WARM_OUTPUT_PRE_MATERIALIZE_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            mutate
+                .upsert_base("/WarmFence.vue", &warm_fence_sfc("string"))
+                .unwrap();
+        }));
+    });
+
+    let warm = project
+        .host()
+        .get_component_meta_output("/WarmFence.vue")
+        .expect("warm output ok")
+        .expect("resolves");
+    let (warm_analysis, _warm_res, warm_types) = warm.into_parts();
+    let warm_lanes = warm_types.into_lanes();
+    assert_eq!(
+        sentinel_registry_member(&warm_analysis, &warm_lanes),
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the materialization derefs Sentinel under the SAME capture the warm \
+         validation used — a fresh-view materialization would observe the \
+         mutated body (`x: string`) and tear the response"
+    );
+}
+
+/// AUDIT-lane equivalence: the audited session wrapper, the audited host
+/// entry (the LSP route), and the NAPI-shaped payload lane all serve the
+/// SAME materialized envelope for the same component.
+#[test]
+fn output_audit_lsp_and_payload_lanes_serve_identical_envelopes() {
+    let project = make_project_with_config(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        audit_enabled: true,
+        footprint_capture: true,
+        ..HostConfig::default()
+    });
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ p: string }>()
+defineEmits<{ e: [n: number] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+
+    // (a) The audited host entry — the LSP custom method's route AND the
+    // sole producer behind the NAPI/WASM audit-bundle session wrapper
+    // (`ComponentMetaSession::get_component_meta_with_audit` delegates
+    // here); the request id retrieves the matching audit record exactly as
+    // the wrapper does.
+    let (lsp_output, rid) = {
+        let (output, request_id) = host
+            .get_component_meta_output_with_resolution("/App.vue")
+            .expect("audited output ok");
+        (output.expect("resolves"), request_id)
+    };
+    let (la, lr, lt) = lsp_output.into_parts();
+    assert!(
+        lr.is_some(),
+        "the audited entry carries the resolution sidecar"
+    );
+    let lsp_debug = format!("{:?}{:?}", la, lt.into_lanes());
+    let record = host
+        .take_audit_record(rid)
+        .expect("the audited output entry produces the request audit record");
+    assert_eq!(
+        record.kind,
+        crate::component_meta_audit::RequestKind::ComponentMeta
+    );
+
+    // (b) A REPEAT audited call (warm path) serves the identical envelope +
+    // a from_cache record — the warm arm materializes under the SAME read
+    // that validated the cache entry.
+    let (warm_output, warm_rid) = {
+        let (output, request_id) = host
+            .get_component_meta_output_with_resolution("/App.vue")
+            .expect("warm audited output ok");
+        (output.expect("resolves"), request_id)
+    };
+    let (wa, wr, wt) = warm_output.into_parts();
+    assert!(wr.is_some());
+    assert_eq!(
+        format!("{:?}{:?}", wa, wt.into_lanes()),
+        lsp_debug,
+        "the warm audited envelope equals the cold one"
+    );
+    let warm_record = host
+        .take_audit_record(warm_rid)
+        .expect("the warm audited hit synthesizes a from_cache record");
+    assert!(warm_record.from_cache, "warm hit records from_cache");
+
+    // (c) The NAPI-shaped payload lane consumes the same envelope.
+    let meta_session = project.open_session().expect("meta session");
+    let payload = meta_session
+        .get_component_meta_payload("/App.vue", |output| {
+            let (pa, pr, pt) = output.into_parts();
+            assert!(
+                pr.is_some(),
+                "the payload lane seeds the resolution sidecar"
+            );
+            format!("{:?}{:?}", pa, pt.into_lanes()).into_bytes()
+        })
+        .expect("payload ok")
+        .expect("resolves");
+    assert_eq!(
+        String::from_utf8(payload).unwrap(),
+        lsp_debug,
+        "the payload lane's envelope equals the audited surfaces'"
+    );
+}
+
+/// CROSS-OWNER effective scope (invariant 16) — NESTED scope-relative
+/// refs: a COMPOSITE inherited source containing a nested bare
+/// `Ref("SharedAlias")` leaf (an anchor-FREE position
+/// `absolutized_against` cannot pin) MUST raise under its PRODUCING
+/// (child) scope. Child and parent both import the SAME alias spelling
+/// resolving to DIFFERENT terminal declarations (renamed re-exports:
+/// `ChildTerminal as SharedAlias` vs `ParentTerminal as SharedAlias`), so
+/// a blind parent-scope raise resolves the nested ref to the WRONG
+/// (parent) terminal declaration. Exercises BOTH inherited lane families:
+/// the branch-structured fallthrough row and the flat accepted row.
+///
+/// Discriminating: with the envelope raising these lanes under the owner
+/// scope instead of the row's positional producing scope, both lanes
+/// materialize `ParentTerminal` and the child-identity asserts fail RED.
+#[test]
+fn cross_owner_nested_scope_relative_ref_raises_under_producing_scope() {
+    use verter_semantic::analysis::component_meta as cm;
+    use verter_type_expr::facts::{FactOrLocator, LeafTypeFact, ResolvedLocalShape};
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/child-types.ts",
+            "type ChildTerminal = { tag: string }\nexport type { ChildTerminal as SharedAlias }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/parent-types.ts",
+            "type ParentTerminal = { other: number }\nexport type { ParentTerminal as SharedAlias }\n",
+        )
+        .unwrap();
+    // The child SFC imports `SharedAlias` from ITS types module — the
+    // nested ref's spelling resolves in the CHILD's file scope.
+    project
+        .upsert_base(
+            "/Child.vue",
+            r#"<script setup lang="ts">
+import type { SharedAlias } from './child-types'
+defineProps<{ inheritedAlias: SharedAlias }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    // The parent resolves the SAME spelling to a DIFFERENT terminal.
+    project
+        .upsert_base(
+            "/Parent.vue",
+            r#"<script setup lang="ts">
+import type { SharedAlias } from './parent-types'
+import Child from './Child.vue'
+defineProps<{ own: SharedAlias }>()
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+
+    // The composite inherited source: a synthesized object whose member
+    // value is the nested bare `Ref("SharedAlias")` — the exact shape the
+    // top-level closed-leaf fast path does NOT cover, so the envelope MUST
+    // enter the raise path for it.
+    let nested_composite =
+        verter_type_expr::facts::SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(
+            Arc::from(vec![verter_type_expr::facts::SynthesizedMemberFact {
+                name: "tag".to_string(),
+                optional: false,
+                ty: FactOrLocator::Leaf(LeafTypeFact::Ref("SharedAlias".to_string())),
+                span_origin: verter_type_expr::span_origins::MemberSpansOrigin::Synthetic(
+                    verter_type_expr::span_origins::SourceSynthetic,
+                ),
+            }]),
+        ));
+
+    let mut analysis = blank_output_analysis();
+    analysis.file_path = "/Parent.vue".to_string();
+    // Branch-structured fallthrough lane: the row carries its positional
+    // PRODUCING scope (threaded by the clone boundary in production).
+    analysis.fallthrough_surface = cm::FallthroughSurface::Branches {
+        branches: vec![cm::FallthroughBranch {
+            branch_key: "0".to_string(),
+            condition_text: None,
+            props: vec![cm::FallthroughPropEntry {
+                name: "inherited".to_string(),
+                type_source: verter_type_expr::facts::SourcePosition::Present(
+                    nested_composite.clone(),
+                ),
+                type_source_scope: Some("/Child.vue".to_string()),
+                raw_type: None,
+                sources: vec![cm::InheritedSource::Component {
+                    canonical_id: "/Child.vue".to_string(),
+                }],
+            }],
+            events: Vec::new(),
+            root_chain: Vec::new(),
+            status: cm::BranchStatus::Resolved,
+        }],
+    };
+    // Flat accepted lane: the merged row carries the SAME producing scope
+    // (threaded by the cross-branch merge finalize in production).
+    analysis.accepted_props.push(cm::AcceptedPropAnalysis {
+        name: "inherited".to_string(),
+        type_source: verter_type_expr::facts::SourcePosition::Present(nested_composite),
+        type_source_scope: Some("/Child.vue".to_string()),
+        raw_type: None,
+        raw_type_source: None,
+        required: false,
+        provenance: cm::MemberProvenance::Inherited {
+            sources: vec![cm::InheritedSource::Component {
+                canonical_id: "/Child.vue".to_string(),
+            }],
+        },
+        availability: cm::MemberAvailability::Always,
+        kind: cm::AcceptedPropKind::Attr,
+    });
+
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
+        host,
+        "/Parent.vue",
+        analysis,
+        None,
+    )
+    .expect("the nested composite inherited source materializes under its producing scope");
+    let lanes = output.into_parts().2.into_lanes();
+
+    let assert_child_identity = |materialized: &TypeExpr, lane: &str| {
+        let TypeExpr::Object(object) = materialized else {
+            panic!("{lane}: the composite source materializes an object; got {materialized:?}");
+        };
+        let tag = object
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == "tag" => Some(&property.ty),
+                _ => None,
+            })
+            .expect("the nested member survives materialization");
+        assert!(
+            matches!(tag, TypeExpr::Ref { name, .. } if name.as_ref() == "ChildTerminal"),
+            "{lane}: the nested scope-relative ref must resolve under the \
+             PRODUCING (child) scope — `SharedAlias` names the CHILD's \
+             terminal declaration `ChildTerminal`, never the parent's \
+             `ParentTerminal` and never an unresolved parent-scope shell; \
+             got {tag:?}"
+        );
+    };
+    assert_child_identity(&lanes.fallthrough_props[0][0], "fallthrough lane");
+    assert_child_identity(&lanes.accepted_props[0], "flat accepted lane");
+}
+
+/// REQUEST-LOCAL DEDUPE: a source repeated across lanes materializes ONCE
+/// per (effective scope, source identity) — the memo's materialize count
+/// equals the number of DISTINCT sources, not the number of lane slots.
+#[test]
+fn output_materialization_dedupes_repeated_sources_across_lanes() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", "<template><div /></template>")
+        .unwrap();
+    let host = project.host();
+
+    let shared = closed_ref_source("SharedAlias");
+    let distinct = closed_ref_source("DistinctAlias");
+    let mut analysis = blank_output_analysis();
+    for name in ["a", "b"] {
+        analysis
+            .props
+            .push(verter_semantic::analysis::component_meta::PropAnalysis {
+                name: name.to_string(),
+                type_source: verter_type_expr::facts::SourcePosition::Present(shared.clone()),
+                type_expansion: None,
+                raw_type: None,
+                raw_type_source: None,
+                required: true,
+                has_default: false,
+                default_value: None,
+                description: None,
+                tags: Vec::new(),
+                declared_in_macro_type_arg: false,
+            });
+    }
+    analysis
+        .events
+        .push(verter_semantic::analysis::component_meta::EventAnalysis {
+            name: "e".to_string(),
+            payload: verter_type_expr::facts::SourcePosition::Present(shared.clone()),
+            payload_expansion: None,
+            raw_signature: None,
+            description: None,
+            tags: Vec::new(),
+        });
+    analysis.accepted_props.push(
+        verter_semantic::analysis::component_meta::AcceptedPropAnalysis {
+            name: "ap".to_string(),
+            type_source: verter_type_expr::facts::SourcePosition::Present(distinct.clone()),
+            type_source_scope: None,
+            raw_type: None,
+            raw_type_source: None,
+            required: false,
+            provenance: verter_semantic::analysis::component_meta::MemberProvenance::Declared,
+            availability: verter_semantic::analysis::component_meta::MemberAvailability::Always,
+            kind: verter_semantic::analysis::component_meta::AcceptedPropKind::DeclaredProp,
+        },
+    );
+
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
+        host, "/App.vue", analysis, None,
+    )
+    .expect("closed sources materialize");
+    let calls =
+        crate::meta_resolve::projectors::LAST_OUTPUT_MATERIALIZE_CALLS.with(std::cell::Cell::get);
+    assert_eq!(
+        calls, 2,
+        "4 populated lane slots over 2 DISTINCT sources must materialize exactly twice \
+         (once per (effective scope, source identity))"
+    );
+    let lanes = output.into_parts().2.into_lanes();
+    assert_eq!(
+        lanes.props[0], lanes.props[1],
+        "deduped slots share the value"
+    );
+    assert_eq!(lanes.props[0], lanes.event_payloads[0]);
+}
+
+/// REQUEST-LOCAL MEMO WORK canary: for a LARGE source repeated across
+/// lanes the memo performs EXACTLY ONE full-source hash traversal per
+/// populated lane slot (the single-hash borrowed-key `entry` route) while
+/// still materializing the source ONCE — the per-slot hash/clone work is
+/// O(lanes × 1 traversal), never a get-then-insert SECOND traversal per
+/// miss and never a per-lookup owned key clone (structurally impossible:
+/// the memo key borrows the scope + source; there is no owned source in
+/// the key type to clone).
+///
+/// Discriminating: a get-then-insert memo route re-hashes every NON-EMPTY
+/// miss on the insert side (with two distinct sources the second source's
+/// miss pays get + insert = 2 traversals) and fails the exact-equality
+/// assert.
+#[test]
+fn output_memo_hash_work_is_one_traversal_per_lane_slot() {
+    use verter_type_expr::facts::{FactOrLocator, LeafTypeFact, ResolvedLocalShape};
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", "<template><div /></template>")
+        .unwrap();
+    let host = project.host();
+
+    // ONE large composite source (64 members) repeated across half the
+    // lane rows — the worst case for per-lookup deep hash/clone work —
+    // plus a second DISTINCT source on the other half, so an insert-side
+    // re-hash of a non-empty-map miss cannot hide behind the empty-map
+    // fast path.
+    let members: Vec<verter_type_expr::facts::SynthesizedMemberFact> = (0..64)
+        .map(|i| verter_type_expr::facts::SynthesizedMemberFact {
+            name: format!("member{i}"),
+            optional: false,
+            ty: FactOrLocator::Leaf(LeafTypeFact::Primitive(
+                verter_type_expr::PrimitiveName::String,
+            )),
+            span_origin: verter_type_expr::span_origins::MemberSpansOrigin::Synthetic(
+                verter_type_expr::span_origins::SourceSynthetic,
+            ),
+        })
+        .collect();
+    let large = verter_type_expr::facts::SemanticTypeSource::Synthesized(
+        ResolvedLocalShape::Object(Arc::from(members)),
+    );
+    let distinct = closed_ref_source("DistinctAlias");
+
+    const LANES: usize = 6;
+    let mut analysis = blank_output_analysis();
+    for i in 0..LANES {
+        let source = if i < LANES / 2 { &large } else { &distinct };
+        analysis
+            .props
+            .push(verter_semantic::analysis::component_meta::PropAnalysis {
+                name: format!("p{i}"),
+                type_source: verter_type_expr::facts::SourcePosition::Present(source.clone()),
+                type_expansion: None,
+                raw_type: None,
+                raw_type_source: None,
+                required: true,
+                has_default: false,
+                default_value: None,
+                description: None,
+                tags: Vec::new(),
+                declared_in_macro_type_arg: false,
+            });
+    }
+
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
+        host, "/App.vue", analysis, None,
+    )
+    .expect("the repeated composite source materializes");
+    let calls =
+        crate::meta_resolve::projectors::LAST_OUTPUT_MATERIALIZE_CALLS.with(std::cell::Cell::get);
+    assert_eq!(
+        calls, 2,
+        "{LANES} lane slots over TWO source identities materialize exactly twice"
+    );
+    let hash_ops =
+        crate::meta_resolve::projectors::LAST_OUTPUT_MEMO_HASH_OPS.with(std::cell::Cell::get);
+    assert_eq!(
+        hash_ops, LANES as u64,
+        "each populated lane slot performs EXACTLY ONE full-source hash \
+         traversal — no insert-side second hash, no per-lookup key clone \
+         (structurally impossible: the memo key borrows the source)"
+    );
+    let lanes = output.into_parts().2.into_lanes();
+    assert_eq!(lanes.props.len(), LANES);
+    assert_eq!(lanes.props[0], lanes.props[LANES / 2 - 1]);
+}
+
+/// PRODUCER-SCOPE HYGIENE end-to-end: two conditional children each publish
+/// the IDENTICAL fully-closed prop type (`shared?: string`); the parent's
+/// REAL fallthrough branch rows (produced by the resolver-core clone
+/// boundary, not hand-built) carry NO positional producer scope for the
+/// closed source, so re-feeding exactly those two rows through the output
+/// envelope materializes the shared source ONCE — the `(effective scope,
+/// source identity)` memo entry is SHARED across the two children.
+///
+/// Discriminating: with the clone boundary allocating the producer scope
+/// unconditionally, the two rows key `(/ChildA.vue, S)` / `(/ChildB.vue,
+/// S)`, the scope asserts fail RED, and the memo probe materializes TWICE.
+#[test]
+fn closed_inherited_sources_share_one_output_memo_entry_across_children() {
+    use verter_semantic::analysis::component_meta as cm;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/ChildA.vue",
+            r#"<script setup lang="ts">
+defineProps<{ shared?: string }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/ChildB.vue",
+            r#"<script setup lang="ts">
+defineProps<{ shared?: string }>()
+</script>
+<template><span /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import ChildA from './ChildA.vue'
+import ChildB from './ChildB.vue'
+const cond = true
+</script>
+<template>
+  <ChildA v-if="cond" />
+  <ChildB v-else />
+</template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+
+    let meta = host
+        .get_component_meta("/App.vue")
+        .expect("two-child conditional parent resolves");
+    let cm::FallthroughSurface::Branches { branches } = &meta.fallthrough_surface else {
+        panic!("fixture premise: v-if/v-else roots produce fallthrough branches");
+    };
+    assert_eq!(branches.len(), 2, "two conditional root branches");
+    let shared_rows: Vec<&cm::FallthroughPropEntry> = branches
+        .iter()
+        .map(|branch| {
+            branch
+                .props
+                .iter()
+                .find(|prop| prop.name == "shared")
+                .expect("each branch inherits its child's `shared` prop")
+        })
+        .collect();
+
+    // The REAL clone-boundary rows: identical fully-closed source, NO
+    // positional producer scope (nothing scope-relative to resolve).
+    let source_a = shared_rows[0]
+        .type_source
+        .present()
+        .expect("the inherited closed prop carries a typed source");
+    assert!(
+        !source_a.is_scope_relative(),
+        "fixture premise: the child's `shared?: string` publishes a fully \
+         anchored/closed source; got {source_a:?}"
+    );
+    assert_eq!(
+        shared_rows[0].type_source, shared_rows[1].type_source,
+        "the two children's identical closed prop types publish the \
+         identical source value"
+    );
+    assert_eq!(
+        shared_rows[0].type_source_scope, None,
+        "a fully-closed inherited source carries NO producer scope (an \
+         irrelevant scope fragments the output memo)"
+    );
+    assert_eq!(
+        shared_rows[1].type_source_scope, None,
+        "a fully-closed inherited source carries NO producer scope (an \
+         irrelevant scope fragments the output memo)"
+    );
+
+    // Memo probe: re-feed EXACTLY those two real rows through the output
+    // envelope — one shared memo entry, ONE materialize call.
+    let mut probe = blank_output_analysis();
+    probe.fallthrough_surface = cm::FallthroughSurface::Branches {
+        branches: vec![
+            cm::FallthroughBranch {
+                branch_key: "0".to_string(),
+                condition_text: None,
+                props: vec![shared_rows[0].clone()],
+                events: Vec::new(),
+                root_chain: Vec::new(),
+                status: cm::BranchStatus::Resolved,
+            },
+            cm::FallthroughBranch {
+                branch_key: "1".to_string(),
+                condition_text: None,
+                props: vec![shared_rows[1].clone()],
+                events: Vec::new(),
+                root_chain: Vec::new(),
+                status: cm::BranchStatus::Resolved,
+            },
+        ],
+    };
+    let output =
+        crate::meta_resolve::projectors::build_component_meta_output(host, "/App.vue", probe, None)
+            .expect("the closed inherited source materializes");
+    let calls =
+        crate::meta_resolve::projectors::LAST_OUTPUT_MATERIALIZE_CALLS.with(std::cell::Cell::get);
+    assert_eq!(
+        calls, 1,
+        "two branch rows carrying the identical closed source from two \
+         different children must share ONE output memo entry — the \
+         now-dropped producer scope was the only discriminator"
+    );
+    // Output-value invariance: both rows materialize the identical value.
+    let lanes = output.into_parts().2.into_lanes();
+    assert_eq!(lanes.fallthrough_props[0][0], lanes.fallthrough_props[1][0]);
+    assert_eq!(
+        lanes.fallthrough_props[0][0],
+        TypeExpr::Primitive(PrimitiveName::String),
+        "the shared closed source materializes the exact child type"
+    );
+}
+
+/// SESSION-owned registry name-overlay finalize: resolved registry entries
+/// REPLACE the first same-name analysis row IN PLACE (order preserved) and
+/// APPEND new names — executed before materialization, so the registry lane
+/// aligns with the MERGED registry.
+#[test]
+fn output_registry_overlay_finalize_replaces_in_place_and_appends() {
+    let project = make_project();
+    project
+        .upsert_base("/App.vue", "<template><div /></template>")
+        .unwrap();
+    let host = project.host();
+
+    let mut analysis = blank_output_analysis();
+    for name in ["Alpha", "Beta"] {
+        analysis.type_registry.push(
+            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+                name: name.to_string(),
+                type_source: verter_type_expr::facts::SourcePosition::Present(closed_ref_source(
+                    name,
+                )),
+                type_expansion: None,
+            },
+        );
+    }
+    let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed {
+        resolved_type_registry: vec![
+            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+                name: "Alpha".to_string(),
+                type_source: verter_type_expr::facts::SourcePosition::Present(closed_ref_source(
+                    "ResolvedAlpha",
+                )),
+                type_expansion: None,
+            },
+            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+                name: "Gamma".to_string(),
+                type_source: verter_type_expr::facts::SourcePosition::Present(closed_ref_source(
+                    "ResolvedGamma",
+                )),
+                type_expansion: None,
+            },
+        ],
+        output: crate::meta_resolve::ComponentMetaResolutionOutput {
+            mode: crate::types::ProjectionMode::Expanded,
+            resolved_macros: Vec::new(),
+            resolved_type_registry_meta: Vec::new(),
+            origin_graph: None,
+        },
+    };
+
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
+        host,
+        "/App.vue",
+        analysis,
+        Some(seed),
+    )
+    .expect("closed registry sources materialize");
+    let (analysis, resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+
+    let names: Vec<&str> = analysis
+        .type_registry
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["Alpha", "Beta", "Gamma"],
+        "replace-in-place preserves order; new names append at the end"
+    );
+    assert_eq!(
+        lanes.type_registry_entries.len(),
+        3,
+        "lane aligns with the MERGED registry"
+    );
+    assert!(
+        matches!(&lanes.type_registry_entries[0], TypeExpr::Ref { name, .. } if name.as_ref() == "ResolvedAlpha"),
+        "the resolved overlay's Alpha REPLACED the shallow analysis row"
+    );
+    assert!(
+        matches!(&lanes.type_registry_entries[1], TypeExpr::Ref { name, .. } if name.as_ref() == "Beta"),
+        "the untouched Beta row keeps its analysis value"
+    );
+    assert!(
+        matches!(&lanes.type_registry_entries[2], TypeExpr::Ref { name, .. } if name.as_ref() == "ResolvedGamma"),
+        "the appended Gamma row materializes the resolved value"
+    );
+    assert_eq!(
+        resolution.expect("seeded resolution").mode,
+        crate::types::ProjectionMode::Expanded
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Required-payload honesty: a REQUIRED emit payload whose faithful source
+// cannot be constructed is a TYPED FAILURE at output materialization — never
+// a Completed + `unknown` + zero-diagnostic success. Authored `unknown`,
+// genuinely-open, and schema-absent positions stay valid successes.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A CROSS-FILE call-signature emit (`defineEmits<Events>()` over an
+/// imported `Events { (e: 'save', value: Row): void }`) publishes the REAL
+/// payload tuple: the normalized row mints the projected CALLABLE-PARAMS
+/// replay route (the macro's stamped type-argument base + the signature's
+/// surface ordinal), output materialization replays it through the one
+/// shared dispatch, and the published payload is `[value: Row]` — the
+/// shallow named reference a consumer re-resolves on demand. The result is
+/// a COMPLETE success (warm-admissible). The pre-fix behavior was the typed
+/// `Failed(UnrepresentableRequiredPayload)` interim (and before that, a
+/// fabricated `unknown` rendered as success).
+#[test]
+fn cross_file_call_signature_emit_payload_publishes_the_real_tuple() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/events.ts",
+            "export interface Row { id: number }\nexport interface Events { (e: 'save', value: Row): void }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Events } from './events'
+defineEmits<Events>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("a cross-file call-signature emit payload is representable and must succeed")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    let save = analysis
+        .events
+        .iter()
+        .position(|event| event.name == "save")
+        .expect("the save event publishes");
+    // The published source is the projected CALLABLE-PARAMS replay route —
+    // never a fabricated closed fact and never a failure.
+    assert!(
+        matches!(
+            analysis.events[save].payload.present(),
+            Some(verter_type_expr::facts::SemanticTypeSource::Projected(
+                verter_type_expr::facts::ProjectedTypeFact::CallableParams { first_param: 1, .. }
+            ))
+        ),
+        "the cross-file call-signature payload publishes the CallableParams \
+         replay source, got {:?}",
+        analysis.events[save].payload
+    );
+    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+        panic!(
+            "the replayed payload tuple renders; got {:?}",
+            lanes.event_payloads[save]
+        );
+    };
+    assert_eq!(elements.len(), 1, "one post-event-name payload param");
+    assert_eq!(elements[0].label.as_deref(), Some("value"));
+    assert!(
+        matches!(&elements[0].ty, TypeExpr::Ref { name, .. } if name.as_ref() == "Row"),
+        "the named payload param stays the shallow resolvable reference — \
+         never a fabricated unknown; got {:?}",
+        elements[0].ty
+    );
+    // Resolvability walk: demanding the published source through the one
+    // shared dispatch materializes the REAL tuple and resolves the imported
+    // `Row` reference — never an unknown and never a semantic miss.
+    let demanded = demand_published_type(
+        project.host(),
+        "/App.vue",
+        analysis.events[save].payload.present(),
+        "save payload",
+    );
+    let TypeExpr::Tuple {
+        elements: demanded_elements,
+        ..
+    } = &demanded
+    else {
+        panic!("the demanded payload source materializes the tuple, got {demanded:?}");
+    };
+    assert_eq!(demanded_elements.len(), 1);
+    match &demanded_elements[0].ty {
+        TypeExpr::Object(shape) => assert!(
+            shape.properties.iter().any(|member| matches!(
+                member,
+                ObjectMember::Property(property) if property.name == "id"
+            )),
+            "the demanded Row payload expands to its declared members, got {demanded:?}"
+        ),
+        TypeExpr::Ref { name, .. } if name.as_ref() == "Row" => {}
+        other => panic!(
+            "the demanded payload element must resolve (an expanded Row body \
+             or the resolvable Row reference), got {other:?}"
+        ),
+    }
+
+    // COMPLETE-success enforcement: the representable payload leaves the
+    // result complete and warm-admissible — the fail-closed interim (a
+    // partial, suppressed result) is gone for this class.
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("resolves");
+    assert!(
+        !state.completeness.is_partial(),
+        "a representable call-signature payload completes; got {:?}",
+        state.completeness
+    );
+}
+
+/// An IMPORTED property-style emit (`ImportedEmits { save: [id: number] }`)
+/// publishes the REAL payload tuple, IDENTICAL to the local authored control
+/// (`defineEmits<{ save: [id: number] }>()`): the normalized emit row's
+/// faithful `Closed(Tuple)` source is the payload AUTHORITY — the flat
+/// `evaluated_types.emits` lane's unrepresentable residue no longer shadows
+/// it. Imported == local. The pre-fix behavior was the typed
+/// `Failed(UnrepresentableRequiredPayload)` interim (and before that, a
+/// fabricated `unknown` rendered as success).
+#[test]
+fn imported_property_style_emit_payload_matches_the_local_control() {
+    let render_save_payload = |project: &MetaProject| {
+        let output = project
+            .host()
+            .get_component_meta_output("/App.vue")
+            .expect("a property-style emit payload tuple is representable and must succeed")
+            .expect("component must resolve");
+        let (analysis, _resolution, types) = output.into_parts();
+        let lanes = types.into_lanes();
+        let save = analysis
+            .events
+            .iter()
+            .position(|event| event.name == "save")
+            .expect("the save event publishes");
+        lanes.event_payloads[save].clone()
+    };
+
+    // The IMPORTED property-style emit.
+    let imported = make_project();
+    imported
+        .upsert_base(
+            "/emits.ts",
+            "export interface ImportedEmits { save: [id: number] }\n",
+        )
+        .unwrap();
+    imported
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { ImportedEmits } from './emits'
+defineEmits<ImportedEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let imported_payload = render_save_payload(&imported);
+
+    // The LOCAL authored control — the same payload written inline.
+    let local = make_project();
+    local
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ save: [id: number] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let local_payload = render_save_payload(&local);
+
+    // The imported payload is the REAL tuple…
+    let TypeExpr::Tuple { elements, .. } = &imported_payload else {
+        panic!("the imported property-style payload tuple renders; got {imported_payload:?}");
+    };
+    assert_eq!(elements.len(), 1);
+    assert_eq!(elements[0].label.as_deref(), Some("id"));
+    assert_eq!(
+        elements[0].ty,
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the imported tuple element renders its real number type — never a \
+         fabricated unknown"
+    );
+    // …IDENTICAL to the local authored control: imported == local.
+    assert_eq!(
+        imported_payload, local_payload,
+        "an imported property-style emit publishes the SAME payload as the \
+         local authored control"
+    );
+}
+
+/// SESSION-OVERLAY parity for the CALLABLE-PARAMS replay: the same
+/// cross-file call-signature emit resolved through a SESSION (overlay
+/// upserts + the fixed-view output path — the flow the native bindings
+/// drive) publishes the same real payload tuple as the base-host scalar.
+#[test]
+fn cross_file_call_signature_emit_payload_replays_under_a_session_overlay() {
+    let project = make_project();
+    let session = project.open_session_batch().expect("batch session");
+    session
+        .upsert(
+            "/events.ts",
+            "export interface Row { id: number }\nexport interface Events { (e: 'save', value: Row): void }\n"
+                .to_string(),
+        )
+        .unwrap();
+    session
+        .upsert(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Events } from './events'
+defineEmits<Events>()
+</script>
+<template><div /></template>"#
+                .to_string(),
+        )
+        .unwrap();
+
+    let output = session
+        .get_component_meta_output("/App.vue")
+        .expect("the session-overlay call-signature emit payload replays and must succeed")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    let save = analysis
+        .events
+        .iter()
+        .position(|event| event.name == "save")
+        .expect("the save event publishes");
+    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+        panic!(
+            "the replayed payload tuple renders under the session view; got {:?}",
+            lanes.event_payloads[save]
+        );
+    };
+    assert_eq!(elements.len(), 1);
+    assert_eq!(elements[0].label.as_deref(), Some("value"));
+    assert!(
+        matches!(&elements[0].ty, TypeExpr::Ref { name, .. } if name.as_ref() == "Row"),
+        "the named payload param stays the shallow resolvable reference under \
+         the session view; got {:?}",
+        elements[0].ty
+    );
+}
+
+/// A COMPOSITE call-signature emit param (`value: A | B`) publishes the real
+/// union payload through the CALLABLE-PARAMS replay: every arm is present in
+/// the rendered tuple (order preserved), never a collapsed or fabricated
+/// value.
+#[test]
+fn composite_call_signature_emit_payload_publishes_all_union_arms() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/events.ts",
+            "export interface A { a: number }\nexport interface B { b: string }\nexport interface Events { (e: 'save', value: A | B): void }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Events } from './events'
+defineEmits<Events>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("a composite call-signature emit payload is representable and must succeed")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    let save = analysis
+        .events
+        .iter()
+        .position(|event| event.name == "save")
+        .expect("the save event publishes");
+    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+        panic!(
+            "the replayed payload tuple renders; got {:?}",
+            lanes.event_payloads[save]
+        );
+    };
+    assert_eq!(elements.len(), 1);
+    assert_eq!(elements[0].label.as_deref(), Some("value"));
+    let TypeExpr::Union(arms) = &elements[0].ty else {
+        panic!(
+            "the composite payload param renders its union, got {:?}",
+            elements[0].ty
+        );
+    };
+    let arm_names: Vec<&str> = arms
+        .iter()
+        .map(|arm| match arm {
+            TypeExpr::Ref { name, .. } => name.as_ref(),
+            other => panic!("every union arm stays a shallow named reference, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        arm_names,
+        vec!["A", "B"],
+        "ALL composite arms are present, in authored order"
+    );
+}
+
+/// A NESTED-OBJECT call-signature emit param (`value: {{ nested: Row }}`)
+/// publishes the shallow object carrier — the nested reference stays a
+/// resolvable `Ref` at publication, and a consumer WALK (demanding the
+/// published source through the one shared dispatch) reaches the nested
+/// leaf.
+#[test]
+fn nested_object_call_signature_emit_payload_stays_a_walkable_shallow_carrier() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/events.ts",
+            "export interface Row { id: number }\nexport interface Events { (e: 'save', value: { nested: Row }): void }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Events } from './events'
+defineEmits<Events>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("a nested-object call-signature emit payload is representable and must succeed")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    let save = analysis
+        .events
+        .iter()
+        .position(|event| event.name == "save")
+        .expect("the save event publishes");
+    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+        panic!(
+            "the replayed payload tuple renders; got {:?}",
+            lanes.event_payloads[save]
+        );
+    };
+    assert_eq!(elements.len(), 1);
+    assert_eq!(elements[0].label.as_deref(), Some("value"));
+    // Published SHALLOW: the object carrier surfaces with its nested member
+    // as a resolvable reference — not eagerly flattened, never unknown.
+    let TypeExpr::Object(shape) = &elements[0].ty else {
+        panic!(
+            "the nested-object payload param renders its object carrier, got {:?}",
+            elements[0].ty
+        );
+    };
+    let nested = shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "nested" => Some(property),
+            _ => None,
+        })
+        .expect("the object carrier keeps its nested member");
+    assert!(
+        matches!(&nested.ty, TypeExpr::Ref { name, .. } if name.as_ref() == "Row"),
+        "the nested member stays a shallow resolvable reference, got {:?}",
+        nested.ty
+    );
+    // Consumer WALK: demanding the published source reaches the nested leaf
+    // (`value.nested` resolves through `Row` to `id: number`).
+    let demanded = demand_published_type(
+        project.host(),
+        "/App.vue",
+        analysis.events[save].payload.present(),
+        "save payload",
+    );
+    let TypeExpr::Tuple {
+        elements: demanded_elements,
+        ..
+    } = &demanded
+    else {
+        panic!("the demanded payload source materializes the tuple, got {demanded:?}");
+    };
+    let TypeExpr::Object(demanded_shape) = &demanded_elements[0].ty else {
+        panic!(
+            "the demanded payload element keeps its object surface, got {:?}",
+            demanded_elements[0].ty
+        );
+    };
+    let demanded_nested = demanded_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "nested" => Some(property),
+            _ => None,
+        })
+        .expect("the demanded object keeps its nested member");
+    match &demanded_nested.ty {
+        TypeExpr::Object(row_shape) => assert!(
+            row_shape.properties.iter().any(|member| matches!(
+                member,
+                ObjectMember::Property(property) if property.name == "id"
+            )),
+            "the walked nested Row reaches its id leaf, got {demanded:?}"
+        ),
+        TypeExpr::Ref { name, .. } if name.as_ref() == "Row" => {}
+        other => panic!(
+            "the walked nested member must resolve (an expanded Row body or \
+             the resolvable Row reference), got {other:?}"
+        ),
+    }
+}
+
+/// A RICH call-signature emit — an optional generic-instantiated param plus
+/// a rest array param — preserves labels, optionality, rest, ORDER, and the
+/// generic substitution through the CALLABLE-PARAMS replay.
+#[test]
+fn rich_call_signature_emit_payload_preserves_labels_optionality_rest_and_substitutions() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/events.ts",
+            "export interface Row { id: number }\nexport interface Box<T> { boxed: T }\nexport interface Events { (e: 'save', value?: Box<number>, ...rows: Row[]): void }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Events } from './events'
+defineEmits<Events>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("a rich call-signature emit payload is representable and must succeed")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    let save = analysis
+        .events
+        .iter()
+        .position(|event| event.name == "save")
+        .expect("the save event publishes");
+    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+        panic!(
+            "the replayed payload tuple renders; got {:?}",
+            lanes.event_payloads[save]
+        );
+    };
+    assert_eq!(
+        elements.len(),
+        2,
+        "both post-event-name params survive, in order"
+    );
+    // Element 0: the OPTIONAL generic-instantiated param, substitution
+    // preserved (`Box<number>` keeps its type argument).
+    assert_eq!(elements[0].label.as_deref(), Some("value"));
+    assert!(elements[0].optional, "the authored `?` is preserved");
+    assert!(!elements[0].rest);
+    let TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = &elements[0].ty
+    else {
+        panic!(
+            "the generic-instantiated param stays a shallow instantiation \
+             reference, got {:?}",
+            elements[0].ty
+        );
+    };
+    assert_eq!(name.as_ref(), "Box");
+    assert_eq!(
+        type_arguments.as_ref(),
+        &[TypeExpr::Primitive(PrimitiveName::Number)],
+        "the generic substitution rides the replay"
+    );
+    // Element 1: the REST array param.
+    assert_eq!(elements[1].label.as_deref(), Some("rows"));
+    assert!(elements[1].rest, "the authored rest is preserved");
+    assert!(!elements[1].optional);
+    let TypeExpr::Array { element, .. } = &elements[1].ty else {
+        panic!(
+            "the rest param keeps its array shape, got {:?}",
+            elements[1].ty
+        );
+    };
+    assert!(
+        matches!(element.as_ref(), TypeExpr::Ref { name, .. } if name.as_ref() == "Row"),
+        "the rest element stays the shallow resolvable reference, got {element:?}"
+    );
+}
+
+/// GENUINE-MISS CONTROL: a call-signature emit whose payload param
+/// references a type that does not exist ANYWHERE stays a typed failure —
+/// the CallableParams replay validates each payload param root through the
+/// one shared dispatch and REFUSES an unresolvable reference, carrying the
+/// failed `.tuple[N]` position; it never fabricates a tuple around a broken
+/// reference. The fail-closed rail still catches TRUE misses.
+#[test]
+fn call_signature_emit_with_unresolvable_param_stays_a_typed_failure() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/events.ts",
+            "export interface Events { (e: 'save', value: Missing): void }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Events } from './events'
+defineEmits<Events>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let err = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect_err(
+            "a payload param referencing a non-existent type must FAIL typed — \
+             the replay never fabricates a tuple around a broken reference",
+        );
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::EventPayload,
+        "the typed failure names the failed lane"
+    );
+    match &err.failure {
+        crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path } => {
+            assert_eq!(
+                path.as_ref(),
+                &[crate::meta_resolve::InteriorSourceStep::TupleElement { ordinal: 0 }],
+                "the failure names the exact unresolvable payload element"
+            );
+        }
+        other => panic!(
+            "the unresolvable param fails as the strict interior miss with \
+             its .tuple[N] position, got {other:?}"
+        ),
+    }
+
+    // The LOCAL form of the same genuine miss fails the same way: with the
+    // normalized source authoritative, a locally-authored call signature
+    // routes through the SAME CallableParams replay and the SAME per-param
+    // validation — never a fabricated tuple around a broken reference.
+    let local = make_project();
+    local
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ (e: 'save', value: Missing): void }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let local_err = local
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect_err(
+            "a LOCAL payload param referencing a non-existent type must FAIL \
+             typed exactly like the cross-file form",
+        );
+    assert_eq!(
+        local_err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::EventPayload
+    );
+}
+
+/// POSITIVE CONTROL: an AUTHORED `unknown` emit payload param is a PRESENT,
+/// valid success — the component completes and the payload tuple renders
+/// the authored `unknown` element. Authored `unknown` is never a failure.
+#[test]
+fn authored_unknown_emit_payload_completes_as_valid_success() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ (e: 'save', value: unknown): void }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("an authored unknown payload is a valid success, never a failure")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    let save = analysis
+        .events
+        .iter()
+        .position(|event| event.name == "save")
+        .expect("the save event publishes");
+    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+        panic!(
+            "the authored payload tuple renders; got {:?}",
+            lanes.event_payloads[save]
+        );
+    };
+    assert_eq!(elements.len(), 1);
+    assert_eq!(
+        elements[0].ty,
+        TypeExpr::Primitive(PrimitiveName::Unknown),
+        "the authored unknown element renders as the author wrote it"
+    );
+}
+
+/// POSITIVE CONTROL: a genuinely-open index-signature-only emits surface is
+/// a valid success (the open position is semantic openness, not a failure).
+#[test]
+fn open_index_signature_emits_surface_completes_as_valid_success() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ [event: string]: [v: number] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project.host().get_component_meta_output("/App.vue");
+    assert!(
+        output.is_ok(),
+        "a genuinely-open emits index signature is a valid success; got {output:?}"
+    );
+}
+
+/// POSITIVE CONTROL: a schema-ABSENT unannotated payload position (an
+/// array-form runtime emit) renders the centralized typed `unknown` and
+/// COMPLETES — honest absence, never a failure.
+#[test]
+fn unannotated_runtime_emit_renders_typed_unknown_and_completes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineEmits(['save'])
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("an unannotated runtime emit is honest absence, never a failure")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    let save = analysis
+        .events
+        .iter()
+        .position(|event| event.name == "save")
+        .expect("the save event publishes");
+    assert_eq!(
+        lanes.event_payloads[save],
+        TypeExpr::Unknown { raw: String::new() },
+        "the unannotated position renders the centralized typed unknown"
+    );
+
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("resolves");
+    assert!(
+        !state.completeness.is_partial(),
+        "schema absence completes; it is never a failure state"
+    );
+}
+
+/// POSITIVE CONTROL: a LOCAL call-signature emit with a named-reference
+/// payload param keeps its faithful AUTHORED payload tuple — the fail-closed
+/// rail must not overfire on locally-authored payloads.
+#[test]
+fn local_call_signature_emit_with_named_param_stays_a_real_tuple_success() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+interface Row { id: number }
+defineEmits<{ (e: 'save', value: Row): void }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("a locally-authored call-signature emit succeeds")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    let save = analysis
+        .events
+        .iter()
+        .position(|event| event.name == "save")
+        .expect("the save event publishes");
+    let TypeExpr::Tuple { elements, .. } = &lanes.event_payloads[save] else {
+        panic!(
+            "the authored payload tuple renders; got {:?}",
+            lanes.event_payloads[save]
+        );
+    };
+    assert_eq!(elements.len(), 1);
+    assert_eq!(elements[0].label.as_deref(), Some("value"));
+    assert!(
+        matches!(&elements[0].ty, TypeExpr::Ref { name, .. } if name.as_ref() == "Row"),
+        "the named payload param stays the shallow authored reference; got {:?}",
+        elements[0].ty
+    );
+}
+
+/// EXHAUSTIVE-arm coverage for the output lane-slot materializer, driven
+/// through the terminal envelope builder over a POPULATED production
+/// analysis: an `Absent` position renders the centralized typed `Unknown`
+/// and completes; a `Present` position materializes its source; a `Failed`
+/// position FAILS the output immediately with the typed
+/// `RequiredSourceUnavailable` error carrying the exact lane, index, and
+/// failed position.
+#[test]
+fn output_lane_slot_decides_absent_present_and_failed_arms_exhaustively() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineEmits<{ save: [id: number] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let analysis = host
+        .get_component_meta("/App.vue")
+        .expect("component must resolve");
+    assert_eq!(analysis.events.len(), 1, "fixture declares exactly 1 event");
+
+    // PRESENT arm: the untampered analysis materializes the real source.
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
+        host,
+        "/App.vue",
+        analysis.clone(),
+        None,
+    )
+    .expect("a present source materializes");
+    let (_analysis, _resolution, types) = output.into_parts();
+    let TypeExpr::Tuple { .. } = &types.into_lanes().event_payloads[0] else {
+        panic!("the present payload source materializes the authored tuple");
+    };
+
+    // ABSENT arm: a proven schema absence renders the centralized typed
+    // `Unknown` and COMPLETES — absence is never a failure.
+    let mut absent = analysis.clone();
+    absent.events[0].payload = verter_type_expr::facts::SourcePosition::unannotated();
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
+        host, "/App.vue", absent, None,
+    )
+    .expect("schema absence keeps materializing the output");
+    let (_analysis, _resolution, types) = output.into_parts();
+    assert_eq!(
+        types.into_lanes().event_payloads[0],
+        TypeExpr::Unknown { raw: String::new() },
+        "the absent position renders the centralized typed Unknown"
+    );
+
+    // FAILED arm: a typed source-construction failure FAILS the output with
+    // the exact lane, index, position, and failure class.
+    let mut failed = analysis;
+    failed.events[0].payload = verter_type_expr::facts::SourcePosition::Failed(
+        verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+    );
+    let err = crate::meta_resolve::projectors::build_component_meta_output(
+        host, "/App.vue", failed, None,
+    )
+    .expect_err("a failed required position must FAIL the output");
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::EventPayload
+    );
+    assert_eq!(err.index, 0);
+    assert_eq!(err.inner_index, None);
+    assert_eq!(
+        *err.position,
+        verter_type_expr::facts::SourcePosition::Failed(
+            verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+        ),
+    );
+    assert_eq!(
+        err.failure,
+        crate::meta_resolve::ComponentMetaOutputFailure::RequiredSourceUnavailable {
+            failure: verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+        },
+    );
+}
+
+/// An IMPORTED props interface member whose value is a function
+/// (`onClick: () => void`) has no authored slot, no use-site slot, and no
+/// closed upgrade on its published node — but it IS known structure: the
+/// structural member-source projection publishes the faithful PRESENT
+/// projected MEMBER-PATH replay route (the macro's stamped type-argument
+/// base + the member name), output materialization replays it through the
+/// one shared dispatch, and the published prop renders the REAL function
+/// shape. The result is a COMPLETE success. The pre-fix behavior was the
+/// typed `Failed(UnrepresentableRequiredMemberValue)` interim (and before
+/// that, a fabricated `Present(Closed(Leaf(unknown)))` rendered as a
+/// COMPLETED `unknown` prop — a fail-open reported as success).
+#[test]
+fn imported_shallow_function_member_publishes_present_structural_source() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/props.ts",
+            "export interface Props { onClick: () => void }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './props'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("a known-structure member value is representable and must succeed")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    let on_click = analysis
+        .props
+        .iter()
+        .position(|prop| prop.name == "onClick")
+        .expect("the onClick prop publishes");
+    // The published source is the projected MEMBER-PATH replay route off the
+    // macro's stamped type-argument base — never a fabricated closed fact
+    // and never a failure.
+    match analysis.props[on_click].type_source.present() {
+        Some(verter_type_expr::facts::SemanticTypeSource::Projected(
+            verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
+        )) => {
+            assert_eq!(path.as_ref(), ["onClick".to_string()], "one member hop");
+        }
+        other => panic!(
+            "the imported function member publishes the MemberPath replay \
+             source, got {other:?}"
+        ),
+    }
+    // The replayed member materializes the REAL shallow function shape —
+    // never an unknown.
+    assert!(
+        matches!(&lanes.props[on_click], TypeExpr::Function { .. }),
+        "the replayed function member renders its function shape; got {:?}",
+        lanes.props[on_click]
+    );
+
+    // COMPLETE-success enforcement: the representable member leaves the
+    // result complete — the fail-closed interim (a partial, suppressed
+    // result) is gone for this class.
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("resolves");
+    assert!(
+        !state.completeness.is_partial(),
+        "a representable member value completes; got {:?}",
+        state.completeness
+    );
+    assert!(
+        !state.synthesis_should_suppress,
+        "a representable member value must not suppress warm result admission"
+    );
+}
+
+/// GENUINE-MISS control: a props member whose value references a
+/// NON-EXISTENT type (`broken: MissingType`) demand-validates to an
+/// unresolvable residual carrier — the structural projection must NOT
+/// fabricate a Present replay route for it. The REQUIRED member-value
+/// position stays the typed source-construction failure and output
+/// materialization fails typed.
+#[test]
+fn prop_member_value_referencing_nonexistent_type_stays_failed() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/props.ts",
+            "export interface Props { broken: MissingType }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './props'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let err = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect_err(
+            "a member value referencing a non-existent type is a genuine miss \
+             and must FAIL output materialization with a typed error",
+        );
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::Prop,
+        "the typed failure names the failed lane"
+    );
+    assert_eq!(
+        err.failure,
+        crate::meta_resolve::ComponentMetaOutputFailure::RequiredSourceUnavailable {
+            failure:
+                verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+        },
+        "the failure class is the producer-typed member-value failure"
+    );
+    assert_eq!(
+        *err.position,
+        verter_type_expr::facts::SourcePosition::Failed(
+            verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+        ),
+        "the error carries the FAILED position — there is no SemanticTypeSource to report"
+    );
+
+    // Non-completed enforcement: the assembled analysis result is NOT
+    // labeled complete, so it is never cached as a complete success.
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("the analysis itself still assembles");
+    assert!(
+        state.completeness.is_partial(),
+        "a failed REQUIRED member-value position must leave the result NON-complete; got {:?}",
+        state.completeness
+    );
+    assert!(
+        state.synthesis_should_suppress,
+        "the failed REQUIRED position must suppress warm result admission"
+    );
+}
+
+/// Shared body for the masked same-name intersection cases: a
+/// `defineProps<T>()` whose type argument INTERSECTS a locally-authored
+/// literal arm (`{ x: string }`) with an imported arm whose SAME-NAME member
+/// is unresolvable (`Bad { x: MissingType }`). The merged member `x` has a
+/// FAILED contributor — the resolvable local arm must NOT mask it into a
+/// wrong concrete `string` success: the merged REQUIRED member-value
+/// position fails typed, exactly like the single-contributor genuine miss
+/// ([`prop_member_value_referencing_nonexistent_type_stays_failed`]).
+fn assert_masked_same_name_intersection_prop_fails_closed(type_argument: &str) {
+    let project = make_project();
+    // `/bad.ts` compiles as a file but `MissingType` does not exist anywhere:
+    // `Bad.x` is a genuine unresolvable member value.
+    project
+        .upsert_base("/bad.ts", "export interface Bad { x: MissingType }\n")
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            &format!(
+                r#"<script setup lang="ts">
+import type {{ Bad }} from './bad'
+defineProps<{type_argument}>()
+</script>
+<template><div /></template>"#
+            ),
+        )
+        .unwrap();
+
+    let err = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect_err(
+            "a same-name intersection member with a FAILED contributor is a \
+             genuine miss for the MERGED member — the resolvable local arm \
+             must not mask it into a concrete success; output \
+             materialization must FAIL with the typed error",
+        );
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::Prop,
+        "the typed failure names the failed lane"
+    );
+    assert_eq!(
+        err.failure,
+        crate::meta_resolve::ComponentMetaOutputFailure::RequiredSourceUnavailable {
+            failure:
+                verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+        },
+        "the failure class is the producer-typed member-value failure"
+    );
+
+    // Non-completed enforcement: the masked-contributor analysis result is
+    // NOT labeled complete, so it is never cached as a complete success.
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("the analysis itself still assembles");
+    assert!(
+        state.completeness.is_partial(),
+        "a failed same-name contributor must leave the result NON-complete; got {:?}",
+        state.completeness
+    );
+    assert!(
+        state.synthesis_should_suppress,
+        "the failed same-name contributor must suppress warm result admission"
+    );
+}
+
+/// MASKED-CONTRIBUTOR enforcement, local-arm-first order: in
+/// `defineProps<{ x: string } & Bad>()` the locally-authored `x: string`
+/// analyzer candidate must NOT be accepted as the merged member's source
+/// while the imported same-name contributor `Bad.x` is unresolvable — that
+/// acceptance published a wrong concrete `string` success (`completed`)
+/// where `defineProps<Bad>()` alone correctly failed typed.
+#[test]
+fn masked_failed_same_name_intersection_prop_contributor_fails_closed() {
+    assert_masked_same_name_intersection_prop_fails_closed("{ x: string } & Bad");
+}
+
+/// MASKED-CONTRIBUTOR enforcement, imported-arm-first order: intersection
+/// arm order must not change the fail-closed decision
+/// (`defineProps<Bad & { x: string }>()` masked identically).
+#[test]
+fn masked_failed_same_name_intersection_prop_contributor_fails_closed_reversed() {
+    assert_masked_same_name_intersection_prop_fails_closed("Bad & { x: string }");
+}
+
+/// POSITIVE control (no overfire): a same-name intersection whose arms AGREE
+/// on a resolvable type (`{ x: string } & Good` with `Good { x: string }`)
+/// stays a PRESENT `string` prop and a COMPLETE result — the masked-failed
+/// fail-close must not fire on an intersection whose every contributor
+/// resolves.
+#[test]
+fn agreeing_same_name_intersection_prop_stays_present() {
+    let project = make_project();
+    project
+        .upsert_base("/good.ts", "export interface Good { x: string }\n")
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Good } from './good'
+defineProps<{ x: string } & Good>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let (analysis, _resolution, types) = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("an agreeing resolvable intersection materializes")
+        .expect("the SFC resolves")
+        .into_parts();
+    let index = analysis
+        .props
+        .iter()
+        .position(|prop| prop.name == "x")
+        .expect("the merged prop publishes");
+    // The published source stays a faithful PRESENT position (the closed
+    // leaf when the merged value collapses to one interned node, else the
+    // projected merged-member replay route) — never a failure and never an
+    // absence.
+    assert!(
+        analysis.props[index].type_source.present().is_some(),
+        "both contributors agree on the same resolvable type — the merged \
+         member publishes a PRESENT source, never a failure; got {:?}",
+        analysis.props[index].type_source
+    );
+    // The materialized lane value is string-equivalent: the agreed leaf
+    // itself, or the faithful merged intersection whose EVERY arm is the
+    // agreed leaf (`string & string`) — never a failure, never a non-string.
+    let lanes = types.into_lanes();
+    let string_equivalent = match &lanes.props[index] {
+        TypeExpr::Primitive(PrimitiveName::String) => true,
+        TypeExpr::Intersection(arms) => {
+            !arms.is_empty()
+                && arms
+                    .iter()
+                    .all(|arm| matches!(arm, TypeExpr::Primitive(PrimitiveName::String)))
+        }
+        _ => false,
+    };
+    assert!(
+        string_equivalent,
+        "the merged member materializes the agreed string type; got {:?}",
+        lanes.props[index]
+    );
+
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("resolves");
+    assert!(
+        !state.completeness.is_partial(),
+        "an agreeing resolvable intersection completes; got {:?}",
+        state.completeness
+    );
+    assert!(
+        !state.synthesis_should_suppress,
+        "an agreeing resolvable intersection must not suppress warm admission"
+    );
+}
+
+/// POSITIVE control (no overfire), both arms local: duplicate same-name
+/// literal contributors (`{ x: string } & { x: string }`) merge to one
+/// PRESENT `string` prop — multiple analyzer candidates keep the row
+/// locator-less but the merged member value still publishes its closed
+/// leaf fact.
+#[test]
+fn duplicate_local_same_name_intersection_prop_stays_present() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ x: string } & { x: string }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let (analysis, _resolution, _types) = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("a duplicate agreeing local intersection materializes")
+        .expect("the SFC resolves")
+        .into_parts();
+    let prop = analysis
+        .props
+        .iter()
+        .find(|prop| prop.name == "x")
+        .expect("the merged prop publishes");
+    assert!(
+        matches!(
+            &prop.type_source,
+            verter_type_expr::facts::SourcePosition::Present(
+                verter_type_expr::facts::SemanticTypeSource::Closed(_)
+            )
+        ),
+        "identical local contributors publish the closed string fact; got {:?}",
+        prop.type_source
+    );
+}
+
+/// MASKED-CONTRIBUTOR enforcement on the EMITS property-style surface: in
+/// `defineEmits<{ save: [id: number] } & BadEmits>()` where the imported
+/// same-name contributor `BadEmits.save` is unresolvable, the merged `save`
+/// payload must FAIL typed — the resolvable local tuple arm must not mask
+/// the failed contributor into a concrete `[id: number]` success.
+#[test]
+fn masked_failed_same_name_intersection_emit_contributor_fails_closed() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/bad-emits.ts",
+            "export interface BadEmits { save: MissingType }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { BadEmits } from './bad-emits'
+defineEmits<{ save: [id: number] } & BadEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let err = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect_err(
+            "a same-name emit payload with a FAILED contributor must fail \
+             output materialization typed — never a masked concrete tuple",
+        );
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::EventPayload,
+        "the typed failure names the event-payload lane"
+    );
+}
+
+/// MASKED-CONTRIBUTOR enforcement on the EXPOSED surface: in
+/// `defineExpose<{ x: string } & Bad>()` where the imported same-name
+/// contributor `Bad.x` is unresolvable, the merged exposed member must FAIL
+/// typed — never a masked concrete `string`.
+#[test]
+fn masked_failed_same_name_intersection_exposed_contributor_fails_closed() {
+    let project = make_project();
+    project
+        .upsert_base("/bad.ts", "export interface Bad { x: MissingType }\n")
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Bad } from './bad'
+defineExpose<{ x: string } & Bad>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let err = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect_err(
+            "a same-name exposed member with a FAILED contributor must fail \
+             output materialization typed — never a masked concrete string",
+        );
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::Exposed,
+        "the typed failure names the exposed lane"
+    );
+}
+
+/// GENUINE-MISS control on the EMITS property-style surface, single
+/// contributor: `defineEmits<BadEmits>()` alone (no masking sibling) must
+/// fail typed — the unvalidated member-path replay route previously
+/// published a Present source for the unresolvable payload and completed.
+#[test]
+fn emit_payload_referencing_nonexistent_type_stays_failed() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/bad-emits.ts",
+            "export interface BadEmits { save: MissingType }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { BadEmits } from './bad-emits'
+defineEmits<BadEmits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let err = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect_err(
+            "an emit payload referencing a non-existent type is a genuine \
+             miss and must FAIL output materialization with a typed error",
+        );
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::EventPayload,
+        "the typed failure names the event-payload lane"
+    );
+}
+
+/// GENUINE-MISS control on the SLOTS surface, single contributor:
+/// `defineSlots<BadSlots>()` alone must not complete as a full success with
+/// the failed slot silently absent — the result stays NON-complete
+/// (never admitted warm as complete metadata).
+#[test]
+fn slot_member_referencing_nonexistent_type_never_completes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/bad-slots.ts",
+            "export interface BadSlots { item: MissingType }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { BadSlots } from './bad-slots'
+defineSlots<BadSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("the analysis itself still assembles");
+    assert!(
+        state.completeness.is_partial(),
+        "an unresolvable slot member must leave the result NON-complete; got {:?}",
+        state.completeness
+    );
+    assert!(
+        state.synthesis_should_suppress,
+        "the unresolvable slot member must suppress warm result admission"
+    );
+}
+
+/// MASKED-CONTRIBUTOR enforcement on INDEX-SIGNATURE positions: index
+/// signatures CONCATENATE across intersection arms (no same-name merge), so
+/// the imported arm's `[k: string]: MissingType` signature keeps its own
+/// row — its unresolvable VALUE position must fail typed, never be dropped
+/// while the local `[k: string]: string` signature completes the surface.
+#[test]
+fn masked_failed_intersection_index_signature_value_never_completes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/bad-index.ts",
+            "export interface BadIndex { [k: string]: MissingType }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { BadIndex } from './bad-index'
+defineProps<{ [k: string]: string } & BadIndex>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // Index-signature positions are not one of the materialized output type
+    // lanes, so the typed output error cannot name them; the enforcement
+    // rail is the shape-level completeness: the FAILED value position marks
+    // the result NON-complete and suppresses warm admission — the resolvable
+    // sibling signature must not complete the surface.
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("the analysis itself still assembles");
+    assert!(
+        state.completeness.is_partial(),
+        "a failed index-signature VALUE position must leave the result \
+         NON-complete; got {:?}",
+        state.completeness
+    );
+    assert!(
+        state.synthesis_should_suppress,
+        "the failed index-signature VALUE must suppress warm result admission"
+    );
+}
+
+/// MASKED-CONTRIBUTOR observation on the SLOTS surface: in
+/// `defineSlots<{ item(props: { a: string }): any } & BadSlots>()` where the
+/// imported same-name contributor `BadSlots.item` is unresolvable, the
+/// merged `item` slot must NOT publish the resolvable local callable's
+/// bindings as a completed concrete success. The slots normalizer keeps
+/// function-like members only, so the fail-closed form here is the merged
+/// member NOT realizing as a callable (no fabricated slot) combined with a
+/// NON-complete result — never a masked complete success.
+#[test]
+fn masked_failed_same_name_intersection_slot_contributor_never_completes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/bad-slots.ts",
+            "export interface BadSlots { item: MissingType }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { BadSlots } from './bad-slots'
+defineSlots<{ item(props: { a: string }): any } & BadSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // Either output materialization fails typed, or the merged slot is not
+    // published as a completed concrete success — a masked complete `item`
+    // slot with the local arm's bindings is the fail-open this pins closed.
+    match project.host().get_component_meta_output("/App.vue") {
+        Err(_) => {}
+        Ok(output) => {
+            let (analysis, _resolution, _types) = output.expect("the SFC resolves").into_parts();
+            let masked_complete = analysis.slots.iter().any(|slot| slot.name == "item")
+                && !project
+                    .host()
+                    .get_component_meta_with_resolution("/App.vue")
+                    .expect("resolves")
+                    .1
+                    .completeness
+                    .is_partial();
+            assert!(
+                !masked_complete,
+                "a merged slot with a FAILED same-name contributor must not \
+                 publish as a COMPLETE concrete success; slots={:?}",
+                analysis.slots
+            );
+        }
+    }
+}
+
+/// SOLE-AUTHORITY discrimination: the `define_props` SHAPE lane publishes
+/// the NORMALIZED prop row's member-value source — the flat
+/// `evaluated_types.props` projection contributes metadata only and can
+/// never shadow it. The imported function-valued member is a production
+/// divergence case: the legacy flat-field preference published the flat
+/// row's value onto the lane here, while the normalized row carries the
+/// faithful projected MEMBER-PATH replay source — so a lane publishing the
+/// normalized value proves the authority order, and the extracted meta
+/// position agrees with the lane (one authority end to end).
+#[test]
+fn normalized_prop_rows_are_the_published_source_authority() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/props.ts",
+            "export interface Props { onClick: () => void }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './props'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let (analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("component resolves");
+    let evaluated = state
+        .evaluated_types
+        .as_ref()
+        .expect("evaluated types present");
+    let lane = &evaluated.define_props[0].result.value;
+    let lane_prop = lane
+        .properties
+        .iter()
+        .find(|property| property.name == "onClick")
+        .expect("the lane publishes the onClick property");
+    // The lane position IS the normalized row's source (the projected
+    // member-path replay route) — never the flat projection's value.
+    let lane_source = match lane_prop.ty.present() {
+        Some(verter_type_expr::facts::SemanticTypeSource::Projected(
+            verter_type_expr::facts::ProjectedTypeFact::MemberPath { path, .. },
+        )) => {
+            assert_eq!(path.as_ref(), ["onClick".to_string()], "one member hop");
+            lane_prop.ty.clone()
+        }
+        other => panic!(
+            "the define_props lane publishes the NORMALIZED member-path \
+             source, got {other:?}"
+        ),
+    };
+    // The extracted meta position agrees with the lane — one authority end
+    // to end (extraction publishes the normalized-derived lane, no
+    // post-extract overwrite).
+    let meta_prop = analysis
+        .props
+        .iter()
+        .find(|prop| prop.name == "onClick")
+        .expect("the meta publishes the onClick prop");
+    assert_eq!(
+        meta_prop.type_source, lane_source,
+        "the extracted position IS the lane's normalized source"
+    );
+}
+
+/// SOLE-AUTHORITY discrimination for the MODEL path: the model prop/event
+/// TYPE source comes from the NORMALIZED `defineModel` surface row — never
+/// a same-name flat evaluated prop from a SIBLING macro. The fixture
+/// declares a `defineProps` prop and a `defineModel` binding under the SAME
+/// name: the legacy path adopted the sibling `defineProps` flat row's
+/// source (anchored at the props macro); the model's own normalized surface
+/// row (its authored type-argument payload, anchored at the MODEL macro)
+/// is authoritative.
+#[test]
+fn model_type_source_comes_from_the_normalized_define_model_surface() {
+    use verter_type_expr::facts::{SemanticTypeSource, SourcePosition};
+    use verter_type_expr::locators::AuthoredBodyLocator;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ value: string }>()
+const value = defineModel<number>("value")
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("component resolves");
+    let model = meta
+        .models
+        .iter()
+        .find(|model| model.name == "value")
+        .expect("the model publishes");
+    // The model's type source is the NORMALIZED defineModel surface row's
+    // authored payload — anchored at the MODEL macro (index 1), never the
+    // sibling defineProps macro (index 0).
+    match &model.type_source {
+        SourcePosition::Present(SemanticTypeSource::Authored(
+            AuthoredBodyLocator::MacroPayload(payload),
+        )) => {
+            assert_eq!(
+                payload.macro_index, 1,
+                "the model type source anchors at the defineModel macro, \
+                 never the sibling defineProps macro"
+            );
+        }
+        other => panic!(
+            "the model publishes its own normalized authored payload \
+             source, got {other:?}"
+        ),
+    }
+    // Demanding the model's published source materializes the MODEL's own
+    // `number` — never the sibling prop's `string`.
+    let demanded = demand_published_type(
+        project.host(),
+        "/App.vue",
+        model.type_source.present(),
+        "model value type",
+    );
+    assert_eq!(
+        demanded,
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the model type is the defineModel type argument"
+    );
+}
+
+/// POSITIVE CONTROL: a shallow prop whose value IS recoverable — an
+/// authored inline annotation (`msg: string`), a local alias reference
+/// (`alias: MyAlias`), and an authored inline `unknown` — still completes
+/// as `Present`. The member-value fail-close must touch ONLY the
+/// no-faithful-source residue, never a recoverable member.
+#[test]
+fn recoverable_shallow_prop_values_still_complete_as_present() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+type MyAlias = number
+defineProps<{ msg: string, alias: MyAlias, open: unknown }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect("recoverable shallow member values complete as Present, never a failure")
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    let position = |name: &str| {
+        analysis
+            .props
+            .iter()
+            .position(|prop| prop.name == name)
+            .unwrap_or_else(|| panic!("the {name} prop publishes"))
+    };
+    for prop in analysis.props.iter() {
+        assert!(
+            prop.type_source.is_present(),
+            "the recoverable {} prop publishes a PRESENT source; got {:?}",
+            prop.name,
+            prop.type_source
+        );
+    }
+    assert_eq!(
+        lanes.props[position("msg")],
+        TypeExpr::Primitive(PrimitiveName::String),
+        "the authored primitive renders as written"
+    );
+    assert!(
+        matches!(
+            &lanes.props[position("alias")],
+            TypeExpr::Ref { name, .. } if name.as_ref() == "MyAlias"
+        ),
+        "the local alias stays the shallow authored reference; got {:?}",
+        lanes.props[position("alias")]
+    );
+    assert_eq!(
+        lanes.props[position("open")],
+        TypeExpr::Primitive(PrimitiveName::Unknown),
+        "an AUTHORED `unknown` is a PRESENT success rendered as the author wrote it"
+    );
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("resolves");
+    assert!(
+        !state.completeness.is_partial(),
+        "recoverable members complete; the fail-close must not overfire"
+    );
+}
+
+/// An index-signature VALUE position richer than the closed leaf/tuple
+/// vocabulary (`{ [key: string]: { nested: number } }`) is KNOWN structure:
+/// it publishes the faithful PRESENT projected INDEX-POSITION replay route
+/// (the macro's stamped type-argument base + the signature's surface
+/// ordinal + the value role) and the result stays COMPLETE. A consumer
+/// demanding the published source through the one shared dispatch reaches
+/// the nested leaf. The pre-fix behavior was the typed
+/// `Failed(UnrepresentableRequiredMemberValue)` interim (and before that, a
+/// fabricated `Closed(Leaf(unknown))` present source inside a COMPLETE
+/// result — a fail-open reported as success). The genuinely-OPEN key domain
+/// (`[key: string]`) stays a valid PRESENT closed leaf — openness is
+/// semantic, never a failure.
+#[test]
+fn richer_index_signature_value_position_publishes_projected_replay() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ [key: string]: { nested: number } }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("the analysis itself still assembles");
+    let evaluated = state
+        .evaluated_types
+        .as_ref()
+        .expect("evaluated types present");
+    let shape = &evaluated.define_props[0].result.value;
+    assert_eq!(shape.index_signatures.len(), 1, "one index signature");
+    let signature = &shape.index_signatures[0];
+    assert_eq!(
+        signature.key_type,
+        verter_type_expr::facts::SourcePosition::Present(
+            verter_type_expr::facts::SemanticTypeSource::Closed(
+                verter_type_expr::facts::ClosedTypeFact::Leaf(
+                    verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::String),
+                ),
+            ),
+        ),
+        "the genuinely-open string key domain stays a PRESENT closed leaf"
+    );
+    // The richer VALUE position publishes the projected INDEX-POSITION
+    // replay route — never a fabricated unknown leaf and never a failure.
+    match signature.value_type.present() {
+        Some(verter_type_expr::facts::SemanticTypeSource::Projected(
+            verter_type_expr::facts::ProjectedTypeFact::IndexPosition {
+                signature_ordinal,
+                position,
+                ..
+            },
+        )) => {
+            assert_eq!(*signature_ordinal, 0, "first surface index signature");
+            assert_eq!(
+                *position,
+                verter_type_expr::facts::IndexSignaturePosition::Value,
+                "the value role addresses the value type"
+            );
+        }
+        other => panic!(
+            "the richer index value position publishes the IndexPosition \
+             replay source, got {other:?}"
+        ),
+    }
+    assert!(
+        !state.completeness.is_partial(),
+        "a representable index value position completes; got {:?}",
+        state.completeness
+    );
+    assert!(
+        !state.synthesis_should_suppress,
+        "a representable index value position must not suppress warm result admission"
+    );
+
+    // Consumer demand-walk: demanding the published replay source through
+    // the one shared dispatch materializes the nested object and reaches
+    // its nested leaf — never an unknown.
+    let demanded = demand_published_type(
+        project.host(),
+        "/App.vue",
+        signature.value_type.present(),
+        "index value position",
+    );
+    let TypeExpr::Object(shape) = &demanded else {
+        panic!("the demanded index value materializes the nested object, got {demanded:?}");
+    };
+    let nested = shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "nested" => {
+                Some(property.ty.clone())
+            }
+            _ => None,
+        })
+        .expect("the demanded object carries the nested member");
+    assert_eq!(
+        nested,
+        TypeExpr::Primitive(PrimitiveName::Number),
+        "the demand-walk reaches the nested leaf"
+    );
+}
+
+/// A PRESENT authored source whose deref'd body contains an interior
+/// unknown-materializing `Opaque` (a method value whose deref interns the
+/// shared miss placeholder at a nested position) FAILS output
+/// materialization with the typed conservative interior fail-close. The
+/// pre-fix behavior — the shell fold rendering the interior failure as a
+/// COMPLETED `unknown` inside an otherwise-successful output — was a
+/// fail-open reported as success. The graph carries no per-position
+/// absent-vs-failed provenance yet, so the conservative interim fails the
+/// source; the fine-grained provenance is the deferred half of
+/// docs/arch/stage10-b6-p4b-debt-rows.md DEBT ROW #2.
+#[test]
+fn present_source_with_interior_unknown_materializing_opaque_fails_output() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ config: { handler(msg: string) } }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let err = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect_err(
+            "a Present source whose materialized shape carries an interior \
+             unknown-materializing failure must FAIL output materialization — \
+             never shell-fold to a completed unknown",
+        );
+    assert_eq!(
+        err.lane,
+        crate::meta_resolve::ComponentMetaOutputLane::Prop,
+        "the typed failure names the failed lane"
+    );
+    assert!(
+        matches!(
+            err.failure,
+            crate::meta_resolve::ComponentMetaOutputFailure::UnknownMaterializingSourceInterior { .. }
+        ),
+        "the failure class is the conservative interior fail-close; got {:?}",
+        err.failure
+    );
+    assert!(
+        err.position.is_present(),
+        "the failed slot was a PRESENT source (the interior, not the position, failed); got {:?}",
+        err.position
+    );
 }

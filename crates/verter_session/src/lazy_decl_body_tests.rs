@@ -116,8 +116,7 @@ fn resolve_unrelated_symbol_lowers_only_demanded_decl() {
     upsert(&host, SCRATCH_ID, SCRATCH);
     host.provenance().reset();
 
-    let node =
-        host.resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded));
+    let node = host.resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded));
     assert!(node.is_some(), "Unrelated must resolve");
 
     let provenance = snap(&host);
@@ -141,7 +140,7 @@ fn resolve_with_dependencies_lowers_exactly_the_walked_closure() {
     upsert(&host, CHAIN_ID, CHAIN);
     host.provenance().reset();
 
-    let node = host.resolve_named_symbol(CHAIN_ID, "A", &[], Some(ProjectionMode::Expanded));
+    let node = host.resolve_named_symbol(CHAIN_ID, "A", Some(ProjectionMode::Expanded));
     assert!(node.is_some(), "A must resolve");
 
     let provenance = snap(&host);
@@ -180,7 +179,7 @@ fn lazy_decl_body_singleflight_lowers_once() {
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            host.resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded))
+            host.resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded))
         }));
     }
     for handle in handles {
@@ -211,7 +210,7 @@ fn content_edit_invalidates_decl_body_memo() {
     upsert(&host, SCRATCH_ID, SCRATCH);
 
     let cold = host
-        .resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded))
         .expect("cold resolve must succeed");
     let cold_expr = host
         .project_node_to_type_expr_for_test(cold)
@@ -233,7 +232,7 @@ fn content_edit_invalidates_decl_body_memo() {
     );
     host.provenance().reset();
     let warm = host
-        .resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded))
         .expect("post-edit resolve must succeed");
     let warm_expr = host
         .project_node_to_type_expr_for_test(warm)
@@ -265,7 +264,7 @@ fn lazy_decl_lowering_uses_scheduler_snapshot_not_reparse() {
 
     for symbol in ["Unrelated", "Var0", "Var1"] {
         assert!(
-            host.resolve_named_symbol(SCRATCH_ID, symbol, &[], Some(ProjectionMode::Expanded))
+            host.resolve_named_symbol(SCRATCH_ID, symbol, Some(ProjectionMode::Expanded))
                 .is_some(),
             "{symbol} must resolve"
         );
@@ -313,7 +312,6 @@ fn live_artifact_memo_pins_snapshot_across_many_other_files() {
             host.resolve_named_symbol(
                 &format!("/workspace/src/many{i}.ts"),
                 &format!("A{i}"),
-                &[],
                 Some(ProjectionMode::Expanded),
             )
             .is_some(),
@@ -330,7 +328,6 @@ fn live_artifact_memo_pins_snapshot_across_many_other_files() {
         host.resolve_named_symbol(
             "/workspace/src/many0.ts",
             "B0",
-            &[],
             Some(ProjectionMode::Expanded),
         )
         .is_some(),
@@ -581,7 +578,7 @@ fn overlay_decl_body_never_serves_base_read() {
     // BASE body — the overlay's memo must never answer a base demand.
     host.provenance().reset();
     let base_node = host
-        .resolve_named_symbol(canonical, "Shared", &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol(canonical, "Shared", Some(ProjectionMode::Expanded))
         .expect("base resolve must succeed");
     let base_expr = host
         .project_node_to_type_expr_for_test(base_node)

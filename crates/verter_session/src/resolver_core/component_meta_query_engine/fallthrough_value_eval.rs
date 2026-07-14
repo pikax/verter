@@ -75,7 +75,7 @@ fn enter_node<T: Clone>(
         // The op-budget trip is a genuine incomplete compute: fold a partial
         // into the active cold-compute completeness scope so the fallthrough
         // surface this walk feeds is refused warm admission.
-        crate::request_context::mark_request_materialization_cache_suppress();
+        crate::request_context::mark_request_result_partial();
         return NodeWalkStep::Halt;
     }
     active.insert(node);
@@ -144,13 +144,26 @@ impl ComponentMetaQueryEngine<'_> {
         }
 
         // (3) Node Class-A projection (registry route fast-path + terminal).
-        let admitted = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
+        if let Some(admitted) = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
             self.ctx,
             Some(self),
             scope_canonical_id,
             &lowered,
-        )?;
-        Some(admitted.node())
+        ) {
+            return Some(admitted.node());
+        }
+        // (4) Key-domain fallback. The class-A terminal admits only a FULLY
+        // materialized expanded surface, but the fallthrough readers consume
+        // the KEY / structure domain: an inferred const-object surface whose
+        // member VALUE is unmaterialized (an un-annotated arrow return) still
+        // exposes its exact spread keys. Lower the expression eagerly and let
+        // the node-domain readers decide what the node statically exposes —
+        // a shape with no static key surface still reads as unknown.
+        dispatch.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            &lowered,
+            ProjectionMode::Expanded,
+        )
     }
 
     /// Node-domain spread-key reader for a root-consumption spread value
@@ -408,7 +421,7 @@ fn insert_dynamic_root_candidate_charged(
     if crate::request_context::current_request_budget()
         .is_some_and(|budget| budget.check_projection_op_count())
     {
-        crate::request_context::mark_request_materialization_cache_suppress();
+        crate::request_context::mark_request_result_partial();
         return false;
     }
     set.insert(candidate);

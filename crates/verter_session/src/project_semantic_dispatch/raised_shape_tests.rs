@@ -182,12 +182,11 @@ fn assert_eq_nodes_parity(host: &VerterHost, a: SemanticNodeId, b: SemanticNodeI
 }
 
 // ---------------------------------------------------------------------------
-// Class 1 — opaque errors (incl. sentinel-like `Other`), raw fallback,
-// VueMacroElements.
+// Class 1 — opaque errors (incl. sentinel-like `Other`), raw fallback.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn parity_opaque_errors_and_raw_fallback_and_vue_macro_elements() {
+fn parity_opaque_errors_and_raw_fallback() {
     let host = host();
     let graph = graph_of(&host);
 
@@ -266,23 +265,10 @@ fn parity_opaque_errors_and_raw_fallback_and_vue_macro_elements() {
         node_contains_semantic_miss_or_unraisable(&host, raw_sentinel),
         "RawFallback whose raw IS a sentinel string ⇒ semantic miss"
     );
-
-    // VueMacroElements raises to the `VueMacroElements` sentinel ⇒ NOT
-    // materialized. DIRECT fixture (the real `SemanticNodeData::VueMacroElements`
-    // match arm, not a RawFallback mirror): the arm ignores the payload, so an
-    // empty `ResolvedElements::default()` suffices to exercise it.
-    let vue = graph.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
-        verter_compiler::utils::oxc::script::type_surface::ResolvedElements::default(),
-    )));
-    assert_classifier_parity(&host, vue, "vue-macro-elements");
-    assert!(
-        node_contains_semantic_miss_or_unraisable(&host, vue),
-        "VueMacroElements raises to the `VueMacroElements` sentinel ⇒ semantic miss"
-    );
 }
 
 /// BEHAVIOUR-PRESERVATION across the typed-sentinel swap: the converted
-/// `fold_node` arms (here, the Vue-macro-elements arm + the surface-member
+/// `fold_node` arms (here, the surface-member
 /// fallback) must raise to the BYTE-IDENTICAL legacy `Unknown { raw }` AND drive
 /// the SAME downstream materialised/miss decision the old hardcoded literal did —
 /// end-to-end through the real graph fixtures, not just at the algebra entry
@@ -304,25 +290,6 @@ fn typed_control_sentinel_producers_raise_byte_identical_and_keep_miss_decision(
 
     let host = host();
     let graph = graph_of(&host);
-
-    // VueMacroElements arm (a CONVERTED producer site): raises EXACTLY to
-    // `Unknown { raw: "VueMacroElements" }` and that spelling is a recognised
-    // sentinel ⇒ contains a semantic miss.
-    let vue = graph.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
-        verter_compiler::utils::oxc::script::type_surface::ResolvedElements::default(),
-    )));
-    let vue_raised = raise_oracle(&host, vue).expect("VueMacroElements must raise to Some");
-    assert_eq!(
-        vue_raised,
-        TypeExpr::Unknown {
-            raw: "VueMacroElements".to_string(),
-        },
-        "the converted VueMacroElements arm must raise byte-identical to the legacy sentinel"
-    );
-    assert!(
-        type_expr_contains_semantic_miss(&vue_raised),
-        "the VueMacroElements sentinel must still read as a semantic miss"
-    );
 
     // Surface-member fallback (the CONVERTED `fold_member` miss arm): an object
     // whose member value node is unraisable hits the `SEMANTIC_SURFACE_MEMBER`
@@ -410,7 +377,7 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
     // (`UnsupportedIntrinsic` → `unsupportedIntrinsic(<name>)`, `BudgetExceeded`),
     // the unmaterialised producer-control carriers
     // (`UnstableState`, `AliasCycle`, `RaiseAliasCycle`, `UnrepresentableSurface`,
-    // `UnrepresentableSurfaceMember`, `VueMacroElementsPlaceholder`), the
+    // `UnrepresentableSurfaceMember`), the
     // MATERIALISED producer placeholders (`TypeParamCycle`, `RaiseMiss`,
     // `ValueDomainMismatch`), the adversarial text-bearing sentinel
     // (`Other("semanticMiss")`) + object-surface-spelling (`Other("semanticObjectSurface")`)
@@ -440,7 +407,6 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
         QueryError::RaiseMiss,
         QueryError::UnrepresentableSurface,
         QueryError::UnrepresentableSurfaceMember,
-        QueryError::VueMacroElementsPlaceholder,
         QueryError::Other(Arc::from("semanticMiss")),
         QueryError::Other(Arc::from("semanticObjectSurface")),
         QueryError::Other(Arc::from("budgetExceeded(x)")),
@@ -2506,12 +2472,6 @@ fn publication_score_corpus(
             "opaque_surface_sentinel",
             graph.intern_node(SemanticNodeData::Opaque(QueryError::UnrepresentableSurface)),
         ),
-        (
-            "vue_macro_elements",
-            graph.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
-                verter_compiler::utils::oxc::script::type_surface::ResolvedElements::default(),
-            ))),
-        ),
         ("function", function),
         ("constructor_type", {
             graph.intern_node(SemanticNodeData::ConstructorType {
@@ -2648,7 +2608,6 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
             SemanticNodeData::TypeParam { .. } => "type_param",
             SemanticNodeData::Infer { .. } => "infer",
             SemanticNodeData::Opaque(_) => "opaque",
-            SemanticNodeData::VueMacroElements(_) => "vue_macro_elements",
             SemanticNodeData::Function { .. } => "function",
             SemanticNodeData::DeclRef { .. } => "decl_ref",
             SemanticNodeData::InstantiationRef { .. } => "instantiation_ref",
@@ -2681,7 +2640,6 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
         "type_param",
         "infer",
         "opaque",
-        "vue_macro_elements",
         "function",
         "decl_ref",
         "instantiation_ref",

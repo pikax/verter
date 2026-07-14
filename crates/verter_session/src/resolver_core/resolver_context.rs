@@ -36,11 +36,15 @@
 //!
 //! ## Sealed against external implementations
 //!
-//! The trait extends `sealed::Sealed`. The `Sealed` marker is defined in
-//! a private inner module and only `VerterHost` registers as `Sealed`
-//! (`impl sealed::Sealed for crate::VerterHost {}` at the bottom of this
-//! file). External crates therefore cannot implement `ResolverContext`,
-//! preserving the host-as-singular-implementer invariant.
+//! The trait extends `sealed::Sealed`, whose marker is defined in a
+//! private inner module — external crates cannot name it, so they cannot
+//! implement `ResolverContext`. Three in-crate types register `Sealed`
+//! (the `impl sealed::Sealed` block at the bottom of this file): the base
+//! `VerterHost` implementer plus the two request-bound wrappers
+//! `HostResolverContext` and `SessionResolverContext`. The request-bound
+//! refinement layers a SECOND, narrower seal on top — see
+//! [`RequestBoundResolverContext`], which admits only the two request-bound
+//! wrappers and never the bare host.
 //!
 //! ## Architectural guarantees (cross-referenced from CLAUDE.md)
 //!
@@ -62,7 +66,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
+use verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
@@ -70,6 +74,7 @@ use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
 use crate::host_manage::ValueDeclIdentity;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::project_type_store::{IndexedReady, ProjectTypeStore};
+use crate::resolver_core::fact_tracer_tls;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::{FactVersionRef, ShallowFileState};
 use crate::resolver_store::HostStoreView;
@@ -78,13 +83,25 @@ use crate::types::Hash16;
 use crate::FileAnalysisSnapshot;
 use crate::HostConfig;
 
-/// Private marker used to seal `ResolverContext` against external
-/// implementations.
+/// Private markers used to seal `ResolverContext` (and its request-bound
+/// refinement) against external implementations.
 mod sealed {
     /// Marker trait `ResolverContext` is sealed against. Only types
     /// inside `verter_session` that implement this marker can implement
-    /// `ResolverContext`. Today the only implementer is `VerterHost`.
+    /// `ResolverContext`. Today the implementers are `VerterHost` and the
+    /// two request-bound contexts.
     pub trait Sealed {}
+
+    /// Narrower marker sealing [`super::RequestBoundResolverContext`].
+    ///
+    /// Implemented ONLY for the two genuinely request-bound contexts
+    /// (`HostResolverContext`, `SessionResolverContext`) — NEVER for the
+    /// bare-host `VerterHost`. Because the marker trait carries this as a
+    /// supertrait bound, a non-request-bound context cannot be laundered
+    /// into `RequestBoundResolverContext` even from inside this crate
+    /// without adding a visible, reviewable `impl RequestBoundSealed`
+    /// here, and no external crate can add one at all.
+    pub trait RequestBoundSealed {}
 }
 
 /// A single, tear-free observation of a materialize-memo scope's
@@ -195,7 +212,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// gates admission on `serve.store_published`; structurally
     /// read-only consumers take `serve.indexed` (the fenced consumption
     /// still reaches every enclosing traced admission point through the
-    /// `note_fenced_serve_fan_out` chokepoint flag).
+    /// `note_non_cacheable_read_fan_out` chokepoint flag).
     fn ensure_indexed_ready_serve(
         &self,
         canonical_id: &str,
@@ -650,12 +667,70 @@ impl<'a> sealed::Sealed
 {
 }
 
+/// Sealed marker subtrait: a [`ResolverContext`] that is genuinely
+/// REQUEST-BOUND — it carries a per-request [`HostStoreView`] (and, for a
+/// session query, an overlay) constructed at the request entry boundary,
+/// so [`ResolverContext::is_request_bound`] is `true` and every artifact
+/// serve is view-correct for the requesting caller.
+///
+/// This is the STRUCTURAL rail behind
+/// [`crate::query_host_port::SessionQueryHostPort::new`]: the port binds a
+/// `&dyn RequestBoundResolverContext`, so the retired bare-host rail
+/// (`impl ResolverContext for VerterHost`) is UNCONSTRUCTIBLE at the type
+/// level — `VerterHost` implements [`ResolverContext`] but NOT this
+/// marker, and therefore cannot coerce to `&dyn RequestBoundResolverContext`.
+/// The runtime `is_request_bound` check the port formerly asserted is now
+/// redundant defense-in-depth.
+///
+/// Sealed via [`sealed::RequestBoundSealed`], implemented ONLY for
+/// [`crate::resolver_core::HostResolverContext`] and
+/// [`crate::resolver_core::SessionResolverContext`]. It is NEVER
+/// implemented for [`crate::VerterHost`]; the seal makes an external or
+/// in-crate-laundered non-request-bound implementer impossible without a
+/// visible `impl RequestBoundSealed`.
+///
+/// The marker deliberately does NOT distinguish a base
+/// [`crate::resolver_core::HostResolverContext`] from an overlay
+/// [`crate::resolver_core::SessionResolverContext`] — both are
+/// request-bound. Overlay-vs-base correctness stays the caller's
+/// obligation (chosen at the request entry) and its regression coverage is
+/// tracked separately.
+pub(crate) trait RequestBoundResolverContext:
+    ResolverContext + sealed::RequestBoundSealed
+{
+}
+
+// The request-bound seal: `RequestBoundSealed` (and hence
+// `RequestBoundResolverContext`) is implemented for the two genuinely
+// request-bound contexts ONLY, and NEVER for the bare-host `VerterHost`.
+impl<'a> sealed::RequestBoundSealed
+    for crate::resolver_core::host_resolver_context::HostResolverContext<'a>
+{
+}
+impl<'a> sealed::RequestBoundSealed
+    for crate::resolver_core::session_resolver_context::SessionResolverContext<'a>
+{
+}
+impl<'a> RequestBoundResolverContext
+    for crate::resolver_core::host_resolver_context::HostResolverContext<'a>
+{
+}
+impl<'a> RequestBoundResolverContext
+    for crate::resolver_core::session_resolver_context::SessionResolverContext<'a>
+{
+}
+
 // Compile-time dyn-compatibility check. If a future trait edit
 // accidentally introduces an associated type, generic method, or
 // `where Self: Sized` bound that breaks dyn-compatibility, this assertion
 // fires inside this file at compile time long before a callsite-cascade
 // error.
 static_assertions::assert_obj_safe!(ResolverContext);
+// The request-bound refinement is used as `&dyn RequestBoundResolverContext`
+// by the query host port, so it must stay dyn-compatible too. A marker
+// subtrait of a dyn-compatible trait adding no new methods is dyn-safe;
+// this pins it against a future edit.
+static_assertions::assert_obj_safe!(RequestBoundResolverContext);
 
 impl ResolverContext for crate::VerterHost {
     // Cache accessors -------------------------------------------------
@@ -1140,13 +1215,45 @@ pub(crate) fn observe_fan_out_borrowed(sig: &[crate::resolver_core::FactVersionR
     fact_tracer_tls::observe_fan_out_borrowed(sig);
 }
 
+/// A typed reason a read was NON-CACHEABLE — the discriminant a marking
+/// site passes to [`note_non_cacheable_read_fan_out`].
+///
+/// The tracer records only a boolean (any non-cacheable read refuses
+/// shared-cache admission for the enclosing compute); the reason is a
+/// structural, self-documenting signal at the marking site so the
+/// non-cacheability class is closed by TYPED dispatch rather than an
+/// untyped "mark suppress" call. Orthogonal to completeness: marking a
+/// read non-cacheable never makes the result `Partial`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NonCacheableReadReason {
+    /// A FENCED (ReturnOnly, `store_published == false`) `IndexedReady`
+    /// serve consumed inside the tracer scope: the payload was computed
+    /// from a served-without-publication (superseded) artifact.
+    FencedServe,
+    /// A broken decl-body lease pin (`DemandOutcome::LeaseMiss` /
+    /// `PreparedDeclOutcome::LeaseMiss` / `LocatorBodyDerefError::LeaseMiss`):
+    /// the demanded body did not lower and produced nothing — a TRANSIENT
+    /// no-warm signal, recoverable on a later demand under a live lease.
+    LeaseMiss,
+    /// An unrootable / unadmitted import route: the served value's basis
+    /// cannot be soundly fact-rooted for warm admission.
+    UnrootableRoute,
+    /// An unobservable contributor source-env identity: the exact artifact
+    /// key the read served from is unavailable, so the result cannot be
+    /// fact-rooted.
+    UnobservableSource,
+}
+
 /// Mark every active tracer on the current thread's stack as having
-/// consumed a FENCED (ReturnOnly) serve — the by-value rail enclosing
-/// traced cold computes consult to refuse shared-cache admission.
-/// No-op when the stack is empty (no traced compute is in scope).
+/// consumed a NON-CACHEABLE read — the by-value rail enclosing traced cold
+/// computes consult to refuse shared-cache admission. `reason` is the typed
+/// marking-site discriminant; the tracer records only the boolean, so the
+/// reason documents intent and keeps the marking surface typed (not an
+/// untyped suppress). No-op when the stack is empty (no traced compute is
+/// in scope).
 #[inline]
-pub(crate) fn note_fenced_serve_fan_out() {
-    fact_tracer_tls::note_fenced_serve_fan_out();
+pub(crate) fn note_non_cacheable_read_fan_out(_reason: NonCacheableReadReason) {
+    fact_tracer_tls::note_non_cacheable_read_fan_out();
 }
 
 // ── `with_fact_tracer` installer ──────────────────────────────────────
@@ -1163,9 +1270,14 @@ pub(crate) fn note_fenced_serve_fan_out() {
 // semantics. The TLS slot is a back-end for the
 // [`crate::VerterHost::with_fact_tracer`] RAII scope and is reachable
 // only through the documented trait method. The contract is:
-//   1. The installer brackets exactly one cold compute on one thread.
-//   2. Nested installers panic — observations must never silently
-//      route to a sibling tracer.
+//   1. Each installer brackets one traced scope on one thread.
+//   2. Nesting IS supported: the active tracers form a per-thread STACK
+//      (`ACTIVE_TRACERS`), and every observation / non-cacheability mark
+//      fans out to ALL active levels, so an inner scope's observations are
+//      also seen by every enclosing scope. An inner `with_fact_tracer`
+//      pushes a second cell and pops it on drop (RAII, including on
+//      unwind). This is what lets the evaluator-scoped carrier observer
+//      nest inside a cold build's tracer.
 //   3. Readers must go through `ResolverContext::current_fact_tracer`,
 //      never through the TLS slot directly. The slot is private to
 //      this module.
@@ -1173,155 +1285,6 @@ pub(crate) fn note_fenced_serve_fan_out() {
 // The trait-method discipline is the architectural contract. The TLS
 // implementation is hidden inside this module and is not part of any
 // public surface.
-
-mod fact_tracer_tls {
-    use std::cell::RefCell;
-
-    use smallvec::SmallVec;
-
-    use crate::resolver_core::{FactReadSetCell, FactVersionRef};
-
-    thread_local! {
-        /// Per-thread tracer stack.
-        ///
-        /// Each entry is a raw pointer to the `FactReadSetCell` owned by
-        /// one `with_fact_tracer` scope on this thread. The stack allows
-        /// nested fact-tracer scopes: the innermost scope sits at the top;
-        /// `observe_fan_out*` fans observations into **all** levels so every
-        /// outer scope captures the inner scope's observations.
-        ///
-        /// SAFETY contract: each pointer is valid for exactly the duration of
-        /// the `with_fact_tracer` call that installed it. `install` pushes the
-        /// pointer and `clear` (called in the RAII drop) pops the top.
-        /// Between push and pop no other thread can mutate the TLS slot, and
-        /// the `FactReadSetCell` is stack-allocated in `with_fact_tracer` on
-        /// the same thread — so the pointee outlives its slot entry.
-        ///
-        /// `RefCell` storage with a clone-then-release-then-iterate
-        /// access pattern (see `observe_fan_out{,_borrowed}` below)
-        /// is what makes this design reentrancy-safe: each fan-out
-        /// borrows the slot only long enough to clone the small
-        /// `SmallVec` of raw pointers, drops the borrow, and iterates
-        /// the clone. No borrow is held when the per-cell `observe`
-        /// runs, so a re-entrant `install` / `clear` inside an
-        /// observer cannot trigger `BorrowMutError`. `Cell::take()`
-        /// + `Cell::set()` would also satisfy this contract — and
-        /// works with non-`Copy` payloads because `Cell::take()`
-        /// internally calls `mem::replace`. The borrow-clone-release
-        /// pattern is exercised by
-        /// `tests/cases/g_misc0/tracer_stack_reentrant_observe_safe.rs`. All access
-        /// is single-threaded (TLS).
-        static ACTIVE_TRACERS: RefCell<SmallVec<[*const FactReadSetCell; 8]>> =
-            RefCell::new(SmallVec::new());
-    }
-
-    /// Push `cell` onto the tracer stack.
-    ///
-    /// Nesting is intentional: a nested `with_fact_tracer` scope adds its
-    /// cell to the stack so `observe_fan_out*` delivers observations to both
-    /// the inner scope and all outer scopes simultaneously.
-    ///
-    /// SAFETY: the caller (`with_fact_tracer`) keeps `cell` alive for the
-    /// entire scope duration. `clear` is called on the RAII guard's drop —
-    /// even on panic — so the pointer is removed before the cell is freed.
-    pub(super) fn install(cell: &FactReadSetCell) {
-        ACTIVE_TRACERS.with(|slot| {
-            slot.borrow_mut().push(cell as *const FactReadSetCell);
-        });
-    }
-
-    /// Pop the top-of-stack entry. Called on the installer's `Drop`.
-    pub(super) fn clear() {
-        ACTIVE_TRACERS.with(|slot| {
-            slot.borrow_mut().pop();
-        });
-    }
-
-    /// Return the top-of-stack tracer, or `None` when the stack is empty.
-    ///
-    /// Used by existing single-tracer callers that only need the innermost
-    /// active scope. These callers write into the top cell; the fan-out
-    /// functions below reach all cells.
-    #[inline]
-    pub(super) fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
-        ACTIVE_TRACERS.with(|slot| {
-            let stack = slot.borrow();
-            let ptr = stack.last().copied();
-            drop(stack);
-            match ptr {
-                Some(p) if !p.is_null() => {
-                    // SAFETY: each live stack entry is installed by
-                    // `with_fact_tracer`; the RAII guard (`TracerScope`)
-                    // calls `clear()` on drop (including on unwind), so
-                    // no dangling pointer can remain on the stack.
-                    Some(unsafe { &*p })
-                }
-                _ => None,
-            }
-        })
-    }
-
-    /// Fan an observed fact into **every** active tracer on the stack.
-    ///
-    /// Snapshot-then-iterate: collect the pointer set under a borrow,
-    /// drop the borrow, then iterate the collected set. No borrow is held
-    /// during the `observe` calls, so re-entrant `install`/`clear` calls
-    /// from inside a tracer are safe.
-    #[inline]
-    pub(super) fn observe_fan_out(fact: FactVersionRef) {
-        // Collect pointers under a short borrow, then drop the borrow
-        // before calling into FactReadSetCell so re-entrant installs
-        // from inside an observer don't cause RefCell panics.
-        let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
-            ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
-        for ptr in ptrs {
-            if !ptr.is_null() {
-                // SAFETY: see module-level SAFETY contract.
-                unsafe { &*ptr }.observe(fact.clone());
-            }
-        }
-    }
-
-    /// Fan a borrowed signature into **every** active tracer on the stack.
-    #[inline]
-    pub(super) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
-        if sig.is_empty() {
-            return;
-        }
-        let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
-            ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
-        for ptr in ptrs {
-            if !ptr.is_null() {
-                // SAFETY: see module-level SAFETY contract.
-                unsafe { &*ptr }.observe_borrowed_signature(sig);
-            }
-        }
-    }
-
-    /// Mark **every** active tracer on the stack as having consumed a
-    /// FENCED (ReturnOnly, `store_published == false`) serve.
-    ///
-    /// Called from the serve chokepoints
-    /// ([`crate::VerterHost::ensure_indexed_ready_serve`], the overlay
-    /// materialiser, and the frontier route reader's per-walk memo) on
-    /// the consuming thread, so every enclosing traced cold compute —
-    /// the semantic-memo build, the owner-import-surface producer, the
-    /// component-meta proof producers — observes the fenced consumption
-    /// by value and can refuse shared-cache admission. Same
-    /// snapshot-then-iterate reentrancy discipline as
-    /// [`observe_fan_out`].
-    #[inline]
-    pub(super) fn note_fenced_serve_fan_out() {
-        let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
-            ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
-        for ptr in ptrs {
-            if !ptr.is_null() {
-                // SAFETY: see module-level SAFETY contract.
-                unsafe { &*ptr }.note_fenced_serve();
-            }
-        }
-    }
-}
 
 /// RAII guard that clears the TLS tracer slot on drop.
 ///
@@ -1361,12 +1324,29 @@ impl crate::VerterHost {
     where
         F: FnOnce() -> R,
     {
+        self.with_fact_tracer_cell(|_cell| f())
+    }
+
+    /// [`Self::with_fact_tracer`], handing the traced closure a borrow of
+    /// the scope's own [`crate::resolver_core::FactReadSetCell`].
+    ///
+    /// The cell accumulates monotonically, so a closure holding it can read
+    /// the scope's verdict-so-far MID-SCOPE — the seam
+    /// `fact_signature_helpers::with_cacheability_scope` builds its
+    /// `CacheabilityProbe` on, so a shared-cache admission that happens
+    /// INSIDE the traced compute can consult the verdict without popping the
+    /// tracer. The borrow cannot escape: it lives only for the closure call.
+    #[must_use]
+    pub fn with_fact_tracer_cell<F, R>(&self, f: F) -> (R, crate::resolver_core::FactReadSet)
+    where
+        F: FnOnce(&crate::resolver_core::FactReadSetCell) -> R,
+    {
         let cell = crate::resolver_core::FactReadSetCell::new();
         // Push onto the tracer stack. The RAII guard pops on drop
         // (including on panic unwind) so no dangling pointer remains.
         fact_tracer_tls::install(&cell);
         let scope = TracerScope;
-        let result = f();
+        let result = f(&cell);
         // Explicit drop so the stack is popped before we consume
         // `cell.into_inner()`. After this point no `&FactReadSetCell`
         // can leak out of TLS.

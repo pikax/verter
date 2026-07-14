@@ -749,9 +749,7 @@ pub fn assemble_volar_payload(
 ///
 /// `project_id` is a stable empty string for the single-project host
 /// model. `query_path` on every handle is `None` (surface root) — no
-/// production path populates
-/// `OwnedTypeResolutionContext::declaration_fingerprints` today, so
-/// declaration-scoped query paths are never emitted here.
+/// production path emits declaration-scoped query paths here.
 pub fn assemble_surface_from_analysis(
     analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
 ) -> ComponentMetaSurface {
@@ -856,9 +854,9 @@ pub fn assemble_surface_from_analysis(
 /// Resolution contract: a handle whose `query_path` is `None` (the surface
 /// root) returns an empty Object expansion; handles with a populated query
 /// path also return an empty Object outline and round-trip the handle
-/// identity. No declaration walk runs here —
-/// `OwnedTypeResolutionContext::declaration_fingerprints` has no
-/// production producer, so there is nothing to walk against.
+/// identity. No declaration walk runs here — declaration-scoped query
+/// paths have no production producer, so there is nothing to walk
+/// against.
 ///
 /// Errors are typed (D104 + D114): `ProjectMismatch` when the handle's
 /// project_id does not match the host's project; `StaleHandle` when the

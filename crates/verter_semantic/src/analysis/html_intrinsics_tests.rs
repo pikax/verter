@@ -81,61 +81,134 @@ fn input_has_specific_attrs() {
     );
 }
 
-// ── Events have payloads ────────────────────────────────────────────────
+// ── Events have payloads (recovered from the catalog by id) ─────────────
 
 #[test]
 fn events_have_payloads() {
+    let catalog = html_intrinsic_catalog();
     let members = intrinsic_members_for_tag("div");
-    let listeners: Vec<(&str, &TypeExpr)> = members
+    let listener_shape = |event: &str| -> &IntrinsicTypeShape {
+        let member = members
+            .iter()
+            .find(|m| m.kind == IntrinsicMemberKind::Listener && m.name == event)
+            .unwrap_or_else(|| panic!("div must have {event} listener"));
+        catalog
+            .shape(member.type_id)
+            .unwrap_or_else(|| panic!("{event} id must resolve in the catalog"))
+    };
+
+    match listener_shape("click") {
+        IntrinsicTypeShape::ListenerFunction(display) => {
+            assert!(
+                display.contains("PointerEvent"),
+                "click should have PointerEvent payload, got: {display}"
+            );
+            assert!(
+                display.contains("=>"),
+                "listener shape is a normalized function form, got: {display}"
+            );
+        }
+        other => panic!("expected ListenerFunction shape for click, got: {other:?}"),
+    }
+    match listener_shape("focus") {
+        IntrinsicTypeShape::ListenerFunction(display) => {
+            assert!(
+                display.contains("FocusEvent"),
+                "focus should have FocusEvent payload, got: {display}"
+            );
+        }
+        other => panic!("expected ListenerFunction shape for focus, got: {other:?}"),
+    }
+    match listener_shape("keydown") {
+        IntrinsicTypeShape::ListenerFunction(display) => {
+            assert!(
+                display.contains("KeyboardEvent"),
+                "keydown should have KeyboardEvent payload, got: {display}"
+            );
+        }
+        other => panic!("expected ListenerFunction shape for keydown, got: {other:?}"),
+    }
+}
+
+// ── Catalog determinism + id/shape recovery ─────────────────────────────
+
+#[test]
+fn catalog_ids_are_deterministic_and_recover_shapes() {
+    let catalog = html_intrinsic_catalog();
+    assert!(!catalog.is_empty(), "generated data populates the catalog");
+
+    // Attr primitives fold to Primitive shapes; non-primitive attr display
+    // text is preserved verbatim.
+    let members = intrinsic_members_for_tag("div");
+    let id_attr = members
         .iter()
-        .filter(|m| m.kind == IntrinsicMemberKind::Listener)
-        .map(|m| (m.name, &m.type_expr))
-        .collect();
-
-    // Find click event
-    let click = listeners.iter().find(|(name, _)| *name == "click");
-    assert!(click.is_some(), "div must have click listener");
-    let (_, click_type) = click.unwrap();
-    match click_type {
-        TypeExpr::Unknown { raw } => {
+        .find(|m| m.kind == IntrinsicMemberKind::Attr && m.name == "id")
+        .expect("div id attr");
+    assert_eq!(
+        catalog.shape(id_attr.type_id),
+        Some(&IntrinsicTypeShape::Primitive(
+            verter_type_expr::PrimitiveName::String
+        ))
+    );
+    let draggable = members
+        .iter()
+        .find(|m| m.kind == IntrinsicMemberKind::Attr && m.name == "draggable")
+        .expect("div draggable attr");
+    match catalog.shape(draggable.type_id).expect("draggable shape") {
+        IntrinsicTypeShape::AttrDisplay(display) => {
             assert!(
-                raw.contains("PointerEvent"),
-                "click should have PointerEvent payload, got: {}",
-                raw
+                display.contains("Booleanish"),
+                "non-primitive attr keeps its generated display text, got {display}"
             );
         }
-        other => panic!("expected Unknown type for click, got: {:?}", other),
+        other => panic!("expected AttrDisplay for draggable, got {other:?}"),
     }
 
-    // Find focus event
-    let focus = listeners.iter().find(|(name, _)| *name == "focus");
-    assert!(focus.is_some(), "div must have focus listener");
-    let (_, focus_type) = focus.unwrap();
-    match focus_type {
-        TypeExpr::Unknown { raw } => {
-            assert!(
-                raw.contains("FocusEvent"),
-                "focus should have FocusEvent payload, got: {}",
-                raw
-            );
-        }
-        other => panic!("expected Unknown type for focus, got: {:?}", other),
+    // Determinism: repeated queries mint IDENTICAL ids (same shape ⇒ same id),
+    // and every member id resolves in the catalog (no dangling ordinals).
+    let again = intrinsic_members_for_tag("div");
+    assert_eq!(members, again, "member ids are stable across queries");
+    for member in &members {
+        assert!(
+            catalog.shape(member.type_id).is_some(),
+            "member {} carries a dangling catalog id",
+            member.name
+        );
     }
 
-    // Find keydown event
-    let keydown = listeners.iter().find(|(name, _)| *name == "keydown");
-    assert!(keydown.is_some(), "div must have keydown listener");
-    let (_, keydown_type) = keydown.unwrap();
-    match keydown_type {
-        TypeExpr::Unknown { raw } => {
-            assert!(
-                raw.contains("KeyboardEvent"),
-                "keydown should have KeyboardEvent payload, got: {}",
-                raw
-            );
-        }
-        other => panic!("expected Unknown type for keydown, got: {:?}", other),
-    }
+    // Dedup: two members with the SAME shape share one id (`id` and `title`
+    // are both generated as plain "string" attrs); a DIFFERENT shape gets a
+    // different id (`class` is generated as "any", not "string").
+    let title_attr = members
+        .iter()
+        .find(|m| m.kind == IntrinsicMemberKind::Attr && m.name == "title")
+        .expect("div title attr");
+    assert_eq!(
+        title_attr.type_id, id_attr.type_id,
+        "equal shapes intern to one id"
+    );
+    let class_attr = members
+        .iter()
+        .find(|m| m.kind == IntrinsicMemberKind::Attr && m.name == "class")
+        .expect("div class attr");
+    assert_ne!(
+        class_attr.type_id, id_attr.type_id,
+        "distinct shapes (any vs string) must not collapse to one id"
+    );
+    assert_eq!(
+        catalog.shape(class_attr.type_id),
+        Some(&IntrinsicTypeShape::AttrDisplay("any".to_string())),
+        "the non-primitive `any` display text is preserved verbatim"
+    );
+
+    // Owned facts carry the same content-free ids.
+    let owned = owned_intrinsic_members_for_tag("div");
+    let owned_id = owned
+        .iter()
+        .find(|m| m.name == "id")
+        .expect("owned id attr");
+    assert_eq!(owned_id.type_id, id_attr.type_id);
+    assert_eq!(owned_id.kind, IntrinsicMemberKind::Attr);
 }
 
 // ── Unknown/custom tags get only global surface ─────────────────────────

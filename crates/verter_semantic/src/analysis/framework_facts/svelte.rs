@@ -5,10 +5,11 @@
 //! from the live OXC program in the ONE shallow pass into the parse-domain
 //! [`SvelteScriptCandidates`] payload:
 //!
-//! * `SveltePropsCandidate` — the `$props()` type, lowered ONCE via
-//!   [`lower_ts_type`](verter_type_expr_oxc::lower_ts_type), from either the
-//!   generic argument (`$props<T>()`) or the destructuring annotation
-//!   (`let {…}: T = $props()`); the `$bindable()` member names; and the members
+//! * `SveltePropsCandidate` — the `$props()` type, captured as an
+//!   [`AuthoredTypePayloadRef`] (a content-free `MacroPayload` locator plus a
+//!   parse-stable structural payload hash) from either the generic argument
+//!   (`$props<T>()`) or the destructuring annotation (`let {…}: T =
+//!   $props()`); the `$bindable()` member names; and the members
 //!   annotated with a binding IMPORTED-AS-`Snippet`-CANDIDATE — recorded as
 //!   `(local_binding, raw_import_source)` pairs, NOT validated here;
 //! * the top-level export inventory (instance-script exports the synth folds
@@ -28,17 +29,24 @@ use std::any::Any;
 use std::sync::Arc;
 
 use oxc_ast::ast::{
-    BindingPattern, Declaration, Expression, ImportDeclarationSpecifier, Program, PropertyKey,
-    Statement, TSSignature, TSType, TSTypeName, VariableDeclarator,
+    BindingPattern, CallExpression, Declaration, Expression, ImportDeclarationSpecifier, Program,
+    PropertyKey, Statement, TSSignature, TSType, TSTypeName, VariableDeclarator,
 };
 use oxc_span::GetSpan;
 
 use verter_language::{FrameworkAdapterId, LanguageId};
+use verter_no_typeexpr::NoTypeExpr;
 use verter_span::Span;
+use verter_type_expr::locators::{
+    AuthoredAnchor, AuthoredBodyLocator, AuthoredTypePayloadRef, LocatorSymbolSpace,
+    MacroPayloadLocator, MacroPayloadPosition,
+};
 use verter_type_expr::TypeExpr;
 use verter_type_expr_oxc::lower_ts_type;
 
 use crate::analysis::types::AnalyzedDefaultValue;
+use crate::facts::hashing::{compute_semantic_hash, UnresolvedLens};
+use crate::facts::registry::SymbolSpace;
 
 use super::{
     FrameworkScriptCandidates, FrameworkScriptFactPayload, ResolvedValidationCx, ScriptCandidateCx,
@@ -54,14 +62,20 @@ pub const SVELTE_CARRIER_LANGUAGE: &str = "svelte";
 pub const SVELTE_PACKAGE: &str = "svelte";
 
 /// One captured `$props()` candidate.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, NoTypeExpr)]
 pub struct SveltePropsCandidate {
     /// The `$props()` call span.
     pub call_span: Span,
-    /// The props TYPE, lowered ONCE via `lower_ts_type` from the generic
-    /// argument or the destructuring annotation. `None` when the component
-    /// declares no props type (an un-annotated `$props()`).
-    pub props_type: Option<TypeExpr>,
+    /// The props-type authored PAYLOAD REF — `Some` whenever the component
+    /// authored a props type (`$props<T>()` generic argument or
+    /// `let {…}: T = $props()` annotation): the content-free `MacroPayload`
+    /// locator (anchored to the component's `default` value symbol under the
+    /// analyzer's local-file convention) plus a parse-stable structural hash of
+    /// the authored type. A bare named reference, an inline object literal,
+    /// and an instantiation carrying type arguments ALL carry a payload ref —
+    /// never a raw `TypeExpr`, never fail-closed. `None` only when the
+    /// component declares no props type.
+    pub props_type: Option<AuthoredTypePayloadRef>,
     /// Whether the props type came from a `$props<T>()` generic argument
     /// (`true`) vs a `let {…}: T = $props()` annotation (`false`).
     pub from_generic_argument: bool,
@@ -76,6 +90,17 @@ pub struct SveltePropsCandidate {
     /// Mirrors Vue's `withDefaults` defaults — source-text + span, NOT a
     /// `TypeExpr` (defaults are runtime expressions).
     pub prop_defaults: Vec<AnalyzedDefaultValue>,
+    /// Depth-closed LEAF display members for an authored props type that is an
+    /// INLINE OBJECT LITERAL whose every member value is a closed leaf
+    /// (primitive / literal / bare named reference) — captured SYNTAX-ONLY by
+    /// lowering the authored payload once at the producer boundary.
+    /// `Some(members)` lets the dispatch-free api projector render the props
+    /// shape shallowly (member refs preserved un-inlined) without any
+    /// render-time resolution; `None` (a named / generic / non-leaf-able
+    /// payload) keeps the honest locator carrier. The payload REF above stays
+    /// the semantic authority — this is a display/prelude inventory, never a
+    /// resolution input.
+    pub props_leaf_members: Option<Vec<verter_type_expr::facts::SynthesizedLeafMember>>,
 }
 
 /// One member annotated with a type IMPORTED-AS-`Snippet`-CANDIDATE.
@@ -84,7 +109,7 @@ pub struct SveltePropsCandidate {
 /// the module specifier it was imported from. NOT validated here: the
 /// resolved-validation half rejects a candidate whose `import_source` does not
 /// resolve to the `svelte` package.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, NoTypeExpr)]
 pub struct SvelteSnippetImportCandidate {
     /// The local type binding the member is annotated with (e.g. `Snippet`).
     pub local_binding: String,
@@ -95,7 +120,7 @@ pub struct SvelteSnippetImportCandidate {
 }
 
 /// One captured legacy `export let` prop.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, NoTypeExpr)]
 pub struct SvelteLegacyProp {
     /// The exported binding name.
     pub name: String,
@@ -104,7 +129,7 @@ pub struct SvelteLegacyProp {
 }
 
 /// The parse-domain Svelte script candidates for one component.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, NoTypeExpr)]
 pub struct SvelteScriptCandidates {
     /// The `$props()` candidate, when the component uses runes-mode props.
     pub props: Option<SveltePropsCandidate>,
@@ -119,9 +144,13 @@ pub struct SvelteScriptCandidates {
     pub module_exports: Vec<String>,
     /// Legacy `export let` props (legacy-mode components).
     pub legacy_props: Vec<SvelteLegacyProp>,
-    /// The `createEventDispatcher<E>()` type argument, lowered once (legacy
-    /// emits). `None` when no dispatcher is declared.
-    pub dispatcher_events: Option<TypeExpr>,
+    /// The `createEventDispatcher<E>()` type-argument authored PAYLOAD REF
+    /// (legacy emits) — `Some` whenever a type argument is authored: a bare
+    /// named reference, an inline event-map literal, and an instantiation all
+    /// carry a payload ref (locator + parse-stable structural hash) — never a
+    /// raw `TypeExpr`, never fail-closed. `None` when no dispatcher (or no
+    /// type argument) is declared.
+    pub dispatcher_events: Option<AuthoredTypePayloadRef>,
     /// The module specifier `createEventDispatcher` was imported from (raw,
     /// un-validated). The resolved-validation half emits `dispatcher_events`
     /// ONLY when this source resolves to the `svelte` package — a userland
@@ -166,29 +195,38 @@ impl FrameworkScriptFactPayload for SvelteScriptCandidates {
 /// `Snippet` import resolved to the `svelte` package, and `dispatcher_events` is
 /// `Some` only when `createEventDispatcher` resolved to the `svelte` package. A
 /// userland look-alike never contributes to either.
-#[derive(Debug, Clone, Default)]
+///
+/// The shape MIRRORS the shared persisted fact
+/// [`verter_type_expr::facts::SvelteScriptFactsFact`] (authored-type payload
+/// refs + `Arc<[…]>` lists, `NoTypeExpr`); it stays a distinct in-crate
+/// struct only because it additionally carries `prop_defaults` (source-text
+/// runtime defaults with spans — not part of the shared fact schema).
+#[derive(Debug, Clone, Default, NoTypeExpr)]
 pub struct SvelteScriptFacts {
-    /// The runes `$props()` type, lowered once (shallow-by-default — a bare
-    /// `Ref` is preserved). `None` for a legacy or props-less component.
-    pub props_type: Option<TypeExpr>,
+    /// The runes `$props()` authored-type payload ref (shallow-by-default —
+    /// the authored payload is carried by content-free locator + structural
+    /// payload hash; the session re-resolves it on demand). `None` for a
+    /// legacy or props-less component.
+    pub props_type: Option<AuthoredTypePayloadRef>,
     /// The `$bindable()` member names (the MODEL bindings).
-    pub bindable_members: Vec<String>,
+    pub bindable_members: Arc<[String]>,
     /// Prop DEFAULT values (source-text + span), passed through verbatim from
     /// the parse-domain capture — a destructuring default or a
     /// `$bindable(<arg0>)` fallback. No package provenance applies.
-    pub prop_defaults: Vec<AnalyzedDefaultValue>,
+    pub prop_defaults: Arc<[AnalyzedDefaultValue]>,
     /// The member names whose `Snippet`-candidate import RESOLVED to the
     /// `svelte` package — the snippet-typed props (structurally validated). A
     /// userland look-alike never appears here.
-    pub validated_snippet_members: Vec<String>,
+    pub validated_snippet_members: Arc<[String]>,
     /// The legacy `export let` props (legacy-mode PROPS).
-    pub legacy_props: Vec<SvelteLegacyProp>,
-    /// The `createEventDispatcher<E>()` event-map type — PRESENT only when the
-    /// `createEventDispatcher` import resolved to the `svelte` package
-    /// (provenance-validated; a userland look-alike contributes `None`).
-    pub dispatcher_events: Option<TypeExpr>,
+    pub legacy_props: Arc<[SvelteLegacyProp]>,
+    /// The `createEventDispatcher<E>()` event-map authored-type payload ref —
+    /// PRESENT only when the `createEventDispatcher` import resolved to the
+    /// `svelte` package (provenance-validated; a userland look-alike
+    /// contributes `None`).
+    pub dispatcher_events: Option<AuthoredTypePayloadRef>,
     /// The exported instance-script members (the EXPOSE surface).
-    pub instance_exports: Vec<String>,
+    pub instance_exports: Arc<[String]>,
 }
 
 impl FrameworkScriptFactPayload for SvelteScriptFacts {
@@ -208,9 +246,15 @@ impl SvelteScriptProvider {
     /// The provider's monotonically-versioned identity. Bump to invalidate the
     /// content-addressed candidate cache after a capture-shape change.
     ///
-    /// `2` — added prop DEFAULT-value capture (`prop_defaults`) folded into the
-    /// stable candidate hash.
-    pub const VERSION: u32 = 2;
+    /// `4` — `props_type` / `dispatcher_events` widened from bare-`Ref`-only
+    /// symbol-body locators (which FAIL-CLOSED on inline / instantiation
+    /// payloads and collided the candidate hash on their content) to
+    /// [`AuthoredTypePayloadRef`]s: a content-free `MacroPayload` locator plus
+    /// a parse-stable structural `payload_hash` of the authored type, both
+    /// folded into the stable candidate hash. The redundant `*_scope`
+    /// pairings are removed (the locator anchor carries the local-file
+    /// convention). Old candidate keys intentionally miss.
+    pub const VERSION: u32 = 4;
 }
 
 impl ScriptFactProvider for SvelteScriptProvider {
@@ -238,6 +282,46 @@ impl ScriptFactProvider for SvelteScriptProvider {
             stable_hash: stable_candidate_hash(&payload),
             payload,
         })
+    }
+
+    fn absolutize_candidates(
+        &self,
+        candidates: FrameworkScriptCandidates,
+        canonical: &str,
+    ) -> FrameworkScriptCandidates {
+        if canonical.is_empty() {
+            // No producing identity to absolutize to — keep the sentinel
+            // rather than stamp another empty anchor.
+            return candidates;
+        }
+        let Some(typed) = candidates.payload.downcast_ref::<SvelteScriptCandidates>() else {
+            // A foreign payload envelope carries nothing this provider can
+            // re-anchor; pass it through untouched.
+            return candidates;
+        };
+        if !carries_empty_payload_anchor(typed) {
+            // Nothing to fill — the envelope (payload AND `stable_hash`) is
+            // already coherent; skip the clone + rehash.
+            return candidates;
+        }
+        let mut filled = typed.clone();
+        if let Some(payload_ref) = filled.props.as_mut().and_then(|p| p.props_type.as_mut()) {
+            fill_empty_payload_ref_anchor(payload_ref, canonical);
+        }
+        if let Some(payload_ref) = filled.dispatcher_events.as_mut() {
+            fill_empty_payload_ref_anchor(payload_ref, canonical);
+        }
+        let payload = Arc::new(filled);
+        FrameworkScriptCandidates {
+            adapter_id: candidates.adapter_id,
+            provider_version: candidates.provider_version,
+            // REBUILT hash: the candidate hash folds the payload refs
+            // (locator anchors included), so the re-anchored payload
+            // re-hashes — the envelope never carries a hash that disagrees
+            // with its payload.
+            stable_hash: stable_candidate_hash(&payload),
+            payload,
+        }
     }
 
     fn validate(
@@ -269,11 +353,13 @@ impl ScriptFactProvider for SvelteScriptProvider {
         // The legacy dispatcher contributes EMITS only when its
         // `createEventDispatcher` import resolved to the `svelte` package (the
         // SAME typed-package provenance test) — a userland look-alike does not.
-        let dispatcher_events = candidates
+        let dispatcher_validated = candidates
             .dispatcher_import_source
             .as_deref()
-            .filter(|src| specifier_resolves_to_svelte(&cx, src))
-            .and(candidates.dispatcher_events.clone());
+            .is_some_and(|src| specifier_resolves_to_svelte(&cx, src));
+        let dispatcher_events = dispatcher_validated
+            .then(|| candidates.dispatcher_events.clone())
+            .flatten();
 
         let facts = SvelteScriptFacts {
             props_type: candidates.props.as_ref().and_then(|p| p.props_type.clone()),
@@ -281,16 +367,18 @@ impl ScriptFactProvider for SvelteScriptProvider {
                 .props
                 .as_ref()
                 .map(|p| p.bindable_members.clone())
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .into(),
             prop_defaults: candidates
                 .props
                 .as_ref()
                 .map(|p| p.prop_defaults.clone())
-                .unwrap_or_default(),
-            validated_snippet_members,
-            legacy_props: candidates.legacy_props.clone(),
+                .unwrap_or_default()
+                .into(),
+            validated_snippet_members: validated_snippet_members.into(),
+            legacy_props: candidates.legacy_props.clone().into(),
             dispatcher_events,
-            instance_exports: candidates.instance_exports.clone(),
+            instance_exports: candidates.instance_exports.clone().into(),
         };
 
         // The honest answer: emit facts whenever the component carries ANY
@@ -330,24 +418,33 @@ fn capture_svelte_candidates(
     let mut out = SvelteScriptCandidates::default();
     // The local type names imported as the structural `Snippet` candidate,
     // mapped to their import source. Built first so the props destructuring can
-    // pair annotated members to a candidate import.
+    // pair annotated members to a candidate import. (The dispatcher-import
+    // tracking lives on the shared [`MacroOrdinalWalk`] — the yielded
+    // dispatcher arm carries its import source.)
     let mut snippet_imports: Vec<(String, String)> = Vec::new();
-    // The local binding `createEventDispatcher` was imported under, mapped to its
-    // import source — so the resolved-validation half can provenance-check the
-    // dispatcher against the `svelte` package.
-    let mut dispatcher_imports: Vec<(String, String)> = Vec::new();
     // INSTANCE-region top-level `let`/`var` binding names — the PROP-kind locals.
     // A re-export specifier (`export { x as y }`) of one of these is a re-exported
     // PROP, NOT an instance EXPOSE member; built first so the specifier loop can
     // classify. Scoped to the instance region (a module-script `let` is not a
     // prop), and a same-name `const`/function/class wins (it is an EXPOSE member).
     let prop_kind_locals = collect_prop_kind_local_names(program, module_region);
+    // ONE shared macro-ordinal walk ([`MacroOrdinalWalk`] — the addressing
+    // engine the deref-side accessor replays) assigns each captured macro CALL
+    // its source-order ordinal; the candidate builders below only CONSUME the
+    // yielded `(ordinal, call)` pairs.
+    let mut walk = MacroOrdinalWalk::new();
 
     for stmt in &program.body {
+        // Ordinal-bearing macro calls of THIS statement (`$props()` declarators
+        // and tracked dispatcher calls) — yielded by the shared walk, built
+        // into candidates here. Runs before the arms below; the touched
+        // candidate fields are disjoint from the export/legacy inventory.
+        walk.visit_statement(stmt, module_region, &mut |macro_index, call| {
+            capture_ordinal_macro_call(call, macro_index, source, &snippet_imports, &mut out);
+        });
         match stmt {
             Statement::ImportDeclaration(import) => {
                 collect_snippet_imports(import, &mut snippet_imports);
-                collect_dispatcher_imports(import, &mut dispatcher_imports);
             }
             Statement::ExportNamedDeclaration(export) => {
                 // A whole-statement type-only export (`export type { Foo }` /
@@ -409,32 +506,22 @@ fn capture_svelte_candidates(
                     }
                     exports.push(spec.exported.name().to_string());
                 }
-                // Props / legacy-`export let` capture is INSTANCE-ONLY semantics:
-                // a `<script module>` `export let` is a module binding, NOT a
-                // component prop. So props/legacy capture runs ONLY for an
-                // instance-block export (or when no module region splits them).
+                // Legacy-`export let` capture is INSTANCE-ONLY semantics: a
+                // `<script module>` `export let` is a module binding, NOT a
+                // component prop. So legacy capture runs ONLY for an
+                // instance-block export (or when no module region splits
+                // them). An exported `$props()` declarator is already yielded
+                // by the shared ordinal walk above (same instance-only gate).
                 let in_module = statement_in_module(export.span.start, module_region);
                 if !in_module {
                     if let Some(decl) = &export.declaration {
-                        capture_props_from_declaration(decl, source, &snippet_imports, &mut out);
                         capture_legacy_export_let(decl, &mut out, true);
                     }
                 }
             }
-            Statement::VariableDeclaration(decl) => {
-                capture_props_from_var_decls(
-                    &decl.declarations,
-                    source,
-                    &snippet_imports,
-                    &mut out,
-                );
-                capture_dispatcher_from_var_decls(
-                    &decl.declarations,
-                    source,
-                    &dispatcher_imports,
-                    &mut out,
-                );
-            }
+            // `$props()` / tracked dispatcher declarators are yielded by the
+            // shared ordinal walk above.
+            Statement::VariableDeclaration(_) => {}
             Statement::FunctionDeclaration(_) | Statement::ClassDeclaration(_) => {}
             _ => {}
         }
@@ -628,102 +715,346 @@ fn collect_declaration_exports(
     }
 }
 
-/// Capture `$props()` from an exported declaration (rare, but legal).
-fn capture_props_from_declaration(
-    decl: &Declaration<'_>,
-    source: &str,
-    snippet_imports: &[(String, String)],
-    out: &mut SvelteScriptCandidates,
-) {
-    if let Declaration::VariableDeclaration(var) = decl {
-        capture_props_from_var_decls(&var.declarations, source, snippet_imports, out);
-    }
+/// One ordinal-bearing macro CALL yielded by the shared [`MacroOrdinalWalk`].
+enum OrdinalMacroCall<'a, 'b> {
+    /// A `$props()` declarator call (`let {…}: T = $props()` /
+    /// `let x = $props<T>()`), yielded with its declarator + call init.
+    Props {
+        declarator: &'b VariableDeclarator<'a>,
+        init: &'b Expression<'a>,
+    },
+    /// A TRACKED `createEventDispatcher` call — the callee's local binding was
+    /// imported as `createEventDispatcher`; `import_source` is the module
+    /// specifier it was imported from (owned — the walk's tracking list is
+    /// walk-internal).
+    Dispatcher {
+        call: &'b CallExpression<'a>,
+        import_source: String,
+    },
 }
 
-/// Capture `$props()` from variable declarators.
-fn capture_props_from_var_decls(
-    declarators: &[VariableDeclarator<'_>],
-    source: &str,
-    snippet_imports: &[(String, String)],
-    out: &mut SvelteScriptCandidates,
-) {
-    for d in declarators {
-        let Some(init) = &d.init else { continue };
-        if !is_rune_call(init, "$props") {
-            continue;
-        }
-        let mut candidate = SveltePropsCandidate {
-            call_span: oxc_span_to_verter(init.span()),
-            ..Default::default()
-        };
-        // 1. `$props<T>()` generic argument.
-        if let Some(type_expr) = props_generic_argument(init, source) {
-            candidate.props_type = Some(type_expr);
-            candidate.from_generic_argument = true;
-        }
-        // 2. destructuring annotation `let {…}: T = $props()` — the annotation
-        //    rides on the DECLARATOR (not the pattern) in this OXC version.
-        if candidate.props_type.is_none() {
-            if let Some(annotation) = &d.type_annotation {
-                candidate.props_type = Some(lower_ts_type(&annotation.type_annotation, source));
-            }
-        }
-        // 3. `$bindable()` members + prop DEFAULT values from the destructuring
-        //    pattern (both are syntax-only reads over the destructuring +
-        //    source slice).
-        collect_bindable_and_defaults(&d.id, source, &mut candidate);
-        // 4. snippet-candidate members from the props type — BOTH the
-        //    destructuring annotation (`let {…}: { row: Snippet } = $props()`)
-        //    AND the generic argument (`$props<{ row: Snippet }>()`). A member
-        //    typed as a `Snippet`-candidate import is recorded (validated later).
-        if let Some(annotation) = &d.type_annotation {
-            collect_snippet_candidate_members(&annotation.type_annotation, snippet_imports, out);
-        }
-        if let Some(generic_ty) = props_generic_argument_ts_type(init) {
-            collect_snippet_candidate_members(generic_ty, snippet_imports, out);
-        }
-        out.props = Some(candidate);
-    }
-}
-
-/// Capture `createEventDispatcher<E>()` type argument (legacy emits).
+/// The ONE source-order macro-ordinal walk — the shared addressing engine for
+/// svelte macro CALLS. Both the candidate CAPTURE (which stamps each payload
+/// locator's `macro_index`) and the deref-side position accessor
+/// ([`lower_props_annotation_at`]) drive this same walk, so the mint-side and
+/// deref-side ordinal conventions cannot drift.
 ///
-/// Records the dispatcher's import SOURCE (paired by the local binding the
-/// dispatcher factory was imported under) so the resolved-validation half can
-/// provenance-check it against the `svelte` package — a userland
-/// `createEventDispatcher` look-alike must NOT contribute EMITS.
-fn capture_dispatcher_from_var_decls(
-    declarators: &[VariableDeclarator<'_>],
+/// Convention (each yielded call consumes one ordinal from ONE shared
+/// counter — `$props()` runes and tracked dispatcher calls never alias):
+///
+/// - statements are walked in source order;
+/// - a plain variable declaration yields its `$props()` declarators FIRST,
+///   then its tracked dispatcher declarators (the deterministic capture
+///   order within one statement);
+/// - an exported variable declaration yields only its `$props()` declarators,
+///   and ONLY in the instance block (a `<script module>` export is a module
+///   binding, not a component macro); a whole-statement type-only export
+///   yields nothing;
+/// - dispatcher-import tracking is source-order INCREMENTAL (a call lexically
+///   before its import statement is untracked and consumes no ordinal),
+///   matching the single-pass capture semantics.
+struct MacroOrdinalWalk {
+    /// The local binding `createEventDispatcher` was imported under, mapped to
+    /// its import source — accumulated as import statements are visited.
+    dispatcher_imports: Vec<(String, String)>,
+    /// The shared source-order ordinal counter.
+    ordinal: u32,
+}
+
+impl MacroOrdinalWalk {
+    fn new() -> Self {
+        Self {
+            dispatcher_imports: Vec::new(),
+            ordinal: 0,
+        }
+    }
+
+    /// Visit one top-level statement: track its dispatcher imports and yield
+    /// its ordinal-bearing macro calls to `visit`.
+    fn visit_statement<'a, 'b>(
+        &mut self,
+        stmt: &'b Statement<'a>,
+        module_region: Option<(u32, u32)>,
+        visit: &mut dyn FnMut(u32, OrdinalMacroCall<'a, 'b>),
+    ) {
+        match stmt {
+            Statement::ImportDeclaration(import) => {
+                collect_dispatcher_imports(import, &mut self.dispatcher_imports);
+            }
+            Statement::VariableDeclaration(decl) => {
+                self.visit_props_declarators(&decl.declarations, visit);
+                self.visit_dispatcher_declarators(&decl.declarations, visit);
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                // A whole-statement type-only export carries no runtime macro
+                // call; a module-block export is a module binding, not a
+                // component macro (the same instance-only gate the legacy-prop
+                // capture applies).
+                if export.export_kind.is_type() {
+                    return;
+                }
+                if statement_in_module(export.span.start, module_region) {
+                    return;
+                }
+                if let Some(Declaration::VariableDeclaration(var)) = &export.declaration {
+                    self.visit_props_declarators(&var.declarations, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Yield each `$props()` declarator, assigning one ordinal per CALL —
+    /// whether or not it authors a type payload, so the ordinal stays a pure
+    /// call address.
+    fn visit_props_declarators<'a, 'b>(
+        &mut self,
+        declarators: &'b [VariableDeclarator<'a>],
+        visit: &mut dyn FnMut(u32, OrdinalMacroCall<'a, 'b>),
+    ) {
+        for d in declarators {
+            let Some(init) = &d.init else { continue };
+            if !is_rune_call(init, "$props") {
+                continue;
+            }
+            let ordinal = self.ordinal;
+            self.ordinal += 1;
+            visit(
+                ordinal,
+                OrdinalMacroCall::Props {
+                    declarator: d,
+                    init,
+                },
+            );
+        }
+    }
+
+    /// Yield each TRACKED dispatcher declarator (the callee's local binding
+    /// was imported as `createEventDispatcher` — an untracked global /
+    /// re-export is not provenance-checkable and consumes no ordinal),
+    /// assigning one ordinal per tracked CALL whether or not it authors a
+    /// type argument.
+    fn visit_dispatcher_declarators<'a, 'b>(
+        &mut self,
+        declarators: &'b [VariableDeclarator<'a>],
+        visit: &mut dyn FnMut(u32, OrdinalMacroCall<'a, 'b>),
+    ) {
+        for d in declarators {
+            let Some(init) = &d.init else { continue };
+            let Expression::CallExpression(call) = init else {
+                continue;
+            };
+            let Expression::Identifier(ident) = &call.callee else {
+                continue;
+            };
+            // Match the LOCAL binding the dispatcher factory was imported
+            // under (handles `import { createEventDispatcher as mk }`).
+            let local = ident.name.as_str();
+            let Some(import_source) = self
+                .dispatcher_imports
+                .iter()
+                .find(|(binding, _)| binding == local)
+                .map(|(_, src)| src.clone())
+            else {
+                continue;
+            };
+            let ordinal = self.ordinal;
+            self.ordinal += 1;
+            visit(
+                ordinal,
+                OrdinalMacroCall::Dispatcher {
+                    call,
+                    import_source,
+                },
+            );
+        }
+    }
+}
+
+/// Depth-closed LEAF extraction over a lowered authored props payload: an
+/// inline object literal whose EVERY member value is a closed leaf
+/// (primitive / literal / bare argument-less reference) maps to the
+/// synthesized leaf-member vocabulary; any deeper shape (nested object,
+/// function, union, generic application, index signature) yields `None` —
+/// all-or-nothing, so a partial display shape is never fabricated.
+fn leaf_members_from_lowered(
+    expr: &TypeExpr,
+) -> Option<Vec<verter_type_expr::facts::SynthesizedLeafMember>> {
+    use verter_type_expr::facts::{LeafTypeFact, SynthesizedLeafMember};
+    use verter_type_expr::{LiteralValue, ObjectMember};
+
+    let TypeExpr::Object(obj) = expr else {
+        return None;
+    };
+    let mut members = Vec::with_capacity(obj.properties.len());
+    for member in obj.properties.iter() {
+        let ObjectMember::Property(property) = member else {
+            return None;
+        };
+        let leaf = match &property.ty {
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if type_arguments.is_empty() => LeafTypeFact::Ref(name.as_ref().to_string()),
+            TypeExpr::Primitive(name) => LeafTypeFact::Primitive(*name),
+            TypeExpr::Literal(LiteralValue::String(text)) => {
+                LeafTypeFact::StringLiteral(text.clone())
+            }
+            TypeExpr::Literal(LiteralValue::Number(value)) => {
+                LeafTypeFact::NumberLiteral(value.to_string())
+            }
+            TypeExpr::Literal(LiteralValue::Boolean(flag)) => LeafTypeFact::BooleanLiteral(*flag),
+            _ => return None,
+        };
+        members.push(SynthesizedLeafMember {
+            name: property.name.clone(),
+            optional: property.optional,
+            ty: leaf,
+        });
+    }
+    Some(members)
+}
+
+/// Build the candidate inventory for one walk-yielded macro call.
+fn capture_ordinal_macro_call(
+    call: OrdinalMacroCall<'_, '_>,
+    macro_index: u32,
     source: &str,
-    dispatcher_imports: &[(String, String)],
+    snippet_imports: &[(String, String)],
     out: &mut SvelteScriptCandidates,
 ) {
-    for d in declarators {
-        let Some(init) = &d.init else { continue };
-        if let Expression::CallExpression(call) = init {
-            if let Expression::Identifier(ident) = &call.callee {
-                // Match the LOCAL binding the dispatcher factory was imported
-                // under (handles `import { createEventDispatcher as mk }`).
-                let local = ident.name.as_str();
-                let import_source = dispatcher_imports
-                    .iter()
-                    .find(|(binding, _)| binding == local)
-                    .map(|(_, src)| src.clone());
-                if import_source.is_none() {
-                    // Not a tracked `createEventDispatcher` import binding — skip
-                    // (an untracked global / re-export is not provenance-checkable
-                    // and therefore not a Svelte dispatcher for our purposes).
-                    continue;
-                }
-                if let Some(args) = &call.type_arguments {
-                    if let Some(first) = args.params.first() {
-                        out.dispatcher_events = Some(lower_ts_type(first, source));
-                        out.dispatcher_import_source = import_source;
-                    }
+    match call {
+        OrdinalMacroCall::Props {
+            declarator: d,
+            init,
+        } => {
+            let mut candidate = SveltePropsCandidate {
+                call_span: oxc_span_to_verter(init.span()),
+                ..Default::default()
+            };
+            // 1. `$props<T>()` generic argument (wins over the annotation when
+            //    authored, matching the pre-payload-ref capture precedence).
+            if let Some(generic_ty) = props_generic_argument_ts_type(init) {
+                candidate.props_type = Some(authored_type_payload_ref(
+                    generic_ty,
+                    source,
+                    macro_index,
+                    MacroPayloadPosition::TypeArgument,
+                ));
+                candidate.from_generic_argument = true;
+                candidate.props_leaf_members =
+                    leaf_members_from_lowered(&lower_ts_type(generic_ty, source));
+            }
+            // 2. destructuring annotation `let {…}: T = $props()` — the annotation
+            //    rides on the DECLARATOR (not the pattern) in this OXC version.
+            //    Consulted only when NO generic argument was authored.
+            else if let Some(annotation) = &d.type_annotation {
+                candidate.props_type = Some(authored_type_payload_ref(
+                    &annotation.type_annotation,
+                    source,
+                    macro_index,
+                    MacroPayloadPosition::TypeAnnotation,
+                ));
+                candidate.props_leaf_members =
+                    leaf_members_from_lowered(&lower_ts_type(&annotation.type_annotation, source));
+            }
+            // 3. `$bindable()` members + prop DEFAULT values from the destructuring
+            //    pattern (both are syntax-only reads over the destructuring +
+            //    source slice).
+            collect_bindable_and_defaults(&d.id, source, &mut candidate);
+            // 4. snippet-candidate members from the props type — BOTH the
+            //    destructuring annotation (`let {…}: { row: Snippet } = $props()`)
+            //    AND the generic argument (`$props<{ row: Snippet }>()`). A member
+            //    typed as a `Snippet`-candidate import is recorded (validated later).
+            if let Some(annotation) = &d.type_annotation {
+                collect_snippet_candidate_members(
+                    &annotation.type_annotation,
+                    snippet_imports,
+                    out,
+                );
+            }
+            if let Some(generic_ty) = props_generic_argument_ts_type(init) {
+                collect_snippet_candidate_members(generic_ty, snippet_imports, out);
+            }
+            out.props = Some(candidate);
+        }
+        OrdinalMacroCall::Dispatcher {
+            call,
+            import_source,
+        } => {
+            if let Some(args) = &call.type_arguments {
+                if let Some(first) = args.params.first() {
+                    out.dispatcher_events = Some(authored_type_payload_ref(
+                        first,
+                        source,
+                        macro_index,
+                        MacroPayloadPosition::TypeArgument,
+                    ));
+                    // The import SOURCE is capture inventory: recorded
+                    // whenever a type argument is authored
+                    // (resolved-validation gates the payload ref on it).
+                    out.dispatcher_import_source = Some(import_source);
                 }
             }
         }
     }
+}
+
+/// Outcome of [`lower_props_annotation_at`] — the deref-side re-derivation of
+/// an authored `$props()` binding-annotation payload. Every non-body arm is a
+/// typed absence, never a fabricated body.
+#[derive(Debug, Clone)]
+pub enum PropsAnnotationLowering {
+    /// The addressed `$props()` declarator carries an authored binding
+    /// annotation, lowered to owned typed IR.
+    Annotation(TypeExpr),
+    /// The addressed `$props()` declarator authors NO binding annotation —
+    /// there is no authored TYPE body at that position.
+    Unannotated,
+    /// `macro_index` addresses no `$props()` declarator at all (an
+    /// out-of-range / drifted ordinal, or the ordinal of a non-`$props`
+    /// macro call).
+    NoPropsCall,
+}
+
+/// The lowered authored `$props()` binding-annotation payload at macro
+/// ordinal `macro_index` — the deref-side re-derivation of the position a
+/// [`MacroPayloadPosition::TypeAnnotation`] payload locator addresses.
+///
+/// Replays the SAME shared [`MacroOrdinalWalk`] the capture stamped the
+/// locator's `macro_index` with (one addressing engine — mint side and deref
+/// side cannot drift) and lowers the authored annotation through the same
+/// `lower_ts_type` producer lowering the capture fingerprinted. The
+/// annotation is served by POSITION: a declarator authoring BOTH a generic
+/// argument and a binding annotation still carries the annotation at this
+/// position (the capture's generic-argument preference is a capture policy,
+/// not a position-existence fact).
+#[must_use]
+pub fn lower_props_annotation_at(
+    program: &Program<'_>,
+    source: &str,
+    module_region: Option<(u32, u32)>,
+    macro_index: u32,
+) -> PropsAnnotationLowering {
+    let mut walk = MacroOrdinalWalk::new();
+    let mut found = PropsAnnotationLowering::NoPropsCall;
+    for stmt in &program.body {
+        walk.visit_statement(stmt, module_region, &mut |ordinal, call| {
+            if ordinal != macro_index {
+                return;
+            }
+            if let OrdinalMacroCall::Props { declarator, .. } = call {
+                found = match &declarator.type_annotation {
+                    Some(annotation) => PropsAnnotationLowering::Annotation(lower_ts_type(
+                        &annotation.type_annotation,
+                        source,
+                    )),
+                    None => PropsAnnotationLowering::Unannotated,
+                };
+            }
+        });
+    }
+    found
 }
 
 /// Collect the local binding `createEventDispatcher` was imported under, paired
@@ -898,9 +1229,102 @@ fn collect_snippet_candidate_members(
     }
 }
 
-/// The `$props<T>()` generic type argument, lowered once.
-fn props_generic_argument(init: &Expression<'_>, source: &str) -> Option<TypeExpr> {
-    props_generic_argument_ts_type(init).map(|ty| lower_ts_type(ty, source))
+/// The content-free anchor of a svelte macro payload: the component's
+/// `default` value symbol under the analyzer's local-file convention (the
+/// empty producing canonical = the component's own file). Mirrors the Vue
+/// analyzer's macro-payload anchor — the owning declaration is the
+/// component's synthesized default-export value symbol.
+fn local_default_anchor() -> AuthoredAnchor {
+    AuthoredAnchor {
+        canonical_id: Arc::from(""),
+        symbol: Arc::from("default"),
+        space: LocatorSymbolSpace::Value,
+    }
+}
+
+/// Whether any captured authored-type payload ref still carries the
+/// local-file EMPTY-sentinel anchor (`canonical_id == ""`) — the
+/// [`ScriptFactProvider::absolutize_candidates`] no-op fast path predicate.
+fn carries_empty_payload_anchor(candidates: &SvelteScriptCandidates) -> bool {
+    let is_empty = |payload_ref: &AuthoredTypePayloadRef| {
+        payload_ref_anchor(&payload_ref.locator)
+            .canonical_id
+            .is_empty()
+    };
+    candidates
+        .props
+        .as_ref()
+        .and_then(|p| p.props_type.as_ref())
+        .is_some_and(is_empty)
+        || candidates.dispatcher_events.as_ref().is_some_and(is_empty)
+}
+
+/// The anchor of a payload-ref locator — every locator kind carries exactly
+/// one authored anchor.
+fn payload_ref_anchor(locator: &AuthoredBodyLocator) -> &AuthoredAnchor {
+    match locator {
+        AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
+        AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
+        AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
+        AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
+    }
+}
+
+/// Fill an EMPTY payload-ref anchor with the producing canonical. A
+/// non-empty anchor may be a cross-file resolver's canonical and is never
+/// rewritten (the locator contract), which also makes the fill idempotent.
+/// The `payload_hash` axis is untouched — it fingerprints the authored TYPE,
+/// not the anchor.
+fn fill_empty_payload_ref_anchor(payload_ref: &mut AuthoredTypePayloadRef, canonical: &str) {
+    let anchor = match &mut payload_ref.locator {
+        AuthoredBodyLocator::DeclBody(slot) => &mut slot.anchor,
+        AuthoredBodyLocator::AugmentationBody(aug) => &mut aug.anchor,
+        AuthoredBodyLocator::JsdocTypedefBody(typedef) => &mut typedef.anchor,
+        AuthoredBodyLocator::MacroPayload(payload) => &mut payload.anchor,
+    };
+    if anchor.canonical_id.is_empty() {
+        anchor.canonical_id = Arc::from(canonical);
+    }
+}
+
+/// The authored-type payload REFERENCE of a props / dispatcher type position:
+/// a content-free [`MacroPayloadLocator`] (the re-resolution address) plus a
+/// parse-stable STRUCTURAL `payload_hash` of the authored type (the cache
+/// discriminator).
+///
+/// NEVER fail-closed: a bare named reference (`Props`), an inline object
+/// literal (`{ a: string }`), and an instantiation carrying type arguments
+/// (`Props<T>`) all yield a payload ref — the authored payload is carried by
+/// POSITION, so no authored shape is lost, and two captures whose authored
+/// content differs always discriminate through the hash.
+///
+/// The authored `TSType` lowers ONCE via `lower_ts_type` into transient
+/// producer-local typed IR, is fingerprinted through the shared
+/// alpha-normalised semantic hasher ([`compute_semantic_hash`] — span-free,
+/// so the content-addressed candidate slot stays stable across
+/// formatting-only edits), and is dropped — the lowered `TypeExpr` never
+/// leaves this function. Capture is SYNTAX-ONLY, so every named reference
+/// hashes as an unresolved reference-shape edge (name + space) via
+/// [`UnresolvedLens`] — exactly the content discrimination the candidate slot
+/// needs; resolved reference identity stays the fact rail's job. A
+/// depth-budget-exceeded walk still yields a deterministic hash (the
+/// budget-fold arm of the shared hasher).
+fn authored_type_payload_ref(
+    ty: &TSType<'_>,
+    source: &str,
+    macro_index: u32,
+    payload: MacroPayloadPosition,
+) -> AuthoredTypePayloadRef {
+    let lowered: TypeExpr = lower_ts_type(ty, source);
+    let outcome = compute_semantic_hash(&lowered, SymbolSpace::Type, &UnresolvedLens);
+    AuthoredTypePayloadRef {
+        locator: AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
+            anchor: local_default_anchor(),
+            macro_index,
+            payload,
+        }),
+        payload_hash: outcome.hash,
+    }
 }
 
 /// The raw `$props<T>()` generic type-argument OXC `TSType`, for snippet-member
@@ -946,6 +1370,12 @@ fn oxc_span_to_verter(span: oxc_span::Span) -> Span {
 
 /// A structural hash of the captured candidates, invariant under cosmetic edits
 /// — lets the content-addressed candidate slot stay stable across formatting.
+///
+/// Every SEMANTIC capture field folds in DIRECTLY as typed data (the authored
+/// payload refs hash their own `Hash` impls — locator + parse-stable
+/// payload hash, never a `format!("{:?}", …)` debug rendering); spans
+/// deliberately do NOT fold in (they shift under formatting-only edits). The
+/// hash shape is versioned by [`SvelteScriptProvider::VERSION`].
 fn stable_candidate_hash(candidates: &SvelteScriptCandidates) -> [u8; 16] {
     use std::hash::{Hash, Hasher};
     let mut hasher = rustc_hash::FxHasher::default();
@@ -953,7 +1383,11 @@ fn stable_candidate_hash(candidates: &SvelteScriptCandidates) -> [u8; 16] {
     if let Some(p) = &candidates.props {
         p.from_generic_argument.hash(&mut hasher);
         p.bindable_members.hash(&mut hasher);
-        format!("{:?}", p.props_type).hash(&mut hasher);
+        // The payload REF hashes both axes: the locator (authored position)
+        // and the parse-stable structural payload hash (authored content) —
+        // `$props<{ a: string }>()` and `$props<{ a: number }>()` occupy
+        // distinct candidate slots.
+        p.props_type.hash(&mut hasher);
         // Defaults are part of the captured shape — an edited default value
         // changes the hash so the content-addressed candidate slot misses.
         for d in &p.prop_defaults {
@@ -973,7 +1407,7 @@ fn stable_candidate_hash(candidates: &SvelteScriptCandidates) -> [u8; 16] {
         p.has_default.hash(&mut hasher);
     }
     candidates.dispatcher_import_source.hash(&mut hasher);
-    format!("{:?}", candidates.dispatcher_events).hash(&mut hasher);
+    candidates.dispatcher_events.hash(&mut hasher);
     let h = hasher.finish();
     let mut out = [0u8; 16];
     out[..8].copy_from_slice(&h.to_le_bytes());

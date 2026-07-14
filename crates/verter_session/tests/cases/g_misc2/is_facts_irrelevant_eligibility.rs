@@ -78,9 +78,10 @@ const ELIGIBLE_CACHES: &[(&str, &str, &str)] = &[(
     // Justification (audit-side): the `IntrinsicSurface(_)` and
     // `ConsumedBindings(_)` variants carry data sourced from
     // inherently-constant inputs. `IntrinsicSurface` wraps
-    // `OwnedIntrinsicMember` data lowered from
+    // `IntrinsicSurfaceMember` fact/id data (static catalog ids from
     // `verter_semantic::analysis::html_intrinsics` — the SDK's HTML
-    // intrinsic registry. `ConsumedBindings` summarises a single
+    // intrinsic registry — or project-resolved semantic sources).
+    // `ConsumedBindings` summarises a single
     // owner's bindings (no cross-file dependency). The variant-
     // gated `self.cache.insert(...)` admission in
     // `FallthroughResolverState::store_node` permits empty-facts

@@ -75,7 +75,8 @@
     "build": "npx shx rm -rf dist tsconfig.tsbuildinfo && tsc -b --force",
     "dev": "tsc -b --watch",
     "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
-    "test": "vitest --run --exclude '**/native-eval.spec.ts' --exclude '**/checker.benchmark.spec.ts' --exclude '**/checker.spec.ts'"
+    "test": "vitest --run --exclude '**/native-eval.spec.ts' --exclude '**/checker.benchmark.spec.ts' --exclude '**/checker.spec.ts'",
+    "test:native": "vitest --run native-eval"
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.12.0",

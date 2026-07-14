@@ -44,11 +44,20 @@ use verter_semantic::analysis::framework_facts::{
 };
 
 use crate::cache_runtime::SignatureAdmission;
-use crate::fact_signature_helpers::ReadSetSignature;
+use crate::fact_signature_helpers::{
+    named_cacheability_scope, named_fact_tracer, ReadSetSignature,
+};
 use crate::framework::registry::FrameworkRegistration;
 use crate::resolver_core::{ResolverContext, StoreView};
 use crate::types::Hash16;
 use crate::VerterHost;
+
+/// The addressable identity of the entry-point's two sibling tracer scopes.
+/// `#[cfg(test)]` because the identity exists only where a test can target it —
+/// the production arms of `named_cacheability_scope!` / `named_fact_tracer!`
+/// drop the scope tokens unexpanded.
+#[cfg(test)]
+use crate::host_test_force::TracerScope;
 
 /// The content-addressed candidate-store key.
 ///
@@ -436,30 +445,59 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // each candidate specifier through its OWN import resolver
     // (`resolve_snapshot_imports`) and hands the outcome to the provider as
     // data — the provider never reaches the resolver itself.
-    let mut snapshot = host.get_analysis(canonical)?;
-    host.resolve_snapshot_imports(canonical, &mut snapshot);
-    let resolved_import_targets: Vec<ResolvedImportTarget> = snapshot
-        .imports
-        .iter()
-        .map(|imp| {
-            // The TYPED resolved-package identity (P2): a bare specifier whose
-            // resolved canonical is PACKAGE-BACKED per the session's classifier
-            // (`workspace_is_package_backed` — NOT a path substring) names its
-            // package; a relative / workspace-owned / unresolved import carries
-            // no package identity, so a userland `./fake-svelte` look-alike never
-            // claims to be the `svelte` package.
-            let package = resolved_package_for_import(
-                host,
-                &imp.source,
-                imp.resolved_canonical_id.as_deref(),
-            );
-            ResolvedImportTarget {
-                specifier: imp.source.clone(),
-                resolved_canonical: imp.resolved_canonical_id.clone(),
-                package,
-            }
-        })
-        .collect();
+    // The owner's import-route resolution walks the route resolver, which
+    // reaches `ensure_indexed_ready_serve` — a FENCED (ReturnOnly,
+    // `store_published == false`) serve there derives STALE resolved import
+    // targets, and the facts entry built from them validates against the LIVE
+    // view (the fenced-serve poison model). This resolution runs BEFORE the
+    // `provider.validate` tracer installed further down, so it needs its OWN
+    // traced scope; the captured `import_non_cacheable` bit refuses this facts
+    // entry's `publish_if_cacheable` admission below (the standalone entry-point
+    // has no enclosing tracer, so the outer surface tracer cannot cover it).
+    //
+    // The facts entry's signature comes from the `provider.validate` tracer below,
+    // never from THIS one, so this boundary reads the CACHEABILITY verdict — which
+    // folds the non-cacheable-read bit together with a
+    // `FactReadSetFinalise::Overflow` (an observation set no signature can root:
+    // a second, INDEPENDENT non-admission condition that must not be dropped here,
+    // since nothing downstream inspects this tracer's finalised set).
+    //
+    // The scope is opened by NAME so a test can target THIS boundary's overflow
+    // rail specifically — see `named_cacheability_scope!`. The name is erased in a
+    // production build.
+    let (resolved_import_targets_opt, import_non_cacheable): (
+        Option<Vec<ResolvedImportTarget>>,
+        bool,
+    ) = named_cacheability_scope!(host, TracerScope::ScriptFactsImportRoute, || {
+        let mut snapshot = host.get_analysis(canonical)?;
+        host.resolve_snapshot_imports(canonical, &mut snapshot);
+        Some(
+            snapshot
+                .imports
+                .iter()
+                .map(|imp| {
+                    // The TYPED resolved-package identity (P2): a bare specifier
+                    // whose resolved canonical is PACKAGE-BACKED per the
+                    // session's classifier (`workspace_is_package_backed` — NOT
+                    // a path substring) names its package; a relative /
+                    // workspace-owned / unresolved import carries no package
+                    // identity, so a userland `./fake-svelte` look-alike never
+                    // claims to be the `svelte` package.
+                    let package = resolved_package_for_import(
+                        host,
+                        &imp.source,
+                        imp.resolved_canonical_id.as_deref(),
+                    );
+                    ResolvedImportTarget {
+                        specifier: imp.source.clone(),
+                        resolved_canonical: imp.resolved_canonical_id.clone(),
+                        package,
+                    }
+                })
+                .collect(),
+        )
+    });
+    let resolved_import_targets = resolved_import_targets_opt?;
 
     // Select the active provider through the SHARED gate-matching authority
     // (`ActiveProviderIndex::gate_matches`) over THIS registration's own
@@ -497,6 +535,13 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
         .or_else(|| {
             let source_type = crate::parse::carrier_eval_source_type(framework_parse.as_deref());
             capture_candidates_for(&provider, &source, source_type, module_region).map(|c| {
+                // Producer-side locator absolutization: fill the capture's
+                // empty-sentinel payload-ref anchors with the PRODUCING
+                // canonical BEFORE the envelope enters the content-addressed
+                // candidate store (provider-owned typed downcast + coherent
+                // `stable_hash` rebuild; the session supplies the canonical as
+                // data).
+                let c = provider.absolutize_candidates(c, canonical);
                 host.framework_script_caches()
                     .candidates
                     .insert(candidate_key.clone(), c)
@@ -572,8 +617,12 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     );
 
     // ── Cold resolved-validation, fact-traced ──
-    let (payload_opt, finalise, _fenced_serve_observed) =
-        crate::fact_signature_helpers::install_fact_tracer(host, || {
+    //
+    // Named for the same reason as the import-route scope above: a test targets
+    // ONE of the two sibling tracers and must be able to say WHICH. Erased in a
+    // production build.
+    let (payload_opt, finalise, validate_non_cacheable) =
+        named_fact_tracer!(host, TracerScope::ScriptFactsProviderValidate, || {
             // Observe the owner's whole hash + every resolved import contributor so
             // a content edit to any of them misses the warm entry.
             crate::resolver_core::resolver_context::observe_fan_out(
@@ -632,6 +681,18 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // produced must NOT warm the store (it would stale-serve on a re-route).
     // Return the computed value to this caller alone, uncached.
     if owner_has_imports && import_route_hash.is_none() {
+        return verter_semantic::analysis::framework_facts::downcast_fact_payload::<T>(payload);
+    }
+    // A FENCED (ReturnOnly, `store_published == false`) / lease-miss serve
+    // consumed while resolving the import route (`import_non_cacheable`) OR while
+    // running `provider.validate` (`validate_non_cacheable`) derived this facts
+    // payload from a served-without-publication / transient basis while its fact
+    // signature validates against the LIVE view — an entry the read-side rail
+    // cannot reject. Return the value to THIS caller alone, uncached: a later
+    // warm read (`get_with_view`) would stale-serve the poisoned facts, and the
+    // executor's Svelte-surface entry re-reads them. The standalone entry-point
+    // has no enclosing tracer, so this is the sole refusal covering it.
+    if import_non_cacheable || validate_non_cacheable {
         return verter_semantic::analysis::framework_facts::downcast_fact_payload::<T>(payload);
     }
     // Cacheable-only publication; overflow returns the value to this caller
@@ -892,286 +953,5 @@ pub(crate) mod fixtures {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cache_runtime::SignatureAdmission;
-    use crate::resolver_core::{
-        FactVersionRef, PermissiveStoreView, StoreView, StoreViewCompatToken,
-    };
-    use verter_semantic::analysis::framework_facts::FrameworkScriptCandidates;
-
-    fn candidate_key(canonical: &str, content: [u8; 16]) -> CandidateSlotKey {
-        CandidateSlotKey {
-            canonical: Arc::from(canonical),
-            content_hash: content,
-            parse_env_hash: [0u8; 16],
-            parser_version: crate::file_artifact_store::LEGACY_PARSER_VERSION,
-            file_language_id: crate::file_artifact_store::FileArtifactKey::derived_file_language_id(
-                canonical,
-            ),
-            provider_id: FrameworkAdapterId::new("fixture-fw"),
-            provider_version: 1,
-        }
-    }
-
-    fn fixture_candidates() -> FrameworkScriptCandidates {
-        FrameworkScriptCandidates {
-            adapter_id: FrameworkAdapterId::new("fixture-fw"),
-            provider_version: 1,
-            stable_hash: [1u8; 16],
-            payload: Arc::new(()),
-        }
-    }
-
-    #[test]
-    fn candidate_store_is_content_addressed_hit_and_version_miss() {
-        let store = FrameworkScriptCandidateStore::new();
-        let key = candidate_key("/a.ts", [3u8; 16]);
-        store.insert(key.clone(), fixture_candidates());
-        // Same key ⇒ hit.
-        assert!(store.get(&key).is_some());
-        // A content edit (different content_hash) ⇒ a DIFFERENT key ⇒ miss.
-        let edited = candidate_key("/a.ts", [4u8; 16]);
-        assert!(store.get(&edited).is_none());
-        // A provider upgrade (different provider_version) ⇒ miss.
-        let upgraded = CandidateSlotKey {
-            provider_version: 2,
-            ..key.clone()
-        };
-        assert!(store.get(&upgraded).is_none());
-    }
-
-    fn fixture_payload() -> Arc<dyn FrameworkScriptFactPayload> {
-        Arc::new(fixtures::FixtureFactPayload {
-            resolved_specifier: "@corp/fixture-fw".to_string(),
-        })
-    }
-
-    fn resolved_fact_key(canonical: &str) -> ResolvedFactKey {
-        ResolvedFactKey {
-            canonical: Arc::from(canonical),
-            provider_id: FrameworkAdapterId::new("fixture-fw"),
-            provider_version: 1,
-            consumed_capability_bits: [0u8; 16],
-            project_identity: [0u8; 16],
-            resolve_env_hash: [0u8; 16],
-        }
-    }
-
-    /// A view that REJECTS every fact — discriminates the fact-rail gate.
-    struct RejectingView;
-    impl StoreView for RejectingView {
-        fn compat_token(&self) -> StoreViewCompatToken {
-            StoreViewCompatToken {
-                epoch: 0,
-                session: None,
-                validity_fingerprint: 0,
-            }
-        }
-        fn validates(&self, _fact: &FactVersionRef) -> bool {
-            false
-        }
-    }
-
-    #[test]
-    fn resolved_fact_warm_read_requires_same_generation_and_fact_rail() {
-        let store = FrameworkScriptFactStore::new();
-        let key = resolved_fact_key("/a.ts");
-        // Admit a Cacheable entry carrying a tracked cross-file fact at gen 5.
-        let cross_file = FactVersionRef::FileWholeHash {
-            canonical_id: "/node_modules/fixture-fw/index.d.ts".to_string(),
-            hash: [9u8; 16],
-        };
-        let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(Arc::from(
-            vec![cross_file].into_boxed_slice(),
-        )));
-        store.publish_if_cacheable(key.clone(), fixture_payload(), &admission, 5);
-
-        // Same gen + permissive view ⇒ warm hit.
-        assert!(store.get_with_view(&key, &PermissiveStoreView, 5).is_some());
-        // Generation bump ⇒ miss (strict same-generation gate).
-        assert!(store.get_with_view(&key, &PermissiveStoreView, 6).is_none());
-        // Right gen but a view that rejects the tracked fact ⇒ miss (fact rail).
-        assert!(store.get_with_view(&key, &RejectingView, 5).is_none());
-    }
-
-    #[test]
-    fn overflowed_admission_never_warms_the_store_return_only() {
-        let store = FrameworkScriptFactStore::new();
-        let key = resolved_fact_key("/a.ts");
-        // An overflowed (NonCacheable) admission: the value is returned to the
-        // caller but the store is NOT warmed (the no-poison invariant).
-        let admission =
-            SignatureAdmission::from_finalise(crate::resolver_core::FactReadSetFinalise::Overflow);
-        let stored = store.publish_if_cacheable(key.clone(), fixture_payload(), &admission, 5);
-        // The computed value is handed back...
-        assert!(
-            verter_semantic::analysis::framework_facts::downcast_fact_payload::<
-                fixtures::FixtureFactPayload,
-            >(Arc::clone(&stored.payload))
-            .is_some()
-        );
-        // ...but the store stays empty — the overflowed result was NOT warmed.
-        assert!(store.is_empty());
-        assert!(store.get_with_view(&key, &PermissiveStoreView, 5).is_none());
-    }
-
-    #[test]
-    fn cacheable_admission_warms_exactly_one_entry() {
-        let store = FrameworkScriptFactStore::new();
-        let key = resolved_fact_key("/a.ts");
-        let admission = SignatureAdmission::Cacheable(ReadSetSignature::empty());
-        store.publish_if_cacheable(key, fixture_payload(), &admission, 5);
-        assert_eq!(store.len(), 1, "a Cacheable admission warms one entry");
-    }
-
-    use crate::{HostConfig, UpsertRequest, VerterHost};
-    use verter_language::FileLanguage;
-
-    fn host_with_files() -> std::sync::Arc<VerterHost> {
-        let host = std::sync::Arc::new(VerterHost::new_standalone(HostConfig::default()));
-        // The framework package file (its canonical contains the package dir
-        // the fixture provider's resolved-validation checks for).
-        let _ = host
-            .upsert(UpsertRequest {
-                canonical_id: None,
-                input_id: "/proj/node_modules/fixture-fw/index.ts".to_string(),
-                source: Arc::from("export const marker = 1;"),
-                file_language: FileLanguage::script_ts(),
-                aliases: Vec::new(),
-            })
-            .expect("upsert package file");
-        // The consumer file importing the package by the GATED specifier.
-        let _ = host.upsert(UpsertRequest {
-            canonical_id: None,
-            input_id: "/proj/Consumer.ts".to_string(),
-            source: Arc::from(
-                "import { marker } from './node_modules/fixture-fw/index';\nexport const x = marker;",
-            ),
-            file_language: FileLanguage::script_ts(),
-            aliases: Vec::new(),
-        })
-        .expect("upsert consumer file");
-        host
-    }
-
-    #[test]
-    fn fixture_provider_resolves_validates_and_caches_end_to_end() {
-        let host = host_with_files();
-        let registration = fixtures::import_gated_capability_free_fixture_registration();
-        // First resolve: cold compute through capture → active-set selection →
-        // resolved-validation → content-addressed cache.
-        let facts = resolve_script_facts::<fixtures::FixtureFactPayload>(
-            &host,
-            &registration,
-            "/proj/Consumer.ts",
-        )
-        .expect("the consumer imports the framework package, so facts resolve");
-        assert_eq!(facts.resolved_specifier, "./node_modules/fixture-fw/index");
-        // The content-addressed candidate slot was filled.
-        assert!(
-            !host.framework_script_caches().candidates.is_empty(),
-            "the candidate slot is filled on the cold capture"
-        );
-        // The resolved-fact slot warmed (a Cacheable admission).
-        assert!(
-            !host.framework_script_caches().facts.is_empty(),
-            "the resolved fact warmed the store (Cacheable admission)"
-        );
-        // The cached entry's read-set ROOTS the payload against the owner's
-        // IMPORT-ROUTE surface (not just whole-hashes) — a re-route that leaves
-        // file contents unchanged must still invalidate. (If the ImportRoute
-        // fact were dropped, this assertion fails.)
-        let stored = host
-            .framework_script_caches()
-            .facts
-            .only_entry()
-            .expect("exactly one resolved fact is cached");
-        let has_import_route_fact = stored.read_set_signature.facts.iter().any(|f| {
-            matches!(
-                f,
-                crate::resolver_core::FactVersionRef::DerivedFactHash {
-                    canonical_id,
-                    kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                    ..
-                } if canonical_id == "/proj/Consumer.ts"
-            )
-        });
-        assert!(
-            has_import_route_fact,
-            "the cached resolved fact must observe the owner's ImportRoute \
-             derived fact so a re-route invalidates it"
-        );
-        // Second resolve: warm hit returns the same typed payload.
-        let facts2 = resolve_script_facts::<fixtures::FixtureFactPayload>(
-            &host,
-            &registration,
-            "/proj/Consumer.ts",
-        )
-        .expect("warm hit");
-        assert_eq!(facts2.resolved_specifier, facts.resolved_specifier);
-    }
-
-    #[test]
-    fn capability_off_refuses_through_the_real_host() {
-        // The real host's capability snapshot is empty, so the
-        // capability-REQUIRING fixture provider refuses — even though the
-        // import resolves to the framework package.
-        let host = host_with_files();
-        let registration = fixtures::import_gated_fixture_registration();
-        let facts = resolve_script_facts::<fixtures::FixtureFactPayload>(
-            &host,
-            &registration,
-            "/proj/Consumer.ts",
-        );
-        assert!(
-            facts.is_none(),
-            "the consumed capability bit is OFF on the real host, so the \
-             provider refuses to emit resolved facts"
-        );
-        // The refusal does NOT warm the resolved-fact store.
-        assert!(host.framework_script_caches().facts.is_empty());
-    }
-
-    #[test]
-    fn no_provider_registration_is_zero_cost_none() {
-        // A registration with no provider answers None without touching the
-        // host's parse/analysis at all (the steady-state zero-cost path).
-        let host = host_with_files();
-        let registration = fixtures::import_gated_capability_free_fixture_registration();
-        let empty_registration = FrameworkRegistration {
-            script_fact_providers: Vec::new(),
-            ..registration
-        };
-        let facts = resolve_script_facts::<fixtures::FixtureFactPayload>(
-            &host,
-            &empty_registration,
-            "/proj/Consumer.ts",
-        );
-        assert!(facts.is_none());
-        assert!(host.framework_script_caches().candidates.is_empty());
-    }
-
-    #[test]
-    fn gate_miss_file_does_not_import_specifier_resolves_none() {
-        // A file that does NOT import the gated specifier selects no provider
-        // (the gate misses), so no facts resolve.
-        let host = std::sync::Arc::new(VerterHost::new_standalone(HostConfig::default()));
-        let _ = host
-            .upsert(UpsertRequest {
-                canonical_id: None,
-                input_id: "/proj/Unrelated.ts".to_string(),
-                source: Arc::from("export const y = 1;"),
-                file_language: FileLanguage::script_ts(),
-                aliases: Vec::new(),
-            })
-            .expect("upsert unrelated file");
-        let registration = fixtures::import_gated_capability_free_fixture_registration();
-        let facts = resolve_script_facts::<fixtures::FixtureFactPayload>(
-            &host,
-            &registration,
-            "/proj/Unrelated.ts",
-        );
-        assert!(facts.is_none(), "the gate misses — no provider is active");
-    }
-}
+#[path = "script_facts_tests.rs"]
+mod tests;

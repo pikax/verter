@@ -192,7 +192,12 @@ fn encode_modifier(m: MappedModifier) -> u8 {
 /// arm hashes its leaf data, then pushes its children in a fixed
 /// order onto the worklist) guarantees that two structurally-equal
 /// `TypeExpr` trees produce the same `u64`.
-fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &mut H) {
+///
+/// `pub(crate)`: this is the ONE structural `TypeExpr` hash walker in the
+/// crate — sibling fingerprint needs (e.g. the resolution-policy cycle
+/// guard's anonymous-shape discriminator) reuse it rather than growing a
+/// second walker that could diverge.
+pub(crate) fn hash_type_expr_structurally<H: Hasher>(root: &TypeExpr, hasher: &mut H) {
     // Worklist of references into the live `TypeExpr` graph.
     // We push every node's children here so the loop visits the
     // whole subtree without recursing. Borrow-checker note: all

@@ -267,7 +267,7 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
     let mut edited_names: Vec<&str> = edited
         .prop_fields()
         .iter()
-        .map(|p| p.name.as_str())
+        .map(|p| p.analysis.name.as_str())
         .collect();
     edited_names.sort_unstable();
     assert_eq!(
@@ -315,7 +315,11 @@ fn vue_macro_dtos_rejects_stale_root_identity_after_edit() {
     // the cache for the props macro.
     let stale_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let v1 = host.vue_macro_dtos(&stale_request);
-    let mut v1_names: Vec<&str> = v1.prop_fields().iter().map(|p| p.name.as_str()).collect();
+    let mut v1_names: Vec<&str> = v1
+        .prop_fields()
+        .iter()
+        .map(|p| p.analysis.name.as_str())
+        .collect();
     v1_names.sort_unstable();
     assert_eq!(
         v1_names,
@@ -339,7 +343,7 @@ fn vue_macro_dtos_rejects_stale_root_identity_after_edit() {
     let mut after_names: Vec<&str> = after_edit
         .prop_fields()
         .iter()
-        .map(|p| p.name.as_str())
+        .map(|p| p.analysis.name.as_str())
         .collect();
     after_names.sort_unstable();
     assert_eq!(
@@ -385,7 +389,11 @@ fn vue_macro_dtos_rejects_macro_kind_mismatch_without_poisoning_cache() {
     // the bundle carries PROPS, not the emits the property-style fallback would
     // fabricate from the props surface.
     let cold = host.vue_macro_dtos(&lying_request);
-    let mut cold_props: Vec<&str> = cold.prop_fields().iter().map(|p| p.name.as_str()).collect();
+    let mut cold_props: Vec<&str> = cold
+        .prop_fields()
+        .iter()
+        .map(|p| p.analysis.name.as_str())
+        .collect();
     cold_props.sort_unstable();
     assert_eq!(
         cold_props,

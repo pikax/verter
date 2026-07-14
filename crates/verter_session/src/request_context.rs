@@ -49,7 +49,7 @@ thread_local! {
     /// for the duration of its single-threaded compute. The compute's
     /// contributing child reads fold their partiality into the top scope
     /// via [`observe_component_meta_read_suppress`] /
-    /// [`mark_request_materialization_cache_suppress`]; the admission gate
+    /// [`mark_request_result_partial`]; the admission gate
     /// reads the scope's completeness so the ENTRY carries its OWN
     /// completeness — NOT a request-global proxy that would let one
     /// consumer's partial poison a sibling consumer's complete entry.
@@ -66,7 +66,7 @@ thread_local! {
 /// RAII scope tracking the completeness of ONE cold compute that admits
 /// into a shared semantic cache. While held, partiality observed via
 /// [`observe_component_meta_read_suppress`] /
-/// [`mark_request_materialization_cache_suppress`] folds into THIS scope;
+/// [`mark_request_result_partial`] folds into THIS scope;
 /// the admission gate reads [`current_cold_compute_completeness`]. On
 /// drop the scope's completeness bubbles into the enclosing scope (if
 /// any) so a nested compute taints its parent. A no-op-safe stack: with
@@ -154,9 +154,9 @@ pub fn current_cold_compute_completeness() -> ResultCompleteness {
 /// ([`current_cold_compute_completeness`]). Returns `false` when no
 /// `RequestContext` is installed.
 #[must_use]
-pub fn current_materialization_cache_suppress() -> bool {
+pub fn current_request_result_is_partial() -> bool {
     current_request_context()
-        .map(|ctx| ctx.materialization_cache_suppress.load(Ordering::Relaxed))
+        .map(|ctx| ctx.request_result_is_partial.load(Ordering::Relaxed))
         .unwrap_or(false)
 }
 
@@ -164,10 +164,9 @@ pub fn current_materialization_cache_suppress() -> bool {
 /// partiality into the active per-cold-compute scope (if any). Sticky for
 /// the request's lifetime. No-op when no `RequestContext` is installed
 /// (the scope fold is still attempted — it is `RequestContext`-independent).
-pub fn mark_request_materialization_cache_suppress() {
+pub fn mark_request_result_partial() {
     if let Some(ctx) = current_request_context() {
-        ctx.materialization_cache_suppress
-            .store(true, Ordering::Relaxed);
+        ctx.request_result_is_partial.store(true, Ordering::Relaxed);
     }
     fold_cold_compute_completeness(ResultCompleteness::partial(PartialReasonSet::PROPAGATED));
 }
@@ -189,8 +188,7 @@ pub fn fold_result_completeness(joined: ResultCompleteness) {
         return;
     }
     if let Some(ctx) = current_request_context() {
-        ctx.materialization_cache_suppress
-            .store(true, Ordering::Relaxed);
+        ctx.request_result_is_partial.store(true, Ordering::Relaxed);
     }
     fold_cold_compute_completeness(joined);
 }
@@ -229,7 +227,7 @@ pub fn fold_result_completeness(joined: ResultCompleteness) {
 #[inline]
 pub fn observe_component_meta_read_suppress<T>(read: &crate::semantic_query::CacheRead<T>) {
     if read.result_is_partial {
-        mark_request_materialization_cache_suppress();
+        mark_request_result_partial();
     }
 }
 
@@ -721,13 +719,17 @@ pub struct RequestContext {
     /// [`verter_audit::ComponentMetaPayload::memo_publish_suppressed`].
     /// Discriminating signal for the no-poison gate.
     pub memo_publish_suppressed: AtomicU64,
-    /// Sticky flag raised by reducer / materializer paths on every
-    /// `cache_suppress=true` semantic read. OR-folded into
+    /// Sticky flag raised by reducer / materializer paths on every GENUINE
+    /// PARTIAL semantic read (projection-budget exhaustion, cancellation,
+    /// same-path recursion, walker fatal) — NOT on a benign
+    /// `cache_suppress=true` (fenced / lease-miss / unrootable) read, which
+    /// stays Complete and routes non-cacheability through the fact-tracer /
+    /// `cache_suppress` channel instead. OR-folded into
     /// `synthesis_should_suppress` so the final-result
-    /// `ComponentMetaResultDb` refuses to admit projection-budget
-    /// partials. See `current_materialization_cache_suppress` and
-    /// `mark_request_materialization_cache_suppress`.
-    pub materialization_cache_suppress: AtomicBool,
+    /// `ComponentMetaResultDb` refuses to admit projection-budget partials.
+    /// See `current_request_result_is_partial` and
+    /// `mark_request_result_partial`.
+    pub request_result_is_partial: AtomicBool,
 
     // ─────── Resolver / import-route hot-path counters ───────
     //
@@ -1145,7 +1147,7 @@ impl RequestContext {
             synthesis_expanded_instantiate_calls: AtomicU64::new(0),
             memo_insertions: AtomicU64::new(0),
             memo_publish_suppressed: AtomicU64::new(0),
-            materialization_cache_suppress: AtomicBool::new(false),
+            request_result_is_partial: AtomicBool::new(false),
             frontier_closure_invocations_total: AtomicU64::new(0),
             frontier_closure_invocations_target_none: AtomicU64::new(0),
             frontier_closure_redundant_target_none_pairs: AtomicU64::new(0),

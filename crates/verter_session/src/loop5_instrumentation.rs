@@ -7,9 +7,6 @@
 //!
 //! Hypothesis attribution mapping (orchestrator memory):
 //!
-//! - (a) Tree-shape — `MAX_TYPE_EXPR_OPERATOR_NODE_COUNT` /
-//!   `TYPE_EXPR_OPERATOR_NODE_COUNT_SUM` measure how many operator nodes
-//!   the lowered TypeExpr presents to `raise_and_reduce`.
 //! - (b) Cache-key mismatch — `MATERIALIZE_MEMO_HITS` /
 //!   `MATERIALIZE_MEMO_PEEKS` measures the host-memo hit rate; the ratio
 //!   reveals whether equivalent surface forms collide.
@@ -77,16 +74,6 @@ pub static MATERIALIZE_MEMO_PUBLISHES: AtomicU64 = AtomicU64::new(0);
 pub static FAMILY_MEMO_HITS: AtomicU64 = AtomicU64::new(0);
 pub static FAMILY_MEMO_MISSES: AtomicU64 = AtomicU64::new(0);
 
-/// Maximum (single-call) operator-node count observed for any
-/// TypeExpr passed into the macro-member materialiser pass.
-/// Tracked via fetch_max so the value is the high-water mark.
-pub static MAX_TYPE_EXPR_OPERATOR_NODE_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Running sum of operator-node counts for every `(member, mode)` walk.
-/// Divide by `MACRO_MEMBER_WALK_OUTER_CALLS` to get the mean
-/// per-outer-call operator-node load.
-pub static TYPE_EXPR_OPERATOR_NODE_COUNT_SUM: AtomicU64 = AtomicU64::new(0);
-
 /// Running sum of nanoseconds spent inside the
 /// `SemanticGraphStore::execute_cooperative` build closure. Divided by
 /// `EXECUTE_COOPERATIVE_COLD_BUILDS` gives the mean ns per cold build.
@@ -112,152 +99,6 @@ pub static EXECUTE_COOPERATIVE_BUILD_NS_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// slot-binding carrier. Default: 0.
 pub static SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS: AtomicU64 = AtomicU64::new(0);
 
-/// Count "operator-bearing" nodes inside a TypeExpr. Operator-bearing
-/// shapes are the ones that turn into a `dispatch_operator_with_recurse`
-/// call after lowering: `Ref`, `IndexedAccess`, `Conditional`, `Mapped`,
-/// `TypeOf`, `KeyOf`, `Infer`. Composite shapes (`Object`, `Union`,
-/// `Intersection`, `Array`, `Tuple`, `Function`) are recursed into but
-/// don't themselves count. Terminal shapes (`Primitive`, `Literal`,
-/// `TypeParameter`, `Unknown`, `RecursiveRef`) and `Rest`/`Parenthesized`
-/// (which the lowering walks through) are ignored.
-pub fn count_operator_nodes(expr: &verter_type_expr::TypeExpr) -> u64 {
-    use verter_type_expr::{ObjectMember, TypeExpr};
-
-    fn walk(expr: &TypeExpr, acc: &mut u64) {
-        match expr {
-            // operator-bearing
-            TypeExpr::Ref { type_arguments, .. } => {
-                *acc += 1;
-                for ta in type_arguments.iter() {
-                    walk(ta, acc);
-                }
-            }
-            TypeExpr::IndexedAccess { object, index } => {
-                *acc += 1;
-                walk(object, acc);
-                walk(index, acc);
-            }
-            // Mirrors the `Ref` arm: an import-type dispatches a cross-file
-            // resolution operation, so it is operator-bearing (+1) and its
-            // nested `type_arguments` are recursed.
-            TypeExpr::ImportType { type_arguments, .. } => {
-                *acc += 1;
-                for ta in type_arguments.iter() {
-                    walk(ta, acc);
-                }
-            }
-            TypeExpr::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
-            } => {
-                *acc += 1;
-                walk(check, acc);
-                walk(extends, acc);
-                walk(true_type, acc);
-                walk(false_type, acc);
-            }
-            TypeExpr::Mapped {
-                source,
-                value,
-                name_type,
-                ..
-            } => {
-                *acc += 1;
-                walk(source, acc);
-                walk(value, acc);
-                if let Some(n) = name_type.as_deref() {
-                    walk(n, acc);
-                }
-            }
-            TypeExpr::TypeOf(_) => *acc += 1,
-            TypeExpr::KeyOf(inner) => {
-                *acc += 1;
-                walk(inner, acc);
-            }
-            TypeExpr::Infer { .. } => *acc += 1,
-
-            // composite - recurse but don't count
-            TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
-                for a in arms.iter() {
-                    walk(a, acc);
-                }
-            }
-            TypeExpr::Array { element, .. } => walk(element, acc),
-            TypeExpr::Tuple { elements, .. } => {
-                for el in elements.iter() {
-                    walk(&el.ty, acc);
-                }
-            }
-            TypeExpr::Object(obj) => {
-                for member in obj.properties.iter() {
-                    match member {
-                        ObjectMember::Property(p) => walk(&p.ty, acc),
-                        ObjectMember::Method(m) => {
-                            for p in m.function.parameters.iter() {
-                                walk(&p.ty, acc);
-                            }
-                            if let Some(rt) = m.function.return_type.as_deref() {
-                                walk(rt, acc);
-                            }
-                        }
-                        ObjectMember::IndexSignature(s) => {
-                            walk(&s.key_type, acc);
-                            walk(&s.value_type, acc);
-                        }
-                        ObjectMember::CallSignature(f) | ObjectMember::ConstructSignature(f) => {
-                            for p in f.parameters.iter() {
-                                walk(&p.ty, acc);
-                            }
-                            if let Some(rt) = f.return_type.as_deref() {
-                                walk(rt, acc);
-                            }
-                        }
-                    }
-                }
-            }
-            // A constructor type's signature is walked identically to a function
-            // type's (same `FunctionExpr` payload).
-            TypeExpr::Function(f) | TypeExpr::ConstructorType(f) => {
-                for p in f.parameters.iter() {
-                    walk(&p.ty, acc);
-                }
-                if let Some(rt) = f.return_type.as_deref() {
-                    walk(rt, acc);
-                }
-            }
-            TypeExpr::TemplateLiteral { expressions, .. } => {
-                for e in expressions.iter() {
-                    walk(e, acc);
-                }
-            }
-            TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => walk(inner, acc),
-
-            // terminals
-            TypeExpr::Primitive(_)
-            | TypeExpr::Literal(_)
-            | TypeExpr::TypeParameter(_)
-            | TypeExpr::RecursiveRef { .. }
-            // Synthetic carriers are intrinsic terminal leaves with no
-            // operator-bearing dispatch.
-            | TypeExpr::SyntheticSlotBinding(_)
-            | TypeExpr::Unknown { .. } => {}
-        }
-    }
-    let mut count: u64 = 0;
-    walk(expr, &mut count);
-    count
-}
-
-/// Record one outer macro-member walk's TypeExpr operator-node count.
-/// Updates both the running sum and the high-water mark via fetch_max.
-pub fn record_outer_call_type_expr(expr: &verter_type_expr::TypeExpr) {
-    let n = count_operator_nodes(expr);
-    TYPE_EXPR_OPERATOR_NODE_COUNT_SUM.fetch_add(n, Ordering::Relaxed);
-    MAX_TYPE_EXPR_OPERATOR_NODE_COUNT.fetch_max(n, Ordering::Relaxed);
-}
-
 /// Per-`SemanticQueryKey`-variant timing for
 /// `dispatch_operator_with_recurse` — loop 7. Each call to
 /// `dispatch_operator_with_recurse` is wrapped in a wall-clock timer
@@ -278,19 +119,18 @@ pub fn record_outer_call_type_expr(expr: &verter_type_expr::TypeExpr) {
 ///   8 = NormalizeUnion
 ///   9 = NormalizeIntersection
 ///  10 = ProjectPath
-///  11 = ResolvedNamedType
-///  12 = Relate
-///  13 = ResolveMacroPayload
-///  14 = ResolveClassSurface
-///  15 = ResolveAmbientNamespace
-///  16 = ResolveEnum
-///  17 = ResolveOverloadSet
-///  18 = ApparentType
-///  19 = TemplateLiteralReduce
-///  20 = FlowNarrowingAt
-///  21 = ContextualTypeAt
-///  22 = LowerLocator
-pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 23;
+///  11 = Relate
+///  12 = ResolveMacroPayload
+///  13 = ResolveClassSurface
+///  14 = ResolveAmbientNamespace
+///  15 = ResolveEnum
+///  16 = ResolveOverloadSet
+///  17 = ApparentType
+///  18 = TemplateLiteralReduce
+///  19 = FlowNarrowingAt
+///  20 = ContextualTypeAt
+///  21 = LowerLocator
+pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 22;
 
 /// Human-readable labels for each operator-kind index. Kept in sync
 /// with the comment on `DISPATCH_OPERATOR_KIND_COUNT` and with the
@@ -307,7 +147,6 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
     "NormalizeUnion",
     "NormalizeIntersection",
     "ProjectPath",
-    "ResolvedNamedType",
     "Relate",
     "ResolveMacroPayload",
     "ResolveClassSurface",
@@ -325,10 +164,8 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
 /// the matching index on entry. Sum across all indices equals
 /// `DISPATCH_OPERATOR_WITH_RECURSE_CALLS`.
 pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
-    // 18 = ApparentType, 19 = TemplateLiteralReduce, 20 = FlowNarrowingAt,
-    // 21 = ContextualTypeAt (all zero-initialised; order within the array is
-    // immaterial — `kind_index_for_key` keys it).
-    AtomicU64::new(0),
+    // All zero-initialised; order within the array is immaterial —
+    // `kind_index_for_key` keys it.
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -359,10 +196,8 @@ pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUN
 /// function entry / exit. Sum across all indices is approximately
 /// `DISPATCH_OPERATOR_TOTAL_NS`.
 pub static DISPATCH_OPERATOR_KIND_NS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] = [
-    // 18 = ApparentType, 19 = TemplateLiteralReduce, 20 = FlowNarrowingAt,
-    // 21 = ContextualTypeAt (all zero-initialised; order within the array is
-    // immaterial — `kind_index_for_key` keys it).
-    AtomicU64::new(0),
+    // All zero-initialised; order within the array is immaterial —
+    // `kind_index_for_key` keys it.
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -429,17 +264,6 @@ pub static WALK_MACRO_MEMBER_TYPES_NS: AtomicU64 = AtomicU64::new(0);
 
 pub static APPEND_REGISTRY_ENTRIES_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static APPEND_REGISTRY_ENTRIES_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Every call to `lowered_root_reaches_transitive_cycle` that takes
-/// the TypeExpr-walk fast path (no dispatch lowering). The deep-lower
-/// path was only useful for `Ref` / `RecursiveRef` shapes that
-/// directly carried a route-root identity in their lowered form;
-/// `IndexedAccess` shapes always fell through the post-lowering match
-/// to `_ => return false` after paying for the lowering recursion.
-/// The walk path constructs a `DeclIdentity` from the outermost
-/// `Ref`/`RecursiveRef` of the TypeExpr structure without triggering
-/// any third-party shallow-file loads. Inert in production.
-pub static LOWERED_ROOT_CYCLE_FAST_PATH_HITS: AtomicU64 = AtomicU64::new(0);
 
 // Walk-macro-member-types sub-blocks: per-iteration counters across
 // the outer `for (macro_index, mac) in snapshot.macros.iter()` loop.
@@ -527,18 +351,17 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
         SemanticQueryKey::NormalizeUnion { .. } => 8,
         SemanticQueryKey::NormalizeIntersection { .. } => 9,
         SemanticQueryKey::ProjectPath { .. } => 10,
-        SemanticQueryKey::ResolvedNamedType { .. } => 11,
-        SemanticQueryKey::Relate { .. } => 12,
-        SemanticQueryKey::ResolveMacroPayload { .. } => 13,
-        SemanticQueryKey::ResolveClassSurface { .. } => 14,
-        SemanticQueryKey::ResolveAmbientNamespace { .. } => 15,
-        SemanticQueryKey::ResolveEnum { .. } => 16,
-        SemanticQueryKey::ResolveOverloadSet { .. } => 17,
-        SemanticQueryKey::ApparentType { .. } => 18,
-        SemanticQueryKey::TemplateLiteralReduce { .. } => 19,
-        SemanticQueryKey::FlowNarrowingAt { .. } => 20,
-        SemanticQueryKey::ContextualTypeAt { .. } => 21,
-        SemanticQueryKey::LowerLocator { .. } => 22,
+        SemanticQueryKey::Relate { .. } => 11,
+        SemanticQueryKey::ResolveMacroPayload { .. } => 12,
+        SemanticQueryKey::ResolveClassSurface { .. } => 13,
+        SemanticQueryKey::ResolveAmbientNamespace { .. } => 14,
+        SemanticQueryKey::ResolveEnum { .. } => 15,
+        SemanticQueryKey::ResolveOverloadSet { .. } => 16,
+        SemanticQueryKey::ApparentType { .. } => 17,
+        SemanticQueryKey::TemplateLiteralReduce { .. } => 18,
+        SemanticQueryKey::FlowNarrowingAt { .. } => 19,
+        SemanticQueryKey::ContextualTypeAt { .. } => 20,
+        SemanticQueryKey::LowerLocator { .. } => 21,
     }
 }
 
@@ -558,8 +381,6 @@ pub fn reset_all() {
     MATERIALIZE_MEMO_PUBLISHES.store(0, Ordering::Relaxed);
     FAMILY_MEMO_HITS.store(0, Ordering::Relaxed);
     FAMILY_MEMO_MISSES.store(0, Ordering::Relaxed);
-    MAX_TYPE_EXPR_OPERATOR_NODE_COUNT.store(0, Ordering::Relaxed);
-    TYPE_EXPR_OPERATOR_NODE_COUNT_SUM.store(0, Ordering::Relaxed);
     EXECUTE_COOPERATIVE_BUILD_NS_TOTAL.store(0, Ordering::Relaxed);
     DISPATCH_OPERATOR_TOTAL_NS.store(0, Ordering::Relaxed);
     for slot in DISPATCH_OPERATOR_KIND_CALLS.iter() {
@@ -614,10 +435,6 @@ pub fn dump_loop5_instrumentation_counters() -> String {
     let materialize_memo_publishes = MATERIALIZE_MEMO_PUBLISHES.load(Ordering::Relaxed);
     let family_memo_hits = FAMILY_MEMO_HITS.load(Ordering::Relaxed);
     let family_memo_misses = FAMILY_MEMO_MISSES.load(Ordering::Relaxed);
-    let max_type_expr_operator_node_count =
-        MAX_TYPE_EXPR_OPERATOR_NODE_COUNT.load(Ordering::Relaxed);
-    let type_expr_operator_node_count_sum =
-        TYPE_EXPR_OPERATOR_NODE_COUNT_SUM.load(Ordering::Relaxed);
     let execute_cooperative_build_ns_total =
         EXECUTE_COOPERATIVE_BUILD_NS_TOTAL.load(Ordering::Relaxed);
     let dispatch_operator_total_ns = DISPATCH_OPERATOR_TOTAL_NS.load(Ordering::Relaxed);
@@ -685,8 +502,6 @@ pub fn dump_loop5_instrumentation_counters() -> String {
          \"MATERIALIZE_MEMO_PUBLISHES\": {materialize_memo_publishes},\n  \
          \"FAMILY_MEMO_HITS\": {family_memo_hits},\n  \
          \"FAMILY_MEMO_MISSES\": {family_memo_misses},\n  \
-         \"MAX_TYPE_EXPR_OPERATOR_NODE_COUNT\": {max_type_expr_operator_node_count},\n  \
-         \"TYPE_EXPR_OPERATOR_NODE_COUNT_SUM\": {type_expr_operator_node_count_sum},\n  \
          \"EXECUTE_COOPERATIVE_BUILD_NS_TOTAL\": {execute_cooperative_build_ns_total},\n  \
          \"DISPATCH_OPERATOR_TOTAL_NS\": {dispatch_operator_total_ns},\n  \
          \"MATERIALIZE_TYPE_EXPR_UNTIL_STABLE_CALLS\": {materialize_type_expr_until_stable_calls},\n  \
@@ -923,8 +738,8 @@ mod tests {
             "MATERIALIZE_MEMO_PUBLISHES",
             "FAMILY_MEMO_HITS",
             "FAMILY_MEMO_MISSES",
-            "MAX_TYPE_EXPR_OPERATOR_NODE_COUNT",
-            "TYPE_EXPR_OPERATOR_NODE_COUNT_SUM",
+            // (The TypeExpr operator-node-count counters were retired with
+            // the graph-native reducer; the dump no longer emits them.)
             "EXECUTE_COOPERATIVE_BUILD_NS_TOTAL",
             "DISPATCH_OPERATOR_TOTAL_NS",
             "DISPATCH_OPERATOR_KIND_CALLS",
@@ -1157,7 +972,7 @@ mod tests {
             kind_index_for_key(&contextual_type_at),
         ];
         let expected = [
-            0usize, 1, 2, 3, 4, 6, 8, 9, 10, 12, 14, 15, 16, 17, 18, 19, 20, 21,
+            0usize, 1, 2, 3, 4, 6, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20,
         ];
         assert_eq!(observed, expected);
         // No off-by-one in the static label table:
@@ -1173,28 +988,6 @@ mod tests {
             DISPATCH_OPERATOR_KIND_NS.len(),
             DISPATCH_OPERATOR_KIND_COUNT
         );
-    }
-
-    #[test]
-    fn count_operator_nodes_terminal_zero() {
-        use verter_type_expr::{PrimitiveName, TypeExpr};
-        let expr = TypeExpr::Primitive(PrimitiveName::String);
-        assert_eq!(count_operator_nodes(&expr), 0);
-    }
-
-    #[test]
-    fn count_operator_nodes_indexed_access_three() {
-        // IndexedAccess(Ref<A>, Ref<B>) → 1 indexed-access + 2 refs = 3
-        use verter_type_expr::TypeExpr;
-        let make_ref = |name: &str| TypeExpr::Ref {
-            name: Arc::from(name),
-            type_arguments: Arc::from(Vec::<TypeExpr>::new()),
-        };
-        let expr = TypeExpr::IndexedAccess {
-            object: Arc::new(make_ref("A")),
-            index: Arc::new(make_ref("B")),
-        };
-        assert_eq!(count_operator_nodes(&expr), 3);
     }
 
     #[test]

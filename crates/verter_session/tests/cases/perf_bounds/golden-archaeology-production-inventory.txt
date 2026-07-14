@@ -7,7 +7,7 @@
 # Format: <relative-path>:<line-number>: <line>
 # Total entries:
 #
-# 639
+# 635
 
 crates/verter_ffi/src/convert.rs:905: /// by the NAPI/WASM audit bindings (plan §3 Commit 8) to package the
 crates/verter_lsp/src/config.rs:63: /// Hover-related init options. Plan §3 Commit 9.
@@ -575,12 +575,9 @@ crates/verter_session/src/semantic_query.rs:1770: /// is a post-track refinement
 crates/verter_session/src/semantic_query_memo.rs:56: // sidecar** (plan §7.10 + C1). Both the node vec and the parallel scope
 crates/verter_session/src/semantic_query_memo.rs:66: // **Path C C17 — sharded dedup index (plan §2 Stage 9).** The dedup index
 crates/verter_session/src/semantic_query_memo.rs:108: /// Origin-scope sidecar (plan §7.10 + C1). Index-aligned with `nodes`.
-crates/verter_session/src/semantic_query_memo.rs:169: // `VueMacroElements` is exempt per plan §7.10 — record `None` so
-crates/verter_session/src/semantic_query_memo.rs:257: /// are `VueMacroElements` nodes (plan §7.10).
 crates/verter_session/src/semantic_query_memo.rs:267: /// Drop shard-dedup entries for the given canonical id. Plan §1.10
 crates/verter_session/src/semantic_query_memo.rs:459: /// Family-keyed warm memo (plan §2 cache topology + B1b).
 crates/verter_session/src/semantic_query_memo.rs:480: /// gives per-`(family, mode_slot)` in-flight authority (plan §7.15) —
-crates/verter_session/src/semantic_query_memo.rs:486: /// read-path shape. Per plan §7.16, `SemanticQueryKey::ResolvedNamedType`
 crates/verter_session/src/semantic_query_memo.rs:491: /// Relation-engine memo (plan §2 + §3 Change S). Added in Phase D §5.4
 crates/verter_session/src/semantic_query_memo.rs:516: /// Plan §6 / §13.2 Γ.B reverse index. For each canonical id,
 crates/verter_session/src/semantic_query_memo.rs:539: /// Plan §6 / §13.2 Γ.B reverse-index type alias. See
@@ -622,7 +619,6 @@ crates/verter_session/src/semantic_query_memo.rs:3253: /// Plan §7 round-7 Code
 crates/verter_session/src/semantic_query_memo.rs:3556: /// Γ.A (component-meta cold-path long-tail plan §5 / §1.10)
 crates/verter_session/src/semantic_query_memo.rs:4145: /// bumps per plan § A0 (tsconfig / SDK / workspace-folder changes).
 crates/verter_session/src/semantic_query_memo.rs:4364: // B1b family-memo backfill matrix (plan §3 B1b + §7.15)
-crates/verter_session/src/semantic_query_memo.rs:4649: // 9. ResolvedNamedType bypasses the family memo entirely (plan §7.16).
 crates/verter_session/src/semantic_query_memo.rs:4670: /// support the contract requires (plan §2 + §7.16).
 crates/verter_session/src/semantic_query_memo.rs:4892: /// them — there is no "canonical publisher" shortcut (plan §7.16).
 crates/verter_session/src/semantic_query_memo.rs:5037: /// **Fixture rewrite (Path C C7 / plan §14.3, §14.4).** Pre-C7 this

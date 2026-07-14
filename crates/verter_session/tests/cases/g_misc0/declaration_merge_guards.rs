@@ -143,12 +143,7 @@ fn merged_decl_lowers_to_distinct_carrier_not_intersection() {
         .expect("upsert merged-interface fixture");
 
     let node = host
-        .resolve_named_symbol(
-            "/merged_carrier.ts",
-            "Foo",
-            &[],
-            Some(ProjectionMode::Expanded),
-        )
+        .resolve_named_symbol("/merged_carrier.ts", "Foo", Some(ProjectionMode::Expanded))
         .expect("the merged interface must resolve through the live dispatch");
 
     match host

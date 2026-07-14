@@ -1,36 +1,42 @@
 # `docs/arch/last/` — the consolidated handoff record
 
-## ⚠ READ THIS FIRST: the landed commit contains a cache-poison REGRESSION
+## READ THIS FIRST: what is closed, and what is still open
 
-**This work introduced a cache-poisoning regression, it is present in the code that landed, and the
-base did not have it. This branch must not be merged onward until it is fixed. Fixing it is the next
-agent's first job.**
+**The fallthrough cache-poison regression this work introduced is CLOSED.** An earlier revision of
+this record led with it as shipping unfixed; that is no longer true, and the correction is the first
+thing to know so you do not go hunting for a bug that is gone.
 
-The fallthrough resolver's admission funnel — `store_node` in
-`crates/verter_session/src/resolver_core/fallthrough_resolver.rs` — has **no non-cacheability rail at
-all**. Confirm it in one command:
+What it was: the fallthrough resolver's admission funnel — `store_node` in
+`crates/verter_session/src/resolver_core/fallthrough_resolver.rs` — had **no non-cacheability rail at
+all**. The file itself had never been edited; what changed was underneath it. The lineage deleted the
+~31 call sites that folded non-cacheability into cold-compute completeness, and **that completeness
+signal was `store_node`'s only safety gate.** Removing the fold left the gate toothless, so a
+fallthrough node computed through a fenced serve or a lease miss — carrying non-empty **live-rooted**
+facts — was admitted and served warm indefinitely. Live-rooted is the sting: the facts revalidate
+against the live view on every warm hit, so the read-side rail can never evict it.
 
-```bash
-grep -cE "non_cacheable|CacheabilityProbe|with_cacheability_scope" \
-  crates/verter_session/src/resolver_core/fallthrough_resolver.rs   # ⇒ 0
-```
+How it is closed: `store_node` now **requires an unforgeable `CacheabilityProbe`** (private field,
+single constructor, an HRTB that stops it escaping its scope) whose tracer scope **encloses** the
+compute, samples it **after** the compute runs, and **refuses the cache write** when
+`probe.non_cacheable()` — while still **serving the value** to the caller. Cache non-admission is not
+a failed request. An untraced producer cannot reach the funnel at all: it is a compile error, not a
+review miss.
 
-The file itself never changed — it is byte-identical to its base. What changed is underneath it: this
-lineage deleted the ~31 call sites that folded non-cacheability into cold-compute completeness, and
-**that completeness signal was `store_node`'s only safety gate.** Removing the fold left the gate
-toothless. A fallthrough node computed through a fenced serve or a lease miss, carrying non-empty
-**live-rooted** facts, is now admitted and served warm indefinitely — and because the facts are
-live-rooted, the read-side validation rail can never reject it.
+The regression was settled the way this record demanded — **by a discriminating test, not an
+opinion**: `fenced_serve_fallthrough_node_is_not_admitted` in
+`crates/verter_session/src/fallthrough_admission_tests.rs`. It has three arms, and the shape matters
+if you ever touch this rail: a **control** arm proving an ordinary compute *does* admit (so a
+zero-candidate assertion under the fence is a refusal, not an absent compute), a **fenced** arm
+asserting refusal while the caller is still served, and a **path-precision** arm proving the fence
+does not blanket-refuse. Delete the `probe.non_cacheable()` refusal from `store_node` and that test
+goes red.
 
-**Hold both halves of the honest caveat.** The missing rail is **proven** (a blob-hash fact, not an
-argument). But **nobody constructed an end-to-end poisoning trace** through `store_node`, so this is a
-**proven-missing safety rail, not a demonstrated exploit**. Do not overstate it — and do not let
-anyone argue you out of it either. **Settle it with a discriminating test, not another opinion:**
-static "this path is safe" reasoning has been wrong **three times** in this work, twice from reviewers
-specifically tasked with attacking the claim. Force a fallthrough node through a fenced serve, assert
-the entry is refused, and watch the test go red against the tree as it stands.
+**This does not close the class.** See below — the poison class it belonged to is still open and
+reachable, and the known hole set is not exhaustive. One instance being closed is not the invariant
+being established.
 
-Full mechanism and fix: **[`cache-admission-closure-design.md`](cache-admission-closure-design.md) §0.**
+Full mechanism, and the design for the class:
+**[`cache-admission-closure-design.md`](cache-admission-closure-design.md) §0.**
 
 ---
 
@@ -55,8 +61,8 @@ document, not as something to go hunting for.
 ## Read in this order
 
 1. **[`single-engine-cutover-state.md`](single-engine-cutover-state.md)** — the goal, what actually
-   landed versus what is merely written, the remaining sequence, the open defects (including one
-   **live regression**), and landing hygiene. **Start here.**
+   landed versus what is merely written, the remaining sequence, the open defects, and landing
+   hygiene. **Start here.**
 2. **[`cache-admission-closure-design.md`](cache-admission-closure-design.md)** — the headline
    remaining deliverable, implementer-ready: the invariant, why the class kept regrowing (the
    root-cause account everyone worked from was **false**), the ruled mechanism (invert scope
@@ -87,7 +93,12 @@ number as a hint, not an address.
 ```bash
 pnpm install                                  # required before any JS/TS test or workspace Node script
 node scripts/gate.mjs                         # THE canonical Rust gate — builds once, runs BOTH surfaces
-cargo clippy --workspace -- -D warnings       # expect dead-code errors; see the state doc before deleting
+cargo check -p verter_session --lib --tests   # PASSES. This — not clippy — is the compile floor.
+cargo clippy --workspace -- -D warnings       # RED: 83 errors (78 dead_code + 5 style), exit 101.
+                                             # Expected. Read the state doc BEFORE deleting any of
+                                             # them: the naive deletion breaks the TEST build while
+                                             # clippy (lib-only) stays green. That trap already cost
+                                             # one reverted attempt.
 cargo fmt --all --check
 pnpm test                                     # only if you touched TypeScript
 ```

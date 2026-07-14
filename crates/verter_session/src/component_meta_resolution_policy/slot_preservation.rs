@@ -1,215 +1,170 @@
-//! Slot-binding indexed-access symbolic preservation (Issue #1, partial).
+//! Slot-binding indexed-access symbolic preservation.
 //!
-//! Force the slot binding's `type_expr` back to the symbolic
-//! `IndexedAccess` shape encoded in the source-annotation typed form when
-//! the indexed access transits through an imported declaration. The eager
+//! Force the slot binding's published source back to the symbolic
+//! `IndexedAccess` shape encoded in the authored annotation source when the
+//! indexed access transits through an imported declaration. The eager
 //! evaluator may have widened the access through an open
 //! `[k: string]: any` index signature; the navigable member-path contract
-//! is the better public surface.
+//! is the better public surface. All classification runs node-domain off
+//! sources raised through the ONE shared dispatch.
 
-use verter_type_expr::{LiteralValue, ObjectMember, TypeExpr};
+use crate::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
+use verter_type_expr::facts::SemanticTypeSource;
 
-use super::core::{peel_paren, DeclLookup, PolicyCtx};
+use super::core::{DeclLookup, PolicyCtx};
 
-/// Whether the slot binding's source-annotation typed form describes an
+/// Whether the slot binding's authored annotation SOURCE describes an
 /// indexed access that transits through an imported declaration. When
-/// true, the caller restores the symbolic form from the typed annotation
+/// true, the caller restores the symbolic form from the authored source
 /// and skips the expansion walk.
 pub(super) fn slot_binding_should_preserve_symbolic_raw_type(
-    raw_type_expr: Option<&TypeExpr>,
+    raw_type_source: Option<&SemanticTypeSource>,
     ctx: &mut PolicyCtx<'_, '_>,
 ) -> bool {
-    let Some(expr) = raw_type_expr else {
+    let Some(raw_source) = raw_type_source else {
         return false;
     };
-    raw_indexed_access_root_is_imported(expr, ctx)
+    let Some(hot) = ctx.raise_source(raw_source) else {
+        return false;
+    };
+    raw_indexed_access_root_is_imported(hot.node(), ctx)
 }
 
-/// Returns true when `expr` is an `IndexedAccess` whose deref chain
-/// transits through a Ref to an imported declaration. The "indexed
-/// root" is the chain starting from the indexed access's `object` and
-/// the property body that the access selects from the root's
+/// Returns true when the raised node is an `IndexedAccess` whose deref
+/// chain transits through a reference to an imported declaration. The
+/// "indexed root" is the chain starting from the indexed access's `object`
+/// and the property body that the access selects from the root's
 /// declaration body.
-fn raw_indexed_access_root_is_imported(expr: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>) -> bool {
-    let TypeExpr::IndexedAccess { object, index } = peel_paren(expr) else {
+fn raw_indexed_access_root_is_imported(node: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>) -> bool {
+    let Some(data) = ctx.node_data(node) else {
         return false;
     };
-    // Index must be a string literal — that is the member-path the
-    // policy can statically inspect inside the root's declaration body.
-    let TypeExpr::Literal(LiteralValue::String(member)) = peel_paren(index) else {
+    let SemanticNodeData::IndexedAccess { object, index } = data.as_ref() else {
         return false;
     };
-    // Peel through `Object & { … }` and `Object` shapes when the user
-    // wrote the indexed access on a literal object (covered by
-    // `reduce_indexed_access_over_object_surface`); for the slot
-    // binding case we expect a Ref to a declaration.
-    let TypeExpr::Ref { name, .. } = peel_paren(object) else {
+    let object = *object;
+    // Index must be a string key — that is the member-path the policy can
+    // statically inspect inside the root's declaration body.
+    let member = match index {
+        IndexKey::String(member) => member.to_string(),
+        _ => return false,
+    };
+    // For the slot binding case we expect a reference to a declaration at
+    // the object position.
+    let Some((name, _)) = ctx.node_ref_head(object) else {
         return false;
     };
     let Some(DeclLookup {
-        canonical_source,
+        canonical_source: _,
         body,
-    }) = ctx.locate_declaration(name.as_ref())
+    }) = ctx.locate_declaration(name.as_str())
     else {
         return false;
     };
-    // The root's declaration body must be an Object whose `member`
-    // property type contains an imported reference (or itself resolves
-    // to an imported declaration).
-    let property_type = match peel_paren(&body) {
-        TypeExpr::Object(obj) => obj.properties.iter().find_map(|m| match m {
-            ObjectMember::Property(p) if p.name == *member => Some(p.ty.clone()),
-            _ => None,
-        }),
-        _ => None,
-    };
-    let Some(property_type) = property_type else {
+    // The root's declaration body must raise to an Object whose `member`
+    // property value contains an imported reference (or itself resolves to
+    // an imported declaration). The root's own location is not the trigger.
+    let Some(body_hot) = ctx.raise_source(&body) else {
         return false;
     };
-    let _ = canonical_source; // root's own location is not the trigger
-    type_expr_contains_imported_ref(&property_type, ctx)
+    let property_value = match ctx.node_data(body_hot.node()).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => surface
+            .members
+            .iter()
+            .find(|candidate| candidate.name.as_ref() == member)
+            .map(|candidate| candidate.value),
+        _ => None,
+    };
+    let Some(property_value) = property_value else {
+        return false;
+    };
+    node_contains_imported_ref(property_value, ctx)
 }
 
-/// Walks `expr` and returns true on the first `Ref` whose declaration
-/// resolves to an imported (non-owner) declaration. Refs whose
-/// declarations cannot be located are ignored — they cannot be proven
-/// imported.
-fn type_expr_contains_imported_ref(expr: &TypeExpr, ctx: &mut PolicyCtx<'_, '_>) -> bool {
-    match expr {
-        TypeExpr::Parenthesized(inner) => type_expr_contains_imported_ref(inner, ctx),
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
+/// Walks the raised node graph and returns true on the first reference
+/// whose declaration resolves to an imported (non-owner) declaration.
+/// References whose declarations cannot be located are ignored — they
+/// cannot be proven imported. A cross-file `import("…")` carrier is, by
+/// construction, a reference to an imported declaration.
+fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>) -> bool {
+    let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+    let mut worklist: Vec<SemanticNodeId> = vec![root];
+    while let Some(node) = worklist.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        if let Some((name, args)) = ctx.node_ref_head(node) {
             if let Some(DeclLookup {
                 canonical_source, ..
-            }) = ctx.locate_declaration(name.as_ref())
+            }) = ctx.locate_declaration(name.as_str())
             {
                 if canonical_source != ctx.owner_canonical {
                     return true;
                 }
             }
-            type_arguments
-                .iter()
-                .any(|arg| type_expr_contains_imported_ref(arg, ctx))
+            worklist.extend(args);
+            continue;
         }
-        // An `import("…")` reference is, by construction, a reference to an
-        // imported (cross-file) declaration — the same condition the `Ref`
-        // arm reports `true` for when its declaration resolves off-owner.
-        TypeExpr::ImportType { .. } => true,
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
-            .iter()
-            .any(|ty| type_expr_contains_imported_ref(ty, ctx)),
-        TypeExpr::Array { element, .. } => type_expr_contains_imported_ref(element, ctx),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .any(|element| type_expr_contains_imported_ref(&element.ty, ctx)),
-        TypeExpr::IndexedAccess { object, index } => {
-            type_expr_contains_imported_ref(object, ctx)
-                || type_expr_contains_imported_ref(index, ctx)
-        }
-        TypeExpr::Object(obj) => obj.properties.iter().any(|member| match member {
-            ObjectMember::Property(prop) => type_expr_contains_imported_ref(&prop.ty, ctx),
-            ObjectMember::Method(method) => {
-                method
-                    .function
-                    .parameters
-                    .iter()
-                    .any(|parameter| type_expr_contains_imported_ref(&parameter.ty, ctx))
-                    || method
-                        .function
-                        .return_type
-                        .as_deref()
-                        .is_some_and(|rt| type_expr_contains_imported_ref(rt, ctx))
+        let Some(data) = ctx.node_data(node) else {
+            continue;
+        };
+        match data.as_ref() {
+            SemanticNodeData::ImportType(_) => return true,
+            SemanticNodeData::Alias(target) => worklist.push(*target),
+            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                worklist.extend(arms.iter().copied());
             }
-            ObjectMember::IndexSignature(sig) => {
-                type_expr_contains_imported_ref(&sig.key_type, ctx)
-                    || type_expr_contains_imported_ref(&sig.value_type, ctx)
+            SemanticNodeData::Array { element, .. } | SemanticNodeData::KeyOf { base: element } => {
+                worklist.push(*element)
             }
-            ObjectMember::CallSignature(function) | ObjectMember::ConstructSignature(function) => {
-                function
-                    .parameters
-                    .iter()
-                    .any(|parameter| type_expr_contains_imported_ref(&parameter.ty, ctx))
-                    || function
-                        .return_type
-                        .as_deref()
-                        .is_some_and(|rt| type_expr_contains_imported_ref(rt, ctx))
+            SemanticNodeData::Tuple { elements, .. } => {
+                worklist.extend(elements.iter().map(|element| element.value));
             }
-        }),
-        // A constructor type's signature is searched identically to a function
-        // type's (same `FunctionExpr` payload).
-        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
-            function
-                .parameters
-                .iter()
-                .any(|parameter| type_expr_contains_imported_ref(&parameter.ty, ctx))
-                || function
-                    .return_type
-                    .as_deref()
-                    .is_some_and(|rt| type_expr_contains_imported_ref(rt, ctx))
+            SemanticNodeData::IndexedAccess { object, index } => {
+                worklist.push(*object);
+                if let IndexKey::TypeNode(index_node) = index {
+                    worklist.push(*index_node);
+                }
+            }
+            SemanticNodeData::Object(surface) => {
+                worklist.extend(surface.members.iter().map(|member| member.value));
+                worklist.extend(surface.call_signatures.iter().copied());
+                worklist.extend(surface.construct_signatures.iter().copied());
+                for signature in surface.index_signatures.iter() {
+                    worklist.push(signature.key_type);
+                    worklist.push(signature.value_type);
+                }
+            }
+            SemanticNodeData::Function {
+                params,
+                return_type,
+                ..
+            } => {
+                worklist.extend(params.iter().map(|param| param.ty));
+                worklist.push(*return_type);
+            }
+            SemanticNodeData::ConstructorType { signature } => worklist.push(*signature),
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                ..
+            } => {
+                worklist.push(*check);
+                worklist.push(*extends);
+                worklist.push(*true_branch_ref);
+                worklist.push(*false_branch_ref);
+            }
+            SemanticNodeData::Mapped { source, .. } => worklist.push(*source),
+            SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                worklist.extend(expressions.iter().copied());
+            }
+            SemanticNodeData::MergedDecl { contributors } => {
+                worklist.extend(contributors.iter().copied());
+            }
+            _ => {}
         }
-        TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) => {
-            type_expr_contains_imported_ref(inner, ctx)
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            type_expr_contains_imported_ref(check, ctx)
-                || type_expr_contains_imported_ref(extends, ctx)
-                || type_expr_contains_imported_ref(true_type, ctx)
-                || type_expr_contains_imported_ref(false_type, ctx)
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            type_expr_contains_imported_ref(source, ctx)
-                || type_expr_contains_imported_ref(value, ctx)
-                || name_type
-                    .as_deref()
-                    .is_some_and(|nt| type_expr_contains_imported_ref(nt, ctx))
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => expressions
-            .iter()
-            .any(|e| type_expr_contains_imported_ref(e, ctx)),
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::TypeParameter(_)
-        | TypeExpr::Infer { .. }
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. }
-        // Synthetic carriers are intrinsic terminals with no imported
-        // declaration reference.
-        | TypeExpr::SyntheticSlotBinding(_) => false,
     }
-}
-
-/// Reduce an indexed access on an already-concrete object surface.
-/// `{ avatar: T }['avatar']` reduces directly to `T` without consulting
-/// the resolver — the object literal is a complete shape so the lookup
-/// is purely structural. Used by the slot-binding policy to short-circuit
-/// when the materializer's expansion produced a known-shape `Object`
-/// where the index-access target is already in the property list.
-#[allow(dead_code)]
-pub(super) fn reduce_indexed_access_over_object_surface(
-    object: &TypeExpr,
-    index: &TypeExpr,
-) -> Option<TypeExpr> {
-    let TypeExpr::Object(obj) = peel_paren(object) else {
-        return None;
-    };
-    let TypeExpr::Literal(LiteralValue::String(member)) = peel_paren(index) else {
-        return None;
-    };
-    obj.properties.iter().find_map(|m| match m {
-        ObjectMember::Property(p) if p.name == *member => Some(p.ty.clone()),
-        _ => None,
-    })
+    false
 }

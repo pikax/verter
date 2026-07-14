@@ -11,16 +11,28 @@
 //!
 //! ## Discrimination contract
 //!
-//! Pre-fix, the route cold path ran under the retain-always
-//! singleflight `run`, so the leader's unadmitted result was retained
-//! as a joinable `Done`: the follower adopted the superseded route and
-//! its own resolve closure never ran. Post-fix, retention mirrors
-//! admission — the follower receives the unadmitted outcome BY VALUE,
-//! re-elects itself leader on a fresh lane, runs its OWN resolve
-//! against fresh state, and admits the live result.
+//! Retaining the leader's unadmitted result as a joinable `Done` makes
+//! the follower adopt the superseded route: its own resolve closure
+//! never runs and the live route never reaches the cache. Retention
+//! mirroring admission instead hands the follower the unadmitted
+//! outcome BY VALUE, it re-elects itself leader on a fresh lane, runs
+//! its OWN resolve against fresh state, and admits the live result.
+//!
+//! Discrimination REQUIRES the burst sibling's lane pin held across the
+//! whole window. The retention decision is observable only while some
+//! other pin keeps the lane in the map: a lone follower's own unpin
+//! reaps the lane the instant it reads the leader's terminal, so its
+//! next bounded attempt (`MAX_FLIGHT_ATTEMPTS`) re-elects a fresh leader
+//! whether the terminal was retained or discarded. With the sibling pin
+//! held, a RETAINED unadmitted terminal stays joinable across every
+//! bounded attempt — the follower exhausts them, adopts, and the
+//! assertions below fail. The pin models exactly what a third concurrent
+//! burst member's in-flight claim does in production.
 //!
 //! ## Driver shape
 //!
+//! - **Burst sibling** (the driver thread) holds a participation pin on
+//!   the lane for the whole burst, as a concurrent claimant would.
 //! - **Leader thread** enters `get_or_resolve_route_observing_facts`
 //!   on the shared key. Its resolve closure parks on a channel until
 //!   the follower is committed to the singleflight wait, then returns
@@ -37,6 +49,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use verter_session::resolver_core::{FactVersionRef, PermissiveStoreView, RouteDb, RouteResult};
+use verter_session::VerterHost;
 
 fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
     verter_session::resolver_core::RouteNameKey::new(
@@ -50,11 +63,12 @@ fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey
 }
 
 /// Strong-reference count of the route singleflight in-flight entry
-/// while only the leader is parked inside its resolve closure: the
-/// leader's local `state` binding plus the `flights` map entry. A
+/// while only the leader is parked inside its resolve closure and the
+/// burst sibling holds its pin: the `flights` map entry, the sibling's
+/// participation guard, and the leader's local `state` binding. A
 /// follower that has joined and is committed to the condvar wait raises
-/// the count by one (to 3).
-const LEADER_ONLY_INFLIGHT_REFS: usize = 2;
+/// the count by one (to 4).
+const LEADER_AND_SIBLING_PIN_INFLIGHT_REFS: usize = 3;
 
 /// Block the calling (driver) thread until a follower has been admitted
 /// onto the route singleflight in-flight entry for `(provider, name)`.
@@ -66,13 +80,13 @@ where
 {
     let deadline = Instant::now() + Duration::from_secs(10);
     while db.test_route_inflight_strong_count(&rk(provider, name), view)
-        <= LEADER_ONLY_INFLIGHT_REFS
+        <= LEADER_AND_SIBLING_PIN_INFLIGHT_REFS
     {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for the follower to be admitted onto the \
              route singleflight in-flight entry (strong count never \
-             exceeded {LEADER_ONLY_INFLIGHT_REFS})",
+             exceeded {LEADER_AND_SIBLING_PIN_INFLIGHT_REFS})",
         );
         thread::sleep(Duration::from_millis(1));
     }
@@ -126,69 +140,94 @@ fn live_fact() -> FactVersionRef {
 #[test]
 fn burst_follower_reresolves_instead_of_adopting_unadmitted_route() {
     let db = Arc::new(RouteDb::new());
-
-    let (tx_leader_in_closure, rx_leader_in_closure) = mpsc::channel::<()>();
-    let (tx_release_leader, rx_release_leader) = mpsc::channel::<()>();
-
-    let leader_db = Arc::clone(&db);
-    let leader = thread::spawn(move || {
-        let view = PermissiveStoreView;
-        leader_db.get_or_resolve_route_observing_facts(
-            rk("burst_provider.ts", "Burst"),
-            &view,
-            || {
-                tx_leader_in_closure
-                    .send(())
-                    .expect("leader: signal in-closure");
-                match rx_release_leader.recv_timeout(Duration::from_secs(10)) {
-                    Ok(()) => {}
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        panic!("leader: timed out waiting for driver release (10s)")
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        panic!("leader: driver dropped the release channel before releasing")
-                    }
-                }
-                // The never-persisted empty-facts shape — the carrier the
-                // fenced frontier walk hands the route singleflight.
-                Some((superseded_route(), Vec::new()))
-            },
-        )
-    });
-
-    match rx_leader_in_closure.recv_timeout(Duration::from_secs(10)) {
-        Ok(()) => {}
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            panic!("timed out waiting for the leader to enter its resolve closure (10s)")
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            panic!("leader thread dropped the in-closure channel before signalling")
-        }
-    }
-
-    // The follower commits to the leader's in-flight lane BEFORE the
-    // leader publishes — a genuine burst member.
-    let follower_resolves = Arc::new(AtomicUsize::new(0));
-    let follower_db = Arc::clone(&db);
-    let follower_resolves_in_closure = Arc::clone(&follower_resolves);
-    let follower = thread::spawn(move || {
-        let view = PermissiveStoreView;
-        follower_db.get_or_resolve_route_observing_facts(
-            rk("burst_provider.ts", "Burst"),
-            &view,
-            move || {
-                follower_resolves_in_closure.fetch_add(1, Ordering::SeqCst);
-                Some((live_route(), vec![live_fact()]))
-            },
-        )
-    });
-
+    // A cacheability scope carrier per thread: the funnel requires a probe, and a
+    // probe can only be minted by opening a real tracer scope (which is per-thread).
+    let host = Arc::new(VerterHost::new_standalone(Default::default()));
     let probe_view = PermissiveStoreView;
-    wait_for_route_follower_admitted(&db, "burst_provider.ts", "Burst", &probe_view);
-    tx_release_leader.send(()).expect("release leader");
+    let follower_resolves = Arc::new(AtomicUsize::new(0));
 
-    let leader_result = join_within(leader, "leader");
-    let follower_result = join_within(follower, "follower");
+    // The whole burst runs while a BURST SIBLING's participation pin is held on
+    // the lane — a concurrent claimant whose in-flight claim keeps the lane in
+    // the map across the leader's publish. Without it the follower's own unpin
+    // reaps the lane the moment it reads the leader's terminal, and a retained
+    // unadmitted `Done` is indistinguishable from a discarded one.
+    let (leader_result, follower_result) =
+        db.test_with_pinned_route_lane(rk("burst_provider.ts", "Burst"), &probe_view, || {
+            let (tx_leader_in_closure, rx_leader_in_closure) = mpsc::channel::<()>();
+            let (tx_release_leader, rx_release_leader) = mpsc::channel::<()>();
+
+            let leader_db = Arc::clone(&db);
+            let leader_host = Arc::clone(&host);
+            let leader = thread::spawn(move || {
+                let host = leader_host;
+                let view = PermissiveStoreView;
+                verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+                    leader_db.get_or_resolve_route_observing_facts(
+                        rk("burst_provider.ts", "Burst"),
+                        &view,
+                        probe,
+                        || {
+                            tx_leader_in_closure
+                                .send(())
+                                .expect("leader: signal in-closure");
+                            match rx_release_leader.recv_timeout(Duration::from_secs(10)) {
+                                Ok(()) => {}
+                                Err(mpsc::RecvTimeoutError::Timeout) => {
+                                    panic!("leader: timed out waiting for driver release (10s)")
+                                }
+                                Err(mpsc::RecvTimeoutError::Disconnected) => panic!(
+                                    "leader: driver dropped the release channel before releasing"
+                                ),
+                            }
+                            // The never-persisted empty-facts shape — the carrier the
+                            // fenced frontier walk hands the route singleflight.
+                            Some((superseded_route(), Vec::new()))
+                        },
+                    )
+                })
+                .0
+            });
+
+            match rx_leader_in_closure.recv_timeout(Duration::from_secs(10)) {
+                Ok(()) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("timed out waiting for the leader to enter its resolve closure (10s)")
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("leader thread dropped the in-closure channel before signalling")
+                }
+            }
+
+            // The follower commits to the leader's in-flight lane BEFORE the
+            // leader publishes — a genuine burst member.
+            let follower_db = Arc::clone(&db);
+            let follower_host = Arc::clone(&host);
+            let follower_resolves_in_closure = Arc::clone(&follower_resolves);
+            let follower = thread::spawn(move || {
+                let host = follower_host;
+                let view = PermissiveStoreView;
+                verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+                    follower_db.get_or_resolve_route_observing_facts(
+                        rk("burst_provider.ts", "Burst"),
+                        &view,
+                        probe,
+                        move || {
+                            follower_resolves_in_closure.fetch_add(1, Ordering::SeqCst);
+                            Some((live_route(), vec![live_fact()]))
+                        },
+                    )
+                })
+                .0
+            });
+
+            wait_for_route_follower_admitted(&db, "burst_provider.ts", "Burst", &probe_view);
+            tx_release_leader.send(()).expect("release leader");
+
+            (
+                join_within(leader, "leader"),
+                join_within(follower, "follower"),
+            )
+        });
 
     // The leader's own caller is still served the unadmitted result —
     // its request pre-dates whatever superseded the walk.
@@ -198,9 +237,9 @@ fn burst_follower_reresolves_instead_of_adopting_unadmitted_route() {
         "the leader must still be served its own resolve's route",
     );
 
-    // THE PIN: the follower must NOT adopt the unadmitted (empty-facts)
-    // result as a joinable rendezvous — it re-resolves against fresh
-    // state and returns the live route.
+    // THE INVARIANT: the follower must NOT adopt the unadmitted
+    // (empty-facts) result as a joinable rendezvous — it re-resolves
+    // against fresh state and returns the live route.
     assert_eq!(
         follower_resolves.load(Ordering::SeqCst),
         1,

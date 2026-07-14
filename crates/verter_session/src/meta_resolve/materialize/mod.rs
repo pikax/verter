@@ -1,4 +1,4 @@
-//! Materialization core: TypeExpr stabilizer + macro-shape ref-name collector.
+//! Materialization core: TypeExpr stabilizer.
 //!
 //! Module split:
 //!
@@ -6,32 +6,17 @@
 //!   (`materialize_component_meta_type_expr_until_stable` and `_full`)
 //!   + package-backed-root predicate that gates reduction.
 //!
-//! - [`macro_shapes`] — the surviving `collect_type_expr_ref_names`
-//!   `TypeExpr`-reference name collector. The macro-object materialiser
-//!   that previously lived here is retired; `define_*` shapes are produced
-//!   by the dispatch projectors (`crate::meta_resolve::projectors::define_shapes`).
-//!
-//! Both children are private modules; this submodule re-exports their
+//! The children are private modules; this submodule re-exports their
 //! `pub(crate)` surface to the parent so existing `crate::meta_resolve::*`
 //! callsites keep working without churn.
 
 mod field_types;
-pub(crate) mod macro_shapes;
 pub(crate) mod utility_types;
 
 pub(crate) use field_types::{
-    lowered_preserve_package_backed_symbolic_refs,
-    materialize_component_meta_type_expr_until_stable,
-    materialize_component_meta_type_expr_until_stable_full,
-    package_backed_object_like_root_identity_with_fence,
-    reduce_member_value_graph_native_with_context, type_expr_has_package_backed_object_like_root,
-    type_expr_materialize_reduction_context, type_expr_materializer_context,
+    lower_type_expr_for_shape_subject, package_backed_object_like_root_identity_with_fence,
+    reduce_member_value_graph_native_with_context, type_expr_materialize_reduction_context,
 };
-// The `_with_fence` TypeExpr front is reached in production only INTERNALLY (via
-// the bare `type_expr_has_package_backed_object_like_root` wrapper); the crate
-// re-export is consumed solely by the node-vs-TypeExpr front differential.
-#[cfg(test)]
-pub(crate) use field_types::type_expr_has_package_backed_object_like_root_with_fence;
 // Re-export ONLY the per-sink output capability TYPE so the
 // `output_materialization` owner module can name it for its explicit
 // `impl OutputProjector for MetaResolveFieldTypesOutputCap` registration pair.
@@ -52,10 +37,7 @@ pub(crate) use field_types::RegistryMemberShapeKeyCap;
 pub(crate) use field_types::{
     stabilize_registry_member_surface_node_with_shape_cache, RegistryMemberStabilizedValue,
 };
-// The reduction-context helper is consumed in production INTERNALLY by the
-// stabiliser (same module); only the node-vs-TypeExpr reduction-context parity
-// differential reaches it through this path.
-#[cfg(test)]
+// The node-domain reduction-context helper: consumed by the stabiliser
+// (same module) and by the publication finaliser's node-start per-field
+// reducer (`output_sink::reduce_field_value_node`).
 pub(crate) use field_types::node_materialize_reduction_context;
-
-pub(crate) use macro_shapes::collect_type_expr_ref_names;

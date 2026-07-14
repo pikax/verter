@@ -23,7 +23,7 @@ use crate::VerterHost;
 
 pub(crate) type ResolvedExternalTypes = rustc_hash::FxHashMap<
     String,
-    verter_compiler::utils::oxc::script::type_surface::ResolvedElements,
+    verter_parser::utils::oxc::script::type_surface::ResolvedElements,
 >;
 
 pub(crate) type ExternalTypeCache = crate::resolver_core::ExternalTypeBodyCache;
@@ -76,7 +76,9 @@ impl RouteShallowStateCache {
             // that opened AFTER the original serve was recorded would
             // otherwise miss the chokepoint flag — re-flag on every
             // memo read so the by-value rail cannot under-report.
-            crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+            );
         }
         Some(cached)
     }
@@ -148,13 +150,13 @@ impl crate::resolver_core::DeclarationMetadataResolver
         let analysis = self.host.external_type_analysis(canonical_source)?;
         let symbol = analysis.local_type_symbol(resolved_name)?;
         let kind = match symbol.kind {
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::TypeAlias => {
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::TypeAlias => {
                 crate::resolver_core::ResolvedDeclarationKind::TypeAlias
             }
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Interface => {
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Interface => {
                 crate::resolver_core::ResolvedDeclarationKind::Interface
             }
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Class => {
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Class => {
                 crate::resolver_core::ResolvedDeclarationKind::Class
             }
         };

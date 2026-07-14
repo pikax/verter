@@ -14,7 +14,7 @@
 //!    `infer_runtime_type`, `capture_statement_surfaces`, …) under/from
 //!    EITHER legacy path form — `utils::oxc::vue::script::*` AND
 //!    `utils::oxc::vue::resolve_type::*` — in any spelling (the direct
-//!    `verter_parser` path, the `verter_compiler::utils` re-export
+//!    `verter_parser` path, the `verter_parser::utils` re-export
 //!    spelling, or in-crate `crate::utils::oxc::vue::…` paths);
 //!  * the legacy module files no longer exist and the neutral home
 //!    does;
@@ -71,13 +71,9 @@ const NEUTRAL_SYMBOLS: &[&str] = &[
     "analyze_external_type_program",
     "analyze_external_type_source",
     "resolve_external_type",
-    "resolve_external_type_with_canonical",
     "resolve_external_type_with_companion",
-    "resolve_external_type_with_companion_and_canonical",
     "resolve_external_type_in_program_with_analyzed_symbol_companion",
-    "resolve_external_type_in_program_with_analyzed_symbol_companion_and_canonical",
     "resolve_external_type_in_context_with_analyzed_symbol_companion",
-    "resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical",
     "ImportedTypeBinding",
     "ExtractedTypeBindings",
     "ExtractedExportSurface",

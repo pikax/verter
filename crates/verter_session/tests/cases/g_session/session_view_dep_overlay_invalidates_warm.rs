@@ -55,17 +55,25 @@ fn workspace_project(files: &[(&str, &str)]) -> Arc<MetaProject> {
     MetaProject::new(host)
 }
 
-/// Resolve the named prop's `TypeExpr` from a component-meta result.
-fn prop_type<'a>(
-    meta: &'a verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+/// Resolve the named prop's `TypeExpr` from a component-meta result,
+/// demand-materialized from its published source through the ONE
+/// shared dispatch.
+fn prop_type(
+    host: &verter_session::VerterHost,
+    owner: &str,
+    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
-) -> &'a TypeExpr {
-    &meta
+) -> TypeExpr {
+    let source = meta
         .props
         .iter()
         .find(|p| p.name == name)
         .unwrap_or_else(|| panic!("missing prop `{name}`"))
-        .type_expr
+        .type_source
+        .present()
+        .unwrap_or_else(|| panic!("prop `{name}` must publish a typed source"));
+    verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
+        .unwrap_or_else(|| panic!("prop `{name}`'s published source must demand-materialize"))
 }
 
 /// Owner SFC imports `Props` from a sibling `.ts` file. The session
@@ -105,8 +113,8 @@ fn view_aware_warm_hit_rejects_base_when_session_overlays_a_dependency() {
         .get_component_meta("/workspace/src/Comp.vue")
         .expect("base host warm path returns Some");
     assert_eq!(
-        prop_type(&base_meta, "msg"),
-        &TypeExpr::Primitive(PrimitiveName::String),
+        prop_type(project.host(), "/workspace/src/Comp.vue", &base_meta, "msg"),
+        TypeExpr::Primitive(PrimitiveName::String),
         "control: the base host's `msg` prop must resolve to `string` \
          (base `/types.ts` declares `msg: string`)",
     );
@@ -148,14 +156,24 @@ fn view_aware_warm_hit_rejects_base_when_session_overlays_a_dependency() {
         .expect("session has overlay-derived meta for Comp.vue");
 
     assert_eq!(
-        prop_type(&session_meta, "msg"),
-        &TypeExpr::Primitive(PrimitiveName::Number),
+        prop_type(
+            project.host(),
+            "/workspace/src/Comp.vue",
+            &session_meta,
+            "msg"
+        ),
+        TypeExpr::Primitive(PrimitiveName::Number),
         "DISCRIMINATING: the session overlays `/types.ts` so the dep's \
          exported `Props.msg` type becomes `number`. The session's \
          view-aware warm-hit path MUST validate cache facts against the \
          session-overlayed store view; otherwise the base candidate's \
          dep parse fact (pinned to base content) survives and the \
          consumer observes the STALE `string`. Observed prop type: {:?}",
-        prop_type(&session_meta, "msg"),
+        prop_type(
+            project.host(),
+            "/workspace/src/Comp.vue",
+            &session_meta,
+            "msg"
+        ),
     );
 }

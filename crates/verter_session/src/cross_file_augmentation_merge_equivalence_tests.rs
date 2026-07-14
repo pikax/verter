@@ -120,13 +120,15 @@ fn upsert_augmentation_fixture(host: &VerterHost) {
 /// The INDEPENDENT oracle: walk the base file's file-scope `type_symbols["Foo"]`
 /// (the `base` member) and UNION the augmenter file's
 /// `augmentation_scopes[(Module("./types"), "Foo")]` (the `fromAug` member),
-/// reading each contributor's RETAINED body straight from the typed inventory.
+/// reading each contributor's RETAINED direct member headers straight from the
+/// typed inventory (the retained inventory is locator-backed, so the header
+/// facts — member names — are its directly readable member surface).
 /// This is a different code path than the dispatch `stitch_module_augmentations`
 /// fold, so the equivalence is a genuine two-source cross-check.
-fn oracle_augmented_foo_surface(host: &VerterHost) -> Vec<(String, String)> {
-    let mut members: Vec<(String, String)> = Vec::new();
+fn oracle_augmented_foo_member_names(host: &VerterHost) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
 
-    // Base contributor: the file-scope interface body in `/types.ts`.
+    // Base contributor: the file-scope interface headers in `/types.ts`.
     let types_env = host
         .base_eval_env_arc("/types.ts")
         .expect("base env for /types.ts must build");
@@ -134,9 +136,15 @@ fn oracle_augmented_foo_surface(host: &VerterHost) -> Vec<(String, String)> {
         .type_symbols
         .get("Foo")
         .expect("the base file must carry the `Foo` interface in file-scope type_symbols");
-    members.extend(object_member_surface(&base_group.primary().body));
+    names.extend(
+        base_group
+            .primary()
+            .direct_member_headers
+            .iter()
+            .map(|header| header.name.clone()),
+    );
 
-    // Augmenter contributor: the RETAINED ambient body in `/aug.ts`, kept in
+    // Augmenter contributor: the RETAINED ambient headers in `/aug.ts`, kept in
     // the SEPARATE augmentation-scope inventory (never in file-scope symbols).
     let aug_env = host
         .base_eval_env_arc("/aug.ts")
@@ -149,10 +157,16 @@ fn oracle_augmented_foo_surface(host: &VerterHost) -> Vec<(String, String)> {
         .augmentation_scopes
         .get(&aug_key)
         .expect("the augmenter must retain its `declare module './types' { Foo }` body in augmentation_scopes");
-    members.extend(object_member_surface(&aug_group.primary().body));
+    names.extend(
+        aug_group
+            .primary()
+            .direct_member_headers
+            .iter()
+            .map(|header| header.name.clone()),
+    );
 
-    members.sort();
-    members
+    names.sort();
+    names
 }
 
 /// A cross-file ambient-augmented interface resolves THROUGH DISPATCH to the
@@ -180,24 +194,28 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
     // augmenter augmentation-scope). Pin its exact content so the cross-check
     // below is anchored to a known, discriminating value — not just "the two
     // rails happen to agree on whatever they both produce".
-    let oracle = oracle_augmented_foo_surface(&host);
+    let oracle = oracle_augmented_foo_member_names(&host);
     assert_eq!(
         oracle,
-        vec![
-            ("base".to_string(), "Primitive(String)".to_string()),
-            ("fromAug".to_string(), "Primitive(Number)".to_string()),
-        ],
+        vec!["base".to_string(), "fromAug".to_string()],
         "the INDEPENDENT oracle (base /types.ts file-scope `Foo` ∪ augmenter \
-         /aug.ts augmentation-scope `Foo`) must union exactly \
-         {{base: string, fromAug: number}}; got {oracle:?}"
+         /aug.ts augmentation-scope `Foo`) must union exactly the \
+         {{base, fromAug}} member set; got {oracle:?}"
     );
+    // The full expected merged surface (name + type). The oracle pins the
+    // member-NAME union from the retained inventory; the member TYPES are
+    // pinned here directly against the dispatch projection.
+    let expected_surface = vec![
+        ("base".to_string(), "Primitive(String)".to_string()),
+        ("fromAug".to_string(), "Primitive(Number)".to_string()),
+    ];
 
     // Entry point (a): resolve `Foo` directly from the base file, under BOTH
     // Navigate AND Expanded — the augmentation stitch runs at decl-body
     // resolution time, so the carrier is a `MergedDecl` in both modes.
     for mode in [ProjectionMode::Navigate, ProjectionMode::Expanded] {
         let node = host
-            .resolve_named_symbol("/types.ts", "Foo", &[], Some(mode))
+            .resolve_named_symbol("/types.ts", "Foo", Some(mode))
             .unwrap_or_else(|| panic!("Foo must resolve in {mode:?}"));
         match node_data(&host, node).as_ref() {
             SemanticNodeData::MergedDecl { contributors } => {
@@ -225,9 +243,18 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
             .unwrap_or_else(|| panic!("the merged `Foo` must project in {mode:?}"));
         let dispatch_surface = object_member_surface(&projected);
         assert_eq!(
-            dispatch_surface, oracle,
-            "the resolved-through-dispatch merged `Foo` member surface in {mode:?} must equal the \
-             independently-computed base∪augmenter oracle; dispatch={dispatch_surface:?} \
+            dispatch_surface, expected_surface,
+            "the resolved-through-dispatch merged `Foo` member surface in {mode:?} must be \
+             exactly {{base: string, fromAug: number}}; dispatch={dispatch_surface:?}"
+        );
+        let dispatch_names: Vec<String> = dispatch_surface
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        assert_eq!(
+            dispatch_names, oracle,
+            "the resolved-through-dispatch merged `Foo` member set in {mode:?} must equal the \
+             independently-computed base∪augmenter oracle; dispatch={dispatch_names:?} \
              oracle={oracle:?}"
         );
     }
@@ -237,7 +264,7 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
     // unioned surface equals the oracle. (This is the consumer-facing path a
     // downstream file sees for an imported augmented type.)
     let alias_node = host
-        .resolve_named_symbol("/use.ts", "A", &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol("/use.ts", "A", Some(ProjectionMode::Expanded))
         .expect("A must resolve Expanded through the imported augmented Foo");
     match node_data(&host, alias_node).as_ref() {
         SemanticNodeData::MergedDecl { contributors } => assert_eq!(
@@ -257,9 +284,15 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
         .expect("the aliased merged surface must project");
     let alias_surface = object_member_surface(&alias_projected);
     assert_eq!(
-        alias_surface, oracle,
-        "the imported-alias `A = Foo` Expanded surface must also equal the base∪augmenter oracle; \
-         alias={alias_surface:?} oracle={oracle:?}"
+        alias_surface, expected_surface,
+        "the imported-alias `A = Foo` Expanded surface must also be exactly \
+         {{base: string, fromAug: number}}; alias={alias_surface:?}"
+    );
+    let alias_names: Vec<String> = alias_surface.iter().map(|(name, _)| name.clone()).collect();
+    assert_eq!(
+        alias_names, oracle,
+        "the imported-alias `A = Foo` Expanded member set must also equal the base∪augmenter \
+         oracle; alias={alias_names:?} oracle={oracle:?}"
     );
 
     // Explicit negative: the augmenter member is NOT in the base file's
@@ -271,17 +304,18 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
     let types_env = host
         .base_eval_env_arc("/types.ts")
         .expect("base env for /types.ts");
-    let base_only = object_member_surface(
-        &types_env
-            .type_symbols
-            .get("Foo")
-            .expect("Foo in base file-scope")
-            .primary()
-            .body,
-    );
+    let base_only: Vec<String> = types_env
+        .type_symbols
+        .get("Foo")
+        .expect("Foo in base file-scope")
+        .primary()
+        .direct_member_headers
+        .iter()
+        .map(|header| header.name.clone())
+        .collect();
     assert_eq!(
         base_only,
-        vec![("base".to_string(), "Primitive(String)".to_string())],
+        vec!["base".to_string()],
         "the base file's file-scope `Foo` must carry ONLY `base` — the augmenter member `fromAug` \
          must NOT pollute file-scope type_symbols (it lives only in augmentation_scopes); \
          got {base_only:?}"
@@ -314,7 +348,7 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
     // Cold resolve of the augmented base decl under a fact tracer: the
     // parent fold must record the contributor source-env observation.
     let (resolved, read_set) = host.with_fact_tracer(|| {
-        host.resolve_named_symbol("/types.ts", "Foo", &[], Some(ProjectionMode::Expanded))
+        host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
     });
     let node = resolved.expect("augmented Foo must resolve");
     match node_data(&host, node).as_ref() {
@@ -454,7 +488,7 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
     // Recording half: the cold production resolve records ONE
     // FileSourceEnv observation for the folded contributor.
     let (resolved, read_set) = host.with_fact_tracer(|| {
-        host.resolve_named_symbol("/types.ts", "Foo", &[], Some(ProjectionMode::Expanded))
+        host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
     });
     resolved.expect("augmented Foo must resolve");
     let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
@@ -578,7 +612,7 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
     );
 
     let (resolved, read_set) = host.with_fact_tracer(|| {
-        host.resolve_named_symbol("/types.ts", "Foo", &[], Some(ProjectionMode::Expanded))
+        host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
     });
     let node = resolved.expect("the doubly-augmented Foo must resolve");
 
@@ -694,7 +728,7 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
     // caches so the first hoisted-key demand below is a clean
     // cold-compute-then-admit (the very first resolution of a fixture can
     // route ReturnOnly while lazy index population settles).
-    host.resolve_named_symbol("/types.ts", "Foo", &[], Some(ProjectionMode::Expanded))
+    host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
         .expect("augmented Foo must resolve");
 
     let graph = host.project_type_store().semantic_graph();
@@ -824,7 +858,7 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
     );
 
     // Warm-up: settle the augmentation index + shared caches.
-    host.resolve_named_symbol("/use.ts", "U", &[], Some(ProjectionMode::Expanded))
+    host.resolve_named_symbol("/use.ts", "U", Some(ProjectionMode::Expanded))
         .expect("U = Cfg must resolve through the external augmentation fold");
 
     let graph = host.project_type_store().semantic_graph();
@@ -1036,6 +1070,124 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
         "a CLEAN external fold (no torn contributor) must NOT set cache_suppress on the \
          `/use.ts::U` Instantiate build — the `true` above is caused by the torn \
          contributor, not an inherently non-cacheable key"
+    );
+}
+
+/// RELATIVE (`declare module "./base"`) augmentation stitch — a torn contributor
+/// (`source_env_unobservable`) MUST fan the generalized `UnobservableSource`
+/// non-cacheability rail onto EVERY active tracer at the single consumer
+/// (`instantiate_shell`, build.rs:2638), so the ENCLOSING component-meta tracer
+/// refuses to warm-admit the under-merged augmentation. Pre-fix the relative
+/// stitch set only the build-local `output.cache_suppress` (which refuses THIS
+/// build's inner memo but does NOT mark the outer tracer), so a `Complete`
+/// enclosing result laundered the under-merged surface into its warm cache — the
+/// read-side fact rail cannot reject it because the facts validate live while a
+/// contributor's source-env is unobservable.
+///
+/// This drives the REAL relative-augmenter fixture (`upsert_augmentation_fixture`:
+/// `/types.ts` base `Foo` + a sibling `/aug.ts` carrying `declare module './types'
+/// { interface Foo { ... } }`), which the relative stitch DISCOVERS by cold-scanning
+/// the loaded augmentation index. The shared `augmentation_force_source_env_unobservable`
+/// knob then taints the discovered contributor's source-env as unobservable inside
+/// `collect_augmentation_contributions` (the exact no-warm state a torn / unhealable /
+/// unservable augmenter organically produces) WITHOUT emptying the contribution set,
+/// so the merged surface stays a real type and the relative stitch reports
+/// `source_env_unobservable = true` to the consumer — no synthetic consumer-flag seam.
+///
+/// DISCRIMINATING: the `/types.ts::Foo` file-based interface instantiate
+/// (`!is_non_file_base`, so the relative-stitch consumer runs) is driven under an
+/// OUTER `install_fact_tracer`. Torn, the consumer's `UnobservableSource` fan-out
+/// marks that outer tracer (`non_cacheable == true`) AND sets the build-local
+/// `cache_suppress`, while the build stays `Complete` (`result_is_partial == false`
+/// — non-cacheability routes through the fan-out, never the partial sticky).
+/// Untorn (anti-vacuity) a clean stitch marks NOTHING. RED-pre: revert the
+/// build.rs:2638 fan-out → the torn build still sets `cache_suppress` (build-local)
+/// but the outer tracer is NOT marked (`non_cacheable == false`), so the
+/// under-merged augmentation launders into the enclosing warm cache and the
+/// `non_cacheable` assertion FAILS.
+#[test]
+fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
+
+    // Drive the `/types.ts::Foo` Instantiate under an OUTER fact tracer, returning
+    // (build.cache_suppress, build.result_is_partial, outer_tracer.non_cacheable).
+    // `/types.ts::Foo` is a file-based interface (`!is_non_file_base`) with a REAL
+    // sibling RELATIVE `declare module './types'` augmenter (`/aug.ts`) in the
+    // fixture, so the relative stitch DISCOVERS the augmenter and the consumer at
+    // build.rs:2638 runs; the outer tracer observes its `UnobservableSource` fan-out
+    // by value. `torn` arms the shared collector's `source_env_unobservable` taint
+    // on the discovered augmenter (the exact no-warm state a torn / unhealable /
+    // unservable augmenter organically produces) WITHOUT emptying the contribution
+    // set — the merged surface stays a real type, isolating the taint fold.
+    fn drive(host: &VerterHost, torn: bool) -> (bool, bool, bool) {
+        let _torn_guard = torn.then(|| {
+            crate::for_tests::augmentation_force_source_env_unobservable_for_tests(host, true)
+        });
+        let view = host.resolver_store_view_read().into_owned_view();
+        let (read, _finalise, outer_non_cacheable) =
+            crate::fact_signature_helpers::install_fact_tracer(host, || {
+                let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
+                let dispatch = ProjectSemanticDispatch::new(&ctx);
+                let key =
+                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                        dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
+                        Arc::from(
+                            Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+                        ),
+                        dispatch.instantiate_context_for(
+                            "/types.ts",
+                            ProjectionReductionContext::published(ProjectionMode::Expanded),
+                        ),
+                    ));
+                dispatch.execute_read(key)
+            });
+        (
+            read.cache_suppress,
+            read.result_is_partial,
+            outer_non_cacheable,
+        )
+    }
+
+    // CONTROL (anti-vacuity) — a clean (untorn) relative stitch marks nothing.
+    let control = make_host();
+    upsert_augmentation_fixture(control.as_ref());
+    let (control_suppress, control_partial, control_non_cacheable) = drive(control.as_ref(), false);
+    assert!(
+        !control_non_cacheable,
+        "anti-vacuity: a clean (untorn) relative stitch must NOT mark the outer tracer \
+         non-cacheable — otherwise the armed assertion is vacuous",
+    );
+    assert!(
+        !control_suppress,
+        "anti-vacuity: a clean relative stitch must NOT set cache_suppress",
+    );
+    assert!(!control_partial, "a clean relative stitch stays Complete");
+
+    // TORN — the shared collector taints the discovered relative augmenter, so the
+    // relative stitch reports `source_env_unobservable`.
+    let armed = make_host();
+    upsert_augmentation_fixture(armed.as_ref());
+    let (armed_suppress, armed_partial, armed_non_cacheable) = drive(armed.as_ref(), true);
+    assert!(
+        armed_non_cacheable,
+        "BLK2: a torn relative-augmentation stitch (source_env_unobservable) MUST fan the \
+         UnobservableSource non-cacheability rail onto the OUTER tracer at build.rs:2638 — \
+         without that fan-out the enclosing component-meta tracer laundered the under-merged \
+         relative augmentation into its warm cache (the read-side fact rail cannot reject it: \
+         the facts validate live while the contributor source-env is unobservable). RED-pre = \
+         revert the fan-out.",
+    );
+    assert!(
+        armed_suppress,
+        "the torn relative stitch sets the build-local cache_suppress (the fan-out's \
+         build-local peer that refuses THIS build's inner memo)",
+    );
+    assert!(
+        !armed_partial,
+        "HARD FLOOR: a torn relative stitch is non-cacheable, NOT partial — the result stays \
+         Complete; non-cacheability routes through the fan-out, never the partial sticky",
     );
 }
 

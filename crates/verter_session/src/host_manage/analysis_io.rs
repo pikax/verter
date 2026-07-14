@@ -413,11 +413,16 @@ impl VerterHost {
                 drop(source_snap);
 
                 let mut script_analysis = if !scope.needs_script_analysis() {
-                    crate::parse::build_script_analysis_for_artifact(
+                    let mut rebuilt = crate::parse::build_script_analysis_for_artifact(
                         framework_parse.as_deref(),
                         &source,
                         &self.provenance,
-                    )
+                    );
+                    // Producer-side locator absolutization for the narrowed-scope
+                    // rebuild lane (the artifact-facing builder is canonical-free;
+                    // the stored-snapshot branch was absolutized at snapshot build).
+                    crate::parse::absolutize_macro_payload_anchors(&mut rebuilt.macros, canonical);
+                    rebuilt
                 } else {
                     stored_script
                 };
@@ -1195,14 +1200,6 @@ impl VerterHost {
         let snap = self.scheduler.try_get_source(canonical)?;
         let hd = snap.downcast_data::<HostSourceData>()?;
         Some(hd.source_type)
-    }
-
-    /// Test-only accessor for the host-owned named-type cache size.
-    #[cfg(test)]
-    pub(crate) fn host_owned_resolved_named_types_len_for_test(&self) -> usize {
-        self.project_type_store
-            .semantic_graph()
-            .resolved_named_type_count()
     }
 
     /// Cheap feasibility predicate for candidate-path probing.
@@ -2059,7 +2056,6 @@ impl VerterHost {
         self.resolver.runtime.invalidate_canonical(&canonical);
         self.project_type_store
             .evict_canonical_for_route_mutation(&canonical);
-        self.resolved_type_cache().clear();
         // R4 producer: rebuild parse-domain facts for the externally
         // changed canonical.
         self.register_facts_for_new_content(&canonical);

@@ -3,7 +3,7 @@
   "props": [
     {
       "name": "count",
-      "type_signature": "number | undefined",
+      "type_signature": "number",
       "required": false,
       "has_default": false,
       "default_signature": null,
@@ -11,7 +11,7 @@
     },
     {
       "name": "modelValue",
-      "type_signature": "string | undefined",
+      "type_signature": "string",
       "required": false,
       "has_default": false,
       "default_signature": null,

@@ -49,8 +49,7 @@ pub(crate) mod component_meta_extract;
 pub(crate) mod component_meta_methods;
 pub(crate) mod import_route_currency;
 // Moved from `meta_resolve/request_host.rs`. The file holds
-// `impl ComponentMetaRequestHost for VerterHost` and the session-scoped
-// variant `impl ComponentMetaRequestHost for SessionRequestHost<'_>`.
+// `impl ComponentMetaRequestHost for VerterHost`.
 // Belongs in host-impl tier per sub-
 pub(crate) mod component_meta_request_impl;
 // Moved from `meta_resolve/jsdoc_resolve.rs`. The file
@@ -327,114 +326,13 @@ pub(crate) fn component_meta_debug(message: impl AsRef<str>) {
 // `component_meta_trace_output_path` / `component_meta_trace_next_span_id` /
 // `component_meta_trace_enabled` helpers have all been removed
 
-// The borrowed `ParsedTypeResolutionContext` is built fresh per call
-// by `host_manage::eval_program::build_type_resolution_context` (the
-// query-time element-resolver path, tracked-debt on the single-engine
-// shrinking ledger) and is never cached. The
-// owned `OwnedTypeResolutionContext` typed cache on `ProjectTypeStore`
-// exists for `Send + Sync` storage but has no production writer yet.
-
-/// Thin adapter that implements
-/// [`verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache`]
-/// on top of the project-global
-/// [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore)
-/// via [`HostResolvedNamedTypeKey`](crate::project_type_store::HostResolvedNamedTypeKey).
-/// Holds an `Arc<SemanticGraphStore>` plus the `(canonical_id, whole_hash)`
-/// tuple for this context's entries. A new adapter is constructed per
-/// `build_type_context` call so child contexts created by
-/// `instantiate_type_params_ctx` share the same graph handle without
-/// re-building scoping metadata.
-///
-/// Read-path contract: `get` performs one `DashMap::get` on the graph's
-/// named-type identity map plus one node-arena read plus one `Arc::clone`.
-/// There is no `execute_cooperative` round-trip, no `DepSignature`
-/// allocation, and no `ProjectSemanticDispatch` dispatch on the hot path —
-/// entries are whole-hash-scoped so reads are self-validating within one
-/// project generation. Writes record the identity mapping and intern the
-/// payload node in the graph arena.
-#[derive(Debug)]
-pub(in crate::host_manage) struct HostNamedTypeCacheAdapter {
-    pub(in crate::host_manage) graph:
-        std::sync::Arc<crate::semantic_query_memo::SemanticGraphStore>,
-    /// Shared `Arc<str>` so adapter clones (one per child type context from
-    /// `instantiate_type_params_ctx`) don't each allocate a fresh `String`.
-    pub(in crate::host_manage) canonical_id: Arc<str>,
-    pub(in crate::host_manage) whole_hash: Hash16,
-    /// Env-scoping dims (R T L J) for the resolved named-type identity,
-    /// captured from the host view at adapter construction. Two
-    /// resolutions of the same content (`whole_hash`) under different envs
-    /// occupy DISTINCT entries instead of colliding (e.g. a different
-    /// `lib` selection that changes heritage resolution).
-    pub(in crate::host_manage) resolve_env_hash: Hash16,
-    pub(in crate::host_manage) type_env_hash: Hash16,
-    pub(in crate::host_manage) lib_env_hash: Hash16,
-    pub(in crate::host_manage) project_identity: u32,
-    /// Resolved-named-type reset epoch snapshotted when this adapter was
-    /// constructed (a fresh adapter per `build_type_context` call). Every
-    /// `insert` threads this snapshot into
-    /// [`SemanticGraphStore::insert_resolved_named_type`](crate::semantic_query_memo::SemanticGraphStore::insert_resolved_named_type),
-    /// which rejects the insert when the snapshot no longer matches the
-    /// live epoch — the airtight fence against a macro-resolution build
-    /// that straggles past a `bump_project_generation_and_evict` and tries
-    /// to land a stale artifact. The snapshot is frozen at construction,
-    /// so the rejection is timing-independent: a build aborted by the
-    /// bump carries the pre-bump epoch however long it straggles.
-    pub(in crate::host_manage) named_type_generation: u64,
-}
-
-impl verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache
-    for HostNamedTypeCacheAdapter
-{
-    fn get(
-        &self,
-        key: &verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey,
-    ) -> Option<std::sync::Arc<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>>
-    {
-        // `canonical_id` is `Arc<str>` — clone is a refcount bump, no alloc.
-        // `inner` still clones `Box<[u8]>` for `name` (cache-key shape
-        // inherited from parser crate); future follow-up can lift that to
-        // `Arc<[u8]>` symmetrically.
-        let host_key = crate::project_type_store::HostResolvedNamedTypeKey {
-            canonical_id: Arc::clone(&self.canonical_id),
-            whole_hash: self.whole_hash,
-            resolve_env_hash: self.resolve_env_hash,
-            type_env_hash: self.type_env_hash,
-            lib_env_hash: self.lib_env_hash,
-            project_identity: self.project_identity,
-            inner: key.clone(),
-        };
-        self.graph.get_resolved_named_type(&host_key)
-    }
-
-    fn insert(
-        &self,
-        key: verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey,
-        value: std::sync::Arc<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
-    ) {
-        let host_key = crate::project_type_store::HostResolvedNamedTypeKey {
-            canonical_id: Arc::clone(&self.canonical_id),
-            whole_hash: self.whole_hash,
-            resolve_env_hash: self.resolve_env_hash,
-            type_env_hash: self.type_env_hash,
-            lib_env_hash: self.lib_env_hash,
-            project_identity: self.project_identity,
-            inner: key,
-        };
-        // Threads the construction-time epoch snapshot: the insert is
-        // dropped if a project-generation bump moved the epoch since this
-        // adapter (hence this build) started — see `named_type_generation`.
-        let g = self.named_type_generation;
-        let _ = self.graph.insert_resolved_named_type(host_key, value, g);
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct ExternalTypeResolutionInputs {
     pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     pub(crate) whole_hash: Hash16,
     pub(crate) eval_source: Arc<str>,
     pub(crate) analysis:
-        Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>,
+        Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>,
     pub(crate) analysis_cache_hit: bool,
 }
 
@@ -443,12 +341,7 @@ pub(crate) struct ExternalTypeResolutionInputs {
 // stack inside the `ensure_indexed_ready_serve` materialise closure
 // (`parse_eval_program` is the single parser entry), and the
 // arena-free outputs it feeds — the `EvalEnv`, analysis, and shallow
-// state — live on `IndexedReady`. `build_type_resolution_context`
-// likewise parses per call on the query-time element-resolver path
-// (tracked-debt on the single-engine shrinking ledger); for `Send + Sync` storage
-// the lowering boundary produces
-// `crate::owned_artifacts::OwnedTypeResolutionContext` for
-// `ProjectTypeStore::type_resolution_context_cache()`.
+// state — live on `IndexedReady`.
 //
 // Architecture guard: `no_thread_local_oxc_caches` rejects any
 // reintroduction of OXC-arena thread-local caches in
@@ -521,7 +414,7 @@ pub fn push_structured_event(event: crate::component_meta_audit::StructuredAudit
 /// is a true cache-state no-op.
 ///
 /// The `layer` argument is a static string identifying the cache
-/// layer (e.g. `"resolved_type_cache"`, `"compile_slots"`); the
+/// layer (e.g. `"dependency_cache"`, `"compile_slots"`); the
 /// runtime value is stored as an `Arc<str>` so the event remains
 /// serialisable.
 pub fn push_cache_drained_at_upsert(layer: &'static str, canonical_id: &str) {
@@ -764,83 +657,106 @@ impl FallthroughRequestHost for VerterHost {
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         store_view: &Self::View,
     ) -> Option<Self::Resolution> {
-        let cache_key = fallthrough_cache_key(
-            canonical_id,
-            self.config.generic_root_propagation,
-            prop_type_overrides,
-        );
-
-        // Per-request hoist: read through the caller-supplied
-        // `store_view` (built ONCE at the request boundary) instead of
-        // building a fresh owned snapshot per call.
-        let live_view = store_view;
-        if let Some(node) = self
-            .resolver_runtime()
-            .fallthrough
-            .get_cached_node(&cache_key, live_view)
-        {
-            if let Some(resolution) = self.runtime_branch_union_node_to_resolution(node) {
-                let resolution = Arc::new(resolution);
-                if prop_type_overrides.is_none() {
-                    self.mirror_cached_fallthrough_arc(canonical_id, resolution.clone());
-                }
-                return Some((*resolution).clone());
-            }
-        }
-
-        let root_follow_key = crate::resolver_core::fallthrough_resolver::root_follow_key(
-            canonical_id,
-            crate::resolver_core::FallthroughOverrideIdentity::for_overrides(prop_type_overrides),
-            self.config.generic_root_propagation,
-        );
-        if let Some(node) = self
-            .resolver_runtime()
-            .fallthrough
-            .get_cached_node(&root_follow_key, live_view)
-        {
-            if let Some(resolution) = self.runtime_root_follow_node_to_resolution(node) {
-                let resolution = Arc::new(resolution);
-                self.resolver_runtime().fallthrough.store_node(
-                    cache_key,
-                    self.build_runtime_fallthrough_node(resolution.as_ref()),
+        // The warm peek is itself a PRODUCER: on a root-follow hit it BACKFILLS
+        // the branch-union key, and on any hit it warms the `cached_fallthrough`
+        // mirror. Both are shared-cache admissions, so the whole body runs
+        // inside ONE cacheability tracer scope — every read that produces the
+        // backfilled node (the node lookups and the node→resolution
+        // projections) lies inside it, and the probe is sampled at each
+        // admission, after the value it admits has been built.
+        let (resolution, _non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
+            self,
+            |probe| -> Option<Self::Resolution> {
+                let cache_key = fallthrough_cache_key(
+                    canonical_id,
+                    self.config.generic_root_propagation,
+                    prop_type_overrides,
                 );
-                if prop_type_overrides.is_none() {
-                    self.mirror_cached_fallthrough_arc(canonical_id, resolution.clone());
-                }
-                return Some((*resolution).clone());
-            }
-        }
 
-        if prop_type_overrides.is_none() {
-            {
-                // cached_fallthrough lives on DerivedRawState (D48 split).
-                if let Some(cc) = self.derived_raw_cache().get(canonical_id) {
-                    if let Some(ref cached) = cc.cached_fallthrough {
-                        // R3/R26/R28: dispatch through
-                        // `StoreView::validates_fact_signature` as a
-                        // per-domain override hook. The default impl
-                        // in `resolver_core/mod.rs` walks the
-                        // signature via `.iter().all(self.validates(..))`,
-                        // so the live behavior matches the legacy
-                        // per-item form; the dispatch point exists so
-                        // future per-domain implementers can
-                        // short-circuit on the first mismatch without
-                        // changing call sites.
-                        if cached.generic_root_propagation == self.config.generic_root_propagation
-                            && store_view.validates_fact_signature(&cached.fact_versions)
-                        {
+                // Per-request hoist: read through the caller-supplied
+                // `store_view` (built ONCE at the request boundary) instead of
+                // building a fresh owned snapshot per call.
+                let live_view = store_view;
+                if let Some(node) = self
+                    .resolver_runtime()
+                    .fallthrough
+                    .get_cached_node(&cache_key, live_view)
+                {
+                    if let Some(resolution) = self.runtime_branch_union_node_to_resolution(node) {
+                        let resolution = Arc::new(resolution);
+                        if prop_type_overrides.is_none() {
                             self.mirror_cached_fallthrough_arc(
                                 canonical_id,
-                                cached.resolution.clone(),
+                                resolution.clone(),
+                                probe,
                             );
-                            return Some((*cached.resolution).clone());
+                        }
+                        return Some((*resolution).clone());
+                    }
+                }
+
+                let root_follow_key = crate::resolver_core::fallthrough_resolver::root_follow_key(
+                    canonical_id,
+                    crate::resolver_core::FallthroughOverrideIdentity::for_overrides(
+                        prop_type_overrides,
+                    ),
+                    self.config.generic_root_propagation,
+                );
+                if let Some(node) = self
+                    .resolver_runtime()
+                    .fallthrough
+                    .get_cached_node(&root_follow_key, live_view)
+                {
+                    if let Some(resolution) = self.runtime_root_follow_node_to_resolution(node) {
+                        let resolution = Arc::new(resolution);
+                        self.resolver_runtime().fallthrough.store_node(
+                            cache_key,
+                            self.build_runtime_fallthrough_node(resolution.as_ref()),
+                            probe,
+                        );
+                        if prop_type_overrides.is_none() {
+                            self.mirror_cached_fallthrough_arc(
+                                canonical_id,
+                                resolution.clone(),
+                                probe,
+                            );
+                        }
+                        return Some((*resolution).clone());
+                    }
+                }
+
+                if prop_type_overrides.is_none() {
+                    // cached_fallthrough lives on DerivedRawState (D48 split).
+                    if let Some(cc) = self.derived_raw_cache().get(canonical_id) {
+                        if let Some(ref cached) = cc.cached_fallthrough {
+                            // R3/R26/R28: dispatch through
+                            // `StoreView::validates_fact_signature` as a
+                            // per-domain override hook. The default impl in
+                            // `resolver_core/mod.rs` walks the signature via
+                            // `.iter().all(self.validates(..))`, so the live
+                            // behavior matches the legacy per-item form; the
+                            // dispatch point exists so future per-domain
+                            // implementers can short-circuit on the first
+                            // mismatch without changing call sites.
+                            if cached.generic_root_propagation
+                                == self.config.generic_root_propagation
+                                && store_view.validates_fact_signature(&cached.fact_versions)
+                            {
+                                self.mirror_cached_fallthrough_arc(
+                                    canonical_id,
+                                    cached.resolution.clone(),
+                                    probe,
+                                );
+                                return Some((*cached.resolution).clone());
+                            }
                         }
                     }
                 }
-            }
-        }
 
-        None
+                None
+            },
+        );
+        resolution
     }
 
     fn compute_fallthrough_surface_uncached(
@@ -896,8 +812,9 @@ impl FallthroughRequestHost for VerterHost {
         canonical_id: &str,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         result: &Self::Resolution,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
     ) {
-        self.cache_fallthrough_result(canonical_id, prop_type_overrides, result);
+        self.cache_fallthrough_result(canonical_id, prop_type_overrides, result, probe);
     }
 }
 
@@ -940,7 +857,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         &self,
         canonical_id: &str,
         tag: &str,
-    ) -> Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember> {
+    ) -> Vec<crate::resolver_core::IntrinsicSurfaceMember> {
         debug_assert_eq!(self.parent_canonical_id, canonical_id);
         let (project_anchor, cache_generation) =
             self.host.project_intrinsic_cache_anchor(canonical_id);
@@ -968,14 +885,27 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             }
         }
 
-        let members = self
-            .host
-            .project_intrinsic_members_for_tag(canonical_id, tag, self.ctx)
-            .unwrap_or_else(|| self.host.intrinsic_members_for_tag(tag));
-        self.host.resolver_runtime().fallthrough.store_node(
-            cache_key,
-            self.host.build_runtime_intrinsic_surface_node(&members),
-        );
+        // No-poison CACHEABILITY scope BRACKETING the intrinsic compute: the
+        // project intrinsic-surface projection resolves `vue`'s intrinsic
+        // element registry through the shared resolver, so it can consume a
+        // fenced `IndexedReady` serve / a broken decl-body lease / an
+        // unrootable route. The probe is sampled INSIDE the scope, after the
+        // members are built — so its verdict covers every read that produced
+        // them. Fanning out to the enclosing tracers also refuses the OWNER's
+        // fallthrough admission on the same read.
+        let (members, _non_cacheable) =
+            crate::fact_signature_helpers::with_cacheability_scope(self.host, |probe| {
+                let members = self
+                    .host
+                    .project_intrinsic_members_for_tag(canonical_id, tag, self.ctx)
+                    .unwrap_or_else(|| self.host.intrinsic_members_for_tag(tag));
+                self.host.resolver_runtime().fallthrough.store_node(
+                    cache_key,
+                    self.host.build_runtime_intrinsic_surface_node(&members),
+                    probe,
+                );
+                members
+            });
         members
     }
 
@@ -1077,20 +1007,30 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             }
         }
 
-        let resolution = self
-            .host
-            .resolve_fallthrough_surface_internal_with_overrides(
-                canonical_id,
-                prop_type_overrides,
-                visiting,
-            );
+        // No-poison CACHEABILITY scope BRACKETING the child compute: the child's
+        // own fallthrough resolution (imports, type surfaces, root chain) is the
+        // read set this admission must be fail-closed on, so the scope opens
+        // BEFORE it and the probe is sampled after it returns.
+        let (resolution, _non_cacheable) =
+            crate::fact_signature_helpers::with_cacheability_scope(self.host, |probe| {
+                let resolution = self
+                    .host
+                    .resolve_fallthrough_surface_internal_with_overrides(
+                        canonical_id,
+                        prop_type_overrides,
+                        visiting,
+                    );
 
-        if let Some(resolution) = resolution.as_ref() {
-            self.host.resolver_runtime().fallthrough.store_node(
-                cache_key,
-                self.host.build_runtime_child_surface_node(resolution),
-            );
-        }
+                if let Some(resolution) = resolution.as_ref() {
+                    self.host.resolver_runtime().fallthrough.store_node(
+                        cache_key,
+                        self.host.build_runtime_child_surface_node(resolution),
+                        probe,
+                    );
+                }
+
+                resolution
+            });
 
         resolution
     }
@@ -1132,20 +1072,30 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             }
         }
 
-        let resolved = self.host.resolve_root_consumption(
-            canonical_id,
-            snapshot,
-            element_index,
-            base,
-            has_unknown_spread,
-            eval_env,
-            self.ctx,
-            overrides,
-        );
-        self.host.resolver_runtime().fallthrough.store_node(
-            cache_key,
-            self.host.build_runtime_consumed_bindings_node(&resolved),
-        );
+        // No-poison CACHEABILITY scope BRACKETING the root-consumption compute:
+        // resolving which attrs / listeners the root element consumes evaluates
+        // the owner's bindings through the shared resolver, so it can consume a
+        // fenced serve / broken lease / unrootable route. The probe is sampled
+        // after `resolved` is built, so its verdict covers that compute.
+        let (resolved, _non_cacheable) =
+            crate::fact_signature_helpers::with_cacheability_scope(self.host, |probe| {
+                let resolved = self.host.resolve_root_consumption(
+                    canonical_id,
+                    snapshot,
+                    element_index,
+                    base,
+                    has_unknown_spread,
+                    eval_env,
+                    self.ctx,
+                    overrides,
+                );
+                self.host.resolver_runtime().fallthrough.store_node(
+                    cache_key,
+                    self.host.build_runtime_consumed_bindings_node(&resolved),
+                    probe,
+                );
+                resolved
+            });
         ResolvedConsumedBindings {
             bindings: resolved.bindings,
             partial_reasons: resolved.partial_reasons,

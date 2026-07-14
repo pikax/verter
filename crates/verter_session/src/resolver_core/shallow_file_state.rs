@@ -18,7 +18,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::route_demand::RouteDemand;
 use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
-use verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
+use verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::decl_headers::{TypeDeclHeader, ValueDeclHeader};
 use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::Hash16;
@@ -279,49 +279,6 @@ pub(crate) fn external_canonical(target: &ImportTarget) -> Option<Arc<str>> {
     (!target.canonical_id.is_empty()).then(|| Arc::<str>::from(target.canonical_id.as_str()))
 }
 
-/// Keyed-map external-ref accumulator: merges same-`(specifier,
-/// imported_name)` refs by route-union in O(1) per add (insertion order
-/// preserved for deterministic output).
-#[derive(Debug, Default)]
-pub(crate) struct ExternalRefAccumulator {
-    index: FxHashMap<(String, String), usize>,
-    refs: Vec<ExternalSymbolRef>,
-}
-
-impl ExternalRefAccumulator {
-    pub(crate) fn add(&mut self, ext_ref: ExternalSymbolRef) {
-        match self.index.entry((
-            ext_ref.source_specifier.clone(),
-            ext_ref.imported_name.clone(),
-        )) {
-            std::collections::hash_map::Entry::Occupied(entry) => {
-                let existing = &mut self.refs[*entry.get()];
-                existing.route =
-                    crate::resolver_core::merge_route_demands(&existing.route, &ext_ref.route);
-            }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(self.refs.len());
-                self.refs.push(ext_ref);
-            }
-        }
-    }
-
-    pub(crate) fn into_vec(self) -> Vec<ExternalSymbolRef> {
-        self.refs
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.refs.is_empty()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WholeRouteContext {
-    Root,
-    CallableParam,
-    LeafProperty,
-}
-
 // ---------------------------------------------------------------------------
 // Budget and failure contract
 // ---------------------------------------------------------------------------
@@ -467,75 +424,185 @@ impl ShallowImportResolver for NullResolver {
 }
 
 impl ShallowFileState {
-    /// Test-only convenience: build from an existing
-    /// `AnalyzedExternalTypeSource` with a null resolver — canonical IDs
-    /// on cross-file edges stay empty. The supplied `eval_env` seeds the
-    /// declaration-body memo (every entry pre-filled through the same
-    /// per-symbol fold the lazy path performs). The production
-    /// construction path is [`Self::from_analysis_with_resolver`] (the
-    /// materialise closure supplies the resolver and the lazy memo).
-    /// Gated `#[cfg(any(test, debug_assertions))]` — integration tests
-    /// in `tests/` compile without `cfg(test)`; release production
-    /// builds compile this edge-less constructor out.
+    /// Test-only HEADER/ROUTING-ONLY constructor: build the routing tables
+    /// (exports / imports / wildcard reexports) from an existing
+    /// `AnalyzedExternalTypeSource` with a null resolver — canonical IDs on
+    /// cross-file edges stay empty. The declaration-body memo is EMPTY and
+    /// serviceless: NO symbol inventory, NO bodies, and any body demand is a
+    /// genuine miss — callers must provably never demand a declaration body
+    /// (body-demanding fixtures use [`Self::service_backed_for_test`], the
+    /// production lazy shape). Gated `#[cfg(any(test, debug_assertions))]` —
+    /// integration tests in `tests/` compile without `cfg(test)`; release
+    /// production builds compile this edge-less constructor out.
     #[cfg(any(test, debug_assertions))]
-    pub fn from_analysis(
+    pub fn header_routing_only_for_test(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
-        eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
     ) -> Self {
-        let empty_env = verter_semantic::analysis::type_eval::EvalEnv::default();
-        let env = eval_env.unwrap_or(&empty_env);
-        let header_index =
-            Arc::new(verter_semantic::analysis::decl_headers::DeclHeaderIndex::from_eval_env(env));
-        let memo = crate::decl_body_memo::DeclBodyMemo::seeded_from_env(
-            crate::decl_lowering::SnapshotKey {
-                canonical: Arc::from(""),
-                whole_hash,
-                parse_env_hash: [0u8; 16],
-            },
-            env,
-            analysis.as_ref(),
-            header_index,
-        );
-        Self::from_analysis_with_memo(whole_hash, analysis, Arc::new(memo), &NullResolver)
+        let memo = Self::empty_header_only_memo(whole_hash, analysis.as_ref());
+        Self::from_analysis_with_memo(whole_hash, analysis, memo, &NullResolver)
     }
 
-    /// Test-only counterpart of [`Self::from_analysis_with_resolver`]
-    /// taking an already-built `EvalEnv` to SEED the declaration-body
-    /// memo (every entry pre-filled through the same per-symbol fold the
-    /// lazy path performs) while resolving cross-file edges through the
-    /// supplied resolver. Same gate as [`Self::from_analysis`].
+    /// [`Self::header_routing_only_for_test`] resolving cross-file edges
+    /// through the supplied resolver (canonical IDs populated on the
+    /// reexport / import / wildcard edges). Same header-only contract:
+    /// EMPTY serviceless memo, no bodies, callers provably never demand
+    /// a declaration body.
     #[cfg(any(test, debug_assertions))]
-    pub fn from_analysis_with_resolver_seeded(
+    pub fn header_routing_only_with_resolver_for_test(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
-        eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
         resolver: &dyn ShallowImportResolver,
     ) -> Self {
-        let empty_env = verter_semantic::analysis::type_eval::EvalEnv::default();
-        let env = eval_env.unwrap_or(&empty_env);
+        let memo = Self::empty_header_only_memo(whole_hash, analysis.as_ref());
+        Self::from_analysis_with_memo(whole_hash, analysis, memo, resolver)
+    }
+
+    /// The EMPTY serviceless memo backing the header/routing-only test
+    /// constructors: no symbol inventory, no bodies, every body demand a
+    /// genuine miss. Same gate as [`Self::header_routing_only_for_test`].
+    #[cfg(any(test, debug_assertions))]
+    fn empty_header_only_memo(
+        whole_hash: Hash16,
+        analysis: &AnalyzedExternalTypeSource,
+    ) -> Arc<crate::decl_body_memo::DeclBodyMemo> {
+        let env = verter_semantic::analysis::type_eval::EvalEnv::default();
         let header_index =
-            Arc::new(verter_semantic::analysis::decl_headers::DeclHeaderIndex::from_eval_env(env));
-        let memo = crate::decl_body_memo::DeclBodyMemo::seeded_from_env(
+            Arc::new(verter_semantic::analysis::decl_headers::DeclHeaderIndex::from_eval_env(&env));
+        Arc::new(crate::decl_body_memo::DeclBodyMemo::seeded_from_env(
             crate::decl_lowering::SnapshotKey {
                 canonical: Arc::from(""),
                 whole_hash,
                 parse_env_hash: [0u8; 16],
             },
-            env,
-            analysis.as_ref(),
+            &env,
+            analysis,
             header_index,
-        );
-        Self::from_analysis_with_memo(whole_hash, analysis, Arc::new(memo), resolver)
+        ))
     }
 
-    /// Test-only constructor with caller-supplied ROUTING tables (exports,
-    /// wildcard reexports, import tables) and an EMPTY seeded symbol
-    /// inventory — for fixtures that exercise route surfaces without any
-    /// declared symbols. Same gate as [`Self::from_analysis`].
+    /// Test-only builder for a SERVICE-backed [`ShallowFileState`] — the
+    /// production lazy-memo shape: a live
+    /// [`crate::decl_lowering::DeclLoweringService`] retains the parse
+    /// snapshot, construction lowers ZERO declaration bodies, and every
+    /// declaration body materialises on first demand through the memo
+    /// exactly as production (the shared lens pair installs from the
+    /// finished state). Broken-lease no-warm regressions break the lease
+    /// out-of-band via
+    /// [`crate::decl_body_memo::DeclBodyMemo::release_retained_snapshot_for_test`].
+    /// Gated `#[cfg(any(test, debug_assertions))]` — integration tests in
+    /// `tests/` compile without `cfg(test)`; release production builds
+    /// compile this out.
+    #[cfg(any(test, debug_assertions))]
+    pub fn service_backed_for_test(source: &str) -> Arc<Self> {
+        Self::service_backed_for_test_at("/ws/fixture.ts", source)
+    }
+
+    /// [`Self::service_backed_for_test`] with a caller-chosen canonical id —
+    /// for fixtures whose locators/routes anchor on a specific canonical
+    /// (augmentation scopes, multi-file stitches).
+    #[cfg(any(test, debug_assertions))]
+    pub fn service_backed_for_test_at(canonical: &str, source: &str) -> Arc<Self> {
+        Self::service_backed_with_provenance_for_test(canonical, source).0
+    }
+
+    /// [`Self::service_backed_for_test_at`] additionally handing back the
+    /// memo's [`crate::types::MetaProvenance`] counters so lazy-demand
+    /// tests can assert HOW MANY bodies lowered / programs parsed.
+    #[cfg(any(test, debug_assertions))]
+    pub fn service_backed_with_provenance_for_test(
+        canonical: &str,
+        source: &str,
+    ) -> (Arc<Self>, Arc<crate::types::MetaProvenance>) {
+        Self::service_backed_with_provenance_and_resolver_for_test(canonical, source, &NullResolver)
+    }
+
+    /// [`Self::service_backed_for_test_at`] with a caller-supplied
+    /// `whole_hash` — for artifact-identity fixtures that vary the content
+    /// hash as a controlled invalidation axis. The hash keys BOTH the memo
+    /// snapshot and the state, exactly like the content-derived default.
+    #[cfg(any(test, debug_assertions))]
+    pub fn service_backed_for_test_with_hash(
+        canonical: &str,
+        source: &str,
+        whole_hash: Hash16,
+    ) -> Arc<Self> {
+        Self::service_backed_core_for_test(canonical, source, Some(whole_hash), &NullResolver).0
+    }
+
+    /// Full-parameter service-backed test builder: caller-chosen canonical,
+    /// import resolver for cross-file canonical edges, and the provenance
+    /// handle. `whole_hash` derives from the source content (production
+    /// shape: same content ⇒ same hash, different content ⇒ different
+    /// hash) and keys BOTH the memo snapshot and the state.
+    #[cfg(any(test, debug_assertions))]
+    pub fn service_backed_with_provenance_and_resolver_for_test(
+        canonical: &str,
+        source: &str,
+        resolver: &dyn ShallowImportResolver,
+    ) -> (Arc<Self>, Arc<crate::types::MetaProvenance>) {
+        Self::service_backed_core_for_test(canonical, source, None, resolver)
+    }
+
+    /// The ONE service-backed construction core every `service_backed_*`
+    /// test front delegates to.
+    #[cfg(any(test, debug_assertions))]
+    fn service_backed_core_for_test(
+        canonical: &str,
+        source: &str,
+        whole_hash: Option<Hash16>,
+        resolver: &dyn ShallowImportResolver,
+    ) -> (Arc<Self>, Arc<crate::types::MetaProvenance>) {
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(!parsed.panicked, "service-backed test fixture must parse");
+        let header_index = Arc::new(
+            verter_semantic::analysis::decl_headers::build_decl_header_index(
+                &parsed.program,
+                source,
+            ),
+        );
+        let analysis = Arc::new(
+            verter_parser::utils::oxc::script::type_surface::analyze_external_type_source(
+                source, &allocator,
+            ),
+        );
+        let eval_source: Arc<str> = Arc::from(source);
+        let whole_hash = whole_hash.unwrap_or_else(|| crate::hash::hash_16(source.as_bytes()));
+        let provenance = Arc::new(crate::types::MetaProvenance::default());
+        let memo = Arc::new(crate::decl_body_memo::DeclBodyMemo::new(
+            crate::decl_lowering::SnapshotKey {
+                canonical: Arc::from(canonical),
+                whole_hash,
+                parse_env_hash: [0u8; 16],
+            },
+            Arc::clone(&eval_source),
+            eval_source,
+            None,
+            oxc_span::SourceType::ts(),
+            Arc::new(crate::decl_lowering::DeclLoweringService::new()),
+            header_index,
+            Arc::clone(&provenance),
+            None,
+        ));
+        (
+            Arc::new(Self::from_analysis_with_resolver(
+                whole_hash, analysis, memo, resolver,
+            )),
+            provenance,
+        )
+    }
+
+    /// Test-only HEADER/ROUTING-ONLY constructor with caller-supplied
+    /// ROUTING tables (exports, wildcard reexports, import tables) and an
+    /// EMPTY symbol inventory — for fixtures that exercise route surfaces
+    /// without any declared symbols and provably never demand a
+    /// declaration body. Same gate as
+    /// [`Self::header_routing_only_for_test`].
     #[cfg(any(test, debug_assertions))]
     #[allow(clippy::too_many_arguments)]
-    pub fn new_for_test_with_routing(
+    pub fn routing_tables_only_for_test(
         whole_hash: Hash16,
         exports: FxHashMap<String, ExportTarget>,
         wildcard_reexports: Vec<WildcardReexport>,
@@ -543,11 +610,22 @@ impl ShallowFileState {
         import_targets: FxHashMap<String, ImportTarget>,
         analysis: Arc<AnalyzedExternalTypeSource>,
     ) -> Self {
-        let mut state = Self::from_analysis(whole_hash, analysis, None);
+        let memo = Self::empty_header_only_memo(whole_hash, analysis.as_ref());
+        let mut state =
+            Self::assemble_from_analysis_with_memo(whole_hash, analysis, memo, &NullResolver);
         state.exports = exports;
         state.wildcard_reexports = wildcard_reexports;
         state.import_locals = import_locals;
         state.import_targets = import_targets;
+        // The lens installs AFTER the routing mutation above: the memo's
+        // `install_shallow_lens` is OnceLock-first-wins, so installing
+        // through `header_routing_only_for_test` first would pin a lens
+        // over the
+        // PRE-routing state forever (stale exports/imports feeding the
+        // lowering-time fingerprint and the parse-fact emitter). Assemble
+        // un-lensed, apply the caller's routing tables, then derive the ONE
+        // shared lens from the FINAL routed state.
+        state.install_shallow_lens_from_final_state();
         state
     }
 
@@ -577,6 +655,25 @@ impl ShallowFileState {
     /// re-parsed the file; the retired name is banned in production by the
     /// `from_analysis_inner_name_is_retired_in_session` guard.)
     fn from_analysis_with_memo(
+        whole_hash: Hash16,
+        analysis: Arc<AnalyzedExternalTypeSource>,
+        decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
+        resolver: &dyn ShallowImportResolver,
+    ) -> Self {
+        let state =
+            Self::assemble_from_analysis_with_memo(whole_hash, analysis, decl_bodies, resolver);
+        state.install_shallow_lens_from_final_state();
+        state
+    }
+
+    /// Assemble the routing tables WITHOUT installing the memo's shared
+    /// shallow lens. Every constructor finishes by calling
+    /// [`Self::install_shallow_lens_from_final_state`] exactly once on its
+    /// FINISHED state — [`Self::from_analysis_with_memo`] immediately after
+    /// assembly, [`Self::routing_tables_only_for_test`] after its routing-table
+    /// mutation — so the one shared lens always derives from the final
+    /// routed state.
+    fn assemble_from_analysis_with_memo(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
@@ -667,6 +764,23 @@ impl ShallowFileState {
             synthesised_value_symbols: FxHashMap::default(),
             synthesised_value_bodies: FxHashMap::default(),
         }
+    }
+
+    /// Install the ONE shared shallow cross-decl lens on the memo. The lens
+    /// derives from the FINISHED state (exports / import targets / symbol
+    /// names), so every constructor calls this exactly once as its LAST
+    /// construction step — strictly before any body demand can reach the
+    /// memo's lowering-time fingerprint site or the parse-fact emitter.
+    /// (`install_shallow_lens` is OnceLock-first-wins: the FIRST install is
+    /// the one the memo serves forever, which is why assembly never
+    /// installs early.)
+    fn install_shallow_lens_from_final_state(&self) {
+        self.decl_bodies.install_shallow_lens(Arc::new(
+            crate::fact_emission::ShallowLens::from_shallow(self),
+        ));
+        self.decl_bodies.install_route_fact_lens(Arc::new(
+            crate::fact_emission::RouteLens::from_shallow(self),
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -1067,7 +1181,18 @@ impl ShallowFileState {
         &self,
         name: &str,
     ) -> Option<Vec<TypeExpr>> {
-        Some(self.type_decl(name)?.body.contributors().to_vec())
+        // The record stores content-free contributor LOCATORS; the oracle's
+        // per-contributor `TypeExpr` view is re-borrowed lease-only from the
+        // retained snapshot (the internals rework this compat helper's
+        // contract anticipated). A header miss stays `None`; a body-less
+        // re-borrow (broken lease / seeded state) is a conservative `None`.
+        self.type_decl(name)?;
+        match self.decl_bodies.transient_type_bodies(name) {
+            crate::decl_body_memo::DemandOutcome::Ready(Some(bodies)) => {
+                Some(bodies.as_ref().clone())
+            }
+            _ => None,
+        }
     }
 
     /// The CENTRALIZED effective VALUE-symbol lookup — the single authority
@@ -1147,7 +1272,17 @@ impl ShallowFileState {
         // under-classify the symbol's dependency edges for the artifact's life
         // (under-invalidation). A later demand under a live lease recovers.
         match self.classify_type_deps(name) {
-            DemandOutcome::LeaseMiss => None,
+            DemandOutcome::LeaseMiss => {
+                // Broken decl-body lease pin: mark the generalized
+                // non-cacheability rail so an enclosing traced compute refuses
+                // shared-cache admission (this accessor collapses the
+                // `DemandOutcome` directly, bypassing `into_option`), and fail
+                // closed — never cache the transient empty classification.
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+                );
+                None
+            }
             DemandOutcome::Ready(computed) => {
                 self.type_deps_cache
                     .insert(name.to_string(), computed.clone());
@@ -1437,1144 +1572,244 @@ impl ShallowFileState {
     /// Compute same-file closure for one symbol, collecting external refs.
     ///
     /// Budget limits the total number of local symbols visited to prevent
-    /// pathological same-file dependency chains.
+    /// pathological same-file dependency chains. Thin driver over the shared
+    /// fact-closure core (`verter_semantic::facts::route_closure`) reading
+    /// this state's stored per-decl route facts + dependency edges.
     pub fn local_closure(&self, symbol_name: &str, budget: usize) -> LocalClosureResult {
-        let mut visited = FxHashSet::default();
-        let mut pending = vec![symbol_name.to_string()];
-        let mut external_refs = ExternalRefAccumulator::default();
-        let mut local_used = Vec::new();
-        let mut steps = 0;
-
-        while let Some(current) = pending.pop() {
-            if !visited.insert(current.clone()) {
-                continue;
-            }
-            steps += 1;
-            if steps >= budget {
-                return LocalClosureResult {
-                    status: LocalClosureStatus::BudgetExceeded,
-                    local_symbols_used: local_used,
-                    unresolved_external: external_refs.into_vec(),
-                    steps: steps as u64,
-                };
-            }
-
-            if let Some(deps) = self.type_deps(&current) {
-                local_used.push(current.clone());
-
-                // Queue same-file dependencies
-                for dep in &deps.local_deps {
-                    if !visited.contains(dep.as_str()) {
-                        pending.push(dep.clone());
-                    }
-                }
-
-                // Collect external refs
-                for ext in &deps.external_deps {
-                    external_refs.add(ext.clone());
-                }
-            } else if self.import_locals.contains(&current) {
-                // This is an import — classify as external
-                if let Some(target) = self.import_targets.get(&current) {
-                    let ext_ref = ExternalSymbolRef {
-                        local_name: current.clone(),
-                        source_specifier: target.source_specifier.clone(),
-                        imported_name: target.imported_name.clone(),
-                        canonical_id: external_canonical(target),
-                        route: RouteDemand::Whole,
-                    };
-                    external_refs.add(ext_ref);
-                } else {
-                    // Import-local without a target — treat as missing
-                    return LocalClosureResult {
-                        status: LocalClosureStatus::MissingLocalSymbol { name: current },
-                        local_symbols_used: local_used,
-                        unresolved_external: external_refs.into_vec(),
-                        steps: steps as u64,
-                    };
-                }
-            } else {
-                return LocalClosureResult {
-                    status: LocalClosureStatus::MissingLocalSymbol { name: current },
-                    local_symbols_used: local_used,
-                    unresolved_external: external_refs.into_vec(),
-                    steps: steps as u64,
-                };
-            }
-        }
-
-        let external_refs = external_refs.into_vec();
-        let status = if external_refs.is_empty() {
-            LocalClosureStatus::Resolved
-        } else {
-            LocalClosureStatus::ResolvedWithExternalDeps
-        };
-
-        LocalClosureResult {
-            status,
-            local_symbols_used: local_used,
-            unresolved_external: external_refs,
-            steps: steps as u64,
-        }
+        from_fact_closure(verter_semantic::facts::local_closure_over_facts(
+            &SfsRouteFactProvider { state: self },
+            symbol_name,
+            budget,
+        ))
     }
 
     /// Compute a narrower closure for a specific route on an exported symbol.
     ///
-    /// For `Route::Whole`, delegates to `local_closure`.
-    /// For `Route::Member(m)`, starts only from the member's type deps
-    /// (if per-member tracking is available for the symbol).
-    /// For `Route::Pick(members)`, unions the member deps for all listed members.
-    ///
-    /// Falls back to whole closure when member-level data is unavailable.
+    /// For `Route::Whole`, the transitive whole-route edge walk; for
+    /// `Route::MemberPath(p)`, the path-precise seed walk; for
+    /// `Route::Pick`/`Route::Omit`, the member-seeded dependency closure.
+    /// Falls back to the plain local closure when member-level data is
+    /// unavailable. Thin driver over the shared fact-closure core: the
+    /// transitive semantics live in `verter_semantic::facts::route_closure`,
+    /// reading each declaration's stored `ShallowRouteFacts` through
+    /// [`SfsRouteFactProvider`] — declaration bodies are never re-walked at
+    /// query time.
     pub fn route_closure(
         &self,
         symbol_name: &str,
         route: &RouteDemand,
         budget: usize,
     ) -> LocalClosureResult {
-        match route {
-            RouteDemand::Whole => self.whole_route_closure(symbol_name, budget),
-            RouteDemand::MemberPath(path) if !path.is_empty() => {
-                self.member_path_route_closure(symbol_name, path, budget)
-            }
-            RouteDemand::MemberPath(_) => self.local_closure(symbol_name, budget),
-            RouteDemand::Pick(members) => {
-                let refs: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
-                self.member_route_closure(symbol_name, &refs, budget)
-            }
-            RouteDemand::Omit(omitted) => {
-                let Some(lowered) = self.type_decl(symbol_name) else {
-                    return self.local_closure(symbol_name, budget);
-                };
-                let lookup = lowered.body.lookup_object();
-                let Some(members) = direct_object_member_names(lookup.as_ref()) else {
-                    return self.local_closure(symbol_name, budget);
-                };
-                let omitted: FxHashSet<&str> = omitted.iter().map(|name| name.as_str()).collect();
-                let remaining = members
-                    .into_iter()
-                    .filter(|name| !omitted.contains(name.as_str()))
-                    .collect::<Vec<_>>();
-                if remaining.is_empty() {
-                    return LocalClosureResult {
-                        status: LocalClosureStatus::Resolved,
-                        local_symbols_used: vec![symbol_name.to_string()],
-                        unresolved_external: Vec::new(),
-                        steps: 1,
-                    };
-                }
-                let refs: Vec<&str> = remaining.iter().map(|s| s.as_str()).collect();
-                self.member_route_closure(symbol_name, &refs, budget)
-            }
-        }
-    }
-
-    fn member_path_route_closure(
-        &self,
-        symbol_name: &str,
-        path: &[String],
-        budget: usize,
-    ) -> LocalClosureResult {
-        if path.len() == 1 {
-            return self.member_route_closure(symbol_name, &[path[0].as_str()], budget);
-        }
-
-        let Some(lowered) = self.type_decl(symbol_name) else {
-            return self.local_closure(symbol_name, budget);
-        };
-
-        let mut seed_names = Vec::new();
-        let mut seed_external = ExternalRefAccumulator::default();
-        let mut seen_symbols = FxHashSet::default();
-        let lookup = lowered.body.lookup_object();
-        let found_path = collect_member_path_seed_names(
-            self,
-            lookup.as_ref(),
-            path,
-            &mut seed_names,
-            &mut seed_external,
-            &mut seen_symbols,
-        );
-
-        if !found_path {
-            return LocalClosureResult {
-                status: LocalClosureStatus::Resolved,
-                local_symbols_used: vec![symbol_name.to_string()],
-                unresolved_external: Vec::new(),
-                steps: 1,
-            };
-        }
-
-        if seed_names.is_empty() && seed_external.is_empty() {
-            return LocalClosureResult {
-                status: LocalClosureStatus::Resolved,
-                local_symbols_used: vec![symbol_name.to_string()],
-                unresolved_external: Vec::new(),
-                steps: 1,
-            };
-        }
-
-        let mut visited = FxHashSet::default();
-        visited.insert(symbol_name.to_string());
-        let mut pending = seed_names;
-        let mut external_refs = seed_external;
-        let mut local_used = vec![symbol_name.to_string()];
-        let mut steps = 1u64;
-
-        while let Some(current) = pending.pop() {
-            if !visited.insert(current.clone()) {
-                continue;
-            }
-            steps += 1;
-            if steps as usize >= budget {
-                return LocalClosureResult {
-                    status: LocalClosureStatus::BudgetExceeded,
-                    local_symbols_used: local_used,
-                    unresolved_external: external_refs.into_vec(),
-                    steps,
-                };
-            }
-
-            if let Some(dep_edges) = self.type_deps(&current) {
-                local_used.push(current.clone());
-                for dep in &dep_edges.local_deps {
-                    if !visited.contains(dep.as_str()) {
-                        pending.push(dep.clone());
-                    }
-                }
-                for ext in &dep_edges.external_deps {
-                    external_refs.add(ext.clone());
-                }
-            } else if self.import_locals.contains(&current) {
-                if let Some(target) = self.import_targets.get(&current) {
-                    let ext_ref = ExternalSymbolRef {
-                        local_name: current.clone(),
-                        source_specifier: target.source_specifier.clone(),
-                        imported_name: target.imported_name.clone(),
-                        canonical_id: external_canonical(target),
-                        route: RouteDemand::Whole,
-                    };
-                    external_refs.add(ext_ref);
-                }
-            }
-        }
-
-        let external_refs = external_refs.into_vec();
-        let status = if external_refs.is_empty() {
-            LocalClosureStatus::Resolved
-        } else {
-            LocalClosureStatus::ResolvedWithExternalDeps
-        };
-
-        LocalClosureResult {
-            status,
-            local_symbols_used: local_used,
-            unresolved_external: external_refs,
-            steps,
-        }
-    }
-
-    /// Internal: compute closure starting from specific member deps only.
-    fn member_route_closure(
-        &self,
-        symbol_name: &str,
-        members: &[&str],
-        budget: usize,
-    ) -> LocalClosureResult {
-        let lowered = match self.type_decl(symbol_name) {
-            Some(s) => s,
-            None => return self.local_closure(symbol_name, budget),
-        };
-
-        // If no member_deps tracking, fall back to whole closure
-        if lowered.member_deps.is_empty() {
-            return self.local_closure(symbol_name, budget);
-        }
-
-        // Collect the initial seed names from the requested members' deps
-        let lookup = lowered.body.lookup_object();
-        let mut seed_names: Vec<String> = Vec::new();
-        let mut saw_known_member = false;
-        for member in members {
-            if let Some(deps) = lowered.member_deps.get(*member) {
-                saw_known_member = true;
-                for dep in deps {
-                    if !seed_names.contains(dep) {
-                        seed_names.push(dep.clone());
-                    }
-                }
-                continue;
-            }
-            if let Some(prop) = direct_object_property(lookup.as_ref(), member) {
-                saw_known_member = true;
-                let mut refs = Vec::new();
-                collect_type_refs(&prop.ty, &mut refs);
-                for dep in refs {
-                    if !seed_names.contains(&dep) {
-                        seed_names.push(dep);
-                    }
-                }
-                continue;
-            }
-        }
-
-        if !saw_known_member {
-            return self.local_closure(symbol_name, budget);
-        }
-
-        if seed_names.is_empty() {
-            // No deps for the requested members — minimal closure
-            return LocalClosureResult {
-                status: LocalClosureStatus::Resolved,
-                local_symbols_used: vec![symbol_name.to_string()],
-                unresolved_external: Vec::new(),
-                steps: 1,
-            };
-        }
-
-        // Now run the local closure starting from only the seed names
-        let mut visited = FxHashSet::default();
-        visited.insert(symbol_name.to_string()); // mark the root as visited
-        let mut pending = seed_names;
-        let mut external_refs = ExternalRefAccumulator::default();
-        let mut local_used = vec![symbol_name.to_string()];
-        let mut steps = 1u64;
-
-        while let Some(current) = pending.pop() {
-            if !visited.insert(current.clone()) {
-                continue;
-            }
-            steps += 1;
-            if steps as usize >= budget {
-                return LocalClosureResult {
-                    status: LocalClosureStatus::BudgetExceeded,
-                    local_symbols_used: local_used,
-                    unresolved_external: external_refs.into_vec(),
-                    steps,
-                };
-            }
-
-            if let Some(dep_edges) = self.type_deps(&current) {
-                local_used.push(current.clone());
-                for dep in &dep_edges.local_deps {
-                    if !visited.contains(dep.as_str()) {
-                        pending.push(dep.clone());
-                    }
-                }
-                for ext in &dep_edges.external_deps {
-                    external_refs.add(ext.clone());
-                }
-            } else if self.import_locals.contains(&current) {
-                if let Some(target) = self.import_targets.get(&current) {
-                    let ext_ref = ExternalSymbolRef {
-                        local_name: current.clone(),
-                        source_specifier: target.source_specifier.clone(),
-                        imported_name: target.imported_name.clone(),
-                        canonical_id: external_canonical(target),
-                        route: RouteDemand::Whole,
-                    };
-                    external_refs.add(ext_ref);
-                }
-            }
-            // Skip unknown names silently — they may be type parameters
-        }
-
-        let external_refs = external_refs.into_vec();
-        let status = if external_refs.is_empty() {
-            LocalClosureStatus::Resolved
-        } else {
-            LocalClosureStatus::ResolvedWithExternalDeps
-        };
-
-        LocalClosureResult {
-            status,
-            local_symbols_used: local_used,
-            unresolved_external: external_refs,
-            steps,
-        }
-    }
-
-    fn whole_route_closure(&self, symbol_name: &str, budget: usize) -> LocalClosureResult {
-        let Some(lowered) = self.type_decl(symbol_name) else {
-            return self.local_closure(symbol_name, budget);
-        };
-
-        let mut visited = FxHashSet::default();
-        visited.insert(symbol_name.to_string());
-        let mut local_used = vec![symbol_name.to_string()];
-        let mut external_refs = ExternalRefAccumulator::default();
-        let mut steps = 1u64;
-
-        let lookup = lowered.body.lookup_object();
-        if !self.collect_whole_route_refs(
-            lookup.as_ref(),
-            WholeRouteContext::Root,
-            &mut visited,
-            &mut local_used,
-            &mut external_refs,
-            &mut steps,
+        from_fact_closure(verter_semantic::facts::route_closure_over_facts(
+            &SfsRouteFactProvider { state: self },
+            symbol_name,
+            route,
             budget,
-        ) {
-            return LocalClosureResult {
-                status: LocalClosureStatus::BudgetExceeded,
-                local_symbols_used: local_used,
-                unresolved_external: external_refs.into_vec(),
-                steps,
-            };
-        }
+        ))
+    }
+}
 
-        let external_refs = external_refs.into_vec();
-        let status = if external_refs.is_empty() {
-            LocalClosureStatus::Resolved
-        } else {
-            LocalClosureStatus::ResolvedWithExternalDeps
-        };
+/// The session-side provider for the shared route-closure core: stored route
+/// facts (lazily lowered on first demand through the memo), header
+/// membership, and the baked dependency-edge classification — never a body
+/// re-walk.
+struct SfsRouteFactProvider<'s> {
+    state: &'s ShallowFileState,
+}
 
-        LocalClosureResult {
-            status,
-            local_symbols_used: local_used,
-            unresolved_external: external_refs,
-            steps,
-        }
+impl verter_semantic::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
+    fn has_type_symbol(&self, name: &str) -> bool {
+        self.state.has_type_symbol(name)
     }
 
-    fn collect_whole_route_refs(
-        &self,
-        expr: &TypeExpr,
-        context: WholeRouteContext,
-        visited: &mut FxHashSet<String>,
-        local_used: &mut Vec<String>,
-        external_refs: &mut ExternalRefAccumulator,
-        steps: &mut u64,
-        budget: usize,
-    ) -> bool {
-        match expr {
-            TypeExpr::Parenthesized(inner) | TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) => self
-                .collect_whole_route_refs(
-                    inner,
-                    context,
-                    visited,
-                    local_used,
-                    external_refs,
-                    steps,
-                    budget,
-                ),
-            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-                for inner in types.iter() {
-                    if !self.collect_whole_route_refs(
-                        inner,
-                        context,
-                        visited,
-                        local_used,
-                        external_refs,
-                        steps,
-                        budget,
-                    ) {
-                        return false;
-                    }
-                }
-                true
-            }
-            TypeExpr::Array { element, .. } => self.collect_whole_route_refs(
-                element,
-                context,
-                visited,
-                local_used,
-                external_refs,
-                steps,
-                budget,
-            ),
-            TypeExpr::Tuple { elements, .. } => {
-                for element in elements.iter() {
-                    if !self.collect_whole_route_refs(
-                        &element.ty,
-                        context,
-                        visited,
-                        local_used,
-                        external_refs,
-                        steps,
-                        budget,
-                    ) {
-                        return false;
-                    }
-                }
-                true
-            }
-            TypeExpr::Object(obj) => {
-                if matches!(context, WholeRouteContext::LeafProperty) {
-                    return true;
-                }
-
-                for member in &obj.properties {
-                    let status = match member {
-                        verter_type_expr::ObjectMember::Property(prop) => self
-                            .collect_whole_route_refs(
-                                &prop.ty,
-                                WholeRouteContext::LeafProperty,
-                                visited,
-                                local_used,
-                                external_refs,
-                                steps,
-                                budget,
-                            ),
-                        verter_type_expr::ObjectMember::IndexSignature(sig) => self
-                            .collect_whole_route_refs(
-                                &sig.value_type,
-                                WholeRouteContext::LeafProperty,
-                                visited,
-                                local_used,
-                                external_refs,
-                                steps,
-                                budget,
-                            ),
-                        verter_type_expr::ObjectMember::CallSignature(func)
-                        | verter_type_expr::ObjectMember::ConstructSignature(func) => self
-                            .collect_whole_route_function_refs(
-                                func,
-                                visited,
-                                local_used,
-                                external_refs,
-                                steps,
-                                budget,
-                            ),
-                        verter_type_expr::ObjectMember::Method(method) => self
-                            .collect_whole_route_function_refs(
-                                &method.function,
-                                visited,
-                                local_used,
-                                external_refs,
-                                steps,
-                                budget,
-                            ),
-                    };
-                    if !status {
-                        return false;
-                    }
-                }
-                true
-            }
-            // A constructor type carries the same `FunctionExpr` payload as a
-            // function type; its whole-route signature refs are collected
-            // identically.
-            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-                if matches!(context, WholeRouteContext::LeafProperty) {
-                    return true;
-                }
-                self.collect_whole_route_function_refs(
-                    func,
-                    visited,
-                    local_used,
-                    external_refs,
-                    steps,
-                    budget,
-                )
-            }
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } => {
-                let symbol_name = name.as_ref();
-                if let Some(target) = self.import_targets.get(symbol_name) {
-                    if matches!(
-                        context,
-                        WholeRouteContext::Root | WholeRouteContext::CallableParam
-                    ) {
-                        external_refs.add(ExternalSymbolRef {
-                            local_name: symbol_name.to_string(),
-                            source_specifier: target.source_specifier.clone(),
-                            imported_name: target.imported_name.clone(),
-                            canonical_id: external_canonical(target),
-                            route: RouteDemand::Whole,
-                        });
-                    }
-                    return true;
-                }
-
-                if let Some(route) = self.utility_route_for_ref(symbol_name, type_arguments) {
-                    return self.follow_routed_expr(
-                        &type_arguments[0],
-                        route,
-                        visited,
-                        local_used,
-                        external_refs,
-                        steps,
-                        budget,
-                    );
-                }
-
-                if matches!(
-                    symbol_name,
-                    "Partial" | "Required" | "Readonly" | "NonNullable"
-                ) && !type_arguments.is_empty()
-                    && !matches!(context, WholeRouteContext::LeafProperty)
-                {
-                    return self.collect_whole_route_refs(
-                        &type_arguments[0],
-                        context,
-                        visited,
-                        local_used,
-                        external_refs,
-                        steps,
-                        budget,
-                    );
-                }
-
-                if self.has_type_symbol(symbol_name) {
-                    return self.follow_local_symbol_precise(
-                        symbol_name,
-                        context,
-                        visited,
-                        local_used,
-                        external_refs,
-                        steps,
-                        budget,
-                    );
-                }
-
-                true
-            }
-            TypeExpr::IndexedAccess { .. } => {
-                let Some((base_expr, route)) = self.extract_indexed_access_route(expr) else {
-                    return true;
-                };
-                self.follow_routed_expr(
-                    base_expr,
-                    route,
-                    visited,
-                    local_used,
-                    external_refs,
-                    steps,
-                    budget,
-                )
-            }
-            TypeExpr::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
-            } => {
-                for inner in [check, extends, true_type, false_type] {
-                    if !self.collect_whole_route_refs(
-                        inner,
-                        context,
-                        visited,
-                        local_used,
-                        external_refs,
-                        steps,
-                        budget,
-                    ) {
-                        return false;
-                    }
-                }
-                true
-            }
-            TypeExpr::Mapped {
-                source,
-                value,
-                name_type,
-                ..
-            } => {
-                if !self.collect_whole_route_refs(
-                    source,
-                    context,
-                    visited,
-                    local_used,
-                    external_refs,
-                    steps,
-                    budget,
-                ) {
-                    return false;
-                }
-                if !self.collect_whole_route_refs(
-                    value,
-                    context,
-                    visited,
-                    local_used,
-                    external_refs,
-                    steps,
-                    budget,
-                ) {
-                    return false;
-                }
-                if let Some(name_type) = name_type.as_deref() {
-                    return self.collect_whole_route_refs(
-                        name_type,
-                        context,
-                        visited,
-                        local_used,
-                        external_refs,
-                        steps,
-                        budget,
-                    );
-                }
-                true
-            }
-            TypeExpr::TemplateLiteral { expressions, .. } => {
-                for inner in expressions.iter() {
-                    if !self.collect_whole_route_refs(
-                        inner,
-                        context,
-                        visited,
-                        local_used,
-                        external_refs,
-                        steps,
-                        budget,
-                    ) {
-                        return false;
-                    }
-                }
-                true
-            }
-            TypeExpr::TypeOf(value_ref) => {
-                if let Some(root) = value_ref.path.first() {
-                    if let Some(target) = self.import_targets.get(root.as_str()) {
-                        if matches!(
-                            context,
-                            WholeRouteContext::Root | WholeRouteContext::CallableParam
-                        ) {
-                            external_refs.add(ExternalSymbolRef {
-                                local_name: root.clone(),
-                                source_specifier: target.source_specifier.clone(),
-                                imported_name: target.imported_name.clone(),
-                                canonical_id: external_canonical(target),
-                                route: RouteDemand::Whole,
-                            });
-                        }
-                    }
-                }
-                true
-            }
-            // Mirrors the `Ref` arm's recursion into `type_arguments`. The
-            // `specifier`/`qualifier` are leaf strings naming the cross-file
-            // module path (not a local route symbol to follow), so only the
-            // nested type-argument exprs are walked for further refs.
-            //
-            // TODO(follow-up): the `specifier` names a cross-file module that
-            // `typeof import("X")` / `import("X").T` depends on, but it is NOT
-            // yet recorded as a cross-file dependency EDGE here — so a content
-            // edit to module "X" does not invalidate this file's read-set
-            // through the import-type path. The architect DEFERRED wiring this
-            // into the cross-file invalidation/read-set bucket; do NOT stuff the
-            // specifier into the local-ref accumulator as a fake local name — it
-            // needs its own dependency-edge channel.
-            TypeExpr::ImportType { type_arguments, .. } => {
-                for argument in type_arguments.iter() {
-                    if !self.collect_whole_route_refs(
-                        argument,
-                        context,
-                        visited,
-                        local_used,
-                        external_refs,
-                        steps,
-                        budget,
-                    ) {
-                        return false;
-                    }
-                }
-                true
-            }
-            TypeExpr::Primitive(_)
-            | TypeExpr::Literal(_)
-            | TypeExpr::TypeParameter(_)
-            | TypeExpr::Infer { .. }
-            | TypeExpr::RecursiveRef { .. }
-            // Synthetic carriers contribute no whole-route refs — they
-            // are intrinsic terminal leaves.
-            | TypeExpr::SyntheticSlotBinding(_)
-            | TypeExpr::Unknown { .. } => true,
-        }
+    fn route_facts(&self, name: &str) -> Option<verter_type_expr::facts::ShallowRouteFacts> {
+        self.state
+            .type_decl(name)
+            .map(|lowered| lowered.route_facts.clone())
     }
 
-    fn collect_whole_route_function_refs(
-        &self,
-        func: &verter_type_expr::FunctionExpr,
-        visited: &mut FxHashSet<String>,
-        local_used: &mut Vec<String>,
-        external_refs: &mut ExternalRefAccumulator,
-        steps: &mut u64,
-        budget: usize,
-    ) -> bool {
-        for param in &func.parameters {
-            if !self.collect_whole_route_refs(
-                &param.ty,
-                WholeRouteContext::CallableParam,
-                visited,
-                local_used,
-                external_refs,
-                steps,
-                budget,
-            ) {
-                return false;
-            }
-        }
-        for type_param in &func.type_parameters {
-            if let Some(constraint) = type_param.constraint.as_deref() {
-                if !self.collect_whole_route_refs(
-                    constraint,
-                    WholeRouteContext::CallableParam,
-                    visited,
-                    local_used,
-                    external_refs,
-                    steps,
-                    budget,
-                ) {
-                    return false;
-                }
-            }
-            if let Some(default) = type_param.default.as_deref() {
-                if !self.collect_whole_route_refs(
-                    default,
-                    WholeRouteContext::CallableParam,
-                    visited,
-                    local_used,
-                    external_refs,
-                    steps,
-                    budget,
-                ) {
-                    return false;
-                }
-            }
-        }
-        true
+    fn classified_deps(&self, name: &str) -> Option<verter_semantic::facts::ClassifiedRouteDeps> {
+        let deps = self.state.type_deps(name)?;
+        Some(verter_semantic::facts::ClassifiedRouteDeps {
+            local_deps: deps.local_deps.clone(),
+            external_deps: deps
+                .external_deps
+                .iter()
+                .map(external_ref_to_fact)
+                .collect(),
+        })
     }
 
-    fn follow_local_symbol_precise(
-        &self,
-        symbol_name: &str,
-        context: WholeRouteContext,
-        visited: &mut FxHashSet<String>,
-        local_used: &mut Vec<String>,
-        external_refs: &mut ExternalRefAccumulator,
-        steps: &mut u64,
-        budget: usize,
-    ) -> bool {
-        if !visited.insert(symbol_name.to_string()) {
-            return true;
-        }
-        *steps += 1;
-        if *steps as usize >= budget {
-            return false;
-        }
-        let Some(lowered) = self.type_decl(symbol_name) else {
-            return true;
-        };
-        local_used.push(symbol_name.to_string());
-        let lookup = lowered.body.lookup_object();
-        self.collect_whole_route_refs(
-            lookup.as_ref(),
-            context,
-            visited,
-            local_used,
-            external_refs,
-            steps,
-            budget,
-        )
+    fn is_import_local(&self, name: &str) -> bool {
+        self.state.import_locals.contains(name)
     }
 
-    fn follow_routed_expr(
-        &self,
-        expr: &TypeExpr,
-        route: RouteDemand,
-        visited: &mut FxHashSet<String>,
-        local_used: &mut Vec<String>,
-        external_refs: &mut ExternalRefAccumulator,
-        steps: &mut u64,
-        budget: usize,
-    ) -> bool {
-        match expr {
-            TypeExpr::Parenthesized(inner) => self.follow_routed_expr(
-                inner,
-                route,
-                visited,
-                local_used,
-                external_refs,
-                steps,
-                budget,
-            ),
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } if type_arguments.is_empty() => {
-                let symbol_name = name.as_ref();
-                if let Some(target) = self.import_targets.get(symbol_name) {
-                    external_refs.add(ExternalSymbolRef {
-                        local_name: symbol_name.to_string(),
-                        source_specifier: target.source_specifier.clone(),
-                        imported_name: target.imported_name.clone(),
-                        canonical_id: external_canonical(target),
-                        route,
-                    });
-                    return true;
-                }
-                if self.has_type_symbol(symbol_name) {
-                    match &route {
-                        RouteDemand::Whole => self.follow_local_symbol_precise(
-                            symbol_name,
-                            WholeRouteContext::Root,
-                            visited,
-                            local_used,
-                            external_refs,
-                            steps,
-                            budget,
-                        ),
-                        RouteDemand::MemberPath(path) => {
-                            let Some(lowered) = self.type_decl(symbol_name) else {
-                                return true;
-                            };
-                            let mut seed_names = Vec::new();
-                            let mut seed_external = ExternalRefAccumulator::default();
-                            let mut seen_symbols = FxHashSet::default();
-                            let lookup = lowered.body.lookup_object();
-                            let found_path = collect_member_path_seed_names(
-                                self,
-                                lookup.as_ref(),
-                                path,
-                                &mut seed_names,
-                                &mut seed_external,
-                                &mut seen_symbols,
-                            );
-                            if !found_path {
-                                return true;
-                            }
-                            for ext in seed_external.into_vec() {
-                                external_refs.add(ext);
-                            }
-                            for seed_name in seed_names {
-                                if let Some(target) = self.import_targets.get(seed_name.as_str()) {
-                                    external_refs.add(ExternalSymbolRef {
-                                        local_name: seed_name.clone(),
-                                        source_specifier: target.source_specifier.clone(),
-                                        imported_name: target.imported_name.clone(),
-                                        canonical_id: external_canonical(target),
-                                        route: RouteDemand::Whole,
-                                    });
-                                } else if self.has_type_symbol(seed_name.as_str())
-                                    && !self.follow_local_symbol_precise(
-                                        seed_name.as_str(),
-                                        WholeRouteContext::Root,
-                                        visited,
-                                        local_used,
-                                        external_refs,
-                                        steps,
-                                        budget,
-                                    )
-                                {
-                                    return false;
-                                }
-                            }
-                            true
-                        }
-                        RouteDemand::Pick(_) | RouteDemand::Omit(_) => {
-                            let closure = self.route_closure(symbol_name, &route, budget);
-                            if matches!(closure.status, LocalClosureStatus::BudgetExceeded) {
-                                return false;
-                            }
-                            for local_name in closure.local_symbols_used {
-                                if visited.insert(local_name.clone()) {
-                                    local_used.push(local_name);
-                                }
-                            }
-                            for ext in closure.unresolved_external {
-                                external_refs.add(ext);
-                            }
-                            true
-                        }
-                    }
-                } else {
-                    true
-                }
-            }
-            _ => true,
-        }
-    }
-
-    fn utility_route_for_ref(
+    fn import_route_target(
         &self,
         name: &str,
-        type_arguments: &[TypeExpr],
-    ) -> Option<RouteDemand> {
-        if type_arguments.len() != 2 {
-            return None;
+    ) -> Option<verter_type_expr::facts::ExternalRouteRefFact> {
+        let target = self.state.import_targets.get(name)?;
+        Some(verter_type_expr::facts::ExternalRouteRefFact {
+            local_name: name.to_string(),
+            source_specifier: target.source_specifier.clone(),
+            imported_name: target.imported_name.clone(),
+            canonical_id: external_canonical(target),
+            route: RouteDemand::Whole,
+        })
+    }
+
+    fn key_source_lookup(&self, name: &str) -> verter_semantic::facts::KeySourceLookup {
+        use verter_semantic::facts::KeySourceLookup;
+        use verter_type_expr::facts::KeySourceFact;
+
+        // Header-decidable without any body demand: a non-type-symbol alias
+        // enumerates to zero keys (the legacy non-symbol arm — the empty-keys
+        // fall-through applies downstream).
+        if !self.state.has_type_symbol(name) {
+            return KeySourceLookup::MissingTypeSymbol;
         }
-        let mut seen_locals = FxHashSet::default();
-        let keys =
-            self.extract_string_literal_keys_from_type_expr(&type_arguments[1], &mut seen_locals);
-        if keys.is_empty() {
-            return None;
+
+        // The ENGINE half of the key-source producer/dispatch split: a
+        // least-fixed-point fold over the same-file alias graph, one
+        // content-free `KeySourceFact` mint per visited declaration
+        // (`mint_key_source_fact` — the local, non-transitive producer over
+        // the lease-borrowed lowered body). Any unavailable hop POISONS the
+        // whole enumeration to `Unavailable` (fail closed — a partial key
+        // set is never handed out, so no torn result can reach a route or a
+        // cache); only a COMPLETED enumeration is sorted/deduped and
+        // returned. Every hop demands through the same lazy decl-body memo
+        // path `route_facts` rides (`type_decl` + lease-only transient
+        // re-borrow), so the fact rail observes exactly the declarations the
+        // enumeration consumed. The route-closure core never sees a
+        // declaration body — only this tri-state outcome.
+        let route_lens = self.state.decl_bodies().route_fact_lens();
+        let own_canonical =
+            verter_semantic::facts::RouteFactLens::own_canonical_id(route_lens.as_ref());
+        let mut visited = FxHashSet::default();
+        let mut keys: Vec<String> = Vec::new();
+        let mut pending = vec![name.to_string()];
+        visited.insert(name.to_string());
+        while let Some(current) = pending.pop() {
+            let Some(fact) = self.mint_key_source_fact(&current, route_lens.as_ref()) else {
+                return KeySourceLookup::Unavailable;
+            };
+            match fact {
+                // A non-finite surface contributes zero keys (distinct from
+                // an unavailable hop — the enumeration stays decided).
+                KeySourceFact::NoFiniteKeys => {}
+                KeySourceFact::LiteralAliasUnion { literals, aliases } => {
+                    keys.extend(literals.iter().cloned());
+                    for alias in aliases.iter() {
+                        // The producer anchors same-scope refs on the owning
+                        // file's canonical; any other hop is unresolvable
+                        // here — fail closed, never a fabricated key set.
+                        if alias.anchor.canonical_id != own_canonical {
+                            return KeySourceLookup::Unavailable;
+                        }
+                        let symbol = alias.anchor.symbol.as_ref();
+                        // A ref that names no file-scope TYPE symbol
+                        // enumerates to zero keys (the legacy guard arm).
+                        if !self.state.has_type_symbol(symbol) {
+                            continue;
+                        }
+                        if visited.insert(symbol.to_string()) {
+                            pending.push(symbol.to_string());
+                        }
+                    }
+                }
+            }
         }
-        match name {
-            "Pick" => Some(RouteDemand::Pick(keys)),
-            "Omit" => Some(RouteDemand::Omit(keys)),
+        keys.sort();
+        keys.dedup();
+        KeySourceLookup::Ready(keys)
+    }
+}
+
+impl SfsRouteFactProvider<'_> {
+    /// Mint the content-free key-source fact for ONE same-file alias hop:
+    /// demand the alias's lowered record through the memo demand cell first
+    /// (the same lazy path `route_facts` rides), then normalize the
+    /// lease-borrowed per-contributor authored bodies LOCALLY and
+    /// NON-TRANSITIVELY through the shared producer
+    /// (`produce_key_source_fact`). `None` = UNAVAILABLE: a header miss,
+    /// fatal parse, broken lease pin (`LeaseMiss`), or body-less re-borrow
+    /// (seeded memo — no retained authored source) leaves the enumeration
+    /// UNDECIDED, not empty — the caller fails closed so the empty-keys
+    /// fallback does NOT fire (under-production, never a wrong route).
+    fn mint_key_source_fact(
+        &self,
+        name: &str,
+        lens: &dyn verter_semantic::facts::RouteFactLens,
+    ) -> Option<verter_type_expr::facts::KeySourceFact> {
+        self.state.type_decl(name)?;
+        match self.state.decl_bodies().transient_type_bodies(name) {
+            crate::decl_body_memo::DemandOutcome::Ready(Some(bodies)) if !bodies.is_empty() => {
+                Some(verter_semantic::facts::produce_key_source_fact(
+                    bodies.as_ref(),
+                    lens,
+                ))
+            }
+            // The DISTINCT transient-body broken-lease pin: this wildcard
+            // collapse bypasses `into_option`, so mark the generalized
+            // non-cacheability rail on `LeaseMiss` (a genuine `Ready(None)` /
+            // body-less re-borrow stays an unmarked, cacheable undecided miss).
+            crate::decl_body_memo::DemandOutcome::LeaseMiss => {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+                );
+                None
+            }
             _ => None,
-        }
-    }
-
-    fn extract_string_literal_keys_from_type_expr(
-        &self,
-        expr: &TypeExpr,
-        seen_locals: &mut FxHashSet<String>,
-    ) -> Vec<String> {
-        match expr {
-            TypeExpr::Literal(verter_type_expr::LiteralValue::String(value)) => {
-                vec![value.clone()]
-            }
-            TypeExpr::Union(types) => {
-                let mut keys = Vec::new();
-                for inner in types.iter() {
-                    keys.extend(
-                        self.extract_string_literal_keys_from_type_expr(inner, seen_locals),
-                    );
-                }
-                keys.sort();
-                keys.dedup();
-                keys
-            }
-            TypeExpr::Parenthesized(inner) => {
-                self.extract_string_literal_keys_from_type_expr(inner, seen_locals)
-            }
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } if type_arguments.is_empty() && self.has_type_symbol(name.as_ref()) => {
-                if !seen_locals.insert(name.to_string()) {
-                    return Vec::new();
-                }
-                let keys = self
-                    .type_decl(name.as_ref())
-                    .map(|lowered| {
-                        let lookup = lowered.body.lookup_object();
-                        self.extract_string_literal_keys_from_type_expr(
-                            lookup.as_ref(),
-                            seen_locals,
-                        )
-                    })
-                    .unwrap_or_default();
-                seen_locals.remove(name.as_ref());
-                keys
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    fn extract_indexed_access_route<'a>(
-        &self,
-        expr: &'a TypeExpr,
-    ) -> Option<(&'a TypeExpr, RouteDemand)> {
-        let TypeExpr::IndexedAccess { object, index } = expr else {
-            return None;
-        };
-        let mut seen_locals = FxHashSet::default();
-        let keys = self.extract_string_literal_keys_from_type_expr(index, &mut seen_locals);
-        if keys.is_empty() {
-            return None;
-        }
-        let (base_expr, mut path) = self.extract_indexed_access_base(object.as_ref())?;
-        if keys.len() == 1 {
-            path.push(keys[0].clone());
-            Some((base_expr, RouteDemand::MemberPath(path)))
-        } else if path.is_empty() {
-            Some((base_expr, RouteDemand::Pick(keys)))
-        } else {
-            None
-        }
-    }
-
-    fn extract_indexed_access_base<'a>(
-        &self,
-        expr: &'a TypeExpr,
-    ) -> Option<(&'a TypeExpr, Vec<String>)> {
-        match expr {
-            TypeExpr::Parenthesized(inner) => self.extract_indexed_access_base(inner),
-            TypeExpr::IndexedAccess { .. } => {
-                let (base_expr, route) = self.extract_indexed_access_route(expr)?;
-                match route {
-                    RouteDemand::MemberPath(path) => Some((base_expr, path)),
-                    _ => None,
-                }
-            }
-            _ => Some((expr, Vec::new())),
         }
     }
 }
 
-fn collect_member_path_seed_names(
-    state: &ShallowFileState,
-    expr: &TypeExpr,
-    path: &[String],
-    seed_names: &mut Vec<String>,
-    seed_external: &mut ExternalRefAccumulator,
-    seen_symbols: &mut FxHashSet<String>,
-) -> bool {
-    if path.is_empty() {
-        collect_type_refs(expr, seed_names);
-        seed_names.sort();
-        seed_names.dedup();
-        return true;
+/// 1:1 field conversion: session `ExternalSymbolRef` → lower-crate
+/// `ExternalRouteRefFact` (the fact-closure boundary).
+fn external_ref_to_fact(ext: &ExternalSymbolRef) -> verter_type_expr::facts::ExternalRouteRefFact {
+    verter_type_expr::facts::ExternalRouteRefFact {
+        local_name: ext.local_name.clone(),
+        source_specifier: ext.source_specifier.clone(),
+        imported_name: ext.imported_name.clone(),
+        canonical_id: ext.canonical_id.clone(),
+        route: ext.route.clone(),
     }
+}
 
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } if type_arguments.is_empty() => {
-            let symbol_name = name.to_string();
-            if let Some(target) = state.import_targets.get(symbol_name.as_str()) {
-                seed_external.add(ExternalSymbolRef {
-                    local_name: symbol_name,
-                    source_specifier: target.source_specifier.clone(),
-                    imported_name: target.imported_name.clone(),
-                    canonical_id: external_canonical(target),
-                    route: RouteDemand::MemberPath(path.to_vec()),
-                });
-                return true;
+/// 1:1 field conversion: lower-crate `ExternalRouteRefFact` → session
+/// `ExternalSymbolRef`.
+fn external_fact_to_ref(fact: verter_type_expr::facts::ExternalRouteRefFact) -> ExternalSymbolRef {
+    ExternalSymbolRef {
+        local_name: fact.local_name,
+        source_specifier: fact.source_specifier,
+        imported_name: fact.imported_name,
+        canonical_id: fact.canonical_id,
+        route: fact.route,
+    }
+}
+
+/// Convert a shared fact-closure result to the session closure result
+/// (status arms map 1:1; external refs convert field-by-field).
+fn from_fact_closure(result: verter_semantic::facts::FactClosureResult) -> LocalClosureResult {
+    use verter_semantic::facts::FactClosureStatus;
+    LocalClosureResult {
+        status: match result.status {
+            FactClosureStatus::Resolved => LocalClosureStatus::Resolved,
+            FactClosureStatus::ResolvedWithExternalDeps => {
+                LocalClosureStatus::ResolvedWithExternalDeps
             }
-            if !seen_symbols.insert(symbol_name.clone()) {
-                return false;
+            FactClosureStatus::MissingLocalSymbol { name } => {
+                LocalClosureStatus::MissingLocalSymbol { name }
             }
-            let result = state
-                .type_decl(symbol_name.as_str())
-                .is_some_and(|lowered| {
-                    let lookup = lowered.body.lookup_object();
-                    collect_member_path_seed_names(
-                        state,
-                        lookup.as_ref(),
-                        path,
-                        seed_names,
-                        seed_external,
-                        seen_symbols,
-                    )
-                });
-            seen_symbols.remove(symbol_name.as_str());
-            result
-        }
-        TypeExpr::Parenthesized(inner) => collect_member_path_seed_names(
-            state,
-            inner,
-            path,
-            seed_names,
-            seed_external,
-            seen_symbols,
-        ),
-        _ => {
-            let Some(prop) = direct_object_property(expr, path[0].as_str()) else {
-                return false;
-            };
-            if path.len() == 1 {
-                collect_type_refs(&prop.ty, seed_names);
-                seed_names.sort();
-                seed_names.dedup();
-                true
-            } else {
-                collect_member_path_seed_names(
-                    state,
-                    &prop.ty,
-                    &path[1..],
-                    seed_names,
-                    seed_external,
-                    seen_symbols,
-                )
-            }
-        }
+            FactClosureStatus::BudgetExceeded => LocalClosureStatus::BudgetExceeded,
+        },
+        local_symbols_used: result.local_symbols_used,
+        unresolved_external: result
+            .unresolved_external
+            .into_iter()
+            .map(external_fact_to_ref)
+            .collect(),
+        steps: result.steps,
     }
 }
 
@@ -2604,74 +1839,6 @@ impl<'a> ShallowTypeView<'a> {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/// Extract per-member dependency names from direct object slices in the body.
-/// For each direct property, collects all type names referenced in that
-/// property's type annotation. Transparent intersections are flattened
-/// right-to-left so declaration-merged interfaces keep earlier members while
-/// later object slices win on duplicate names.
-pub(crate) fn extract_member_deps(body: &TypeExpr) -> FxHashMap<String, Vec<String>> {
-    let mut result = FxHashMap::default();
-    for prop in direct_object_properties(body) {
-        let mut refs = Vec::new();
-        collect_type_refs(&prop.ty, &mut refs);
-        if !refs.is_empty() {
-            result.insert(prop.name.clone(), refs);
-        }
-    }
-    result
-}
-
-fn direct_object_member_names(body: &TypeExpr) -> Option<Vec<String>> {
-    let names = direct_object_properties(body)
-        .into_iter()
-        .map(|prop| prop.name.clone())
-        .collect::<Vec<_>>();
-    (!names.is_empty()).then_some(names)
-}
-
-fn direct_object_property<'a>(
-    body: &'a TypeExpr,
-    name: &str,
-) -> Option<&'a verter_type_expr::ObjectProperty> {
-    direct_object_properties(body)
-        .into_iter()
-        .find(|prop| prop.name == name)
-}
-
-fn direct_object_properties(body: &TypeExpr) -> Vec<&verter_type_expr::ObjectProperty> {
-    let mut result = Vec::new();
-    let mut seen = FxHashSet::default();
-    collect_direct_object_properties(body, &mut result, &mut seen);
-    result
-}
-
-fn collect_direct_object_properties<'a>(
-    body: &'a TypeExpr,
-    out: &mut Vec<&'a verter_type_expr::ObjectProperty>,
-    seen: &mut FxHashSet<String>,
-) {
-    match body {
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                if let verter_type_expr::ObjectMember::Property(prop) = member {
-                    if seen.insert(prop.name.clone()) {
-                        out.push(prop);
-                    }
-                }
-            }
-        }
-        TypeExpr::Intersection(parts) => {
-            for part in parts.iter().rev() {
-                collect_direct_object_properties(part, out, seen);
-            }
-        }
-        TypeExpr::Parenthesized(inner) => {
-            collect_direct_object_properties(inner, out, seen);
-        }
-        _ => {}
-    }
-}
 
 /// Collect all named type references from a TypeExpr, non-recursively
 /// (only direct references, not transitive).
@@ -2883,66 +2050,11 @@ fn collect_typeof_roots_in_function(
 mod tests {
     use super::*;
     use verter_semantic::analysis::type_eval::ValueDeclKind;
-    use verter_semantic::analysis::type_eval_build::parse_and_build_env;
-
-    impl ShallowFileState {
-        /// Test-only builder for a SERVICE-backed [`ShallowFileState`] — the
-        /// production lazy-memo shape whose declaration-body lease can be broken
-        /// out-of-band (via [`crate::decl_body_memo::DeclBodyMemo::release_retained_snapshot_for_test`])
-        /// to exercise the fail-closed no-warm rails. Unlike [`Self::from_analysis`]
-        /// (a SEEDED memo, which can never lease-miss), this wires a live
-        /// [`crate::decl_lowering::DeclLoweringService`], so a broken retained-
-        /// snapshot pin surfaces the typed `LeaseMiss` outcome instead of a
-        /// genuine miss. `#[cfg(test)]`-only: the sole callers are the
-        /// broken-lease no-warm regressions in `prepared_decl_tests.rs`.
-        pub(crate) fn service_backed_for_test(source: &str) -> Arc<Self> {
-            let allocator = oxc_allocator::Allocator::default();
-            let parsed =
-                oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
-            assert!(
-                !parsed.panicked,
-                "service_backed_for_test fixture must parse"
-            );
-            let header_index = Arc::new(
-                verter_semantic::analysis::decl_headers::build_decl_header_index(
-                    &parsed.program,
-                    source,
-                ),
-            );
-            let analysis = Arc::new(
-                verter_compiler::utils::oxc::script::type_surface::analyze_external_type_source(
-                    source, &allocator,
-                ),
-            );
-            let eval_source: Arc<str> = Arc::from(source);
-            let memo = crate::decl_body_memo::DeclBodyMemo::new(
-                crate::decl_lowering::SnapshotKey {
-                    canonical: Arc::from("/ws/fixture.ts"),
-                    whole_hash: [7u8; 16],
-                    parse_env_hash: [0u8; 16],
-                },
-                Arc::clone(&eval_source),
-                eval_source,
-                None,
-                oxc_span::SourceType::ts(),
-                Arc::new(crate::decl_lowering::DeclLoweringService::new()),
-                header_index,
-                Arc::new(crate::types::MetaProvenance::default()),
-                None,
-            );
-            Arc::new(Self::from_analysis_with_resolver(
-                Hash16::default(),
-                analysis,
-                Arc::new(memo),
-                &NullResolver,
-            ))
-        }
-    }
 
     fn make_analysis(source: &str) -> Arc<AnalyzedExternalTypeSource> {
         let alloc = oxc_allocator::Allocator::new();
         Arc::new(
-            verter_compiler::utils::oxc::script::type_surface::analyze_external_type_source(
+            verter_parser::utils::oxc::script::type_surface::analyze_external_type_source(
                 source, &alloc,
             ),
         )
@@ -2951,7 +2063,7 @@ mod tests {
     #[test]
     fn simple_interface_produces_local_export() {
         let analysis = make_analysis("export interface Props { label: string }");
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
 
         assert!(
             state.export_target("Props").is_some(),
@@ -2972,7 +2084,7 @@ mod tests {
     #[test]
     fn reexport_produces_reexport_target() {
         let analysis = make_analysis(r#"export { Foo } from "./inner""#);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
 
         match state.export_target("Foo") {
             Some(ExportTarget::Reexport {
@@ -2991,7 +2103,7 @@ mod tests {
     fn wildcard_reexport_captured_in_order() {
         let analysis =
             make_analysis("export * from './a'\nexport * from './b'\nexport * from './c'\n");
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
 
         let specifiers: Vec<&str> = state
             .wildcard_reexports
@@ -3013,7 +2125,7 @@ mod tests {
     #[test]
     fn analysis_only_has_no_symbols() {
         let analysis = make_analysis("export interface Props { label: string }\n");
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
 
         // Symbols require eval_env
         assert!(
@@ -3030,9 +2142,7 @@ mod tests {
 export interface Props { label: string }
 export const defaults: Props = { label: 'ok' }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         assert!(
             state.symbol("Props").is_some(),
@@ -3045,7 +2155,10 @@ export const defaults: Props = { label: 'ok' }
         let defaults_body = state
             .value_decl("defaults")
             .expect("value body should lower on demand");
-        assert!(defaults_body.type_annotation.is_some());
+        assert!(!matches!(
+            defaults_body.type_annotation.classification,
+            verter_type_expr::facts::ValueAnnotationClass::Absent
+        ));
     }
 
     /// A type that references a JSDoc-`@typedef` name must classify that
@@ -3060,9 +2173,7 @@ import { Imported } from './dep'
 /** @typedef {Imported} Alias */
 export type X = Alias
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         // `Alias` is a shallow type symbol (header index) even though the
         // analyzer never tracked it.
@@ -3088,9 +2199,7 @@ export type Button = {
   slots: keyof typeof theme
 }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
         let button = state.type_deps("Button").expect("Button should exist");
 
         assert!(
@@ -3112,7 +2221,7 @@ export { Foo } from './direct'
 export * from './wildcard'
 "#,
         );
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
 
         // Foo should resolve through the direct reexport, not the wildcard
         match state.export_target("Foo") {
@@ -3146,7 +2255,7 @@ import type { Beta as B } from './b'
 export interface Props extends Alpha { beta: B }
 "#,
         );
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
 
         assert!(state.is_import_local("Alpha"));
         let alpha_target = state.import_target("Alpha").unwrap();
@@ -3167,7 +2276,7 @@ import Foo from './dep'
 export { Foo as Bar }
 "#,
         );
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
 
         assert!(state.is_import_local("Foo"));
         assert!(
@@ -3199,7 +2308,7 @@ export default class Props {
 }
 "#,
         );
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
 
         assert!(
             state.export_target("Props").is_none(),
@@ -3224,9 +2333,7 @@ export interface Props { label: string }
 export const defaults: Props = { label: 'ok' }
 export function makeProps(): Props { return defaults }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         let defaults = state
             .value_symbol("defaults")
@@ -3235,7 +2342,10 @@ export function makeProps(): Props { return defaults }
         let defaults_body = state
             .value_decl("defaults")
             .expect("defaults value body should lower on demand");
-        assert!(defaults_body.type_annotation.is_some());
+        assert!(!matches!(
+            defaults_body.type_annotation.classification,
+            verter_type_expr::facts::ValueAnnotationClass::Absent
+        ));
         assert!(defaults_body.object_shape.is_some());
 
         let make_props = state
@@ -3255,9 +2365,7 @@ import type { Shared } from './shared'
 export interface Props extends Shared { label: string }
 export const defaults: Props = { label: 'ok' }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
         let view = state.type_view();
 
         assert!(view.export_target("Props").is_some());
@@ -3276,7 +2384,7 @@ export interface Props { label: string }
 export const defaults: Props = { label: 'ok' }
 "#;
         let analysis = make_analysis(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
+        let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), analysis);
 
         match state.export_target("defaults") {
             Some(ExportTarget::Local { symbol_name }) => assert_eq!(symbol_name, "defaults"),
@@ -3294,9 +2402,7 @@ export const defaults: Props = { label: 'ok' }
 export interface Props { x: string }
 export interface Props { y: number }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         let symbol = state.symbol("Props").expect("Props symbol should exist");
         assert_eq!(
@@ -3310,7 +2416,7 @@ export interface Props { y: number }
             body.body.is_merged(),
             "two `interface Props` declarations must produce a Merged body"
         );
-        let members = body.body.merged_member_names();
+        let members = &symbol.member_names;
         assert!(
             members.contains(&"x".to_string()),
             "merged Props must expose `x`; got {members:?}"
@@ -3328,9 +2434,7 @@ import type { Inner } from "./inner"
 type Local = { x: number }
 export interface Props { child: Inner; data: Local }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         let dep_edges = {
             let mut edges = FxHashMap::default();
@@ -3383,34 +2487,42 @@ export interface CheckboxProps extends ButtonHTMLAttributes {
 
 type AppConfig = { theme: string }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         let sym = state.type_decl("CheckboxProps").expect("CheckboxProps");
 
-        // member_deps should exist for 'ui', 'indicator', but not 'color' (primitive)
+        // Member dependency edges should exist for 'ui', 'indicator', but not
+        // 'color' (primitive).
+        let member_edge = |member: &str| {
+            sym.route_facts
+                .member_dependency_edges
+                .iter()
+                .find(|edge| edge.member == member)
+        };
         assert!(
-            sym.member_deps.contains_key("ui"),
-            "ui should have member deps, member_deps: {:?}",
-            sym.member_deps
+            member_edge("ui").is_some(),
+            "ui should have member deps, edges: {:?}",
+            sym.route_facts.member_dependency_edges
         );
         assert!(
-            sym.member_deps.contains_key("indicator"),
+            member_edge("indicator").is_some(),
             "indicator should have member deps"
         );
         // 'color' is just 'string' — no refs
         assert!(
-            !sym.member_deps.contains_key("color"),
+            member_edge("color").is_none(),
             "color (primitive string) should have no deps"
         );
 
         // Verify 'ui' deps reference AppConfig
-        let ui_deps = &sym.member_deps["ui"];
+        let ui_edge = member_edge("ui").expect("ui edge");
         assert!(
-            ui_deps.contains(&"AppConfig".to_string()),
+            ui_edge.depends_on.iter().any(|dep| matches!(
+                dep,
+                verter_type_expr::facts::RouteDependencyRefFact::Local { name, .. } if name == "AppConfig"
+            )),
             "ui deps should reference AppConfig, got {:?}",
-            ui_deps
+            ui_edge.depends_on
         );
     }
 
@@ -3425,13 +2537,14 @@ export interface Props {
   b: Beta
 }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         // Route::Member("a") should only include Alpha deps, not Beta
-        let closure_a =
-            state.route_closure("Props", &RouteDemand::MemberPath(vec!["a".into()]), 500);
+        let closure_a = state.route_closure(
+            "Props",
+            &RouteDemand::member_path(vec!["a".to_string()]),
+            500,
+        );
         let ext_names: Vec<&str> = closure_a
             .unresolved_external
             .iter()
@@ -3472,9 +2585,7 @@ export interface Props {
   avatar?: AvatarProps
 }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         let closure = state.route_closure("Props", &RouteDemand::Whole, 500);
         assert_eq!(
@@ -3489,7 +2600,7 @@ export interface Props {
         );
         assert_eq!(
             closure.unresolved_external[0].route,
-            RouteDemand::MemberPath(vec!["name".into()]),
+            RouteDemand::member_path(vec!["name".to_string()]),
             "whole-route imported closure should preserve the member tail on the external route"
         );
     }
@@ -3507,14 +2618,12 @@ export interface Props {
   z: C
 }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         // Pick(['x', 'z']) should include A and C but not B
         let closure = state.route_closure(
             "Props",
-            &RouteDemand::Pick(vec!["x".into(), "z".into()]),
+            &RouteDemand::pick(vec!["x".to_string(), "z".to_string()]),
             500,
         );
         let ext_names: Vec<&str> = closure
@@ -3543,11 +2652,9 @@ export interface Props {
   z: C
 }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
-        let closure = state.route_closure("Props", &RouteDemand::Omit(vec!["y".into()]), 500);
+        let closure = state.route_closure("Props", &RouteDemand::omit(vec!["y".to_string()]), 500);
         let ext_names: Vec<&str> = closure
             .unresolved_external
             .iter()
@@ -3556,6 +2663,136 @@ export interface Props {
         assert!(ext_names.contains(&"A"));
         assert!(ext_names.contains(&"C"));
         assert!(!ext_names.contains(&"B"));
+    }
+
+    /// Discriminator for the deferred key-source hand-off
+    /// ([`SfsRouteFactProvider::key_source_lookup`]): a deferred Pick key
+    /// alias (`type K = 'a' | 'b'; type D = Pick<Imported, K>`) enumerates
+    /// through the content-free key-source fact minted off the lazy
+    /// decl-body machinery, so the whole-route closure over `D` emits the
+    /// EXTERNAL route for `Imported` carrying the CONCRETE keys
+    /// `Pick(["a", "b"])`.
+    ///
+    /// With a broken hand-off (`key_source_lookup → Unavailable`) the
+    /// deferred edge contributes nothing — the closure emits NO external
+    /// route at all, so this test fails RED there.
+    #[test]
+    fn route_closure_deferred_pick_key_alias_derefs_to_literal_union_keys() {
+        let source = r#"
+import type { Imported } from './dep'
+
+type K = 'a' | 'b'
+export type D = Pick<Imported, K>
+"#;
+        let state = ShallowFileState::service_backed_for_test(source);
+
+        let closure = state.route_closure("D", &RouteDemand::Whole, 500);
+        assert_eq!(
+            closure
+                .unresolved_external
+                .iter()
+                .map(|e| (e.imported_name.as_str(), e.route.clone()))
+                .collect::<Vec<_>>(),
+            vec![("Imported", RouteDemand::pick(["a", "b"]))],
+            "the deferred key alias `K` must deref to its literal union keys \
+             through the lazy decl-body machinery and route the imported Pick \
+             base with the concrete keys, got {:?}",
+            closure.unresolved_external
+        );
+        assert!(
+            matches!(closure.status, LocalClosureStatus::ResolvedWithExternalDeps),
+            "the deferred edge resolves with the external base outstanding, \
+             got {:?}",
+            closure.status
+        );
+    }
+
+    /// Discriminator for the ENGINE-side alias follow (the dispatch half of
+    /// the key-source producer/dispatch split): a CHAINED key alias
+    /// (`type K = K2; type K2 = 'a' | 'b'`) resolves through the
+    /// least-fixed-point fold over per-decl content-free key-source facts —
+    /// the producer mints `K`'s fact with an UNRESOLVED alias ref to `K2`,
+    /// and the session dispatch follows it. With the alias follow neutered
+    /// (the ref arm not pushed), `K` enumerates to zero literal keys and the
+    /// concrete `Pick(["a", "b"])` route never materializes — this test
+    /// fails RED there.
+    #[test]
+    fn route_closure_deferred_pick_key_alias_chain_follows_through_engine_dispatch() {
+        let source = r#"
+import type { Imported } from './dep'
+
+type K = K2
+type K2 = 'a' | 'b'
+export type D = Pick<Imported, K>
+"#;
+        let state = ShallowFileState::service_backed_for_test(source);
+
+        let closure = state.route_closure("D", &RouteDemand::Whole, 500);
+        assert_eq!(
+            closure
+                .unresolved_external
+                .iter()
+                .map(|e| (e.imported_name.as_str(), e.route.clone()))
+                .collect::<Vec<_>>(),
+            vec![("Imported", RouteDemand::pick(["a", "b"]))],
+            "the chained key alias must resolve through the engine-side \
+             alias-graph fold to the terminal literal union, got {:?}",
+            closure.unresolved_external
+        );
+    }
+
+    /// Fail-closed CONTROL for the deferred key-source hand-off: a key
+    /// alias whose body genuinely cannot be resolved (a broken decl-body
+    /// lease pin) is UNAVAILABLE — the deferred edge contributes NOTHING
+    /// and in particular must NOT fire the userland `Pick` empty-keys
+    /// fallback (which would emit `Imported2` whole — a route the authoring
+    /// walk never produced).
+    #[test]
+    fn route_closure_deferred_key_source_lease_miss_fails_closed_without_fallback() {
+        let source = r#"
+import type { Imported } from './dep'
+import type { Imported2 } from './b'
+
+type K = 'a' | 'b'
+type Pick = Imported2
+export type D = Pick<Imported, K>
+"#;
+        let state = ShallowFileState::service_backed_for_test(source);
+
+        // Under a LIVE lease the keys resolve and the imported base routes
+        // path-precisely (positive control: the hand-off genuinely works on
+        // this fixture before the lease breaks).
+        let live = state.route_closure("D", &RouteDemand::Whole, 500);
+        assert_eq!(
+            live.unresolved_external
+                .iter()
+                .map(|e| (e.imported_name.as_str(), e.route.clone()))
+                .collect::<Vec<_>>(),
+            vec![("Imported", RouteDemand::pick(["a", "b"]))],
+            "live-lease control: the deferred keys resolve, got {:?}",
+            live.unresolved_external
+        );
+
+        // Break the retained snapshot out-of-band: the next transient body
+        // borrow lease-misses, so the key source is genuinely UNAVAILABLE.
+        state.decl_bodies().release_retained_snapshot_for_test();
+
+        let broken = state.route_closure("D", &RouteDemand::Whole, 500);
+        assert!(
+            broken
+                .unresolved_external
+                .iter()
+                .all(|e| e.imported_name != "Imported2"),
+            "an unavailable key source must NOT fire the userland Pick \
+             empty-keys fallback (wrong route), got {:?}",
+            broken.unresolved_external
+        );
+        assert_eq!(
+            broken.unresolved_external,
+            Vec::new(),
+            "an unavailable key source fails closed: the deferred edge \
+             contributes nothing (under-production, never a fabricated route)"
+        );
     }
 
     #[test]
@@ -3568,12 +2805,13 @@ export interface Props {
   color: string
 }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
-        let closure =
-            state.route_closure("Props", &RouteDemand::MemberPath(vec!["color".into()]), 500);
+        let closure = state.route_closure(
+            "Props",
+            &RouteDemand::member_path(vec!["color".to_string()]),
+            500,
+        );
         assert!(closure.unresolved_external.is_empty());
         assert_eq!(closure.local_symbols_used, vec!["Props".to_string()]);
     }
@@ -3593,13 +2831,11 @@ export interface Props {
   variants: Variants
 }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         let closure = state.route_closure(
             "Props",
-            &RouteDemand::MemberPath(vec!["variants".into(), "color".into()]),
+            &RouteDemand::member_path(vec!["variants".to_string(), "color".to_string()]),
             500,
         );
         let ext_names: Vec<&str> = closure
@@ -3630,13 +2866,11 @@ export interface Props {
   secondary: Beta
 }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         let closure = state.route_closure(
             "Props",
-            &RouteDemand::MemberPath(vec!["primary".into(), "label".into()]),
+            &RouteDemand::member_path(vec!["primary".to_string(), "label".to_string()]),
             500,
         );
         let ext_names: Vec<&str> = closure
@@ -3652,7 +2886,7 @@ export interface Props {
         );
         assert_eq!(
             closure.unresolved_external[0].route,
-            RouteDemand::MemberPath(vec!["label".into()]),
+            RouteDemand::member_path(vec!["label".to_string()]),
             "imported companion should keep only the remaining member path"
         );
     }
@@ -3672,13 +2906,11 @@ export interface Props {
   variants: Variants
 }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         let closure = state.route_closure(
             "Props",
-            &RouteDemand::MemberPath(vec!["variants".into(), "missing".into()]),
+            &RouteDemand::member_path(vec!["variants".to_string(), "missing".to_string()]),
             500,
         );
         let ext_names: Vec<&str> = closure
@@ -3720,12 +2952,9 @@ export { Foo } from './bar'
 export * from './types'
 export interface Props { child: Foo }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis_with_resolver_seeded(
-            Hash16::default(),
-            analysis,
-            Some(&env),
+        let (state, _) = ShallowFileState::service_backed_with_provenance_and_resolver_for_test(
+            "/ws/fixture.ts",
+            source,
             &TestResolver,
         );
 
@@ -3818,13 +3047,11 @@ export interface Props extends Base {
   own: string
 }
 "#;
-        let analysis = make_analysis(source);
-        let env = parse_and_build_env(source);
-        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let state = ShallowFileState::service_backed_for_test(source);
 
         let closure = state.route_closure(
             "Props",
-            &RouteDemand::MemberPath(vec!["inherited".into()]),
+            &RouteDemand::member_path(vec!["inherited".to_string()]),
             500,
         );
         let ext_names: Vec<&str> = closure

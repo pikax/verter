@@ -171,7 +171,7 @@ fn tuple_element_ty(e: &verter_type_expr::TupleElement) -> Option<&TypeExpr> {
 }
 
 /// Names in the registry's `name` set, plus every `Ref` reached
-/// through any registry entry's `type_expr`.
+/// through any registry entry's demanded type source.
 /// Collect every string-literal payload reachable within a
 /// `TypeExpr`. Used by the primitive-keyspace admission guards
 /// to detect that a discriminator literal (the marker carried by
@@ -269,11 +269,61 @@ fn collect_numeric_literals(expr: &TypeExpr, out: &mut Vec<f64>) {
     }
 }
 
-fn reachable_refs_in_registry(registry: &[ResolvedTypeAnalysis]) -> Vec<String> {
+/// Demand-materialize a registry entry's published source through the
+/// ONE shared dispatch — the explicit consumer resolution step for a
+/// shallow-by-default publication.
+fn demand_registry_entry_type(
+    project: &Arc<MetaProject>,
+    owner: &str,
+    entry: &ResolvedTypeAnalysis,
+) -> TypeExpr {
+    verter_session::test_only::semantic_source_probe::demand_type_expr(
+        project.host(),
+        owner,
+        entry.type_source.present().expect("present source"),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "registry entry `{}`'s published source must demand-materialize",
+            entry.name
+        )
+    })
+}
+
+/// Demand-materialize the named prop's published type source through
+/// the ONE shared dispatch.
+fn demand_prop_type(
+    project: &Arc<MetaProject>,
+    owner: &str,
+    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+) -> TypeExpr {
+    let source = prop
+        .type_source
+        .present()
+        .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name));
+    verter_session::test_only::semantic_source_probe::demand_type_expr(
+        project.host(),
+        owner,
+        source,
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "prop `{}`'s published source must demand-materialize",
+            prop.name
+        )
+    })
+}
+
+fn reachable_refs_in_registry(
+    project: &Arc<MetaProject>,
+    owner: &str,
+    registry: &[ResolvedTypeAnalysis],
+) -> Vec<String> {
     let mut all = Vec::new();
     for entry in registry {
         all.push(entry.name.clone());
-        collect_ref_names(&entry.type_expr, &mut all);
+        let resolved = demand_registry_entry_type(project, owner, entry);
+        collect_ref_names(&resolved, &mut all);
     }
     all
 }
@@ -337,7 +387,7 @@ defineProps<{
     );
 
     let meta = meta_for(&project, "/Comp.vue");
-    let refs = reachable_refs_in_registry(&meta.type_registry);
+    let refs = reachable_refs_in_registry(&project, "/Comp.vue", &meta.type_registry);
 
     // Discriminating gate: `UnreachedT` is reachable ONLY through
     // `Carrier.baz` which the Pick excludes. Path-precise projection
@@ -391,7 +441,7 @@ defineProps<{
     );
 
     let meta = meta_for(&project, "/Comp.vue");
-    let refs = reachable_refs_in_registry(&meta.type_registry);
+    let refs = reachable_refs_in_registry(&project, "/Comp.vue", &meta.type_registry);
 
     // The check is closed (`string extends string`) → only `OnString`
     // is reached. `OnOther` must NOT be in the registry/refs.
@@ -449,7 +499,7 @@ defineProps<{
     );
 
     let meta = meta_for(&project, "/Comp.vue");
-    let refs = reachable_refs_in_registry(&meta.type_registry);
+    let refs = reachable_refs_in_registry(&project, "/Comp.vue", &meta.type_registry);
 
     // Only KeyA is on the projected path. KeyB and KeyC are siblings
     // in `Bag` but NOT walked — they must stay shallow / absent.
@@ -485,6 +535,9 @@ defineProps<{
 fn per_key_route_builds_bounded() {
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    // A cacheability scope carrier: the shared-cache funnels require a probe, and
+    // a probe can only be minted by opening a real tracer scope.
+    let host = VerterHost::new_standalone(Default::default());
     let db = RouteDb::new();
     let view = PermissiveStoreView;
     let cold_resolver_calls = AtomicU32::new(0);
@@ -507,10 +560,13 @@ fn per_key_route_builds_bounded() {
 
     // First resolve: cold path, runs the resolver closure exactly once
     // AND bumps the cold counter.
-    let first = db.get_or_resolve_route_observing_facts(rk("o.ts", "X"), &view, || {
-        cold_resolver_calls.fetch_add(1, Ordering::Relaxed);
-        Some((route.clone(), vec![fact.clone()]))
-    });
+    let first = verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+        db.get_or_resolve_route_observing_facts(rk("o.ts", "X"), &view, probe, || {
+            cold_resolver_calls.fetch_add(1, Ordering::Relaxed);
+            Some((route.clone(), vec![fact.clone()]))
+        })
+    })
+    .0;
     assert!(first.is_some(), "first resolve must succeed");
     let cold_after_first = db.route_cold_fact_bubble_emissions();
     assert_eq!(
@@ -529,12 +585,15 @@ fn per_key_route_builds_bounded() {
     // in `get_or_resolve_route_observing_facts` short-circuits at
     // `get_route_with_facts`.
     for i in 0..3 {
-        let warm = db.get_or_resolve_route_observing_facts(rk("o.ts", "X"), &view, || {
-            // This closure MUST NOT run on warm hits. If it does, the
-            // warm-collapse contract is broken.
-            cold_resolver_calls.fetch_add(1, Ordering::Relaxed);
-            Some((route.clone(), vec![fact.clone()]))
-        });
+        let warm = verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+            db.get_or_resolve_route_observing_facts(rk("o.ts", "X"), &view, probe, || {
+                // This closure MUST NOT run on warm hits. If it does, the
+                // warm-collapse contract is broken.
+                cold_resolver_calls.fetch_add(1, Ordering::Relaxed);
+                Some((route.clone(), vec![fact.clone()]))
+            })
+        })
+        .0;
         assert!(warm.is_some(), "warm hit {} must succeed", i);
     }
 
@@ -719,7 +778,7 @@ defineProps<{
     );
 
     let meta = meta_for(&project, "/Comp.vue");
-    let refs = reachable_refs_in_registry(&meta.type_registry);
+    let refs = reachable_refs_in_registry(&project, "/Comp.vue", &meta.type_registry);
 
     // Discriminating: pre-fix the walker substituted K = "nonexistent"
     // into `mapper.value_expr = Marker`, evaluating to `Marker` and
@@ -793,7 +852,7 @@ defineProps<{
     );
 
     let meta = meta_for(&project, "/Comp.vue");
-    let refs = reachable_refs_in_registry(&meta.type_registry);
+    let refs = reachable_refs_in_registry(&project, "/Comp.vue", &meta.type_registry);
 
     // Discriminating: if the admission check over-rejected the
     // admitted key `a`, the walker would fall back to the coarse
@@ -881,10 +940,11 @@ defineProps<{
         .iter()
         .find(|p| p.name == "resolved")
         .expect("resolved prop must be present");
+    let resolved_ty = demand_prop_type(&project, "/Comp.vue", resolved_prop);
     let mut tags: Vec<String> = Vec::new();
-    collect_string_literals(&resolved_prop.type_expr, &mut tags);
+    collect_string_literals(&resolved_ty, &mut tags);
     let is_wrapped_ref = matches!(
-        &resolved_prop.type_expr,
+        &resolved_ty,
         verter_type_expr::TypeExpr::Ref { name, type_arguments }
             if name.as_ref() == "Wrapped" && type_arguments.is_empty()
     );
@@ -893,8 +953,7 @@ defineProps<{
         "guard: {{ [K in string]: Wrapped }}['foo'] MUST resolve to Wrapped (string \
          primitive key domain admits any string-literal segment) — either the \
          `Wrapped` reference carrier or its materialised body. \
-         type_expr: {:#?}",
-        resolved_prop.type_expr,
+         type: {resolved_ty:#?}",
     );
 }
 
@@ -956,14 +1015,14 @@ defineProps<{
         .iter()
         .find(|p| p.name == "mismatched")
         .expect("mismatched prop must be present");
+    let mismatched_ty = demand_prop_type(&project, "/Comp.vue", mismatched_prop);
     let mut tags: Vec<String> = Vec::new();
-    collect_string_literals(&mismatched_prop.type_expr, &mut tags);
+    collect_string_literals(&mismatched_ty, &mut tags);
     assert!(
         !tags.iter().any(|t| t == "must-not-leak-on-domain-mismatch"),
         "guard: {{ [K in number]: Wrapped }}['foo'] MUST NOT publish Wrapped \
          (number key domain rejects string-literal segments). \
-         type_expr: {:#?}",
-        mismatched_prop.type_expr,
+         type: {mismatched_ty:#?}",
     );
 }
 
@@ -1041,11 +1100,12 @@ defineProps<{
         .iter()
         .find(|p| p.name == "numericIdentity")
         .expect("numericIdentity prop must be present");
+    let prop_ty = demand_prop_type(&project, "/Comp.vue", prop);
 
     let mut string_lits: Vec<String> = Vec::new();
-    collect_string_literals(&prop.type_expr, &mut string_lits);
+    collect_string_literals(&prop_ty, &mut string_lits);
     let mut number_lits: Vec<f64> = Vec::new();
-    collect_numeric_literals(&prop.type_expr, &mut number_lits);
+    collect_numeric_literals(&prop_ty, &mut number_lits);
 
     // Pre-G4.3 discrimination: the string-rendered "1" appears as
     // a `LiteralValue::String("1")` because the narrowing forced
@@ -1056,15 +1116,13 @@ defineProps<{
         number_lits.iter().any(|n| (*n - 1.0).abs() < f64::EPSILON),
         "guard: {{ [K in number]: K }}[1] MUST publish a numeric literal 1 (LiteralValue::Number), \
          not a string literal \"1\" (LiteralValue::String). \
-         type_expr: {:#?}",
-        prop.type_expr,
+         type: {prop_ty:#?}",
     );
     assert!(
         !string_lits.iter().any(|s| s == "1"),
         "guard: {{ [K in number]: K }}[1] MUST NOT publish the string literal \"1\" — \
          the numeric segment kind must be preserved through Mapped narrowing. \
-         type_expr: {:#?}",
-        prop.type_expr,
+         type: {prop_ty:#?}",
     );
 }
 
@@ -1165,9 +1223,10 @@ defineProps<{
         .iter()
         .find(|p| p.name == "numericIdentityViaHelper")
         .expect("numericIdentityViaHelper prop must be present");
+    let prop_ty = demand_prop_type(&project, "/Comp.vue", prop);
 
     let mut number_lits: Vec<f64> = Vec::new();
-    collect_numeric_literals(&prop.type_expr, &mut number_lits);
+    collect_numeric_literals(&prop_ty, &mut number_lits);
 
     // Characterisation: published numeric literal is exactly 1.0
     // (within f64::EPSILON). Any future refactor that funnels
@@ -1180,8 +1239,7 @@ defineProps<{
          Convention unification — every `IndexKey::Number` producer stores integer \
          convention; every consumer recovers via `*n as f64`. A 5e-324 here would \
          indicate a regression to the pre-G4.4 mixed-convention pipeline. \
-         type_expr: {:#?}",
-        prop.type_expr,
+         type: {prop_ty:#?}",
     );
     // Negative: no denormal numeric literal appears anywhere in
     // the published surface. `f64::from_bits(1u64)` ≈ 5e-324 is
@@ -1191,8 +1249,7 @@ defineProps<{
         "guard G4.4: the published numeric surface MUST NOT contain a denormal \
          (e.g. 5e-324 from `f64::from_bits(1u64)`) — that would indicate a \
          consumer is decoding an integer-convention `IndexKey::Number` as a \
-         bit-pattern. type_expr: {:#?}",
-        prop.type_expr,
+         bit-pattern. type: {prop_ty:#?}",
     );
 }
 
@@ -1251,16 +1308,16 @@ defineProps<{
         .iter()
         .find(|p| p.name == "seven")
         .expect("seven prop must be present");
+    let prop_ty = demand_prop_type(&project, "/Comp.vue", prop);
 
     let mut number_lits: Vec<f64> = Vec::new();
-    collect_numeric_literals(&prop.type_expr, &mut number_lits);
+    collect_numeric_literals(&prop_ty, &mut number_lits);
 
     assert!(
         number_lits.iter().any(|n| (*n - 7.0).abs() < f64::EPSILON),
         "guard G4.4: NumberIdentity[7] MUST publish the numeric literal 7.0. \
          Any non-7.0 value indicates the producer/consumer conventions \
-         disagree on `IndexKey::Number`. type_expr: {:#?}",
-        prop.type_expr,
+         disagree on `IndexKey::Number`. type: {prop_ty:#?}",
     );
     // Pre-G4.4 bit-pattern decoder of the integer-convention 7
     // would yield `f64::from_bits(7u64)` ≈ 3.5e-323. Negative
@@ -1269,8 +1326,7 @@ defineProps<{
         !number_lits.iter().any(|n| *n != 0.0 && n.abs() < 1e-300),
         "guard G4.4: the published numeric surface MUST NOT contain a denormal. \
          A non-zero sub-1e-300 value here would indicate a producer/consumer \
-         convention mismatch (e.g. `f64::from_bits(7u64)`). type_expr: {:#?}",
-        prop.type_expr,
+         convention mismatch (e.g. `f64::from_bits(7u64)`). type: {prop_ty:#?}",
     );
 }
 
@@ -1347,9 +1403,10 @@ defineProps<{
         .iter()
         .find(|p| p.name == "oneAndAHalf")
         .expect("oneAndAHalf prop must be present");
+    let prop_ty = demand_prop_type(&project, "/Comp.vue", prop);
 
     let mut number_lits: Vec<f64> = Vec::new();
-    collect_numeric_literals(&prop.type_expr, &mut number_lits);
+    collect_numeric_literals(&prop_ty, &mut number_lits);
 
     // Discriminating positive: 1.5 appears as a numeric literal in
     // the published surface. Pre-G4.5 the Mapped narrowing fell
@@ -1363,8 +1420,7 @@ defineProps<{
          for the non-integer numeric path segment — the producer emitted \
          `IndexKey::TypeNode(node)` (because 1.5 fails the bounded \
          integer-convention admission), and the walker's `IndexKey::TypeNode(_)` arm dropped \
-         the literal recovery. type_expr: {:#?}",
-        prop.type_expr,
+         the literal recovery. type: {prop_ty:#?}",
     );
     // Negative: no integer truncation (1.0) leaked through. A 1.0
     // here would indicate a regression where the walker recovered
@@ -1375,7 +1431,6 @@ defineProps<{
         "guard G4.5: the published numeric surface MUST NOT contain `1.0` \
          (an integer truncation of 1.5). A 1.0 here would indicate the \
          f64 literal recovery path was bypassed in favour of an i64-cast \
-         path that loses the fractional component. type_expr: {:#?}",
-        prop.type_expr,
+         path that loses the fractional component. type: {prop_ty:#?}",
     );
 }

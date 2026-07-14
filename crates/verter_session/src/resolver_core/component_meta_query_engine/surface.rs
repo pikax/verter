@@ -2,7 +2,7 @@
 //! arc cache-key constructors used by `ComponentMetaQueryEngine`.
 //!
 //! Free functions (not engine methods) that operate on
-//! `TypeExpr` / `ProjectedSurface` values produced by the engine and
+//! `TypeExpr` / [`SurfaceView`] values produced by the engine and
 //! dispatch layers; no engine-state dependencies beyond a borrowed
 //! `VerterHost` reference.
 //!
@@ -12,7 +12,6 @@
 //! parent-private (no visibility relaxation).
 
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, ProjectedSurface};
 use verter_type_expr::TypeExpr;
 
 use super::route_admission::{
@@ -297,6 +296,18 @@ pub(crate) fn project_class_a_terminal_node(
         QueryResult::Value(node) => node,
         QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
     };
+    // A `BareRef` carrier SURVIVING the `Published(Expanded)` demand is a
+    // genuine unresolved route/declaration — this sink IS the resolving
+    // demand point, so the class-A projection FAILS here exactly as the
+    // pre-carrier `Opaque(Miss)` terminal did. (`DeclRef` /
+    // `InstantiationRef` identity carriers are NOT in this class — they
+    // name a resolved declaration.)
+    if crate::project_semantic_dispatch::node_data_for(ctx, result_node)
+        .as_deref()
+        .is_some_and(|data| data.bare_ref_head().is_some())
+    {
+        return None;
+    }
     // Facts-only gate — reuses the dispatch above; no structural key interned.
     let witness = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
     admit_expanded_surface(&witness)
@@ -328,67 +339,40 @@ pub(crate) fn project_class_a_published(
     materialize_route_projection_node(ctx, &node)
 }
 
-/// Engine-THREADED variant of [`project_class_a_published`]: resolve the
-/// Class-A decision through the node sibling using the CALLER's engine (so
-/// engine-local re-export / prepared-decl resolution state persists across
-/// callsites — the registry structural materialiser threads one engine across
-/// every leaf), decide the object-surface fact off the PRODUCING node, then
-/// materialise the accepted route node ONCE at the surface sink. Returns the
-/// materialised `TypeExpr` paired with that node-domain object-surface fact, so
-/// the registry materialiser never re-lowers the materialised value to recover
-/// it. The node→`TypeExpr` materialisation stays owner-confined here.
-pub(crate) fn project_class_a_published_threaded(
-    engine: &mut super::ComponentMetaQueryEngine<'_>,
-    scope_canonical_id: &str,
-    expr: &TypeExpr,
-) -> Option<(TypeExpr, bool)> {
-    let ctx = engine.ctx;
-    let node = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
-        ctx,
-        Some(engine),
-        scope_canonical_id,
-        expr,
-    )?;
-    let explicit_object_surface =
-        super::node_materialize::component_meta_registry_node_has_explicit_object_surface(
-            ctx,
-            node.node(),
-        );
-    let type_expr = materialize_route_projection_node(ctx, &node)?;
-    Some((type_expr, explicit_object_surface))
-}
-
-pub(crate) fn projected_surface_from_semantic_node(
+/// Resolve a root node to its one-level `Object` [`SurfaceView`], following
+/// `Alias` identity hops (cycle-guarded).
+///
+/// Compound roots (`A | B`, `A & B` / heritage overlay, `Foo<Bar>`) carry no
+/// single `Object` surface on the post-`Published(Expanded)` instantiated
+/// node, and that node can collapse a generic heritage / `Omit` carrier arm
+/// to `Opaque(Miss)`. So this projector returns `None` for them; the seam
+/// (`dispatch_projected_surface_with_node`) composes the compound root via
+/// [`compound_root_surface_view_via_dispatch`] driven from the decl anchor
+/// (carrier intact).
+pub(super) fn surface_view_from_semantic_node(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
-) -> Option<ProjectedSurface> {
+) -> Option<SurfaceView> {
     let mut active = FxHashSet::default();
-    projected_surface_from_semantic_node_inner(ctx, node, &mut active)
+    surface_view_from_semantic_node_inner(ctx, node, &mut active)
 }
 
-fn projected_surface_from_semantic_node_inner(
+fn surface_view_from_semantic_node_inner(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
-) -> Option<ProjectedSurface> {
+) -> Option<SurfaceView> {
     let data = ctx.dispatch_node_data(node)?;
     match data.as_ref() {
         SemanticNodeData::Alias(target) => {
             if !active.insert(node) {
                 return None;
             }
-            let result = projected_surface_from_semantic_node_inner(ctx, *target, active);
+            let result = surface_view_from_semantic_node_inner(ctx, *target, active);
             active.remove(&node);
             result
         }
-        SemanticNodeData::Object(surface) => Some(surface_view_to_projected_surface(ctx, surface)),
-        // Compound roots (`A | B`, `A & B` / heritage overlay, `Foo<Bar>`)
-        // carry no single `Object` surface on the post-`Published(Expanded)`
-        // instantiated node, and that node can collapse a generic heritage /
-        // `Omit` carrier arm to `Opaque(Miss)`. So this projector returns
-        // `None` here; the seam (`dispatch_projected_surface_with_node`) composes
-        // the compound root via `projected_compound_root_surface_via_dispatch`
-        // driven from the decl anchor (carrier intact).
+        SemanticNodeData::Object(surface) => Some(surface.clone()),
         _ => None,
     }
 }
@@ -397,8 +381,8 @@ fn projected_surface_from_semantic_node_inner(
 /// `Intersection` / `InstantiationRef`) through the shared empty-path
 /// Shallow surface walker: drives `ProjectPath { base: node, path: [],
 /// macro_object_surface(Shallow, Structural) }` via
-/// `resolve_typeinfo_surface_view`, then reconstructs the terminal
-/// `SurfaceView` into a `ProjectedSurface`.
+/// `resolve_typeinfo_surface_view_with_node` and returns the terminal
+/// [`SurfaceView`] directly — no materialisation.
 ///
 /// `node` is the decl-anchor base the seam supplies — NOT the
 /// post-`Published(Expanded)` instantiated root, which can collapse a
@@ -408,16 +392,16 @@ fn projected_surface_from_semantic_node_inner(
 /// resolves no `Object` terminal OR the composed surface is empty (an empty
 /// surface is never a COMPLETE compound-root projection).
 ///
-/// Returns the composed `ProjectedSurface` PAIRED with the terminal `Object`
+/// Returns the composed [`SurfaceView`] PAIRED with the terminal `Object`
 /// NODE the walker read it from. That node IS the composed surface, so the
 /// Whole-route publication gate folds its node-domain materializedness over
 /// THAT node — never over the carrier-intact `node` decl anchor, whose own
 /// raise keeps heritage / import carriers unresolved (materialized) and would
 /// admit a partial composed surface the surface-materialization filter rejects.
-pub(super) fn projected_compound_root_surface_via_dispatch(
+pub(super) fn compound_root_surface_view_via_dispatch(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
-) -> Option<(ProjectedSurface, SemanticNodeId)> {
+) -> Option<(SurfaceView, SemanticNodeId)> {
     use crate::semantic_query::{
         ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
     };
@@ -429,106 +413,207 @@ pub(super) fn projected_compound_root_surface_via_dispatch(
             SurfaceProvenanceContext::Structural,
         ),
     )?;
-    let projected = surface_view_to_projected_surface(ctx, &surface);
-    if projected_surface_is_empty(&projected) {
+    if surface_view_is_empty(&surface) {
         return None;
     }
-    Some((projected, surface_node))
+    Some((surface, surface_node))
 }
 
-pub(crate) fn surface_view_to_projected_surface(
+/// A surface with no members, no call/construct signatures, and no index
+/// signature carries nothing to publish (never a COMPLETE compound-root
+/// projection). Node-domain — no materialisation feeds this decision.
+pub(super) fn surface_view_is_empty(surface: &SurfaceView) -> bool {
+    surface.members.is_empty()
+        && surface.call_signatures.is_empty()
+        && surface.construct_signatures.is_empty()
+        && !surface.has_index_signature
+}
+
+/// TERMINAL registry publication sink: materialise a one-level [`SurfaceView`]
+/// into the published registry `TypeExpr` ONCE, through the sealed
+/// [`MetaQuerySurfaceOutputCap`]. Every member value / call signature /
+/// construct signature / index-signature key+value node is minted exactly here
+/// — the produced `TypeExpr` is a terminal OUTPUT value only, never a semantic
+/// carrier (the registry object-surface decision reads
+/// [`super::node_materialize::component_meta_registry_node_has_explicit_object_surface`]
+/// off the producing NODE, never this value).
+///
+/// Shape rules (span- and visibility-lossless):
+/// - `None` for an empty surface (no members / signatures / index signature);
+/// - a surface that is ONLY a single call signature publishes that signature's
+///   materialised value directly (the callable unwrap);
+/// - otherwise an `Object` whose members reconstruct via `with_visibility`
+///   (NOT `with_spans`, which defaults `Public`) so a non-public class member
+///   survives with its true accessibility, whose signatures re-emit their OXC
+///   spans, and whose index signatures re-emit their declared `[k: K]: V`
+///   shape — plus the synthetic open placeholder when the surface is
+///   GENUINELY OPEN (`has_index_signature` with no concrete payload);
+/// - a member value that does not materialise publishes the
+///   `UnrepresentableSurfaceMember` sentinel in its slot (position-preserving,
+///   never a dropped member).
+pub(super) fn surface_view_to_registry_type_expr(
     ctx: &dyn ResolverContext,
     surface: &SurfaceView,
-) -> ProjectedSurface {
+) -> Option<TypeExpr> {
+    use std::sync::Arc;
+    use verter_type_expr::{
+        FunctionExpr, IndexSignature, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
+        PrimitiveName,
+    };
+
     let dispatch = ctx.dispatch();
     // Mint the surface-projector output capability (constructor visible only
     // within `crate::resolver_core::component_meta_query_engine::surface`):
-    // this projector is a true publication sink, so it materializes graph
-    // nodes into sealed output carriers and unwraps them via the capability.
+    // this is a true publication sink, so it materializes graph nodes into
+    // sealed output carriers and unwraps them via the capability.
     let cap = MetaQuerySurfaceOutputCap::new(&dispatch);
-    let members = surface
-        .members
-        .iter()
-        .map(|member| ProjectedMember {
-            name: member.name.as_ref().to_string(),
-            ty: cap
-                .materialize_output_type_expr(member.value)
-                .map(|raised| raised.into_type_expr(&cap))
-                .unwrap_or(TypeExpr::Unknown {
-                    raw: semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
-                }),
-            optional: member.optional,
-            readonly: member.readonly,
-            is_method: member.is_method,
-            // Carry the graph `SurfaceMember`'s declared accessibility verbatim
-            // so the SurfaceView -> ProjectedMember -> TypeExpr round-trip is
-            // visibility-lossless: a non-public class member stays non-public
-            // through the reconstruction (`projected_surface_to_type_expr`).
-            visibility: member.visibility,
-            declared_in_macro_type_arg: member.declared_in_macro_type_arg.get(),
-            // Graph `SurfaceMember` carries the real OXC declaration-site spans
-            // (stamped during shallow lowering) AND the member's declaration
-            // file; carry both verbatim so the reconstruction re-emits the spans
-            // paired with the correct file (a cross-file surface's members keep
-            // their own declaring file, not the projection scope).
-            spans: member.spans,
-            declaration_origin: member.declaration_origin.clone(),
-        })
-        .collect();
-    let call_signatures = surface
+    let materialize = |node: SemanticNodeId| {
+        cap.materialize_output_type_expr(node)
+            .map(|raised| raised.into_type_expr(&cap))
+    };
+
+    // Signatures materialise up front (a signature node that does not
+    // materialise contributes nothing), so the empty / callable-unwrap checks
+    // below see the published signature set.
+    let call_signatures: Vec<TypeExpr> = surface
         .call_signatures
         .iter()
-        .filter_map(|signature| {
-            cap.materialize_output_type_expr(*signature)
-                .map(|raised| raised.into_type_expr(&cap))
-        })
+        .filter_map(|signature| materialize(*signature))
         .collect();
-    let construct_signatures = surface
+    let construct_signatures: Vec<TypeExpr> = surface
         .construct_signatures
         .iter()
-        .filter_map(|signature| {
-            cap.materialize_output_type_expr(*signature)
-                .map(|raised| raised.into_type_expr(&cap))
-        })
+        .filter_map(|signature| materialize(*signature))
         .collect();
-    // Graph `SurfaceView::index_signatures` carries the declared key/value
-    // nodes + real OXC spans + the declaration file. Raise the key/value nodes
-    // to `TypeExpr` and carry the spans/origin verbatim so the reconstruction
-    // re-emits a real `[k: K]: V` rather than the synthetic open placeholder.
-    let index_signatures = surface
-        .index_signatures
-        .iter()
-        .map(|signature| {
-            use verter_semantic::analysis::type_solver::query_engine::ProjectedIndexSignature;
-            ProjectedIndexSignature {
-                key_name: "key".to_string(),
-                key_type: cap
-                    .materialize_output_type_expr(signature.key_type)
-                    .map(|raised| raised.into_type_expr(&cap))
-                    .unwrap_or(TypeExpr::Unknown {
-                        raw: semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
-                    }),
-                value_type: cap
-                    .materialize_output_type_expr(signature.value_type)
-                    .map(|raised| raised.into_type_expr(&cap))
-                    .unwrap_or(TypeExpr::Unknown {
-                        raw: semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
-                    }),
-                readonly: signature.readonly,
-                spans: signature.spans,
-                declaration_origin: signature.declaration_origin.clone(),
-            }
-        })
-        .collect();
-    ProjectedSurface {
-        members,
-        call_signatures,
-        construct_signatures,
-        index_signatures,
-        has_index_signature: surface.has_index_signature,
+
+    if surface.members.is_empty()
+        && call_signatures.is_empty()
+        && construct_signatures.is_empty()
+        && !surface.has_index_signature
+    {
+        return None;
     }
+
+    if surface.members.is_empty()
+        && construct_signatures.is_empty()
+        && !surface.has_index_signature
+        && call_signatures.len() == 1
+    {
+        return call_signatures.into_iter().next();
+    }
+
+    // Graph `SurfaceMember` carries the real OXC declaration-site spans
+    // (stamped during shallow lowering); re-emit them verbatim onto the
+    // reconstructed IR member so the projection path is span-lossless.
+    let mut properties = surface
+        .members
+        .iter()
+        .map(|member| {
+            let ty = materialize(member.value).unwrap_or(TypeExpr::Unknown {
+                raw: semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
+            });
+            // Reconstruct via `with_visibility` (NOT `with_spans`, which defaults
+            // Public) so a non-public class member projected onto the surface
+            // survives the reconstruction with its true accessibility — both a
+            // leak-prevention and a `native_props` fidelity requirement.
+            if member.is_method {
+                if let TypeExpr::Function(function) = &ty {
+                    return ObjectMember::Method(MethodSignature::with_visibility(
+                        member.name.as_ref().to_string(),
+                        (**function).clone(),
+                        member.optional,
+                        member.visibility,
+                        member.spans,
+                    ));
+                }
+            }
+            ObjectMember::Property(ObjectProperty::with_visibility(
+                member.name.as_ref().to_string(),
+                ty,
+                member.optional,
+                member.readonly,
+                member.visibility,
+                member.spans,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    for signature in &call_signatures {
+        if let TypeExpr::Function(function) = signature {
+            // Preserve the call-signature function shape's OXC spans verbatim.
+            properties.push(ObjectMember::CallSignature(FunctionExpr::with_spans(
+                function.parameters.clone(),
+                function.return_type.clone(),
+                function.type_parameters.clone(),
+                function.spans,
+            )));
+        }
+    }
+
+    for signature in &construct_signatures {
+        if let TypeExpr::Function(function) = signature {
+            properties.push(ObjectMember::ConstructSignature(FunctionExpr::with_spans(
+                function.parameters.clone(),
+                function.return_type.clone(),
+                function.type_parameters.clone(),
+                function.spans,
+            )));
+        }
+    }
+
+    // A REAL `[k: K]: V` index signature (sourced from an OXC declaration site)
+    // re-emits its declared key/value shape AND its real spans — losslessly.
+    for signature in surface.index_signatures.iter() {
+        let key_type = materialize(signature.key_type).unwrap_or(TypeExpr::Unknown {
+            raw: semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
+        });
+        let value_type = materialize(signature.value_type).unwrap_or(TypeExpr::Unknown {
+            raw: semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
+        });
+        properties.push(ObjectMember::IndexSignature(IndexSignature::with_spans(
+            "key".to_string(),
+            key_type,
+            value_type,
+            signature.readonly,
+            signature.spans,
+        )));
+    }
+
+    // Emit the synthetic open-surface placeholder ONLY when the surface is
+    // GENUINELY OPEN — `has_index_signature` is set but no concrete signature
+    // payload was carried (e.g. a mapped/inferred open surface). This placeholder
+    // has no single OXC declaration site, so its spans stay `None` by design
+    // (not a deferral): there is no source range to anchor to.
+    if surface.has_index_signature && surface.index_signatures.is_empty() {
+        properties.push(ObjectMember::IndexSignature(IndexSignature::synthetic(
+            "key".to_string(),
+            TypeExpr::Primitive(PrimitiveName::String),
+            TypeExpr::Unknown {
+                raw: "projectedOpenSurface".to_string(),
+            },
+            false,
+        )));
+    }
+
+    Some(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
 }
 
+/// Raw `TypeExpr`-domain materialisation recogniser — a DISPLAY/PARITY oracle,
+/// NOT a production semantic gate. Production semantic decisions read the
+/// node-domain `materialized` fact off the shape-engine fold
+/// (`node_raised_shape_facts_with_dispatch` /
+/// `node_contains_semantic_miss_with_dispatch`); this `TypeExpr` walk survives
+/// only as the raised-string recogniser the parity suite compares those node
+/// facts against (see `raised_shape_tests`) and as the raw classification
+/// backing the test-only [`type_expr_root_is_unmaterialized_sentinel`].
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "TypeExpr parity oracle for the node-domain materialized fact; \
+                  production gates read the shape-engine node facts"
+    )
+)]
 pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::Unknown { raw } => {
@@ -536,8 +621,7 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
             // materialisation algebra (exact matches) or by
             // `semantic_query_error_raw` (prefix matches for parameterised
             // errors) must round-trip to
-            // "not materialised" so the dispatch-first path falls back
-            // to `owner_engine` for fuller expansion. The sentinel set
+            // "not materialised". The sentinel set
             // is owned by the shared `raise_sentinel` classifier so the
             // node-domain raised-shape projection and this `TypeExpr`
             // recogniser can never disagree on the spelling.
@@ -642,9 +726,23 @@ pub(super) fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
 }
 
 /// Detects sentinel tokens emitted by the `shape_engine::fold_node`
-/// materialisation algebra when dispatch cannot materialise a node.
-/// Dispatch-first paths fall back to `owner_engine` when the sentinel is
-/// present — transitional until §5.8 retires the owner_engine bridge.
+/// materialisation algebra when dispatch cannot materialise a node — the
+/// whole-tree `TypeExpr`-domain miss walk.
+///
+/// DISPLAY/PARITY oracle only, NOT a production semantic gate: production
+/// reads the node-domain whole-tree miss fact
+/// (`node_contains_semantic_miss_with_dispatch`, the typed
+/// `!RaisedShapeFacts.materialized` projection) off the shape-engine fold.
+/// This `TypeExpr` predicate survives as the oracle the raised-shape parity
+/// suite compares that node fact against.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "TypeExpr parity oracle for the node-domain whole-tree miss fact; \
+                  production gates read node_contains_semantic_miss_with_dispatch"
+    )
+)]
 pub(crate) fn type_expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
     !dispatch_route_expr_is_materialized(expr)
 }
@@ -743,288 +841,7 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
         QueryError::RaiseMiss => "<raise miss>".to_string(),
         QueryError::UnrepresentableSurface => SEMANTIC_OBJECT_SURFACE.to_string(),
         QueryError::UnrepresentableSurfaceMember => SEMANTIC_SURFACE_MEMBER.to_string(),
-        QueryError::VueMacroElementsPlaceholder => "VueMacroElements".to_string(),
     }
-}
-
-pub(super) fn projected_surface_is_empty(surface: &ProjectedSurface) -> bool {
-    surface.members.is_empty()
-        && surface.call_signatures.is_empty()
-        && surface.construct_signatures.is_empty()
-        && !surface.has_index_signature
-}
-
-pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Option<TypeExpr> {
-    use std::sync::Arc;
-    use verter_type_expr::{
-        FunctionExpr, IndexSignature, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
-        PrimitiveName,
-    };
-
-    if surface.members.is_empty()
-        && surface.call_signatures.is_empty()
-        && surface.construct_signatures.is_empty()
-        && !surface.has_index_signature
-    {
-        return None;
-    }
-
-    if surface.members.is_empty()
-        && surface.construct_signatures.is_empty()
-        && !surface.has_index_signature
-        && surface.call_signatures.len() == 1
-    {
-        return surface.call_signatures.first().cloned();
-    }
-
-    // `ProjectedMember` carries the real OXC declaration-site spans
-    // (`member.spans`), threaded from the graph `SurfaceMember` / `PreparedMember`
-    // / IR source the surface was projected from. Re-emit them verbatim onto the
-    // reconstructed IR member so the projection path is span-lossless end-to-end.
-    let mut properties = surface
-        .members
-        .iter()
-        .map(|member| {
-            // Reconstruct via `with_visibility` (NOT `with_spans`, which defaults
-            // Public) so a non-public class member projected onto the surface
-            // survives the reconstruction with its true accessibility — both a
-            // leak-prevention and a `native_props` fidelity requirement.
-            if member.is_method {
-                if let TypeExpr::Function(function) = &member.ty {
-                    return ObjectMember::Method(MethodSignature::with_visibility(
-                        member.name.clone(),
-                        (**function).clone(),
-                        member.optional,
-                        member.visibility,
-                        member.spans,
-                    ));
-                }
-            }
-
-            ObjectMember::Property(ObjectProperty::with_visibility(
-                member.name.clone(),
-                member.ty.clone(),
-                member.optional,
-                member.readonly,
-                member.visibility,
-                member.spans,
-            ))
-        })
-        .collect::<Vec<_>>();
-
-    for signature in &surface.call_signatures {
-        if let TypeExpr::Function(function) = signature {
-            // Preserve the call-signature function shape's OXC spans verbatim.
-            properties.push(ObjectMember::CallSignature(FunctionExpr::with_spans(
-                function.parameters.clone(),
-                function.return_type.clone(),
-                function.type_parameters.clone(),
-                function.spans,
-            )));
-        }
-    }
-
-    for signature in &surface.construct_signatures {
-        if let TypeExpr::Function(function) = signature {
-            properties.push(ObjectMember::ConstructSignature(FunctionExpr::with_spans(
-                function.parameters.clone(),
-                function.return_type.clone(),
-                function.type_parameters.clone(),
-                function.spans,
-            )));
-        }
-    }
-
-    // A REAL `[k: K]: V` index signature (sourced from an OXC declaration site,
-    // carried structurally on `ProjectedSurface::index_signatures`) re-emits its
-    // declared key/value shape AND its real spans — losslessly. Reverting this
-    // to the synthetic-`None` placeholder (the pre-fix state) drops both the
-    // shape and the spans.
-    for signature in &surface.index_signatures {
-        properties.push(ObjectMember::IndexSignature(IndexSignature::with_spans(
-            signature.key_name.clone(),
-            signature.key_type.clone(),
-            signature.value_type.clone(),
-            signature.readonly,
-            signature.spans,
-        )));
-    }
-
-    // Emit the synthetic open-surface placeholder ONLY when the surface is
-    // GENUINELY OPEN — `has_index_signature` is set but no concrete signature
-    // payload was carried (e.g. a mapped/inferred open surface). This placeholder
-    // has no single OXC declaration site, so its spans stay `None` by design
-    // (not a deferral): there is no source range to anchor to.
-    if surface.has_index_signature && surface.index_signatures.is_empty() {
-        properties.push(ObjectMember::IndexSignature(IndexSignature::synthetic(
-            "key".to_string(),
-            TypeExpr::Primitive(PrimitiveName::String),
-            TypeExpr::Unknown {
-                raw: "projectedOpenSurface".to_string(),
-            },
-            false,
-        )));
-    }
-
-    Some(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
-}
-
-pub(crate) fn projected_surface_to_expanded_shape(
-    surface: &ProjectedSurface,
-) -> verter_semantic::analysis::type_expand::ExpandedObjectShape {
-    use verter_semantic::analysis::type_expand::{
-        ExpandedCallSignature, ExpandedIndexSignature, ExpandedObjectShape, ExpandedParameter,
-        ExpandedProperty,
-    };
-    use verter_type_expr::PrimitiveName;
-
-    let properties = surface
-        .members
-        .iter()
-        .map(|member| ExpandedProperty {
-            name: member.name.clone(),
-            ty: member.ty.clone(),
-            optional: member.optional,
-            readonly: member.readonly,
-            // Carry the projected member's declared accessibility verbatim so a
-            // downstream key-filtering derivation (`Pick`/`Omit` over the
-            // shape) can re-apply the public-keyspace gate.
-            visibility: member.visibility,
-            declared_in_macro_type_arg: member.declared_in_macro_type_arg,
-        })
-        .collect::<Vec<_>>();
-
-    let mut call_signatures = surface
-        .call_signatures
-        .iter()
-        .chain(surface.construct_signatures.iter())
-        .filter_map(|signature| match signature {
-            TypeExpr::Function(function) => Some(ExpandedCallSignature {
-                parameters: function
-                    .parameters
-                    .iter()
-                    .map(|parameter| ExpandedParameter {
-                        name: parameter.name.clone().unwrap_or_default(),
-                        ty: parameter.ty.clone(),
-                        optional: parameter.optional,
-                        rest: parameter.rest,
-                    })
-                    .collect(),
-                return_type: function
-                    .return_type
-                    .as_ref()
-                    .map(|return_type| return_type.as_ref().clone())
-                    .unwrap_or(TypeExpr::Primitive(PrimitiveName::Void)),
-                type_parameters: function.type_parameters.clone(),
-            }),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    let mut index_signatures = Vec::new();
-    // Concrete declared index signatures preserve their real key/value shape
-    // (the expand layer does not track spans).
-    for signature in &surface.index_signatures {
-        index_signatures.push(ExpandedIndexSignature {
-            key_type: signature.key_type.clone(),
-            value_type: signature.value_type.clone(),
-            readonly: signature.readonly,
-        });
-    }
-    // Genuinely-open surface (flag set, no concrete payload) → open placeholder.
-    if surface.has_index_signature && surface.index_signatures.is_empty() {
-        index_signatures.push(ExpandedIndexSignature {
-            key_type: TypeExpr::Primitive(PrimitiveName::String),
-            value_type: TypeExpr::Unknown {
-                raw: "projectedOpenSurface".to_string(),
-            },
-            readonly: false,
-        });
-    }
-
-    // Preserve previous round-trip behavior: call and construct signatures
-    // both become call signatures after object-shape extraction.
-    if !surface.call_signatures.is_empty() && !surface.construct_signatures.is_empty() {
-        call_signatures.shrink_to_fit();
-    }
-
-    ExpandedObjectShape {
-        properties,
-        index_signatures,
-        call_signatures,
-    }
-}
-
-/// Build an [`ExpandedObjectShape`](verter_semantic::analysis::type_expand::ExpandedObjectShape)
-/// DTO directly from a one-level [`SurfaceView`], materialising ONLY the
-/// terminal leaves (member value types, call/construct-signature parameters +
-/// returns, index-signature key/value leaves) into the DTO — NEVER the whole
-/// object `TypeExpr`, and NEVER `type_expr_to_object_shape`. The composition is
-/// [`surface_view_to_projected_surface`] (the registered surface sink that mints
-/// each leaf ONCE) + [`projected_surface_to_expanded_shape`] (a pure
-/// `ProjectedSurface -> ExpandedObjectShape` map: no mint, no decision). The
-/// produced shape carries the FULL surface (properties + call signatures + index
-/// signatures); each CONSUMER applies its own has-surface gate (the direct-utility
-/// `shape_has_surface` ignores index signatures, the registry general arm counts
-/// them) — this builder makes no decision, it is a terminal DTO writer.
-///
-/// The projected shape preserves every member facet the `SurfaceView` carries —
-/// per-member optionality (a member a union arm omits stays optional) and call
-/// signatures (a single-call-signature surface keeps its call signature). See
-/// [`project_admitted_route_node_to_expanded_object_shape`] for the full object-
-/// shape projection invariant.
-pub(super) fn surface_view_to_expanded_shape(
-    ctx: &dyn ResolverContext,
-    surface: &SurfaceView,
-) -> verter_semantic::analysis::type_expand::ExpandedObjectShape {
-    let projected = surface_view_to_projected_surface(ctx, surface);
-    projected_surface_to_expanded_shape(&projected)
-}
-
-/// Project an admitted route / surface NODE to its
-/// [`ExpandedObjectShape`](verter_semantic::analysis::type_expand::ExpandedObjectShape)
-/// in NODE DOMAIN: resolve the node's one-level [`SurfaceView`] through the
-/// shared empty-path Shallow surface walker
-/// ([`ProjectSemanticDispatch::resolve_typeinfo_surface_view`](crate::project_semantic_dispatch::ProjectSemanticDispatch::resolve_typeinfo_surface_view)),
-/// then build the DTO via [`surface_view_to_expanded_shape`] — materialising only
-/// the surface's terminal leaves, never the whole object `TypeExpr`.
-///
-/// For a compound root (`A | B`, `A & B`, a `Pick<…>` / `Omit<…>` carrier) the
-/// walker COMPOSES the one-level surface off the admitted node — which IS the
-/// composed surface, NOT the carrier-intact decl anchor that would collapse a
-/// generic heritage / `Omit` arm to `Opaque(Miss)` (the admitted route node is
-/// projected `Navigate`-mode, carriers intact, so it re-resolves cleanly). The
-/// `MacroObjectSurface` demand selects union-OF-members for a union root.
-///
-/// INVARIANT — object-shape projection semantics this function upholds:
-/// - A member present in only SOME arms of a union root is published
-///   OPTIONAL. A non-object arm (e.g. a bare primitive) contributes no
-///   members, so any member that a legal arm omits is widened to optional —
-///   the surface is the union OF members across every arm, and a member
-///   absent from one arm cannot be guaranteed present.
-/// - A single-call-signature object surface PRESERVES its call signature in
-///   the projected shape: a callable member surface is published with its
-///   call signature intact, never collapsed away into an empty shape.
-///
-/// Takes the SEALED [`AdmittedRouteProjectionNode`] carrier (never a raw forgeable
-/// `SemanticNodeId`), so no node crosses the query-engine boundary. `None` when
-/// the node resolves to no one-level object surface.
-pub(crate) fn project_admitted_route_node_to_expanded_object_shape(
-    ctx: &dyn ResolverContext,
-    node: &AdmittedRouteProjectionNode,
-) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    use crate::semantic_query::{
-        ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
-    };
-
-    let surface = ctx.dispatch().resolve_typeinfo_surface_view(
-        node.node(),
-        ProjectionReductionContext::macro_object_surface(
-            ProjectionMode::Shallow,
-            SurfaceProvenanceContext::Structural,
-        ),
-    )?;
-    Some(surface_view_to_expanded_shape(ctx, &surface))
 }
 
 pub(super) fn type_expr_references_names(

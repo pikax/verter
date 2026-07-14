@@ -15,7 +15,6 @@
 
 pub mod bindings;
 pub mod macros;
-pub mod named_type_keys;
 pub mod options;
 pub mod setup;
 pub mod shared;

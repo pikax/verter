@@ -466,15 +466,17 @@ impl VerterHost {
                 // (the request pre-dates the mutation, and the leader's
                 // recorded facts match the data it computed FROM — the
                 // read-side fact rail is the stated authority), but mark
-                // admission suppression anyway as cheap defense-in-depth:
-                // an enclosing cold compute that folds this ReturnOnly
-                // artifact into a broader result must not warm shared
-                // caches with it (symmetric with the follower fallback
-                // below). The fenced consumption ALSO flows by value
-                // (the TLS chokepoint flag) so enclosing traced cold
-                // computes refuse shared-cache admission.
-                crate::request_context::mark_request_materialization_cache_suppress();
-                crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+                // cache non-admission anyway as cheap defense-in-depth: an
+                // enclosing cold compute that folds this ReturnOnly artifact
+                // into a broader result must not warm shared caches with it
+                // (symmetric with the follower fallback below). A
+                // fenced-but-VALID serve is Complete, NOT partial — cache
+                // non-admission only, never request partiality. The fenced
+                // consumption ALSO flows by value (the TLS chokepoint flag)
+                // so enclosing traced cold computes refuse admission.
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                );
                 return Some(crate::host_manage::prepared_decl::IndexedReadyServe {
                     indexed: outcome.indexed,
                     store_published: false,
@@ -483,8 +485,13 @@ impl VerterHost {
             last_fenced = Some(outcome.indexed);
         }
         if last_fenced.is_some() {
-            crate::request_context::mark_request_materialization_cache_suppress();
-            crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+            // Sustained-churn follower fallback: a fenced-but-VALID serve is
+            // Complete, NOT partial — mark cache non-admission only, never
+            // request partiality (the by-value `store_published == false`
+            // and the fan-out both refuse shared-cache admission).
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+            );
         }
         last_fenced.map(
             |indexed| crate::host_manage::prepared_decl::IndexedReadyServe {
@@ -611,7 +618,7 @@ impl VerterHost {
         };
         struct ColdIndexProducts {
             header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
-            analysis: verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
+            analysis: verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
             snapshot: Option<crate::types::FileAnalysisSnapshot>,
         }
         let job_canonical = analysis_canonical_id.to_string();
@@ -647,7 +654,7 @@ impl VerterHost {
                                 body,
                                 parsed.source_str(),
                             ),
-                            verter_compiler::utils::oxc::script::type_surface::analyze_external_type_program_headers(body),
+                            verter_parser::utils::oxc::script::type_surface::analyze_external_type_program_headers(body),
                         )
                     }
                     None => Default::default(),

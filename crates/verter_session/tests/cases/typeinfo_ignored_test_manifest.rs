@@ -400,7 +400,6 @@ semantic_query_names! {
     NormalizeUnion,
     NormalizeIntersection,
     ProjectPath,
-    ResolvedNamedType,
     Relate,
     ResolveMacroPayload,
     ResolveClassSurface,
@@ -628,7 +627,7 @@ struct BlockContractRow {
 /// line number — line numbers drift as the docs are edited, the block heading
 /// does not:
 /// - foundational decl/value keys (`ResolveDecl`, `TypeOf`, `NormalizeUnion`,
-///   `NormalizeIntersection`, `ResolvedNamedType`) PLUS `Instantiate` at
+///   `NormalizeIntersection`) PLUS `Instantiate` at
 ///   `U2.QUERY_VALUE_DOMAIN` (its `Context` adds/upgrades the U2 key surface +
 ///   value-domain arms; generic substitution is a value-domain instantiation,
 ///   not a relation inference);
@@ -663,7 +662,6 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
         | TypeOf
         | NormalizeUnion
         | NormalizeIntersection
-        | ResolvedNamedType
         | Instantiate
         | LowerLocator => U2QueryValueDomain,
         Relate | Conditional => U2RelationInfer,
@@ -1874,7 +1872,6 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         (TypeOf, U2QueryValueDomain),
         (NormalizeUnion, U2QueryValueDomain),
         (NormalizeIntersection, U2QueryValueDomain),
-        (ResolvedNamedType, U2QueryValueDomain),
         // Generic substitution (`Instantiate`) is a value-domain instantiation
         // produced by U2.QUERY_VALUE_DOMAIN's foundation, NOT a relation
         // inference — it joins the foundational decl/value keys here.
@@ -2287,7 +2284,7 @@ fn run_lifted_query_payload(
     };
 
     let (_outcome, record) = host
-        .resolve_named_symbol_with_audit(spec.primary_canonical, symbol, &[], Some(mode))
+        .resolve_named_symbol_with_audit(spec.primary_canonical, symbol, Some(mode))
         .into_parts();
     match record.kind_payload {
         RequestKindPayload::TypeResolution(payload) => payload,

@@ -390,9 +390,17 @@ fn pathological_extract_through_typeof() {
         .iter()
         .find(|p| p.name == "kind")
         .expect("the `kind` prop must surface from defineProps<{ kind: X }>()");
-    let signature = crate::component_meta_pathological_recursion_tests::render_signature_for_test(
-        &kind_prop.type_expr,
-    );
+    let kind_type = crate::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/A.vue",
+        kind_prop
+            .type_source
+            .present()
+            .expect("the `kind` prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("`kind`'s published source must demand-materialize"));
+    let signature =
+        crate::component_meta_pathological_recursion_tests::render_signature_for_test(&kind_type);
     assert_eq!(
         signature, "\"a\" | \"b\"",
         "Extract<typeof y, R> must reduce to the literal union \"a\" | \"b\" \
@@ -655,7 +663,16 @@ fn pathological_nested_slot_definitions() {
     // assertion: the L1 binding's type MUST NOT be the
     // `semanticMiss` sentinel — a regression in slot-binding
     // lowering at depth 1 would surface that.
-    let dbg = format!("{:?}", l1_binding.type_expr);
+    let l1_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/A.vue",
+        l1_binding
+            .type_source
+            .present()
+            .expect("the L1 binding must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("the L1 binding's published source must shell-materialize"));
+    let dbg = format!("{l1_type:?}");
     assert!(
         !dbg.contains("semanticMiss"),
         "L1 binding type must NOT be the semanticMiss sentinel — a regression in \
@@ -766,7 +783,7 @@ fn pathological_self_referential_slot_payload() {
     // `join().expect`). We additionally check the resolved type
     // string does not surface a literal "stack-overflow" or other
     // crash signature, which is implicit.
-    let dbg = format!("{:?}", rec_binding.type_expr);
+    let dbg = format!("{:?}", rec_binding.type_source);
     let _ = dbg; // termination is the contract; structural shape is
                  // implementation-dependent and may change.
 }
@@ -865,7 +882,7 @@ fn pathological_typeof_substitution_cycle() {
     // signature (which would never appear unless the recursion guard
     // failed catastrophically). Termination is the contract;
     // structural shape is implementation-dependent.
-    let dbg = format!("{:?}", value_prop.type_expr);
+    let dbg = format!("{:?}", value_prop.type_source);
     assert!(
         !dbg.contains("stack-overflow"),
         "typeof-substitution cycle's resolved type must NOT surface stack-overflow signature; got {dbg}"
@@ -1042,7 +1059,16 @@ fn pathological_context_different_reentry_active_stack() {
     // → join error); this assertion is the anti-FORGERY discriminator.
     {
         use verter_type_expr::{PrimitiveName, TypeExpr};
-        match &root_prop.type_expr {
+        let root_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+            &host,
+            "/ctx.vue",
+            root_prop
+                .type_source
+                .present()
+                .expect("the `root` prop must publish a typed source"),
+        )
+        .unwrap_or_else(|| panic!("`root`'s published source must shell-materialize"));
+        match &root_type {
             TypeExpr::Ref {
                 name,
                 type_arguments,

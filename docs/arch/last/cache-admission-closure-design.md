@@ -1,49 +1,75 @@
 # Closing the shared-cache admission poison class — implementer-ready design
 
-## 0. STOP — the landed commit ships a cache-poison REGRESSION, and fixing it is job one
+## 0. The fallthrough admission regression — FOUND, and CLOSED
 
-**This work introduced a cache-poisoning regression that is present in the landed code. The base did
-not have it. This branch must not be merged onward until it is fixed.** That distinction — regression,
-not inherited debt — is the whole point of this section, and it is the first thing you should act on.
-Not the type change in §5. This.
+**An earlier revision of this section led with this regression as shipping unfixed. It is now closed.**
+It is written up here rather than deleted, because *how* it happened is the single best worked example
+of the failure mode this whole document exists to prevent — and because the funnel it closed is one
+funnel, not the class.
 
-**The mechanism, exactly.** The fallthrough resolver's admission funnel,
-`store_node` in `crates/verter_session/src/resolver_core/fallthrough_resolver.rs` (around line 193),
-gates admission on exactly three things:
+**The mechanism, exactly.** The fallthrough resolver's admission funnel, `store_node` in
+`crates/verter_session/src/resolver_core/fallthrough_resolver.rs`, used to gate admission on exactly
+three things:
 
 1. `key.is_cacheable()`,
 2. `crate::request_context::current_cold_compute_completeness().is_partial()`, and
 3. `!result.facts.is_empty()` (or an intrinsic-surface / consumed-bindings value).
 
-**It has no non-cacheability rail at all.** Verify it in one command — the file contains **zero**
-occurrences of any of them:
+**It had no non-cacheability rail at all** — and **the file had never been edited.** It was
+byte-identical to its base. What changed was *underneath* it: this lineage deleted the roughly **31
+call sites that folded non-cacheability into cold-compute completeness**. Decoupling those two concerns
+was architecturally **correct** — a fenced serve should not make a result *partial* — but
+`store_node`'s only safety gate was that very completeness signal. Removing the fold **rendered its
+gate toothless** while its comment still claimed a "single no-poison rail".
 
-```bash
-grep -cE "non_cacheable|CacheabilityProbe|with_cacheability_scope" \
-  crates/verter_session/src/resolver_core/fallthrough_resolver.rs   # ⇒ 0
-```
+**The consequence it had:** a fallthrough node computed through a fenced serve or a lease miss,
+carrying non-empty **live-rooted** facts, was admitted and served warm **indefinitely**. Live-rooted is
+the sting — the facts validate against the current view on every warm hit, so the read-side rail can
+never reject it (see §2 for why "it roots on a live hash, therefore it is safe" is a category error).
 
-**And the file never changed.** It is byte-identical to its base. What changed is *underneath* it:
-this lineage deleted the roughly **31 call sites that folded non-cacheability into cold-compute
-completeness**. Decoupling those two concerns was architecturally **correct** — a fenced serve should
-not make a result *partial* — but `store_node`'s only safety gate was that very completeness signal.
-Removing the fold **rendered its gate toothless**. Its comment still claims a "single no-poison rail
-shared with the component-meta materialiser"; that rail no longer carries non-cacheability.
+**Learn the shape of this, because the class is still open (§6, §7):** the poison was introduced into a
+file that nobody touched, by a change that was *correct on its own terms*, and it was invisible to
+every static safety argument applied to it. That is the whole thesis of §2.
 
-**The consequence:** a fallthrough node computed through a fenced serve or a lease miss, carrying
-non-empty **live-rooted** facts, is admitted and served warm **indefinitely**. Live-rooted is the
-sting — the facts validate against the current view on every warm hit, so the read-side rail can never
-reject it (see §2 for why "it roots on a live hash, therefore it is safe" is a category error).
+### How it is closed
 
-**The honest caveat, and you must hold both halves of it.** The *rail* is **proven absent** — that is
-a blob-hash fact, not an argument. But **nobody constructed an end-to-end poisoning trace through
-`store_node`.** So what is established is a **proven-missing safety rail**, not a demonstrated
-exploit. Do not overstate it, and do not let anyone talk you out of it either: **settle it with a
-discriminating test, not with another opinion.** Static "this path is safe" reasoning has been wrong
-**three times** in this work — including from a read-only diagnostic and from an adversarial reviewer
-told to attack that exact claim (§2, §9). Force a fallthrough node through a fenced serve or a lease
-miss, assert the entry is refused admission, and watch the test go **red** against the tree as it
-stands.
+`store_node` now **requires an unforgeable `CacheabilityProbe`** — private field, single constructor,
+an HRTB that prevents it escaping its scope — whose tracer scope **encloses** the compute that produced
+the value. It is sampled **after** the compute runs (the temporal hole: sampling at funnel entry misses
+a compute that runs later), and it **refuses the cache write** when `probe.non_cacheable()` while still
+**serving the value** to the caller. Cache non-admission is not a failed request. An untraced producer
+cannot reach the funnel at all — it is now a **compile error**, not a review miss.
+
+The refusal covers the content-neutral reasons, which are the permanent ones: a FENCED (ReturnOnly,
+`store_published == false`) serve, a broken decl-body lease, an unrootable import route, an
+unobservable contributor source env, or an observation set that overflowed the fact-signature cap. A
+non-cacheable read is **never** a `ResultCompleteness::Partial` — which is precisely why the
+completeness rail could not have caught this, and why a separate probe rail was the only thing that
+could.
+
+### It was settled by a test, not an opinion
+
+The earlier revision of this section demanded exactly that, and it is worth honouring the reason:
+static "this path is safe" reasoning was wrong **three times** in this work — including from a
+read-only diagnostic and from an adversarial reviewer specifically told to attack that claim (§2, §9).
+
+`fenced_serve_fallthrough_node_is_not_admitted`, in
+`crates/verter_session/src/fallthrough_admission_tests.rs`, has three arms and **all three are load
+bearing**:
+
+- **control** — an *unfenced* compute **admits** every node asserted below. Without this, a
+  zero-candidate assertion under the fence would pass vacuously on a compute that never reached the
+  funnel at all.
+- **fenced** — every node whose compute consumed the fence is **refused**, while the caller is still
+  **served** its resolution and the request remains `Complete`.
+- **path-precision** — the fence does **not** blanket-refuse: nodes whose own compute was provably
+  fence-free still admit. A rail that refused *everything* while the knob was armed would pass the
+  fenced arm for the wrong reason.
+
+**The discrimination contract, if you touch this rail:** delete the `probe.non_cacheable()` refusal
+from `store_node` and that test goes **red**. If it does not, the rail is no longer covered and you
+have a zero-coverage fix — which is a thing that has already happened once in this codebase, and was
+caught by exactly this check *after review had passed it*.
 
 ---
 
@@ -393,22 +419,22 @@ outer request observes the *current* file hash while the inner cache hands back 
 declaration.
 
 **(ii) The fallthrough store validates forever, because its key carries no content hash.**
-`resolver_core/fallthrough_resolver.rs::store_node` (`:193`) checks key cacheability and partiality,
-but not taint, overflow, provenance or supersession. Its writes happen **during** the cold compute,
-and the top-level stability fence runs later and **does not retract nested nodes already inserted**.
-Worse than first alleged: consumed-bindings are stored with **empty facts**, under a key with **no
-content hash and no generation** (the branch key is just the branch index) — and the validated fact
-cache validates by "all facts still valid", so **empty facts validate vacuously, forever**. The
-decider gave a concrete reproducing edit: change a spread binding's resolved keys without changing
-the branch index, and the old consumed-bindings node is served for ever.
+`resolver_core/fallthrough_resolver.rs::store_node` now checks key cacheability, partiality **and
+non-cacheability** (taint, overflow, provenance — the `CacheabilityProbe` rail added by §0), but **not
+supersession**. Its writes still happen **during** the cold compute, and the top-level stability fence
+runs later and **does not retract nested nodes already inserted**. And the sharpest edge is untouched:
+consumed-bindings are stored with **empty facts**, under a key with **no content hash and no
+generation** (the branch key is just the branch index) — and the validated fact cache validates by "all
+facts still valid", so **empty facts validate vacuously, forever**. The decider gave a concrete
+reproducing edit: change a spread binding's resolved keys without changing the branch index, and the
+old consumed-bindings node is served for ever.
 
-> **⚠ This is also the site of the REGRESSION THIS WORK INTRODUCED, and it SHIPS UNFIXED in the
-> landed commit — see §0, which is your first job.** The pre-existing weaknesses above (no content
-> hash in the key, vacuous empty-fact validation) are inherited debt. The *regression* is separate and
-> newer: this lineage deleted the ~31 call sites that folded non-cacheability into cold-compute
-> completeness, which **rendered `store_node`'s completeness gate toothless** — so a node computed
-> through a fenced serve or a lease miss, carrying non-empty live-rooted facts, is now admitted and
-> served warm. The base did not have this. Fix §0 before you touch anything else in this document.
+> **This hole is NOT closed.** §0 closed the *regression* at this funnel — the missing non-cacheability
+> rail — and that is all it closed. The weaknesses named above are **inherited debt that predates this
+> work and remains live**: no content hash in the key, vacuous empty-fact validation, no supersession
+> check, and nested writes that the later stability fence does not retract. A probe refusal does not
+> help a node whose facts are **empty**: there is nothing to invalidate. **Do not read §0's green test
+> as this hole being fixed.**
 
 **(iii) A scalar lane deliberately publishes partial results, against its own no-poison contract.**
 In `crates/verter_session/src/resolver_core/component_meta_request.rs`, partial results are refused

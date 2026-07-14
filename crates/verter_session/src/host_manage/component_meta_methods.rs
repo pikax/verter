@@ -26,15 +26,11 @@ use crate::instant::Instant;
 // resolved through `meta_resolve`'s private siblings; after the move,
 // they rewrite to `crate::meta_resolve::X` (the parent module's
 // re-exported `pub(crate)` surface).
-use crate::meta_resolve::component_meta_registry_prefers_structural_materialization;
 use crate::meta_resolve::slot_binding_graph;
 use crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 use crate::meta_resolve::{
     collect_define_props_root_names, slot_binding_targets_define_props_root,
     RegistryMaterialization, ResolvedComponentMetaState,
-};
-use crate::meta_resolve::{
-    collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
 };
 use crate::meta_resolve::{
     drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
@@ -46,29 +42,15 @@ use crate::meta_resolve::{
 };
 
 // Items that live in the parent shell (`crate::meta_resolve`): the
-// registry-structural materialiser, the registry-route preservers, the
-// graph-native registry-route + cycle-BFS predicates, and the
 // origin-graph builder. The `HostComponentMetaResolver` adapter lives
 // in `host_manage/jsdoc_resolve.rs` (host-impl tier).
 use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
 use crate::meta_resolve::build_origin_graph;
-use crate::meta_resolve::{
-    component_meta_registry_prefers_structural_materialization_node,
-    component_meta_registry_should_keep_raw_symbolic_non_object_alias,
-    preserve_nested_symbolic_member_routes, preserve_registry_callable_param_member_routes,
-    type_expr_needs_nested_symbolic_route_preservation,
-};
 
 use crate::resolver_core::component_meta_registry::{
-    collect_component_meta_registry_public_field_refs, collect_component_meta_registry_refs,
-    component_meta_registry_expr_references_name,
-    component_meta_registry_has_explicit_object_surface,
-    component_meta_registry_has_non_object_top_level_surface,
-    component_meta_registry_has_unmerged_heritage_intersection,
-    component_meta_registry_raw_member_path_surface, component_meta_registry_ref_name,
-    enqueue_component_meta_registry_ref, merge_component_meta_registry_candidates,
-    owner_component_meta_registry_import_root, upsert_component_meta_registry_entry,
-    PendingComponentMetaRegistryRef,
+    collect_component_meta_registry_public_field_refs, collect_component_meta_registry_refs_node,
+    enqueue_component_meta_registry_ref, owner_component_meta_registry_import_root,
+    upsert_component_meta_registry_entry, PendingComponentMetaRegistryRef,
 };
 
 crate::project_semantic_dispatch::output_materialization::define_output_capability! {
@@ -594,41 +576,6 @@ impl VerterHost {
         )
     }
 
-    /// Bare-host overlay-aware cold compute entry.
-    ///
-    /// Routes the bare-host (no [`SessionView`](crate::session_view::SessionView))
-    /// cold-compute through a
-    /// [`HostResolverContext`](crate::resolver_core::HostResolverContext)
-    /// rooted on `overlay`, so the resolver-tier reads inside
-    /// [`Self::compute_component_meta_state_inner`] observe canonicals
-    /// promoted by mid-request `ensure_loaded` /
-    /// `ensure_indexed_ready_serve` through the shared overlay.
-    ///
-    /// Used by
-    /// [`SessionRequestHost::compute_component_meta`](crate::host_manage::component_meta_request_impl::SessionRequestHost).
-    /// The shared overlay lets cold compute calls accumulate across the
-    /// request rather than each paying the per-call workspace sweep cost
-    /// with no cross-call accumulation benefit.
-    pub(crate) fn compute_component_meta_state_with_overlay(
-        &self,
-        canonical: &str,
-        mode: ProjectionMode,
-        whole_hash: Hash16,
-        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
-    ) -> Option<ResolvedComponentMetaState> {
-        // Fenced cold compute (driver `run_stable_request` `compute`, gated
-        // by `is_stable`): seed from a FRESH base read whose currentness is
-        // INTRINSIC to the seed (`into_cold_seed_view` carries the read's
-        // `Current` / `ReturnOnly` arm). A `ReturnOnly` seed makes the
-        // derived `HostResolverContext` fail its nested warm-cache probes
-        // closed; there is no separate currentness flag to mismatch with the
-        // view.
-        let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
-        self.compute_component_meta_state_with_cold_seed_arg(
-            canonical, mode, whole_hash, &cold_seed, overlay,
-        )
-    }
-
     /// Compute cold-compute body with a caller-supplied executor-snapshot
     /// view. `store_view` and `base_is_current` are the executor's
     /// SINGLE-read pair; re-binding them through
@@ -687,28 +634,7 @@ impl VerterHost {
         )
     }
 
-    /// Captured-inputs variant of
-    /// [`Self::compute_component_meta_state_with_overlay`] (same routing).
-    pub(crate) fn compute_component_meta_state_from_captured_with_overlay(
-        &self,
-        canonical: &str,
-        mode: ProjectionMode,
-        captured: &CapturedComponentMetaInputs,
-        overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
-    ) -> Option<ResolvedComponentMetaState> {
-        // Fenced cold compute (driver `run_stable_request` `compute`, gated
-        // by `is_stable`): seed from a FRESH base read whose currentness is
-        // INTRINSIC to the seed (see
-        // [`Self::compute_component_meta_state_with_overlay`]). No separate
-        // flag to mismatch with the view.
-        let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
-        self.compute_component_meta_state_from_captured_with_cold_seed_arg(
-            canonical, mode, captured, &cold_seed, overlay,
-        )
-    }
-
-    /// View-bearing variant of
-    /// [`Self::compute_component_meta_state_from_captured_with_overlay`].
+    /// View-bearing captured-inputs cold-compute entry.
     /// Reuses an executor-snapshotted view rather than rebuilding one.
     /// `store_view` and `base_is_current` are the executor's SINGLE-read
     /// pair; re-binding them through `StoreViewRead::from_executor_snapshot`
@@ -1066,14 +992,14 @@ impl VerterHost {
                             evaluated_types.define_slots.len(),
                         ),
                     );
-                    // Per-macro projectors are the sole component-meta
-                    // resolution path. Each projector dispatches
+                    // The flat evaluated projection is a METADATA + display
+                    // surface (exactness / execution status / diagnostics /
+                    // raw display types for the `evaluate_types` payload) —
+                    // never a published-source authority: every published
+                    // `SourcePosition` is owned by the NORMALIZED macro rows
+                    // the `define_*` shapes read. Each projector dispatches
                     // `ResolveMacroPayload` + empty-path Shallow
-                    // `ProjectPath`, raises surface members, runs the
-                    // bounded fixed-point reducer
-                    // (`materialize_component_meta_type_expr_until_stable`)
-                    // so nested operator chains collapse to concrete
-                    // leaves before publication, and writes
+                    // `ProjectPath`, raises surface members, and writes
                     // `Vec<ExpandedField>` into `evaluated_types.props` /
                     // `.emits`. Recursive / Error branches emit diagnostics
                     // into `synthesis_diagnostics` (silent-miss prevention).
@@ -1098,9 +1024,10 @@ impl VerterHost {
                     // Macro-shape publication (`define_props` / `define_emits` /
                     // `define_slots`) is owned by the dispatch projector — the
                     // eager macro-object materialiser is retired. Each shape is
-                    // built from the context-aware `vue_macro_dtos` member
-                    // authority + the flat fields `project_evaluated_types` just
-                    // projected, with NO solver / reparse / eval_source fallback.
+                    // built from the context-aware `vue_macro_dtos` normalized
+                    // rows (the sole published-source authority); the flat
+                    // fields contribute metadata only. NO solver / reparse /
+                    // eval_source fallback.
                     crate::meta_resolve::projectors::project_define_macro_shapes(
                         &mut query_engine,
                         canonical,
@@ -1251,7 +1178,7 @@ impl VerterHost {
         // instead of re-running the cold compute against the fresh
         // budget.
         let synthesis_should_suppress = synthesis_should_suppress
-            || crate::request_context::current_materialization_cache_suppress();
+            || crate::request_context::current_request_result_is_partial();
         // Typed per-result completeness: the partial signal is the union of
         // the synthesis-suppress producer signal and the request-result
         // partiality accumulator (a partial macro DTO surface / budget-tripped
@@ -1342,616 +1269,89 @@ impl VerterHost {
                 tracked_dependencies.insert(canonical_id.to_string());
             }
         }
-        // The registry-symbol "stay symbolic" root predicate. Delegates
-        // to the single shared definition in `meta_resolve::exactness`,
-        // whose graph-native sibling (`node_root_should_stay_symbolic`)
-        // is proven equivalent to it by the handle-capable equivalence
-        // fixtures — so the `TypeExpr` arm and the handle arm classify
-        // identically.
-        fn imported_registry_alias_should_stay_symbolic(expr: &verter_type_expr::TypeExpr) -> bool {
-            crate::meta_resolve::exactness::expr_root_should_stay_symbolic(expr)
+        // The registry-symbol "stay symbolic" root predicate, node-domain:
+        // lower the resolved declaration's content-free body slot through the
+        // ONE shared dispatch and classify its root via the graph-native
+        // `node_root_should_stay_symbolic`. An unraisable body (evicted /
+        // unloaded producing canonical) conservatively stays symbolic — the
+        // consumer re-resolves the named root on demand.
+        fn imported_registry_alias_should_stay_symbolic(
+            ctx: &dyn crate::resolver_core::ResolverContext,
+            body: &verter_type_expr::facts::PreparedTypeBodyFacts,
+        ) -> bool {
+            let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let locator =
+                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(body.body_slot.clone());
+            match dispatch.raise_authored_locator_to_hot(
+                &locator,
+                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            ) {
+                Some(hot) => {
+                    crate::meta_resolve::exactness::node_root_should_stay_symbolic(ctx, hot.node())
+                }
+                None => true,
+            }
         }
-        /// Module-private registry candidate carrier: the published `TypeExpr`
-        /// PAIRED with its precomputed `explicit_object_surface` fact. The registry
-        /// loop reads the fact instead of inspecting the materialised value, and
-        /// publishes the `type_expr` directly — no semantic decision crosses the
-        /// materialised value. The fact is precomputed at its producer per arm: the
-        /// node-domain candidate siblings (`materialize_pick_member_surface_candidate`,
-        /// `materialize_registry_routed_member_surface`,
-        /// `materialize_registry_whole_surface_candidate`, …) decide it OFF THE
-        /// PRODUCING NODE, while the still-`TypeExpr` structural materialiser threads
-        /// out an interim `component_meta_registry_has_explicit_object_surface(&result)`
-        /// computed on its final materialised value (its own fence-flagged site, a
-        /// later block converts it node-native). Either way the host reads a
-        /// precomputed fact and this carrier never RE-derives meaning.
-        struct RegistryCandidate {
-            type_expr: verter_type_expr::TypeExpr,
-            explicit_object_surface: bool,
-        }
-        fn materialize_component_meta_registry_candidate(
-            query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-            scope_canonical_id: &str,
-            symbol_name: &str,
-            raw_body: Option<&verter_type_expr::TypeExpr>,
-            prefer_explicit_raw_surface: bool,
-        ) -> Option<RegistryCandidate> {
-            use verter_type_expr::TypeExpr;
-
-            let imported_generic_alias_scope: Option<String> = raw_body.and_then(|expr| {
-                let TypeExpr::Ref {
-                    name,
-                    type_arguments,
-                } = expr
-                else {
-                    return None;
-                };
-                if type_arguments.is_empty() {
-                    return None;
-                }
-                let declaration = query_engine.resolve_type_declaration(scope_canonical_id, name);
-                if !declaration.canonical_source.is_empty()
-                    && declaration.canonical_source != scope_canonical_id
-                {
-                    Some(declaration.canonical_source.clone())
-                } else {
-                    None
-                }
-            });
-            let imported_generic_alias_root = imported_generic_alias_scope.is_some();
-
-            // Owner-local generic Refs preserve helper-Ref structure. When
-            // `Button = ComponentConfig<typeof theme>` is declared in the SAME
-            // file as `ComponentConfig` (owner-local), the registry publishes
-            // Button as the SHALLOW substituted body — helper-ref members stay as
-            // carrier Refs — rather than fully materialising every helper. The
-            // substitution + the object-surface acceptance run in the shared
-            // query-engine sibling, which gates on the instantiated body's node
-            // (NOT on a materialised `TypeExpr`).
-            if !imported_generic_alias_root {
-                if let Some((type_expr, explicit_object_surface)) = raw_body.and_then(|raw| {
-                    query_engine.owner_local_generic_alias_candidate(scope_canonical_id, raw)
-                }) {
-                    return Some(RegistryCandidate {
-                        type_expr,
-                        explicit_object_surface,
-                    });
-                }
-            }
-
-            // The object-surface fact for any RAW-body passthrough arm is the
-            // `TypeExpr` predicate applied to the raw INPUT (an authored body,
-            // never a materialised value) — preserved per the candidate-fact
-            // contract for authored raw bodies.
-            let raw_is_object =
-                raw_body.is_some_and(component_meta_registry_has_explicit_object_surface);
-
-            // Refine an imported generic-alias Object candidate member-by-member
-            // through the shared query-engine sibling, preserving the candidate's
-            // object-surface fact (the per-member refine maps Object property
-            // values, so the surface stays an Object).
-            let refine = |candidate: RegistryCandidate,
-                          query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>|
-             -> RegistryCandidate {
-                if !imported_generic_alias_root {
-                    return candidate;
-                }
-                let materialize_scope = imported_generic_alias_scope
-                    .as_deref()
-                    .unwrap_or(scope_canonical_id);
-                let type_expr = query_engine.refine_imported_generic_alias_object_surface(
-                    scope_canonical_id,
-                    materialize_scope,
-                    symbol_name,
-                    &candidate.type_expr,
-                );
-                RegistryCandidate {
-                    type_expr,
-                    explicit_object_surface: candidate.explicit_object_surface,
-                }
-            };
-
-            // Prefer-raw applies only when the raw body already IS an explicit
-            // one-level surface. An UN-MERGED heritage intersection
-            // (`interface X extends Base { ... }`) is not — it must fall through
-            // to the shared materialisation routes, which fold base + own members
-            // into the heritage-merged shallow Object surface.
-            if prefer_explicit_raw_surface
-                && raw_body.is_some_and(|expr| {
-                    component_meta_registry_has_explicit_object_surface(expr)
-                        && !component_meta_registry_has_unmerged_heritage_intersection(expr)
-                })
-            {
-                return raw_body.cloned().map(|raw| {
-                    refine(
-                        RegistryCandidate {
-                            type_expr: raw,
-                            explicit_object_surface: true,
-                        },
-                        query_engine,
-                    )
-                });
-            }
-            if raw_body.is_some_and(|expr| {
-                component_meta_registry_has_non_object_top_level_surface(expr)
-                    && component_meta_registry_should_keep_raw_symbolic_non_object_alias(
-                        expr,
-                        scope_canonical_id,
-                        query_engine,
-                    )
-            }) {
-                return raw_body.cloned().map(|raw| RegistryCandidate {
-                    type_expr: raw,
-                    explicit_object_surface: raw_is_object,
-                });
-            }
-            // Structural-materialisation preference is the graph-native predicate:
-            // lower the raw TypeExpr to a Navigate-mode SemanticNodeId and consult
-            // `component_meta_registry_prefers_structural_materialization_node`.
-            // The structural materialiser (`materialize_registry_structural_candidate`,
-            // node-domain) returns the surface PAIRED with its object-surface fact:
-            // each reference/route leaf resolves through the node-domain Class-A /
-            // whole-surface helpers (materialised ONCE at the surface sink) and
-            // carries its producing node's object-surface fact; compound arms compose
-            // the leaf facts. The host READS that precomputed fact rather than
-            // re-deriving it from the materialised result.
-            if let Some(raw) = raw_body.filter(|expr| {
-                if !component_meta_registry_has_non_object_top_level_surface(expr) {
-                    return false;
-                }
-                // An un-merged heritage intersection must NOT take the structural
-                // route: the registry contract for a heritage interface is the
-                // MERGED one-level Object surface, not the preserved arm structure.
-                if component_meta_registry_has_unmerged_heritage_intersection(expr) {
-                    return false;
-                }
-                let host = query_engine.ctx;
-                let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-                if let Some(node) = dispatch.lower_type_expr_in_scope_with_context(
-                    scope_canonical_id,
-                    expr,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                        crate::semantic_query::ProjectionMode::Navigate,
-                    ),
-                ) {
-                    let graph = host.project_type_store().semantic_graph();
-                    component_meta_registry_prefers_structural_materialization_node(graph, node, 0)
-                } else {
-                    component_meta_registry_prefers_structural_materialization(expr)
-                }
-            }) {
-                let (type_expr, explicit_object_surface) =
-                    query_engine.materialize_registry_structural_candidate(scope_canonical_id, raw);
-                return Some(RegistryCandidate {
-                    type_expr,
-                    explicit_object_surface,
-                });
-            }
-            // Whole-surface projection via the node-domain query-engine
-            // root-surface authority, returning the surface PLUS its object-surface
-            // fact off the producing node.
-            query_engine
-                .materialize_registry_whole_surface_candidate(scope_canonical_id, symbol_name)
-                .map(|(materialized, explicit_object_surface)| {
-                    let type_expr = raw_body.map_or_else(
-                        || materialized.clone(),
-                        |raw| {
-                            let preserved_package_refs =
-                                lowered_preserve_package_backed_symbolic_refs(
-                                    &materialized,
-                                    raw,
-                                    scope_canonical_id,
-                                    query_engine,
-                                );
-                            preserve_registry_callable_param_member_routes(
-                                &preserved_package_refs,
-                                raw,
-                            )
-                        },
-                    );
-                    RegistryCandidate {
-                        type_expr,
-                        explicit_object_surface,
-                    }
-                })
-                .map(|candidate| refine(candidate, query_engine))
-                .or_else(|| {
-                    raw_body.and_then(|expr| {
-                        (!component_meta_registry_has_non_object_top_level_surface(expr)).then(
-                            || {
-                                refine(
-                                    RegistryCandidate {
-                                        type_expr: expr.clone(),
-                                        explicit_object_surface: raw_is_object,
-                                    },
-                                    query_engine,
-                                )
-                            },
-                        )
-                    })
-                })
-                .or_else(|| {
-                    raw_body.cloned().map(|raw| {
-                        refine(
-                            RegistryCandidate {
-                                type_expr: raw,
-                                explicit_object_surface: raw_is_object,
-                            },
-                            query_engine,
-                        )
-                    })
-                })
-        }
-        fn build_registry_indexed_access_expr(
-            symbol_name: &str,
-            path: &[String],
-        ) -> verter_type_expr::TypeExpr {
-            path.iter().fold(
-                verter_type_expr::TypeExpr::named(symbol_name),
-                |object, member| verter_type_expr::TypeExpr::IndexedAccess {
-                    object: std::sync::Arc::new(object),
-                    index: std::sync::Arc::new(verter_type_expr::TypeExpr::string_literal(
-                        member.clone(),
-                    )),
-                },
+        /// The shallow named-reference SOURCE a registry entry publishes when
+        /// its body must stay symbolic — consumers re-resolve the named root
+        /// on demand through the one shared dispatch.
+        fn shallow_named_ref_source(name: &str) -> verter_type_expr::facts::SemanticTypeSource {
+            verter_type_expr::facts::SemanticTypeSource::Closed(
+                verter_type_expr::facts::ClosedTypeFact::Leaf(
+                    verter_type_expr::facts::LeafTypeFact::Ref(name.to_string()),
+                ),
             )
         }
-        fn wrap_registry_member_path_surface(
-            path: &[String],
-            leaf: verter_type_expr::TypeExpr,
-        ) -> verter_type_expr::TypeExpr {
-            path.iter().rfold(leaf, |child, member| {
-                // Structural nested-object wrapper synthesized from a member-name
-                // path with NO source object (the route fallback: `raw_body` was
-                // not an Object surface, so no source member visibility exists to
-                // thread). This fallback is reached only with public member names
-                // — non-public class members are gated out of the keyspace and
-                // out of route keys upstream — so `synthetic_public` is correct.
-                // The primary `component_meta_registry_raw_member_path_surface`
-                // path threads real source visibility when an Object body exists.
-                verter_type_expr::TypeExpr::Object(std::sync::Arc::new(
-                    verter_type_expr::ObjectExpr {
-                        properties: vec![verter_type_expr::ObjectMember::Property(
-                            verter_type_expr::ObjectProperty::synthetic_public(
-                                member.clone(),
-                                child,
-                                true,
-                                false,
-                            ),
-                        )],
-                    },
-                ))
-            })
+        /// The authored-body SOURCE a registry entry publishes for a resolved
+        /// declaration: the content-free decl-body slot locator, lowered
+        /// through the one shared dispatch on demand.
+        fn authored_body_source(
+            body_slot: &verter_type_expr::locators::TypeBodySlot,
+        ) -> verter_type_expr::facts::SemanticTypeSource {
+            verter_type_expr::facts::SemanticTypeSource::Authored(
+                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(body_slot.clone()),
+            )
         }
-        /// Issue #10 / predicate: does `expr` contain any
-        /// callable surface (`TypeExpr::Function` or an Object with a
-        /// call/method signature) anywhere reachable from its top-
-        /// level structure (Array element, Intersection arm, Union
-        /// arm, Object property, Tuple element)?
-        ///
-        /// Used by the Pick member-route materialiser to detect when
-        /// descending into a member's leaf would walk through a
-        /// callable parameter type — which, when the param root is
-        /// package-backed, must be preserved symbolically rather than
-        /// expanded as if it were prop metadata.
-        fn type_expr_contains_callable_surface(expr: &verter_type_expr::TypeExpr) -> bool {
-            // Real logic lives at module scope
-            // (`type_expr_contains_callable_surface_impl`) so it is directly
-            // unit-testable; this binding preserves the method-local call
-            // sites that reference the predicate by name.
-            type_expr_contains_callable_surface_impl(expr)
-        }
-
-        /// Issue #10 / extract the raw type AND declared visibility of
-        /// `member` from `raw_body` when `raw_body` is an Object surface (the
-        /// resolved body of the picked alias). Returns `None` when `raw_body`
-        /// is not an Object or no property matches. The visibility is threaded
-        /// so the Pick member-route reconstruction preserves the source
-        /// member's accessibility rather than re-minting it as `Public`.
-        fn raw_pick_member_leaf(
-            raw_body: &verter_type_expr::TypeExpr,
-            member: &str,
-        ) -> Option<(
-            verter_type_expr::TypeExpr,
-            verter_type_expr::MemberVisibility,
-        )> {
-            use verter_type_expr::{ObjectMember, TypeExpr};
-            match raw_body {
-                TypeExpr::Parenthesized(inner) => raw_pick_member_leaf(inner, member),
-                TypeExpr::Object(object) => object.properties.iter().find_map(|m| match m {
-                    ObjectMember::Property(p) if p.name == member => {
-                        Some((p.ty.clone(), p.visibility))
-                    }
-                    _ => None,
-                }),
-                _ => None,
-            }
-        }
-
-        /// Issue #10 / predicate: does `param.ty` resolve
-        /// to a package-backed declaration?
-        ///
-        /// Walks every `TypeExpr::Ref { name }` rooted in the
-        /// parameter type, lowers each to a `SemanticNodeId` via the
-        /// project's dispatch, and returns `true` iff any of those
-        /// roots resolves to a package-backed declaration (per the
-        /// graph-native `is_package_backed_ref` predicate, which
-        /// routes the canonical-id classification through
-        /// `ResolverContext::workspace_is_package_backed`).
-        /// Issue #10 / predicate: does the picked member's
-        /// raw leaf contain a callable surface whose param root is
-        /// package-backed? When this fires, the Pick member-route
-        /// materialiser MUST bypass the registry indexed-access route
-        /// and project the raw leaf directly so the package-backed
-        /// callable parameter type stays symbolic.
-        fn pick_member_route_should_skip_callable_descent(
-            raw_leaf: &verter_type_expr::TypeExpr,
+        /// Node-domain imported-seed collector: walk the resolved imported
+        /// alias's raised body node and enqueue transitive references,
+        /// dropping deep `MemberPath` routes (len > 1) — the imported-seed
+        /// contract stays path-precise and never breadth-walks unrelated
+        /// imports. Top-level object member VALUES collect as roots (a bare
+        /// reference member value enqueues `Whole`), matching the registry
+        /// seed-scan contract.
+        fn collect_imported_component_meta_registry_seed_refs_node(
             ctx: &dyn crate::resolver_core::ResolverContext,
-            scope_canonical_id: &str,
-        ) -> bool {
-            pick_member_route_should_skip_callable_descent_impl(raw_leaf, ctx, scope_canonical_id)
-        }
-
-        fn materialize_component_meta_registry_candidate_for_route(
-            query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-            scope_canonical_id: &str,
-            symbol_name: &str,
-            route: &crate::resolver_core::RouteDemand,
-            raw_body: Option<&verter_type_expr::TypeExpr>,
-            prefer_explicit_raw_surface: bool,
-        ) -> Option<RegistryCandidate> {
-            use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
-
-            match route {
-                crate::resolver_core::RouteDemand::Whole => {
-                    materialize_component_meta_registry_candidate(
-                        query_engine,
-                        scope_canonical_id,
-                        symbol_name,
-                        raw_body,
-                        prefer_explicit_raw_surface,
-                    )
-                }
-                crate::resolver_core::RouteDemand::MemberPath(path) if path.is_empty() => {
-                    materialize_component_meta_registry_candidate(
-                        query_engine,
-                        scope_canonical_id,
-                        symbol_name,
-                        raw_body,
-                        prefer_explicit_raw_surface,
-                    )
-                }
-                crate::resolver_core::RouteDemand::MemberPath(path) => {
-                    if let Some(projected) = raw_body.and_then(|expr| {
-                        component_meta_registry_raw_member_path_surface(expr, path)
-                    }) {
-                        // The raw member-path surface is the source body navigated
-                        // + wrapped in nested objects (non-empty path) — an Object
-                        // surface.
-                        let type_expr = query_engine.materialize_member_surface_expr(
-                            scope_canonical_id,
-                            &projected,
-                            true,
-                        );
-                        return Some(RegistryCandidate {
-                            type_expr,
-                            explicit_object_surface: true,
-                        });
-                    }
-                    let route_expr = build_registry_indexed_access_expr(symbol_name, path);
-                    // The leaf's reject/accept facts are decided in NODE DOMAIN off
-                    // the leaf's projected node (the former `matches!` / `has_*_surface`
-                    // checks on the materialised leaf).
-                    let (member_path_leaf, leaf_is_object, leaf_non_object_top, leaf_is_indexed) =
-                        query_engine
-                            .project_member_path_leaf_facts(scope_canonical_id, &route_expr);
-                    if path.len() > 1 && !leaf_is_object && leaf_non_object_top && leaf_is_indexed {
-                        return None;
-                    }
-                    if path.len() > 1 && !leaf_is_object && !leaf_non_object_top {
-                        return None;
-                    }
-                    // The leaf is wrapped in nested objects (non-empty path) — an
-                    // Object surface.
-                    let type_expr = query_engine.materialize_member_surface_expr(
-                        scope_canonical_id,
-                        &wrap_registry_member_path_surface(path, member_path_leaf),
-                        false,
-                    );
-                    Some(RegistryCandidate {
-                        type_expr,
-                        explicit_object_surface: true,
-                    })
-                }
-                crate::resolver_core::RouteDemand::Pick(members) => {
-                    let mut properties = Vec::new();
-                    for member in members {
-                        // Source visibility of the picked member (when the
-                        // resolved alias body is an Object surface). Threaded
-                        // into the reconstructed member so a Pick of a class
-                        // member preserves its declared accessibility instead of
-                        // re-minting it as `Public`. `Public` only when the
-                        // origin is genuinely source-less (no Object body / no
-                        // matching member — e.g. a route-only Pick).
-                        let member_visibility = raw_body
-                            .and_then(|body| raw_pick_member_leaf(body, member.as_str()))
-                            .map_or(verter_type_expr::MemberVisibility::Public, |(_, vis)| vis);
-                        // When the picked member's RAW leaf (an authored body
-                        // member, not a materialised value) contains a callable
-                        // surface whose param root is package-backed, bypass the
-                        // registry indexed-access route and project the raw leaf
-                        // directly so the package-backed param root stays symbolic
-                        // (descending into it would expand package internals into
-                        // the consumer's prop surface). The skip decision + the raw
-                        // leaf are authored-body INPUT classification; the per-member
-                        // value is materialised in the shared sibling and carried
-                        // back untainted.
-                        if let Some((raw_leaf, _)) =
-                            raw_body.and_then(|body| raw_pick_member_leaf(body, member.as_str()))
-                        {
-                            if pick_member_route_should_skip_callable_descent(
-                                &raw_leaf,
-                                query_engine.ctx,
-                                scope_canonical_id,
-                            ) {
-                                let surface = query_engine.materialize_registry_member_value(
-                                    scope_canonical_id,
-                                    &raw_leaf,
-                                );
-                                properties.push(ObjectMember::Property(
-                                    ObjectProperty::synthetic_with_visibility(
-                                        member.clone(),
-                                        surface.value,
-                                        true,
-                                        false,
-                                        member_visibility,
-                                    ),
-                                ));
-                                continue;
-                            }
-                        }
-                        let route_expr = build_registry_indexed_access_expr(
-                            symbol_name,
-                            std::slice::from_ref(member),
-                        );
-                        // Record actual descent into the indexed-access route. The
-                        // package-backed suppression branch above bails before this
-                        // point; reaching here means we are about to materialise the
-                        // routed member surface (which, for callable members, walks
-                        // through callable parameters). The callable check reads the
-                        // RAW authored leaf (input classification).
-                        if raw_body
-                            .and_then(|body| raw_pick_member_leaf(body, member.as_str()))
-                            .is_some_and(|(raw_member_leaf, _)| {
-                                type_expr_contains_callable_surface(&raw_member_leaf)
-                            })
-                        {
-                            #[cfg(any(test, debug_assertions))]
-                            crate::capture_token::with_active_capture(|t| {
-                                t.record_counter(
-                                    crate::meta_resolve::PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER,
-                                    1,
-                                );
-                            });
-                        }
-                        // One materialise + one node-domain stabilisation per routed
-                        // member, in the shared sibling — the value comes back
-                        // untainted.
-                        let surface = query_engine.materialize_registry_routed_member_surface(
-                            scope_canonical_id,
-                            &route_expr,
-                        );
-                        properties.push(ObjectMember::Property(
-                            ObjectProperty::synthetic_with_visibility(
-                                member.clone(),
-                                surface.value,
-                                true,
-                                false,
-                                member_visibility,
-                            ),
-                        ));
-                    }
-                    (!properties.is_empty())
-                        .then(|| RegistryCandidate {
-                            type_expr: TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                                properties,
-                            })),
-                            explicit_object_surface: true,
-                        })
-                        .or_else(|| {
-                            // The Pick fallback dispatches through the builtin Pick
-                            // utility path behind the query-engine DEMAND API,
-                            // paired with the Pick result's object-surface fact.
-                            // Falls back to the raw materialiser candidate for
-                            // non-Object bases.
-                            query_engine
-                                .materialize_pick_member_surface_candidate(
-                                    scope_canonical_id,
-                                    symbol_name,
-                                    members.as_slice(),
-                                )
-                                .map(|surface| RegistryCandidate {
-                                    type_expr: surface.value,
-                                    explicit_object_surface: surface.explicit_object_surface,
-                                })
-                                .or_else(|| {
-                                    materialize_component_meta_registry_candidate(
-                                        query_engine,
-                                        scope_canonical_id,
-                                        symbol_name,
-                                        raw_body,
-                                        prefer_explicit_raw_surface,
-                                    )
-                                })
-                        })
-                }
-                crate::resolver_core::RouteDemand::Omit(omitted) => {
-                    let base = materialize_component_meta_registry_candidate(
-                        query_engine,
-                        scope_canonical_id,
-                        symbol_name,
-                        raw_body,
-                        prefer_explicit_raw_surface,
-                    )?;
-                    // The base candidate's `type_expr` is an UNTAINTED carrier
-                    // (materialised in the engine, carried out of the candidate
-                    // sibling). The omit key-removal is a pure STRUCTURAL transform
-                    // (not a host-side semantic branch on the carrier) routed through
-                    // the `omit_registry_surface_keys` transformer; filtering an
-                    // Object surface preserves object-ness, a non-object base keeps
-                    // its fact.
-                    let type_expr = omit_registry_surface_keys(base.type_expr, omitted);
-                    Some(RegistryCandidate {
-                        type_expr,
-                        explicit_object_surface: base.explicit_object_surface,
-                    })
-                }
-            }
-        }
-        /// Pure structural key-removal transformer for the registry `Omit<…>` route:
-        /// when `expr` is an Object surface, drop the `omitted` keys; otherwise pass
-        /// it through unchanged. Takes the value by move and returns a `TypeExpr`, so
-        /// a host caller hands the candidate's carrier straight in without branching
-        /// on it (the destructure is a transform, not a semantic decision).
-        fn omit_registry_surface_keys(
-            expr: verter_type_expr::TypeExpr,
-            omitted: &[String],
-        ) -> verter_type_expr::TypeExpr {
-            use verter_type_expr::{ObjectExpr, ObjectMember, TypeExpr};
-            let TypeExpr::Object(object) = &expr else {
-                return expr;
-            };
-            let omitted: rustc_hash::FxHashSet<_> = omitted.iter().map(String::as_str).collect();
-            TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                properties: object
-                    .properties
-                    .iter()
-                    .filter(|member| match member {
-                        ObjectMember::Property(property) => {
-                            !omitted.contains(property.name.as_str())
-                        }
-                        _ => true,
-                    })
-                    .cloned()
-                    .collect(),
-            }))
-        }
-        fn collect_imported_component_meta_registry_seed_refs(
-            expr: &verter_type_expr::TypeExpr,
+            node: crate::semantic_query::SemanticNodeId,
             published_names: &rustc_hash::FxHashSet<String>,
             queued_names: &mut rustc_hash::FxHashSet<String>,
             output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
             source_hint: Option<&str>,
             cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
         ) {
-            use verter_type_expr::{ObjectMember, TypeExpr};
-
-            fn drain_filtered_pending(
+            fn collect_one_filtered_node(
+                ctx: &dyn crate::resolver_core::ResolverContext,
+                node: crate::semantic_query::SemanticNodeId,
                 published_names: &rustc_hash::FxHashSet<String>,
                 queued_names: &mut rustc_hash::FxHashSet<String>,
                 output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
-                pending: std::collections::VecDeque<PendingComponentMetaRegistryRef>,
+                source_hint: Option<&str>,
+                cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
             ) {
-                for pending in pending {
+                let mut local_queue = std::collections::VecDeque::new();
+                let mut local_names = rustc_hash::FxHashSet::default();
+                collect_component_meta_registry_refs_node(
+                    ctx,
+                    node,
+                    published_names,
+                    &mut local_names,
+                    &mut local_queue,
+                    source_hint,
+                    crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::PublicationBoundary,
+                    cursor,
+                );
+                for pending in local_queue {
                     if matches!(
                         pending.route,
                         crate::resolver_core::RouteDemand::MemberPath(ref path) if path.len() > 1,
@@ -1969,104 +1369,92 @@ impl VerterHost {
                     );
                 }
             }
-
-            fn collect_one_filtered_expr(
-                expr: &verter_type_expr::TypeExpr,
-                published_names: &rustc_hash::FxHashSet<String>,
-                queued_names: &mut rustc_hash::FxHashSet<String>,
-                output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
-                source_hint: Option<&str>,
-                cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
-            ) {
-                let mut local_queue = std::collections::VecDeque::new();
-                let mut local_names = rustc_hash::FxHashSet::default();
-                collect_component_meta_registry_refs(
-                    expr,
-                    published_names,
-                    &mut local_names,
-                    &mut local_queue,
-                    source_hint,
-                    false,
-                    cursor,
-                );
-                drain_filtered_pending(published_names, queued_names, output, local_queue);
-            }
-
-            match expr {
-                TypeExpr::Object(obj) => {
-                    for member in &obj.properties {
-                        match member {
-                            ObjectMember::Property(prop) => collect_one_filtered_expr(
-                                &prop.ty,
-                                published_names,
-                                queued_names,
-                                output,
-                                source_hint,
-                                cursor,
-                            ),
-                            ObjectMember::IndexSignature(sig) => {
-                                collect_one_filtered_expr(
-                                    &sig.key_type,
-                                    published_names,
-                                    queued_names,
-                                    output,
-                                    source_hint,
-                                    cursor,
-                                );
-                                collect_one_filtered_expr(
-                                    &sig.value_type,
-                                    published_names,
-                                    queued_names,
-                                    output,
-                                    source_hint,
-                                    cursor,
-                                );
-                            }
-                            ObjectMember::CallSignature(func)
-                            | ObjectMember::ConstructSignature(func) => collect_one_filtered_expr(
-                                &TypeExpr::Function(func.clone().into()),
-                                published_names,
-                                queued_names,
-                                output,
-                                source_hint,
-                                cursor,
-                            ),
-                            ObjectMember::Method(method) => collect_one_filtered_expr(
-                                &TypeExpr::Function(method.function.clone().into()),
-                                published_names,
-                                queued_names,
-                                output,
-                                source_hint,
-                                cursor,
-                            ),
-                        }
+            match crate::project_semantic_dispatch::node_data_for(ctx, node).as_deref() {
+                Some(crate::semantic_query::SemanticNodeData::Object(surface)) => {
+                    for member in surface.members.iter() {
+                        collect_one_filtered_node(
+                            ctx,
+                            member.value,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                            cursor,
+                        );
+                    }
+                    for signature in surface
+                        .call_signatures
+                        .iter()
+                        .chain(surface.construct_signatures.iter())
+                    {
+                        collect_one_filtered_node(
+                            ctx,
+                            *signature,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                            cursor,
+                        );
+                    }
+                    for signature in surface.index_signatures.iter() {
+                        collect_one_filtered_node(
+                            ctx,
+                            signature.key_type,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                            cursor,
+                        );
+                        collect_one_filtered_node(
+                            ctx,
+                            signature.value_type,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                            cursor,
+                        );
                     }
                 }
-                TypeExpr::Function(func) => collect_one_filtered_expr(
-                    &TypeExpr::Function(func.clone()),
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                    cursor,
-                ),
-                _ => collect_one_filtered_expr(
-                    expr,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                    cursor,
-                ),
+                _ => {
+                    collect_one_filtered_node(
+                        ctx,
+                        node,
+                        published_names,
+                        queued_names,
+                        output,
+                        source_hint,
+                        cursor,
+                    );
+                }
             }
         }
         let debug_enabled = crate::host_manage::component_meta_debug_enabled();
         let import_refresh_started = debug_enabled.then(Instant::now);
+        // §3.4 structural role classification for the seed refresh below: a
+        // registry entry whose NAME a type-role-bearing macro consumes
+        // (`defineProps<ButtonSlots>()`'s direct type references) is the
+        // macro root's SEPARATE symbolic publication — it stays the original
+        // shallow `Ref` seed (consumers re-resolve the named root on demand
+        // through the one shared dispatch; the published surface authority is
+        // the typeinfo macro-surface path). Rewriting it to the authored
+        // declaration body would eagerly fold the surface the registry must
+        // keep shallow.
+        let macro_root_names: rustc_hash::FxHashSet<&str> = snapshot
+            .macros
+            .iter()
+            .flat_map(|mac| mac.type_references.iter().map(String::as_str))
+            .collect();
         for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
             let _entry_started = debug_enabled.then(Instant::now);
             let Some(meta) = resolved_type_registry_meta.get_mut(index) else {
                 continue;
             };
+            if macro_root_names.contains(entry.name.as_str()) {
+                continue;
+            }
             let declaration_source = meta.declaration.canonical_source.clone();
             if declaration_source.is_empty() || declaration_source == owner_canonical {
                 continue;
@@ -2076,11 +1464,13 @@ impl VerterHost {
                 owner_canonical,
                 declaration_source.as_str(),
             );
-            if should_skip_imported_registry_seed_refresh(
-                owner_canonical,
-                &meta.declaration,
-                &entry.type_expr,
-            ) {
+            if entry.type_source.present().is_some_and(|source| {
+                should_skip_imported_registry_seed_refresh(
+                    owner_canonical,
+                    &meta.declaration,
+                    source,
+                )
+            }) {
                 continue;
             }
             let requested_exported_name = if meta.declaration.resolved_name.is_empty() {
@@ -2107,24 +1497,18 @@ impl VerterHost {
                 );
             }
             meta.declaration.canonical_source = resolved.canonical_id.clone();
-            if imported_registry_alias_should_stay_symbolic(&resolved.body) {
-                entry.type_expr = verter_type_expr::TypeExpr::named(entry.name.clone());
+            if imported_registry_alias_should_stay_symbolic(query_engine.ctx, &resolved.body) {
+                entry.type_source = verter_type_expr::facts::SourcePosition::Present(
+                    shallow_named_ref_source(entry.name.as_str()),
+                );
                 continue;
             }
-            let materialized = materialize_component_meta_registry_candidate(
-                query_engine,
-                resolved.canonical_id.as_str(),
-                resolved.exported_name.as_str(),
-                Some(&resolved.body),
-                true,
-            )
-            .map(|candidate| candidate.type_expr)
-            .unwrap_or_else(|| resolved.body.clone());
-            entry.type_expr = merge_component_meta_registry_candidates(
-                Some(entry.type_expr.clone()),
-                Some(materialized),
-            )
-            .unwrap_or_else(|| entry.type_expr.clone());
+            // Publish the resolved declaration's content-free authored body
+            // slot — consumers lower it through the one shared dispatch on
+            // demand (shallow-by-default; no materialised `TypeExpr`).
+            entry.type_source = verter_type_expr::facts::SourcePosition::Present(
+                authored_body_source(&resolved.body.body_slot),
+            );
             if let Some(started) = _entry_started {
                 let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                 if elapsed_ms >= 5.0 {
@@ -2175,7 +1559,8 @@ impl VerterHost {
                     Some(owner_canonical),
                 );
             }
-            let define_props_roots = collect_define_props_root_names(snapshot);
+            let define_props_roots =
+                collect_define_props_root_names(query_engine.ctx, owner_canonical, snapshot);
             // Refuse-to-enqueue for synthetic slot-binding carriers.
             // The slot-binding graph publisher's no-parser-branch
             // mints a `TypeExpr::SyntheticSlotBinding(_)` typed-IR
@@ -2194,13 +1579,18 @@ impl VerterHost {
             // different `TypeExpr` variant and cannot be suppressed
             // by this gate.
             for field in &evaluated_types.slot_bindings {
-                if matches!(
-                    &field.r#type,
-                    verter_type_expr::TypeExpr::SyntheticSlotBinding(_)
+                // Issue #8 skip runs FIRST — it classifies off the binding's
+                // authored SHALLOW annotation (`Props['avatar']`), which
+                // survives on a graph-raised binding row whose published
+                // source is the synthetic carrier. An owner-rooted binding is
+                // redundant registry work regardless of which source variant
+                // publishes it.
+                if slot_binding_targets_define_props_root(
+                    query_engine.ctx,
+                    owner_canonical,
+                    field,
+                    &define_props_roots,
                 ) {
-                    continue;
-                }
-                if slot_binding_targets_define_props_root(field, &define_props_roots) {
                     #[cfg(any(test, debug_assertions))]
                     crate::capture_token::with_active_capture(|t| {
                         t.record_counter(
@@ -2208,6 +1598,16 @@ impl VerterHost {
                             1,
                         );
                     });
+                    continue;
+                }
+                // A synthetic binding carrier (the graph-raised binding row
+                // published against its first-class synthetic source) names no
+                // workspace type alias — the typed SOURCE-variant identity is
+                // the refuse-to-enqueue signal.
+                if matches!(
+                    field.r#type.present(),
+                    Some(verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(_))
+                ) {
                     continue;
                 }
                 collect_component_meta_registry_public_field_refs(
@@ -2226,6 +1626,28 @@ impl VerterHost {
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or_default();
         let seed_scan_started = debug_enabled.then(Instant::now);
+        // One dispatch for every seed-source raise below: registry locators
+        // and shallow sources lower through the ONE shared engine, and the
+        // discovery walks run node-domain off the raised carriers.
+        let engine_ctx = query_engine.ctx;
+        let seed_dispatch =
+            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(engine_ctx);
+        let seed_transit_ctx =
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Navigate,
+            );
+        let raise_seed_source =
+            |dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+             source: &verter_type_expr::facts::SemanticTypeSource| {
+                dispatch.raise_semantic_type_source_to_hot(
+                    source,
+                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                        scope_canonical_id: owner_canonical,
+                        context: seed_transit_ctx,
+                        interior_failures: None,
+                    },
+                )
+            };
         for (index, entry) in resolved_type_registry.iter().enumerate() {
             let Some(meta) = resolved_type_registry_meta.get(index) else {
                 continue;
@@ -2241,14 +1663,16 @@ impl VerterHost {
                 !canonical_id.is_empty() && canonical_id != owner_canonical
             }) || (!meta.declaration.canonical_source.is_empty()
                 && meta.declaration.canonical_source != owner_canonical);
-            if should_skip_imported_registry_seed_refresh(
-                owner_canonical,
-                &meta.declaration,
-                &entry.type_expr,
-            ) {
+            if entry.type_source.present().is_some_and(|source| {
+                should_skip_imported_registry_seed_refresh(
+                    owner_canonical,
+                    &meta.declaration,
+                    source,
+                )
+            }) {
                 continue;
             }
-            let source_expr = source_hint
+            let source_locator = source_hint
                 .filter(|source| source.is_empty() || *source == owner_canonical)
                 .and_then(|_| {
                     query_engine.owner_collection_expr(owner_canonical, entry.name.as_str())
@@ -2270,36 +1694,76 @@ impl VerterHost {
                 // imported-seed collector stays path-precise: it drops deep
                 // `MemberPath` routes (len > 1) and honours the registry
                 // cursor, so this does not breadth-walk unrelated imports.
-                let imported_collection_expr = component_meta_registry_ref_name(&entry.type_expr)
+                let imported_collection_locator = entry
+                    .type_source
+                    .present()
+                    .and_then(crate::resolver_core::component_meta_registry::source_bare_ref_name)
                     .filter(|ref_name| *ref_name == meta.declaration.resolved_name)
                     .filter(|_| !meta.declaration.canonical_source.is_empty())
+                    .map(|_| ())
                     .and_then(|_| {
                         query_engine.named_decl_body(
                             meta.declaration.canonical_source.as_str(),
                             meta.declaration.resolved_name.as_str(),
                         )
                     });
-                collect_imported_component_meta_registry_seed_refs(
-                    imported_collection_expr
-                        .as_ref()
-                        .or(source_expr.as_ref())
-                        .unwrap_or(&entry.type_expr),
-                    &published_names,
-                    &mut queued_names,
-                    &mut referenced_names,
-                    source_hint,
-                    registry_cursor,
-                );
+                // Raise ONE input node through the shared dispatch: the
+                // imported declaration's body locator, else the owner
+                // collection locator, else the entry's own published source.
+                let seed_node = match imported_collection_locator
+                    .as_ref()
+                    .or(source_locator.as_ref())
+                {
+                    Some(locator) => seed_dispatch
+                        .raise_authored_locator_to_hot(locator, seed_transit_ctx)
+                        .map(|hot| hot.node()),
+                    None => entry
+                        .type_source
+                        .present()
+                        .and_then(|source| raise_seed_source(&seed_dispatch, source))
+                        .map(|hot| hot.node()),
+                };
+                if let Some(node) = seed_node {
+                    collect_imported_component_meta_registry_seed_refs_node(
+                        query_engine.ctx,
+                        node,
+                        &published_names,
+                        &mut queued_names,
+                        &mut referenced_names,
+                        source_hint,
+                        registry_cursor,
+                    );
+                }
             } else {
-                collect_component_meta_registry_refs(
-                    source_expr.as_ref().unwrap_or(&entry.type_expr),
-                    &published_names,
-                    &mut queued_names,
-                    &mut referenced_names,
-                    source_hint,
-                    false,
-                    registry_cursor,
-                );
+                let seed_node = match source_locator.as_ref() {
+                    Some(locator) => seed_dispatch
+                        .raise_authored_locator_to_hot(locator, seed_transit_ctx)
+                        .map(|hot| hot.node()),
+                    None => entry
+                        .type_source
+                        .present()
+                        .and_then(|source| raise_seed_source(&seed_dispatch, source))
+                        .map(|hot| hot.node()),
+                };
+                if let Some(node) = seed_node {
+                    // Q6 (demand-scoped owner-local helper discovery): a plain
+                    // named ref reached on an actively demanded member path of
+                    // an OWNER-LOCAL seed is a registry dependency — the
+                    // collector threads this eligibility unchanged through
+                    // transparent composites and stops at the first plain ref
+                    // head (discovery only; dequeue-time resolution applies
+                    // the owner-local-vs-imported policy).
+                    collect_component_meta_registry_refs_node(
+                        query_engine.ctx,
+                        node,
+                        &published_names,
+                        &mut queued_names,
+                        &mut referenced_names,
+                        source_hint,
+                        crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
+                        registry_cursor,
+                    );
+                }
             }
         }
         let seed_scan_elapsed_ms = seed_scan_started
@@ -2312,7 +1776,17 @@ impl VerterHost {
         let seeded_dependency_names: rustc_hash::FxHashSet<String> = {
             let mut names = rustc_hash::FxHashSet::default();
             for entry in resolved_type_registry.iter() {
-                collect_type_expr_ref_names(&entry.type_expr, &mut names);
+                if let Some(hot) = entry
+                    .type_source
+                    .present()
+                    .and_then(|source| raise_seed_source(&seed_dispatch, source))
+                {
+                    crate::resolver_core::component_meta_registry::collect_node_ref_names(
+                        query_engine.ctx,
+                        hot.node(),
+                        &mut names,
+                    );
+                }
             }
             // Also include owner-local names queued alongside a seeded
             // published entry. When the registry already has published
@@ -2350,7 +1824,17 @@ impl VerterHost {
                 source_hint: pending_source_hint_owned,
                 exported_name: pending_exported_name_owned,
                 route: pending_route,
+                member_use_sites: pending_member_use_sites,
             } = pending;
+            // A DEEP member path (len > 1) selects NO top-level member of the
+            // route root — the consumer resolves that path inline,
+            // path-precisely, so publication for the root is route-scoped to
+            // nothing. Skipping keeps the published entry (if any) from
+            // widening into sibling members no consumer demanded.
+            let pending_route_is_deep_member_path = matches!(
+                &pending_route,
+                crate::resolver_core::RouteDemand::MemberPath(path) if path.len() > 1
+            );
             let imported_owner_route = owner_component_meta_registry_import_root(
                 query_engine.ctx,
                 owner_canonical,
@@ -2478,15 +1962,21 @@ impl VerterHost {
                     };
                     if crate::host_manage::component_meta_debug_enabled() {
                         crate::host_manage::component_meta_debug(format!(
-                            "REGISTRY_IMPORTED_GATE owner={} name={} stay_symbolic={} route_whole={} body_variant={:?}",
+                            "REGISTRY_IMPORTED_GATE owner={} name={} stay_symbolic={} route_whole={} body_class={:?}",
                             owner_canonical, type_name,
-                            imported_registry_alias_should_stay_symbolic(&resolved.body),
+                            imported_registry_alias_should_stay_symbolic(
+                                query_engine.ctx,
+                                &resolved.body,
+                            ),
                             pending_route_is_whole,
-                            std::mem::discriminant(&resolved.body),
+                            resolved.body.classification,
                         ));
                     }
                     if pending_route_is_whole
-                        && imported_registry_alias_should_stay_symbolic(&resolved.body)
+                        && imported_registry_alias_should_stay_symbolic(
+                            query_engine.ctx,
+                            &resolved.body,
+                        )
                     {
                         // Imported non-object helpers (mapped/conditional/
                         // indexed-access/typeof aliases) must not be expanded
@@ -2494,13 +1984,14 @@ impl VerterHost {
                         // consumer will resolve them through member paths.
                         //
                         // If we already published a richer entry under this
-                        // name, refresh its declaration metadata (the merge in
+                        // name, refresh its declaration metadata (the
+                        // node-domain preference in
                         // upsert_component_meta_registry_entry keeps the
-                        // richer body, so the bare Named placeholder is
-                        // discarded by `merge_component_meta_registry_candidates`).
+                        // richer source, so the bare named-reference seed is
+                        // discarded).
                         //
                         // If the name was never published, skip publication
-                        // entirely — a bare Named placeholder only leaks a
+                        // entirely — a bare named-reference seed only leaks a
                         // symbolic helper that the consumer didn't ask for.
                         if published_names.contains(&type_name) {
                             upsert_component_meta_registry_entry(
@@ -2510,10 +2001,10 @@ impl VerterHost {
                                 &mut published_names,
                                 &mut queued_names,
                                 &mut referenced_names,
+                                query_engine.ctx,
                                 type_name.clone(),
-                                verter_type_expr::TypeExpr::named(type_name.clone()),
+                                shallow_named_ref_source(type_name.as_str()),
                                 declaration,
-                                None,
                                 registry_cursor,
                             );
                         }
@@ -2524,26 +2015,56 @@ impl VerterHost {
                         owner_canonical,
                         declaration.canonical_source.as_str(),
                     );
+                    if pending_route_is_deep_member_path {
+                        // Route-scoped publication: a deep member path selects
+                        // no top-level member — never widen the entry with the
+                        // whole authored body.
+                        continue;
+                    }
                     let surface_started =
                         crate::host_manage::component_meta_debug_enabled().then(Instant::now);
-                    let type_expr = materialize_component_meta_registry_candidate_for_route(
-                        query_engine,
-                        resolved.canonical_id.as_str(),
-                        resolved.exported_name.as_str(),
-                        &pending_route,
-                        Some(&resolved.body),
-                        true,
-                    )
-                    .map(|candidate| candidate.type_expr)
-                    .or_else(|| match &pending_route {
-                        crate::resolver_core::RouteDemand::Whole => Some(resolved.body.clone()),
-                        crate::resolver_core::RouteDemand::MemberPath(path) if path.is_empty() => {
-                            Some(resolved.body.clone())
+                    // Route-scoped registry publication: a non-whole route
+                    // publishes the SELECTED one-level topology as a
+                    // `Projected(Surface)` fact (member payloads stay lazy
+                    // authored slots); multiple discoveries union
+                    // monotonically at the upsert. A whole route (or a
+                    // route-scoped build decline) publishes the resolved
+                    // declaration's content-free authored body slot —
+                    // consumers project it path-precisely through the one
+                    // shared dispatch.
+                    let route_scoped_source = (!pending_route_is_whole)
+                        .then(|| {
+                            // Resolve within the resolved declaration's own
+                            // file scope — the pending name need not be
+                            // visible from the owner (it may be referenced
+                            // only inside the imported file).
+                            query_engine.route_scoped_surface_fact(
+                                resolved.canonical_id.as_str(),
+                                resolved.exported_name.as_str(),
+                                &pending_route,
+                                &pending_member_use_sites,
+                            )
+                        })
+                        .flatten()
+                        .map(|fact| {
+                            verter_type_expr::facts::SemanticTypeSource::Projected(
+                                verter_type_expr::facts::ProjectedTypeFact::Surface(fact),
+                            )
+                        });
+                    let type_source = match route_scoped_source {
+                        Some(source) => source,
+                        // A route-scoped demand publishes the SELECTED
+                        // topology or nothing — an imported entry whose
+                        // route-scoped surface cannot be built (an open
+                        // mapped/generic surface with no closable member
+                        // selection) is NEVER widened to the whole authored
+                        // body (that would leak the body's unrequested
+                        // references — e.g. an open mapped helper's
+                        // non-identity value type — into the registry).
+                        None if !pending_route_is_whole => {
+                            continue;
                         }
-                        _ => None,
-                    });
-                    let Some(type_expr) = type_expr else {
-                        continue;
+                        None => authored_body_source(&resolved.body.body_slot),
                     };
                     let surface_elapsed_ms = surface_started
                         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -2555,10 +2076,10 @@ impl VerterHost {
                         &mut published_names,
                         &mut queued_names,
                         &mut referenced_names,
+                        query_engine.ctx,
                         type_name.clone(),
-                        type_expr,
+                        type_source,
                         declaration,
-                        None,
                         registry_cursor,
                     );
                     if let Some(started) = _pending_started {
@@ -2597,20 +2118,22 @@ impl VerterHost {
             }
             let declaration_body =
                 query_engine.named_decl_body(declaration_owner, type_name.as_str());
-            let mut materialized = if declaration_owner != owner_canonical {
-                materialize_component_meta_registry_candidate_for_route(
-                    query_engine,
-                    declaration_owner,
-                    type_name.as_str(),
-                    &pending_route,
-                    declaration_body.as_ref(),
-                    true,
-                )
-            } else {
-                None
-            };
-            let owner_collection_expr =
+            let owner_collection_locator =
                 query_engine.owner_collection_expr(owner_canonical, type_name.as_str());
+            // The owner-collection body's reference HEAD, read node-domain:
+            // the OwnerCollectionDb locator lowers through the ONE shared
+            // dispatch and the head classifies off the raised carrier — no
+            // materialised `TypeExpr` in the BFS.
+            let owner_collection_ref_head = owner_collection_locator.as_ref().and_then(|locator| {
+                seed_dispatch
+                    .raise_authored_locator_to_hot(locator, seed_transit_ctx)
+                    .and_then(|hot| {
+                        crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(
+                            engine_ctx,
+                            hot.node(),
+                        )
+                    })
+            });
             // Owner-local type aliases whose body is a generic ref to an
             // imported type should resolve inline via indexed access rather
             // than creating a separate registry entry.
@@ -2624,11 +2147,7 @@ impl VerterHost {
                 && !pending_route_is_whole_local
                 && !seeded_dependency_names.contains(&type_name)
             {
-                if let Some(verter_type_expr::TypeExpr::Ref {
-                    name: body_ref_name,
-                    type_arguments,
-                }) = owner_collection_expr.as_ref()
-                {
+                if let Some((body_ref_name, type_arguments)) = owner_collection_ref_head.as_ref() {
                     if !type_arguments.is_empty() {
                         let body_decl =
                             query_engine.resolve_type_declaration(owner_canonical, body_ref_name);
@@ -2643,37 +2162,19 @@ impl VerterHost {
                     }
                 }
             }
-            // Owner-local generic aliases publish the full shape so all
-            // members (including those from deep indexed-access paths that
-            // were already resolved inline) appear in the registry entry.
-            let effective_local_route =
-                if declaration_owner == owner_canonical && !pending_route_is_whole_local {
-                    if owner_collection_expr.as_ref().is_some_and(|expr| {
-                        matches!(
-                            expr,
-                            verter_type_expr::TypeExpr::Ref {
-                                type_arguments, ..
-                            } if !type_arguments.is_empty()
-                        )
-                    }) {
-                        crate::resolver_core::RouteDemand::Whole
-                    } else {
-                        pending_route.clone()
-                    }
-                } else {
-                    pending_route.clone()
-                };
-            materialized = materialized.or_else(|| {
-                materialize_component_meta_registry_candidate_for_route(
-                    query_engine,
-                    owner_canonical,
-                    type_name.as_str(),
-                    &effective_local_route,
-                    owner_collection_expr.as_ref(),
-                    true,
-                )
-            });
-            if materialized.is_some() && declaration.canonical_source.is_empty() {
+            // The published source: the declaration's content-free authored
+            // body slot (the imported scope's decl body when the pending name
+            // resolved off-owner, else the owner's collection locator / own
+            // decl body). Consumers lower it through the one shared dispatch
+            // on demand.
+            let published_locator = if declaration_owner != owner_canonical {
+                declaration_body.clone()
+            } else {
+                owner_collection_locator
+                    .clone()
+                    .or_else(|| query_engine.named_decl_body(owner_canonical, type_name.as_str()))
+            };
+            if published_locator.is_some() && declaration.canonical_source.is_empty() {
                 if let Some(import) = snapshot
                     .imports
                     .iter()
@@ -2697,30 +2198,75 @@ impl VerterHost {
                 owner_canonical,
                 declaration.canonical_source.as_str(),
             );
-            let Some(materialized) = materialized else {
+            let Some(published_locator) = published_locator else {
                 continue;
-            };
-            // The collection-expr selection reads the candidate's PRECOMPUTED
-            // node-domain object-surface fact (decided off the producing node in
-            // the engine sibling), not a re-inspection of the materialised value.
-            // The owner-collection-expr predicate stays — it classifies the
-            // AUTHORED raw collection body (an input), never a materialised value.
-            let collection_expr = if owner_collection_expr
-                .as_ref()
-                .is_some_and(|expr| !component_meta_registry_has_explicit_object_surface(expr))
-                && materialized.explicit_object_surface
-            {
-                Some(materialized.type_expr.clone())
-            } else {
-                owner_collection_expr.clone()
             };
             if crate::host_manage::component_meta_debug_enabled() {
                 crate::host_manage::component_meta_debug(format!(
-                    "REGISTRY_PENDING_LOCAL_SURFACE owner={} name={} route={:?} materialized={:?}",
-                    owner_canonical, type_name, pending_route, materialized.type_expr
+                    "REGISTRY_PENDING_LOCAL_SURFACE owner={} name={} route={:?} locator={:?}",
+                    owner_canonical, type_name, pending_route, published_locator
                 ));
             }
+            // Substituted-whole exemption: an OWNER-LOCAL alias whose body is
+            // a generic APPLICATION (`type Button = ComponentConfig<...>`)
+            // publishes the WHOLE scope-bearing authored body on ANY route —
+            // the observation executes the outer substitution on demand, so
+            // narrowing the entry to a route selection would lose the
+            // substituted sibling members consumers demand.
+            let owner_local_substituted_whole = declaration_owner == owner_canonical
+                && owner_collection_ref_head
+                    .as_ref()
+                    .is_some_and(|(_, type_arguments)| !type_arguments.is_empty());
+            if pending_route_is_deep_member_path && !owner_local_substituted_whole {
+                // Route-scoped publication: a deep member path selects no
+                // top-level member — never widen the entry with the whole
+                // authored body.
+                continue;
+            }
             _loop_materializations += 1;
+            // Heritage composition at surface observation: a whole-route
+            // owner-local entry whose raised body root is the lone-`extends`
+            // heritage intersection publishes the one-level MERGED surface
+            // composed through the shared empty-path Shallow surface walker
+            // (member values stay shallow slots). A NON-whole route publishes
+            // the route-SELECTED one-level topology as a `Projected(Surface)`
+            // fact (member payloads stay lazy authored slots; multiple
+            // discoveries union monotonically at the upsert) — EXCEPT the
+            // substituted-whole exemption above. Every other entry keeps the
+            // raw authored carrier — the raw Intersection stays the graph
+            // carrier outside this structural-surface observation point.
+            let published_source =
+                if pending_route_is_whole_local && declaration_owner == owner_canonical {
+                    query_engine
+                        .heritage_merged_surface_fact(owner_canonical, type_name.as_str())
+                        .map(|fact| {
+                            verter_type_expr::facts::SemanticTypeSource::Projected(
+                                verter_type_expr::facts::ProjectedTypeFact::Surface(fact),
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            verter_type_expr::facts::SemanticTypeSource::Authored(
+                                published_locator.clone(),
+                            )
+                        })
+                } else if let Some(fact) = (!pending_route_is_whole_local
+                    && !owner_local_substituted_whole)
+                    .then(|| {
+                        query_engine.route_scoped_surface_fact(
+                            owner_canonical,
+                            type_name.as_str(),
+                            &pending_route,
+                            &pending_member_use_sites,
+                        )
+                    })
+                    .flatten()
+                {
+                    verter_type_expr::facts::SemanticTypeSource::Projected(
+                        verter_type_expr::facts::ProjectedTypeFact::Surface(fact),
+                    )
+                } else {
+                    verter_type_expr::facts::SemanticTypeSource::Authored(published_locator.clone())
+                };
             upsert_component_meta_registry_entry(
                 owner_canonical,
                 resolved_type_registry,
@@ -2728,10 +2274,10 @@ impl VerterHost {
                 &mut published_names,
                 &mut queued_names,
                 &mut referenced_names,
+                query_engine.ctx,
                 type_name.clone(),
-                materialized.type_expr,
+                published_source,
                 declaration,
-                collection_expr.as_ref(),
                 registry_cursor,
             );
             if let Some(started) = _pending_started {
@@ -2757,94 +2303,14 @@ impl VerterHost {
                 ));
         }
         let loop_elapsed_ms = _loop_start.elapsed().as_secs_f64() * 1000.0;
-        let enrich_started = debug_enabled.then(Instant::now);
-
-        // Registry enrichment: materialize imported type expressions through
-        // the shared request-scoped engine so projection/instantiation caches
-        // are reused across all registry entries in one request.
-        for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
-            let _entry_started =
-                crate::host_manage::component_meta_debug_enabled().then(Instant::now);
-            let Some(meta) = resolved_type_registry_meta.get(index) else {
-                continue;
-            };
-            let scope_canonical = if !meta.declaration.canonical_source.is_empty() {
-                meta.declaration.canonical_source.as_str()
-            } else {
-                owner_canonical
-            };
-            if scope_canonical == owner_canonical {
-                continue;
-            }
-            if !meta.declaration.resolved_name.is_empty()
-                && component_meta_registry_expr_references_name(
-                    &entry.type_expr,
-                    meta.declaration.resolved_name.as_str(),
-                )
-            {
-                continue;
-            }
-            if component_meta_registry_has_non_object_top_level_surface(&entry.type_expr)
-                && component_meta_registry_should_keep_raw_symbolic_non_object_alias(
-                    &entry.type_expr,
-                    scope_canonical,
-                    query_engine,
-                )
-            {
-                continue;
-            }
-            let raw_body = query_engine.named_decl_body(
-                scope_canonical,
-                if !meta.declaration.resolved_name.is_empty() {
-                    meta.declaration.resolved_name.as_str()
-                } else {
-                    entry.name.as_str()
-                },
-            );
-            let materialized = query_engine.materialize_member_surface_expr(
-                scope_canonical,
-                &entry.type_expr,
-                false,
-            );
-            let preserved_nested_routes = raw_body
-                .as_ref()
-                .filter(|raw| type_expr_needs_nested_symbolic_route_preservation(raw))
-                .map_or(materialized.clone(), |raw| {
-                    preserve_nested_symbolic_member_routes(
-                        &materialized,
-                        raw,
-                        scope_canonical,
-                        query_engine,
-                        false,
-                    )
-                });
-            entry.type_expr = raw_body
-                .as_ref()
-                .map_or(preserved_nested_routes.clone(), |raw| {
-                    preserve_registry_callable_param_member_routes(&preserved_nested_routes, raw)
-                });
-            if let Some(started) = _entry_started {
-                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-                if elapsed_ms >= 5.0 {
-                    crate::host_manage::component_meta_debug(format!(
-                        "REGISTRY_ENRICH_ENTRY owner={} name={} scope={} elapsed_ms={:.1}",
-                        owner_canonical, entry.name, scope_canonical, elapsed_ms,
-                    ));
-                }
-            }
-        }
-        let enrich_elapsed_ms = enrich_started
-            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or_default();
         if debug_enabled {
             crate::host_manage::component_meta_debug(format!(
-                "PROFILE_PHASES owner={} import_refresh_ms={:.1} public_field_collect_ms={:.1} seed_scan_ms={:.1} loop_ms={:.1} enrich_ms={:.1}",
+                "PROFILE_PHASES owner={} import_refresh_ms={:.1} public_field_collect_ms={:.1} seed_scan_ms={:.1} loop_ms={:.1}",
                 owner_canonical,
                 import_refresh_elapsed_ms,
                 public_field_collect_elapsed_ms,
                 seed_scan_elapsed_ms,
                 loop_elapsed_ms,
-                enrich_elapsed_ms,
             ));
         }
     }
@@ -3526,157 +2992,3 @@ impl VerterHost {
 // type, so both predicates must treat `TypeExpr::ConstructorType` exactly
 // like `TypeExpr::Function`.
 // ===========================================================================
-
-/// Does `expr` contain any callable surface (`TypeExpr::Function`, a bare
-/// `TypeExpr::ConstructorType`, or an Object with a call / construct /
-/// method signature) anywhere reachable from its top-level structure
-/// (Array element, Intersection arm, Union arm, Object property, Tuple
-/// element)?
-///
-/// Used by the Pick member-route materialiser to detect when descending
-/// into a member's leaf would walk through a callable parameter type —
-/// which, when the param root is package-backed, must be preserved
-/// symbolically rather than expanded as if it were prop metadata.
-pub(crate) fn type_expr_contains_callable_surface_impl(expr: &verter_type_expr::TypeExpr) -> bool {
-    use verter_type_expr::{ObjectMember, TypeExpr};
-    match expr {
-        // A bare constructor type (`new (...) => R`) is a callable surface
-        // exactly like a function type — both carry the same `FunctionExpr`
-        // payload. This predicate runs on raw prepared-decl bodies (analyzer
-        // IR), so a constructor type reaches it un-collapsed and MUST be
-        // detected as callable.
-        TypeExpr::Function(_) | TypeExpr::ConstructorType(_) => true,
-        TypeExpr::Object(object) => object.properties.iter().any(|m| match m {
-            ObjectMember::Property(p) => type_expr_contains_callable_surface_impl(&p.ty),
-            ObjectMember::CallSignature(_)
-            | ObjectMember::ConstructSignature(_)
-            | ObjectMember::Method(_) => true,
-            ObjectMember::IndexSignature(_) => false,
-        }),
-        TypeExpr::Array { element, .. } => type_expr_contains_callable_surface_impl(element),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .any(|el| type_expr_contains_callable_surface_impl(&el.ty)),
-        TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
-            arms.iter().any(type_expr_contains_callable_surface_impl)
-        }
-        TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
-            type_expr_contains_callable_surface_impl(inner)
-        }
-        _ => false,
-    }
-}
-
-/// Does `param_ty` resolve to a package-backed declaration? Walks every
-/// `TypeExpr::Ref { name }` rooted in the parameter type, lowers each to a
-/// `SemanticNodeId` via the project's dispatch, and returns `true` iff any
-/// of those roots resolves to a package-backed declaration (per the
-/// graph-native `is_package_backed_ref` predicate, which routes the
-/// canonical-id classification through
-/// `ResolverContext::workspace_is_package_backed`).
-pub(crate) fn callable_param_root_is_package_backed_impl(
-    param_ty: &verter_type_expr::TypeExpr,
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    scope_canonical_id: &str,
-) -> bool {
-    use crate::component_meta_materialize::is_package_backed_ref;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::ProjectionMode;
-    use verter_type_expr::TypeExpr;
-    fn collect_root_refs<'a>(expr: &'a TypeExpr, out: &mut Vec<&'a TypeExpr>) {
-        match expr {
-            TypeExpr::Ref { .. } => out.push(expr),
-            TypeExpr::Parenthesized(inner) => collect_root_refs(inner, out),
-            TypeExpr::Array { element, .. } => collect_root_refs(element, out),
-            TypeExpr::Tuple { elements, .. } => {
-                for el in elements.iter() {
-                    collect_root_refs(&el.ty, out);
-                }
-            }
-            TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
-                for a in arms.iter() {
-                    collect_root_refs(a, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut roots: Vec<&TypeExpr> = Vec::new();
-    collect_root_refs(param_ty, &mut roots);
-    if roots.is_empty() {
-        return false;
-    }
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    roots.iter().any(|r| {
-        dispatch
-            .lower_type_expr_in_scope_with_mode(scope_canonical_id, r, ProjectionMode::Navigate)
-            .is_some_and(|node| is_package_backed_ref(ctx, node))
-    })
-}
-
-/// Does the picked member's raw leaf contain a callable surface whose
-/// param root is package-backed? When this fires, the Pick member-route
-/// materialiser MUST bypass the registry indexed-access route and project
-/// the raw leaf directly so the package-backed callable parameter type
-/// stays symbolic.
-pub(crate) fn pick_member_route_should_skip_callable_descent_impl(
-    raw_leaf: &verter_type_expr::TypeExpr,
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    scope_canonical_id: &str,
-) -> bool {
-    use verter_type_expr::{ObjectMember, TypeExpr};
-    // Visit every callable surface reachable from `raw_leaf` and check ANY
-    // parameter root for package-backed-ness.
-    fn any_callable_param_is_package_backed(
-        expr: &TypeExpr,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        scope_canonical_id: &str,
-    ) -> bool {
-        match expr {
-            // A constructor type carries the same `FunctionExpr` payload as a
-            // function type; its parameter roots must be checked for
-            // package-backed-ness identically. Without this arm a raw
-            // `new (m: PackageBacked) => ...` member silently fails the
-            // suppression predicate and the package-backed param would be
-            // descended into.
-            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-                func.parameters.iter().any(|p| {
-                    callable_param_root_is_package_backed_impl(&p.ty, ctx, scope_canonical_id)
-                })
-            }
-            TypeExpr::Object(object) => object.properties.iter().any(|m| match m {
-                ObjectMember::Property(p) => {
-                    any_callable_param_is_package_backed(&p.ty, ctx, scope_canonical_id)
-                }
-                ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                    func.parameters.iter().any(|p| {
-                        callable_param_root_is_package_backed_impl(&p.ty, ctx, scope_canonical_id)
-                    })
-                }
-                ObjectMember::Method(method) => method.function.parameters.iter().any(|p| {
-                    callable_param_root_is_package_backed_impl(&p.ty, ctx, scope_canonical_id)
-                }),
-                ObjectMember::IndexSignature(_) => false,
-            }),
-            TypeExpr::Array { element, .. } => {
-                any_callable_param_is_package_backed(element, ctx, scope_canonical_id)
-            }
-            TypeExpr::Tuple { elements, .. } => elements
-                .iter()
-                .any(|el| any_callable_param_is_package_backed(&el.ty, ctx, scope_canonical_id)),
-            TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => arms
-                .iter()
-                .any(|a| any_callable_param_is_package_backed(a, ctx, scope_canonical_id)),
-            TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => {
-                any_callable_param_is_package_backed(inner, ctx, scope_canonical_id)
-            }
-            _ => false,
-        }
-    }
-    type_expr_contains_callable_surface_impl(raw_leaf)
-        && any_callable_param_is_package_backed(raw_leaf, ctx, scope_canonical_id)
-}
-
-#[cfg(test)]
-#[path = "component_meta_callable_descent_tests.rs"]
-mod callable_descent_predicate_tests;

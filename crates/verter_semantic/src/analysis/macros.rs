@@ -1,6 +1,8 @@
 use oxc_ast::ast::*;
 use oxc_ast::Comment;
+
 use oxc_span::GetSpan;
+use verter_type_expr::TypeExpr;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -203,7 +205,12 @@ fn collect_qualified_name_root(name: &TSQualifiedName<'_>, refs: &mut Vec<String
 
 /// Detect Vue macros from a parsed program's body.
 /// Returns analyzed macros with type reference information.
-#[cfg(test)]
+///
+/// This is the analyzer's OWN macro assembly (statement-order walk +
+/// local-type-reference resolution + final-index locator stamping) — the one
+/// macro-ordinal / field-ordinal addressing engine. The deref-side field
+/// replay ([`lower_macro_field_payload_at`]) calls it over the retained
+/// snapshot so the mint side and the deref side cannot drift.
 fn analyze_macros_from_program(program: &Program<'_>, source: &str) -> Vec<AnalyzedMacro> {
     let mut macros = Vec::new();
 
@@ -229,7 +236,574 @@ fn analyze_macros_from_program(program: &Program<'_>, source: &str) -> Vec<Analy
     // Post-processing: resolve local type references in prop fields
     resolve_macro_type_references(program, &mut macros, source);
 
+    // Final normalization: stamp the authored macro-payload locators at each
+    // macro's final index. Constructor sites record authored-annotation
+    // presence via the scope pairing fields; the content-free POSITION (macro
+    // index + field index) is only known once the macro list is final.
+    for (macro_index, mac) in macros.iter_mut().enumerate() {
+        stamp_macro_payload_locators(mac, u32::try_from(macro_index).unwrap_or(u32::MAX));
+    }
+
     macros
+}
+
+/// Lower the authored generic TYPE ARGUMENT of the macro call whose
+/// SFC-absolute span is `macro_span`, replaying the analyzer's own
+/// statement-position walk over the retained `program` (the span comes from
+/// the analyzer's `AnalyzedMacro.span`, so the mint side and the deref side
+/// share one address) and lowering `type_arguments.params[0]` through the
+/// same `lower_ts_type` producer the analyzer fingerprints. `None` when no
+/// macro-shaped call sits at that span or it carries no type argument.
+///
+/// The walk covers exactly the analyzer's macro positions: a top-level
+/// expression statement, a variable declarator initializer, and the INNER
+/// call of a `withDefaults(defineProps<T>(), …)` wrapper.
+#[must_use]
+pub fn lower_macro_type_argument_at_span(
+    program: &Program<'_>,
+    source: &str,
+    macro_span: verter_span::Span,
+) -> Option<verter_type_expr::TypeExpr> {
+    fn from_call<'a>(
+        call: &'a oxc_ast::ast::CallExpression<'a>,
+        source: &str,
+        macro_span: verter_span::Span,
+    ) -> Option<verter_type_expr::TypeExpr> {
+        let call_span: verter_span::Span = call.span.into();
+        if call_span == macro_span {
+            let type_args = call.type_arguments.as_ref()?;
+            let first = type_args.params.first()?;
+            return Some(verter_type_expr_oxc::lower_ts_type(first, source));
+        }
+        // `withDefaults(defineProps<T>(), …)` — the INNER macro call is a
+        // distinct analyzer macro at the inner call's span.
+        for argument in &call.arguments {
+            if let Some(Expression::CallExpression(inner)) = argument.as_expression() {
+                if let Some(lowered) = from_call(inner, source, macro_span) {
+                    return Some(lowered);
+                }
+            }
+        }
+        None
+    }
+    fn from_expression(
+        expr: &Expression<'_>,
+        source: &str,
+        macro_span: verter_span::Span,
+    ) -> Option<verter_type_expr::TypeExpr> {
+        match expr {
+            Expression::CallExpression(call) => from_call(call, source, macro_span),
+            _ => None,
+        }
+    }
+
+    for stmt in &program.body {
+        let lowered = match stmt {
+            Statement::ExpressionStatement(expr_stmt) => {
+                from_expression(&expr_stmt.expression, source, macro_span)
+            }
+            Statement::VariableDeclaration(var_decl) => {
+                var_decl.declarations.iter().find_map(|decl| {
+                    decl.init
+                        .as_ref()
+                        .and_then(|init| from_expression(init, source, macro_span))
+                })
+            }
+            _ => None,
+        };
+        if lowered.is_some() {
+            return lowered;
+        }
+    }
+    None
+}
+
+/// Outcome of [`lower_macro_field_payload_at`] — the deref-side re-derivation
+/// of one authored per-field macro payload. Every non-body arm is a typed
+/// absence, never a fabricated body.
+#[derive(Debug, Clone)]
+pub enum MacroFieldPayloadLowering {
+    /// The addressed field carries an authored payload position, lowered to
+    /// owned typed IR (a prop's type annotation, an emit's payload type / the
+    /// call-signature payload tuple, a slot's return type, a `defineModel`
+    /// type argument).
+    Payload(TypeExpr),
+    /// The addressed field exists but authors NO payload at its position —
+    /// there is no authored TYPE body there.
+    Unauthored,
+    /// `(macro_index, field_index)` addresses no analyzer field at all (an
+    /// out-of-range / drifted ordinal, a macro kind without a field
+    /// vocabulary, or a field whose authored node no longer sits at the
+    /// recorded position).
+    NoField,
+}
+
+/// The lowered authored PER-FIELD payload of the macro at ordinal
+/// `macro_index`, field ordinal `field_index` — the deref-side re-derivation
+/// of the position a [`MacroPayloadPosition::Field`] payload locator
+/// addresses.
+///
+/// Replays the analyzer's OWN macro assembly ([`analyze_macros_from_program`]
+/// — the one macro-ordinal / field-ordinal addressing engine, so the mint
+/// side and the deref side cannot drift), selects the field family by the
+/// macro's kind (props for `defineProps` / `defineModel`, emits, slots), and
+/// lowers the field's authored node through the same `lower_ts_type`
+/// producer the analyzer fingerprints. The authored node is re-located by
+/// the field's recorded byte span — the exact span the assembly just
+/// recorded from THIS program, so the match is byte-precise:
+///
+/// - a PROP field's annotation lives on a `TSPropertySignature` (the macro
+///   type-argument literal, an intersection arm, or a local interface /
+///   alias body the analyzer resolved through its local registry) or on the
+///   runtime object argument's authored `as PropType<T>` / function-type
+///   assertion;
+/// - a `defineModel` field's span IS the macro type-argument span;
+/// - an EMIT property-signature field's payload is the member value type; a
+///   call-signature field's payload is the tuple synthesised from the
+///   parameters after the event name (the same shape the analyzer displays);
+/// - a SLOT field's payload is the slot function's RETURN type (property or
+///   method signature form).
+///
+/// [`MacroPayloadPosition::Field`]: verter_type_expr::locators::MacroPayloadPosition::Field
+#[must_use]
+pub fn lower_macro_field_payload_at(
+    program: &Program<'_>,
+    source: &str,
+    macro_index: u32,
+    field_index: u32,
+) -> MacroFieldPayloadLowering {
+    let macros = analyze_macros_from_program(program, source);
+    let Some(mac) = macros.get(macro_index as usize) else {
+        return MacroFieldPayloadLowering::NoField;
+    };
+    enum FieldTarget {
+        Prop { span: verter_span::Span },
+        ModelTypeArgument { macro_span: verter_span::Span },
+        Emit { span: verter_span::Span },
+        SlotReturn { span: verter_span::Span },
+    }
+    let target = match mac.kind {
+        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
+            let Some(field) = mac.prop_fields.get(field_index as usize) else {
+                return MacroFieldPayloadLowering::NoField;
+            };
+            if field.type_expr_scope.is_none() {
+                return MacroFieldPayloadLowering::Unauthored;
+            }
+            FieldTarget::Prop { span: field.span }
+        }
+        AnalyzedMacroKind::DefineModel => {
+            let Some(field) = mac.prop_fields.get(field_index as usize) else {
+                return MacroFieldPayloadLowering::NoField;
+            };
+            if field.type_expr_scope.is_none() {
+                return MacroFieldPayloadLowering::Unauthored;
+            }
+            FieldTarget::ModelTypeArgument {
+                macro_span: mac.span,
+            }
+        }
+        AnalyzedMacroKind::DefineEmits => {
+            let Some(field) = mac.emit_fields.get(field_index as usize) else {
+                return MacroFieldPayloadLowering::NoField;
+            };
+            if field.payload_expr_scope.is_none() {
+                return MacroFieldPayloadLowering::Unauthored;
+            }
+            FieldTarget::Emit { span: field.span }
+        }
+        AnalyzedMacroKind::DefineSlots => {
+            let Some(field) = mac.slot_fields.get(field_index as usize) else {
+                return MacroFieldPayloadLowering::NoField;
+            };
+            if field.return_expr_scope.is_none() {
+                return MacroFieldPayloadLowering::Unauthored;
+            }
+            FieldTarget::SlotReturn { span: field.span }
+        }
+        // `defineExpose` / `defineOptions` fields never stamp a payload
+        // position (their inventories are runtime object forms).
+        AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => {
+            return MacroFieldPayloadLowering::NoField;
+        }
+    };
+    match target {
+        FieldTarget::ModelTypeArgument { macro_span } => {
+            match lower_macro_type_argument_at_span(program, source, macro_span) {
+                Some(expr) => MacroFieldPayloadLowering::Payload(expr),
+                None => MacroFieldPayloadLowering::NoField,
+            }
+        }
+        FieldTarget::Prop { span } => lower_prop_field_payload_at_span(program, source, mac, span),
+        FieldTarget::Emit { span } => lower_emit_field_payload_at_span(program, source, mac, span),
+        FieldTarget::SlotReturn { span } => {
+            lower_slot_return_payload_at_span(program, source, mac, span)
+        }
+    }
+}
+
+/// Collect every `TSSignature` member list an analyzer field span can live
+/// in: the macro call's type-argument literal (plus intersection arms) and
+/// every local registry declaration body (interface bodies and alias object
+/// literals — the bodies `resolve_macro_type_references` draws fields from).
+fn field_payload_member_lists<'a>(
+    program: &'a Program<'a>,
+    mac: &AnalyzedMacro,
+) -> Vec<&'a [TSSignature<'a>]> {
+    fn collect_from_type<'a>(ts_type: &'a TSType<'a>, out: &mut Vec<&'a [TSSignature<'a>]>) {
+        match ts_type {
+            TSType::TSTypeLiteral(literal) => out.push(&literal.members),
+            TSType::TSIntersectionType(intersection) => {
+                for arm in &intersection.types {
+                    collect_from_type(arm, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut lists: Vec<&'a [TSSignature<'a>]> = Vec::new();
+    if let Some(call) = find_macro_call_at_span(program, mac.span) {
+        if let Some(type_args) = call.type_arguments.as_ref() {
+            if let Some(first) = type_args.params.first() {
+                collect_from_type(first, &mut lists);
+            }
+        }
+    }
+    for decl in build_local_type_registry(program).into_values() {
+        match decl {
+            LocalTypeDecl::Interface { body, .. } => lists.push(&body.body),
+            LocalTypeDecl::Alias(ts_type) => collect_from_type(ts_type, &mut lists),
+            LocalTypeDecl::Class => {}
+        }
+    }
+    lists
+}
+
+/// Find the macro CALL node at `macro_span`, replaying the analyzer's own
+/// statement-position walk (top-level expression statement, variable
+/// declarator initializer, and the INNER call of a
+/// `withDefaults(defineProps<T>(), …)` wrapper).
+fn find_macro_call_at_span<'a>(
+    program: &'a Program<'a>,
+    macro_span: verter_span::Span,
+) -> Option<&'a CallExpression<'a>> {
+    fn from_call<'a>(
+        call: &'a CallExpression<'a>,
+        macro_span: verter_span::Span,
+    ) -> Option<&'a CallExpression<'a>> {
+        let call_span: verter_span::Span = call.span.into();
+        if call_span == macro_span {
+            return Some(call);
+        }
+        for argument in &call.arguments {
+            if let Some(Expression::CallExpression(inner)) = argument.as_expression() {
+                if let Some(found) = from_call(inner, macro_span) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    fn from_expression<'a>(
+        expr: &'a Expression<'a>,
+        macro_span: verter_span::Span,
+    ) -> Option<&'a CallExpression<'a>> {
+        match expr {
+            Expression::CallExpression(call) => from_call(call, macro_span),
+            _ => None,
+        }
+    }
+    for stmt in &program.body {
+        let found = match stmt {
+            Statement::ExpressionStatement(expr_stmt) => {
+                from_expression(&expr_stmt.expression, macro_span)
+            }
+            Statement::VariableDeclaration(var_decl) => {
+                var_decl.declarations.iter().find_map(|decl| {
+                    decl.init
+                        .as_ref()
+                        .and_then(|init| from_expression(init, macro_span))
+                })
+            }
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+/// Lower a PROP field's authored payload node at its recorded key span: a
+/// `TSPropertySignature` annotation (type-argument literal / local decl
+/// body) or the runtime object argument's authored `as PropType<T>` /
+/// function-type assertion.
+fn lower_prop_field_payload_at_span(
+    program: &Program<'_>,
+    source: &str,
+    mac: &AnalyzedMacro,
+    span: verter_span::Span,
+) -> MacroFieldPayloadLowering {
+    for members in field_payload_member_lists(program, mac) {
+        for member in members {
+            if let TSSignature::TSPropertySignature(prop) = member {
+                let key_span: verter_span::Span = prop.key.span().into();
+                if key_span == span {
+                    return match prop.type_annotation.as_ref() {
+                        Some(ta) => MacroFieldPayloadLowering::Payload(
+                            verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source),
+                        ),
+                        None => MacroFieldPayloadLowering::Unauthored,
+                    };
+                }
+            }
+        }
+    }
+    // Runtime object argument: `name: { type: X as PropType<T> }` — the
+    // authored assertion node the mint's scope pairing recorded.
+    if let Some(call) = find_macro_call_at_span(program, mac.span) {
+        if let Some(first_arg) = call.arguments.first() {
+            if let Some(Expression::ObjectExpression(obj)) = first_arg.as_expression() {
+                for prop in &obj.properties {
+                    let ObjectPropertyKind::ObjectProperty(p) = prop else {
+                        continue;
+                    };
+                    let key_span: verter_span::Span = p.key.span().into();
+                    if key_span != span {
+                        continue;
+                    }
+                    return lower_runtime_prop_assertion(&p.value, source);
+                }
+            }
+        }
+    }
+    MacroFieldPayloadLowering::NoField
+}
+
+/// Lower the authored type of one runtime prop VALUE (the expanded object
+/// form's `type:` sub-property carrying an `as PropType<T>` / `as () => T` /
+/// `as new () => T` assertion — the exact shapes the mint stamps a payload
+/// position for).
+fn lower_runtime_prop_assertion(value: &Expression<'_>, source: &str) -> MacroFieldPayloadLowering {
+    let Expression::ObjectExpression(val_obj) = value else {
+        return MacroFieldPayloadLowering::Unauthored;
+    };
+    for sub_prop in &val_obj.properties {
+        let ObjectPropertyKind::ObjectProperty(sp) = sub_prop else {
+            continue;
+        };
+        let PropertyKey::StaticIdentifier(id) = &sp.key else {
+            continue;
+        };
+        if id.name != "type" {
+            continue;
+        }
+        let Expression::TSAsExpression(ts_as) = &sp.value else {
+            continue;
+        };
+        if !has_authored_prop_type_assertion(ts_as) {
+            continue;
+        }
+        let node = match &ts_as.type_annotation {
+            TSType::TSTypeReference(type_ref) => type_ref
+                .type_arguments
+                .as_ref()
+                .and_then(|args| args.params.first()),
+            TSType::TSFunctionType(fn_type) => Some(&fn_type.return_type.type_annotation),
+            TSType::TSConstructorType(ctor) => Some(&ctor.return_type.type_annotation),
+            _ => None,
+        };
+        return match node {
+            Some(node) => MacroFieldPayloadLowering::Payload(verter_type_expr_oxc::lower_ts_type(
+                node, source,
+            )),
+            None => MacroFieldPayloadLowering::Unauthored,
+        };
+    }
+    MacroFieldPayloadLowering::Unauthored
+}
+
+/// Lower an EMIT field's authored payload at its recorded span: a
+/// property-signature member VALUE (`change: [id: number]` — span = the key)
+/// or the call-signature payload TUPLE (`(e: 'change', id: number): void` —
+/// span = the event-name string literal; the tuple synthesises from the
+/// parameters after the event name, the same shape the analyzer displays).
+fn lower_emit_field_payload_at_span(
+    program: &Program<'_>,
+    source: &str,
+    mac: &AnalyzedMacro,
+    span: verter_span::Span,
+) -> MacroFieldPayloadLowering {
+    for members in field_payload_member_lists(program, mac) {
+        for member in members {
+            match member {
+                TSSignature::TSPropertySignature(prop) => {
+                    let key_span: verter_span::Span = prop.key.span().into();
+                    if key_span == span {
+                        return match prop.type_annotation.as_ref() {
+                            Some(ta) => MacroFieldPayloadLowering::Payload(
+                                verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source),
+                            ),
+                            None => MacroFieldPayloadLowering::Unauthored,
+                        };
+                    }
+                }
+                TSSignature::TSCallSignatureDeclaration(call_sig) => {
+                    let Some(first_param) = call_sig.params.items.first() else {
+                        continue;
+                    };
+                    let Some(ta) = first_param.type_annotation.as_ref() else {
+                        continue;
+                    };
+                    let TSType::TSLiteralType(lit) = &ta.type_annotation else {
+                        continue;
+                    };
+                    let TSLiteral::StringLiteral(s) = &lit.literal else {
+                        continue;
+                    };
+                    let name_span: verter_span::Span = s.span.into();
+                    if name_span != span {
+                        continue;
+                    }
+                    let elements: Vec<verter_type_expr::TupleElement> = call_sig
+                        .params
+                        .items
+                        .iter()
+                        .skip(1)
+                        .map(|param| verter_type_expr::TupleElement {
+                            label: match &param.pattern {
+                                BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
+                                _ => None,
+                            },
+                            ty: param
+                                .type_annotation
+                                .as_ref()
+                                .map(|ta| {
+                                    verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source)
+                                })
+                                .unwrap_or(TypeExpr::Primitive(
+                                    verter_type_expr::PrimitiveName::Any,
+                                )),
+                            optional: param.optional,
+                            rest: false,
+                        })
+                        .collect();
+                    return MacroFieldPayloadLowering::Payload(TypeExpr::Tuple {
+                        elements: std::sync::Arc::from(elements),
+                        readonly: false,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    MacroFieldPayloadLowering::NoField
+}
+
+/// Lower a SLOT field's authored RETURN payload at its recorded key span
+/// (property-signature function-type return or method-signature return —
+/// the exact positions the mint's `return_expr_scope` pairing records).
+fn lower_slot_return_payload_at_span(
+    program: &Program<'_>,
+    source: &str,
+    mac: &AnalyzedMacro,
+    span: verter_span::Span,
+) -> MacroFieldPayloadLowering {
+    for members in field_payload_member_lists(program, mac) {
+        for member in members {
+            match member {
+                TSSignature::TSPropertySignature(prop) => {
+                    let key_span: verter_span::Span = prop.key.span().into();
+                    if key_span == span {
+                        let Some(ta) = prop.type_annotation.as_ref() else {
+                            return MacroFieldPayloadLowering::Unauthored;
+                        };
+                        let TSType::TSFunctionType(fn_type) = &ta.type_annotation else {
+                            return MacroFieldPayloadLowering::Unauthored;
+                        };
+                        return MacroFieldPayloadLowering::Payload(
+                            verter_type_expr_oxc::lower_ts_type(
+                                &fn_type.return_type.type_annotation,
+                                source,
+                            ),
+                        );
+                    }
+                }
+                TSSignature::TSMethodSignature(method) => {
+                    let key_span: verter_span::Span = method.key.span().into();
+                    if key_span == span {
+                        return match method.return_type.as_ref() {
+                            Some(rt) => MacroFieldPayloadLowering::Payload(
+                                verter_type_expr_oxc::lower_ts_type(&rt.type_annotation, source),
+                            ),
+                            None => MacroFieldPayloadLowering::Unauthored,
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    MacroFieldPayloadLowering::NoField
+}
+
+/// Stamp the content-free authored payload locators onto a fully-assembled
+/// macro at its FINAL index. A locator addresses the analyzer's replayable
+/// field positions (`macros[macro_index].<fields>[field_index]`); the anchor
+/// mirrors the analyzer's local-file scope convention (empty producing
+/// canonical = the local file; the owning declaration is the component's
+/// `default` value symbol). A field whose scope pairing is absent has no
+/// authored annotation and keeps `payload: None` — never a fabricated
+/// position. Slot BINDING payloads stay `None`: the flat field-position
+/// vocabulary cannot address a nested (slot, binding) position honestly, so
+/// typed binding demand is host-raised.
+pub(crate) fn stamp_macro_payload_locators(mac: &mut AnalyzedMacro, macro_index: u32) {
+    use verter_type_expr::locators::{
+        AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
+    };
+
+    fn local_default_anchor() -> AuthoredAnchor {
+        AuthoredAnchor {
+            canonical_id: std::sync::Arc::from(""),
+            symbol: std::sync::Arc::from("default"),
+            space: LocatorSymbolSpace::Value,
+        }
+    }
+    let field_locator = |macro_index: u32, field_index: usize| MacroPayloadLocator {
+        anchor: local_default_anchor(),
+        macro_index,
+        payload: MacroPayloadPosition::Field {
+            field_index: u32::try_from(field_index).unwrap_or(u32::MAX),
+        },
+    };
+
+    if mac.parsed_type_argument_scope.is_some() {
+        mac.parsed_type_argument = Some(MacroPayloadLocator {
+            anchor: local_default_anchor(),
+            macro_index,
+            payload: MacroPayloadPosition::TypeArgument,
+        });
+    }
+    for (field_index, field) in mac.prop_fields.iter_mut().enumerate() {
+        if field.type_expr_scope.is_some() {
+            field.payload = Some(field_locator(macro_index, field_index));
+        }
+    }
+    for (field_index, field) in mac.emit_fields.iter_mut().enumerate() {
+        if field.payload_expr_scope.is_some() {
+            field.payload = Some(field_locator(macro_index, field_index));
+        }
+    }
+    for (field_index, field) in mac.slot_fields.iter_mut().enumerate() {
+        if field.return_expr_scope.is_some() {
+            field.payload = Some(field_locator(macro_index, field_index));
+        }
+    }
+    for (field_index, field) in mac.expose_fields.iter_mut().enumerate() {
+        if field.type_expr_scope.is_some() {
+            field.payload = Some(field_locator(macro_index, field_index));
+        }
+    }
 }
 
 // ── Local type registry for resolving TSTypeReference in defineProps ──
@@ -547,7 +1121,8 @@ fn extract_fields_from_interface_body_like(
                 };
                 // Lower the OXC `TSType<'_>` AST node directly. Source slicing is
                 // display-only.
-                let (type_annotation, type_expr) = match prop.type_annotation.as_ref() {
+                let (type_annotation, has_authored_annotation) = match prop.type_annotation.as_ref()
+                {
                     Some(ta) => {
                         let start = ta.type_annotation.span().start as usize;
                         let end = ta.type_annotation.span().end as usize;
@@ -557,17 +1132,15 @@ fn extract_fields_from_interface_body_like(
                         } else {
                             None
                         };
-                        let expr = verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source);
-                        (display, Some(expr))
+                        (display, true)
                     }
-                    None => (None, None),
+                    None => (None, false),
                 };
+                // The scope pairing records authored-annotation PRESENCE (the
+                // local-file empty scope); the payload position is stamped at
+                // the macro's final index by `stamp_macro_payload_locators`.
                 let type_expr_scope =
-                    type_expr.as_ref().map(|_| verter_type_expr::TypeExprScope::new(""));
-                debug_assert!(
-                    type_expr.is_some() == type_expr_scope.is_some(),
-                    "AnalyzedPropField pairing invariant: type_expr.is_some() == type_expr_scope.is_some()"
-                );
+                    has_authored_annotation.then(|| verter_type_expr::TypeExprScope::new(""));
                 let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
                 key_name.map(|name| AnalyzedPropField {
                     name,
@@ -578,7 +1151,7 @@ fn extract_fields_from_interface_body_like(
                     tags,
                     resolution_source: TypeResolutionSource::Rust,
                     resolution_error: None,
-                    type_expr,
+                    payload: None,
                     type_expr_scope,
                     declared_in_macro_type_arg,
                 })
@@ -719,15 +1292,10 @@ fn resolve_local_define_props(
                             LocalTypeDecl::Alias(t) => t.span().into(),
                             LocalTypeDecl::Class => verter_span::Span::default(),
                         };
-                        let type_expr = Some(build_expanded_type_expr(&ref_fields));
-                        debug_assert!(
-                            type_expr.is_some() || expanded.is_empty(),
-                            "ResolvedLocalType.type_expr MUST be populated when expanded is non-empty"
-                        );
                         resolved_types.push(ResolvedLocalType {
                             name: type_ref.clone(),
                             expanded,
-                            type_expr,
+                            shape: local_type_ref_shape(type_ref),
                             span,
                         });
                     }
@@ -768,15 +1336,10 @@ fn resolve_local_define_props(
                         LocalTypeDecl::Alias(t) => t.span().into(),
                         LocalTypeDecl::Class => verter_span::Span::default(),
                     };
-                    let type_expr = Some(build_expanded_type_expr(&fields));
-                    debug_assert!(
-                        type_expr.is_some() || expanded.is_empty(),
-                        "ResolvedLocalType.type_expr MUST be populated when expanded is non-empty"
-                    );
                     resolved_types.push(ResolvedLocalType {
                         name: type_ref.clone(),
                         expanded,
-                        type_expr,
+                        shape: local_type_ref_shape(type_ref),
                         span,
                     });
                     mac.prop_fields = fields;
@@ -1389,50 +1952,6 @@ fn build_expanded_type_text(fields: &[AnalyzedPropField]) -> String {
     format!("{{ {} }}", parts.join("; "))
 }
 
-/// Build a structured expanded object from resolved prop fields.
-fn build_expanded_type_expr(fields: &[AnalyzedPropField]) -> verter_type_expr::TypeExpr {
-    use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
-
-    // The analyzer producer (`extract_fields_from_interface_body_like`,
-    // `try_extract_macro`, etc.) lowers each prop's TS annotation directly
-    // from the OXC `TSType<'_>` AST node and stores the result on
-    // `AnalyzedPropField.type_expr`. Consumers of this helper read the
-    // typed form authoritatively — no source slicing, no string parsing.
-    //
-    // When a producer leaves `type_expr` unset (e.g., it had no `TSType`
-    // node in scope, such as for an inferred-only field) we publish the
-    // raw display text wrapped in `TypeExpr::Unknown { raw }` so display
-    // passthroughs keep the original text.
-    let properties = fields
-        .iter()
-        .map(|field| {
-            let ty = match &field.type_expr {
-                Some(expr) => expr.clone(),
-                None => TypeExpr::Unknown {
-                    raw: field
-                        .type_annotation
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                },
-            };
-            // `AnalyzedPropField.span` is the prop NAME span; the declaration
-            // and annotation spans are not separately tracked on the analyzed
-            // field. `name_only` maps an empty (default-placeholder) span to
-            // `None` so a field with no real span does not fabricate a byte-0
-            // span.
-            ObjectMember::Property(ObjectProperty::with_spans_public(
-                field.name.clone(),
-                ty,
-                field.is_optional,
-                false,
-                verter_type_expr::MemberSpans::name_only(field.span),
-            ))
-        })
-        .collect();
-
-    TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
-}
-
 /// Try to extract macros from an expression statement.
 /// Called per-statement from the single-pass AST walk.
 pub(crate) fn try_extract_macro_from_expr(
@@ -1491,6 +2010,22 @@ fn try_extract_inner_macro(
     }
 }
 
+/// The synthesized closed shape of a locally-resolved type reference: an
+/// object expansion is never a primitive, so it stays a shallow named
+/// reference resolved on demand (the analyzer's local-file scope convention is
+/// the empty producing canonical).
+fn local_type_ref_shape(type_ref: &str) -> verter_type_expr::facts::ResolvedLocalShape {
+    verter_type_expr::facts::ResolvedLocalShape::Ref(
+        verter_type_expr::locators::SymbolBodyLocator {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: std::sync::Arc::from(""),
+                symbol: std::sync::Arc::from(type_ref),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+            },
+        },
+    )
+}
+
 /// Try to extract a macro call from an expression.
 fn try_extract_macro(
     expr: &Expression<'_>,
@@ -1508,37 +2043,24 @@ fn try_extract_macro(
             let kind = classify_macro(callee_name)?;
 
             // In OXC 0.112, type parameters on call expressions are `.type_arguments`
-            let (is_type_based, type_references, parsed_type_argument) =
+            let (is_type_based, type_references, has_parsed_type_argument) =
                 if let Some(ref type_args) = call.type_arguments {
                     if let Some(first) = type_args.params.first() {
-                        // D1.2: capture the parent shell as a TypeExpr
-                        // once during shallow analysis. The host-side
-                        // closure consumes this field to drive a
-                        // dispatch projection of the macro's fields
-                        // without re-parsing. Lower the OXC `TSType<'_>`
-                        // AST node directly — no source slicing or
-                        // re-parsing.
-                        let lowered = verter_type_expr_oxc::lower_ts_type(first, source);
-                        let parsed =
-                            if matches!(lowered, verter_type_expr::TypeExpr::Unknown { .. }) {
-                                None
-                            } else {
-                                Some(std::sync::Arc::new(lowered))
-                            };
-                        (true, collect_type_references(first), parsed)
+                        // Capture the parent shell's authored POSITION once
+                        // during shallow analysis: the scope pairing records
+                        // presence; the payload locator is stamped at the
+                        // macro's final index. The host-side closure demands
+                        // the typed body through the shared dispatch.
+                        (true, collect_type_references(first), true)
                     } else {
-                        (true, Vec::new(), None)
+                        (true, Vec::new(), false)
                     }
                 } else {
-                    (false, Vec::new(), None)
+                    (false, Vec::new(), false)
                 };
-            let parsed_type_argument_scope = parsed_type_argument
-                .as_ref()
-                .map(|_| verter_type_expr::TypeExprScope::new(""));
-            debug_assert!(
-                parsed_type_argument.is_some() == parsed_type_argument_scope.is_some(),
-                "AnalyzedMacro pairing invariant: parsed_type_argument.is_some() == parsed_type_argument_scope.is_some()"
-            );
+            let parsed_type_argument = None;
+            let parsed_type_argument_scope =
+                has_parsed_type_argument.then(|| verter_type_expr::TypeExprScope::new(""));
 
             // Extract model name from defineModel('name') first string argument
             let model_name = if kind == AnalyzedMacroKind::DefineModel {
@@ -1599,6 +2121,8 @@ fn try_extract_macro(
                 extract_with_defaults_values(call, source)
             } else if kind == AnalyzedMacroKind::DefineProps {
                 prop_extraction.default_values
+            } else if kind == AnalyzedMacroKind::DefineModel {
+                extract_define_model_default_values(call, &model_name, source)
             } else {
                 Vec::new()
             };
@@ -1654,14 +2178,9 @@ fn extract_define_model_type(
     }
     let name = model_name.as_deref().unwrap_or("modelValue").to_string();
     let is_optional = !define_model_is_required(call);
-    let type_expr = Some(verter_type_expr_oxc::lower_ts_type(first, source));
-    let type_expr_scope = type_expr
-        .as_ref()
-        .map(|_| verter_type_expr::TypeExprScope::new(""));
-    debug_assert!(
-        type_expr.is_some() == type_expr_scope.is_some(),
-        "AnalyzedPropField pairing invariant: type_expr.is_some() == type_expr_scope.is_some()"
-    );
+    // Authored `defineModel<T>()` annotation: the scope pairing records
+    // presence; the payload position is stamped at the macro's final index.
+    let type_expr_scope = Some(verter_type_expr::TypeExprScope::new(""));
     vec![AnalyzedPropField {
         name,
         is_optional,
@@ -1671,7 +2190,7 @@ fn extract_define_model_type(
         tags: Vec::new(),
         resolution_source: TypeResolutionSource::Rust,
         resolution_error: None,
-        type_expr,
+        payload: None,
         type_expr_scope,
         // `defineModel<T>()` declares the model prop name explicitly at the
         // macro site.
@@ -1719,6 +2238,56 @@ fn extract_define_model_default_keys(
     } else {
         Vec::new()
     }
+}
+
+/// Extract the authored `default` value from a `defineModel()` options object.
+///
+/// Handles:
+/// - `defineModel<T>({ default: ... })` — options as first arg
+/// - `defineModel<T>('name', { default: ... })` — options as second arg
+///
+/// Mirrors [`extract_define_model_default_keys`]: the value entry comes from
+/// the same `default` property that marks the model as defaulted, keyed by
+/// the model name, so a present default key always pairs with a present
+/// default value entry. The value carries the verbatim source text of the
+/// default expression, exactly like `withDefaults()` defaults.
+fn extract_define_model_default_values(
+    call: &CallExpression<'_>,
+    model_name: &Option<String>,
+    source: &str,
+) -> Vec<AnalyzedDefaultValue> {
+    let name = model_name.as_deref().unwrap_or("modelValue");
+
+    // Find the options object argument (skip string literal name argument)
+    let options_obj = call.arguments.iter().find_map(|arg| {
+        if let Argument::ObjectExpression(obj) = arg {
+            Some(obj)
+        } else {
+            None
+        }
+    });
+
+    let Some(obj) = options_obj else {
+        return Vec::new();
+    };
+
+    obj.properties
+        .iter()
+        .filter_map(|prop| {
+            let ObjectPropertyKind::ObjectProperty(p) = prop else {
+                return None;
+            };
+            if !matches!(&p.key, PropertyKey::StaticIdentifier(id) if id.name == "default") {
+                return None;
+            }
+            let value = default_value_source_text(&p.value, source).unwrap_or_default();
+            Some(AnalyzedDefaultValue {
+                key: name.to_string(),
+                value,
+                span: p.value.span().into(),
+            })
+        })
+        .collect()
 }
 
 fn define_model_is_required(call: &CallExpression<'_>) -> bool {
@@ -1854,46 +2423,30 @@ fn constructor_to_ts_type(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Extract the meaningful TypeScript type from a `TSAsExpression` on a runtime prop `type:` field.
+/// Whether a runtime prop's `as` assertion carries an authored payload TYPE
+/// position. Presence-only — the payload position is stamped at the macro's
+/// final index; the typed body is demanded through the shared dispatch on read.
 ///
 /// Rules:
-/// - `X as PropType<T>`  → `T` (extracts the first type argument)
-/// - `X as () => T`      → `T` (extracts the return type, not the callable)
-/// - `X as new () => T`  → `T` (extracts the return type, not the constructor)
-/// - Other assertions    → `None` (caller falls back to `constructor_to_ts_type`)
-fn extract_ts_as_type(
-    ts_as: &TSAsExpression<'_>,
-    source: &str,
-) -> Option<verter_type_expr::TypeExpr> {
+/// - `X as PropType<T>` → the `T` argument position
+/// - `X as () => T` / `X as new () => T` → the return-type position
+/// - Other assertions → no authored payload (caller falls back to
+///   `constructor_to_ts_type`)
+fn has_authored_prop_type_assertion(ts_as: &TSAsExpression<'_>) -> bool {
     match &ts_as.type_annotation {
         TSType::TSTypeReference(type_ref) => {
-            // `X as PropType<T>` → lower T from the OXC AST node directly
             if let TSTypeName::IdentifierReference(id) = &type_ref.type_name {
-                if id.name == "PropType" {
-                    if let Some(args) = &type_ref.type_arguments {
-                        if let Some(first) = args.params.first() {
-                            return Some(verter_type_expr_oxc::lower_ts_type(first, source));
-                        }
-                    }
-                }
+                id.name == "PropType"
+                    && type_ref
+                        .type_arguments
+                        .as_ref()
+                        .is_some_and(|args| !args.params.is_empty())
+            } else {
+                false
             }
-            None
         }
-        TSType::TSFunctionType(fn_type) => {
-            // `X as () => T` → lower T (the return type, not the callable signature)
-            Some(verter_type_expr_oxc::lower_ts_type(
-                &fn_type.return_type.type_annotation,
-                source,
-            ))
-        }
-        TSType::TSConstructorType(ctor_type) => {
-            // `X as new () => T` → lower T (the return type, not the constructor signature)
-            Some(verter_type_expr_oxc::lower_ts_type(
-                &ctor_type.return_type.type_annotation,
-                source,
-            ))
-        }
-        _ => None,
+        TSType::TSFunctionType(_) | TSType::TSConstructorType(_) => true,
+        _ => false,
     }
 }
 
@@ -1923,7 +2476,9 @@ fn extract_prop_fields_from_runtime(
                 };
 
                 let mut type_annotation: Option<String> = None;
-                let mut type_expr: Option<verter_type_expr::TypeExpr> = None;
+                // Whether an authored `PropType<T>`-style assertion exists (the
+                // payload position is stamped at the macro's final index).
+                let mut has_authored_prop_type = false;
                 // Vue semantics: props are optional by default unless `required: true` is set.
                 let mut is_optional = true;
 
@@ -1950,7 +2505,7 @@ fn extract_prop_fields_from_runtime(
                                 // `X as () => T`, `X as new () => T`), then fall back to mapping the
                                 // base constructor identifier via `constructor_to_ts_type`.
                                 if let Expression::TSAsExpression(ts_as) = &sp.value {
-                                    if let Some(extracted) = extract_ts_as_type(ts_as, source) {
+                                    if has_authored_prop_type_assertion(ts_as) {
                                         // Display: slice the source span of the inner type-arg / return-type
                                         // so the wire payload still carries human-readable text.
                                         let display_span = match &ts_as.type_annotation {
@@ -1974,7 +2529,7 @@ fn extract_prop_fields_from_runtime(
                                                 .then(|| source[s..e].trim().to_string())
                                                 .filter(|t| !t.is_empty())
                                         });
-                                        type_expr = Some(extracted);
+                                        has_authored_prop_type = true;
                                     } else if let Expression::Identifier(id) = &ts_as.expression {
                                         if let Some(ts_text) = constructor_to_ts_type(&id.name) {
                                             type_annotation = Some(ts_text.to_string());
@@ -2009,13 +2564,8 @@ fn extract_prop_fields_from_runtime(
 
                 let (description, tags) = extract_jsdoc_for(comments, p.key.span().start, source);
 
-                let type_expr_scope = type_expr
-                    .as_ref()
-                    .map(|_| verter_type_expr::TypeExprScope::new(""));
-                debug_assert!(
-                    type_expr.is_some() == type_expr_scope.is_some(),
-                    "AnalyzedPropField pairing invariant: type_expr.is_some() == type_expr_scope.is_some()"
-                );
+                let type_expr_scope =
+                    has_authored_prop_type.then(|| verter_type_expr::TypeExprScope::new(""));
                 fields.push(AnalyzedPropField {
                     name: key_name,
                     is_optional,
@@ -2025,7 +2575,7 @@ fn extract_prop_fields_from_runtime(
                     tags,
                     resolution_source: TypeResolutionSource::Rust,
                     resolution_error: None,
-                    type_expr,
+                    payload: None,
                     type_expr_scope,
                     // Runtime object form — the author wrote this prop name
                     // directly as a key in `defineProps({ ... })`.
@@ -2055,7 +2605,7 @@ fn extract_prop_fields_from_runtime(
                             tags: Vec::new(),
                             resolution_source: TypeResolutionSource::Rust,
                             resolution_error: None,
-                            type_expr: None,
+                            payload: None,
                             type_expr_scope: None,
                             // Runtime array form — the author wrote the name
                             // directly as an array entry in `defineProps([...])`.
@@ -2146,7 +2696,7 @@ fn extract_emit_fields_from_members(
                     PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                     _ => None,
                 };
-                let (payload_type, payload_expr) = match prop.type_annotation.as_ref() {
+                let (payload_type, has_authored_payload) = match prop.type_annotation.as_ref() {
                     Some(ta) => {
                         let start = ta.type_annotation.span().start as usize;
                         let end = ta.type_annotation.span().end as usize;
@@ -2156,18 +2706,12 @@ fn extract_emit_fields_from_members(
                         } else {
                             None
                         };
-                        let expr = verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source);
-                        (display, Some(expr))
+                        (display, true)
                     }
-                    None => (None, None),
+                    None => (None, false),
                 };
-                let payload_expr_scope = payload_expr
-                    .as_ref()
-                    .map(|_| verter_type_expr::TypeExprScope::new(""));
-                debug_assert!(
-                    payload_expr.is_some() == payload_expr_scope.is_some(),
-                    "AnalyzedEmitField pairing invariant: payload_expr.is_some() == payload_expr_scope.is_some()"
-                );
+                let payload_expr_scope =
+                    has_authored_payload.then(|| verter_type_expr::TypeExprScope::new(""));
                 let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
                 key_name.map(|name| AnalyzedEmitField {
                     name,
@@ -2175,7 +2719,7 @@ fn extract_emit_fields_from_members(
                     payload_type,
                     description,
                     tags,
-                    payload_expr,
+                    payload: None,
                     payload_expr_scope,
                 })
             }
@@ -2203,52 +2747,12 @@ fn extract_emit_fields_from_members(
                             })
                             .collect();
                         let payload_type = Some(format!("[{}]", extra_params_text.join(", ")));
-                        // Typed: build a `TypeExpr::Tuple` from the lowered remaining-param types.
-                        // No source-text reparse — each param's `type_annotation` AST node is
-                        // lowered directly via `lower_ts_type`. Params without a type annotation
-                        // become `TypeExpr::Primitive(Unknown)` shells.
-                        let elements: Vec<verter_type_expr::TupleElement> = call_sig
-                            .params
-                            .items
-                            .iter()
-                            .skip(1)
-                            .map(|p| {
-                                let ty = match p.type_annotation.as_ref() {
-                                    Some(ta) => {
-                                        verter_type_expr_oxc::lower_ts_type(
-                                            &ta.type_annotation,
-                                            source,
-                                        )
-                                    }
-                                    None => verter_type_expr::TypeExpr::Primitive(
-                                        verter_type_expr::PrimitiveName::Unknown,
-                                    ),
-                                };
-                                let label = match &p.pattern {
-                                    BindingPattern::BindingIdentifier(id) => {
-                                        Some(id.name.to_string())
-                                    }
-                                    _ => None,
-                                };
-                                verter_type_expr::TupleElement {
-                                    ty,
-                                    optional: p.optional,
-                                    label,
-                                    rest: false,
-                                }
-                            })
-                            .collect();
-                        let payload_expr = Some(verter_type_expr::TypeExpr::Tuple {
-                            elements: std::sync::Arc::from(elements),
-                            readonly: false,
-                        });
-                        let payload_expr_scope = payload_expr
-                            .as_ref()
-                            .map(|_| verter_type_expr::TypeExprScope::new(""));
-                        debug_assert!(
-                            payload_expr.is_some() == payload_expr_scope.is_some(),
-                            "AnalyzedEmitField pairing invariant: payload_expr.is_some() == payload_expr_scope.is_some()"
-                        );
+                        // The call-signature payload tuple is an authored
+                        // structure at this emit position: the scope pairing
+                        // records presence, the payload locator is stamped at
+                        // the macro's final index, and the tuple materializes
+                        // through the shared dispatch on demand.
+                        let payload_expr_scope = Some(verter_type_expr::TypeExprScope::new(""));
                         let (description, tags) =
                             extract_jsdoc_for(comments, call_sig.span().start, source);
                         return Some(AnalyzedEmitField {
@@ -2257,7 +2761,7 @@ fn extract_emit_fields_from_members(
                             payload_type,
                             description,
                             tags,
-                            payload_expr,
+                            payload: None,
                             payload_expr_scope,
                         });
                     }
@@ -2288,7 +2792,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                         payload_type: None,
                         description: None,
                         tags: Vec::new(),
-                        payload_expr: None,
+                        payload: None,
                         payload_expr_scope: None,
                     })
                 } else {
@@ -2307,7 +2811,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                         payload_type: None,
                         description: None,
                         tags: Vec::new(),
-                        payload_expr: None,
+                        payload: None,
                         payload_expr_scope: None,
                     })
                 } else {
@@ -2423,7 +2927,7 @@ fn extract_expose_fields(
                 key_name.map(|name| AnalyzedExposeField {
                     name,
                     span: Some(p.key.span().into()),
-                    type_expr: None,
+                    payload: None,
                     type_expr_scope: None,
                     description,
                     tags,
@@ -2498,18 +3002,13 @@ fn extract_slot_fields_from_members(
                     .as_ref()
                     .map(|ta| extract_slot_bindings_from_fn_type(&ta.type_annotation, source))
                     .unwrap_or_default();
-                let (return_type, return_expr) = prop
+                let (return_type, has_authored_return) = prop
                     .type_annotation
                     .as_ref()
                     .map(|ta| extract_slot_return_from_fn(&ta.type_annotation, source))
-                    .unwrap_or((None, None));
-                let return_expr_scope = return_expr
-                    .as_ref()
-                    .map(|_| verter_type_expr::TypeExprScope::new(""));
-                debug_assert!(
-                    return_expr.is_some() == return_expr_scope.is_some(),
-                    "AnalyzedSlotField pairing invariant: return_expr.is_some() == return_expr_scope.is_some()"
-                );
+                    .unwrap_or((None, false));
+                let return_expr_scope =
+                    has_authored_return.then(|| verter_type_expr::TypeExprScope::new(""));
                 let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
                 key_name.map(|name| AnalyzedSlotField {
                     name,
@@ -2519,7 +3018,7 @@ fn extract_slot_fields_from_members(
                     return_type,
                     description,
                     tags,
-                    return_expr,
+                    payload: None,
                     return_expr_scope,
                 })
             }
@@ -2530,7 +3029,7 @@ fn extract_slot_fields_from_members(
                     _ => None,
                 };
                 let bindings = extract_slot_bindings_from_params(&method.params, source);
-                let (return_type, return_expr) = match method.return_type.as_ref() {
+                let (return_type, has_authored_return) = match method.return_type.as_ref() {
                     Some(rt) => {
                         let start = rt.type_annotation.span().start as usize;
                         let end = rt.type_annotation.span().end as usize;
@@ -2540,18 +3039,12 @@ fn extract_slot_fields_from_members(
                         } else {
                             None
                         };
-                        let expr = verter_type_expr_oxc::lower_ts_type(&rt.type_annotation, source);
-                        (display, Some(expr))
+                        (display, true)
                     }
-                    None => (None, None),
+                    None => (None, false),
                 };
-                let return_expr_scope = return_expr
-                    .as_ref()
-                    .map(|_| verter_type_expr::TypeExprScope::new(""));
-                debug_assert!(
-                    return_expr.is_some() == return_expr_scope.is_some(),
-                    "AnalyzedSlotField pairing invariant: return_expr.is_some() == return_expr_scope.is_some()"
-                );
+                let return_expr_scope =
+                    has_authored_return.then(|| verter_type_expr::TypeExprScope::new(""));
                 let (description, tags) = extract_jsdoc_for(comments, method.span().start, source);
                 key_name.map(|name| AnalyzedSlotField {
                     name,
@@ -2561,7 +3054,7 @@ fn extract_slot_fields_from_members(
                     return_type,
                     description,
                     tags,
-                    return_expr,
+                    payload: None,
                     return_expr_scope,
                 })
             }
@@ -2570,14 +3063,14 @@ fn extract_slot_fields_from_members(
         .collect()
 }
 
-/// Extract both the display text AND the lowered `TypeExpr` of a `TSFunctionType`'s
-/// return type. Returns `(None, None)` for non-function-type inputs.
+/// Extract the display text of a `TSFunctionType`'s return type plus whether
+/// an authored return position exists. Returns `(None, false)` for
+/// non-function-type inputs. The return payload position is stamped at the
+/// macro's final index; the typed body is demanded through the shared
+/// dispatch on read.
 ///
-/// Handles: `(props: { row: MyItem }) => VNode[]` → (`"VNode[]"`, lowered VNode[]).
-fn extract_slot_return_from_fn(
-    ts_type: &TSType<'_>,
-    source: &str,
-) -> (Option<String>, Option<verter_type_expr::TypeExpr>) {
+/// Handles: `(props: { row: MyItem }) => VNode[]` → (`"VNode[]"`, true).
+fn extract_slot_return_from_fn(ts_type: &TSType<'_>, source: &str) -> (Option<String>, bool) {
     if let TSType::TSFunctionType(fn_type) = ts_type {
         let start = fn_type.return_type.type_annotation.span().start as usize;
         let end = fn_type.return_type.type_annotation.span().end as usize;
@@ -2587,11 +3080,9 @@ fn extract_slot_return_from_fn(
         } else {
             None
         };
-        let expr =
-            verter_type_expr_oxc::lower_ts_type(&fn_type.return_type.type_annotation, source);
-        return (display, Some(expr));
+        return (display, true);
     }
-    (None, None)
+    (None, false)
 }
 
 /// Extract binding types from a `TSFunctionType` annotation on a property signature.
@@ -2648,34 +3139,28 @@ fn extract_slot_bindings_from_type_literal(
                     PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                     _ => None,
                 };
-                let (type_annotation, binding_expr) = match prop.type_annotation.as_ref() {
+                let type_annotation = match prop.type_annotation.as_ref() {
                     Some(ta) => {
                         let start = ta.type_annotation.span().start as usize;
                         let end = ta.type_annotation.span().end as usize;
-                        let display = if end <= source.len() {
+                        if end <= source.len() {
                             let text = source[start..end].trim();
                             (!text.is_empty()).then(|| text.to_string())
                         } else {
                             None
-                        };
-                        let expr = verter_type_expr_oxc::lower_ts_type(&ta.type_annotation, source);
-                        (display, Some(expr))
+                        }
                     }
-                    None => (None, None),
+                    None => None,
                 };
-                let binding_expr_scope = binding_expr
-                    .as_ref()
-                    .map(|_| verter_type_expr::TypeExprScope::new(""));
-                debug_assert!(
-                    binding_expr.is_some() == binding_expr_scope.is_some(),
-                    "AnalyzedSlotFieldBinding pairing invariant: binding_expr.is_some() == binding_expr_scope.is_some()"
-                );
+                // A nested (slot, binding) position is not addressable by the
+                // flat field-position vocabulary — the typed binding channel
+                // is host-raised; the binding carries display text only.
                 key_name.map(|name| AnalyzedSlotFieldBinding {
                     name,
                     type_annotation,
                     span: prop.key.span().into(),
-                    binding_expr,
-                    binding_expr_scope,
+                    payload: None,
+                    binding_expr_scope: None,
                 })
             } else {
                 None
@@ -2686,14 +3171,18 @@ fn extract_slot_bindings_from_type_literal(
 
 /// Recover slot bindings from an AST `Pick<Object, Keys>` type reference.
 ///
-/// Walks the OXC `TSType` directly — no source slicing, no text-mode reparse.
-/// For each key in the keys union (or a single key reference):
-/// - String-literal keys (`"name"`) emit
-///   `binding_expr = TypeExpr::IndexedAccess { object: lower(args[0]), index: Literal(String("name")) }`.
-/// - Userland alias keys (`type BindingKey = "name" | "value"`) emit
-///   `binding_expr = TypeExpr::IndexedAccess { object: lower(args[0]), index: Ref { name: "BindingKey" } }`.
-///   Alias resolution is NOT analyzer scope — the projector / cross-file resolver
-///   walks the `Ref` to its body lazily via the standard `TypeExpr` path.
+/// Walks the OXC `TSType` directly for the key inventory. A nested
+/// (slot, binding) position is not addressable by the flat field-position
+/// payload vocabulary, so each emitted binding carries DISPLAY TEXT only
+/// (`type_annotation = "Object[Key]"`, sliced from the authored spans) with
+/// `payload: None` — no stored typed shape; the typed binding channel is
+/// host-raised on demand. For each key in the keys union (or a single key
+/// reference):
+/// - String-literal keys (`"name"`) emit one binding named after the literal.
+/// - Userland alias keys (`type BindingKey = "name" | "value"`) emit ONE
+///   binding named after the alias. Alias resolution is NOT analyzer scope —
+///   enumerating the literal-union members happens downstream through the
+///   host-raised typed binding channel.
 ///
 /// Other shapes (non-Pick references, missing arguments, non-literal/non-ref keys)
 /// return an empty vec.
@@ -2720,9 +3209,6 @@ fn extract_slot_bindings_from_pick_ast(
     }
     let object_ts = &type_args.params[0];
     let keys_ts = &type_args.params[1];
-
-    // The object is the same for every binding — lower once and clone.
-    let object_expr = std::sync::Arc::new(verter_type_expr_oxc::lower_ts_type(object_ts, source));
 
     // Collect each key as either a literal-string key, or a userland alias Ref.
     let mut bindings = Vec::new();
@@ -2755,32 +3241,22 @@ fn extract_slot_bindings_from_pick_ast(
                     };
                     let display =
                         (!object_text.is_empty()).then(|| format!("{object_text}[{key_text}]"));
-                    let index_expr = verter_type_expr::TypeExpr::Literal(
-                        verter_type_expr::LiteralValue::String(key_name.clone()),
-                    );
-                    let binding_expr = Some(verter_type_expr::TypeExpr::IndexedAccess {
-                        object: object_expr.clone(),
-                        index: std::sync::Arc::new(index_expr),
-                    });
-                    let binding_expr_scope = binding_expr
-                        .as_ref()
-                        .map(|_| verter_type_expr::TypeExprScope::new(""));
-                    debug_assert!(
-                        binding_expr.is_some() == binding_expr_scope.is_some(),
-                        "AnalyzedSlotFieldBinding pairing invariant"
-                    );
+                    // A nested (slot, binding) position is not addressable by
+                    // the flat field-position vocabulary — the typed binding
+                    // channel is host-raised; display text only.
                     bindings.push(AnalyzedSlotFieldBinding {
                         name: key_name,
                         type_annotation: display,
                         span: verter_span::Span::default(),
-                        binding_expr,
-                        binding_expr_scope,
+                        payload: None,
+                        binding_expr_scope: None,
                     });
                 }
             }
-            // Userland alias: `type BindingKey = "name" | "value"` referenced by name.
-            // Analyzer emits the symbolic shape `IndexedAccess { object, index: Ref { name } }`.
-            // Resolution to the literal-union body happens in the projector / cross-file resolver.
+            // Userland alias: `type BindingKey = "name" | "value"` referenced
+            // by name. The analyzer emits one display-text binding named after
+            // the alias; resolving the alias to its literal-union body happens
+            // downstream through the host-raised typed binding channel.
             TSType::TSTypeReference(key_ref) => {
                 let alias_name = match &key_ref.type_name {
                     TSTypeName::IdentifierReference(id) => Some(id.name.to_string()),
@@ -2809,31 +3285,23 @@ fn extract_slot_bindings_from_pick_ast(
                     };
                     let display =
                         (!object_text.is_empty()).then(|| format!("{object_text}[{key_text}]"));
-                    // Lower the alias-key AST node directly so any type arguments
-                    // (`Pick<X, K<T>>`) are preserved.
-                    let index_expr = verter_type_expr_oxc::lower_ts_type(key_ts, source);
-                    let binding_expr = Some(verter_type_expr::TypeExpr::IndexedAccess {
-                        object: object_expr.clone(),
-                        index: std::sync::Arc::new(index_expr),
-                    });
-                    let binding_expr_scope = binding_expr
-                        .as_ref()
-                        .map(|_| verter_type_expr::TypeExprScope::new(""));
-                    debug_assert!(
-                        binding_expr.is_some() == binding_expr_scope.is_some(),
-                        "AnalyzedSlotFieldBinding pairing invariant"
-                    );
+                    // A nested (slot, binding) position is not addressable by
+                    // the flat field-position vocabulary — the typed binding
+                    // channel is host-raised; display text only.
                     bindings.push(AnalyzedSlotFieldBinding {
-                        // Bare alias reference: at analyzer scope we cannot enumerate
-                        // the underlying literal-union members; the projector / resolver
-                        // walks `Ref { name: alias_name }` and emits a per-binding entry
-                        // for each resolved literal. Use the alias name as the analyzer
-                        // shape's identifier; the consumer overrides downstream.
+                        // Bare alias reference: at analyzer scope we cannot
+                        // enumerate the underlying literal-union members, and
+                        // no typed shape is stored — a downstream consumer
+                        // demands the typed surface through the host-raised
+                        // binding channel and emits a per-binding entry for
+                        // each resolved literal. The alias name stands in as
+                        // the binding identifier; the consumer overrides it
+                        // downstream.
                         name: alias_name,
                         type_annotation: display,
                         span: verter_span::Span::default(),
-                        binding_expr,
-                        binding_expr_scope,
+                        payload: None,
+                        binding_expr_scope: None,
                     });
                 }
             }

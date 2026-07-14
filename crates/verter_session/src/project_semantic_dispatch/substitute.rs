@@ -858,7 +858,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// descended automatically, never silently dropped) — the mirror
     /// contract. Arms that return `(node, false)` without recursion (leaf
     /// TypeParam / Primitive / Literal / Opaque / DeclRef / Never /
-    /// Unknown / Any / VueMacroElements) terminate here too — the accessor
+    /// Unknown / Any) terminate here too — the accessor
     /// returns an empty slice for them. Cyclic graphs are guarded by a
     /// `visited` set.
     ///
@@ -1051,7 +1051,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 //
                 // The catch-all also covers substitute's `_ => (node, false)`
                 // leaf variants (Primitive, Literal, Opaque, DeclRef, Never,
-                // Unknown, Any, VueMacroElements): none have child
+                // Unknown, Any): none have child
                 // semantic-node references, and the accessor returns an empty
                 // slice for them, so the walker pushes nothing.
                 other => {

@@ -1,11 +1,13 @@
 //! DTO-boundary architecture guard.
 //!
-//! `verter_compiler` must never depend on `verter_session`. The compiler-owned
-//! macro-surface DTOs (`crates/verter_compiler/src/compile/macro_dto.rs`) are
-//! the owned hand-off shape the session/host *produces* and the compiler
-//! *consumes*; the dependency arrow points session → compiler, never the
-//! reverse. A `verter_session` dependency on `verter_compiler` would invert that
-//! arrow and let semantic/host concerns leak into the codegen crate.
+//! `verter_compiler` must never depend on `verter_session`. The macro-surface
+//! codegen DTOs live in the dependency-neutral `verter_macro_dto` leaf crate
+//! (re-exported at `verter_compiler::compile`): the resolution/session side
+//! *produces* that hand-off shape and the compiler *consumes* it, and the two
+//! sides share ONLY the neutral leaf — so the compiler never needs (and must
+//! never grow) a `verter_session` dependency to reach its macro surface. A
+//! `verter_session` dependency here would invert the boundary and let
+//! semantic/host concerns leak into the codegen crate.
 //!
 //! This guard parses `verter_compiler`'s own `Cargo.toml` and asserts no
 //! dependency entry names `verter_session` in any dependency table

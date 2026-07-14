@@ -841,7 +841,7 @@ fn materialization_cache_key_is_content_free_and_env_discriminating() {
     );
 
     let mut proj_variant = base.clone();
-    proj_variant.projection_path = RouteDemand::Pick(vec!["id".to_string()]);
+    proj_variant.projection_path = RouteDemand::pick(vec!["id".to_string()]);
     assert_ne!(
         hash_of(&base),
         hash_of(&proj_variant),
@@ -1700,13 +1700,12 @@ fn shape_materialize_key_hygiene_predicate_discriminates() {
 /// `ProjectPath.base` / `ResolveOverloadSet.callee` / `IndexKey::TypeNode`),
 /// which are NOT shape/materialize keys and stay allowed.
 /// The sanctioned `ShapeSubject` variant inventory. The scanner extracts
-/// the `MemberValueNode` / `TypeExpr` / `SyntheticBinding` arms by name,
-/// so a NEW arm would be INVISIBLE to that extraction. The closed
-/// inventory assertion FAILS the guard the moment the enum grows a 4th
-/// arm — forcing a conscious review (and an explicit add here) of whether
-/// the new arm carries an unsanctioned `SemanticNodeId`.
-const SANCTIONED_SHAPE_SUBJECT_VARIANTS: &[&str] =
-    &["TypeExpr", "MemberValueNode", "SyntheticBinding"];
+/// the `MemberValueNode` / `SyntheticBinding` arms by name, so a NEW arm
+/// would be INVISIBLE to that extraction. The closed inventory assertion
+/// FAILS the guard the moment the enum grows a 3rd arm — forcing a
+/// conscious review (and an explicit add here) of whether the new arm
+/// carries an unsanctioned `SemanticNodeId`.
+const SANCTIONED_SHAPE_SUBJECT_VARIANTS: &[&str] = &["MemberValueNode", "SyntheticBinding"];
 
 #[test]
 fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
@@ -1778,8 +1777,7 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
              component_meta_materialize.rs",
         );
     // Scope variant-arm extraction to the `ShapeSubject` enum body first, so
-    // a variant needle (e.g. `TypeExpr {`) cannot match an unrelated earlier
-    // site like `impl NonSyntheticTypeExpr {`.
+    // a variant needle cannot match an unrelated earlier site.
     let shape_subject_enum = extract_brace_block(&caches, "pub enum ShapeSubject {").expect(
         "key-hygiene GUARD: could not locate `pub enum ShapeSubject` body in \
          component_meta_caches.rs",
@@ -1811,10 +1809,6 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
             "key-hygiene GUARD: could not locate the `ShapeSubject::MemberValueNode` variant body \
              in the ShapeSubject enum",
         );
-    let type_expr_arm = extract_enum_variant_block(&shape_subject_enum, "TypeExpr").expect(
-        "key-hygiene GUARD: could not locate the `ShapeSubject::TypeExpr` variant body in the \
-         ShapeSubject enum",
-    );
     let synthetic_binding_arm = extract_enum_variant_block(&shape_subject_enum, "SyntheticBinding")
         .expect(
             "key-hygiene GUARD: could not locate the `ShapeSubject::SyntheticBinding` variant body \
@@ -1898,20 +1892,6 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
         ],
     ));
     inventory_failures.extend(exact_field_inventory_failures(
-        "ShapeSubject::TypeExpr",
-        &type_expr_arm,
-        &[
-            ExpectedField {
-                name: "scope",
-                ty: None,
-            },
-            ExpectedField {
-                name: "expr",
-                ty: None,
-            },
-        ],
-    ));
-    inventory_failures.extend(exact_field_inventory_failures(
         "ShapeSubject::MemberValueNode",
         &member_value_arm,
         &[
@@ -1981,9 +1961,8 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
     // `MemberShapeNodeSubject` is pinned GLOBALLY to exactly the
     // `MemberValueNode.node` field. The newtype hides its inner
     // `SemanticNodeId` from the bare-`SemanticNodeId` scan, so a MISPLACED
-    // wrapper — `ShapeDemand { decoy: MemberShapeNodeSubject, .. }`,
-    // `MaterializationCacheKey { rogue: MemberShapeNodeSubject, .. }`, or
-    // `ShapeSubject::TypeExpr { .., decoy: MemberShapeNodeSubject }` —
+    // wrapper — `ShapeDemand { decoy: MemberShapeNodeSubject, .. }` or
+    // `MaterializationCacheKey { rogue: MemberShapeNodeSubject, .. }` —
     // would otherwise PASS. Count the newtype across EVERY scanned body and
     // assert the SINGLE occurrence is the member arm's `node` field. The
     // `ShapeSubject` ENUM body already contains the member arm, so the four
@@ -1999,8 +1978,8 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
         "key-hygiene GUARD (global newtype pin): the sealed `MemberShapeNodeSubject` newtype \
          must appear EXACTLY ONCE across all scanned shape/materialize bodies — and that one \
          occurrence is `ShapeSubject::MemberValueNode.node`. A second occurrence (a \
-         misplaced wrapper on `ShapeDemand` / `MaterializationCacheKey` / \
-         `ShapeSubject::TypeExpr` etc.) hides a `SemanticNodeId` behind the newtype and \
+         misplaced wrapper on `ShapeDemand` / `MaterializationCacheKey` etc.) hides a \
+         `SemanticNodeId` behind the newtype and \
          re-opens the graph-instance ordinal key the content-free identities removed \
          (R6). Found {member_subject_total} occurrence(s).",
     );
@@ -2017,11 +1996,6 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
     violations.extend(shape_materialize_key_violations(
         "ShapeDemand",
         &shape_demand,
-        None,
-    ));
-    violations.extend(shape_materialize_key_violations(
-        "ShapeSubject::TypeExpr",
-        &type_expr_arm,
         None,
     ));
     violations.extend(shape_materialize_key_violations(
@@ -2085,14 +2059,13 @@ fn no_unsanctioned_semantic_node_id_in_shape_or_materialize_key() {
 }
 
 /// Self-test: the closed `ShapeSubject` variant-inventory assertion
-/// provably FAILS on a hypothetical 4th arm carrying a bare
-/// `SemanticNodeId`, and provably PASSES on the sanctioned three. Without
+/// provably FAILS on a hypothetical 3rd arm carrying a bare
+/// `SemanticNodeId`, and provably PASSES on the sanctioned two. Without
 /// this, the closed-inventory and whole-enum-body scan could be a stub.
 #[test]
 fn shape_subject_closed_inventory_self_test() {
-    // The real (sanctioned) shape: exactly the three known arms, in order.
-    let sanctioned_enum = "TypeExpr { scope: Arc<str>, expr: NonSyntheticTypeExpr }, \
-                           MemberValueNode { scope: Arc<str>, node: MemberShapeNodeSubject }, \
+    // The real (sanctioned) shape: exactly the two known arms, in order.
+    let sanctioned_enum = "MemberValueNode { scope: Arc<str>, node: MemberShapeNodeSubject }, \
                            SyntheticBinding { id: SyntheticBindingId, _seal: ConstructionSeal },";
     assert_eq!(
         enum_variant_names(sanctioned_enum)
@@ -2100,14 +2073,13 @@ fn shape_subject_closed_inventory_self_test() {
             .map(String::as_str)
             .collect::<Vec<_>>(),
         SANCTIONED_SHAPE_SUBJECT_VARIANTS,
-        "self-test: the sanctioned three-arm enum must enumerate to exactly the \
+        "self-test: the sanctioned two-arm enum must enumerate to exactly the \
          sanctioned variant set",
     );
 
-    // A hypothetical 4th arm carrying a bare `SemanticNodeId` — the closed
+    // A hypothetical 3rd arm carrying a bare `SemanticNodeId` — the closed
     // inventory must NO LONGER match the sanctioned set (FAILS the guard).
-    let with_rogue_arm = "TypeExpr { scope: Arc<str>, expr: NonSyntheticTypeExpr }, \
-                          MemberValueNode { scope: Arc<str>, node: MemberShapeNodeSubject }, \
+    let with_rogue_arm = "MemberValueNode { scope: Arc<str>, node: MemberShapeNodeSubject }, \
                           SyntheticBinding { id: SyntheticBindingId, _seal: ConstructionSeal }, \
                           Other { node: SemanticNodeId },";
     let rogue_variants = enum_variant_names(with_rogue_arm);
@@ -2117,7 +2089,7 @@ fn shape_subject_closed_inventory_self_test() {
             .map(String::as_str)
             .collect::<Vec<_>>(),
         SANCTIONED_SHAPE_SUBJECT_VARIANTS,
-        "self-test: a 4th `Other` arm must break the closed inventory equality",
+        "self-test: a 3rd `Other` arm must break the closed inventory equality",
     );
     assert!(
         rogue_variants.iter().any(|v| v == "Other"),
@@ -2131,7 +2103,7 @@ fn shape_subject_closed_inventory_self_test() {
     let v = shape_materialize_key_violations("ShapeSubject (rogue)", with_rogue_arm, None);
     assert!(
         v.iter().any(|m| m.contains("BARE `SemanticNodeId`")),
-        "self-test: the whole-enum-body scan must flag the rogue 4th arm's bare \
+        "self-test: the whole-enum-body scan must flag the rogue 3rd arm's bare \
          `SemanticNodeId`; got {v:?}",
     );
 
@@ -2145,14 +2117,13 @@ fn shape_subject_closed_inventory_self_test() {
          `SemanticNodeId` is sealed behind `MemberShapeNodeSubject`)",
     );
 
-    // An ATTRIBUTED 4th arm must STILL surface its name, so the
+    // An ATTRIBUTED 3rd arm must STILL surface its name, so the
     // closed-inventory assert FAILS on it. Reading only a leading
     // identifier would let `#[cfg(test)] Other { .. }` (starting with
     // `#`) produce no name, so a content-free attributed arm would stay
     // invisible to the inventory. With attribute-stripping the arm's name
     // surfaces and the inventory no longer matches.
-    let with_attributed_arm = "TypeExpr { scope: Arc<str>, expr: NonSyntheticTypeExpr }, \
-                               MemberValueNode { scope: Arc<str>, node: MemberShapeNodeSubject }, \
+    let with_attributed_arm = "MemberValueNode { scope: Arc<str>, node: MemberShapeNodeSubject }, \
                                SyntheticBinding { id: SyntheticBindingId, _seal: ConstructionSeal }, \
                                #[cfg(test)] Other { scope: Arc<str> },";
     let attributed_variants = enum_variant_names(with_attributed_arm);
@@ -2168,12 +2139,11 @@ fn shape_subject_closed_inventory_self_test() {
             .map(String::as_str)
             .collect::<Vec<_>>(),
         SANCTIONED_SHAPE_SUBJECT_VARIANTS,
-        "self-test (attributed-arm inventory): an attributed 4th arm must break the \
+        "self-test (attributed-arm inventory): an attributed 3rd arm must break the \
          closed-inventory equality (the guard FAILS on it)",
     );
     // A MULTI-LINE / MULTI-attribute form must also surface the name.
-    let multiline_attr_arm = "TypeExpr { scope: Arc<str>, expr: NonSyntheticTypeExpr }, \
-                              MemberValueNode { scope: Arc<str>, node: MemberShapeNodeSubject }, \
+    let multiline_attr_arm = "MemberValueNode { scope: Arc<str>, node: MemberShapeNodeSubject }, \
                               SyntheticBinding { id: SyntheticBindingId, _seal: ConstructionSeal }, \
                               #[cfg(test)]\n    #[doc = \"x\"]\n    Other { scope: Arc<str> },";
     assert!(
@@ -2262,8 +2232,7 @@ fn member_shape_node_subject_global_single_occurrence_self_test() {
                                scope_axis: MaterializationScope, projection_mode: ProjectionMode, \
                                normalized_type_args: Arc<[SemanticNodeId]>, \
                                resolve_env_hash: HashValue";
-    let shape_subject_enum = "TypeExpr { scope: Arc<str>, expr: NonSyntheticTypeExpr }, \
-                              MemberValueNode { scope: Arc<str>, node: MemberShapeNodeSubject }, \
+    let shape_subject_enum = "MemberValueNode { scope: Arc<str>, node: MemberShapeNodeSubject }, \
                               SyntheticBinding { id: SyntheticBindingId, _seal: ConstructionSeal }";
     let legit_total = count_ident_tokens(shape_cache_key, "MemberShapeNodeSubject")
         + count_ident_tokens(shape_demand, "MemberShapeNodeSubject")

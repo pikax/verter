@@ -45,7 +45,7 @@ fn unrelated_edit_keeps_cached_meta_payload_warm() {
 
     // Prime — cold-encode.
     let _ = session
-        .get_component_meta_payload("/src/Comp.vue", |_, _| b"prime".to_vec())
+        .get_component_meta_payload("/src/Comp.vue", |_| b"prime".to_vec())
         .expect("prime payload");
     let prov = mh.host().provenance();
     let hits_before = prov.payload_cache_hits.load(Relaxed);
@@ -60,7 +60,7 @@ fn unrelated_edit_keeps_cached_meta_payload_warm() {
 
     let session2 = mh.open_session().expect("session2 opens");
     let _ = session2
-        .get_component_meta_payload("/src/Comp.vue", |_, _| b"after-unrelated".to_vec())
+        .get_component_meta_payload("/src/Comp.vue", |_| b"after-unrelated".to_vec())
         .expect("post-unrelated payload");
 
     let hits_after = prov.payload_cache_hits.load(Relaxed);

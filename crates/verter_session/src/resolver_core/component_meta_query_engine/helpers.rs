@@ -169,7 +169,7 @@ where
     ImportedRegistrySymbolResolution::Resolved(Some(ResolvedImportedRegistrySymbol {
         canonical_id: resolved_id.clone(),
         exported_name: resolved_name,
-        body: prepared.body.clone(),
+        body: prepared.body_facts.clone(),
         canonical_dependencies: prepared_type_decl_canonical_dependencies(
             resolved_id.as_str(),
             prepared.as_ref(),

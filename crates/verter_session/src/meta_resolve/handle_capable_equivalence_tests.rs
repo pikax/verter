@@ -234,9 +234,10 @@ fn owner_collection_node_arm_matches_materialized_body_surface() {
 }
 
 // ---------------------------------------------------------------------------
-// ShapeSubject seam: the TypeExpr-subject materialiser
-// (`materialize_component_meta_type_expr_until_stable_full`, the
-// `ShapeSubject::TypeExpr` path) and the graph-native member reducer
+// ShapeSubject seam: the TypeExpr-START materialiser
+// (`materialize_component_meta_type_expr_until_stable_full`, which keys the
+// shared member-value-node slot off its pre-peek lowering) and the
+// graph-native member reducer
 // (`reduce_member_value_graph_native_with_context`, the
 // `ShapeSubject::MemberValueNode` / handle path) produce the same public
 // shape for the same body. This locks the existing handle-native
@@ -246,8 +247,8 @@ fn owner_collection_node_arm_matches_materialized_body_surface() {
 #[test]
 fn shape_subject_type_expr_and_member_value_node_arms_agree() {
     use crate::meta_resolve::materialize::{
-        materialize_component_meta_type_expr_until_stable,
-        reduce_member_value_graph_native_with_context,
+        lower_type_expr_for_shape_subject, reduce_member_value_graph_native_with_context,
+        type_expr_materialize_reduction_context,
     };
     use crate::semantic_query::ProjectionReductionContext;
 
@@ -270,21 +271,29 @@ fn shape_subject_type_expr_and_member_value_node_arms_agree() {
 
     let ((expr_shape, node_shape), _facts) = host.with_fact_tracer(|| {
         let mut engine = ComponentMetaQueryEngine::new(host);
-        // ShapeSubject::TypeExpr arm.
-        let expr_shape = materialize_component_meta_type_expr_until_stable(
-            &expr,
+        let ctx: &dyn crate::resolver_core::ResolverContext = host;
+        // TypeExpr-START shape-route arm: the pre-peek shape-subject lowering
+        // under the EXACT materialise reduction context, reduced through the
+        // shared graph-native reducer.
+        let reduction_context =
+            type_expr_materialize_reduction_context(ctx, "/shape.ts", &expr, mode);
+        let lowering =
+            lower_type_expr_for_shape_subject(&mut engine, "/shape.ts", &expr, reduction_context)
+                .expect("the TypeExpr-start shape route must lower the fixture body");
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let cap =
+            crate::project_semantic_dispatch::output_materialization::TestOutputCap::new(&dispatch);
+        let expr_shape = reduce_member_value_graph_native_with_context(
+            ctx,
             "/shape.ts",
-            mode,
-            &mut engine,
-        );
+            lowering.lowered,
+            reduction_context,
+        )
+        .into_type_expr(&cap);
 
         // ShapeSubject::MemberValueNode / handle arm: lower then reduce the
         // node DIRECTLY (no TypeExpr round-trip).
         let node = lower_handle(host, "/shape.ts", &expr);
-        let ctx: &dyn crate::resolver_core::ResolverContext = host;
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-        let cap =
-            crate::project_semantic_dispatch::output_materialization::TestOutputCap::new(&dispatch);
         let node_shape = reduce_member_value_graph_native_with_context(
             ctx,
             "/shape.ts",
@@ -298,8 +307,8 @@ fn shape_subject_type_expr_and_member_value_node_arms_agree() {
     assert_eq!(
         expr_shape, node_shape,
         "the ShapeSubject::MemberValueNode handle arm (reduce_member_value_graph_native_with_context) \
-         MUST produce the identical public shape as the ShapeSubject::TypeExpr arm \
-         (materialize_component_meta_type_expr_until_stable) for the same body"
+         MUST produce the identical public shape as the TypeExpr-START shape route \
+         (lower_type_expr_for_shape_subject + the shared reducer) for the same body"
     );
     // NEGATIVE: the indexed-access hop must have reduced to the concrete
     // `number`, proving the dispatch ran on the handle (not a passthrough).
@@ -314,7 +323,7 @@ fn shape_subject_type_expr_and_member_value_node_arms_agree() {
 }
 
 /// Shared equivalence assertion for the ShapeSubject reduction path: the
-/// `ShapeSubject::TypeExpr` materialiser
+/// TypeExpr-START materialiser
 /// (`materialize_component_meta_type_expr_until_stable`) and the
 /// `ShapeSubject::MemberValueNode` / handle reducer
 /// (`reduce_member_value_graph_native_with_context`, fed the lowered
@@ -326,21 +335,30 @@ fn shape_subject_type_expr_and_member_value_node_arms_agree() {
 /// to a concrete terminal so the negative assertion discriminates.
 fn assert_shape_subject_arms_agree(host: &VerterHost, scope: &str, expr: &TypeExpr) -> TypeExpr {
     use crate::meta_resolve::materialize::{
-        materialize_component_meta_type_expr_until_stable,
-        reduce_member_value_graph_native_with_context,
+        lower_type_expr_for_shape_subject, reduce_member_value_graph_native_with_context,
+        type_expr_materialize_reduction_context,
     };
     use crate::semantic_query::ProjectionReductionContext;
 
     let mode = ProjectionMode::Expanded;
     let ((expr_arm, node_arm), _facts) = host.with_fact_tracer(|| {
         let mut engine = ComponentMetaQueryEngine::new(host);
-        let expr_arm =
-            materialize_component_meta_type_expr_until_stable(expr, scope, mode, &mut engine);
-        let node = lower_handle(host, scope, expr);
         let ctx: &dyn crate::resolver_core::ResolverContext = host;
+        let reduction_context = type_expr_materialize_reduction_context(ctx, scope, expr, mode);
+        let lowering =
+            lower_type_expr_for_shape_subject(&mut engine, scope, expr, reduction_context)
+                .expect("the TypeExpr-start shape route must lower the fixture body");
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let cap =
             crate::project_semantic_dispatch::output_materialization::TestOutputCap::new(&dispatch);
+        let expr_arm = reduce_member_value_graph_native_with_context(
+            ctx,
+            scope,
+            lowering.lowered,
+            reduction_context,
+        )
+        .into_type_expr(&cap);
+        let node = lower_handle(host, scope, expr);
         let node_arm = reduce_member_value_graph_native_with_context(
             ctx,
             scope,
@@ -353,7 +371,7 @@ fn assert_shape_subject_arms_agree(host: &VerterHost, scope: &str, expr: &TypeEx
     assert_eq!(
         expr_arm, node_arm,
         "the ShapeSubject::MemberValueNode handle arm MUST produce the identical shape as the \
-         ShapeSubject::TypeExpr arm for scope {scope}"
+         TypeExpr-START shape-route arm for scope {scope}"
     );
     node_arm
 }

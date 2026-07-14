@@ -42,8 +42,8 @@
 use std::sync::Arc;
 
 use verter_session::semantic_query::{
-    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey,
+    PartialReasonSet, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
+    ResultCompleteness, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
@@ -101,7 +101,16 @@ fn short_alias_chain_completes_without_hitting_budget_guard() {
     // terminal `string` primitive. Pre-guard the same path would
     // also complete — this test guards against the guard FIRING
     // too aggressively on benign deep chains.
-    let resolved = for_tests::dispatch_evaluate_deferred_for_tests(&host, carrier, context);
+    let (resolved, completeness) =
+        for_tests::dispatch_evaluate_deferred_for_tests(&host, carrier, context);
+    // The benign 10-hop chain (10 << 256) resolves without the depth guard
+    // firing, so the evaluation is Complete — the discriminating control that
+    // the depth fuse does NOT trip too aggressively on ordinary deep chains.
+    assert!(
+        matches!(completeness, ResultCompleteness::Complete),
+        "a benign 10-hop chain must evaluate Complete (the depth guard must NOT fire), got \
+         {completeness:?}"
+    );
 
     let graph = host.project_type_store().semantic_graph();
     let data = graph
@@ -169,7 +178,24 @@ fn budget_guard_returns_input_node_on_deep_recursion() {
     // own SemanticQueryKey::KeyOf dispatch, and yields whatever
     // that returns — most likely Opaque(Miss) because the underlying
     // input is a Primitive(string) that has no `keyof`).
-    let resolved = for_tests::dispatch_evaluate_deferred_for_tests(&host, chain_head, context);
+    let (resolved, completeness) =
+        for_tests::dispatch_evaluate_deferred_for_tests(&host, chain_head, context);
+
+    // ── Discriminator 0 — typed completeness: the recursion-ceiling truncation
+    // reports `Partial(DEFERRED_EVALUATION_LIMIT)`. Pre-change the evaluator
+    // returned a bare carrier-stop node with NO signal (a consumer could not
+    // tell truncation from a stable stop); the typed outcome now names the
+    // ceiling reason, so the enclosing build refuses warm admission. ──
+    match completeness {
+        ResultCompleteness::Partial(reasons) => assert!(
+            reasons.contains(PartialReasonSet::DEFERRED_EVALUATION_LIMIT),
+            "the 256-depth ceiling truncation must carry DEFERRED_EVALUATION_LIMIT, got {reasons:?}"
+        ),
+        ResultCompleteness::Complete => panic!(
+            "a 10_000-deep KeyOf chain MUST trip the recursion ceiling and report Partial, \
+             never Complete"
+        ),
+    }
 
     assert!(
         graph.node_data(resolved).is_some(),

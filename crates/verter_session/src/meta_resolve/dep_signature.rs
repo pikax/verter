@@ -141,7 +141,7 @@ pub(crate) fn accumulate_dispatch_dep_signature(sig: &crate::semantic_query::Dep
 /// the materialiser site in
 /// `meta_resolve/materialize/field_types.rs::materialize_component_meta_type_expr_until_stable_full`,
 /// the BFS-cycle site in
-/// `meta_resolve/resolved_state.rs::lowered_root_reaches_transitive_cycle`,
+/// `meta_resolve/graph_predicates.rs::node_root_reaches_transitive_cycle_with_fence`,
 /// and the registry-materialise site in
 /// `resolver_core/component_meta_query_engine/registry_decl.rs::materialize_member_surface_expr`
 /// — fan their dispatch facts through this helper so the same set of

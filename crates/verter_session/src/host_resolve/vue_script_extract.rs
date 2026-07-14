@@ -15,12 +15,14 @@
 //! - The forgiving raw-byte scanner used as a fall-back when the parser
 //!   produced lossy spans (`script_content_spans_from_*` and the ASCII
 //!   tag/needle helpers).
-//! - The `<script setup generic="…">` type-parameter readers
-//!   (`sfc_script_setup_type_params` / `apply_sfc_script_setup_type_params`)
-//!   and the component-meta `populate_sfc_blocks_sidecar` — Vue-semantic
-//!   leaves that open the neutral parse artifact through the blessed
-//!   `vue_parse()` accessor, keeping `host_manage/**` free of Vue parse
-//!   types.
+//! - The `<script setup generic="…">` type-parameter reader
+//!   (`sfc_script_setup_type_params`) and the component-meta
+//!   `populate_sfc_blocks_sidecar` — Vue-semantic leaves that open the
+//!   neutral parse artifact through the blessed `vue_parse()` accessor,
+//!   keeping `host_manage/**` free of Vue parse types. Generic parameters
+//!   BIND through the prepared-decl bundle's script-setup type bindings
+//!   (the dispatch `DeclarationScopePayload` rail), never through an eval
+//!   env.
 
 #[allow(clippy::type_complexity)]
 pub(crate) fn template_converter_inputs(
@@ -92,21 +94,6 @@ pub(crate) fn sfc_script_setup_type_params(
         return Vec::new();
     }
     verter_semantic::analysis::type_eval_build::parse_type_parameter_clause(clause)
-}
-
-/// Bind the `<script setup generic="…">` type parameters into an eval
-/// env (see [`sfc_script_setup_type_params`]).
-pub(crate) fn apply_sfc_script_setup_type_params(
-    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-    source: &str,
-    framework_parse: Option<&verter_language::FrameworkParseArtifact>,
-) {
-    for param in sfc_script_setup_type_params(source, framework_parse) {
-        env.type_bindings.insert(
-            param.name.clone(),
-            std::sync::Arc::new(verter_type_expr::TypeExpr::type_parameter(param)),
-        );
-    }
 }
 
 /// Extract a **position-preserving** script-only source from a Vue SFC string.

@@ -82,7 +82,7 @@ pub(crate) use verter_audit::NonAdmissionReason;
 ///   [`crate::semantic_query::CacheRead::result_is_partial`].
 /// - The registry / resolvability rails (no per-value flag) pass the
 ///   request-result completeness
-///   ([`crate::request_context::current_materialization_cache_suppress`]),
+///   ([`crate::request_context::current_request_result_is_partial`]),
 ///   which for the component-meta entry point IS result-scoped (one
 ///   request resolves one component's meta).
 ///

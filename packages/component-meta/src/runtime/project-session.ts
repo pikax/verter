@@ -185,7 +185,11 @@ export class ProjectSession {
    * `SemanticGraphStore`) are shared across the batch.
    *
    * Returns one slot per input in input order — decoded metadata for
-   * successful slots, `null` for missing canonicals or per-id failures.
+   * successful slots, `null` EXCLUSIVELY for genuinely missing
+   * canonicals. A real per-id failure (a budget overrun or a fail-closed
+   * output-materialization failure) THROWS from the native call —
+   * matching the scalar `getComponentMeta` failure semantics; a real
+   * failure is never reported as a missing component.
    *
    * Per-id decode results are NOT memoized through `_memoizedDecode`
    * because the batch is the canonical entry point for callers that
@@ -194,11 +198,13 @@ export class ProjectSession {
    */
   getComponentMetaBatch(canonicalIds: string[]): Array<unknown | null> {
     this.ensureOpen();
+    // The native call THROWS on a real per-id failure (scalar ≡ batch),
+    // so the sentinel below is reserved for genuine absence.
     const payloads = this._nativeSession.getComponentMetaBatch(canonicalIds);
     return payloads.map((payload) => {
-      // Sentinel: empty buffer means "no result" (missing canonical or
-      // per-id failure).
       if (payload === null || payload === undefined || payload.length === 0) {
+        // Sentinel: empty buffer means "genuinely missing canonical"
+        // (never a masked failure).
         return null;
       }
       return decodeComponentMetaPayload(payload);

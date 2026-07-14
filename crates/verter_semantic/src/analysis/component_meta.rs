@@ -16,49 +16,125 @@ use crate::analysis::types::{
     AnalyzedMacro, AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField,
     ImportBindingKind, JsdocTag, StoreUsage, VueApiCallSite,
 };
-use verter_type_expr::{PrimitiveName, TypeExpr, TypeExprScope};
-
-/// Convenience: build `TypeExpr::Unknown { raw }` from a string.
-fn unknown_type(raw: impl Into<String>) -> TypeExpr {
-    TypeExpr::Unknown { raw: raw.into() }
+use verter_type_expr::facts::{SemanticTypeSource, SourcePosition};
+use verter_type_expr::locators::{AuthoredBodyLocator, MacroPayloadLocator};
+use verter_type_expr::TypeExprScope;
+/// The authored SOURCE of an analyzer field's payload position: the
+/// content-free locator wrapped as the four-source `Authored` arm. Consumers
+/// demand the typed body through the shared dispatch from it.
+fn authored_payload_source(payload: Option<&MacroPayloadLocator>) -> Option<SemanticTypeSource> {
+    payload.map(|locator| {
+        SemanticTypeSource::Authored(AuthoredBodyLocator::MacroPayload(locator.clone()))
+    })
 }
 
-/// Convert a typed expression option into a concrete `TypeExpr`, falling back
-/// to a raw-preserving `Unknown` sentinel when no typed form is available.
+/// The authored source POSITION of an analyzer field's payload: the stamped
+/// authored locator when the analyzer recorded one, else the PROVEN
+/// unannotated schema absence — the analyzer's payload slot IS the authored
+/// annotation record, so its absence is structural (an array-form emit, a
+/// runtime prop, an untyped binding), never a failure.
+fn authored_payload_position(payload: Option<&MacroPayloadLocator>) -> SourcePosition {
+    authored_payload_source(payload)
+        .map(SourcePosition::Present)
+        .unwrap_or_else(SourcePosition::unannotated)
+}
+
+/// A present source, else the PROVEN unannotated schema absence. Used at
+/// the extraction fallbacks whose `None` structurally means "this position
+/// carries no semantic annotation" (untyped bindings, unevaluated exposures,
+/// display-only positions) — REQUIRED-position failures never flow through
+/// these fallbacks (they arrive as already-classified `Failed` positions on
+/// the evaluated lanes).
+fn present_or_unannotated(source: Option<SemanticTypeSource>) -> SourcePosition {
+    source
+        .map(SourcePosition::Present)
+        .unwrap_or_else(SourcePosition::unannotated)
+}
+
+/// Choose the resolved source POSITION for a field: the evaluated position,
+/// unless the expansion is INCOMPLETE and an authored payload exists — an
+/// incomplete evaluation's honest surface is the author's own annotation
+/// position (the symbolic fallback), never a torn partial.
 ///
-/// Producers (analyzer in `macros.rs`, cross-file external resolver in
-/// `verter_parser`) populate `*_expr` whenever they have an OXC `TSType<'_>`
-/// in scope. Consumers therefore prefer the typed form and only fall back to
-/// `Unknown { raw }` when the producer could not lower (e.g., raw text from
-/// an Options API path whose lowering was not part of W0.1 schema work).
-fn typed_or_unknown(typed: Option<&TypeExpr>, raw: &str) -> TypeExpr {
-    match typed {
-        Some(expr) => expr.clone(),
-        None => unknown_type(raw.to_string()),
+/// A `Failed` evaluated position is FINAL and never falls back: it is the
+/// producer's TYPED fail-closed decision (e.g. a merged same-name member
+/// with an unresolvable contributor), not a torn partial — degrading it to
+/// one contributor's authored annotation would mask the failure with that
+/// contributor's value (a wrong concrete success). The authored fallback
+/// applies only to the incomplete evaluation's non-failed positions.
+fn prefer_authored_on_incomplete(
+    evaluated: &SourcePosition,
+    authored: Option<&MacroPayloadLocator>,
+    metadata: Option<&crate::analysis::type_expand::ExpansionMetadata>,
+) -> SourcePosition {
+    let incomplete = metadata.is_some_and(|m| {
+        m.exactness == crate::analysis::type_expand::ExpansionExactness::Incomplete
+    });
+    if incomplete && !matches!(evaluated, SourcePosition::Failed(_)) {
+        if let Some(source) = authored_payload_source(authored) {
+            return SourcePosition::Present(source);
+        }
     }
+    evaluated.clone()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Input view
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// One host-resolved prop row: the prop analysis field plus the member
+/// VALUE's session-resolved SOURCE POSITION — the prop-type authority the
+/// extraction publishes (the flat evaluated lanes contribute metadata only).
+#[derive(Debug, Clone)]
+pub struct ResolvedPropInput {
+    /// The prop analysis field.
+    pub field: AnalyzedPropField,
+    /// The member value's published source position.
+    pub type_source: SourcePosition,
+}
+
+/// One host-resolved emit row: the emit analysis field plus the payload's
+/// session-resolved SOURCE POSITION — the emit-payload authority the
+/// extraction publishes (the flat evaluated lanes contribute metadata only).
+#[derive(Debug, Clone)]
+pub struct ResolvedEmitInput {
+    /// The emit analysis field.
+    pub field: AnalyzedEmitField,
+    /// The payload's published source position.
+    pub payload_source: SourcePosition,
+}
+
+/// One host-resolved expose row: the expose analysis field plus the member
+/// VALUE's session-resolved SOURCE POSITION — the exposed-type authority the
+/// extraction publishes for type-argument surface members.
+#[derive(Debug, Clone)]
+pub struct ResolvedExposeInput {
+    /// The expose analysis field.
+    pub field: AnalyzedExposeField,
+    /// The member value's published source position.
+    pub type_source: SourcePosition,
+}
+
 /// Input view for component-meta extraction.
 ///
 /// All fields reference existing `verter_semantic::analysis` types.
-/// The host constructs this by projecting from its internal snapshot.
+/// The host constructs this by projecting from its internal snapshot; the
+/// prop / emit / expose rows carry the session-resolved SOURCE POSITIONS the
+/// normalized macro surface produced — the extraction's source authority.
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedMacroInput {
     /// Index of the macro in `ComponentMetaInput.macros`.
     pub macro_index: usize,
-    /// Host-resolved props for the macro.
-    pub props: Vec<AnalyzedPropField>,
-    /// Host-resolved emits for the macro.
-    pub emits: Vec<AnalyzedEmitField>,
+    /// Host-resolved props for the macro, each with its member-value source.
+    pub props: Vec<ResolvedPropInput>,
+    /// Host-resolved emits for the macro, each with its payload source.
+    pub emits: Vec<ResolvedEmitInput>,
     /// Host-resolved slots for the macro.
     pub slots: Vec<AnalyzedSlotField>,
-    /// Host-resolved exposed fields for the macro (`defineExpose<T>()`
-    /// type-argument surface members with their span-sliced JSDoc).
-    pub exposed: Vec<AnalyzedExposeField>,
+    /// Host-resolved exposed rows for the macro (`defineExpose<T>()`
+    /// type-argument surface members with their span-sliced JSDoc), each
+    /// with its member-value source.
+    pub exposed: Vec<ResolvedExposeInput>,
 }
 
 pub struct ComponentMetaInput<'a> {
@@ -144,19 +220,21 @@ pub struct MacroExpansionDiagnostics {
 #[derive(Debug, Clone)]
 pub struct PropAnalysis {
     pub name: String,
-    /// Resolved via priority chain: evaluated TypeExpr > raw annotation > Unknown.
-    pub type_expr: TypeExpr,
+    /// The resolved type SOURCE POSITION: the evaluated source unless the
+    /// expansion is incomplete and an authored payload exists (the symbolic
+    /// fallback); a PROVEN schema absence when the position carries no
+    /// annotation; a typed failure when the REQUIRED value position's source
+    /// could not be constructed (fails output materialization).
+    pub type_source: SourcePosition,
     /// Completeness and diagnostics from native expansion when available.
     pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
     /// Original annotation text from the source.
     pub raw_type: Option<String>,
-    /// Lowered TypeExpr companion of `raw_type` — the typed form of the
-    /// user's source annotation, populated by the analyzer's `lower_ts_type`
-    /// pass. Consumers (e.g. publication policy) walk this directly instead
-    /// of reparsing `raw_type` text. `None` when the chosen `raw_type` came
-    /// from a backend's textual rendering (no typed companion available)
-    /// or when the source had no annotation.
-    pub raw_type_expr: Option<TypeExpr>,
+    /// Authored-source companion of `raw_type` — the author's own annotation
+    /// position when the chosen `raw_type` text equals the source annotation.
+    /// `None` when the chosen `raw_type` came from a backend's textual
+    /// rendering or the source had no typed payload.
+    pub raw_type_source: Option<SemanticTypeSource>,
     pub required: bool,
     pub has_default: bool,
     pub default_value: Option<String>,
@@ -177,7 +255,10 @@ pub struct PropAnalysis {
 #[derive(Debug, Clone)]
 pub struct EventAnalysis {
     pub name: String,
-    pub payload: TypeExpr,
+    /// The resolved payload SOURCE POSITION: present, PROVEN schema-absent
+    /// (an unannotated runtime emit), or a typed failure at the REQUIRED
+    /// payload-tuple position (fails output materialization).
+    pub payload: SourcePosition,
     pub payload_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
     pub raw_signature: Option<String>,
     pub description: Option<String>,
@@ -192,15 +273,13 @@ pub struct SlotAnalysis {
     pub bindings: Vec<SlotBindingAnalysis>,
     pub is_required: bool,
     pub return_type: Option<String>,
-    /// Lowered typed form of the slot return type. Propagated from
-    /// [`AnalyzedSlotField::return_expr`] (analyzer-populated). Authoritative
-    /// for resolver / projector / registry / policy / materialiser /
-    /// public-instance consumers — `return_type` is display-only.
-    pub return_expr: Option<TypeExpr>,
-    /// Scope of `return_expr`: canonical_id of the file whose OXC parse
-    /// produced the typed expression. Pairing invariant:
-    /// `return_expr.is_some() <=> return_expr_scope.is_some()`.
-    pub return_expr_scope: Option<TypeExprScope>,
+    /// The slot return's authored SOURCE, propagated from
+    /// [`AnalyzedSlotField::payload`] — `return_type` is display-only.
+    pub return_source: Option<SemanticTypeSource>,
+    /// Scope of `return_source`: canonical_id of the file whose parse produced
+    /// the authored return type. Pairing invariant:
+    /// `return_source.is_some() <=> return_source_scope.is_some()`.
+    pub return_source_scope: Option<TypeExprScope>,
     pub description: Option<String>,
     pub tags: Vec<JsdocTag>,
 }
@@ -209,27 +288,32 @@ pub struct SlotAnalysis {
 #[derive(Debug, Clone)]
 pub struct SlotBindingAnalysis {
     pub name: String,
-    pub type_expr: TypeExpr,
+    /// The resolved binding type SOURCE POSITION (`Absent` = display text
+    /// only; the typed binding channel is host-raised).
+    pub type_source: SourcePosition,
     pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
     pub raw_type: Option<String>,
-    /// Lowered TypeExpr companion of `raw_type` — the typed form of the
-    /// user's source annotation for this binding. See
-    /// [`PropAnalysis::raw_type_expr`] for the contract.
-    pub raw_type_expr: Option<TypeExpr>,
+    /// Authored-source companion of `raw_type`. See
+    /// [`PropAnalysis::raw_type_source`] for the contract.
+    pub raw_type_source: Option<SemanticTypeSource>,
 }
 
 /// Analyzed model from `defineModel`.
 #[derive(Debug, Clone)]
 pub struct ModelAnalysis {
     pub name: String,
-    pub type_expr: TypeExpr,
+    /// The model value's resolved type SOURCE POSITION (`Absent` = untyped
+    /// model).
+    pub type_source: SourcePosition,
 }
 
 /// Analyzed exposed member from `defineExpose`.
 #[derive(Debug, Clone)]
 pub struct ExposedAnalysis {
     pub name: String,
-    pub type_expr: TypeExpr,
+    /// The exposed member's resolved type SOURCE POSITION (`Absent` =
+    /// untyped binding).
+    pub type_source: SourcePosition,
     pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
     pub description: Option<String>,
     /// JSDoc tags from the exposed member's leading `/** ... */` block.
@@ -248,7 +332,9 @@ pub struct PublicInstanceAnalysis {
 pub struct PublicInstanceMemberAnalysis {
     pub name: String,
     pub kind: PublicInstanceMemberKind,
-    pub type_expr: TypeExpr,
+    /// The member's resolved type SOURCE POSITION (`Absent` = untyped
+    /// member).
+    pub type_source: SourcePosition,
     pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
     pub raw_type: Option<String>,
     pub description: Option<String>,
@@ -332,7 +418,10 @@ pub enum PublicInstanceCompleteness {
 #[derive(Debug, Clone)]
 pub struct ResolvedTypeAnalysis {
     pub name: String,
-    pub type_expr: TypeExpr,
+    /// The registry entry's resolved type SOURCE POSITION (registry entries
+    /// always resolve a present source; the position type keeps the lane
+    /// uniform with every other materialized output lane).
+    pub type_source: SourcePosition,
     pub type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
 }
 
@@ -718,12 +807,19 @@ pub enum AcceptedSurfaceCompleteness {
 #[derive(Debug, Clone)]
 pub struct AcceptedPropAnalysis {
     pub name: String,
-    pub type_expr: TypeExpr,
+    /// The accepted prop's resolved type SOURCE POSITION (`Absent` =
+    /// untyped / cross-branch divergent).
+    pub type_source: SourcePosition,
+    /// The canonical file scope `type_source`'s SCOPE-RELATIVE names (bare
+    /// `Ref` leaf spellings, producer-local anchors at any nesting depth)
+    /// resolve under — the PRODUCING owner of an inherited source, carried
+    /// positionally per the cross-owner effective-scope invariant. `None` =
+    /// the analysis owner itself (own/declared rows, intrinsic attr rows).
+    pub type_source_scope: Option<String>,
     pub raw_type: Option<String>,
-    /// Lowered TypeExpr companion of `raw_type` — the typed form of the
-    /// user's source annotation for this accepted prop. See
-    /// [`PropAnalysis::raw_type_expr`] for the contract.
-    pub raw_type_expr: Option<TypeExpr>,
+    /// Authored-source companion of `raw_type`. See
+    /// [`PropAnalysis::raw_type_source`] for the contract.
+    pub raw_type_source: Option<SemanticTypeSource>,
     pub required: bool,
     pub provenance: MemberProvenance,
     pub availability: MemberAvailability,
@@ -734,7 +830,14 @@ pub struct AcceptedPropAnalysis {
 #[derive(Debug, Clone)]
 pub struct AcceptedEventAnalysis {
     pub name: String,
-    pub payload: TypeExpr,
+    /// The accepted event's resolved payload SOURCE POSITION (`Absent` =
+    /// untyped / cross-branch divergent).
+    pub payload: SourcePosition,
+    /// The canonical file scope `payload`'s SCOPE-RELATIVE names resolve
+    /// under — the PRODUCING owner of an inherited source, carried
+    /// positionally (see [`AcceptedPropAnalysis::type_source_scope`]).
+    /// `None` = the analysis owner itself.
+    pub payload_scope: Option<String>,
     pub raw_signature: Option<String>,
     pub provenance: MemberProvenance,
     pub availability: MemberAvailability,
@@ -754,7 +857,15 @@ pub enum FallthroughSurface {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FallthroughPropEntry {
     pub name: String,
-    pub type_expr: TypeExpr,
+    /// The inherited prop's resolved type SOURCE POSITION (`Absent` =
+    /// untyped).
+    pub type_source: SourcePosition,
+    /// The canonical file scope `type_source`'s SCOPE-RELATIVE names resolve
+    /// under — the PRODUCING owner (the terminal origin of a multi-hop
+    /// inheritance chain), carried positionally per the cross-owner
+    /// effective-scope invariant. `None` = the intrinsic/native case with no
+    /// producing file (the branch owner's scope applies).
+    pub type_source_scope: Option<String>,
     pub raw_type: Option<String>,
     pub sources: Vec<InheritedSource>,
 }
@@ -763,7 +874,14 @@ pub struct FallthroughPropEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FallthroughEventEntry {
     pub name: String,
-    pub payload: TypeExpr,
+    /// The inherited event's resolved payload SOURCE POSITION (`Absent` =
+    /// untyped).
+    pub payload: SourcePosition,
+    /// The canonical file scope `payload`'s SCOPE-RELATIVE names resolve
+    /// under — the PRODUCING owner (the terminal origin of a multi-hop
+    /// inheritance chain), carried positionally (see
+    /// [`FallthroughPropEntry::type_source_scope`]).
+    pub payload_scope: Option<String>,
     pub raw_signature: Option<String>,
     pub sources: Vec<InheritedSource>,
 }
@@ -1264,10 +1382,11 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
             }
             AnalyzedMacroKind::DefineModel => {
                 let prop_fields = merged_prop_fields(mac, resolved_macro.as_ref());
-                extract_model_from_macro(mac, &prop_fields, evaluated_types, &mut models);
+                extract_model_from_macro(mac, &prop_fields, &mut models);
             }
             AnalyzedMacroKind::DefineExpose => {
                 extract_exposed_from_macro(
+                    macro_index,
                     mac,
                     resolved_macro.as_ref(),
                     input.bindings,
@@ -1441,7 +1560,7 @@ fn collect_macro_expansion_diagnostics(
 
 fn extract_props_from_macro(
     macro_index: usize,
-    prop_fields: &[AnalyzedPropField],
+    prop_fields: &[ResolvedPropInput],
     default_keys: &std::collections::HashSet<&str>,
     default_values: &std::collections::HashMap<&str, &str>,
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
@@ -1450,7 +1569,10 @@ fn extract_props_from_macro(
     if let Some(eval_fields) = expanded_define_props_fields(evaluated, macro_index) {
         if !eval_fields.is_empty() {
             for field in eval_fields {
-                let source_field = prop_fields.iter().find(|prop| prop.name == field.name);
+                let source_field = prop_fields
+                    .iter()
+                    .find(|row| row.field.name == field.name)
+                    .map(|row| &row.field);
                 let evaluated_field = evaluated.and_then(|eval| {
                     eval.props
                         .iter()
@@ -1470,15 +1592,14 @@ fn extract_props_from_macro(
                     source_field.and_then(|prop| prop.type_annotation.as_deref()),
                     field.optional,
                 );
-                let raw_type_expr = raw_type_expr_from_source_annotation(
+                let raw_type_source = raw_type_source_from_source_annotation(
                     raw_type.as_deref(),
                     source_field.and_then(|prop| prop.type_annotation.as_deref()),
-                    source_field.and_then(|prop| prop.type_expr.as_ref()),
+                    source_field.and_then(|prop| prop.payload.as_ref()),
                 );
-                let type_expr = prefer_symbolic_prop_type_expr(
+                let type_source = prefer_authored_on_incomplete(
                     &field.ty,
-                    source_field.and_then(|prop| prop.type_expr.as_ref()),
-                    raw_type.as_deref(),
+                    source_field.and_then(|prop| prop.payload.as_ref()),
                     type_expansion.as_ref(),
                 );
 
@@ -1492,10 +1613,10 @@ fn extract_props_from_macro(
 
                 out.push(PropAnalysis {
                     name: field.name.clone(),
-                    type_expr,
+                    type_source,
                     type_expansion,
                     raw_type,
-                    raw_type_expr,
+                    raw_type_source,
                     required: !field.optional && !has_default,
                     has_default,
                     default_value,
@@ -1514,8 +1635,7 @@ fn extract_props_from_macro(
                     //   `expand_macro_types_impl_with_expander` and
                     //   `surface_member_to_expanded_field` thread the
                     //   fact through `AnalyzedPropField` →
-                    //   `ProjectedMember` → `SurfaceMember` →
-                    //   `ExpandedField`.
+                    //   `SurfaceMember` → `ExpandedField`.
                     // - Session prepared-surface walker:
                     //   `project_prepared_surface_from_expr` threads
                     //   `from_root_body` through every recursion arm
@@ -1543,8 +1663,9 @@ fn extract_props_from_macro(
         }
     }
 
-    for field in prop_fields {
-        let (type_expr, type_expansion) = resolve_prop_type(field, evaluated);
+    for row in prop_fields {
+        let field = &row.field;
+        let (type_source, type_expansion) = resolve_prop_type(row, evaluated);
         let has_default = default_keys.contains(field.name.as_str());
         let default_value = default_values
             .get(field.name.as_str())
@@ -1560,18 +1681,18 @@ fn extract_props_from_macro(
             field.type_annotation.as_deref(),
             field.is_optional,
         );
-        let raw_type_expr = raw_type_expr_from_source_annotation(
+        let raw_type_source = raw_type_source_from_source_annotation(
             raw_type.as_deref(),
             field.type_annotation.as_deref(),
-            field.type_expr.as_ref(),
+            field.payload.as_ref(),
         );
 
         out.push(PropAnalysis {
             name: field.name.clone(),
-            type_expr,
+            type_source,
             type_expansion,
             raw_type,
-            raw_type_expr,
+            raw_type_source,
             required: !field.is_optional && !has_default,
             has_default,
             default_value,
@@ -1582,8 +1703,10 @@ fn extract_props_from_macro(
     }
 
     if let Some(eval_fields) = expanded_define_props_fields(evaluated, macro_index) {
-        let mut seen: std::collections::HashSet<String> =
-            prop_fields.iter().map(|field| field.name.clone()).collect();
+        let mut seen: std::collections::HashSet<String> = prop_fields
+            .iter()
+            .map(|row| row.field.name.clone())
+            .collect();
         for field in eval_fields {
             if !seen.insert(field.name.clone()) {
                 continue;
@@ -1605,14 +1728,9 @@ fn extract_props_from_macro(
                     .and_then(|candidate| candidate.raw_type.clone())
             });
             // Evaluator-only branch: no source AnalyzedPropField in scope, so
-            // no `*_expr` symbolic fallback is available. The heuristic still
-            // runs; when it prefers symbolic, the `evaluated_type` is kept.
-            let type_expr = prefer_symbolic_prop_type_expr(
-                &field.ty,
-                None,
-                raw_type.as_deref(),
-                type_expansion.as_ref(),
-            );
+            // no authored symbolic fallback is available — the evaluated
+            // position is kept as-is.
+            let type_source = field.ty.clone();
 
             // No source field reachable from this branch, so no JSDoc supply:
             // doc text rides the span-borne member supply only — an
@@ -1621,10 +1739,10 @@ fn extract_props_from_macro(
             // which has no typed companion.
             out.push(PropAnalysis {
                 name: field.name.clone(),
-                type_expr,
+                type_source,
                 type_expansion,
                 raw_type,
-                raw_type_expr: None,
+                raw_type_source: None,
                 required: !field.optional && !has_default,
                 has_default,
                 default_value,
@@ -1730,8 +1848,8 @@ fn macro_object_property_expansion_metadata(
 }
 
 /// Resolve prop type via priority chain:
-/// 1. Evaluated TypeExpr (preferred)
-/// 2. Raw annotation text → TypeExpr::Unknown
+/// 1. Evaluated type source (preferred)
+/// 2. Raw annotation text (display-only fallback)
 fn merged_resolved_macro_input(
     resolved_macros: &[ResolvedMacroInput],
     macro_index: usize,
@@ -1755,14 +1873,18 @@ fn merged_resolved_macro_input(
         });
 
         for prop in &resolved.props {
-            if let Some(existing) = entry.props.iter_mut().find(|field| field.name == prop.name) {
-                merge_prop_field(existing, prop);
-            } else if seen_props.insert(prop.name.clone()) {
+            if let Some(existing) = entry
+                .props
+                .iter_mut()
+                .find(|row| row.field.name == prop.field.name)
+            {
+                merge_prop_field(&mut existing.field, &prop.field);
+            } else if seen_props.insert(prop.field.name.clone()) {
                 entry.props.push(prop.clone());
             }
         }
         for emit in &resolved.emits {
-            if seen_emits.insert(emit.name.clone()) {
+            if seen_emits.insert(emit.field.name.clone()) {
                 entry.emits.push(emit.clone());
             }
         }
@@ -1772,7 +1894,7 @@ fn merged_resolved_macro_input(
             }
         }
         for exposed in &resolved.exposed {
-            if seen_exposed.insert(exposed.name.clone()) {
+            if seen_exposed.insert(exposed.field.name.clone()) {
                 entry.exposed.push(exposed.clone());
             }
         }
@@ -1802,30 +1924,28 @@ fn merged_resolved_macro_input(
 /// incomplete-placeholder fallback becomes structurally unreachable
 /// and can be removed.
 fn resolve_prop_type(
-    field: &AnalyzedPropField,
+    row: &ResolvedPropInput,
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
 ) -> (
-    TypeExpr,
+    SourcePosition,
     Option<crate::analysis::type_expand::ExpansionMetadata>,
 ) {
-    if let Some(eval) = evaluated {
-        if let Some(ef) = eval.props.iter().find(|f| f.name == field.name) {
-            let metadata = field_expansion_metadata(ef);
-            let preferred_raw_type = symbolic_type_from_evaluated_and_source(
-                ef.raw_type.as_deref(),
-                field.type_annotation.as_deref(),
-            );
-            let type_expr = prefer_symbolic_prop_type_expr(
-                &ef.r#type,
-                field.type_expr.as_ref(),
-                preferred_raw_type.as_deref(),
-                Some(&metadata),
-            );
-            return (type_expr, Some(metadata));
-        }
-    }
-    let raw = field.type_annotation.as_deref().unwrap_or("unknown");
-    (typed_or_unknown(field.type_expr.as_ref(), raw), None)
+    // The row's own session-resolved source is the authority; the flat
+    // evaluated lane contributes ONLY expansion metadata (an INCOMPLETE
+    // expansion still falls back to the author's own annotation position —
+    // the honest symbolic surface, never a torn partial).
+    let metadata = evaluated.and_then(|eval| {
+        eval.props
+            .iter()
+            .find(|f| f.name == row.field.name)
+            .map(field_expansion_metadata)
+    });
+    let type_source = prefer_authored_on_incomplete(
+        &row.type_source,
+        row.field.payload.as_ref(),
+        metadata.as_ref(),
+    );
+    (type_source, metadata)
 }
 
 // ── Events ─────────────────────────────────────────────────────────────────
@@ -1838,26 +1958,25 @@ fn prop_raw_type_from_evaluated_and_source(
     symbolic_type_from_evaluated_and_source(evaluated_raw_type, source_annotation)
 }
 
-/// Compute the typed companion `raw_type_expr` for a `PropAnalysis` /
-/// `SlotBindingAnalysis` / `AcceptedPropAnalysis` when the chosen `raw_type`
-/// text equals the user's source annotation text. The analyzer's
-/// `lower_ts_type` pass already produced the typed form for the source
-/// annotation; consumers walk that directly instead of reparsing the text.
+/// Compute the authored-source companion `raw_type_source` for a
+/// `PropAnalysis` / `SlotBindingAnalysis` when the chosen `raw_type` text
+/// equals the user's source annotation text: the author's own payload
+/// position, demanded through the shared dispatch on read.
 ///
 /// Returns `None` when the chosen `raw_type` came from a backend's textual
-/// rendering (no typed companion available) or when the source had no
-/// typed sidecar populated.
-fn raw_type_expr_from_source_annotation(
+/// rendering (no authored companion) or when the source had no payload
+/// position.
+fn raw_type_source_from_source_annotation(
     chosen_raw_type: Option<&str>,
     source_annotation: Option<&str>,
-    source_type_expr: Option<&TypeExpr>,
-) -> Option<TypeExpr> {
+    source_payload: Option<&MacroPayloadLocator>,
+) -> Option<SemanticTypeSource> {
     let chosen = chosen_raw_type?.trim();
     let source = source_annotation?.trim();
     if chosen.is_empty() || source.is_empty() || chosen != source {
         return None;
     }
-    source_type_expr.cloned()
+    authored_payload_source(source_payload)
 }
 
 fn symbolic_type_from_evaluated_and_source(
@@ -1887,218 +2006,6 @@ fn symbolic_type_from_evaluated_and_source(
         (Some(raw_type), _) => Some(raw_type.to_string()),
         (None, Some(source_annotation)) => Some(source_annotation.to_string()),
         (None, None) => None,
-    }
-}
-
-const LARGE_PARTIAL_PROP_TYPE_NODE_LIMIT: usize = 256;
-
-/// Choose between the evaluator-produced `evaluated_type` and a symbolic
-/// fallback supplied by the caller.
-///
-/// The decision (`should_prefer_symbolic_prop_type_expr`) reads display
-/// strings (`preferred_raw_type`) for shape heuristics — that is purely a
-/// classification of incomplete / placeholder evaluator output. The returned
-/// `TypeExpr` itself comes from typed inputs only:
-///
-/// - When the heuristic falls through, the `evaluated_type` clone is
-///   returned unchanged.
-/// - When the heuristic prefers the symbolic alternative, `symbolic_type`
-///   (the caller's pre-lowered typed form, populated by the analyzer at the
-///   producer site) is returned. If the caller has no typed form available,
-///   the function falls back to `evaluated_type` so no string parsing is
-///   reintroduced.
-fn prefer_symbolic_prop_type_expr(
-    evaluated_type: &TypeExpr,
-    symbolic_type: Option<&TypeExpr>,
-    preferred_raw_type: Option<&str>,
-    metadata: Option<&crate::analysis::type_expand::ExpansionMetadata>,
-) -> TypeExpr {
-    if !should_prefer_symbolic_prop_type_expr(evaluated_type, preferred_raw_type, metadata) {
-        return evaluated_type.clone();
-    }
-
-    symbolic_type
-        .cloned()
-        .unwrap_or_else(|| evaluated_type.clone())
-}
-
-fn should_prefer_symbolic_prop_type_expr(
-    evaluated_type: &TypeExpr,
-    preferred_raw_type: Option<&str>,
-    metadata: Option<&crate::analysis::type_expand::ExpansionMetadata>,
-) -> bool {
-    let Some(raw_type) = preferred_raw_type
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-    else {
-        return false;
-    };
-
-    let Some(metadata) = metadata else {
-        return false;
-    };
-
-    let raw_type_supports_symbolic_fallback =
-        source_annotation_beats_placeholder_backend_type(raw_type)
-            || (matches!(raw_type, "any" | "unknown")
-                && type_expr_is_suspicious_identifier_ref(evaluated_type));
-
-    metadata.exactness == crate::analysis::type_expand::ExpansionExactness::Incomplete
-        && raw_type_supports_symbolic_fallback
-        && (type_expr_exceeds_node_limit(evaluated_type, LARGE_PARTIAL_PROP_TYPE_NODE_LIMIT)
-            || type_expr_is_placeholder_for_symbolic_fallback(evaluated_type))
-}
-
-fn type_expr_exceeds_node_limit(type_expr: &TypeExpr, limit: usize) -> bool {
-    fn visit(type_expr: &TypeExpr, seen: &mut usize, limit: usize) -> bool {
-        *seen += 1;
-        if *seen > limit {
-            return true;
-        }
-
-        match type_expr {
-            TypeExpr::Primitive(_)
-            | TypeExpr::Literal(_)
-            | TypeExpr::Infer { .. }
-            | TypeExpr::TypeOf(_)
-            | TypeExpr::Unknown { .. }
-            | TypeExpr::RecursiveRef { .. }
-            // Synthetic carrier is a 1-node terminal; never exceeds limit.
-            | TypeExpr::SyntheticSlotBinding(_)
-            | TypeExpr::TypeParameter(_) => false,
-            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-                types.iter().any(|inner| visit(inner, seen, limit))
-            }
-            TypeExpr::Array { element, .. }
-            | TypeExpr::KeyOf(element)
-            | TypeExpr::Rest(element)
-            | TypeExpr::Parenthesized(element) => visit(element, seen, limit),
-            TypeExpr::Tuple { elements, .. } => elements
-                .iter()
-                .any(|element| visit(&element.ty, seen, limit)),
-            TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
-                verter_type_expr::ObjectMember::Property(property) => {
-                    visit(&property.ty, seen, limit)
-                }
-                verter_type_expr::ObjectMember::IndexSignature(signature) => {
-                    visit(&signature.key_type, seen, limit)
-                        || visit(&signature.value_type, seen, limit)
-                }
-                verter_type_expr::ObjectMember::CallSignature(function)
-                | verter_type_expr::ObjectMember::ConstructSignature(function) => {
-                    type_expr_function_exceeds_node_limit(function, seen, limit)
-                }
-                verter_type_expr::ObjectMember::Method(method) => {
-                    type_expr_function_exceeds_node_limit(&method.function, seen, limit)
-                }
-            }),
-            // A constructor type carries the same `FunctionExpr` payload as a
-            // function type, so its node count is computed identically.
-            TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => {
-                type_expr_function_exceeds_node_limit(function, seen, limit)
-            }
-            TypeExpr::Ref { type_arguments, .. } => {
-                type_arguments.iter().any(|inner| visit(inner, seen, limit))
-            }
-            // `import("m").Gen<Arg>` — only the instantiation arguments are
-            // nested nodes (specifier / qualifier are leaf strings).
-            TypeExpr::ImportType { type_arguments, .. } => {
-                type_arguments.iter().any(|inner| visit(inner, seen, limit))
-            }
-            TypeExpr::IndexedAccess { object, index } => {
-                visit(object, seen, limit) || visit(index, seen, limit)
-            }
-            TypeExpr::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
-            } => {
-                visit(check, seen, limit)
-                    || visit(extends, seen, limit)
-                    || visit(true_type, seen, limit)
-                    || visit(false_type, seen, limit)
-            }
-            TypeExpr::Mapped {
-                source,
-                value,
-                name_type,
-                ..
-            } => {
-                visit(source, seen, limit)
-                    || visit(value, seen, limit)
-                    || name_type
-                        .as_deref()
-                        .is_some_and(|inner| visit(inner, seen, limit))
-            }
-            TypeExpr::TemplateLiteral { expressions, .. } => {
-                expressions.iter().any(|inner| visit(inner, seen, limit))
-            }
-        }
-    }
-
-    fn type_expr_function_exceeds_node_limit(
-        function: &verter_type_expr::FunctionExpr,
-        seen: &mut usize,
-        limit: usize,
-    ) -> bool {
-        function
-            .parameters
-            .iter()
-            .any(|param| visit(&param.ty, seen, limit))
-            || function
-                .return_type
-                .as_deref()
-                .is_some_and(|return_type| visit(return_type, seen, limit))
-            || function.type_parameters.iter().any(|type_param| {
-                type_param
-                    .constraint
-                    .as_deref()
-                    .is_some_and(|constraint| visit(constraint, seen, limit))
-                    || type_param
-                        .default
-                        .as_deref()
-                        .is_some_and(|default| visit(default, seen, limit))
-            })
-    }
-
-    let mut seen = 0;
-    visit(type_expr, &mut seen, limit)
-}
-
-fn type_expr_is_placeholder_for_symbolic_fallback(type_expr: &TypeExpr) -> bool {
-    match type_expr {
-        TypeExpr::Primitive(
-            PrimitiveName::Any | PrimitiveName::Unknown | PrimitiveName::Undefined,
-        ) => true,
-        TypeExpr::Unknown { .. } => true,
-        TypeExpr::Ref { .. }
-        | TypeExpr::IndexedAccess { .. }
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::Conditional { .. }
-        | TypeExpr::Mapped { .. } => true,
-        TypeExpr::Parenthesized(inner) => type_expr_is_placeholder_for_symbolic_fallback(inner),
-        TypeExpr::Object(object) => {
-            object.properties.is_empty()
-                || object.properties.iter().all(|member| match member {
-                    verter_type_expr::ObjectMember::Property(property) => {
-                        type_expr_is_placeholder_for_symbolic_fallback(&property.ty)
-                    }
-                    verter_type_expr::ObjectMember::IndexSignature(signature) => {
-                        type_expr_is_placeholder_for_symbolic_fallback(&signature.value_type)
-                    }
-                    verter_type_expr::ObjectMember::CallSignature(_)
-                    | verter_type_expr::ObjectMember::ConstructSignature(_)
-                    | verter_type_expr::ObjectMember::Method(_) => false,
-                })
-        }
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            !types.is_empty()
-                && types
-                    .iter()
-                    .all(type_expr_is_placeholder_for_symbolic_fallback)
-        }
-        _ => false,
     }
 }
 
@@ -2133,17 +2040,6 @@ fn backend_raw_type_is_suspicious_identifier(raw_type: &str) -> bool {
                 | "true"
                 | "false"
         )
-}
-
-fn type_expr_is_suspicious_identifier_ref(type_expr: &TypeExpr) -> bool {
-    match type_expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => type_arguments.is_empty() && backend_raw_type_is_suspicious_identifier(name),
-        TypeExpr::Parenthesized(inner) => type_expr_is_suspicious_identifier_ref(inner),
-        _ => false,
-    }
 }
 
 fn source_annotation_beats_placeholder_backend_type(annotation: &str) -> bool {
@@ -2255,86 +2151,6 @@ fn event_raw_signature_from_evaluated_and_source(
     }
 }
 
-fn event_payload_raw_signature_from_type_expr(payload: &TypeExpr) -> Option<String> {
-    use verter_type_expr::LiteralValue;
-
-    fn render_type_expr(expr: &TypeExpr) -> Option<String> {
-        match expr {
-            TypeExpr::Primitive(name) => Some(match name {
-                verter_type_expr::PrimitiveName::String => "string".to_string(),
-                verter_type_expr::PrimitiveName::Number => "number".to_string(),
-                verter_type_expr::PrimitiveName::Boolean => "boolean".to_string(),
-                verter_type_expr::PrimitiveName::BigInt => "bigint".to_string(),
-                verter_type_expr::PrimitiveName::Symbol => "symbol".to_string(),
-                verter_type_expr::PrimitiveName::Null => "null".to_string(),
-                verter_type_expr::PrimitiveName::Undefined => "undefined".to_string(),
-                verter_type_expr::PrimitiveName::Void => "void".to_string(),
-                verter_type_expr::PrimitiveName::Any => "any".to_string(),
-                verter_type_expr::PrimitiveName::Unknown => "unknown".to_string(),
-                verter_type_expr::PrimitiveName::Never => "never".to_string(),
-                verter_type_expr::PrimitiveName::Object => "object".to_string(),
-            }),
-            TypeExpr::Literal(LiteralValue::String(value)) => Some(format!("{value:?}")),
-            TypeExpr::Literal(LiteralValue::Number(value)) => Some(value.to_string()),
-            TypeExpr::Literal(LiteralValue::Boolean(value)) => Some(value.to_string()),
-            TypeExpr::Literal(LiteralValue::BigInt(value)) => Some(value.clone()),
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } => {
-                if type_arguments.is_empty() {
-                    Some(name.to_string())
-                } else {
-                    let args = type_arguments
-                        .iter()
-                        .map(render_type_expr)
-                        .collect::<Option<Vec<_>>>()?;
-                    Some(format!("{}<{}>", name, args.join(", ")))
-                }
-            }
-            TypeExpr::Union(types) => Some(
-                types
-                    .iter()
-                    .map(render_type_expr)
-                    .collect::<Option<Vec<_>>>()?
-                    .join(" | "),
-            ),
-            TypeExpr::Intersection(types) => Some(
-                types
-                    .iter()
-                    .map(render_type_expr)
-                    .collect::<Option<Vec<_>>>()?
-                    .join(" & "),
-            ),
-            TypeExpr::Tuple { elements, .. } => Some(format!(
-                "[{}]",
-                elements
-                    .iter()
-                    .map(|element| {
-                        let mut rendered = String::new();
-                        if let Some(label) = &element.label {
-                            rendered.push_str(label);
-                            if element.optional {
-                                rendered.push('?');
-                            }
-                            rendered.push_str(": ");
-                        }
-                        if element.rest {
-                            rendered.push_str("...");
-                        }
-                        rendered.push_str(&render_type_expr(&element.ty)?);
-                        Some(rendered)
-                    })
-                    .collect::<Option<Vec<_>>>()?
-                    .join(", ")
-            )),
-            _ => None,
-        }
-    }
-
-    render_type_expr(payload).filter(|rendered| rendered.starts_with('['))
-}
-
 fn preserve_or_wrap_event_payload(raw_type: &str) -> String {
     let trimmed = raw_type.trim();
     if trimmed.starts_with('[') && trimmed.ends_with(']') {
@@ -2368,7 +2184,7 @@ fn strip_event_tuple_wrapper(source_payload: &str) -> Option<&str> {
 
 fn extract_events_from_macro(
     macro_index: usize,
-    emit_fields: &[crate::analysis::types::AnalyzedEmitField],
+    emit_fields: &[ResolvedEmitInput],
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<EventAnalysis>,
 ) {
@@ -2387,15 +2203,13 @@ fn extract_events_from_macro(
                         .iter()
                         .find(|candidate| candidate.name == event.name)
                 });
-                let expanded_raw_signature =
-                    event_payload_raw_signature_from_type_expr(&event.payload);
                 out.push(EventAnalysis {
                     name: event.name,
                     payload: event.payload,
                     payload_expansion: event.payload_expansion,
                     raw_signature: event_raw_signature_from_evaluated_and_source(
                         evaluated_field.and_then(|candidate| candidate.raw_type.as_deref()),
-                        expanded_raw_signature.as_deref(),
+                        None,
                     ),
                     description: None,
                     tags: Vec::new(),
@@ -2404,23 +2218,25 @@ fn extract_events_from_macro(
             return;
         }
 
-        for field in emit_fields {
+        for row in emit_fields {
+            let field = &row.field;
+            // The `define_emits` SHAPE lane row (built from the normalized
+            // payload source) is the payload authority when present; the
+            // row's own session-resolved `payload_source` covers the rest.
+            // The flat evaluated lane contributes ONLY expansion metadata —
+            // never the payload source.
             let (payload, payload_expansion) = expanded_by_name
                 .get(&field.name)
                 .map(|event| (event.payload.clone(), event.payload_expansion.clone()))
-                .or_else(|| {
-                    evaluated.and_then(|eval| {
+                .unwrap_or_else(|| {
+                    let metadata = evaluated.and_then(|eval| {
                         eval.emits
                             .iter()
                             .find(|f| f.name == field.name)
-                            .map(|f| (f.r#type.clone(), Some(field_expansion_metadata(f))))
-                    })
-                })
-                .unwrap_or_else(|| {
-                    let raw = field.payload_type.as_deref().unwrap_or("unknown");
-                    (typed_or_unknown(field.payload_expr.as_ref(), raw), None)
+                            .map(field_expansion_metadata)
+                    });
+                    (row.payload_source.clone(), metadata)
                 });
-            let expanded_raw_signature = event_payload_raw_signature_from_type_expr(&payload);
 
             out.push(EventAnalysis {
                 name: field.name.clone(),
@@ -2433,9 +2249,7 @@ fn extract_events_from_macro(
                             .find(|candidate| candidate.name == field.name)
                             .and_then(|candidate| candidate.raw_type.as_deref())
                     }),
-                    expanded_raw_signature
-                        .as_deref()
-                        .or(field.payload_type.as_deref()),
+                    field.payload_type.as_deref(),
                 ),
                 description: field.description.clone(),
                 tags: field.tags.clone(),
@@ -2444,24 +2258,20 @@ fn extract_events_from_macro(
         return;
     }
 
-    for field in emit_fields {
-        let (payload, payload_expansion) = if let Some(eval) = evaluated {
+    for row in emit_fields {
+        let field = &row.field;
+        // The row's session-resolved payload source is the authority; the
+        // flat evaluated lane contributes ONLY expansion metadata.
+        let payload_expansion = evaluated.and_then(|eval| {
             eval.emits
                 .iter()
                 .find(|f| f.name == field.name)
-                .map(|f| (f.r#type.clone(), Some(field_expansion_metadata(f))))
-                .unwrap_or_else(|| {
-                    let raw = field.payload_type.as_deref().unwrap_or("unknown");
-                    (typed_or_unknown(field.payload_expr.as_ref(), raw), None)
-                })
-        } else {
-            let raw = field.payload_type.as_deref().unwrap_or("unknown");
-            (typed_or_unknown(field.payload_expr.as_ref(), raw), None)
-        };
+                .map(field_expansion_metadata)
+        });
 
         out.push(EventAnalysis {
             name: field.name.clone(),
-            payload,
+            payload: row.payload_source.clone(),
             payload_expansion,
             raw_signature: event_raw_signature_from_evaluated_and_source(
                 evaluated.and_then(|eval| {
@@ -2496,20 +2306,16 @@ fn extract_slots_from_macro(
             };
             let mut slot = remaining.remove(slot_index);
             slot.bindings = merge_slot_bindings_with_source(field, slot.bindings);
-            let return_expr = field.return_expr.clone();
-            let return_expr_scope = field.return_expr_scope.clone();
-            debug_assert!(
-                return_expr.is_some() == return_expr_scope.is_some(),
-                "SlotAnalysis pairing invariant: return_expr.is_some() == return_expr_scope.is_some()"
-            );
+            let return_source = authored_payload_source(field.payload.as_ref());
+            let return_source_scope = field.return_expr_scope.clone();
             out.push(SlotAnalysis {
                 name: slot.name,
                 is_scoped: !slot.bindings.is_empty(),
                 bindings: slot.bindings,
                 is_required: slot.is_required,
                 return_type: field.return_type.clone(),
-                return_expr,
-                return_expr_scope,
+                return_source,
+                return_source_scope,
                 description: field.description.clone(),
                 tags: field.tags.clone(),
             });
@@ -2517,20 +2323,18 @@ fn extract_slots_from_macro(
 
         for slot in remaining {
             let source_field = slot_fields.iter().find(|field| field.name == slot.name);
-            let return_expr = source_field.and_then(|field| field.return_expr.clone());
-            let return_expr_scope = source_field.and_then(|field| field.return_expr_scope.clone());
-            debug_assert!(
-                return_expr.is_some() == return_expr_scope.is_some(),
-                "SlotAnalysis pairing invariant: return_expr.is_some() == return_expr_scope.is_some()"
-            );
+            let return_source =
+                source_field.and_then(|field| authored_payload_source(field.payload.as_ref()));
+            let return_source_scope =
+                source_field.and_then(|field| field.return_expr_scope.clone());
             out.push(SlotAnalysis {
                 name: slot.name,
                 is_scoped: !slot.bindings.is_empty(),
                 bindings: slot.bindings,
                 is_required: slot.is_required,
                 return_type: source_field.and_then(|field| field.return_type.clone()),
-                return_expr,
-                return_expr_scope,
+                return_source,
+                return_source_scope,
                 description: source_field.and_then(|field| field.description.clone()),
                 tags: source_field
                     .map(|field| field.tags.clone())
@@ -2545,7 +2349,7 @@ fn extract_slots_from_macro(
             .bindings
             .iter()
             .map(|b| {
-                let (type_expr, type_expansion) = if let Some(eval) = evaluated {
+                let (type_source, type_expansion) = if let Some(eval) = evaluated {
                     // Slot bindings are keyed as "slotName.bindingName" in ExpandedComponentTypes
                     let key = format!("{}.{}", field.name, b.name);
                     eval.slot_bindings
@@ -2553,27 +2357,16 @@ fn extract_slots_from_macro(
                         .find(|f| f.name == key)
                         .map(|f| {
                             let type_expansion = field_expansion_metadata(f);
-                            let raw_type = symbolic_type_from_evaluated_and_source(
-                                f.raw_type.as_deref(),
-                                b.type_annotation.as_deref(),
+                            let source = prefer_authored_on_incomplete(
+                                &f.r#type,
+                                b.payload.as_ref(),
+                                Some(&type_expansion),
                             );
-                            (
-                                prefer_symbolic_prop_type_expr(
-                                    &f.r#type,
-                                    b.binding_expr.as_ref(),
-                                    raw_type.as_deref(),
-                                    Some(&type_expansion),
-                                ),
-                                Some(type_expansion),
-                            )
+                            (source, Some(type_expansion))
                         })
-                        .unwrap_or_else(|| {
-                            let raw = b.type_annotation.as_deref().unwrap_or("unknown");
-                            (typed_or_unknown(b.binding_expr.as_ref(), raw), None)
-                        })
+                        .unwrap_or_else(|| (authored_payload_position(b.payload.as_ref()), None))
                 } else {
-                    let raw = b.type_annotation.as_deref().unwrap_or("unknown");
-                    (typed_or_unknown(b.binding_expr.as_ref(), raw), None)
+                    (authored_payload_position(b.payload.as_ref()), None)
                 };
                 let raw_type = evaluated
                     .and_then(|eval| {
@@ -2584,35 +2377,31 @@ fn extract_slots_from_macro(
                             .and_then(|candidate| candidate.raw_type.clone())
                     })
                     .or_else(|| b.type_annotation.clone());
-                let raw_type_expr = raw_type_expr_from_source_annotation(
+                let raw_type_source = raw_type_source_from_source_annotation(
                     raw_type.as_deref(),
                     b.type_annotation.as_deref(),
-                    b.binding_expr.as_ref(),
+                    b.payload.as_ref(),
                 );
                 SlotBindingAnalysis {
                     name: b.name.clone(),
-                    type_expr,
+                    type_source,
                     type_expansion,
                     raw_type,
-                    raw_type_expr,
+                    raw_type_source,
                 }
             })
             .collect();
 
-        let return_expr = field.return_expr.clone();
-        let return_expr_scope = field.return_expr_scope.clone();
-        debug_assert!(
-            return_expr.is_some() == return_expr_scope.is_some(),
-            "SlotAnalysis pairing invariant: return_expr.is_some() == return_expr_scope.is_some()"
-        );
+        let return_source = authored_payload_source(field.payload.as_ref());
+        let return_source_scope = field.return_expr_scope.clone();
         out.push(SlotAnalysis {
             name: field.name.clone(),
             is_scoped: !field.bindings.is_empty(),
             bindings,
             is_required: field.is_required,
             return_type: field.return_type.clone(),
-            return_expr,
-            return_expr_scope,
+            return_source,
+            return_source_scope,
             description: field.description.clone(),
             tags: field.tags.clone(),
         });
@@ -2622,7 +2411,7 @@ fn extract_slots_from_macro(
 #[derive(Clone)]
 struct ExpandedEventEntry {
     name: String,
-    payload: TypeExpr,
+    payload: SourcePosition,
     payload_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
 }
 
@@ -2637,7 +2426,7 @@ fn expanded_define_emit_events(
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
     macro_index: usize,
 ) -> Vec<ExpandedEventEntry> {
-    use verter_type_expr::{LiteralValue, TupleElement, TypeExpr};
+    use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact};
 
     let Some(entry) = expanded_define_emits_shape(evaluated, macro_index) else {
         return Vec::new();
@@ -2661,21 +2450,17 @@ fn expanded_define_emit_events(
         let Some(first) = sig.parameters.first() else {
             continue;
         };
-        let payload = TypeExpr::Tuple {
-            elements: std::sync::Arc::from(
-                sig.parameters
-                    .iter()
-                    .skip(1)
-                    .map(|param| TupleElement {
-                        label: (!param.name.is_empty()).then(|| param.name.clone()),
-                        ty: param.ty.clone(),
-                        optional: param.optional,
-                        rest: param.rest,
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            readonly: false,
-        };
+        // Call-signature events: the event NAME is derivable from a CLOSED
+        // string-literal first-parameter fact. The realized signature's
+        // payload-tuple position is REQUIRED: zero post-event-name params
+        // are the PRESENT empty closed tuple; params richer than the closed
+        // element vocabulary have no faithful lower-crate CLOSED source, so
+        // the position is the typed source-construction FAILURE — never a
+        // fabricated unknown success. (This arm covers a shape-carried
+        // call-signature fact only; the session-side normalized emit rows
+        // publish richer payloads through the projected callable-params
+        // replay route and reach `EventAnalysis.payload` via the property
+        // rows above.)
         // Call-signature events have no per-field diagnostics. Macro-wide
         // diagnostics are collected separately into `macro_expansion_diagnostics`.
         let payload_expansion = Some(crate::analysis::type_expand::ExpansionMetadata {
@@ -2684,31 +2469,28 @@ fn expanded_define_emit_events(
             diagnostics: vec![],
         });
 
-        match &first.ty {
-            TypeExpr::Literal(LiteralValue::String(name)) => {
-                if seen.insert(name.clone()) {
-                    events.push(ExpandedEventEntry {
-                        name: name.clone(),
-                        payload: payload.clone(),
-                        payload_expansion: payload_expansion.clone(),
-                    });
-                }
+        if let SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::StringLiteral(name))) =
+            &first.ty
+        {
+            if seen.insert(name.clone()) {
+                let payload = if sig.parameters.len() == 1 {
+                    SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(
+                        verter_type_expr::facts::TuplePayloadFact {
+                            readonly: false,
+                            elements: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                        },
+                    )))
+                } else {
+                    SourcePosition::Failed(
+                        verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+                    )
+                };
+                events.push(ExpandedEventEntry {
+                    name: name.clone(),
+                    payload,
+                    payload_expansion: payload_expansion.clone(),
+                });
             }
-            TypeExpr::Union(types) => {
-                for ty in types.iter() {
-                    let TypeExpr::Literal(LiteralValue::String(name)) = ty else {
-                        continue;
-                    };
-                    if seen.insert(name.clone()) {
-                        events.push(ExpandedEventEntry {
-                            name: name.clone(),
-                            payload: payload.clone(),
-                            payload_expansion: payload_expansion.clone(),
-                        });
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -2730,12 +2512,7 @@ fn expanded_define_slot_entries(
         .iter()
         .map(|prop| ExpandedSlotEntry {
             name: prop.name.clone(),
-            bindings: expanded_slot_bindings(
-                evaluated,
-                &prop.name,
-                &prop.ty,
-                Some(macro_object_property_expansion_metadata(entry, &prop.name)),
-            ),
+            bindings: expanded_slot_bindings(evaluated, &prop.name),
             is_required: !prop.optional,
         })
         .collect()
@@ -2744,92 +2521,33 @@ fn expanded_define_slot_entries(
 fn expanded_slot_bindings(
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
     slot_name: &str,
-    ty: &TypeExpr,
-    type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
 ) -> Vec<SlotBindingAnalysis> {
-    fn evaluated_slot_bindings_for_slot(
-        evaluated: &crate::analysis::type_expand::ExpandedComponentTypes,
-        slot_name: &str,
-    ) -> Vec<SlotBindingAnalysis> {
-        evaluated
-            .slot_bindings
-            .iter()
-            .filter(|field| field.name.starts_with(&format!("{slot_name}.")))
-            .map(|field| {
-                let type_expansion = field_expansion_metadata(field);
-                // Evaluator-only path: no source-annotation typed companion
-                // is available — the chosen raw_type came from the
-                // backend's textual rendering.
-                SlotBindingAnalysis {
-                    name: field
-                        .name
-                        .split_once('.')
-                        .map(|(_, binding)| binding.to_string())
-                        .unwrap_or_else(|| field.name.clone()),
-                    // Evaluator-only branch: source `AnalyzedSlotFieldBinding`
-                    // is not in scope here, so no `binding_expr` symbolic
-                    // fallback is available. The heuristic still runs;
-                    // when it would prefer symbolic, the evaluated type is
-                    // kept.
-                    type_expr: prefer_symbolic_prop_type_expr(
-                        &field.r#type,
-                        None,
-                        field.raw_type.as_deref(),
-                        Some(&type_expansion),
-                    ),
-                    type_expansion: Some(type_expansion),
-                    raw_type: field.raw_type.clone(),
-                    raw_type_expr: None,
-                }
-            })
-            .collect()
-    }
-
-    fn should_prefer_evaluated_slot_binding(
-        current: &SlotBindingAnalysis,
-        evaluated: &SlotBindingAnalysis,
-    ) -> bool {
-        type_expr_is_placeholder_for_symbolic_fallback(&current.type_expr)
-            && !type_expr_is_placeholder_for_symbolic_fallback(&evaluated.type_expr)
-    }
-
-    let mut direct_bindings = slot_bindings_from_type_expr(ty, type_expansion.clone());
+    // The per-binding evaluation channel ("slotName.bindingName" entries) is
+    // the only lower-crate source of evaluated bindings: deriving bindings by
+    // walking a slot's materialized function shape is a host concern (the
+    // materialized surface lives on the host's hot mirror, never here).
     let Some(evaluated) = evaluated else {
-        return direct_bindings;
+        return Vec::new();
     };
-
-    let evaluated_bindings = evaluated_slot_bindings_for_slot(evaluated, slot_name);
-    if direct_bindings.is_empty() {
-        return evaluated_bindings;
-    }
-
-    // Order discipline: `direct_bindings` arrives in declaration order
-    // (Vec walk via `slot_bindings_from_type_expr`); `evaluated_bindings`
-    // arrives in the evaluator's emission order (Vec filter over
-    // `evaluated.slot_bindings`). Walk both Vecs in arrival order —
-    // matched entries fold into `direct_bindings`; evaluator-only
-    // remainder appends in its emission order. No hash structure
-    // (FxHashMap/IndexMap) participates: the order-preserving Vec is
-    // the canonical source.
-    let mut evaluated_remaining: Vec<SlotBindingAnalysis> = evaluated_bindings;
-    for binding in &mut direct_bindings {
-        let Some(pos) = evaluated_remaining
-            .iter()
-            .position(|candidate| candidate.name == binding.name)
-        else {
-            continue;
-        };
-        let evaluated = evaluated_remaining.remove(pos);
-        if should_prefer_evaluated_slot_binding(binding, &evaluated) {
-            binding.type_expr = evaluated.type_expr;
-            binding.type_expansion = evaluated.type_expansion;
-        }
-        if binding.raw_type.is_none() {
-            binding.raw_type = evaluated.raw_type;
-        }
-    }
-    direct_bindings.extend(evaluated_remaining);
-    direct_bindings
+    evaluated
+        .slot_bindings
+        .iter()
+        .filter(|field| field.name.starts_with(&format!("{slot_name}.")))
+        .map(|field| {
+            let type_expansion = field_expansion_metadata(field);
+            SlotBindingAnalysis {
+                name: field
+                    .name
+                    .split_once('.')
+                    .map(|(_, binding)| binding.to_string())
+                    .unwrap_or_else(|| field.name.clone()),
+                type_source: field.r#type.clone(),
+                type_expansion: Some(type_expansion),
+                raw_type: field.raw_type.clone(),
+                raw_type_source: None,
+            }
+        })
+        .collect()
 }
 
 fn merge_slot_bindings_with_source(
@@ -2843,24 +2561,20 @@ fn merge_slot_bindings_with_source(
         return source_field
             .bindings
             .iter()
-            .map(|binding| {
-                let raw = binding.type_annotation.as_deref().unwrap_or("unknown");
-                SlotBindingAnalysis {
-                    name: binding.name.clone(),
-                    type_expr: typed_or_unknown(binding.binding_expr.as_ref(), raw),
-                    type_expansion: None,
-                    raw_type: binding.type_annotation.clone(),
-                    raw_type_expr: binding.binding_expr.clone(),
-                }
+            .map(|binding| SlotBindingAnalysis {
+                name: binding.name.clone(),
+                type_source: authored_payload_position(binding.payload.as_ref()),
+                type_expansion: None,
+                raw_type: binding.type_annotation.clone(),
+                raw_type_source: authored_payload_source(binding.payload.as_ref()),
             })
             .collect();
     }
 
     // Order discipline: source-captured bindings (parser-side
     // `AnalyzedSlotField::bindings`) come first in parser order;
-    // expansion-only remainder appends in `expanded_bindings`'s
-    // declaration order (Vec walk via `slot_bindings_from_type_expr`
-    // / evaluator emission order). No hash structure participates.
+    // expansion-only remainder appends in the evaluator's emission order.
+    // No hash structure participates.
     let mut expanded_remaining: Vec<SlotBindingAnalysis> = expanded_bindings;
     let mut merged: Vec<SlotBindingAnalysis> = Vec::with_capacity(expanded_remaining.len());
 
@@ -2876,120 +2590,31 @@ fn merge_slot_bindings_with_source(
             binding.raw_type.as_deref(),
             source_binding.type_annotation.as_deref(),
         );
-        binding.type_expr = prefer_symbolic_prop_type_expr(
-            &binding.type_expr,
-            source_binding.binding_expr.as_ref(),
-            raw_type.as_deref(),
-            binding.type_expansion.as_ref(),
-        );
+        // An incomplete per-binding evaluation falls back to the author's own
+        // annotation position when one exists; an ABSENT evaluated position
+        // adopts the authored annotation position.
+        binding.type_source = if binding.type_source.is_present() {
+            prefer_authored_on_incomplete(
+                &binding.type_source,
+                source_binding.payload.as_ref(),
+                binding.type_expansion.as_ref(),
+            )
+        } else if matches!(binding.type_source, SourcePosition::Absent(_)) {
+            authored_payload_position(source_binding.payload.as_ref())
+        } else {
+            // A typed FAILURE position is preserved — the authored fallback
+            // must not paper over a failed required position unless the
+            // author actually annotated it.
+            authored_payload_source(source_binding.payload.as_ref())
+                .map(SourcePosition::Present)
+                .unwrap_or_else(|| binding.type_source.clone())
+        };
         binding.raw_type = raw_type;
         merged.push(binding);
     }
 
     merged.extend(expanded_remaining);
     merged
-}
-
-fn slot_bindings_from_type_expr(
-    ty: &TypeExpr,
-    type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
-) -> Vec<SlotBindingAnalysis> {
-    let mut binding_param_types = Vec::new();
-    collect_slot_binding_param_types(ty, &mut binding_param_types);
-    if binding_param_types.is_empty() {
-        return Vec::new();
-    }
-
-    let mut seen = rustc_hash::FxHashSet::default();
-    let mut bindings = Vec::new();
-    for binding_param_ty in binding_param_types {
-        collect_slot_bindings_from_object_type(
-            binding_param_ty,
-            &type_expansion,
-            &mut seen,
-            &mut bindings,
-        );
-    }
-    bindings
-}
-
-fn collect_slot_binding_param_types<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a TypeExpr>) {
-    match ty {
-        TypeExpr::Parenthesized(inner) => collect_slot_binding_param_types(inner, out),
-        TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
-            for inner in types.iter() {
-                collect_slot_binding_param_types(inner, out);
-            }
-        }
-        // A function type and a bare constructor type (`new (props) => R`)
-        // carry the same `FunctionExpr` payload; a slot whose value is either
-        // contributes its first parameter as the binding object. This runs on
-        // analyzer IR (lowered slot type), where a constructor type is still
-        // present un-collapsed.
-        TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-            if let Some(first) = func.parameters.first() {
-                out.push(&first.ty);
-            }
-        }
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                match member {
-                    verter_type_expr::ObjectMember::CallSignature(function)
-                    | verter_type_expr::ObjectMember::ConstructSignature(function) => {
-                        if let Some(first) = function.parameters.first() {
-                            out.push(&first.ty);
-                        }
-                    }
-                    verter_type_expr::ObjectMember::Method(method) => {
-                        if let Some(first) = method.function.parameters.first() {
-                            out.push(&first.ty);
-                        }
-                    }
-                    verter_type_expr::ObjectMember::Property(_)
-                    | verter_type_expr::ObjectMember::IndexSignature(_) => {}
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_slot_bindings_from_object_type(
-    ty: &TypeExpr,
-    type_expansion: &Option<crate::analysis::type_expand::ExpansionMetadata>,
-    seen: &mut rustc_hash::FxHashSet<String>,
-    out: &mut Vec<SlotBindingAnalysis>,
-) {
-    use verter_type_expr::{ObjectMember, TypeExpr};
-
-    match ty {
-        TypeExpr::Parenthesized(inner) => {
-            collect_slot_bindings_from_object_type(inner, type_expansion, seen, out);
-        }
-        TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
-            for inner in types.iter() {
-                collect_slot_bindings_from_object_type(inner, type_expansion, seen, out);
-            }
-        }
-        TypeExpr::Object(obj) => {
-            for member in &obj.properties {
-                let ObjectMember::Property(prop) = member else {
-                    continue;
-                };
-                if !seen.insert(prop.name.clone()) {
-                    continue;
-                }
-                out.push(SlotBindingAnalysis {
-                    name: prop.name.clone(),
-                    type_expr: prop.ty.clone(),
-                    type_expansion: type_expansion.clone(),
-                    raw_type: None,
-                    raw_type_expr: None,
-                });
-            }
-        }
-        _ => {}
-    }
 }
 
 fn reconcile_update_events_with_props(
@@ -3051,8 +2676,8 @@ fn merge_template_slots(
                 bindings: Vec::new(),
                 is_required: false,
                 return_type: None,
-                return_expr: None,
-                return_expr_scope: None,
+                return_source: None,
+                return_source_scope: None,
                 description: None,
                 tags: Vec::new(),
             });
@@ -3064,8 +2689,7 @@ fn merge_template_slots(
 
 fn extract_model_from_macro(
     mac: &AnalyzedMacro,
-    prop_fields: &[AnalyzedPropField],
-    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    prop_fields: &[ResolvedPropInput],
     out: &mut Vec<ModelAnalysis>,
 ) {
     let name = mac
@@ -3073,36 +2697,26 @@ fn extract_model_from_macro(
         .clone()
         .unwrap_or_else(|| "modelValue".to_string());
 
-    // Try evaluated type from props (model generates a prop with the model name)
-    let type_expr = if let Some(eval) = evaluated {
-        eval.props
-            .iter()
-            .find(|f| f.name == name)
-            .map(|f| f.r#type.clone())
-            .unwrap_or_else(|| unknown_type("unknown".to_string()))
-    } else {
-        // Fall back to prop_fields on the macro itself.
-        // Prefer the analyzer-populated `type_expr`; fall back to a
-        // raw-preserving Unknown sentinel when the producer could not
-        // lower (no OXC TSType node was in scope).
-        prop_fields
-            .iter()
-            .find(|f| f.name == name)
-            .map(|f| {
-                let raw = f.type_annotation.as_deref().unwrap_or("unknown");
-                typed_or_unknown(f.type_expr.as_ref(), raw)
-            })
-            .unwrap_or_else(|| unknown_type("unknown".to_string()))
-    };
+    // The model's TYPE source is the NORMALIZED `defineModel` surface row's
+    // own source (the synthesized model prop carries its authored
+    // type-argument position, or the PROVEN unannotated absence for an
+    // untyped `defineModel()`) — never a same-name flat evaluated prop from
+    // a sibling macro (the cross-macro shadow the sole-authority rule
+    // removed).
+    let type_source = prop_fields
+        .iter()
+        .find(|row| row.field.name == name)
+        .map(|row| row.type_source.clone())
+        .unwrap_or_else(SourcePosition::unannotated);
 
-    out.push(ModelAnalysis { name, type_expr });
+    out.push(ModelAnalysis { name, type_source });
 }
 
 // ── Exposed ────────────────────────────────────────────────────────────────
 
 fn synthesize_model_prop_and_event(
     mac: &AnalyzedMacro,
-    prop_fields: &[AnalyzedPropField],
+    prop_fields: &[ResolvedPropInput],
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
     props: &mut Vec<PropAnalysis>,
     events: &mut Vec<EventAnalysis>,
@@ -3111,34 +2725,34 @@ fn synthesize_model_prop_and_event(
         .model_name
         .clone()
         .unwrap_or_else(|| "modelValue".to_string());
-    let has_default = mac.default_keys.iter().any(|key| key == &name);
-    let source_prop = prop_fields.iter().find(|field| field.name == name);
-    let raw_type = source_prop.and_then(|field| field.type_annotation.clone());
-    let evaluated_prop =
-        evaluated.and_then(|eval| eval.props.iter().find(|field| field.name == name));
+    // The single authored `default` source: presence and value text both
+    // derive from this one lookup, so `has_default` and `default_value`
+    // cannot diverge (a defaulted model always carries its authored value
+    // text).
+    let default_value = mac
+        .default_values
+        .iter()
+        .find(|entry| entry.key == name)
+        .map(|entry| entry.value.clone());
+    let has_default = default_value.is_some();
+    let source_prop = prop_fields.iter().find(|row| row.field.name == name);
+    let raw_type = source_prop.and_then(|row| row.field.type_annotation.clone());
     let is_optional = source_prop
-        .map(|field| field.is_optional)
-        .or_else(|| evaluated_prop.map(|field| field.optional))
+        .map(|row| row.field.is_optional)
         .unwrap_or(false);
-    let mut prop_type_expr = evaluated_prop
-        .map(|field| field.r#type.clone())
-        .or_else(|| {
-            // Prefer the analyzer-populated typed form. Falls back to a
-            // raw-preserving `Unknown` when the producer left `type_expr`
-            // unset (e.g., no OXC TSType in scope).
-            source_prop.map(|field| {
-                let raw = field.type_annotation.as_deref().unwrap_or("unknown");
-                typed_or_unknown(field.type_expr.as_ref(), raw)
-            })
-        })
-        .unwrap_or_else(|| unknown_type("unknown".to_string()));
-
-    if has_default || is_optional {
-        prop_type_expr = add_top_level_undefined_to_type_expr(prop_type_expr);
-    }
+    // The prop's resolved SOURCE: the NORMALIZED `defineModel` surface row's
+    // own source (its authored type-argument position, or the PROVEN
+    // unannotated absence for an untyped `defineModel()`) — never a
+    // same-name flat evaluated prop from a sibling macro (the cross-macro
+    // shadow the sole-authority rule removed). The `| undefined`
+    // optionality decoration is a projection-time concern (derivable from
+    // `required`/`has_default`), never synthesized into the carrier.
+    let prop_type_source = source_prop
+        .map(|row| row.type_source.clone())
+        .unwrap_or_else(SourcePosition::unannotated);
 
     if let Some(existing_prop) = props.iter_mut().find(|prop| prop.name == name) {
-        existing_prop.type_expr = prop_type_expr.clone();
+        existing_prop.type_source = prop_type_source.clone();
         existing_prop.type_expansion = existing_prop.type_expansion.clone().or_else(|| {
             evaluated.and_then(|eval| {
                 eval.props
@@ -3152,13 +2766,16 @@ fn synthesize_model_prop_and_event(
         }
         existing_prop.required = !has_default && !is_optional;
         existing_prop.has_default |= has_default;
+        if existing_prop.default_value.is_none() {
+            existing_prop.default_value = default_value;
+        }
     } else {
         // `defineModel` synthesizes the prop from the model declaration —
         // there is no separate user prop annotation to lower, so the
         // typed companion is unset.
         props.push(PropAnalysis {
             name: name.clone(),
-            type_expr: prop_type_expr.clone(),
+            type_source: prop_type_source.clone(),
             type_expansion: evaluated.and_then(|eval| {
                 eval.props
                     .iter()
@@ -3166,10 +2783,10 @@ fn synthesize_model_prop_and_event(
                     .map(field_expansion_metadata)
             }),
             raw_type: raw_type.clone(),
-            raw_type_expr: None,
+            raw_type_source: None,
             required: !has_default && !is_optional,
             has_default,
-            default_value: None,
+            default_value,
             description: None,
             tags: Vec::new(),
             // `defineModel` declares the prop name explicitly at the macro
@@ -3181,8 +2798,11 @@ fn synthesize_model_prop_and_event(
     let event_name = format!("update:{name}");
     let evaluated_event =
         evaluated.and_then(|eval| eval.emits.iter().find(|field| field.name == event_name));
+    // Only an UNDEFAULTED optional model's update event can emit
+    // `undefined` — once a default exists the model ref always holds a
+    // value, so the display payload stays the bare `[value: T]`.
     let source_payload_type = raw_type.as_deref().map(|raw| {
-        if has_default || is_optional {
+        if !has_default && is_optional {
             optionalize_model_source_type_text(raw)
         } else {
             raw.to_string()
@@ -3195,20 +2815,44 @@ fn synthesize_model_prop_and_event(
             .map(|raw| format!("[value: {raw}]"))
             .as_deref(),
     );
-    let payload = {
-        let payload = evaluated_event
-            .map(|field| field.r#type.clone())
-            .or_else(|| raw_signature.as_ref().map(|raw| unknown_type(raw.clone())))
-            .unwrap_or_else(|| unknown_type("unknown".to_string()));
-        if has_default || is_optional {
-            add_top_level_undefined_to_model_event_payload(payload)
-        } else {
-            payload
-        }
-    };
+    // The event payload SOURCE derives from the NORMALIZED `defineModel`
+    // surface: `update:X` emits the new model value, so a TYPED model
+    // publishes the composed closed payload tuple `[value: <authored T>]`
+    // (the element derefs the model's own authored type-argument payload on
+    // demand through the one shared dispatch); an untyped `defineModel()` is
+    // a PROVEN unannotated position. Never a same-name flat evaluated emit
+    // from a sibling macro (the cross-macro shadow the sole-authority
+    // rule removed). The flat lane contributes ONLY expansion metadata.
+    let payload = source_prop
+        .and_then(|row| row.field.payload.clone())
+        .map(|locator| {
+            use verter_type_expr::facts::{
+                ClosedTypeFact, FactOrLocator, TupleElementFact, TuplePayloadFact,
+            };
+            SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(
+                TuplePayloadFact {
+                    readonly: false,
+                    elements: std::sync::Arc::from(
+                        vec![TupleElementFact {
+                            label: Some("value".to_string()),
+                            optional: false,
+                            rest: false,
+                            ty: FactOrLocator::MacroPayload(locator),
+                        }]
+                        .into_boxed_slice(),
+                    ),
+                },
+            )))
+        })
+        .unwrap_or_else(SourcePosition::unannotated);
 
     if let Some(existing_event) = events.iter_mut().find(|event| event.name == event_name) {
-        existing_event.payload = payload;
+        // A TYPED model's payload is authoritative for its own update event;
+        // an untyped model must not DOWNGRADE an event another producer
+        // already published with a present source.
+        if payload.is_present() || !existing_event.payload.is_present() {
+            existing_event.payload = payload;
+        }
         existing_event.payload_expansion = existing_event
             .payload_expansion
             .clone()
@@ -3225,64 +2869,6 @@ fn synthesize_model_prop_and_event(
             description: None,
             tags: Vec::new(),
         });
-    }
-}
-
-fn add_top_level_undefined_to_type_expr(type_expr: TypeExpr) -> TypeExpr {
-    if matches!(
-        type_expr,
-        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined)
-    ) {
-        return type_expr;
-    }
-
-    if let TypeExpr::Union(members) = &type_expr {
-        if members.iter().any(|member| {
-            matches!(
-                member,
-                TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined)
-            )
-        }) {
-            return type_expr;
-        }
-    }
-
-    match type_expr {
-        TypeExpr::Unknown { .. } => type_expr,
-        other => TypeExpr::union(vec![
-            other,
-            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
-        ]),
-    }
-}
-
-fn add_top_level_undefined_to_model_event_payload(payload: TypeExpr) -> TypeExpr {
-    // `TypeExpr` implements `Drop`, so a field cannot be moved out of an
-    // owned `payload` by a by-value match arm. Match on a borrow and clone
-    // the (refcounted) children; the non-tuple case forwards `payload`
-    // whole (a full-value move, which `Drop` permits).
-    match &payload {
-        TypeExpr::Tuple { elements, readonly } => {
-            let updated = elements
-                .iter()
-                .enumerate()
-                .map(|(index, element)| verter_type_expr::TupleElement {
-                    label: element.label.clone(),
-                    ty: if index == 0 {
-                        add_top_level_undefined_to_type_expr(element.ty.clone())
-                    } else {
-                        element.ty.clone()
-                    },
-                    optional: element.optional,
-                    rest: element.rest,
-                })
-                .collect::<Vec<_>>();
-            TypeExpr::Tuple {
-                elements: std::sync::Arc::from(updated),
-                readonly: *readonly,
-            }
-        }
-        _ => add_top_level_undefined_to_type_expr(payload),
     }
 }
 
@@ -3318,6 +2904,7 @@ fn type_text_contains_undefined(text: &str) -> bool {
 }
 
 fn extract_exposed_from_macro(
+    macro_index: usize,
     mac: &AnalyzedMacro,
     resolved: Option<&ResolvedMacroInput>,
     bindings: &[AnalyzedBinding],
@@ -3325,113 +2912,164 @@ fn extract_exposed_from_macro(
     out: &mut Vec<ExposedAnalysis>,
 ) {
     for field in &mac.expose_fields {
-        let type_expr = resolve_exposed_type(&field.name, bindings, evaluated);
-        // Docs pair by name: the object-literal field's own leading JSDoc
-        // wins; a `defineExpose<T>({ ... })` member without one inherits the
-        // type-argument surface member's span-sliced JSDoc.
+        // Mixed-form precedence: an authored object-literal exposure keeps
+        // its own (binding-derived) source; the NORMALIZED type-argument
+        // surface row only fills what the literal form does not provide (the
+        // flat evaluated lane contributes metadata only).
         let resolved_field = resolved.and_then(|resolved| {
             resolved
                 .exposed
                 .iter()
-                .find(|candidate| candidate.name == field.name)
+                .find(|candidate| candidate.field.name == field.name)
         });
+        let type_source = resolve_exposed_type(&field.name, bindings, evaluated)
+            .map(SourcePosition::Present)
+            .or_else(|| resolved_field.map(|candidate| candidate.type_source.clone()))
+            .unwrap_or_else(SourcePosition::unannotated);
+        // Docs pair by name: the object-literal field's own leading JSDoc
+        // wins; a `defineExpose<T>({ ... })` member without one inherits the
+        // type-argument surface member's span-sliced JSDoc.
         let description = field
             .description
             .clone()
-            .or_else(|| resolved_field.and_then(|candidate| candidate.description.clone()));
+            .or_else(|| resolved_field.and_then(|candidate| candidate.field.description.clone()));
         let tags = if field.tags.is_empty() {
             resolved_field
-                .map(|candidate| candidate.tags.clone())
+                .map(|candidate| candidate.field.tags.clone())
                 .unwrap_or_default()
         } else {
             field.tags.clone()
         };
         out.push(ExposedAnalysis {
             name: field.name.clone(),
-            type_expr,
-            type_expansion: evaluated.and_then(|eval| {
-                eval.bindings
-                    .iter()
-                    .find(|binding| binding.name == field.name)
-                    .map(field_expansion_metadata)
-            }),
+            type_source,
+            type_expansion: evaluated
+                .and_then(|eval| {
+                    eval.bindings
+                        .iter()
+                        .find(|binding| binding.name == field.name)
+                        .map(field_expansion_metadata)
+                })
+                .or_else(|| {
+                    exposed_lane_field(evaluated, macro_index, &field.name)
+                        .map(field_expansion_metadata)
+                }),
             description,
             tags,
         });
     }
     // `defineExpose<T>()` surface members with no object-literal counterpart
     // publish from the resolved type-argument surface, in surface order,
-    // carrying their span-sliced docs and their raised surface type. The
+    // carrying their span-sliced docs and their NORMALIZED member-value
+    // source ([`ResolvedExposeInput::type_source`] — the exposed-type
+    // authority: the graph-native closed / shallow-ref / projected
+    // member-path ladder, or the typed failure for a genuine miss). The
     // object-literal loop above already consumed the name-paired entries, so
-    // this appends only the type-argument-only members.
+    // this appends only the type-argument-only members. The flat evaluated
+    // `exposed` lane contributes ONLY expansion metadata.
     let Some(resolved) = resolved else {
         return;
     };
     for candidate in &resolved.exposed {
-        if mac.expose_fields.iter().any(|f| f.name == candidate.name) {
+        if mac
+            .expose_fields
+            .iter()
+            .any(|f| f.name == candidate.field.name)
+        {
             continue;
         }
-        let type_expr = candidate
-            .type_expr
-            .clone()
-            .unwrap_or_else(|| resolve_exposed_type(&candidate.name, bindings, evaluated));
         out.push(ExposedAnalysis {
-            name: candidate.name.clone(),
-            type_expr,
-            type_expansion: evaluated.and_then(|eval| {
-                eval.bindings
-                    .iter()
-                    .find(|binding| binding.name == candidate.name)
-                    .map(field_expansion_metadata)
-            }),
-            description: candidate.description.clone(),
-            tags: candidate.tags.clone(),
+            name: candidate.field.name.clone(),
+            type_source: candidate.type_source.clone(),
+            type_expansion: evaluated
+                .and_then(|eval| {
+                    eval.bindings
+                        .iter()
+                        .find(|binding| binding.name == candidate.field.name)
+                        .map(field_expansion_metadata)
+                })
+                .or_else(|| {
+                    exposed_lane_field(evaluated, macro_index, &candidate.field.name)
+                        .map(field_expansion_metadata)
+                }),
+            description: candidate.field.description.clone(),
+            tags: candidate.field.tags.clone(),
         });
     }
+}
+
+/// The projector's per-macro `defineExpose` lane entry for
+/// `(macro_index, name)` — the join key pairing a type-argument-derived
+/// exposure with its projected surface field.
+fn exposed_lane_field<'a>(
+    evaluated: Option<&'a crate::analysis::type_expand::ExpandedComponentTypes>,
+    macro_index: usize,
+    name: &str,
+) -> Option<&'a crate::analysis::type_expand::ExpandedField> {
+    evaluated?
+        .exposed
+        .iter()
+        .find(|entry| entry.macro_index == macro_index)?
+        .fields
+        .iter()
+        .find(|field| field.name == name)
 }
 
 fn resolve_exposed_type(
     name: &str,
     bindings: &[AnalyzedBinding],
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
-) -> TypeExpr {
+) -> Option<SemanticTypeSource> {
     if let Some(eval) = evaluated {
         if let Some(f) = eval.bindings.iter().find(|f| f.name == name) {
-            return f.r#type.clone();
+            return f.r#type.present().cloned();
         }
     }
-    // Fall back to binding type annotation if available.
-    //
-    // `AnalyzedBinding` does not currently carry a typed `type_expr`
-    // companion (W0.1 scope covered macro-side surfaces only — see
-    // feedback file for the follow-up debt). The raw annotation is
-    // preserved on the published `TypeExpr::Unknown { raw }` sentinel so
-    // downstream display passthroughs keep the original text.
-    if let Some(binding) = bindings.iter().find(|b| b.name == name) {
-        if let Some(ref ann) = binding.type_annotation {
-            return unknown_type(ann.clone());
-        }
-    }
-    unknown_type("unknown".to_string())
+    // `AnalyzedBinding` carries no typed payload position (its raw annotation
+    // text is display-only) — an unevaluated exposed binding is an honest
+    // untyped `None`, never a fabricated placeholder.
+    let _ = bindings;
+    None
 }
 
 // ── Options API fallback ───────────────────────────────────────────────────
 
+/// Merge the analyzer's parse-domain prop fields with the host-resolved
+/// rows into ONE per-macro row set, each carrying its member-value SOURCE.
+/// An analyzer-only field's source is its authored payload position (or the
+/// PROVEN unannotated absence for a payload-less runtime field); a
+/// host-resolved row's `type_source` is the normalized-surface authority and
+/// WINS on a same-name merge (the analysis metadata gap-fills through
+/// [`merge_prop_field`]).
 fn merged_prop_fields(
     mac: &AnalyzedMacro,
     resolved: Option<&ResolvedMacroInput>,
-) -> Vec<AnalyzedPropField> {
-    let mut fields = mac.prop_fields.clone();
+) -> Vec<ResolvedPropInput> {
+    let mut rows: Vec<ResolvedPropInput> = mac
+        .prop_fields
+        .iter()
+        .map(|field| ResolvedPropInput {
+            type_source: authored_payload_position(field.payload.as_ref()),
+            field: field.clone(),
+        })
+        .collect();
     if let Some(resolved) = resolved {
         for prop in &resolved.props {
-            if let Some(existing) = fields.iter_mut().find(|field| field.name == prop.name) {
-                merge_prop_field(existing, prop);
+            if let Some(existing) = rows
+                .iter_mut()
+                .find(|row| row.field.name == prop.field.name)
+            {
+                merge_prop_field(&mut existing.field, &prop.field);
+                // The normalized-surface source is authoritative for the
+                // merged row (it already prefers the PROVEN authored
+                // position when one denotes the resolved member).
+                existing.type_source = prop.type_source.clone();
             } else {
-                fields.push(prop.clone());
+                rows.push(prop.clone());
             }
         }
     }
-    fields
+    rows
 }
 
 fn merge_prop_field(target: &mut AnalyzedPropField, candidate: &AnalyzedPropField) {
@@ -3470,21 +3108,41 @@ fn should_replace_merged_prop_type_annotation(
             && !source_annotation_contains_indexed_access(current))
 }
 
+/// Merge the analyzer's parse-domain emit fields with the host-resolved
+/// rows into ONE per-macro row set, each carrying its payload SOURCE. An
+/// analyzer-only field's source is its authored payload position; a
+/// host-resolved row carries the normalized `payload_source` authority.
+/// First-writer-wins by event name (analyzer rows first — a local authored
+/// event keeps its authored position).
 fn merged_emit_fields(
     mac: &AnalyzedMacro,
     resolved: Option<&ResolvedMacroInput>,
-) -> Vec<crate::analysis::types::AnalyzedEmitField> {
-    let mut fields = mac.emit_fields.clone();
-    let mut seen: rustc_hash::FxHashSet<String> =
-        fields.iter().map(|field| field.name.clone()).collect();
+) -> Vec<ResolvedEmitInput> {
+    let mut rows: Vec<ResolvedEmitInput> = mac
+        .emit_fields
+        .iter()
+        .map(|field| ResolvedEmitInput {
+            payload_source: authored_payload_position(field.payload.as_ref()),
+            field: field.clone(),
+        })
+        .collect();
     if let Some(resolved) = resolved {
         for emit in &resolved.emits {
-            if seen.insert(emit.name.clone()) {
-                fields.push(emit.clone());
+            if let Some(existing) = rows
+                .iter_mut()
+                .find(|row| row.field.name == emit.field.name)
+            {
+                // The normalized-surface payload source is authoritative for
+                // the merged row (it already prefers the PROVEN authored
+                // position when one denotes the resolved member); the
+                // analyzer row keeps its local analysis metadata.
+                existing.payload_source = emit.payload_source.clone();
+            } else {
+                rows.push(emit.clone());
             }
         }
     }
-    fields
+    rows
 }
 
 fn merged_slot_fields(
@@ -3544,36 +3202,32 @@ fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnaly
             .type_annotation
             .clone()
             .or_else(|| prop.type_constructor.clone());
-        // Prefer the analyzer-populated typed sidecar (`type_expr`) when
-        // available. The Options API analyzer now lowers `PropType<T>` AST
-        // nodes directly via `verter_type_expr_oxc::lower_ts_type`, so the
-        // structured form is authoritative for downstream consumers.
-        // Fall back to the constructor mapping only when no `PropType<T>`
-        // annotation was present.
-        let type_expr = if let Some(typed) = prop.type_expr.clone() {
-            typed
-        } else if let Some(rt) = prop.type_constructor.as_ref() {
-            match rt.as_str() {
-                "String" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
-                "Number" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
-                "Boolean" => TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
-                "Function" => unknown_type("Function".to_string()),
-                "Array" => unknown_type("Array".to_string()),
-                "Object" => unknown_type("Object".to_string()),
-                other => unknown_type(other.to_string()),
-            }
-        } else {
-            unknown_type("unknown".to_string())
-        };
+        // Prefer the authored `PropType<T>` payload position when available;
+        // else fold the primitive runtime constructor to a closed leaf fact
+        // (non-primitive constructors carry display text only — `raw_type`).
+        let type_source = authored_payload_source(prop.payload.as_ref()).or_else(|| {
+            prop.type_constructor.as_ref().and_then(|rt| {
+                use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact};
+                use verter_type_expr::PrimitiveName;
+                let primitive = match rt.as_str() {
+                    "String" => PrimitiveName::String,
+                    "Number" => PrimitiveName::Number,
+                    "Boolean" => PrimitiveName::Boolean,
+                    _ => return None,
+                };
+                Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
+                    LeafTypeFact::Primitive(primitive),
+                )))
+            })
+        });
         out.push(PropAnalysis {
             name: prop.name.clone(),
-            type_expr,
+            type_source: present_or_unannotated(type_source),
             type_expansion: None,
             raw_type,
-            // Options API path: `raw_type_expr` is for resolver-level typed
-            // companion to the raw_type text. The typed form is already on
-            // `type_expr` above; leave this unset.
-            raw_type_expr: None,
+            // Options API path: no authored companion for the raw display
+            // text (the typed source is above).
+            raw_type_source: None,
             required: prop.is_required,
             has_default: prop.has_default,
             default_value: prop.default_value.clone(),
@@ -3590,15 +3244,12 @@ fn extract_props_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<PropAnaly
 
 fn extract_events_from_options(opts: &AnalyzedOptionsApi, out: &mut Vec<EventAnalysis>) {
     for field in &opts.emits {
-        // The Options API analyzer (`extract_options_emits`) does not
-        // currently lower OXC TS types, so `payload_expr` is `None` here
-        // — see feedback file for the follow-up debt. We preserve the
-        // raw payload string on `TypeExpr::Unknown { raw }` and avoid
-        // string-reparsing inside the resolver pipeline.
-        let raw = field.payload_type.as_deref().unwrap_or("unknown");
+        // Options-API emits carry no authored payload position (validator
+        // payload text is display-only on `raw_signature`) — the typed
+        // channel is host-raised.
         out.push(EventAnalysis {
             name: field.name.clone(),
-            payload: typed_or_unknown(field.payload_expr.as_ref(), raw),
+            payload: authored_payload_position(field.payload.as_ref()),
             payload_expansion: None,
             raw_signature: field.payload_type.clone(),
             description: field.description.clone(),

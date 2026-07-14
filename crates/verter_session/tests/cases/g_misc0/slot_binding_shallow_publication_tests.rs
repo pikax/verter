@@ -134,7 +134,7 @@ fn indexed_access_slot_binding_does_not_expand_nested_callback_payload() {
     upsert_vue(&host, "/GenericPanel.vue", GENERIC_PANEL_VUE);
 
     let (analysis, _resolved, _audit) = AuditedRequest::builder()
-        .attach_to(host)
+        .attach_to(std::sync::Arc::clone(&host))
         .resolve_component_meta("/GenericPanel.vue")
         .expect("hermetic indexed-access slot-binding repro must resolve");
 
@@ -156,11 +156,24 @@ fn indexed_access_slot_binding_does_not_expand_nested_callback_payload() {
     // — no nominal collision with a real workspace alias is
     // structurally possible because the carrier lives on a distinct
     // `TypeExpr` variant.
-    let carrier = match &controls_binding.type_expr {
+    // Shell-materialize the published source WITHOUT a resolution
+    // demand: the SHALLOW published shape is exactly what this guard
+    // pins (a demand would resolve and invert the claim).
+    let controls_source = controls_binding
+        .type_source
+        .present()
+        .expect("toolbar.controls must publish a typed source");
+    let shallow_binding = verter_session::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/GenericPanel.vue",
+        controls_source,
+    )
+    .unwrap_or_else(|| panic!("toolbar.controls' published source must shell-materialize"));
+    let carrier = match &shallow_binding {
         verter_type_expr::TypeExpr::SyntheticSlotBinding(key) => key,
-        other => panic!(
-            "toolbar.controls must publish the SyntheticSlotBinding carrier after S3; got {other:?}"
-        ),
+        other => {
+            panic!("toolbar.controls must publish the SyntheticSlotBinding carrier; got {other:?}")
+        }
     };
     assert_eq!(carrier.binding_name.as_ref(), "controls");
     assert_eq!(carrier.slot_name.as_deref(), Some("toolbar"));
@@ -173,7 +186,7 @@ fn indexed_access_slot_binding_does_not_expand_nested_callback_payload() {
     // to `raise_node_to_type_expr`-style deep expansion (payload
     // contains the nested callback shape).
     let binding_json =
-        serde_json::to_string(&controls_binding.type_expr).expect("serialize binding type expr");
+        serde_json::to_string(&shallow_binding).expect("serialize binding type expr");
 
     assert!(
         !binding_json.contains("outputSchema")

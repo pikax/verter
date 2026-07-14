@@ -1687,9 +1687,7 @@ fn no_type_solver_host_trait_in_production_code() {
 fn no_parser_arena_adapter_in_production_code() {
     // Identifier-absence invariant: the `ParserArenaAdapter` /
     // `ParserArenaBridgeHost` bridge names must not appear in
-    // production code. `HostNamedTypeCacheAdapter` in `host_manage.rs`
-    // is the only parser↔dispatch seam and does not carry these
-    // names.
+    // production code. There is no parser↔dispatch bridge seam.
     let hits = retired_symbol_hits_in_production(&[
         "ParserArenaAdapter",
         "ParserArenaBridgeHost",
@@ -1823,29 +1821,6 @@ fn semantic_graph_store_has_relation_memo_field() {
         graph.relation_memo_count(),
         0,
         "fresh host has zero relation memo entries"
-    );
-}
-
-#[test]
-fn host_named_type_cache_adapter_uses_semantic_graph_store_directly() {
-    // Cache-routing invariant: `HostNamedTypeCacheAdapter` reads
-    // and writes `SemanticGraphStore` via `get_resolved_named_type`
-    // / `insert_resolved_named_type` directly — no
-    // SessionSolverHost wrapper sits in between.
-    let host_manage_src = include_str!("host_manage.rs");
-    // The adapter struct is present.
-    assert!(
-        host_manage_src.contains("struct HostNamedTypeCacheAdapter"),
-        "HostNamedTypeCacheAdapter struct must be present"
-    );
-    // The adapter calls the SemanticGraphStore entry points directly.
-    assert!(
-        host_manage_src.contains(".graph.get_resolved_named_type"),
-        "HostNamedTypeCacheAdapter must call graph.get_resolved_named_type"
-    );
-    assert!(
-        host_manage_src.contains(".graph.insert_resolved_named_type"),
-        "HostNamedTypeCacheAdapter must call graph.insert_resolved_named_type"
     );
 }
 
@@ -2901,46 +2876,6 @@ fn eval_env_solver_host_removal_does_not_lose_env_context() {
     );
 }
 
-/// Cache-routing invariant: all dispatch consumers route through
-/// `ProjectSemanticDispatch` directly — no `SessionSolverHost`-style
-/// bridge sits between them. The parser-adjacent
-/// `HostNamedTypeCacheAdapter` reads/writes `SemanticGraphStore` via
-/// `get_resolved_named_type` / `insert_resolved_named_type`.
-#[test]
-fn session_solver_host_removal_migrates_all_consumers_to_dispatch() {
-    let host_manage_src = include_str!("host_manage.rs");
-    assert!(
-        host_manage_src.contains("SemanticGraphStore"),
-        "HostNamedTypeCacheAdapter must reach SemanticGraphStore directly"
-    );
-    assert!(
-        host_manage_src.contains("get_resolved_named_type")
-            && host_manage_src.contains("insert_resolved_named_type"),
-        "HostNamedTypeCacheAdapter must call get_resolved_named_type / insert_resolved_named_type"
-    );
-}
-
-/// Session entry-point invariant: session paths use
-/// `ProjectSemanticDispatch::new(host)` directly (no
-/// `TypeQueryEngine`-style intermediary). Parser's Vue macro cache
-/// key routes through `HostNamedTypeCacheAdapter`.
-#[test]
-fn type_query_engine_removal_migrates_vue_macro_parsing_to_host_named_type_cache_adapter() {
-    let host_manage_src = include_str!("host_manage.rs");
-    assert!(
-        host_manage_src.contains("HostNamedTypeCacheAdapter"),
-        "HostNamedTypeCacheAdapter must exist in host_manage.rs post-migration"
-    );
-    // The adapter implements the NamedTypeCache trait from verter_compiler's
-    // resolve_type cache_keys module.
-    assert!(
-        host_manage_src
-            .contains("impl verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache")
-            || host_manage_src.contains("NamedTypeCache for HostNamedTypeCacheAdapter"),
-        "HostNamedTypeCacheAdapter must implement NamedTypeCache for parser integration"
-    );
-}
-
 /// Evaluation-entry-point invariant: the entry point for type
 /// evaluation is
 /// `dispatch.execute_type_node(ProjectPath { ..., mode: Expanded })`. The
@@ -2972,28 +2907,6 @@ fn type_eval_evaluate_removal_preserves_semantic_output() {
         }
         other => panic!("expected Value for identity projection, got {other:?}"),
     }
-}
-
-/// Vue-macro-pipeline routing invariant: the Vue macro pipeline
-/// runs through the parser's `NamedTypeCache` adapter on the
-/// dispatch side. The host adapter infrastructure must exist and
-/// lookups must hit the `SemanticGraphStore` cache layer.
-#[test]
-fn type_eval_build_expand_macro_types_removal_preserves_macro_pipeline_output() {
-    let host = host_for_relation_tests();
-    let graph = host.project_type_store().semantic_graph();
-    // resolved_named_type_count is a proxy for the Vue macro cache
-    // surface being present and queryable.
-    assert_eq!(
-        graph.resolved_named_type_count(),
-        0,
-        "fresh host has zero Vue macro resolution entries"
-    );
-    // The clear / invalidate helpers exist — part of the migration
-    // preservation surface for macro cache lifecycle.
-    graph.clear_resolved_named_types();
-    graph.invalidate_resolved_named_types_for_canonical("unused");
-    assert_eq!(graph.resolved_named_type_count(), 0);
 }
 
 /// Object-shape projection invariant: object surface projection
@@ -3159,20 +3072,16 @@ fn route_loop_callers_route_through_dispatch() {
 /// may appear.
 #[test]
 fn instantiate_local_generic_ref_callers_route_through_dispatch() {
-    // `meta_resolve.rs` is the shell of a folder module; the bodies
-    // that carry the `instantiate_local_generic_ref` /
-    // `SemanticQueryKey::Instantiate` markers live in:
-    //   - `meta_resolve/registry_materialize.rs` — the registry-route
-    //     fast path that dispatches Instantiate for route-target
-    //     Pick/Omit recipes.
-    //   - `meta_resolve/dispatch_helpers.rs` — the
-    //     `instantiate_local_generic_ref_via_dispatch` bridge helper.
-    // The test concatenates the relevant post-split siblings before
-    // running the static-text grep predicates.
+    // `meta_resolve.rs` is the shell of a folder module; the body that
+    // carries the `instantiate_local_generic_ref` /
+    // `SemanticQueryKey::Instantiate` markers lives in
+    // `meta_resolve/dispatch_helpers.rs` — the
+    // `instantiate_local_generic_ref_via_dispatch` bridge helper.
+    // The test concatenates the relevant siblings before running the
+    // static-text grep predicates.
     let shell_src = include_str!("meta_resolve.rs");
-    let registry_materialize_src = include_str!("meta_resolve/registry_materialize.rs");
     let dispatch_helpers_src = include_str!("meta_resolve/dispatch_helpers.rs");
-    let meta_src = format!("{shell_src}\n{registry_materialize_src}\n{dispatch_helpers_src}");
+    let meta_src = format!("{shell_src}\n{dispatch_helpers_src}");
 
     let meta_callsites = meta_src.matches(".instantiate_local_generic_ref(").count();
     assert_eq!(

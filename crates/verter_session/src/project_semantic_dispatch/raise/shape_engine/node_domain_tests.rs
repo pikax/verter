@@ -62,7 +62,6 @@ fn opaque_sentinel_summary_matches_legacy_unknown_summary() {
         QueryError::RaiseMiss,
         QueryError::UnrepresentableSurface,
         QueryError::UnrepresentableSurfaceMember,
-        QueryError::VueMacroElementsPlaceholder,
         QueryError::Other(std::sync::Arc::from("semanticMiss")),
         QueryError::Other(std::sync::Arc::from("semanticObjectSurface")),
         QueryError::Other(std::sync::Arc::from("budgetExceeded(x)")),
@@ -107,7 +106,7 @@ fn opaque_sentinel_summary_matches_legacy_unknown_summary() {
 /// flipped a single variant's classification is caught directly (not only
 /// via the parity loop). Derived first-hand from the raw recogniser:
 /// `semanticObjectSurface` / `semanticAliasCycle` / `semanticSurfaceMember`
-/// / `VueMacroElements` are recognised sentinels ⇒ NOT materialized;
+/// are recognised sentinels ⇒ NOT materialized;
 /// `<raise miss>` and `semanticTypeParamCycle` are deliberately NOT in the
 /// recogniser ⇒ materialized. Only the object-surface sentinel tags
 /// `ObjectSurfaceSentinel`.
@@ -124,10 +123,6 @@ fn opaque_sentinel_summary_pins_exact_materialized_and_tag() {
     let alias_cycle = summary::opaque_sentinel(&QueryError::RaiseAliasCycle);
     assert!(!alias_cycle.facts.materialized);
     assert_eq!(alias_cycle.tag, FactShapeTag::Other);
-
-    let vue = summary::opaque_sentinel(&QueryError::VueMacroElementsPlaceholder);
-    assert!(!vue.facts.materialized);
-    assert_eq!(vue.tag, FactShapeTag::Other);
 
     // `<raise miss>` is NOT a recognised sentinel ⇒ materialized = true.
     let raise_miss = summary::opaque_sentinel(&QueryError::RaiseMiss);
@@ -303,8 +298,8 @@ fn root_only_projection_root_kind_matches_full_fold() {
 /// collapsed-intersection test does not — Reference, Conditional, both Mapped
 /// sub-cases, ConstructorType, Array, Alias, MergedDecl, RawFallback, Opaque (both
 /// the `_` and the `RecursiveRef` sub-arm), ImportType, Tuple, TemplateLiteral,
-/// Literal, Infer, TypeParam, SyntheticBinding, the three `Ref` carriers (DeclRef /
-/// InstantiationRef / BareRef), and VueMacroElements — on top of the object case.
+/// Literal, Infer, TypeParam, SyntheticBinding, and the three `Ref` carriers
+/// (DeclRef / InstantiationRef / BareRef) — on top of the object case.
 ///
 /// SC-FIRST: arm-PRESENCE is COMPILER-sealed — `project_root_summary`'s match is
 /// wildcard-free, so the compiler already forces every `SemanticNodeData` arm to be
@@ -456,12 +451,6 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         ),
         readonly: false,
     });
-    // VueMacroElements folds to the `VueMacroElementsPlaceholder` sentinel
-    // (root `Other`); the arm ignores the payload, so an empty
-    // `ResolvedElements::default()` exercises it.
-    let vue = graph.intern_node(SemanticNodeData::VueMacroElements(StdArc::new(
-        verter_compiler::utils::oxc::script::type_surface::ResolvedElements::default(),
-    )));
     // The `Opaque(RecursiveRef)` sub-arm (distinct from the `_` Opaque conduit) —
     // raises to a materialized/expanded leaf (root `Other`).
     let recursive_ref = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
@@ -529,7 +518,6 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         ("instantiation_ref", instantiation_ref),
         ("bare_ref", bare_ref),
         ("tuple", tuple),
-        ("vue", vue),
         ("recursive_ref", recursive_ref),
     ] {
         assert_parity(label, node);
@@ -577,7 +565,6 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     assert_eq!(root_kind(type_param), Some(RaisedRootKind::Other));
     assert_eq!(root_kind(synthetic), Some(RaisedRootKind::Other));
     assert_eq!(root_kind(tuple), Some(RaisedRootKind::Other));
-    assert_eq!(root_kind(vue), Some(RaisedRootKind::Other));
     assert_eq!(root_kind(recursive_ref), Some(RaisedRootKind::Other));
 }
 

@@ -70,12 +70,6 @@ compile-fail = []
 # feature — corpus drift is detected by the harness before
 # the work begins.
 diagnosis-bench = ["external-corpus"]
-# Debug-mode audit: on every `HostNamedTypeCacheAdapter::get` hit, recompute
-# the slow-path resolution and assert structural equality against the cached
-# value. Catches cache-key insufficiencies (a cached entry returned for a
-# key that should resolve differently). Not gated behind `debug_assertions`
-# because the slow path is expensive; opt-in for focused audit runs only.
-parser_cache_audit = ["verter_compiler/parser_cache_audit"]
 hotpath = [
   "dep:hotpath",
   "hotpath/hotpath",
@@ -89,9 +83,14 @@ hotpath = [
 verter_audit = { path = "../verter_audit" }
 verter_language = { path = "../verter_language" }
 verter_compiler = { path = "../verter_compiler" }
+verter_parser = { path = "../verter_parser" }
 verter_protocol = { path = "../verter_protocol" }
 prost = "0.14.3"
 verter_semantic = { path = "../verter_semantic" }
+# The query-owned host port (inversion of control): the query boundary crate
+# defines the demand trait + neutral DTOs; this crate implements them in
+# `src/query_host_port.rs`. The dependency points host -> query only.
+verter_session_query = { workspace = true }
 verter_no_typeexpr = { workspace = true }
 verter_no_storedspan = { workspace = true }
 verter_type_expr = { workspace = true }
@@ -188,7 +187,6 @@ blake3 = { workspace = true }
 verter_session_oracle_macro = { path = "../verter_session_oracle_macro" }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 toml = "1.1"
-verter_parser = { path = "../verter_parser" }
 # Activates the `test-support` feature on `verter_scheduler` for
 # `cargo test --package verter_session` (and example/bench) builds only.
 # The regular dependency above does NOT enable the feature, so

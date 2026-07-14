@@ -2229,7 +2229,28 @@ const SANCTIONED_SINK_MODULES: &[(&str, &[&str])] = &[
     ),
     (
         "MetaResolveProjectorsOutputCap",
-        &["crate :: meta_resolve :: projectors :: output_sink"],
+        &[
+            "crate :: meta_resolve :: projectors :: output_sink",
+            // The output-ENVELOPE assembly half of the terminal sink (the
+            // request-local source memo, the 11-lane positional materializer,
+            // the session-owned registry overlay finalize, and the envelope
+            // builder). It mints the cap INTERNALLY in
+            // `build_component_meta_output` and drives the per-source terminal
+            // (`materialize_output_source`) — output transport only, no
+            // decision on any materialized value. A genuine co-sink split out
+            // of `output_sink.rs` for the file-size gate, NOT a non-sink
+            // helper.
+            "crate :: meta_resolve :: projectors :: output_sink :: envelope",
+            // The published-field FINALIZE half of the terminal sink (the
+            // whole-surface field-type reducer over `ExpandedComponentTypes`,
+            // `reduce_published_field_types`). It drives the sink-private
+            // node-start reducer (`reduce_field_value_node`, which mints
+            // internally) and publishes content-free sources — publication
+            // finalize only, no decision on any materialized value. A genuine
+            // co-sink split out of `output_sink.rs` for the file-size gate,
+            // NOT a non-sink helper.
+            "crate :: meta_resolve :: projectors :: output_sink :: published_finalize",
+        ],
     ),
     ("TypeinfoRaiseOutputCap", &["crate :: typeinfo :: raise"]),
     (
@@ -2241,6 +2262,17 @@ const SANCTIONED_SINK_MODULES: &[(&str, &[&str])] = &[
         &[
             "crate :: typeinfo :: framework_surface :: vue_exec",
             "crate :: typeinfo :: framework_surface :: vue_exec :: normalize",
+            // The slot half of the per-surface normalizers (file-size split
+            // sibling of `normalize`) — the SAME sanctioned slot sinks
+            // (`materialize_slot_return_node`, `slot_binding_field`), minting
+            // the cap internally at the terminal display renders.
+            "crate :: typeinfo :: framework_surface :: vue_exec :: normalize_slots",
+            // The imported-macro-type element projection — a genuine co-sink:
+            // it mints the cap INTERNALLY in its terminal `render_params_text`
+            // display render (mint-once, no decision on the materialized
+            // value), projecting shared-engine macro-surface results into the
+            // legacy compile-facing DTO. NOT a non-sink helper.
+            "crate :: typeinfo :: framework_surface :: vue_exec :: imported_elements",
         ],
     ),
 ];
@@ -2943,10 +2975,11 @@ fn mint_scope_module_tree_walker_self_test_discriminates() {
         "walker: an out-of-line child with no resolvable file MUST surface an error; got: {errors:?}"
     );
 
-    // The real production trees the live guard relies on: vue_exec → {vue_exec,
-    // normalize}; projectors output_sink → {output_sink} only. (Discriminating:
-    // a regression that stopped excluding `#[cfg(test)]` or stopped resolving the
-    // out-of-line `normalize` child would change these.)
+    // The real production trees the live guard relies on: vue_exec →
+    // {vue_exec, normalize, imported_elements}; projectors output_sink →
+    // {output_sink} only. (Discriminating: a regression that stopped excluding
+    // `#[cfg(test)]` or stopped resolving an out-of-line child would change
+    // these.)
     let (vue, vue_errs) = reachable_production_modules(
         "crate :: typeinfo :: framework_surface :: vue_exec",
         &disk_loader,
@@ -2955,6 +2988,8 @@ fn mint_scope_module_tree_walker_self_test_discriminates() {
     let vue_expected: std::collections::BTreeSet<String> = [
         "crate :: typeinfo :: framework_surface :: vue_exec",
         "crate :: typeinfo :: framework_surface :: vue_exec :: normalize",
+        "crate :: typeinfo :: framework_surface :: vue_exec :: normalize_slots",
+        "crate :: typeinfo :: framework_surface :: vue_exec :: imported_elements",
     ]
     .iter()
     .map(|m| normalize_mod_path(m))
@@ -2962,7 +2997,7 @@ fn mint_scope_module_tree_walker_self_test_discriminates() {
     assert_eq!(
         vue, vue_expected,
         "the live vue_exec mint-scope reachable PRODUCTION tree must be EXACTLY {{vue_exec, \
-         normalize}}"
+         normalize, normalize_slots, imported_elements}}"
     );
 
     let (sink, sink_errs) = reachable_production_modules(
@@ -2973,15 +3008,22 @@ fn mint_scope_module_tree_walker_self_test_discriminates() {
         sink_errs.is_empty(),
         "output_sink tree errors: {sink_errs:?}"
     );
-    let sink_expected: std::collections::BTreeSet<String> =
-        ["crate :: meta_resolve :: projectors :: output_sink"]
-            .iter()
-            .map(|m| normalize_mod_path(m))
-            .collect();
+    let sink_expected: std::collections::BTreeSet<String> = [
+        "crate :: meta_resolve :: projectors :: output_sink",
+        // The sanctioned envelope co-sink (the 11-lane positional
+        // materializer + envelope builder split out for the file-size gate).
+        "crate :: meta_resolve :: projectors :: output_sink :: envelope",
+        // The sanctioned published-finalize co-sink (the whole-surface
+        // field-type reducer split out for the file-size gate).
+        "crate :: meta_resolve :: projectors :: output_sink :: published_finalize",
+    ]
+    .iter()
+    .map(|m| normalize_mod_path(m))
+    .collect();
     assert_eq!(
         sink, sink_expected,
         "the live projectors output_sink mint-scope reachable PRODUCTION tree must be EXACTLY \
-         {{output_sink}} (no non-sink helper descendant)"
+         {{output_sink, envelope, published_finalize}} (no non-sink helper descendant)"
     );
 }
 
@@ -4294,6 +4336,15 @@ fn test_output_cap_gate_self_test_discriminates() {
 /// not bare name. `ResolvedMacroPayload` here is the BEARING `results` alias
 /// (`ResolvedOutcome<Arc<MacroSurfaceDtos>>`), DISTINCT from the sealed
 /// publication-authority construction-chain token of the same bare name.
+///
+/// NOT seeds (narrowed, sealed `NoTypeExpr` by derive): `NamedTypeMember` /
+/// `NamedTypeMemberOutput` / `OptionsSurface` / `ExposeSurface` (the closed
+/// shallow output vocabulary) and `MacroSurfaceDtos` (no independent root —
+/// its remaining bearing-ness derives honestly through its `Analyzed*` /
+/// `Expanded*` field seeds below, so the field-closure keeps flagging it
+/// until those roots retire). The jsdoc `resolved_type` position carries the
+/// sealed `verter_protocol` `ResolvedJsdocTypeOutput` snapshot — never a
+/// `TypeExpr` — so it contributes no seed either.
 const OUTPUT_AUTHORITY_SEEDS: &[(&str, &str)] = &[
     ("verter_type_expr", "TypeExpr"),
     (
@@ -4321,14 +4372,6 @@ const OUTPUT_AUTHORITY_SEEDS: &[(&str, &str)] = &[
     ("verter_semantic::analysis::types", "AnalyzedSlotField"),
     ("verter_semantic::analysis::types", "AnalyzedExposeField"),
     (
-        "crate::typeinfo::framework_surface::results",
-        "NamedTypeMember",
-    ),
-    (
-        "crate::typeinfo::framework_surface::results",
-        "MacroSurfaceDtos",
-    ),
-    (
         "verter_semantic::analysis::type_solver::query_engine",
         "ProjectedSurface",
     ),
@@ -4347,14 +4390,6 @@ const OUTPUT_AUTHORITY_SEEDS: &[(&str, &str)] = &[
     (
         "crate::typeinfo::framework_surface::results",
         "EmitsSurface",
-    ),
-    (
-        "crate::typeinfo::framework_surface::results",
-        "OptionsSurface",
-    ),
-    (
-        "crate::typeinfo::framework_surface::results",
-        "ExposeSurface",
     ),
     (
         "crate::typeinfo::framework_surface::results",
@@ -4538,6 +4573,14 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
         "crate::project_semantic_dispatch::raise",
         "raise_and_reduce_with_context",
     ),
+    // The consumer-OBSERVATION variant of `raise_and_reduce_with_context` —
+    // the SAME sink-local reduce-then-raise orchestrator with the observation
+    // carrier fence armed (interior owner-local / package-backed carriers stay
+    // shallow). Same module, same sealed-carrier seam, same class.
+    (
+        "crate::project_semantic_dispatch::raise",
+        "raise_and_reduce_observation",
+    ),
     (
         "crate::project_semantic_dispatch::raise",
         "materialize_type_expr",
@@ -4562,24 +4605,15 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
         "crate::typeinfo::raise",
         "project_node_to_type_expr_for_test",
     ),
-    // The query-engine surface projector — sink-internal, confined to the
+    // The query-engine surface projector (successor of the retired
+    // `surface_view_to_projected_surface` / `projected_surface_from_semantic_node*`
+    // ProjectedSurface-bridge raisers — registry + intrinsic consumers now read
+    // `SurfaceView` directly) — sink-internal, confined to the
     // `component_meta_query_engine` subtree (the forgeable input is the leak the
-    // re-export removal closes; these stay reachable only in-subtree).
+    // re-export removal closes; it stays reachable only in-subtree).
     (
         "crate::resolver_core::component_meta_query_engine::surface",
-        "surface_view_to_projected_surface",
-    ),
-    (
-        "crate::resolver_core::component_meta_query_engine::surface",
-        "projected_surface_from_semantic_node",
-    ),
-    (
-        "crate::resolver_core::component_meta_query_engine::surface",
-        "projected_surface_from_semantic_node_inner",
-    ),
-    (
-        "crate::resolver_core::component_meta_query_engine::surface",
-        "projected_compound_root_surface_via_dispatch",
+        "surface_view_to_registry_type_expr",
     ),
     // The route-fixpoint terminal raiser: materialises the sealed
     // `AdmittedRouteProjectionNode` (minted only by the in-subtree route/surface
@@ -4603,26 +4637,6 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
     (
         "crate::resolver_core::component_meta_query_engine::surface",
         "materialize_registry_publication_node",
-    ),
-    // The SurfaceView → `ExpandedObjectShape` DTO projector — the exact analog of
-    // `surface_view_to_projected_surface` above: it delegates to that registered
-    // surface sink (which mints each terminal leaf once) plus the pure
-    // `projected_surface_to_expanded_shape` map, materialising ONLY terminal
-    // member/signature/index leaves into the DTO with no decision on them — never
-    // the whole object. Sink-internal, in-subtree.
-    (
-        "crate::resolver_core::component_meta_query_engine::surface",
-        "surface_view_to_expanded_shape",
-    ),
-    // The admitted-route-node → `ExpandedObjectShape` projector — same category as
-    // `materialize_route_projection_node` above: its input is the SEALED
-    // `AdmittedRouteProjectionNode` (minted only by the in-subtree route/surface
-    // adapters after their node-domain acceptance gate), not a caller-forged
-    // surface/member. It resolves the admitted node's composed SurfaceView through
-    // the shared walker and projects it via `surface_view_to_expanded_shape`.
-    (
-        "crate::resolver_core::component_meta_query_engine::surface",
-        "project_admitted_route_node_to_expanded_object_shape",
     ),
     // The framework-surface member raiser — confined to `vue_exec`, reachable
     // only through a token-gated normalizer.
@@ -4670,10 +4684,18 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
         "crate::meta_resolve::materialize::field_types",
         "reduce_member_value_graph_native_with_context",
     ),
-    (
-        "crate::meta_resolve::projectors::output_sink",
-        "shell_raise_to_type_expr",
-    ),
+    // The `ShapeCacheDb` STORAGE layer: `peek` / `get_or_compute` /
+    // `admit_computed` hand back (or store) previously SEALED
+    // `MaterializedOutputTypeExpr` carriers under a `ShapeCacheKey`. The cache
+    // is storage, not a raiser: a value can enter a slot only as a sealed
+    // carrier a registered sink produced, and the admitted-member key
+    // constructor (`ShapeCacheKey::surface_member_value_whole_with_context`)
+    // requires the `AdmittedPublishedMember` token — a forged key can only
+    // ever read back a value the honest path already published under that
+    // exact identity.
+    ("crate::component_meta_caches", "peek"),
+    ("crate::component_meta_caches", "get_or_compute"),
+    ("crate::component_meta_caches", "admit_computed"),
 ];
 
 /// All idents referenced in a `syn::Type`'s token stream (the type names a
@@ -5120,6 +5142,32 @@ fn type_def_source_files() -> Vec<(String, String)> {
         (
             "../verter_semantic/src/analysis/component_meta.rs",
             "verter_semantic::analysis::component_meta",
+        ),
+        // `AuthoredBodyLocator` (returned by the decl-body sink accessors
+        // `named_decl_body` / `owner_collection_expr` / the shape-cache
+        // `get_or_compute`) is the content-free locator enum — `NoTypeExpr`
+        // by construction (a locator never embeds a `TypeExpr`); reading its
+        // home lets the closure classify it as non-bearing.
+        (
+            "../verter_type_expr/src/locators.rs",
+            "verter_type_expr::locators",
+        ),
+        // `SemanticTypeSource` (returned by `slot_field_function_source`) is
+        // the content-free published-source fact enum (`NoTypeExpr` fact
+        // substrate); reading its home lets the closure classify it as
+        // non-bearing.
+        (
+            "../verter_type_expr/src/facts.rs",
+            "verter_type_expr::facts",
+        ),
+        // `ResolvedElements` / `ResolvedProp` / `ResolvedNamedCallSignature`
+        // (returned by the `vue_exec::imported_elements` DTO builders) are the
+        // legacy display-row DTOs — rendered text + `RuntimeType` rows, no
+        // `TypeExpr` field; reading their home lets the closure classify them
+        // as non-bearing.
+        (
+            "../verter_parser/src/utils/oxc/script/type_surface/mod.rs",
+            "verter_parser::utils::oxc::script::type_surface",
         ),
     ];
     for (rel, module_base) in EXTERNAL {
@@ -7385,6 +7433,15 @@ const KNOWN_NON_DTO_OUTPUT_IDENTS: &[(&str, NonAuthorityCategory)] = &[
     // on their own merits and take folded children, NOT a forgeable
     // `SemanticNodeId`. Exempted ONLY under the `Self::` qualifier.
     ("Out", NonAuthorityCategory::GenericOrAssocOrStd(&["Self"])),
+    // `BuildHasher::build_hasher -> Self::Hasher` on the output-envelope
+    // memo's counting hasher (`MemoBuildHasher` in
+    // `output_sink/envelope.rs`) — a hash-machinery associated type
+    // (`rustc_hash::FxHasher`), genuinely non-TypeExpr-bearing. Exempted
+    // ONLY under the `Self::` qualifier.
+    (
+        "Hasher",
+        NonAuthorityCategory::GenericOrAssocOrStd(&["Self"]),
+    ),
     ("Fn", NonAuthorityCategory::GenericOrAssocOrStd(&["Self"])),
     (
         "Member",
@@ -12096,9 +12153,7 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 /// field bound would silently stop rejecting `TypeExpr` ownership — the
 /// structural rail would go hollow while staying green. `assert_not_impl_any!`
 /// fails to COMPILE on regression, so this file (compiled in both default-gate
-/// surfaces) carries the proof without running a test. The public alias
-/// `TypeArgList` pins that a public type ALIAS cannot re-admit the marker
-/// either — the compiler resolves the alias to its `TypeExpr`-owning target.
+/// surfaces) carries the proof without running a test.
 /// (The compile-FAIL half of the structural proof — the `#[derive(NoTypeExpr)]`
 /// rejection shapes and the out-of-crate `OutputProjector` seal — runs as the
 /// always-on trybuild smoke `hot_materialize_structural_rails_smoke` in the
@@ -12106,7 +12161,6 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 mod hot_structural_rail_not_impl_asserts {
     use static_assertions::assert_not_impl_any;
     use verter_no_typeexpr::NoTypeExpr;
-    use verter_session::typeinfo::types::TypeArgList;
     use verter_type_expr::TypeExpr;
 
     assert_not_impl_any!(TypeExpr: NoTypeExpr);
@@ -12114,7 +12168,35 @@ mod hot_structural_rail_not_impl_asserts {
     assert_not_impl_any!(Vec<TypeExpr>: NoTypeExpr);
     assert_not_impl_any!(std::sync::Arc<TypeExpr>: NoTypeExpr);
     assert_not_impl_any!(Box<TypeExpr>: NoTypeExpr);
-    assert_not_impl_any!(TypeArgList<'static>: NoTypeExpr);
+}
+
+/// ALWAYS-ON semantic-API wire-input witness (compile-time, default gate):
+/// the internal same-view carrier alias `TypeArgList` is a slice of
+/// ALREADY-LOWERED `SemanticNodeId`s. No PUBLIC `resolve_named_symbol*`
+/// entry takes it: the bare `resolve_named_symbol` / `_with_audit` entries
+/// accept NO type-argument parameter (a public entry accepting
+/// caller-pre-lowered ids would be a cross-view foot-gun), and the sole
+/// type-argument path is `VerterHost::resolve_named_symbol_wire_with_audit`,
+/// which accepts SYMBOLIC `TypeExpr` payloads and lowers them to node ids
+/// INSIDE its audited request under the request's one store view before
+/// resolving. `TypeArgList` survives only as the request body's post-lowering
+/// same-view carrier — never a symbolic-IR admission point and never a public
+/// parameter.
+///
+/// The proof is COMPILER-RESOLVED TYPE IDENTITY on the alias itself — the
+/// identity coercion below only compiles while `TypeArgList<'a>` IS
+/// `&'a [SemanticNodeId]`, so re-admitting a symbolic element type
+/// (`Arc<TypeExpr>` or any other) fails at compile time. A `NoTypeExpr`
+/// bound is deliberately NOT usable here: `SemanticNodeId` is a raw keyable
+/// arena ordinal that must never satisfy the hot-carrier marker (see the
+/// audited `assert_not_impl_any!(SemanticNodeId: NoTypeExpr)` beside
+/// `HotTypeRef` in `semantic_query.rs`), and a shared reference is never a
+/// witness — type identity is the strictly stronger statement.
+mod semantic_api_wire_input_witness {
+    use verter_session::semantic_query::SemanticNodeId;
+    use verter_session::typeinfo::types::TypeArgList;
+
+    const _: fn(TypeArgList<'static>) -> &'static [SemanticNodeId] = |args| args;
 }
 
 /// Direct materialize PRIMITIVE idents — obtaining a bare `TypeExpr` from the
@@ -12129,8 +12211,6 @@ const HOT_MAT_DIRECT_IDENTS: &[&str] = &[
     "into_type_expr",
     "type_expr", // the `carrier.type_expr(&cap)` accessor (method-call form only)
     "materialize_published_node",
-    "shell_raise_to_type_expr",
-    "unwrap_materialized",
     "materialize_component_meta_type_expr_until_stable",
     "materialize_component_meta_type_expr_until_stable_full",
     "materialize_admitted_expansion_node",
@@ -12147,10 +12227,13 @@ const HOT_MAT_DIRECT_IDENTS: &[&str] = &[
 /// on any materialising bridge call that reappears.
 const HOT_MAT_BRIDGE_IDENTS: &[&str] = &["lower_and_project_to_expanded_via_host_threaded"];
 
-/// The STANDALONE semantic-gate ident — calling it AT ALL is a decide. Defined
-/// in `verter_semantic`, only ever called on a materialized `TypeExpr` to derive
-/// an object shape for a Pick/Omit/utility decision; there is no benign use, so
-/// it is rejected unconditionally (no taint required).
+/// The STANDALONE semantic-gate ident — calling it AT ALL is a decide. The
+/// production definition (formerly in `verter_semantic`, only ever called on a
+/// materialized `TypeExpr` to derive an object shape for a Pick/Omit/utility
+/// decision) was retired with the graph-native conversion; the spelling is
+/// retained SYNTHETIC-ONLY (planted + proven by
+/// `hot_materialize_fence_self_test_discriminates`) so the standalone-decide
+/// rail stays testable and fires if the shape-derivation gate ever reappears.
 const HOT_DECIDE_STANDALONE_IDENTS: &[&str] = &["type_expr_to_object_shape"];
 
 /// TAINTED-OPERAND semantic-gate idents — a node-domain-only classifier that, fed
@@ -12207,6 +12290,15 @@ const HOT_LOWERING_IDENTS: &[&str] = &[
     // a materialized-value decide — its `matches!(expr, TypeOf)` input
     // classification is publication classification.
     "shallow_lower_type_expr_with_context",
+    // The TypeExpr-START shape-subject lowering (one tear-free scope
+    // observation + one shallow lowering shared by the cache-key subject, the
+    // peek, the cold reduce, and the admit self-root): it lowers its `expr`
+    // input through `shallow_lower_type_expr_with_context` INTERNALLY and
+    // returns the settled node. The whole-expression materialiser
+    // (`materialize_component_meta_type_expr_until_stable_full`) delegates its
+    // `expr` lowering here, so feeding `expr` to it is a pipeline feed, not a
+    // materialized-value decide.
+    "lower_type_expr_for_shape_subject",
 ];
 
 /// Method idents that PROPAGATE taint from receiver to result (and, for the
@@ -12311,8 +12403,27 @@ const HOT_SERIALIZER_PUBLISH_IDENTS: &[&str] = &[
 /// classifier.)
 const HOT_TERMINAL_PASSTHROUGH_IDENTS: &[&str] = &[
     "upsert_component_meta_registry_entry",
-    "surface_view_to_projected_surface",
     "track_component_meta_dependency",
+    // The pure display renderer (`fn(&TypeExpr) -> Option<String>`): rendering
+    // a sink-minted value into its display string IS publication — the result
+    // leaves the typed domain, so no semantic decision can flow from it. The
+    // sanctioned sinks already render through the by-name `.and_then` form;
+    // the direct-call form is the same publication.
+    "render_type_expr_display",
+    // The sealed shallow output-vocabulary classifier
+    // (`NamedTypeMemberOutput::classify_shallow`): classifies a sink-minted
+    // member value INTO the sealed publication vocabulary at the boundary —
+    // the raised form is transient and discarded, no raw `TypeExpr` enters
+    // the DTO (see `object_members_from_typeinfo_surface`'s doc contract).
+    "classify_shallow",
+    // The published emit-signature DTO row constructor
+    // (`named_signature_row(name, ResolvedCallPayloadForm)`): stamping a
+    // rendered display text into the published row is publication.
+    "named_signature_row",
+    // The wire `GraphBuilder::node_id(&TypeExpr)` snapshot intern (method-arg
+    // form): capturing the output wire-graph snapshot at the output boundary
+    // is publication — the JSDoc producer discards the `TypeExpr` after it.
+    "node_id",
     "push",
     "insert",
     "extend",
@@ -12361,9 +12472,16 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
         "component_meta_query_engine/surface.rs",
         "materialize_registry_publication_node",
     ),
+    // The registry-publication SurfaceView converter (successor of the retired
+    // `surface_view_to_projected_surface` after the ProjectedSurface bridge was
+    // retired): materialises a one-level `SurfaceView` into the published
+    // registry `TypeExpr` ONCE through the sealed `MetaQuerySurfaceOutputCap`.
+    // The produced `TypeExpr` is a terminal OUTPUT value only — the registry
+    // object-surface decision reads the node-domain fact off the producing
+    // NODE, never this value.
     (
         "component_meta_query_engine/surface.rs",
-        "surface_view_to_projected_surface",
+        "surface_view_to_registry_type_expr",
     ),
     (
         "component_meta_query_engine/registry_decl.rs",
@@ -12387,18 +12505,6 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
         "meta_resolve/materialize/field_types.rs",
         "reduce_member_value_graph_native_with_context",
     ),
-    (
-        "meta_resolve/materialize/field_types.rs",
-        "lowered_preserve_package_backed_symbolic_refs",
-    ),
-    (
-        "meta_resolve/projectors/output_sink.rs",
-        "shell_raise_to_type_expr",
-    ),
-    (
-        "meta_resolve/projectors/output_sink.rs",
-        "unwrap_materialized",
-    ),
     // The node→carrier raw-raise seal: mints the node into the sealed
     // `OutputTypeExpr` payload ONCE and assembles the `MaterializedOutputTypeExpr`
     // carrier (NO `into_type_expr` — never produces a bare `TypeExpr`). The
@@ -12409,16 +12515,17 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
         "meta_resolve/projectors/output_sink.rs",
         "raise_node_to_sealed_carrier",
     ),
-    // The TypeExpr-start field-value reduction terminal: wraps
-    // `materialize_component_meta_type_expr_until_stable_full` and returns the
-    // sealed carrier ONCE. Makes no decision on the materialised value — the
-    // per-field reducer (`reduce_field_type_expr_with_mode`) reads the cache-
-    // admission root-sentinel fact off the carrier NODE. Its `expr` param is the
-    // input it feeds straight to the materialiser (which lowers it), not a value it
-    // classifies, so the self-policing rail records no decided param.
+    // The output-ENVELOPE per-source terminal: renders a closed leaf /
+    // leaf-union source verbatim (the published shallow value — never raised),
+    // or shell-raises every other source ONCE through the one dispatch and
+    // unwraps the sealed carrier into the envelope lane value. Fail-closed: a
+    // raise/shell miss is a typed error decided on the OPTION, never on a
+    // materialised `TypeExpr`; the source match is on the content-free
+    // `SemanticTypeSource`, so no decision touches the materialised value. It
+    // takes no `TypeExpr` param, so the self-policing rail seeds nothing.
     (
         "meta_resolve/projectors/output_sink.rs",
-        "materialize_field_value_carrier",
+        "materialize_output_source",
     ),
     // The published-field-type publication terminal: picks the better field shape
     // in NODE DOMAIN (`compare_node_improvement` / `node_root_is_explicit_selector_operator`
@@ -12427,7 +12534,7 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     // decision is made on a materialised `TypeExpr`; it takes no `TypeExpr` param,
     // so the self-policing rail seeds nothing.
     (
-        "meta_resolve/projectors/output_sink.rs",
+        "meta_resolve/projectors/output_sink/published_finalize.rs",
         "reduce_published_field_types",
     ),
     (
@@ -12442,6 +12549,37 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ("macro_output_expansion.rs", "expand_slot_binding_output"),
     ("typeinfo/raise.rs", "project_node_to_type_expr_json_bytes"),
     ("vue_exec/mod.rs", "raise_member_value"),
+    // The imported-macro combined DTO builder (the imported-macro analogue of
+    // `props_from_typeinfo_surface`): mints each member value ONCE via the
+    // registered `raise_member_value` mint, renders it for display, and stamps
+    // BOTH published row families from the same pass — the `ResolvedProp`
+    // rows and the keep-all `ResolvedNativeProp` rows (via the
+    // `ResolvedNativeProp::from_surface_member` constructor — publication,
+    // not a decide). The runtime-constructor classification decides on the
+    // member's NODE (`runtime_types_for_node`), never the minted value.
+    // (`props_elements_from_surface` is its thin `.elements` adapter for the
+    // compile-facing per-name route and no longer mints.)
+    (
+        "vue_exec/imported_elements.rs",
+        "macro_elements_from_surface",
+    ),
+    // The imported-emits DTO builder (the imported-macro analogue of
+    // `emits_from_typeinfo_surface` + `property_style_emit_fields` in one
+    // terminal): the event-name / signature / tuple-ness decisions are
+    // node-domain (`CallableNodeView` / `SemanticNodeData::Tuple` via
+    // `node_data_for` on the member NODE); each member value / param display is
+    // minted ONCE (via `raise_member_value` / `render_params_text`) and feeds
+    // only the published `ResolvedProp` / `ResolvedNamedCallSignature` rows.
+    (
+        "vue_exec/imported_elements.rs",
+        "imported_emits_resolved_elements",
+    ),
+    // The params-list display terminal (the params-text twin of
+    // `materialize_payload_tuple`): mints each node-domain `FunctionParam.ty`
+    // ONCE through the sealed Vue output cap and renders it by name; the `...`
+    // / `?` / name come from node-domain flags. ZERO decide on the minted
+    // value; an unrenderable position fails the whole row closed.
+    ("vue_exec/imported_elements.rs", "render_params_text"),
     ("vue_exec/normalize.rs", "index_signatures_from_surface"),
     ("vue_exec/normalize.rs", "model_prop_fields"),
     // The sealed carrier mint accessors — the lowest-level sanctioned mint
@@ -12458,7 +12596,7 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ),
     // Per-member publication DTO builders (props / expose / object-member / slot
     // binding leaf surfaces): mint each member's value once through the
-    // registered `raise_member_value` / `unwrap_materialized` mint, store it in
+    // registered `raise_member_value` mint, store it in
     // the published DTO, and render it for display — no decision on its variants.
     ("vue_exec/normalize.rs", "props_from_typeinfo_surface"),
     ("vue_exec/normalize.rs", "exposed_from_typeinfo_surface"),
@@ -12474,10 +12612,12 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     // selection are node-domain (`CallableNodeView`) in the non-terminal
     // `emits_from_typeinfo_surface`.
     ("vue_exec/normalize.rs", "materialize_payload_tuple"),
-    // The Vue property-style emit fallback terminal: iterates the surface's
-    // PUBLIC members (a node-domain visibility fact), mints each member value
-    // ONCE via the registered `raise_member_value` sink, and builds the
-    // `AnalyzedEmitField` DTOs — structurally identical to `props_from_typeinfo_surface`.
+    // The Vue property-style emit terminal: iterates the surface's PUBLIC
+    // members (a node-domain visibility fact), mints each member value ONCE
+    // via the registered `raise_member_value` sink, and builds the
+    // `ResolvedEmitField` rows (the analysis field + the published payload
+    // SOURCE — an authored locator or a node-domain closed/use-site fact
+    // projection) — structurally identical to `props_from_typeinfo_surface`.
     // No decision on any materialized value; no `TypeExpr` param.
     ("vue_exec/normalize.rs", "property_style_emit_fields"),
     // The Svelte callback-event payload-tuple terminal (the Svelte-cap twin of
@@ -12502,7 +12642,10 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     // decide; takes NO `TypeExpr` param. The slot param/return decide is
     // node-domain (`CallableNodeView::slot_param_and_return_by_arm`) in the
     // non-terminal `slots_from_typeinfo_surface`.
-    ("vue_exec/normalize.rs", "materialize_slot_return_node"),
+    (
+        "vue_exec/normalize_slots.rs",
+        "materialize_slot_return_node",
+    ),
     // The Vue per-slot-binding terminal: builds ONE `AnalyzedSlotFieldBinding` —
     // a `Pick` member as the SYMBOLIC `NamedRoot['member']` access (the source
     // root minted ONCE, the `IndexedAccess` a pure syntactic display build), any
@@ -12511,7 +12654,7 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     // the non-terminal `binding_fields_from_param_node`), never a `TypeExpr`
     // decide; the display renders through the by-name `.and_then` form; takes NO
     // `TypeExpr` param.
-    ("vue_exec/normalize.rs", "slot_binding_field"),
+    ("vue_exec/normalize_slots.rs", "slot_binding_field"),
     // NOTE: `binding_fields_from_param_ty` is NOT here — it BRANCHES on its
     // `param_ty` (`if let TypeExpr::Object`), NAVIGATES it through the shared
     // resolver (`navigate_param_to_object_surface`), shape-matches `Pick`, and
@@ -12530,6 +12673,13 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     // only branch is the node-domain reducibility fact. Takes NO `TypeExpr`
     // param, so the self-policing rail seeds nothing.
     ("meta_resolve/projectors/output_sink.rs", "project_model"),
+    // The JSDoc `{Type}` output boundary: parses the tag payload (the one
+    // sanctioned text exception), resolves it through the shared dispatch
+    // Class-A adapter, then renders the display string + captures the wire
+    // `GraphBuilder` snapshot ONCE and DISCARDS the `TypeExpr` — no raw
+    // symbolic IR survives past this producer, and no decision is made on the
+    // resolved value (render + wire-intern are publications).
+    ("host_manage/jsdoc_resolve.rs", "resolve_jsdoc_tag_type"),
 ];
 
 /// Whether a fn/mod/impl is compile-absent from a default production build —
@@ -16939,10 +17089,19 @@ fn hot_collection_mutation_receiver_taint_discriminates() {
 fn hot_detector_spellings_are_live_or_synthetic() {
     /// Spellings that exist ONLY synthetically, each naming the self-test fn
     /// (in this file) that plants it and proves its rail fires.
-    const SYNTHETIC_ONLY: &[(&str, &str)] = &[(
-        "lower_and_project_to_expanded_via_host_threaded",
-        "hot_materialize_fence_self_test_discriminates",
-    )];
+    const SYNTHETIC_ONLY: &[(&str, &str)] = &[
+        (
+            "lower_and_project_to_expanded_via_host_threaded",
+            "hot_materialize_fence_self_test_discriminates",
+        ),
+        // Retired production gate (the `verter_semantic` object-shape deriver
+        // deleted by the graph-native conversion); retained as the
+        // standalone-decide rail's planted spelling.
+        (
+            "type_expr_to_object_shape",
+            "hot_materialize_fence_self_test_discriminates",
+        ),
+    ];
 
     // Production `.rs` sources across EVERY workspace crate (`crates/*/src`),
     // test files excluded. The detector spellings police call sites that can
@@ -17107,7 +17266,7 @@ const UNKNOWN_SENTINEL_IDENT_MARKERS: &[&str] = &[
 
 /// EXACT sentinel spellings — faithful to the owner classifier's exact-match
 /// arm (`SEMANTIC_MISS | SEMANTIC_OBJECT_SURFACE | SEMANTIC_SURFACE_MEMBER |
-/// "semanticAliasCycle" | "semanticFunction" | "VueMacroElements" |
+/// "semanticAliasCycle" | "semanticFunction" |
 /// "projectedOpenSurface"`). A `raw:` string literal fires only when its VALUE
 /// equals one of these EXACTLY — never when it merely embeds the text.
 const UNKNOWN_SENTINEL_EXACT_SPELLINGS: &[&str] = &[
@@ -17116,7 +17275,6 @@ const UNKNOWN_SENTINEL_EXACT_SPELLINGS: &[&str] = &[
     "semanticSurfaceMember",
     "semanticAliasCycle",
     "semanticFunction",
-    "VueMacroElements",
     "projectedOpenSurface",
 ];
 

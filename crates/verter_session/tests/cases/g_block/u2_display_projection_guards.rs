@@ -34,8 +34,6 @@
 //! - `function_type_parameters_render_constraint_and_default` — `<T extends
 //!   C = D>` clause; a TypeParam reference stays name-only.
 //! - `string_and_template_literals_are_escaped` — literal text is escaped.
-//! - `vue_macro_elements_render_is_payload_derived_not_constant` — the carrier
-//!   summary is derived from the live `ResolvedElements` payload.
 
 use std::sync::Arc;
 
@@ -1041,36 +1039,6 @@ fn display_source_does_not_call_graph_interning_or_dispatch() {
             "display.rs must be a read-only projection; found forbidden `{forbidden}`"
         );
     }
-}
-
-// ----------------------------------------------------------------------
-// GUARD 9 — the Vue-macro carrier renders content DERIVED from the live
-// `ResolvedElements` payload, not a fixed `"<vue-macro>"` constant.
-// ----------------------------------------------------------------------
-
-#[test]
-fn vue_macro_elements_render_is_payload_derived_not_constant() {
-    use verter_parser::utils::oxc::script::type_surface::ResolvedElements;
-
-    let store = SemanticGraphStore::new();
-
-    let empty = store.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
-        ResolvedElements::default(),
-    )));
-    let callable = store.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
-        ResolvedElements {
-            has_call_signature: true,
-            ..ResolvedElements::default()
-        },
-    )));
-
-    let r_empty = render(&store, empty);
-    let r_callable = render(&store, callable);
-
-    // DISCRIMINATING: a bare-constant impl renders both identically.
-    assert_ne!(r_empty, r_callable);
-    assert_eq!(r_empty, "<vue-macro props=0 emits=0>");
-    assert_eq!(r_callable, "<vue-macro props=0 emits=0 callable>");
 }
 
 // ----------------------------------------------------------------------

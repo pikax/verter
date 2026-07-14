@@ -409,7 +409,7 @@ fn merged_interface_generic_heritage_own_member_shadows_expanded() {
     );
 
     let node = host
-        .resolve_named_symbol(PATH, "X", &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol(PATH, "X", Some(ProjectionMode::Expanded))
         .expect("merged X must resolve Expanded");
     let graph = host.project_type_store().semantic_graph();
 
@@ -485,7 +485,7 @@ fn merged_interface_mapper_builtin_heritage_own_member_shadows_expanded() {
     );
 
     let node = host
-        .resolve_named_symbol(PATH, "X", &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol(PATH, "X", Some(ProjectionMode::Expanded))
         .expect("merged X must resolve Expanded");
     let graph = host.project_type_store().semantic_graph();
 
@@ -589,7 +589,7 @@ fn merged_interface_mapper_builtin_heritage_own_member_shadows_skeleton() {
     // arm projects under StructuralTransit(Skeleton), where the builtin gate
     // decides whether `Partial<Base>` carrier-stops or materialises.
     let node = host
-        .resolve_named_symbol(PATH, "X", &[], Some(ProjectionMode::Skeleton))
+        .resolve_named_symbol(PATH, "X", Some(ProjectionMode::Skeleton))
         .expect("merged X must resolve under Skeleton");
     let graph = host.project_type_store().semantic_graph();
 

@@ -14,8 +14,8 @@ use crate::analysis::exports::extract_export_signatures_from_program;
 use crate::analysis::imports::analyze_import_declaration;
 
 use crate::analysis::macros::{
-    collect_type_references, resolve_macro_type_references, try_extract_macro_from_expr,
-    try_extract_macro_from_var_decl,
+    collect_type_references, resolve_macro_type_references, stamp_macro_payload_locators,
+    try_extract_macro_from_expr, try_extract_macro_from_var_decl,
 };
 use crate::analysis::scope::AnalysisScope;
 use crate::analysis::types::*;
@@ -606,6 +606,14 @@ fn build_script_analysis_inner(
     }
 
     resolve_macro_type_references(program, &mut macros, content);
+
+    // Final normalization: stamp the authored macro-payload locators at each
+    // macro's final index (constructor sites record authored-annotation
+    // presence via the scope pairing fields; positions are only known once
+    // the macro list is final).
+    for (macro_index, mac) in macros.iter_mut().enumerate() {
+        stamp_macro_payload_locators(mac, u32::try_from(macro_index).unwrap_or(u32::MAX));
+    }
 
     let macro_type_deps = derive_macro_type_deps(&macros, &imports, &import_map, &local_type_deps);
 

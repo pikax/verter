@@ -37,11 +37,13 @@
 
 use super::harness::{build_hermetic_host_with_lib, resolve_under_audit, STUB_LIB_ES5};
 
-/// Returns a debug representation of the prop's resolved `type_expr`,
+/// Returns a debug representation of the prop's demanded resolved type,
 /// or `None` if the prop is missing. Used to discriminate
 /// `TypeExpr::Unknown { raw: "semanticMiss" }` (the cross-package
 /// utility-wrapped-generic give-up) from a real resolved shape.
 fn prop_type_repr(
+    host: &verter_session::VerterHost,
+    owner: &str,
     analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
 ) -> Option<String> {
@@ -49,18 +51,32 @@ fn prop_type_repr(
         .props
         .iter()
         .find(|p| p.name.as_str() == name)
-        .map(|p| format!("{:?}", p.type_expr))
+        .map(|p| {
+            let source = p.type_source.present().unwrap_or_else(|| {
+                panic!(
+                    "prop `{name}` must publish a typed source \
+                     (a missing source is the cross-package give-up)"
+                )
+            });
+            let ty = verter_session::test_only::semantic_source_probe::demand_type_expr(
+                host, owner, source,
+            )
+            .unwrap_or_else(|| panic!("prop `{name}`'s published source must demand-materialize"));
+            format!("{ty:?}")
+        })
 }
 
 /// Assert the named prop exists AND resolved to a real shape — i.e.
-/// the prop's `type_expr` is NOT `TypeExpr::Unknown { raw:
+/// the prop's demanded type is NOT `TypeExpr::Unknown { raw:
 /// "semanticMiss" }` and not an `Unknown` shell. Either condition is
 /// the cross-package utility-wrapped-generic give-up.
 fn assert_prop_resolved(
+    host: &verter_session::VerterHost,
+    owner: &str,
     analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
 ) {
-    let repr = prop_type_repr(analysis, name).unwrap_or_else(|| {
+    let repr = prop_type_repr(host, owner, analysis, name).unwrap_or_else(|| {
         let all: Vec<&str> = analysis.props.iter().map(|p| p.name.as_str()).collect();
         panic!("prop `{name}` must surface; published prop names: {all:?}")
     });
@@ -116,12 +132,13 @@ fn bare_instantiated_generic_via_wildcard_resolves() {
         ],
         &[("lib.es5.d.ts", STUB_LIB_ES5)],
     );
-    let (analysis, _resolution, _record) = resolve_under_audit(host, "/ws/src/c.vue");
+    let (analysis, _resolution, _record) =
+        resolve_under_audit(std::sync::Arc::clone(&host), "/ws/src/c.vue");
 
     // Discriminating positive: `label` is the explicit own-member of
     // `Foo<T>`. It MUST surface as a published prop with a real
     // (non-semanticMiss) kind.
-    assert_prop_resolved(&analysis, "label");
+    assert_prop_resolved(&host, "/ws/src/c.vue", &analysis, "label");
 }
 
 // ── Sanity #2: utility-wrapped NON-generic interface via wildcard ────────────
@@ -162,13 +179,14 @@ fn omit_wrapped_non_generic_via_wildcard_resolves() {
         ],
         &[("lib.es5.d.ts", STUB_LIB_ES5)],
     );
-    let (analysis, _resolution, _record) = resolve_under_audit(host, "/ws/src/c.vue");
+    let (analysis, _resolution, _record) =
+        resolve_under_audit(std::sync::Arc::clone(&host), "/ws/src/c.vue");
     let names: Vec<String> = analysis.props.iter().map(|p| p.name.to_string()).collect();
 
     // Discriminating positive: the two non-omitted members surface
     // with real shape.
-    assert_prop_resolved(&analysis, "kept");
-    assert_prop_resolved(&analysis, "also_kept");
+    assert_prop_resolved(&host, "/ws/src/c.vue", &analysis, "kept");
+    assert_prop_resolved(&host, "/ws/src/c.vue", &analysis, "also_kept");
 
     // Discriminating negative: the omitted member is NOT published.
     assert!(
@@ -226,12 +244,13 @@ fn omit_wrapped_instantiated_generic_via_wildcard_resolves() {
         ],
         &[("lib.es5.d.ts", STUB_LIB_ES5)],
     );
-    let (analysis, _resolution, _record) = resolve_under_audit(host, "/ws/src/c.vue");
+    let (analysis, _resolution, _record) =
+        resolve_under_audit(std::sync::Arc::clone(&host), "/ws/src/c.vue");
     let names: Vec<String> = analysis.props.iter().map(|p| p.name.to_string()).collect();
 
     // Discriminating positive: the kept (non-omitted) member resolves
     // with a real shape — NOT `semanticMiss`.
-    assert_prop_resolved(&analysis, "label");
+    assert_prop_resolved(&host, "/ws/src/c.vue", &analysis, "label");
 
     // Discriminating negative: the omitted key is absent.
     assert!(
@@ -285,12 +304,13 @@ fn omit_wrapped_instantiated_generic_via_named_reexport_fails() {
         ],
         &[("lib.es5.d.ts", STUB_LIB_ES5)],
     );
-    let (analysis, _resolution, _record) = resolve_under_audit(host, "/ws/src/c.vue");
+    let (analysis, _resolution, _record) =
+        resolve_under_audit(std::sync::Arc::clone(&host), "/ws/src/c.vue");
     let names: Vec<String> = analysis.props.iter().map(|p| p.name.to_string()).collect();
 
     // Discriminating positive: the kept member resolves under named
     // re-export too — the bug is NOT wildcard-specific.
-    assert_prop_resolved(&analysis, "label");
+    assert_prop_resolved(&host, "/ws/src/c.vue", &analysis, "label");
 
     // Discriminating negative: the omitted key is absent.
     assert!(
@@ -350,13 +370,14 @@ fn omit_wrapped_sfc_generic_param_via_wildcard_resolves() {
         ],
         &[("lib.es5.d.ts", STUB_LIB_ES5)],
     );
-    let (analysis, _resolution, _record) = resolve_under_audit(host, "/ws/src/c.vue");
+    let (analysis, _resolution, _record) =
+        resolve_under_audit(std::sync::Arc::clone(&host), "/ws/src/c.vue");
     let names: Vec<String> = analysis.props.iter().map(|p| p.name.to_string()).collect();
 
     // Discriminating positive: SFC `generic="T"` parameter resolves
     // through the utility-wrap composition and publishes `label` as a
     // real shape.
-    assert_prop_resolved(&analysis, "label");
+    assert_prop_resolved(&host, "/ws/src/c.vue", &analysis, "label");
 
     // Discriminating negative: the omitted key is absent.
     assert!(

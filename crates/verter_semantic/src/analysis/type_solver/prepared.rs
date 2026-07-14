@@ -9,13 +9,87 @@
 //! - `PreparedLocalImportedTypeAlias`
 //! - `PreparedImportedDeclContext`
 
+use std::sync::Arc;
+
 use rustc_hash::FxHashMap;
 
 use super::host::ResolvedRootIdentity;
-use crate::analysis::type_eval::{EnumMemberValue, FunctionSignature, TypeDeclKind, ValueDeclKind};
-use verter_type_expr::{
-    MappedModifier, ObjectExpr, ObjectMember, PrimitiveName, TypeExpr, TypeParam,
+use crate::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
+use verter_type_expr::facts::{
+    ClosednessRecipe, DeclarationOrigin, EnumMemberFact, FunctionSignatureFact, HeritageBaseFact,
+    KeyDomainClosednessFact, NarrowTypeParam, ObjectShapeFact, PreparedCaseTransformKind,
+    PreparedForwardPayloadFact, PreparedForwardingKind, PreparedKeyFilterShapeFact,
+    PreparedKeyRemapShapeFact, PreparedMemberFact, PreparedProjectionClassFact,
+    PreparedSurfaceModifiersFact, PreparedTypeBodyFacts, PreparedValueMemberFact,
+    PreparedValueRuleShapeFact, PreparedWrapperKindFact, PreparedWrapperShapeFact, TypeBodyClass,
+    ValueAnnotationClass, ValueTypeAnnotationFact,
 };
+use verter_type_expr::locators::{
+    AuthoredAnchor, LocatorSymbolSpace, TypeArgLocator, TypeBodyPathStep, TypeBodySlot,
+};
+use verter_type_expr::span_origins::{DeclContributorAnchor, MemberSpansOrigin, SourceSynthetic};
+use verter_type_expr::{MappedModifier, ObjectMember, PrimitiveName, TypeExpr};
+
+/// The content-free anchor of a prepared declaration's authored positions.
+fn decl_anchor(root_identity: &ResolvedRootIdentity, space: LocatorSymbolSpace) -> AuthoredAnchor {
+    AuthoredAnchor {
+        canonical_id: Arc::from(root_identity.canonical_id.as_str()),
+        symbol: Arc::from(root_identity.symbol_name.as_str()),
+        space,
+    }
+}
+
+/// A body slot rooted at the declaration anchor with the given path.
+fn decl_slot(
+    root_identity: &ResolvedRootIdentity,
+    space: LocatorSymbolSpace,
+    path: Vec<TypeBodyPathStep>,
+) -> TypeBodySlot {
+    TypeBodySlot {
+        anchor: decl_anchor(root_identity, space),
+        path: path.into(),
+    }
+}
+
+/// The "not a structural wrapper" classification — what every non-mapped or
+/// unrecognized body keeps.
+fn unclassified_wrapper_shape() -> PreparedWrapperShapeFact {
+    PreparedWrapperShapeFact {
+        kind: PreparedWrapperKindFact::None,
+        source_param_index: None,
+        key_filter: PreparedKeyFilterShapeFact::All,
+        key_remap: PreparedKeyRemapShapeFact::Identity,
+        value_rule: PreparedValueRuleShapeFact::PassThrough,
+        modifiers: PreparedSurfaceModifiersFact {
+            optional: None,
+            readonly: None,
+        },
+    }
+}
+
+/// The span-recovery origin of one indexed member: descend `[ordinal]` from the
+/// owning declaration's authored contributor statement, or an explicit
+/// synthetic marker when the origin is not recoverable. Two miss cases:
+///
+/// - the body has no authored contributor anchor (genuinely synthetic), or
+/// - the member was reached through an `IntersectionArm` descent (non-empty
+///   `path_prefix`): `MemberSpansOrigin::Authored` member paths descend
+///   top-level decl-body member ordinals only — an intersection-arm position
+///   is not representable, so the honest typed miss is recorded instead of an
+///   `Authored` origin claiming a position the schema cannot address.
+fn member_span_origin(
+    contributor: Option<DeclContributorAnchor>,
+    ordinal: u32,
+    path_prefix: &[TypeBodyPathStep],
+) -> MemberSpansOrigin {
+    match contributor {
+        Some(anchor) if path_prefix.is_empty() => MemberSpansOrigin::Authored {
+            anchor,
+            member_path: Arc::from(vec![ordinal]),
+        },
+        _ => MemberSpansOrigin::Synthetic(SourceSynthetic),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Prepared type declaration
@@ -24,14 +98,13 @@ use verter_type_expr::{
 /// Solver-facing prepared type declaration.
 ///
 /// Prepared declarations are cache-owned, declaration-only, and intentionally
-/// shallow: they preserve symbolic bodies rather than eagerly normalizing them.
+/// shallow: they carry classification FACTS plus content-free LOCATORS of the
+/// authored body positions — never the body itself. The shared dispatch lowers
+/// a located body on demand from the producing canonical's retained parse
+/// snapshot.
 ///
 /// Keyed by `(canonical_id, symbol_name, source_hash)` in the host cache.
-///
-/// The `kind` field currently uses `TypeDeclKind` for backward compatibility
-/// with existing session code. It will migrate to `PreparedDeclKind` when the
-/// session preparation code is updated (Milestone 2).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub struct PreparedTypeDecl {
     /// Canonical identity of the defining file + symbol name.
     pub root_identity: ResolvedRootIdentity,
@@ -42,26 +115,26 @@ pub struct PreparedTypeDecl {
     /// Declaration kind.
     pub kind: TypeDeclKind,
 
-    /// Generic type parameters.
-    pub type_parameters: Vec<TypeParam>,
+    /// Generic type parameters — narrowed: constraint/default bounds are
+    /// content-free locators of the authored bound positions, never embedded
+    /// bodies.
+    pub type_parameters: Vec<NarrowTypeParam>,
 
-    /// The symbolic body — NOT eagerly evaluated. For a merged interface this
-    /// is the shallow union projection (an `Object`); the authoritative ordered
-    /// contributor bodies live in [`merged_contributors`](Self::merged_contributors)
-    /// and drive the project-semantic peer-merge reducer.
-    pub body: TypeExpr,
-
-    /// Ordered contributor bodies when this declaration is a same-name merged
-    /// interface (TS same-file declaration merging). Empty for the common
-    /// single-declaration case. When non-empty, body lowering interns a
-    /// `MergedDecl` carrier over these contributors instead of lowering `body`
-    /// directly — preserving overload accumulation and member union under the
-    /// peer-merge reducer (NOT the intersection heritage-shadow rule).
-    pub merged_contributors: Vec<TypeExpr>,
+    /// The narrowed body FACTS: classification + the content-free body slot
+    /// locator + ordered merged-contributor slots. The authored body is NOT
+    /// stored — the shared dispatch lowers it on demand from the locator.
+    /// A non-empty contributor-slot list marks a same-name merged interface
+    /// (TS same-file declaration merging); body lowering interns a `MergedDecl`
+    /// carrier over those contributors — preserving overload accumulation and
+    /// member union under the peer-merge reducer (NOT the intersection
+    /// heritage-shadow rule).
+    pub body_facts: PreparedTypeBodyFacts,
 
     /// Member index for direct property/method lookup without walking the body.
     /// Populated for interfaces and object-like aliases. Default: empty.
-    pub member_index: FxHashMap<String, PreparedMember>,
+    /// Each member is a narrowed fact: header flags + the content-free locator
+    /// of its authored value position + its span-recovery origin.
+    pub member_index: FxHashMap<String, PreparedMemberFact>,
 
     /// Same-file symbol references needed for local closure.
     pub local_deps: Vec<String>,
@@ -85,185 +158,36 @@ pub struct PreparedTypeDecl {
 
     /// Structural wrapper classification computed at preparation time.
     /// Enables the solver to fast-path identity wrappers, pure overlays,
-    /// key filters, key remaps, and transparent aliases.
-    pub wrapper_shape: PreparedWrapperShape,
+    /// key filters, key remaps, and transparent aliases. Opaque filter/remap/
+    /// transform payloads are content-free locators of the authored positions.
+    pub wrapper_shape: PreparedWrapperShapeFact,
 
     /// Projection classification computed at preparation time.
     /// Determines how the solver can project individual members without
-    /// fully instantiating the declaration body.
-    pub projection_class: PreparedProjectionClass,
-}
+    /// fully instantiating the declaration body. Forward-subject type
+    /// arguments are content-free locators of the authored argument positions.
+    pub projection_class: PreparedProjectionClassFact,
 
-// ---------------------------------------------------------------------------
-// Structural wrapper classification
-// ---------------------------------------------------------------------------
+    /// The producer-minted content-free heritage-base FACTS of a CLASS
+    /// declaration body's Intersection fold (heritage `Ref` arms before the
+    /// own `Object` arm): the authored base NAME (also the `name_resolution`
+    /// routing key the dispatch head-resolution uses) plus one content-free
+    /// [`TypeArgLocator`] per authored heritage type argument. Minted ONCE at
+    /// lazy decl-body lowering by [`collect_heritage_base_facts`]; NEVER a
+    /// resolved identity (heads resolve at dispatch time) and NEVER an
+    /// embedded body (arguments deref + lower on demand). Empty for non-class
+    /// declarations and heritage-free classes.
+    pub heritage_bases: Arc<[HeritageBaseFact]>,
 
-/// Structural wrapper metadata classified at preparation time.
-///
-/// Enables the solver to fast-path identity wrappers, pure overlays,
-/// key filters, key remaps, and transparent aliases without lowering full
-/// bodies or dispatching on helper names.
-#[derive(Debug, Clone, Default)]
-pub struct PreparedWrapperShape {
-    pub kind: PreparedWrapperKind,
-    /// Which type parameter is the "source" (e.g., T in `{ [K in keyof T]: T[K] }`).
-    pub source_param_index: Option<u16>,
-    pub key_filter: PreparedKeyFilterShape,
-    pub key_remap: PreparedKeyRemapShape,
-    pub value_rule: PreparedValueRuleShape,
-    pub modifiers: PreparedSurfaceModifiers,
-}
-
-/// Classification of the wrapper kind.
-///
-/// Covers structural mapped-type patterns only. Alias forwarding (including
-/// transparent pass-through aliases like `type A<T> = B<T>`) is handled by
-/// `PreparedProjectionClass::ForwardSubject(IdentityParams)` instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, verter_no_typeexpr::NoTypeExpr)]
-pub enum PreparedWrapperKind {
-    /// Not a recognized structural wrapper pattern.
-    #[default]
-    None,
-    /// Identity: `{ [K in keyof T]: T[K] }` — collapse to base subject.
-    Identity,
-    /// Pure overlay: only modifier changes (optional/readonly), no key/value transform.
-    PureOverlay,
-    /// Key filter: `Pick`/`Omit`-style literal key filtering.
-    KeyFilter,
-    /// Key remap: template literal or case transform on keys.
-    KeyRemap,
-}
-
-/// How the declaration filters its source keyspace (classified at prep time).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum PreparedKeyFilterShape {
-    #[default]
-    All,
-    IncludeLiteral(Vec<String>),
-    ExcludeLiteral(Vec<String>),
-    Opaque(TypeExpr),
-}
-
-/// How the declaration remaps key names (classified at prep time).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum PreparedKeyRemapShape {
-    #[default]
-    Identity,
-    Prefix(String),
-    Suffix(String),
-    CaseTransform(PreparedCaseTransformKind),
-    Opaque(TypeExpr),
-}
-
-/// Case transform kinds for key remapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
-pub enum PreparedCaseTransformKind {
-    Capitalize,
-    Uncapitalize,
-    Uppercase,
-    Lowercase,
-}
-
-/// How the declaration transforms member values (classified at prep time).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum PreparedValueRuleShape {
-    /// Value is `T[K]` — pass through unchanged.
-    #[default]
-    PassThrough,
-    /// Value involves a transform over `T[K]`.
-    Transform(TypeExpr),
-}
-
-/// Surface modifiers (optional/readonly) for structural wrapper classification.
-#[derive(Debug, Clone, PartialEq, Eq, Default, verter_no_typeexpr::NoTypeExpr)]
-pub struct PreparedSurfaceModifiers {
-    /// `Some(true)` = add optional, `Some(false)` = remove optional, `None` = unchanged.
-    pub optional: Option<bool>,
-    /// `Some(true)` = add readonly, `Some(false)` = remove readonly, `None` = unchanged.
-    pub readonly: Option<bool>,
-}
-
-// ---------------------------------------------------------------------------
-// Projection classification
-// ---------------------------------------------------------------------------
-
-/// Projection-oriented classification of a prepared type declaration.
-///
-/// Computed at prep time alongside `wrapper_shape`. Determines how the solver
-/// can project individual members without fully instantiating the declaration.
-///
-/// This is intentionally separate from `PreparedWrapperShape` which classifies
-/// mapped-type structural patterns. Projection classification covers the
-/// broader question of how member access should be routed.
-#[derive(Debug, Clone, Default)]
-pub enum PreparedProjectionClass {
-    /// Declaration has a `member_index` — project directly from it.
-    DirectMembers,
-    /// Declaration is a structural wrapper (identity, overlay, key filter, etc.).
-    /// Projection delegates through the wrapper shape.
-    Wrapper,
-    /// Declaration body is a single `Ref` to another type, possibly with args.
-    /// Projection can forward to the target without full instantiation.
-    ForwardSubject(PreparedForwardPayload),
-    /// Cannot be projected structurally — fall back to full instantiation.
-    #[default]
-    Opaque,
-}
-
-/// Structured forwarding payload for `PreparedProjectionClass::ForwardSubject`.
-///
-/// Stores the target type reference and its arguments as symbolic `TypeExpr`
-/// values (not arena `NodeId`s), because this metadata is computed at prep
-/// time before any request arena exists.
-#[derive(Debug, Clone)]
-pub struct PreparedForwardPayload {
-    /// Target type name (e.g., `"ComponentConfig"`).
-    pub target_name: String,
-    /// Symbolic type arguments passed to the target in alias scope.
-    /// For `type A = B<X, Y>`, this is `[X, Y]` as `TypeExpr` values.
-    pub target_args: Vec<TypeExpr>,
-    /// How the alias's own type parameters map to the forwarded args.
-    pub forwarding_kind: PreparedForwardingKind,
-}
-
-/// How an alias's type parameters relate to the forwarded target's arguments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
-pub enum PreparedForwardingKind {
-    /// Args are exactly the alias's own params in order: `type A<T> = B<T>`.
-    /// The alias is structurally transparent for projection purposes.
-    IdentityParams,
-    /// Args include concrete types or reordered/partial params:
-    /// `type A = B<X, Y>` or `type A<T> = B<T, string>`.
-    AppliedAlias,
-}
-
-/// A member in the prepared member index — pre-extracted from the declaration
-/// body for O(1) property lookup.
-#[derive(Debug, Clone)]
-pub struct PreparedMember {
-    pub ty: TypeExpr,
-    pub optional: bool,
-    pub readonly: bool,
-    pub is_method: bool,
-    /// Declared accessibility of the member, carried verbatim from the IR
-    /// [`verter_type_expr::ObjectProperty::visibility`] /
-    /// [`verter_type_expr::MethodSignature::visibility`]. `Public` for every
-    /// non-class origin; class members carry their `TSAccessibility`. The
-    /// published-prop surface re-applies a `Public`-only filter at the
-    /// publication boundary, so non-public class members stay recorded here.
-    pub visibility: verter_type_expr::MemberVisibility,
-    /// OXC declaration-site spans of this member, carried verbatim from the
-    /// IR [`verter_type_expr::ObjectProperty::spans`] /
-    /// [`verter_type_expr::ObjectMethod::spans`] so the macro-surface
-    /// own-member overlay (`backfill_member_index_surface`) appends members
-    /// with their real spans instead of `MemberSpans::default()`.
-    pub spans: verter_type_expr::MemberSpans,
-    /// Canonical file the member's declaration lives in — the defining file of
-    /// the owning [`PreparedTypeDecl`] (its `root_identity.canonical_id`),
-    /// stamped at `build_member_index`. The overlay pairs the member's
-    /// `spans` with this file. Empty for a member indexed without a known
-    /// defining file (test-only fixtures).
-    pub declaration_origin: String,
+    /// The producer-minted per-declaration KEY-DOMAIN closedness fact —
+    /// the closed-object SHAPE verdict plus one [`ClosednessRecipe`] per
+    /// contributor body. Minted ONCE at lazy decl-body lowering by
+    /// [`collect_key_domain_closedness_fact`] from the SAME transient bodies
+    /// the fingerprint observes; the dispatch closedness evaluator reads it
+    /// in place of any query-time authored-body `TypeExpr` walk. `None` for
+    /// seeded (locator-only) states and enum groups — UNAVAILABLE, never a
+    /// verdict.
+    pub key_domain_closedness: Option<Arc<KeyDomainClosednessFact>>,
 }
 
 /// A cross-file dependency reference in a prepared declaration.
@@ -278,8 +202,11 @@ pub struct PreparedExternalDep {
 pub struct DeclProvenance {
     /// Route kind that resolved this declaration (direct, alias, wildcard).
     pub route_kind: Option<String>,
-    /// Source text range if available (for diagnostics).
-    pub source_range: Option<(u32, u32)>,
+    /// Declaration-span ORIGIN locator: the authored top-level contributor
+    /// statement (`program.body[contributor_index]`) whose span the producing
+    /// canonical's retained parse snapshot recovers on demand (diagnostics
+    /// display). Never a stored byte range.
+    pub source_origin: Option<DeclContributorAnchor>,
     /// Barrel files traversed to reach the defining file.
     pub barrel_hops: Vec<String>,
 }
@@ -287,8 +214,8 @@ pub struct DeclProvenance {
 /// Prepared declaration kind — broader than `TypeDeclKind` to support
 /// declaration merging and enum dual-space treatment.
 ///
-/// Not yet used as the primary `kind` field — this is reserved for Milestone 2
-/// when session preparation code is updated.
+/// Not yet the primary `kind` field: `TypeDeclKind` remains the stored kind
+/// until the session preparation surface adopts this broader taxonomy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PreparedDeclKind {
     Alias,
@@ -318,7 +245,7 @@ impl From<TypeDeclKind> for PreparedDeclKind {
 /// - `typeof x`
 /// - dotted paths: `typeof ns.foo.bar`
 /// - class/constructor/static-member queries
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
 pub struct PreparedValueDecl {
     /// Canonical identity.
     pub root_identity: ResolvedRootIdentity,
@@ -329,26 +256,32 @@ pub struct PreparedValueDecl {
     /// Value declaration kind.
     pub kind: ValueDeclKind,
 
-    /// Type annotation on the value declaration (e.g. `const x: T`).
-    pub type_annotation: Option<TypeExpr>,
+    /// The narrowed annotation FACT: classification, the precomputed
+    /// `typeof x` peel target, and the annotation source (an authored value
+    /// annotation is its decl-body locator; an inferred one is host-raised).
+    pub type_annotation: ValueTypeAnnotationFact,
 
-    /// Function signatures if the value is a function. Empty = non-callable;
-    /// length 1 = the common single-declaration case; length > 1 = an overload
-    /// group (source order; trailing entry may be the implementation).
-    pub signatures: Vec<FunctionSignature>,
+    /// Narrowed function signature facts if the value is a function. Empty =
+    /// non-callable; length 1 = the common single-declaration case; length > 1
+    /// = an overload group (source order; the trailing entry may be the
+    /// implementation, flagged by `has_implementation_body`). Return/parameter
+    /// types are content-free locators of the authored positions.
+    pub signatures: Vec<FunctionSignatureFact>,
 
-    /// Object shape if the value is a const object / namespace.
-    pub object_shape: Option<ObjectExpr>,
+    /// Narrowed object shape fact if the value is a const object / namespace.
+    /// Member value types are content-free locators.
+    pub object_shape: Option<ObjectShapeFact>,
 
-    /// Member index for dotted path lookup (e.g. `typeof ns.member`).
-    pub member_index: FxHashMap<String, PreparedValueMember>,
+    /// Member index for dotted path lookup (e.g. `typeof ns.member`) —
+    /// narrowed value-member facts carrying body locators.
+    pub member_index: FxHashMap<String, PreparedValueMemberFact>,
 
-    /// For enum values: the full ordered member inventory (NAME →
-    /// [`EnumMemberValue`]), unioned across same-name merged enum contributors.
-    /// Every member is present — foldable members carry their literal, deferred
-    /// members their degraded sound primitive domain — so `typeof Enum` /
-    /// `Enum.Member` see EVERY member, never just the foldable subset.
-    pub enum_members: Option<Vec<(String, EnumMemberValue)>>,
+    /// For enum values: the full ordered narrowed member inventory, unioned
+    /// across same-name merged enum contributors. Every member is present —
+    /// foldable members carry their literal scalar, deferred members their
+    /// degraded sound primitive domain — so `typeof Enum` / `Enum.Member` see
+    /// EVERY member, never just the foldable subset.
+    pub enum_members: Option<EnumMemberFact>,
 
     /// Cross-file dependencies.
     pub external_deps: Vec<PreparedExternalDep>,
@@ -390,13 +323,6 @@ impl From<ValueDeclKind> for PreparedValueDeclKind {
     }
 }
 
-/// A member in a prepared value's member index (for dotted typeof paths).
-#[derive(Debug, Clone)]
-pub struct PreparedValueMember {
-    pub ty: TypeExpr,
-    pub is_method: bool,
-}
-
 // ---------------------------------------------------------------------------
 // Prepared cache dependency contract
 // ---------------------------------------------------------------------------
@@ -435,28 +361,68 @@ impl PreparedCacheDeps {
 // ---------------------------------------------------------------------------
 
 impl PreparedTypeDecl {
-    /// Create a new prepared type declaration with minimal fields.
-    /// Extra fields (member_index, deps, provenance) are defaulted.
-    pub fn new(root_identity: ResolvedRootIdentity, kind: TypeDeclKind, body: TypeExpr) -> Self {
+    /// Create a new prepared type declaration with minimal fields. The body
+    /// FACTS are minted from the declaration's own anchor (classification from
+    /// `kind`; the body slot addresses the whole authored body); extra fields
+    /// (member_index, deps, provenance) are defaulted. The producer then feeds
+    /// the TRANSIENT authored body to [`build_member_index`](Self::build_member_index)
+    /// / [`classify_wrapper_shape`](Self::classify_wrapper_shape) /
+    /// [`classify_projection`](Self::classify_projection) — the body itself is
+    /// never retained.
+    pub fn new(root_identity: ResolvedRootIdentity, kind: TypeDeclKind) -> Self {
+        let body_facts = PreparedTypeBodyFacts {
+            classification: match kind {
+                TypeDeclKind::Alias => TypeBodyClass::Alias,
+                TypeDeclKind::Interface => TypeBodyClass::Interface,
+                TypeDeclKind::Class => TypeBodyClass::Class,
+            },
+            body_slot: decl_slot(&root_identity, LocatorSymbolSpace::Type, Vec::new()),
+            merged_contributor_slots: Arc::from([]),
+        };
         Self {
             root_identity,
             exported_name: None,
             kind,
             type_parameters: Vec::new(),
-            body,
-            merged_contributors: Vec::new(),
+            body_facts,
             member_index: FxHashMap::default(),
             local_deps: Vec::new(),
             external_deps: Vec::new(),
             name_resolution: FxHashMap::default(),
             provenance: DeclProvenance::default(),
             cache_deps: PreparedCacheDeps::default(),
-            wrapper_shape: PreparedWrapperShape::default(),
-            projection_class: PreparedProjectionClass::default(),
+            wrapper_shape: unclassified_wrapper_shape(),
+            projection_class: PreparedProjectionClassFact::Opaque,
+            heritage_bases: Arc::from([]),
+            key_domain_closedness: None,
         }
     }
 
-    /// Build a member index from an object-like body.
+    /// Record that this declaration is a same-name merged interface with
+    /// `count` ordered contributors: mints one contributor slot per ordinal
+    /// and flips the body classification to
+    /// [`TypeBodyClass::MergedInterface`]. A zero count resets to the
+    /// non-merged state.
+    pub fn set_merged_contributors(&mut self, count: usize) {
+        if count == 0 {
+            self.body_facts.merged_contributor_slots = Arc::from([]);
+            return;
+        }
+        self.body_facts.merged_contributor_slots = (0..count)
+            .map(|ordinal| {
+                decl_slot(
+                    &self.root_identity,
+                    LocatorSymbolSpace::Type,
+                    vec![TypeBodyPathStep::MergedContributor {
+                        ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                    }],
+                )
+            })
+            .collect();
+        self.body_facts.classification = TypeBodyClass::MergedInterface;
+    }
+
+    /// Build a member index from the TRANSIENT object-like authored body.
     ///
     /// Handles:
     /// - `TypeExpr::Object` — direct properties
@@ -464,73 +430,131 @@ impl PreparedTypeDecl {
     ///   object members. Right-to-left precedence ensures the interface's own
     ///   object tail (last part) wins over inherited parts (earlier parts).
     ///   Only direct Object members are indexed; heritage Ref parts are skipped.
-    ///   Nested transparent intersections are flattened so declaration-merged
+    ///   Nested transparent intersections are descended so declaration-merged
     ///   interfaces still expose members from earlier object slices.
-    pub fn build_member_index(&mut self) {
+    ///
+    /// Each indexed member's `ty` is the content-free LOCATOR of its authored
+    /// value position — the RAW body path the shared deref navigates:
+    /// `[IntersectionArm { arm } ..., Member { ordinal }, MemberValue]`, where
+    /// each `IntersectionArm` step carries the arm's raw source index at its
+    /// intersection level (parenthesized layers are structurally transparent
+    /// and take no step) and `Member.ordinal` is the raw index into the
+    /// containing object's `properties` — counting nameless call / construct /
+    /// index signatures. The member-index MAP stays name-keyed (the lookup
+    /// key); only the minted locator carries the raw body path.
+    ///
+    /// `contributor` is the owning declaration's authored top-level statement
+    /// anchor: `Some(anchor)` mints each TOP-LEVEL object member's
+    /// span-recovery origin as `[ordinal]` (the raw index within its
+    /// containing object's authored member surface) descended from it; `None`
+    /// asserts the body is GENUINELY synthetic (hand-built fixtures /
+    /// synthesized surfaces) and records explicit `Synthetic` origins. Passing
+    /// `None` for an authored body is forbidden — a synthetic origin must
+    /// never stand in for an authored member whose anchor the producer failed
+    /// to thread through. A member reached through an `IntersectionArm`
+    /// descent records a `Synthetic` origin even under `Some(anchor)`:
+    /// `MemberSpansOrigin::Authored` member paths descend top-level decl-body
+    /// member ordinals only, so an intersection-arm position is not
+    /// representable — the explicit typed miss, never a dishonest `Authored`.
+    pub fn build_member_index(
+        &mut self,
+        body: &TypeExpr,
+        contributor: Option<DeclContributorAnchor>,
+    ) {
         // The defining file of this declaration is the declaration site of
         // every own-body member it indexes (heritage Ref parts are skipped),
-        // so each `PreparedMember` is stamped with it. The macro-surface
-        // overlay pairs the member's `spans` with this file.
-        let declaration_origin = self.root_identity.canonical_id.clone();
+        // so each member fact is stamped with it. The macro-surface overlay
+        // pairs the member's recovered spans with this file.
+        let declaration_origin =
+            DeclarationOrigin::Declared(Arc::from(self.root_identity.canonical_id.as_str()));
+        let mut path_prefix = Vec::new();
         Self::index_transparent_object_members(
             &mut self.member_index,
-            &self.body,
+            body,
             &declaration_origin,
+            contributor,
+            &self.root_identity,
+            &mut path_prefix,
         );
     }
 
     /// Index direct object members into the member_index map.
     /// Existing entries are NOT overwritten (preserves right-to-left precedence
     /// when called from intersection traversal).
+    ///
+    /// `path_prefix` is the raw body path from the decl body root to this
+    /// object (`IntersectionArm` steps only; empty for an object-root body);
+    /// each member's locator appends `[Member { raw_index }, MemberValue]`.
     fn index_object_members(
-        member_index: &mut rustc_hash::FxHashMap<String, PreparedMember>,
+        member_index: &mut rustc_hash::FxHashMap<String, PreparedMemberFact>,
         obj: &verter_type_expr::ObjectExpr,
-        declaration_origin: &str,
+        declaration_origin: &DeclarationOrigin,
+        contributor: Option<DeclContributorAnchor>,
+        root_identity: &ResolvedRootIdentity,
+        path_prefix: &[TypeBodyPathStep],
     ) {
-        for member in &obj.properties {
+        for (raw_index, member) in obj.properties.iter().enumerate() {
+            // The RAW index into this object's `properties` — the exact index
+            // the `Member` step derefs. Nameless call / construct / index
+            // signatures occupy their positions, so a named member after one
+            // does NOT compact down.
+            let ordinal = u32::try_from(raw_index).unwrap_or(u32::MAX);
+            let member_value_path = || {
+                let mut path = path_prefix.to_vec();
+                path.push(TypeBodyPathStep::Member { ordinal });
+                path.push(TypeBodyPathStep::MemberValue);
+                path
+            };
             match member {
                 ObjectMember::Property(prop) => {
                     // entry API: only insert if not already present
                     member_index
                         .entry(prop.name.clone())
-                        .or_insert_with(|| PreparedMember {
-                            ty: prop.ty.clone(),
+                        .or_insert_with(|| PreparedMemberFact {
                             optional: prop.optional,
                             readonly: prop.readonly,
                             is_method: false,
                             // Carry the IR property's declared accessibility.
                             visibility: prop.visibility,
-                            // Carry the IR property's OXC declaration-site
-                            // spans + this declaration's defining file so the
-                            // overlay append is span-rich.
-                            spans: prop.spans,
-                            declaration_origin: declaration_origin.to_string(),
+                            // Stamp this declaration's defining file.
+                            declaration_origin: declaration_origin.clone(),
+                            ty: decl_slot(
+                                root_identity,
+                                LocatorSymbolSpace::Type,
+                                member_value_path(),
+                            ),
+                            // Span-recovery origin: the member's raw index
+                            // within its containing object's authored member
+                            // surface, under the owning declaration's
+                            // contributor anchor — recoverable only for a
+                            // top-level object member; an intersection-arm
+                            // member records the typed miss.
+                            span_origin: member_span_origin(contributor, ordinal, path_prefix),
                         });
                 }
                 ObjectMember::Method(method) => {
-                    // Own method members are also direct own-body members
-                    // — index them so the macro-surface own-member overlay
-                    // (`build_instantiate` → `backfill_member_index_surface`)
-                    // can stamp `declared_in_macro_type_arg` for an own
-                    // interface method (e.g. `interface Slots { default(): VNode[] }`).
-                    // The value is the method's function shape, mirroring
-                    // the generic object lowering that materialises methods
-                    // as canonical `Function` nodes.
+                    // Own method members are also direct own-body members —
+                    // index them so the macro-surface own-member overlay can
+                    // stamp `declared_in_macro_type_arg` for an own interface
+                    // method. The locator addresses the method's value
+                    // surface; the dispatch lowers its function shape on
+                    // demand.
                     member_index
                         .entry(method.name.clone())
-                        .or_insert_with(|| PreparedMember {
-                            ty: verter_type_expr::TypeExpr::Function(std::sync::Arc::new(
-                                method.function.clone(),
-                            )),
+                        .or_insert_with(|| PreparedMemberFact {
                             optional: method.optional,
                             readonly: false,
                             is_method: true,
                             // Carry the IR method's declared accessibility.
                             visibility: method.visibility,
-                            // Carry the IR method's OXC member spans + defining
-                            // file.
-                            spans: method.spans,
-                            declaration_origin: declaration_origin.to_string(),
+                            // Stamp this declaration's defining file.
+                            declaration_origin: declaration_origin.clone(),
+                            ty: decl_slot(
+                                root_identity,
+                                LocatorSymbolSpace::Type,
+                                member_value_path(),
+                            ),
+                            span_origin: member_span_origin(contributor, ordinal, path_prefix),
                         });
                 }
                 _ => {}
@@ -538,29 +562,63 @@ impl PreparedTypeDecl {
         }
     }
 
+    /// Descend the transparent structure of an object-like body, indexing each
+    /// direct object's members. `path_prefix` accumulates the raw body path to
+    /// the current position: an `IntersectionArm { ordinal }` step per
+    /// intersection level (the arm's raw source index — NOT its reversed visit
+    /// order); a parenthesized layer is structurally transparent to the deref
+    /// and takes no step.
     fn index_transparent_object_members(
-        member_index: &mut rustc_hash::FxHashMap<String, PreparedMember>,
+        member_index: &mut rustc_hash::FxHashMap<String, PreparedMemberFact>,
         body: &TypeExpr,
-        declaration_origin: &str,
+        declaration_origin: &DeclarationOrigin,
+        contributor: Option<DeclContributorAnchor>,
+        root_identity: &ResolvedRootIdentity,
+        path_prefix: &mut Vec<TypeBodyPathStep>,
     ) {
         match body {
-            TypeExpr::Object(obj) => {
-                Self::index_object_members(member_index, obj, declaration_origin)
-            }
+            TypeExpr::Object(obj) => Self::index_object_members(
+                member_index,
+                obj,
+                declaration_origin,
+                contributor,
+                root_identity,
+                path_prefix,
+            ),
             TypeExpr::Intersection(parts) => {
-                for part in parts.iter().rev() {
-                    Self::index_transparent_object_members(member_index, part, declaration_origin);
+                // Right-to-left visit order (last arm wins the name-keyed
+                // entry); each arm's PATH step carries its raw source index.
+                for (arm_index, part) in parts.iter().enumerate().rev() {
+                    path_prefix.push(TypeBodyPathStep::IntersectionArm {
+                        ordinal: u32::try_from(arm_index).unwrap_or(u32::MAX),
+                    });
+                    Self::index_transparent_object_members(
+                        member_index,
+                        part,
+                        declaration_origin,
+                        contributor,
+                        root_identity,
+                        path_prefix,
+                    );
+                    path_prefix.pop();
                 }
             }
             TypeExpr::Parenthesized(inner) => {
-                Self::index_transparent_object_members(member_index, inner, declaration_origin);
+                Self::index_transparent_object_members(
+                    member_index,
+                    inner,
+                    declaration_origin,
+                    contributor,
+                    root_identity,
+                    path_prefix,
+                );
             }
             _ => {}
         }
     }
 
     /// Look up a member by name. O(1) if the member index is populated.
-    pub fn member(&self, name: &str) -> Option<&PreparedMember> {
+    pub fn member(&self, name: &str) -> Option<&PreparedMemberFact> {
         self.member_index.get(name)
     }
 
@@ -569,24 +627,274 @@ impl PreparedTypeDecl {
         PreparedDeclKind::from(self.kind)
     }
 
-    /// Classify the structural wrapper shape from the body and type parameters.
+    /// Classify the structural wrapper shape from the TRANSIENT authored body
+    /// and type parameters.
     ///
     /// Must be called after `type_parameters` is populated. Sets `self.wrapper_shape`.
-    pub fn classify_wrapper_shape(&mut self) {
-        self.wrapper_shape = classify_wrapper_shape_inner(&self.body, &self.type_parameters);
+    pub fn classify_wrapper_shape(&mut self, body: &TypeExpr) {
+        self.wrapper_shape =
+            classify_wrapper_shape_inner(body, &self.type_parameters, &self.root_identity);
     }
 
-    /// Classify the projection class from the body, member index, and wrapper shape.
+    /// Classify the projection class from the TRANSIENT authored body, member
+    /// index, and wrapper shape.
     ///
     /// Must be called after `build_member_index()` and `classify_wrapper_shape()`.
     /// Sets `self.projection_class`.
-    pub fn classify_projection(&mut self) {
+    pub fn classify_projection(&mut self, body: &TypeExpr) {
         self.projection_class = classify_projection_inner(
-            &self.body,
+            body,
             &self.type_parameters,
             &self.member_index,
             &self.wrapper_shape,
+            &self.root_identity,
         );
+    }
+}
+
+/// Extract the content-free heritage-base FACTS from ONE transient authored
+/// CLASS contributor body — a pure syntactic extraction over the producer's
+/// Intersection fold (heritage `Ref` arms before the own `Object` arm).
+///
+/// For each DIRECT `Ref` arm of the top-level `Intersection`, mints one
+/// [`HeritageBaseFact`]: the authored base name (also the `name_resolution`
+/// routing key) plus one [`TypeArgLocator`] per authored type argument, whose
+/// path is `path_prefix ++ [IntersectionArm { arm ordinal }]` rooted at the
+/// declaration's type-space anchor (`path_prefix` carries the
+/// `MergedContributor` step for a merged group's contributor; empty for a
+/// single body). The extraction does NOT resolve the base (head resolution is
+/// the dispatch's job) and does NOT lower the arguments (they deref + lower on
+/// demand). A non-`Intersection` body (a heritage-free class) yields no facts.
+///
+/// The caller gates on the declaration KIND: only a CLASS body's Intersection
+/// fold encodes heritage — an interface's extends fold serves the instance
+/// rail structurally and an alias's authored intersection is composition, not
+/// heritage.
+///
+/// The base-name span is not representable in the member-ordinal
+/// [`MemberSpansOrigin::Authored`] vocabulary (heritage arms are not object
+/// members), so each fact records the explicit
+/// [`MemberSpansOrigin::Synthetic`] typed miss — never a dishonest `Authored`
+/// origin (the same rule [`PreparedTypeDecl::build_member_index`] applies to
+/// intersection-arm member positions).
+pub fn collect_heritage_base_facts(
+    root_identity: &ResolvedRootIdentity,
+    body: &TypeExpr,
+    path_prefix: &[TypeBodyPathStep],
+) -> Vec<HeritageBaseFact> {
+    let TypeExpr::Intersection(parts) = body else {
+        return Vec::new();
+    };
+    let anchor = decl_anchor(root_identity, LocatorSymbolSpace::Type);
+    parts
+        .iter()
+        .enumerate()
+        .filter_map(|(arm, part)| {
+            let TypeExpr::Ref {
+                name,
+                type_arguments,
+            } = part
+            else {
+                return None;
+            };
+            let mut path: Vec<TypeBodyPathStep> = Vec::with_capacity(path_prefix.len() + 1);
+            path.extend_from_slice(path_prefix);
+            path.push(TypeBodyPathStep::IntersectionArm {
+                ordinal: u32::try_from(arm).unwrap_or(u32::MAX),
+            });
+            let path: Arc<[TypeBodyPathStep]> = path.into();
+            let type_args: Arc<[TypeArgLocator]> = (0..type_arguments.len())
+                .map(|arg_index| TypeArgLocator {
+                    anchor: anchor.clone(),
+                    path: Arc::clone(&path),
+                    arg_index: u32::try_from(arg_index).unwrap_or(u32::MAX),
+                })
+                .collect();
+            Some(HeritageBaseFact {
+                name: name.to_string(),
+                type_args,
+                name_resolution_ref: name.to_string(),
+                base_name_origin: MemberSpansOrigin::Synthetic(SourceSynthetic),
+            })
+        })
+        .collect()
+}
+
+/// Whether ONE transient authored contributor body is a closed-object SHAPE —
+/// an `Object`, an intersection of closed-object shapes, or a parenthesized
+/// chain of those. The nominal-interface carve-out verdict the publication
+/// terminals consult, minted at lazy decl-body lowering (pure syntax: index
+/// signatures and member values are NOT consulted — a nominal object surface
+/// stays a carrier regardless of its values; a union is NOT a closed-object
+/// shape).
+pub fn body_is_closed_object_shape(expr: &TypeExpr) -> bool {
+    match expr {
+        TypeExpr::Object(_) => true,
+        TypeExpr::Intersection(arms) => arms.iter().all(body_is_closed_object_shape),
+        TypeExpr::Parenthesized(inner) => body_is_closed_object_shape(inner),
+        _ => false,
+    }
+}
+
+/// Extract the content-free KEY-DOMAIN closedness fact from the transient
+/// authored contributor bodies of ONE type declaration group — a pure
+/// syntactic extraction (no name resolution, no lowering, no verdicts beyond
+/// binding-independent-sound shapes; everything else escapes by locator to
+/// the dispatch-time node-route classifier).
+///
+/// `merged` mirrors the group's `TypeDeclBody` merge shape: a merged group
+/// mints per contributor under its `MergedContributor` path step (the same
+/// ordinal space the locator deref's transient shape serves); a single group
+/// mints from the primary (last-wins) body with an empty prefix — the one
+/// body the whole-body locator deref serves.
+pub fn collect_key_domain_closedness_fact(
+    root_identity: &ResolvedRootIdentity,
+    bodies: &[TypeExpr],
+    merged: bool,
+) -> KeyDomainClosednessFact {
+    let recipes: Vec<ClosednessRecipe> = if merged {
+        bodies
+            .iter()
+            .enumerate()
+            .map(|(ordinal, body)| {
+                let mut path = vec![TypeBodyPathStep::MergedContributor {
+                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                }];
+                closedness_recipe_of(root_identity, body, &mut path)
+            })
+            .collect()
+    } else {
+        bodies
+            .last()
+            .map(|body| {
+                let mut path = Vec::new();
+                closedness_recipe_of(root_identity, body, &mut path)
+            })
+            .into_iter()
+            .collect()
+    };
+    // The closed-object SHAPE verdict folds over the SAME body set the
+    // recipes cover (merged: every contributor; single: the primary body) —
+    // the exact transient set the query-time walk previously consumed.
+    let shape_bodies: &[TypeExpr] = if merged {
+        bodies
+    } else {
+        bodies.last().map(std::slice::from_ref).unwrap_or(&[])
+    };
+    KeyDomainClosednessFact {
+        closed_object_shape: !shape_bodies.is_empty()
+            && shape_bodies.iter().all(body_is_closed_object_shape),
+        body_recipes: recipes.into(),
+    }
+}
+
+/// One body position's closedness recipe. `path` is the locator path TO this
+/// position (rooted at the declaration's type-space anchor); it grows only
+/// through the composition arm (union / intersection ordinals) — every other
+/// complex shape escapes AT its position with the accumulated path.
+fn closedness_recipe_of(
+    root_identity: &ResolvedRootIdentity,
+    expr: &TypeExpr,
+    path: &mut Vec<TypeBodyPathStep>,
+) -> ClosednessRecipe {
+    match expr {
+        // Parentheses are transparent to both the recipe semantics and the
+        // locator navigation (which unwraps them at every expression step),
+        // so they mint NO arm and consume NO path step.
+        TypeExpr::Parenthesized(inner) => closedness_recipe_of(root_identity, inner, path),
+        TypeExpr::Literal(_) | TypeExpr::Primitive(_) => ClosednessRecipe::ClosedLeaf,
+        // An object's NAMED members fix its key domain regardless of member
+        // values — but an index-signature KEY that is not a syntactically
+        // closed scalar needs the full walker (it may be a bound parameter,
+        // a closed ref, or an open interpolation): escape the whole object.
+        TypeExpr::Object(obj) => {
+            let keys_scalar = obj.properties.iter().all(|member| match member {
+                ObjectMember::IndexSignature(sig) => scalar_key_shape(&sig.key_type),
+                _ => true,
+            });
+            if keys_scalar {
+                ClosednessRecipe::ObjectClosed
+            } else {
+                ClosednessRecipe::LowerAndClassify {
+                    slot: decl_slot(root_identity, LocatorSymbolSpace::Type, path.clone()),
+                }
+            }
+        }
+        TypeExpr::Function(_) | TypeExpr::ConstructorType(_) => ClosednessRecipe::OpenLeaf,
+        TypeExpr::Union(arms) => collect_all_arms(root_identity, arms, path, |ordinal| {
+            TypeBodyPathStep::UnionArm { ordinal }
+        }),
+        TypeExpr::Intersection(arms) => collect_all_arms(root_identity, arms, path, |ordinal| {
+            TypeBodyPathStep::IntersectionArm { ordinal }
+        }),
+        TypeExpr::TypeParameter(param) => ClosednessRecipe::ParamRef {
+            name: param.name.clone(),
+        },
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => ClosednessRecipe::FollowRefByName {
+            name: name.to_string(),
+        },
+        // An indexed access is judged OPERAND-WISE: the object operand is
+        // VALUE-SENSITIVE, the index a key/keyspace question — a
+        // whole-position escape would let the lowerer execute a literal
+        // access and lose the value-sensitive operand rule.
+        TypeExpr::IndexedAccess { .. } => {
+            let mut object_path = path.clone();
+            object_path.push(TypeBodyPathStep::IndexedAccessObject);
+            let mut index_path = path.clone();
+            index_path.push(TypeBodyPathStep::IndexedAccessIndex);
+            ClosednessRecipe::ValueProjection {
+                object: decl_slot(root_identity, LocatorSymbolSpace::Type, object_path),
+                index: decl_slot(root_identity, LocatorSymbolSpace::Type, index_path),
+            }
+        }
+        // `typeof x` value queries, recursion placeholders, synthetic
+        // carriers, and unlowerable fragments cannot be classified from
+        // syntax or the node route — UNAVAILABLE, never a false verdict.
+        TypeExpr::TypeOf(_)
+        | TypeExpr::RecursiveRef { .. }
+        | TypeExpr::SyntheticSlotBinding(_)
+        | TypeExpr::Unknown { .. } => ClosednessRecipe::Unsupported,
+        // Everything else — generic/builtin instantiations, conditionals,
+        // mapped/indexed/keyof/template operators, tuples, arrays, rests,
+        // infer placeholders, import-type carriers — escapes to the
+        // dispatch-time node-route classifier at this position.
+        _ => ClosednessRecipe::LowerAndClassify {
+            slot: decl_slot(root_identity, LocatorSymbolSpace::Type, path.clone()),
+        },
+    }
+}
+
+/// The composition fold shared by the union / intersection arms.
+fn collect_all_arms(
+    root_identity: &ResolvedRootIdentity,
+    arms: &[TypeExpr],
+    path: &mut Vec<TypeBodyPathStep>,
+    step: impl Fn(u32) -> TypeBodyPathStep,
+) -> ClosednessRecipe {
+    let recipes: Vec<ClosednessRecipe> = arms
+        .iter()
+        .enumerate()
+        .map(|(ordinal, arm)| {
+            path.push(step(u32::try_from(ordinal).unwrap_or(u32::MAX)));
+            let recipe = closedness_recipe_of(root_identity, arm, path);
+            path.pop();
+            recipe
+        })
+        .collect();
+    ClosednessRecipe::AllArms(recipes.into())
+}
+
+/// Whether an index-signature KEY is a syntactically closed scalar (a literal
+/// / primitive, through parentheses) — the only key shapes [`ClosednessRecipe::ObjectClosed`]
+/// may absorb without the walker.
+fn scalar_key_shape(expr: &TypeExpr) -> bool {
+    match expr {
+        TypeExpr::Literal(_) | TypeExpr::Primitive(_) => true,
+        TypeExpr::Parenthesized(inner) => scalar_key_shape(inner),
+        _ => false,
     }
 }
 
@@ -605,11 +913,15 @@ fn is_passthrough_value(value: &TypeExpr, base_name: &str, param_name: &str) -> 
     }
 }
 
-/// Classify the body of a mapped type declaration into a `PreparedWrapperShape`.
+/// Classify the body of a mapped type declaration into a
+/// `PreparedWrapperShapeFact`. Non-literal remap / transform payloads become
+/// content-free LOCATORS of the authored mapped positions (the body root IS
+/// the mapped type, so the paths are `[MappedNameType]` / `[MappedValue]`).
 fn classify_wrapper_shape_inner(
     body: &TypeExpr,
-    type_params: &[TypeParam],
-) -> PreparedWrapperShape {
+    type_params: &[NarrowTypeParam],
+    root_identity: &ResolvedRootIdentity,
+) -> PreparedWrapperShapeFact {
     // Only classify mapped type bodies with at least one type param
     let (param, source, value, optional, readonly, name_type) = match body {
         TypeExpr::Mapped {
@@ -622,8 +934,8 @@ fn classify_wrapper_shape_inner(
         } => (parameter, source, value, optional, readonly, name_type),
         _ => {
             // Non-mapped body — not a structural wrapper. Alias forwarding
-            // is handled by PreparedProjectionClass::ForwardSubject instead.
-            return PreparedWrapperShape::default();
+            // is handled by PreparedProjectionClassFact::ForwardSubject instead.
+            return unclassified_wrapper_shape();
         }
     };
 
@@ -644,7 +956,7 @@ fn classify_wrapper_shape_inner(
 
     let (source_param_index, base_name) = match base_param {
         Some((idx, name)) => (idx, name),
-        None => return PreparedWrapperShape::default(),
+        None => return unclassified_wrapper_shape(),
     };
 
     // Classify optional/readonly modifiers
@@ -658,50 +970,68 @@ fn classify_wrapper_shape_inner(
         MappedModifier::Add => Some(true),
         MappedModifier::Remove => Some(false),
     };
-    let modifiers = PreparedSurfaceModifiers {
+    let modifiers = PreparedSurfaceModifiersFact {
         optional: opt_mod,
         readonly: ro_mod,
     };
 
-    // Check value rule: is it `T[K]` (passthrough)?
+    // Check value rule: is it `T[K]` (passthrough)? A transform is the LOCATOR
+    // of the authored mapped-value position.
     let value_rule = if is_passthrough_value(value, base_name, param) {
-        PreparedValueRuleShape::PassThrough
+        PreparedValueRuleShapeFact::PassThrough
     } else {
-        PreparedValueRuleShape::Transform((**value).clone())
+        PreparedValueRuleShapeFact::Transform(decl_slot(
+            root_identity,
+            LocatorSymbolSpace::Type,
+            vec![TypeBodyPathStep::MappedValue],
+        ))
     };
 
     // Check name_type for key remap
     let key_remap = match name_type {
-        None => PreparedKeyRemapShape::Identity,
-        Some(nt) => classify_key_remap(nt, param),
+        None => PreparedKeyRemapShapeFact::Identity,
+        Some(nt) => classify_key_remap(nt, param, root_identity),
     };
 
     // Determine the kind
-    let is_passthrough = matches!(value_rule, PreparedValueRuleShape::PassThrough);
-    let is_identity_remap = matches!(key_remap, PreparedKeyRemapShape::Identity);
+    let is_passthrough = matches!(value_rule, PreparedValueRuleShapeFact::PassThrough);
+    let is_identity_remap = matches!(key_remap, PreparedKeyRemapShapeFact::Identity);
 
     let kind = if is_passthrough && is_identity_remap && opt_mod.is_none() && ro_mod.is_none() {
-        PreparedWrapperKind::Identity
+        PreparedWrapperKindFact::Identity
     } else if is_passthrough && is_identity_remap {
-        PreparedWrapperKind::PureOverlay
+        PreparedWrapperKindFact::PureOverlay
     } else if !is_identity_remap {
-        PreparedWrapperKind::KeyRemap
+        PreparedWrapperKindFact::KeyRemap
     } else {
-        PreparedWrapperKind::None
+        PreparedWrapperKindFact::None
     };
 
-    PreparedWrapperShape {
+    PreparedWrapperShapeFact {
         kind,
         source_param_index: Some(source_param_index as u16),
-        key_filter: PreparedKeyFilterShape::All,
+        key_filter: PreparedKeyFilterShapeFact::All,
         key_remap,
         value_rule,
         modifiers,
     }
 }
 
-/// Classify key remap from a name_type expression.
-fn classify_key_remap(name_type: &TypeExpr, param: &str) -> PreparedKeyRemapShape {
+/// Classify key remap from a name_type expression. A non-literal remap is the
+/// content-free LOCATOR of the authored `as`-clause position (`[MappedNameType]`
+/// from the decl body root).
+fn classify_key_remap(
+    name_type: &TypeExpr,
+    param: &str,
+    root_identity: &ResolvedRootIdentity,
+) -> PreparedKeyRemapShapeFact {
+    let opaque_remap = || {
+        PreparedKeyRemapShapeFact::Opaque(decl_slot(
+            root_identity,
+            LocatorSymbolSpace::Type,
+            vec![TypeBodyPathStep::MappedNameType],
+        ))
+    };
     match name_type {
         // `` `prefix${K & string}` `` or `` `${K & string}suffix` ``
         TypeExpr::TemplateLiteral {
@@ -715,14 +1045,14 @@ fn classify_key_remap(name_type: &TypeExpr, param: &str) -> PreparedKeyRemapShap
                     let prefix = &quasis[0];
                     let suffix = &quasis[1];
                     if suffix.is_empty() && !prefix.is_empty() {
-                        return PreparedKeyRemapShape::Prefix(prefix.clone());
+                        return PreparedKeyRemapShapeFact::Prefix(prefix.clone());
                     }
                     if prefix.is_empty() && !suffix.is_empty() {
-                        return PreparedKeyRemapShape::Suffix(suffix.clone());
+                        return PreparedKeyRemapShapeFact::Suffix(suffix.clone());
                     }
                 }
             }
-            PreparedKeyRemapShape::Opaque(name_type.clone())
+            opaque_remap()
         }
         // `Capitalize<K & string>` etc.
         TypeExpr::Ref {
@@ -733,31 +1063,31 @@ fn classify_key_remap(name_type: &TypeExpr, param: &str) -> PreparedKeyRemapShap
             if arg_is_param {
                 match &**name {
                     "Capitalize" => {
-                        return PreparedKeyRemapShape::CaseTransform(
+                        return PreparedKeyRemapShapeFact::CaseTransform(
                             PreparedCaseTransformKind::Capitalize,
                         )
                     }
                     "Uncapitalize" => {
-                        return PreparedKeyRemapShape::CaseTransform(
+                        return PreparedKeyRemapShapeFact::CaseTransform(
                             PreparedCaseTransformKind::Uncapitalize,
                         )
                     }
                     "Uppercase" => {
-                        return PreparedKeyRemapShape::CaseTransform(
+                        return PreparedKeyRemapShapeFact::CaseTransform(
                             PreparedCaseTransformKind::Uppercase,
                         )
                     }
                     "Lowercase" => {
-                        return PreparedKeyRemapShape::CaseTransform(
+                        return PreparedKeyRemapShapeFact::CaseTransform(
                             PreparedCaseTransformKind::Lowercase,
                         )
                     }
                     _ => {}
                 }
             }
-            PreparedKeyRemapShape::Opaque(name_type.clone())
+            opaque_remap()
         }
-        _ => PreparedKeyRemapShape::Opaque(name_type.clone()),
+        _ => opaque_remap(),
     }
 }
 
@@ -790,26 +1120,27 @@ fn is_param_or_param_intersect_string(expr: &TypeExpr, param: &str) -> bool {
 /// 4. Otherwise → `Opaque`.
 fn classify_projection_inner(
     body: &TypeExpr,
-    type_params: &[TypeParam],
-    member_index: &FxHashMap<String, PreparedMember>,
-    wrapper_shape: &PreparedWrapperShape,
-) -> PreparedProjectionClass {
+    type_params: &[NarrowTypeParam],
+    member_index: &FxHashMap<String, PreparedMemberFact>,
+    wrapper_shape: &PreparedWrapperShapeFact,
+    root_identity: &ResolvedRootIdentity,
+) -> PreparedProjectionClassFact {
     // 1. Direct members — interfaces and object-bodied aliases.
     if !member_index.is_empty() && body_supports_direct_member_projection(body) {
-        return PreparedProjectionClass::DirectMembers;
+        return PreparedProjectionClassFact::DirectMembers;
     }
 
     // 2. Structural wrapper — mapped types with recognized patterns.
-    if !matches!(wrapper_shape.kind, PreparedWrapperKind::None) {
-        return PreparedProjectionClass::Wrapper;
+    if !matches!(wrapper_shape.kind, PreparedWrapperKindFact::None) {
+        return PreparedProjectionClassFact::Wrapper;
     }
 
     // 3. Forward subject — body is a single Ref to another type.
-    if let Some(payload) = extract_forward_payload(body, type_params) {
-        return PreparedProjectionClass::ForwardSubject(payload);
+    if let Some(payload) = extract_forward_payload(body, type_params, root_identity) {
+        return PreparedProjectionClassFact::ForwardSubject(payload);
     }
 
-    PreparedProjectionClass::Opaque
+    PreparedProjectionClassFact::Opaque
 }
 
 fn body_supports_direct_member_projection(body: &TypeExpr) -> bool {
@@ -824,25 +1155,39 @@ fn body_supports_direct_member_projection(body: &TypeExpr) -> bool {
 /// Try to extract a forward-subject payload from a declaration body.
 ///
 /// Matches bodies of the form `Ref { name, type_arguments }` (allowing
-/// `Parenthesized` wrapping). Returns `None` for unions, intersections,
-/// conditionals, mapped types, objects, and other non-forwarding shapes.
+/// `Parenthesized` wrapping — parenthesization is transparent to the arg
+/// locators). Returns `None` for unions, intersections, conditionals, mapped
+/// types, objects, and other non-forwarding shapes.
+///
+/// Each forwarded argument becomes a content-free [`TypeArgLocator`] of the
+/// authored argument position: the empty path addresses the decl body's own
+/// arg-bearing `Ref`, and `arg_index` selects the argument in source order.
 fn extract_forward_payload(
     body: &TypeExpr,
-    type_params: &[TypeParam],
-) -> Option<PreparedForwardPayload> {
+    type_params: &[NarrowTypeParam],
+    root_identity: &ResolvedRootIdentity,
+) -> Option<PreparedForwardPayloadFact> {
     match body {
         TypeExpr::Ref {
             name,
             type_arguments,
         } => {
             let forwarding_kind = classify_forwarding_kind(type_arguments, type_params);
-            Some(PreparedForwardPayload {
+            Some(PreparedForwardPayloadFact {
                 target_name: name.to_string(),
-                target_args: type_arguments.to_vec(),
                 forwarding_kind,
+                target_args: (0..type_arguments.len())
+                    .map(|arg_index| TypeArgLocator {
+                        anchor: decl_anchor(root_identity, LocatorSymbolSpace::Type),
+                        path: Vec::new().into(),
+                        arg_index: u32::try_from(arg_index).unwrap_or(u32::MAX),
+                    })
+                    .collect(),
             })
         }
-        TypeExpr::Parenthesized(inner) => extract_forward_payload(inner, type_params),
+        TypeExpr::Parenthesized(inner) => {
+            extract_forward_payload(inner, type_params, root_identity)
+        }
         _ => None,
     }
 }
@@ -851,7 +1196,7 @@ fn extract_forward_payload(
 /// alias's own type parameters, or an applied (concrete/remapped) alias.
 fn classify_forwarding_kind(
     target_args: &[TypeExpr],
-    alias_params: &[TypeParam],
+    alias_params: &[NarrowTypeParam],
 ) -> PreparedForwardingKind {
     // Identity: args must be exactly the alias params in order, with no extras.
     if !alias_params.is_empty()
@@ -874,7 +1219,11 @@ impl PreparedValueDecl {
             root_identity,
             exported_name: None,
             kind,
-            type_annotation: None,
+            type_annotation: ValueTypeAnnotationFact {
+                typeof_alias_target: None,
+                classification: ValueAnnotationClass::Absent,
+                annotation: None,
+            },
             signatures: Vec::new(),
             object_shape: None,
             member_index: FxHashMap::default(),
@@ -899,9 +1248,18 @@ impl PreparedValueDecl {
 mod tests {
     use std::sync::Arc;
 
-    use verter_type_expr::{LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName};
+    use verter_type_expr::facts::{EnumMemberEntry, EnumScalar};
+    use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName};
 
     use super::*;
+
+    /// The expected member-value locator path for the member at `ordinal`.
+    fn member_value_path(ordinal: u32) -> [TypeBodyPathStep; 2] {
+        [
+            TypeBodyPathStep::Member { ordinal },
+            TypeBodyPathStep::MemberValue,
+        ]
+    }
 
     #[test]
     fn prepared_type_decl_member_index_from_object_body() {
@@ -925,19 +1283,22 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/types.ts", "Props"),
             TypeDeclKind::Interface,
-            body,
         );
-        decl.build_member_index();
+        decl.build_member_index(&body, None);
 
+        // Each indexed member's `ty` is the content-free LOCATOR of its
+        // authored value position — anchored at the declaration, with the
+        // source-order member ordinal. No body is stored.
         let label = decl.member("label").expect("label should exist");
         assert!(!label.optional);
-        assert!(matches!(
-            label.ty,
-            TypeExpr::Primitive(PrimitiveName::String)
-        ));
+        assert_eq!(&*label.ty.anchor.canonical_id, "/types.ts");
+        assert_eq!(&*label.ty.anchor.symbol, "Props");
+        assert_eq!(label.ty.anchor.space, LocatorSymbolSpace::Type);
+        assert_eq!(&*label.ty.path, &member_value_path(0));
 
         let count = decl.member("count").expect("count should exist");
         assert!(count.optional);
+        assert_eq!(&*count.ty.path, &member_value_path(1));
 
         assert!(decl.member("missing").is_none());
     }
@@ -978,9 +1339,8 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/types.ts", "Slots"),
             TypeDeclKind::Interface,
-            body,
         );
-        decl.build_member_index();
+        decl.build_member_index(&body, None);
 
         // The property member is indexed as a non-method.
         let label = decl.member("label").expect("property `label` indexed");
@@ -998,54 +1358,34 @@ mod tests {
             "a method-syntax member (`greet(): any`) MUST carry is_method=true; \
              a property-valued function would carry is_method=false",
         );
-        // The method's value is its function shape.
-        assert!(
-            matches!(greet.ty, TypeExpr::Function(_)),
-            "the method member's value type must be a Function shape, got {:?}",
-            greet.ty,
-        );
+        // The method's value locator addresses its source-order member
+        // position; the dispatch lowers the function shape on demand.
+        assert_eq!(&*greet.ty.path, &member_value_path(1));
     }
 
     #[test]
-    fn prepared_member_index_carries_spans_and_declaration_origin() {
-        // The member-index producer (`index_object_members`) must carry the IR
-        // member's OXC declaration-site spans AND stamp the declaration's
-        // defining file (`root_identity.canonical_id`) onto each
-        // `PreparedMember`. The macro-surface overlay
-        // (`backfill_member_index_surface` in verter_session) reads these so an
-        // appended own-body member reaches the graph `SurfaceMember` span-rich
-        // instead of `MemberSpans::default()`.
+    fn prepared_member_index_mints_span_origins_and_declaration_origin() {
+        // The member-index producer (`index_object_members`) must mint each
+        // member's SPAN-RECOVERY ORIGIN (the member ordinal descended from the
+        // owning declaration's authored contributor anchor) and stamp the
+        // declaration's defining file (`root_identity.canonical_id`) as a
+        // typed `DeclarationOrigin` fact. The macro-surface overlay recovers
+        // the real spans from the retained parse snapshot via the origin.
         //
-        // Discrimination: before the fix `PreparedMember` had no `spans` field
-        // (it could not carry them) and no `declaration_origin`; the producer
-        // dropped `prop.spans` / `method.spans`. This test pins BOTH the
-        // property and method branches carrying NON-default spans + the
-        // defining file. If the producer reverted to dropping spans, the
-        // `prop_spans.name` / `method_spans.declaration` assertions FAIL (they
-        // would be `None`), and the `declaration_origin` equality FAILS.
-        use verter_span::Span;
-        use verter_type_expr::MemberSpans;
-
-        let prop_spans = MemberSpans {
-            declaration: Some(Span::new(10, 30)),
-            name: Some(Span::new(10, 15)),
-            type_annotation: Some(Span::new(17, 30)),
-        };
-        let method_spans = MemberSpans {
-            declaration: Some(Span::new(40, 60)),
-            name: Some(Span::new(40, 45)),
-            type_annotation: None,
-        };
+        // Discrimination: a producer that drops the contributor anchor, the
+        // member ordinal, or the defining-file stamp FAILS the `Authored`
+        // equality / `Declared` equality below; a producer that fabricates
+        // `Authored` origins for an anchor-less body FAILS the `Synthetic`
+        // equality at the end.
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![
-                ObjectMember::Property(ObjectProperty::with_spans_public(
+                ObjectMember::Property(ObjectProperty::synthetic_public(
                     "label".into(),
                     TypeExpr::Primitive(PrimitiveName::String),
                     false,
                     false,
-                    prop_spans,
                 )),
-                ObjectMember::Method(verter_type_expr::MethodSignature::with_spans_public(
+                ObjectMember::Method(verter_type_expr::MethodSignature::synthetic_public(
                     "greet".into(),
                     verter_type_expr::FunctionExpr::synthetic(
                         vec![],
@@ -1053,7 +1393,6 @@ mod tests {
                         vec![],
                     ),
                     false,
-                    method_spans,
                 )),
             ],
         }));
@@ -1061,32 +1400,64 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/decl_origin.ts", "Slots"),
             TypeDeclKind::Interface,
-            body,
         );
-        decl.build_member_index();
+        decl.build_member_index(
+            &body,
+            Some(DeclContributorAnchor {
+                contributor_index: 3,
+            }),
+        );
 
-        // PROPERTY member: real spans + the declaration's defining file.
+        // PROPERTY member: authored span origin (ordinal 0 under the
+        // contributor anchor) + the declaration's defining file.
         let label = decl.member("label").expect("property `label` indexed");
         assert_eq!(
-            label.spans, prop_spans,
-            "PreparedMember must carry the property's OXC spans verbatim, not default()"
+            label.span_origin,
+            MemberSpansOrigin::Authored {
+                anchor: DeclContributorAnchor {
+                    contributor_index: 3
+                },
+                member_path: Arc::from(vec![0u32]),
+            },
+            "property span origin must descend [0] from the contributor anchor"
         );
         assert_eq!(
-            label.declaration_origin, "/decl_origin.ts",
-            "PreparedMember must stamp the declaration's defining file"
+            label.declaration_origin,
+            DeclarationOrigin::Declared(Arc::from("/decl_origin.ts")),
+            "member fact must stamp the declaration's defining file"
         );
 
-        // METHOD member: real spans + the declaration's defining file.
+        // METHOD member: authored span origin (ordinal 1) + defining file.
         let greet = decl.member("greet").expect("method `greet` indexed");
         assert_eq!(
-            greet.spans, method_spans,
-            "PreparedMember must carry the method's OXC spans verbatim, not default()"
+            greet.span_origin,
+            MemberSpansOrigin::Authored {
+                anchor: DeclContributorAnchor {
+                    contributor_index: 3
+                },
+                member_path: Arc::from(vec![1u32]),
+            },
         );
-        assert_eq!(greet.declaration_origin, "/decl_origin.ts");
+        assert_eq!(
+            greet.declaration_origin,
+            DeclarationOrigin::Declared(Arc::from("/decl_origin.ts")),
+        );
 
-        // NEGATIVE: a genuinely-absent member is still absent (the producer did
-        // not fabricate entries).
+        // NEGATIVE: a genuinely-absent member is still absent (the producer
+        // did not fabricate entries).
         assert!(decl.member("missing").is_none());
+
+        // A GENUINELY SYNTHETIC body (no contributor anchor) records explicit
+        // Synthetic origins — never a fabricated authored position.
+        let mut synthetic = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/decl_origin.ts", "SynthSlots"),
+            TypeDeclKind::Interface,
+        );
+        synthetic.build_member_index(&body, None);
+        assert_eq!(
+            synthetic.member("label").unwrap().span_origin,
+            MemberSpansOrigin::Synthetic(SourceSynthetic),
+        );
     }
 
     #[test]
@@ -1144,24 +1515,28 @@ mod tests {
             ValueDeclKind::Const,
         );
 
-        let members = vec![
-            (
-                "Red".to_string(),
-                EnumMemberValue::Folded(TypeExpr::Literal(LiteralValue::Number(0.0))),
-            ),
-            (
-                "Green".to_string(),
-                EnumMemberValue::Folded(TypeExpr::Literal(LiteralValue::Number(1.0))),
-            ),
-        ];
-        decl.enum_members = Some(members);
+        decl.enum_members = Some(EnumMemberFact {
+            members: Arc::from(vec![
+                EnumMemberEntry {
+                    name: "Red".to_string(),
+                    value: EnumScalar::Number("0".to_string()),
+                },
+                EnumMemberEntry {
+                    name: "Green".to_string(),
+                    value: EnumScalar::Number("1".to_string()),
+                },
+            ]),
+        });
 
-        let enum_members = decl.enum_members.as_ref().unwrap();
+        let enum_members = &decl.enum_members.as_ref().unwrap().members;
         assert_eq!(enum_members.len(), 2);
-        assert!(enum_members.iter().any(|(name, _)| name == "Red"));
-        // Source order is preserved (TS enum members are ordered).
-        assert_eq!(enum_members[0].0, "Red");
-        assert_eq!(enum_members[1].0, "Green");
+        assert!(enum_members.iter().any(|entry| entry.name == "Red"));
+        // Source order is preserved (TS enum members are ordered), and each
+        // member carries its closed scalar value.
+        assert_eq!(enum_members[0].name, "Red");
+        assert_eq!(enum_members[0].value, EnumScalar::Number("0".to_string()));
+        assert_eq!(enum_members[1].name, "Green");
+        assert_eq!(enum_members[1].value, EnumScalar::Number("1".to_string()));
     }
 
     #[test]
@@ -1169,13 +1544,53 @@ mod tests {
         let decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "T"),
             TypeDeclKind::Interface,
-            TypeExpr::Primitive(PrimitiveName::String),
         );
         assert_eq!(decl.prepared_kind(), PreparedDeclKind::Interface);
+        // The minted body facts classify from the kind and address the whole
+        // authored body (empty path at the declaration's own anchor).
+        assert_eq!(decl.body_facts.classification, TypeBodyClass::Interface);
+        assert_eq!(&*decl.body_facts.body_slot.anchor.canonical_id, "/t.ts");
+        assert_eq!(&*decl.body_facts.body_slot.anchor.symbol, "T");
+        assert!(decl.body_facts.body_slot.path.is_empty());
+        assert!(decl.body_facts.merged_contributor_slots.is_empty());
+    }
+
+    #[test]
+    fn set_merged_contributors_mints_ordered_contributor_slots() {
+        // A same-name merged interface records one contributor slot per
+        // ordinal and flips the classification to MergedInterface; a zero
+        // count resets to the non-merged state.
+        //
+        // Discrimination: a producer that stops minting per-ordinal slots (or
+        // forgets the classification flip) fails the slot-path / class
+        // equalities below.
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Merged"),
+            TypeDeclKind::Interface,
+        );
+        decl.set_merged_contributors(2);
+
+        assert_eq!(
+            decl.body_facts.classification,
+            TypeBodyClass::MergedInterface
+        );
+        assert_eq!(decl.body_facts.merged_contributor_slots.len(), 2);
+        for (ordinal, slot) in decl.body_facts.merged_contributor_slots.iter().enumerate() {
+            assert_eq!(&*slot.anchor.symbol, "Merged");
+            assert_eq!(
+                &*slot.path,
+                &[TypeBodyPathStep::MergedContributor {
+                    ordinal: ordinal as u32
+                }],
+            );
+        }
+
+        decl.set_merged_contributors(0);
+        assert!(decl.body_facts.merged_contributor_slots.is_empty());
     }
 
     // -----------------------------------------------------------------------
-    // Workstream D: intersection member indexing tests
+    // Intersection member indexing tests
     // -----------------------------------------------------------------------
 
     fn make_object(props: &[(&str, TypeExpr, bool)]) -> TypeExpr {
@@ -1206,21 +1621,23 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/types.ts", "Foo"),
             TypeDeclKind::Interface,
-            body,
         );
-        decl.build_member_index();
+        decl.build_member_index(&body, None);
 
-        // KEY ASSERTION: 'own' from the intersection tail should be indexed
-        assert!(
-            decl.member("own").is_some(),
-            "own member from intersection tail should be indexed"
-        );
-        assert!(
-            matches!(
-                decl.member("own").unwrap().ty,
-                TypeExpr::Primitive(PrimitiveName::String)
-            ),
-            "own should be string"
+        // KEY ASSERTION: 'own' from the intersection tail is indexed with the
+        // RAW body path — the intersection-root body needs the arm step (the
+        // deref fails a bare `Member` step on an intersection), then the raw
+        // member index within that object.
+        let own = decl
+            .member("own")
+            .expect("own member from intersection tail should be indexed");
+        assert_eq!(
+            &*own.ty.path,
+            &[
+                TypeBodyPathStep::IntersectionArm { ordinal: 1 },
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::MemberValue,
+            ],
         );
 
         // Negative: 'Bar' heritage ref members should NOT be indexed
@@ -1235,37 +1652,48 @@ mod tests {
     fn intersection_own_members_win_over_heritage() {
         // interface Foo extends Bar { mode: number }
         // where Bar also has mode: string
-        // Lowered as: Intersection([Object({mode: string}), Object({mode: number})])
+        // Lowered as: Intersection([Object({mode: string}), Object({mode?: number})])
+        // — the own (last) slice declares `mode` OPTIONAL so the winning
+        // header facts are observable.
         let body = TypeExpr::Intersection(Arc::from(vec![
             make_object(&[("mode", TypeExpr::Primitive(PrimitiveName::String), false)]),
-            make_object(&[("mode", TypeExpr::Primitive(PrimitiveName::Number), false)]),
+            make_object(&[("mode", TypeExpr::Primitive(PrimitiveName::Number), true)]),
         ]));
 
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/types.ts", "Foo"),
             TypeDeclKind::Interface,
-            body,
         );
-        decl.build_member_index();
+        decl.build_member_index(&body, None);
 
         // Right-to-left precedence: the LAST object in the intersection wins
+        // the indexed header facts (here: `optional == true`). Removing the
+        // reverse traversal makes the first slice (`optional == false`) win
+        // and FAILS this assertion.
         let mode = decl.member("mode").expect("mode should be indexed");
         assert!(
-            matches!(mode.ty, TypeExpr::Primitive(PrimitiveName::Number)),
-            "own member (last in intersection) should win, got {:?}",
-            mode.ty
+            mode.optional,
+            "own member (last in intersection) should win the indexed facts"
+        );
+        // The winning fact's locator addresses where the winning member
+        // actually lives: arm 1 (its RAW source index), member 0 within it —
+        // never the shadowed arm-0 position.
+        assert_eq!(
+            &*mode.ty.path,
+            &[
+                TypeBodyPathStep::IntersectionArm { ordinal: 1 },
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::MemberValue,
+            ],
         );
     }
 
     #[test]
     fn non_object_body_still_produces_empty_index() {
         let body = TypeExpr::Primitive(PrimitiveName::String);
-        let mut decl = PreparedTypeDecl::new(
-            ResolvedRootIdentity::new("/t.ts", "T"),
-            TypeDeclKind::Alias,
-            body,
-        );
-        decl.build_member_index();
+        let mut decl =
+            PreparedTypeDecl::new(ResolvedRootIdentity::new("/t.ts", "T"), TypeDeclKind::Alias);
+        decl.build_member_index(&body, None);
 
         assert!(
             decl.member_index.is_empty(),
@@ -1286,20 +1714,22 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/types.ts", "Foo"),
             TypeDeclKind::Interface,
-            body,
         );
-        decl.build_member_index();
+        decl.build_member_index(&body, None);
 
-        assert!(
-            decl.member("own").is_some(),
-            "own member should be indexed from trailing object"
-        );
-        assert!(
-            matches!(
-                decl.member("own").unwrap().ty,
-                TypeExpr::Primitive(PrimitiveName::Boolean)
-            ),
-            "own should be boolean"
+        // Heritage refs contribute no members, but they still occupy their
+        // RAW arm positions: the trailing object is arm 2, and `own` is its
+        // member 0.
+        let own = decl
+            .member("own")
+            .expect("own member should be indexed from trailing object");
+        assert_eq!(
+            &*own.ty.path,
+            &[
+                TypeBodyPathStep::IntersectionArm { ordinal: 2 },
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::MemberValue,
+            ],
         );
         // Heritage Ref names should NOT appear as members
         assert!(decl.member("A").is_none());
@@ -1316,9 +1746,8 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "T"),
             TypeDeclKind::Interface,
-            body,
         );
-        decl.build_member_index();
+        decl.build_member_index(&body, None);
 
         assert!(decl.member("existing").is_some());
         assert!(
@@ -1338,9 +1767,8 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "Wrapper"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.build_member_index();
+        decl.build_member_index(&body, None);
 
         assert!(
             decl.member_index.is_empty(),
@@ -1362,21 +1790,200 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/types.ts", "Merged"),
             TypeDeclKind::Interface,
-            body,
         );
-        decl.build_member_index();
+        decl.build_member_index(&body, None);
 
-        assert!(decl.member("first").is_some());
-        assert!(decl.member("second").is_some());
+        // Both slices are indexed; each locator is the RAW body path — one
+        // `IntersectionArm` step per intersection LEVEL (the deref selects one
+        // level per step), then the raw member index within its object.
+        let first = decl.member("first").expect("first indexed");
+        assert_eq!(
+            &*first.ty.path,
+            &[
+                TypeBodyPathStep::IntersectionArm { ordinal: 0 },
+                TypeBodyPathStep::IntersectionArm { ordinal: 0 },
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::MemberValue,
+            ],
+        );
+        let second = decl.member("second").expect("second indexed");
+        assert_eq!(
+            &*second.ty.path,
+            &[
+                TypeBodyPathStep::IntersectionArm { ordinal: 1 },
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::MemberValue,
+            ],
+        );
+    }
+
+    #[test]
+    fn nameless_signature_positions_keep_named_member_raw_ordinal() {
+        // `{ (x: string): void; p: number }` — the deref selects
+        // `obj.properties[ordinal]`, and the nameless call signature occupies
+        // raw index 0. A producer that compacted named members to a
+        // NAME-ordinal would store `Member { ordinal: 0 }` for `p` and
+        // mis-address the call signature.
+        let body = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::CallSignature(verter_type_expr::FunctionExpr::synthetic(
+                    vec![],
+                    Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Void))),
+                    vec![],
+                )),
+                ObjectMember::Property(ObjectProperty::synthetic_public(
+                    "p".into(),
+                    TypeExpr::Primitive(PrimitiveName::Number),
+                    false,
+                    false,
+                )),
+            ],
+        }));
+
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Callable"),
+            TypeDeclKind::Interface,
+        );
+        decl.build_member_index(
+            &body,
+            Some(DeclContributorAnchor {
+                contributor_index: 0,
+            }),
+        );
+
+        let p = decl.member("p").expect("named member indexed");
+        assert_eq!(&*p.ty.path, &member_value_path(1));
+        // The span-recovery origin indexes the same RAW authored member
+        // surface — the call signature occupies position 0 there too.
+        assert_eq!(
+            p.span_origin,
+            MemberSpansOrigin::Authored {
+                anchor: DeclContributorAnchor {
+                    contributor_index: 0
+                },
+                member_path: Arc::from(vec![1u32]),
+            },
+        );
+    }
+
+    #[test]
+    fn intersection_root_member_locator_carries_raw_arm_step() {
+        // An intersection-root body is NOT navigable by a bare `Member` step
+        // (the deref fails closed on the shape mismatch): the stored locator
+        // must carry the `IntersectionArm` descent with the arm's RAW source
+        // index. A parenthesized wrapper is structurally transparent to the
+        // deref and must take NO path step.
+        let body = TypeExpr::Intersection(Arc::from(vec![
+            TypeExpr::named("Base"),
+            TypeExpr::Parenthesized(Arc::new(make_object(&[(
+                "wrapped",
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+            )]))),
+        ]));
+
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Wrapped"),
+            TypeDeclKind::Interface,
+        );
+        decl.build_member_index(&body, None);
+
+        let wrapped = decl.member("wrapped").expect("wrapped indexed");
+        assert_eq!(
+            &*wrapped.ty.path,
+            &[
+                TypeBodyPathStep::IntersectionArm { ordinal: 1 },
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::MemberValue,
+            ],
+        );
+    }
+
+    #[test]
+    fn intersection_arm_members_record_synthetic_span_origin() {
+        // `MemberSpansOrigin::Authored { member_path }` descends TOP-LEVEL
+        // decl-body member ordinals only — it has no intersection-arm step, so
+        // a member reached through an `IntersectionArm` descent has no
+        // representable authored position. The producer must record the honest
+        // typed miss (`Synthetic`), never an `Authored` origin claiming a
+        // position the schema cannot address.
+        //
+        // Discrimination: a producer that mints `Authored { member_path:
+        // [raw_index] }` for intersection-arm members FAILS the `Synthetic`
+        // equalities below.
+        //
+        // `type T = { a: string } & { b: number }`
+        let body = TypeExpr::Intersection(Arc::from(vec![
+            make_object(&[("a", TypeExpr::Primitive(PrimitiveName::String), false)]),
+            make_object(&[("b", TypeExpr::Primitive(PrimitiveName::Number), false)]),
+        ]));
+
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "T"),
+            TypeDeclKind::Alias,
+        );
+        decl.build_member_index(
+            &body,
+            Some(DeclContributorAnchor {
+                contributor_index: 0,
+            }),
+        );
+
+        // Both intersection-arm members carry the explicit typed miss.
+        assert_eq!(
+            decl.member("a").expect("a indexed").span_origin,
+            MemberSpansOrigin::Synthetic(SourceSynthetic),
+            "an intersection-arm member has no representable authored span \
+             origin — it must record Synthetic, not a top-level-ordinal \
+             Authored",
+        );
+        let b = decl.member("b").expect("b indexed");
+        assert_eq!(b.span_origin, MemberSpansOrigin::Synthetic(SourceSynthetic));
+        // The BODY locator stays intersection-truthful (raw arm + member
+        // steps) — the span-origin miss does not degrade the value locator.
+        assert_eq!(
+            &*b.ty.path,
+            &[
+                TypeBodyPathStep::IntersectionArm { ordinal: 1 },
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::MemberValue,
+            ],
+        );
+
+        // CONTROL: `type U = { a: string }` — a plain top-level object body
+        // under the same anchor keeps the recoverable `Authored` origin with
+        // the raw member ordinal.
+        let plain = make_object(&[("a", TypeExpr::Primitive(PrimitiveName::String), false)]);
+        let mut plain_decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "U"),
+            TypeDeclKind::Alias,
+        );
+        plain_decl.build_member_index(
+            &plain,
+            Some(DeclContributorAnchor {
+                contributor_index: 0,
+            }),
+        );
+        assert_eq!(
+            plain_decl.member("a").expect("a indexed").span_origin,
+            MemberSpansOrigin::Authored {
+                anchor: DeclContributorAnchor {
+                    contributor_index: 0
+                },
+                member_path: Arc::from(vec![0u32]),
+            },
+            "a top-level object member keeps the recoverable Authored origin",
+        );
     }
 
     // -----------------------------------------------------------------------
     // Wrapper shape classification tests
     // -----------------------------------------------------------------------
 
-    fn make_type_param(name: &str) -> TypeParam {
-        TypeParam {
+    fn make_type_param(name: &str, ordinal: u32) -> NarrowTypeParam {
+        NarrowTypeParam {
             name: name.into(),
+            ordinal,
             constraint: None,
             default: None,
         }
@@ -1403,23 +2010,25 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "Identity"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.type_parameters = vec![make_type_param("T")];
-        decl.classify_wrapper_shape();
+        decl.type_parameters = vec![make_type_param("T", 0)];
+        decl.classify_wrapper_shape(&body);
 
-        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::Identity);
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKindFact::Identity);
         assert_eq!(decl.wrapper_shape.source_param_index, Some(0));
         assert!(matches!(
             decl.wrapper_shape.value_rule,
-            PreparedValueRuleShape::PassThrough
+            PreparedValueRuleShapeFact::PassThrough
         ));
         assert!(matches!(
             decl.wrapper_shape.key_remap,
-            PreparedKeyRemapShape::Identity
+            PreparedKeyRemapShapeFact::Identity
         ));
         // Negative: must not be PureOverlay
-        assert_ne!(decl.wrapper_shape.kind, PreparedWrapperKind::PureOverlay);
+        assert_ne!(
+            decl.wrapper_shape.kind,
+            PreparedWrapperKindFact::PureOverlay
+        );
     }
 
     #[test]
@@ -1439,22 +2048,24 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "MyPartial"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.type_parameters = vec![make_type_param("T")];
-        decl.classify_wrapper_shape();
+        decl.type_parameters = vec![make_type_param("T", 0)];
+        decl.classify_wrapper_shape(&body);
 
-        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::PureOverlay);
+        assert_eq!(
+            decl.wrapper_shape.kind,
+            PreparedWrapperKindFact::PureOverlay
+        );
         assert_eq!(decl.wrapper_shape.modifiers.optional, Some(true));
         // Negative: readonly unchanged, key remap is identity, value is passthrough
         assert_eq!(decl.wrapper_shape.modifiers.readonly, None);
         assert!(matches!(
             decl.wrapper_shape.key_remap,
-            PreparedKeyRemapShape::Identity
+            PreparedKeyRemapShapeFact::Identity
         ));
         assert!(matches!(
             decl.wrapper_shape.value_rule,
-            PreparedValueRuleShape::PassThrough
+            PreparedValueRuleShapeFact::PassThrough
         ));
     }
 
@@ -1475,12 +2086,14 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "MyRequired"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.type_parameters = vec![make_type_param("T")];
-        decl.classify_wrapper_shape();
+        decl.type_parameters = vec![make_type_param("T", 0)];
+        decl.classify_wrapper_shape(&body);
 
-        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::PureOverlay);
+        assert_eq!(
+            decl.wrapper_shape.kind,
+            PreparedWrapperKindFact::PureOverlay
+        );
         assert_eq!(decl.wrapper_shape.modifiers.optional, Some(false));
         // Negative: readonly unchanged
         assert_eq!(decl.wrapper_shape.modifiers.readonly, None);
@@ -1503,12 +2116,14 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "MyReadonly"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.type_parameters = vec![make_type_param("T")];
-        decl.classify_wrapper_shape();
+        decl.type_parameters = vec![make_type_param("T", 0)];
+        decl.classify_wrapper_shape(&body);
 
-        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::PureOverlay);
+        assert_eq!(
+            decl.wrapper_shape.kind,
+            PreparedWrapperKindFact::PureOverlay
+        );
         assert_eq!(decl.wrapper_shape.modifiers.readonly, Some(true));
         // Negative: optional unchanged
         assert_eq!(decl.wrapper_shape.modifiers.optional, None);
@@ -1537,20 +2152,19 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "DataPrefixed"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.type_parameters = vec![make_type_param("T")];
-        decl.classify_wrapper_shape();
+        decl.type_parameters = vec![make_type_param("T", 0)];
+        decl.classify_wrapper_shape(&body);
 
-        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::KeyRemap);
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKindFact::KeyRemap);
         assert!(matches!(
             decl.wrapper_shape.key_remap,
-            PreparedKeyRemapShape::Prefix(ref p) if p == "data-"
+            PreparedKeyRemapShapeFact::Prefix(ref p) if p == "data-"
         ));
         // Negative: value is still passthrough
         assert!(matches!(
             decl.wrapper_shape.value_rule,
-            PreparedValueRuleShape::PassThrough
+            PreparedValueRuleShapeFact::PassThrough
         ));
     }
 
@@ -1577,41 +2191,81 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "CapKeys"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.type_parameters = vec![make_type_param("T")];
-        decl.classify_wrapper_shape();
+        decl.type_parameters = vec![make_type_param("T", 0)];
+        decl.classify_wrapper_shape(&body);
 
-        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::KeyRemap);
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKindFact::KeyRemap);
         assert!(matches!(
             decl.wrapper_shape.key_remap,
-            PreparedKeyRemapShape::CaseTransform(PreparedCaseTransformKind::Capitalize)
+            PreparedKeyRemapShapeFact::CaseTransform(PreparedCaseTransformKind::Capitalize)
         ));
+    }
+
+    #[test]
+    fn classify_opaque_key_remap_mints_name_type_locator() {
+        // { [K in keyof T as Weird<K, K>]: T[K] } — an unrecognized remap is
+        // the content-free LOCATOR of the authored `as`-clause position
+        // ([MappedNameType] at the declaration's own anchor), never an
+        // embedded body.
+        //
+        // Discrimination: the pre-narrowing shape stored the remap expression
+        // itself; a producer that stops minting the authored position (or
+        // anchors it elsewhere) fails the locator equality below.
+        let body = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+            value: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("T")),
+                index: Arc::new(TypeExpr::named("K")),
+            }),
+            optional: MappedModifier::None,
+            readonly: MappedModifier::None,
+            name_type: Some(Arc::new(TypeExpr::named_with_args(
+                "Weird",
+                vec![TypeExpr::named("K"), TypeExpr::named("K")],
+            ))),
+        };
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "WeirdKeys"),
+            TypeDeclKind::Alias,
+        );
+        decl.type_parameters = vec![make_type_param("T", 0)];
+        decl.classify_wrapper_shape(&body);
+
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKindFact::KeyRemap);
+        match &decl.wrapper_shape.key_remap {
+            PreparedKeyRemapShapeFact::Opaque(slot) => {
+                assert_eq!(&*slot.anchor.canonical_id, "/t.ts");
+                assert_eq!(&*slot.anchor.symbol, "WeirdKeys");
+                assert_eq!(&*slot.path, &[TypeBodyPathStep::MappedNameType]);
+            }
+            other => panic!("expected Opaque(name-type locator), got {:?}", other),
+        }
     }
 
     #[test]
     fn classify_identity_alias_not_wrapper() {
         // type Alias<T, U> = Other<T, U>
         // This is an identity-forwarding alias, NOT a structural wrapper.
-        // Handled by PreparedProjectionClass::ForwardSubject(IdentityParams).
+        // Handled by PreparedProjectionClassFact::ForwardSubject(IdentityParams).
         let body =
             TypeExpr::named_with_args("Other", vec![TypeExpr::named("T"), TypeExpr::named("U")]);
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "Alias"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.type_parameters = vec![make_type_param("T"), make_type_param("U")];
-        decl.build_member_index();
-        decl.classify_wrapper_shape();
-        decl.classify_projection();
+        decl.type_parameters = vec![make_type_param("T", 0), make_type_param("U", 1)];
+        decl.build_member_index(&body, None);
+        decl.classify_wrapper_shape(&body);
+        decl.classify_projection(&body);
 
         // Wrapper shape: None — not a mapped type
-        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::None);
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKindFact::None);
         assert_eq!(decl.wrapper_shape.source_param_index, None);
         // Projection class: ForwardSubject(IdentityParams)
         match &decl.projection_class {
-            PreparedProjectionClass::ForwardSubject(payload) => {
+            PreparedProjectionClassFact::ForwardSubject(payload) => {
                 assert_eq!(payload.target_name, "Other");
                 assert_eq!(
                     payload.forwarding_kind,
@@ -1634,12 +2288,11 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "Foo"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.type_parameters = vec![make_type_param("T")];
-        decl.classify_wrapper_shape();
+        decl.type_parameters = vec![make_type_param("T", 0)];
+        decl.classify_wrapper_shape(&body);
 
-        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::None);
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKindFact::None);
         // Negative: source_param_index is None for non-structural bodies
         assert_eq!(decl.wrapper_shape.source_param_index, None);
     }
@@ -1664,17 +2317,23 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "Wrapped"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.type_parameters = vec![make_type_param("T")];
-        decl.classify_wrapper_shape();
+        decl.type_parameters = vec![make_type_param("T", 0)];
+        decl.classify_wrapper_shape(&body);
 
-        // Has a value transform, so not Identity or PureOverlay
-        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::None);
-        assert!(matches!(
-            decl.wrapper_shape.value_rule,
-            PreparedValueRuleShape::Transform(_)
-        ));
+        // Has a value transform, so not Identity or PureOverlay. The
+        // transform is the LOCATOR of the authored mapped-value position
+        // ([MappedValue] at the declaration's own anchor) — never an
+        // embedded body.
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKindFact::None);
+        match &decl.wrapper_shape.value_rule {
+            PreparedValueRuleShapeFact::Transform(slot) => {
+                assert_eq!(&*slot.anchor.canonical_id, "/t.ts");
+                assert_eq!(&*slot.anchor.symbol, "Wrapped");
+                assert_eq!(&*slot.path, &[TypeBodyPathStep::MappedValue]);
+            }
+            other => panic!("expected Transform(mapped-value locator), got {:?}", other),
+        }
     }
 
     #[test]
@@ -1684,11 +2343,10 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "Foo"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.classify_wrapper_shape();
+        decl.classify_wrapper_shape(&body);
 
-        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::None);
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKindFact::None);
         // Negative: no source param for non-generic types
         assert_eq!(decl.wrapper_shape.source_param_index, None);
     }
@@ -1704,15 +2362,14 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "Props"),
             TypeDeclKind::Interface,
-            body,
         );
-        decl.build_member_index();
-        decl.classify_wrapper_shape();
-        decl.classify_projection();
+        decl.build_member_index(&body, None);
+        decl.classify_wrapper_shape(&body);
+        decl.classify_projection(&body);
 
         assert!(matches!(
             decl.projection_class,
-            PreparedProjectionClass::DirectMembers
+            PreparedProjectionClassFact::DirectMembers
         ));
     }
 
@@ -1723,15 +2380,14 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "Props"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.build_member_index();
-        decl.classify_wrapper_shape();
-        decl.classify_projection();
+        decl.build_member_index(&body, None);
+        decl.classify_wrapper_shape(&body);
+        decl.classify_projection(&body);
 
         assert!(matches!(
             decl.projection_class,
-            PreparedProjectionClass::DirectMembers
+            PreparedProjectionClassFact::DirectMembers
         ));
     }
 
@@ -1742,22 +2398,15 @@ mod tests {
             name: "B".into(),
             type_arguments: vec![TypeExpr::named("T")].into(),
         };
-        let mut decl = PreparedTypeDecl::new(
-            ResolvedRootIdentity::new("/t.ts", "A"),
-            TypeDeclKind::Alias,
-            body,
-        );
-        decl.type_parameters = vec![TypeParam {
-            name: "T".into(),
-            constraint: None,
-            default: None,
-        }];
-        decl.build_member_index();
-        decl.classify_wrapper_shape();
-        decl.classify_projection();
+        let mut decl =
+            PreparedTypeDecl::new(ResolvedRootIdentity::new("/t.ts", "A"), TypeDeclKind::Alias);
+        decl.type_parameters = vec![make_type_param("T", 0)];
+        decl.build_member_index(&body, None);
+        decl.classify_wrapper_shape(&body);
+        decl.classify_projection(&body);
 
         match &decl.projection_class {
-            PreparedProjectionClass::ForwardSubject(payload) => {
+            PreparedProjectionClassFact::ForwardSubject(payload) => {
                 assert_eq!(payload.target_name, "B");
                 assert_eq!(
                     payload.forwarding_kind,
@@ -1783,20 +2432,28 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "ChatShimmer"),
             TypeDeclKind::Alias,
-            body,
         );
-        decl.build_member_index();
-        decl.classify_wrapper_shape();
-        decl.classify_projection();
+        decl.build_member_index(&body, None);
+        decl.classify_wrapper_shape(&body);
+        decl.classify_projection(&body);
 
         match &decl.projection_class {
-            PreparedProjectionClass::ForwardSubject(payload) => {
+            PreparedProjectionClassFact::ForwardSubject(payload) => {
                 assert_eq!(payload.target_name, "ComponentConfig");
-                assert_eq!(payload.target_args.len(), 3);
                 assert_eq!(
                     payload.forwarding_kind,
                     PreparedForwardingKind::AppliedAlias
                 );
+                // The forwarded args are content-free LOCATORS of the authored
+                // argument positions: one per source-order arg_index, anchored
+                // at the declaration's own body (empty path).
+                assert_eq!(payload.target_args.len(), 3);
+                for (index, arg) in payload.target_args.iter().enumerate() {
+                    assert_eq!(arg.arg_index, index as u32);
+                    assert_eq!(&*arg.anchor.canonical_id, "/t.ts");
+                    assert_eq!(&*arg.anchor.symbol, "ChatShimmer");
+                    assert!(arg.path.is_empty());
+                }
             }
             other => panic!("expected ForwardSubject(AppliedAlias), got {:?}", other),
         }
@@ -1813,22 +2470,15 @@ mod tests {
             ]
             .into(),
         };
-        let mut decl = PreparedTypeDecl::new(
-            ResolvedRootIdentity::new("/t.ts", "A"),
-            TypeDeclKind::Alias,
-            body,
-        );
-        decl.type_parameters = vec![TypeParam {
-            name: "T".into(),
-            constraint: None,
-            default: None,
-        }];
-        decl.build_member_index();
-        decl.classify_wrapper_shape();
-        decl.classify_projection();
+        let mut decl =
+            PreparedTypeDecl::new(ResolvedRootIdentity::new("/t.ts", "A"), TypeDeclKind::Alias);
+        decl.type_parameters = vec![make_type_param("T", 0)];
+        decl.build_member_index(&body, None);
+        decl.classify_wrapper_shape(&body);
+        decl.classify_projection(&body);
 
         match &decl.projection_class {
-            PreparedProjectionClass::ForwardSubject(payload) => {
+            PreparedProjectionClassFact::ForwardSubject(payload) => {
                 assert_eq!(payload.target_name, "B");
                 assert_eq!(
                     payload.forwarding_kind,
@@ -1849,18 +2499,15 @@ mod tests {
             ]
             .into(),
         );
-        let mut decl = PreparedTypeDecl::new(
-            ResolvedRootIdentity::new("/t.ts", "A"),
-            TypeDeclKind::Alias,
-            body,
-        );
-        decl.build_member_index();
-        decl.classify_wrapper_shape();
-        decl.classify_projection();
+        let mut decl =
+            PreparedTypeDecl::new(ResolvedRootIdentity::new("/t.ts", "A"), TypeDeclKind::Alias);
+        decl.build_member_index(&body, None);
+        decl.classify_wrapper_shape(&body);
+        decl.classify_projection(&body);
 
         assert!(matches!(
             decl.projection_class,
-            PreparedProjectionClass::Opaque
+            PreparedProjectionClassFact::Opaque
         ));
     }
 
@@ -1868,18 +2515,15 @@ mod tests {
     fn projection_intersection_is_opaque() {
         // type A = B & C — not a forward subject
         let body = TypeExpr::Intersection(vec![TypeExpr::named("B"), TypeExpr::named("C")].into());
-        let mut decl = PreparedTypeDecl::new(
-            ResolvedRootIdentity::new("/t.ts", "A"),
-            TypeDeclKind::Alias,
-            body,
-        );
-        decl.build_member_index();
-        decl.classify_wrapper_shape();
-        decl.classify_projection();
+        let mut decl =
+            PreparedTypeDecl::new(ResolvedRootIdentity::new("/t.ts", "A"), TypeDeclKind::Alias);
+        decl.build_member_index(&body, None);
+        decl.classify_wrapper_shape(&body);
+        decl.classify_projection(&body);
 
         assert!(matches!(
             decl.projection_class,
-            PreparedProjectionClass::Opaque
+            PreparedProjectionClassFact::Opaque
         ));
     }
 
@@ -1893,15 +2537,14 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "Props"),
             TypeDeclKind::Interface,
-            body,
         );
-        decl.build_member_index();
-        decl.classify_wrapper_shape();
-        decl.classify_projection();
+        decl.build_member_index(&body, None);
+        decl.classify_wrapper_shape(&body);
+        decl.classify_projection(&body);
 
         assert!(matches!(
             decl.projection_class,
-            PreparedProjectionClass::Opaque
+            PreparedProjectionClassFact::Opaque
         ));
     }
 
@@ -1912,22 +2555,24 @@ mod tests {
             name: "B".into(),
             type_arguments: vec![TypeExpr::named("X")].into(),
         }));
-        let mut decl = PreparedTypeDecl::new(
-            ResolvedRootIdentity::new("/t.ts", "A"),
-            TypeDeclKind::Alias,
-            body,
-        );
-        decl.build_member_index();
-        decl.classify_wrapper_shape();
-        decl.classify_projection();
+        let mut decl =
+            PreparedTypeDecl::new(ResolvedRootIdentity::new("/t.ts", "A"), TypeDeclKind::Alias);
+        decl.build_member_index(&body, None);
+        decl.classify_wrapper_shape(&body);
+        decl.classify_projection(&body);
 
         match &decl.projection_class {
-            PreparedProjectionClass::ForwardSubject(payload) => {
+            PreparedProjectionClassFact::ForwardSubject(payload) => {
                 assert_eq!(payload.target_name, "B");
                 assert_eq!(
                     payload.forwarding_kind,
                     PreparedForwardingKind::AppliedAlias
                 );
+                // Parenthesization is transparent: the arg locator still
+                // addresses the body's own arg-bearing position.
+                assert_eq!(payload.target_args.len(), 1);
+                assert_eq!(payload.target_args[0].arg_index, 0);
+                assert!(payload.target_args[0].path.is_empty());
             }
             other => panic!("expected ForwardSubject, got {:?}", other),
         }
@@ -1935,50 +2580,268 @@ mod tests {
 }
 
 #[cfg(test)]
+mod key_domain_closedness_producer_tests {
+    //! Discriminating fixtures for the KEY-DOMAIN closedness fact producer:
+    //! each asserts a specific recipe arm / path / shape verdict a perturbed
+    //! producer could not reproduce (no always-true predicates).
+
+    use std::sync::Arc;
+
+    use verter_type_expr::facts::ClosednessRecipe;
+    use verter_type_expr::{
+        empty_type_args, IndexSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
+        TypeParam,
+    };
+
+    use super::*;
+
+    fn ident() -> ResolvedRootIdentity {
+        ResolvedRootIdentity::new("/types.ts", "Props")
+    }
+
+    fn object_body() -> TypeExpr {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
+                "label".into(),
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+                false,
+            ))],
+        }))
+    }
+
+    fn object_with_index_key(key: TypeExpr) -> TypeExpr {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::IndexSignature(IndexSignature::synthetic(
+                "k".into(),
+                key,
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+            ))],
+        }))
+    }
+
+    fn bare_ref(name: &str) -> TypeExpr {
+        TypeExpr::Ref {
+            name: Arc::from(name),
+            type_arguments: empty_type_args(),
+        }
+    }
+
+    #[test]
+    fn plain_object_body_mints_object_closed_and_shape() {
+        let fact = collect_key_domain_closedness_fact(&ident(), &[object_body()], false);
+        assert!(fact.closed_object_shape);
+        assert_eq!(&*fact.body_recipes, &[ClosednessRecipe::ObjectClosed]);
+    }
+
+    #[test]
+    fn scalar_index_key_stays_object_closed_but_param_key_escapes() {
+        let scalar = collect_key_domain_closedness_fact(
+            &ident(),
+            &[object_with_index_key(TypeExpr::Primitive(
+                PrimitiveName::String,
+            ))],
+            false,
+        );
+        assert_eq!(&*scalar.body_recipes, &[ClosednessRecipe::ObjectClosed]);
+
+        let param_key = collect_key_domain_closedness_fact(
+            &ident(),
+            &[object_with_index_key(TypeExpr::TypeParameter(TypeParam {
+                name: "K".into(),
+                constraint: None,
+                default: None,
+            }))],
+            false,
+        );
+        match &param_key.body_recipes[..] {
+            [ClosednessRecipe::LowerAndClassify { slot }] => {
+                assert_eq!(&*slot.anchor.canonical_id, "/types.ts");
+                assert_eq!(&*slot.anchor.symbol, "Props");
+                assert!(slot.path.is_empty(), "whole-body escape has empty path");
+            }
+            other => panic!("expected whole-object escape, got {other:?}"),
+        }
+        // The closed-object SHAPE verdict is the nominal carve-out (pure
+        // member-set syntax) — it holds for BOTH objects.
+        assert!(scalar.closed_object_shape);
+        assert!(param_key.closed_object_shape);
+    }
+
+    #[test]
+    fn union_of_literals_mints_all_arms_and_is_not_object_shape() {
+        let body = TypeExpr::Union(Arc::from(
+            vec![
+                TypeExpr::Literal(verter_type_expr::LiteralValue::String("a".into())),
+                TypeExpr::Primitive(PrimitiveName::Number),
+            ]
+            .into_boxed_slice(),
+        ));
+        let fact = collect_key_domain_closedness_fact(&ident(), &[body], false);
+        assert!(!fact.closed_object_shape, "a union is not an object shape");
+        assert_eq!(
+            &*fact.body_recipes,
+            &[ClosednessRecipe::AllArms(Arc::from(
+                vec![ClosednessRecipe::ClosedLeaf, ClosednessRecipe::ClosedLeaf].into_boxed_slice()
+            ))]
+        );
+    }
+
+    #[test]
+    fn intersection_escape_carries_the_arm_path() {
+        let generic_arm = TypeExpr::Ref {
+            name: Arc::from("Foo"),
+            type_arguments: Arc::from(vec![bare_ref("T")].into_boxed_slice()),
+        };
+        let body = TypeExpr::Intersection(Arc::from(
+            vec![object_body(), generic_arm].into_boxed_slice(),
+        ));
+        let fact = collect_key_domain_closedness_fact(&ident(), &[body], false);
+        let [ClosednessRecipe::AllArms(arms)] = &fact.body_recipes[..] else {
+            panic!("expected one AllArms recipe, got {:?}", fact.body_recipes);
+        };
+        assert_eq!(arms[0], ClosednessRecipe::ObjectClosed);
+        match &arms[1] {
+            ClosednessRecipe::LowerAndClassify { slot } => {
+                assert_eq!(
+                    &*slot.path,
+                    &[TypeBodyPathStep::IntersectionArm { ordinal: 1 }]
+                );
+            }
+            other => panic!("expected arm escape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merged_bodies_mint_per_contributor_with_merged_prefix() {
+        let generic = TypeExpr::Ref {
+            name: Arc::from("Foo"),
+            type_arguments: Arc::from(vec![bare_ref("T")].into_boxed_slice()),
+        };
+        let fact =
+            collect_key_domain_closedness_fact(&ident(), &[object_body(), generic.clone()], true);
+        assert_eq!(fact.body_recipes.len(), 2);
+        assert_eq!(fact.body_recipes[0], ClosednessRecipe::ObjectClosed);
+        match &fact.body_recipes[1] {
+            ClosednessRecipe::LowerAndClassify { slot } => {
+                assert_eq!(
+                    &*slot.path,
+                    &[TypeBodyPathStep::MergedContributor { ordinal: 1 }]
+                );
+            }
+            other => panic!("expected merged-contributor escape, got {other:?}"),
+        }
+        assert!(
+            !fact.closed_object_shape,
+            "a non-object contributor breaks the shape fold"
+        );
+
+        // A SINGLE group mints from the primary (last-wins) body only.
+        let single = collect_key_domain_closedness_fact(&ident(), &[generic, object_body()], false);
+        assert_eq!(&*single.body_recipes, &[ClosednessRecipe::ObjectClosed]);
+        assert!(single.closed_object_shape);
+    }
+
+    #[test]
+    fn leaf_arms_discriminate_by_shape() {
+        let cases = [
+            (
+                bare_ref("Alias"),
+                ClosednessRecipe::FollowRefByName {
+                    name: "Alias".into(),
+                },
+            ),
+            (
+                TypeExpr::TypeParameter(TypeParam {
+                    name: "T".into(),
+                    constraint: None,
+                    default: None,
+                }),
+                ClosednessRecipe::ParamRef { name: "T".into() },
+            ),
+            (
+                TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                ))),
+                ClosednessRecipe::OpenLeaf,
+            ),
+            (
+                TypeExpr::Unknown { raw: "??".into() },
+                ClosednessRecipe::Unsupported,
+            ),
+        ];
+        for (body, expected) in cases {
+            let fact = collect_key_domain_closedness_fact(&ident(), &[body], false);
+            assert_eq!(&*fact.body_recipes, std::slice::from_ref(&expected));
+            assert!(!fact.closed_object_shape);
+        }
+    }
+
+    #[test]
+    fn parenthesized_layers_are_transparent() {
+        let body =
+            TypeExpr::Parenthesized(Arc::new(TypeExpr::Parenthesized(Arc::new(object_body()))));
+        let fact = collect_key_domain_closedness_fact(&ident(), &[body], false);
+        assert!(fact.closed_object_shape);
+        assert_eq!(&*fact.body_recipes, &[ClosednessRecipe::ObjectClosed]);
+    }
+
+    #[test]
+    fn empty_body_set_is_no_shape_and_no_recipes() {
+        let fact = collect_key_domain_closedness_fact(&ident(), &[], false);
+        assert!(!fact.closed_object_shape);
+        assert!(fact.body_recipes.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod no_type_expr_poison_asserts {
-    //! Compile-time negatives for the `NoTypeExpr` invariant on the prepared /
-    //! type-eval surface. The TypeExpr-free scalar facts the hot carriers reuse
-    //! verbatim DO carry the derive; every sibling that owns a `TypeExpr`
-    //! (directly or via a member/element/payload) MUST stay non-`NoTypeExpr`, so
-    //! it can never satisfy a hot-carrier field bound. Each assert FAILS TO
-    //! COMPILE if its subject ever gains or loses the impl as appropriate.
+    //! Compile-time witnesses for the `NoTypeExpr` invariant on the prepared /
+    //! type-eval surface. The prepared declaration carriers AND the type-eval
+    //! symbol-table inventory are narrowed to facts + content-free locators, so
+    //! every stored carrier (and every scalar they reuse) carries the derive —
+    //! a reintroduced `TypeExpr` field anywhere in their reachable field graph
+    //! fails these asserts at compile time. The transient lowering carriers
+    //! that DO hold typed IR live in `type_eval_build` (`Lowered*Parts`) as
+    //! producer-local return values only — never stored on the inventory or a
+    //! prepared declaration.
     use super::{
-        DeclProvenance, PreparedCacheDeps, PreparedCaseTransformKind, PreparedExternalDep,
-        PreparedForwardPayload, PreparedForwardingKind, PreparedKeyFilterShape,
-        PreparedKeyRemapShape, PreparedMember, PreparedSurfaceModifiers, PreparedValueDecl,
-        PreparedValueMember, PreparedValueRuleShape, PreparedWrapperKind,
+        DeclProvenance, PreparedCacheDeps, PreparedExternalDep, PreparedTypeDecl, PreparedValueDecl,
     };
     use crate::analysis::type_eval::{
-        EnumMemberValue, FunctionSignature, TypeDeclKind, ValueDeclKind,
+        EnumMemberValue, EvalEnv, FunctionSignature, MergedTypeBody, TypeDeclBody, TypeDeclGroup,
+        TypeDeclInfo, TypeDeclKind, ValueDeclGroup, ValueDeclInfo, ValueDeclKind,
     };
     use crate::analysis::type_solver::host::ResolvedRootIdentity;
-    use static_assertions::{assert_impl_all, assert_not_impl_any};
+    use static_assertions::assert_impl_all;
     use verter_no_typeexpr::NoTypeExpr;
 
-    // The TypeExpr-free scalars that DO carry the derive (the hot carriers
-    // reuse each verbatim).
+    // The narrowed prepared carriers: fully `TypeExpr`-free, field-recursively.
+    assert_impl_all!(PreparedTypeDecl: NoTypeExpr);
+    assert_impl_all!(PreparedValueDecl: NoTypeExpr);
+
+    // The TypeExpr-free scalars the carriers reuse verbatim.
     assert_impl_all!(DeclProvenance: NoTypeExpr);
     assert_impl_all!(PreparedCacheDeps: NoTypeExpr);
-    assert_impl_all!(PreparedCaseTransformKind: NoTypeExpr);
     assert_impl_all!(PreparedExternalDep: NoTypeExpr);
-    assert_impl_all!(PreparedForwardingKind: NoTypeExpr);
-    assert_impl_all!(PreparedSurfaceModifiers: NoTypeExpr);
-    assert_impl_all!(PreparedWrapperKind: NoTypeExpr);
     assert_impl_all!(TypeDeclKind: NoTypeExpr);
     assert_impl_all!(ValueDeclKind: NoTypeExpr);
     assert_impl_all!(ResolvedRootIdentity: NoTypeExpr);
 
-    // The danger siblings that own a `TypeExpr` and must stay non-`NoTypeExpr`.
-    assert_not_impl_any!(PreparedKeyFilterShape: NoTypeExpr);
-    assert_not_impl_any!(PreparedKeyRemapShape: NoTypeExpr);
-    assert_not_impl_any!(PreparedValueRuleShape: NoTypeExpr);
-    assert_not_impl_any!(PreparedForwardPayload: NoTypeExpr);
-    assert_not_impl_any!(PreparedMember: NoTypeExpr);
-    assert_not_impl_any!(PreparedValueMember: NoTypeExpr);
-    assert_not_impl_any!(PreparedValueDecl: NoTypeExpr);
-    // `FunctionSignature` / `EnumMemberValue` are the type-eval `TypeExpr`
-    // owners the hot carriers mirror as handle-native shapes; they too stay
-    // non-`NoTypeExpr`.
-    assert_not_impl_any!(FunctionSignature: NoTypeExpr);
-    assert_not_impl_any!(EnumMemberValue: NoTypeExpr);
+    // The narrowed type-eval inventory cluster: the whole stored symbol-table
+    // surface is `TypeExpr`-free, field-recursively — the signature carrier is
+    // the shared closed fact, and the enum member value is the rail-explicit
+    // scalar/domain view.
+    assert_impl_all!(EvalEnv: NoTypeExpr);
+    assert_impl_all!(TypeDeclInfo: NoTypeExpr);
+    assert_impl_all!(TypeDeclGroup: NoTypeExpr);
+    assert_impl_all!(TypeDeclBody: NoTypeExpr);
+    assert_impl_all!(MergedTypeBody: NoTypeExpr);
+    assert_impl_all!(ValueDeclInfo: NoTypeExpr);
+    assert_impl_all!(ValueDeclGroup: NoTypeExpr);
+    assert_impl_all!(FunctionSignature: NoTypeExpr);
+    assert_impl_all!(EnumMemberValue: NoTypeExpr);
 }

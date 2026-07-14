@@ -1,5 +1,6 @@
 use rustc_hash::FxHashSet;
 
+use crate::fact_signature_helpers::CacheabilityProbe;
 use crate::request_context::ColdComputeCompletenessScope;
 use crate::resolver_core::{
     fallthrough_cache_key, run_stable_request, FallthroughNodeKey, FallthroughPropOverrideSet,
@@ -65,19 +66,36 @@ pub trait FallthroughRequestHost {
         store_view: &Self::View,
         base_is_current: bool,
     ) -> Option<Self::Resolution>;
+    /// Admit `result` into the shared fallthrough caches.
+    ///
+    /// `probe` is the [`CacheabilityProbe`] of the scope the CALLER of
+    /// [`run_fallthrough_request`] opened around this whole request — it
+    /// therefore encloses [`Self::compute_fallthrough_surface_uncached`], whose
+    /// reads are exactly the reads this admission must be fail-closed on. A
+    /// scope opened at the store site instead would prove nothing: the fenced
+    /// serve / broken lease / unrootable route it must catch happened during
+    /// the compute, before such a scope existed.
     fn store_fallthrough_result(
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<&FallthroughPropOverrideSet>,
         result: &Self::Resolution,
+        probe: &CacheabilityProbe<'_>,
     );
 }
 
-struct FallthroughRequestExecutor<'a, 'b, H: FallthroughRequestHost> {
+struct FallthroughRequestExecutor<'a, 'b, 'p, H: FallthroughRequestHost> {
     host: &'a H,
     canonical_id: String,
     prop_type_overrides: Option<&'a FallthroughPropOverrideSet>,
     visiting: &'b mut FxHashSet<String>,
+    /// The CALLER's cacheability probe. Its scope was opened around the entire
+    /// `run_fallthrough_request` call, so it encloses every `compute` attempt
+    /// this executor drives — and `store_stable` samples it AFTER the compute
+    /// it is admitting. That ordering is the whole rail: a scope that started
+    /// at the store site would never see the compute's fenced serve / broken
+    /// lease / unrootable route.
+    probe: &'p CacheabilityProbe<'p>,
     fixed_store_view: Option<H::View>,
     /// EXTERNAL-supersession fingerprint of the snapshot the current
     /// attempt was taken under. Gates stable promotion on the COMPLETE
@@ -122,12 +140,13 @@ struct FallthroughRequestExecutor<'a, 'b, H: FallthroughRequestHost> {
     max_attempts: usize,
 }
 
-impl<'a, 'b, H: FallthroughRequestHost> FallthroughRequestExecutor<'a, 'b, H> {
+impl<'a, 'b, 'p, H: FallthroughRequestHost> FallthroughRequestExecutor<'a, 'b, 'p, H> {
     fn new(
         host: &'a H,
         canonical_id: String,
         prop_type_overrides: Option<&'a FallthroughPropOverrideSet>,
         visiting: &'b mut FxHashSet<String>,
+        probe: &'p CacheabilityProbe<'p>,
         max_attempts: usize,
     ) -> Self {
         Self {
@@ -135,6 +154,7 @@ impl<'a, 'b, H: FallthroughRequestHost> FallthroughRequestExecutor<'a, 'b, H> {
             canonical_id,
             prop_type_overrides,
             visiting,
+            probe,
             fixed_store_view: None,
             last_snapshot_supersession_fp: None,
             fallback_snapshot_incoherent: false,
@@ -150,8 +170,8 @@ impl<'a, 'b, H: FallthroughRequestHost> FallthroughRequestExecutor<'a, 'b, H> {
     }
 }
 
-impl<'a, 'b, H> StableRequestExecutor<FallthroughNodeKey, Option<H::Resolution>>
-    for FallthroughRequestExecutor<'a, 'b, H>
+impl<H> StableRequestExecutor<FallthroughNodeKey, Option<H::Resolution>>
+    for FallthroughRequestExecutor<'_, '_, '_, H>
 where
     H: FallthroughRequestHost,
 {
@@ -287,10 +307,13 @@ where
 
     fn store_stable(&mut self, value: &Option<H::Resolution>) {
         if let Some(result) = value.as_ref() {
+            // Sampled AFTER the compute, through the caller's scope: the probe's
+            // verdict covers every read the value was built from.
             self.host.store_fallthrough_result(
                 &self.canonical_id,
                 self.prop_type_overrides,
                 result,
+                self.probe,
             );
         }
     }
@@ -319,7 +342,7 @@ where
     }
 }
 
-impl<'a, 'b, H: FallthroughRequestHost> Drop for FallthroughRequestExecutor<'a, 'b, H> {
+impl<H: FallthroughRequestHost> Drop for FallthroughRequestExecutor<'_, '_, '_, H> {
     fn drop(&mut self) {
         // DISCARD the FINAL attempt's held scope (or the held scope left by a
         // prior attempt on a cache-served-final path) WITHOUT bubbling. The
@@ -335,6 +358,14 @@ impl<'a, 'b, H: FallthroughRequestHost> Drop for FallthroughRequestExecutor<'a, 
     }
 }
 
+/// Drive one fallthrough request (warm peek → singleflight → cold compute →
+/// stable admission).
+///
+/// `probe` MUST come from a cacheability tracer scope the CALLER opened around
+/// this call, so the scope encloses the cold compute the admission is gated on.
+/// The type system enforces that a probe exists at all; the ENCLOSING discipline
+/// is the caller's, and is the reason the parameter is threaded from the entry
+/// point rather than minted inside `store_stable`.
 pub(crate) fn run_fallthrough_request<H>(
     host: &H,
     singleflight: &SingleflightGroup<
@@ -346,6 +377,7 @@ pub(crate) fn run_fallthrough_request<H>(
     prop_type_overrides: Option<&FallthroughPropOverrideSet>,
     visiting: &mut FxHashSet<String>,
     fixed_store_view: Option<&H::View>,
+    probe: &CacheabilityProbe<'_>,
     max_attempts: usize,
 ) -> RequestRunResult<Option<H::Resolution>>
 where
@@ -356,6 +388,7 @@ where
         canonical_id.to_string(),
         prop_type_overrides,
         visiting,
+        probe,
         max_attempts,
     )
     .with_fixed_view(fixed_store_view);
@@ -388,6 +421,21 @@ mod tests {
     use super::*;
     use crate::resolver_core::{SingleflightRole, StoreViewCompatToken};
     use std::cell::Cell;
+
+    /// Open a REAL cacheability tracer scope and hand its probe to `f`.
+    ///
+    /// `run_fallthrough_request` requires the caller to own the scope that
+    /// encloses the compute, and only a `VerterHost` can open one. The mock
+    /// hosts below implement `FallthroughRequestHost` without being a
+    /// `VerterHost`, so the scope is opened on a throwaway host — the probe is
+    /// still a genuine one (`with_cacheability_scope` is its only constructor);
+    /// no mock can forge it.
+    fn with_scoped_probe<R>(
+        f: impl for<'t> FnOnce(&crate::fact_signature_helpers::CacheabilityProbe<'t>) -> R,
+    ) -> R {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        crate::fact_signature_helpers::with_cacheability_scope(&host, f).0
+    }
 
     /// Validation-trivial view: the executor's stability gate reads
     /// `current_view_supersession_fingerprint()` from the HOST, not the
@@ -503,6 +551,7 @@ mod tests {
             canonical_id: &str,
             _prop_type_overrides: Option<&FallthroughPropOverrideSet>,
             _result: &Self::Resolution,
+            _probe: &CacheabilityProbe<'_>,
         ) {
             self.promotions.borrow_mut().push(canonical_id.to_string());
         }
@@ -545,15 +594,18 @@ mod tests {
         // (diverges), then the FALLBACK branch is taken; the outer loop
         // runs once, so the single stability check observes the incoherent
         // fallback attempt.
-        let result = run_fallthrough_request(
-            &host,
-            &singleflight,
-            "/proj/Child.vue",
-            None,
-            &mut visiting,
-            None,
-            1,
-        );
+        let result = with_scoped_probe(|probe| {
+            run_fallthrough_request(
+                &host,
+                &singleflight,
+                "/proj/Child.vue",
+                None,
+                &mut visiting,
+                None,
+                probe,
+                1,
+            )
+        });
 
         // The computed surface is still HANDED to the caller (return-only)…
         assert_eq!(
@@ -593,15 +645,18 @@ mod tests {
         >::default();
         let mut visiting = FxHashSet::default();
 
-        let result = run_fallthrough_request(
-            &host,
-            &singleflight,
-            "/proj/Child.vue",
-            None,
-            &mut visiting,
-            None,
-            3,
-        );
+        let result = with_scoped_probe(|probe| {
+            run_fallthrough_request(
+                &host,
+                &singleflight,
+                "/proj/Child.vue",
+                None,
+                &mut visiting,
+                None,
+                probe,
+                3,
+            )
+        });
 
         assert_eq!(result.value, Some(42));
         assert_eq!(
@@ -652,15 +707,18 @@ mod tests {
         >::default();
         let mut visiting = FxHashSet::default();
 
-        let result = run_fallthrough_request(
-            &host,
-            &singleflight,
-            "/proj/Child.vue",
-            None,
-            &mut visiting,
-            None,
-            2,
-        );
+        let result = with_scoped_probe(|probe| {
+            run_fallthrough_request(
+                &host,
+                &singleflight,
+                "/proj/Child.vue",
+                None,
+                &mut visiting,
+                None,
+                probe,
+                2,
+            )
+        });
 
         assert_eq!(
             result.value,
@@ -710,15 +768,18 @@ mod tests {
             }],
         };
 
-        let result = run_fallthrough_request(
-            &host,
-            &singleflight,
-            "/proj/Child.vue",
-            Some(&overrides),
-            &mut visiting,
-            None,
-            3,
-        );
+        let result = with_scoped_probe(|probe| {
+            run_fallthrough_request(
+                &host,
+                &singleflight,
+                "/proj/Child.vue",
+                Some(&overrides),
+                &mut visiting,
+                None,
+                probe,
+                3,
+            )
+        });
 
         assert_eq!(
             result.value,
@@ -748,7 +809,7 @@ mod tests {
     /// callers that share one fallthrough singleflight lane. The LEADER parks
     /// mid-`compute` (the established `LeaderGate` + `test_flight_strong_count`
     /// seam — deterministic, no timing sleeps), folds a PARTIAL (a budget trip
-    /// modelled by `mark_request_materialization_cache_suppress`), then
+    /// modelled by `mark_request_result_partial`), then
     /// returns. The FOLLOWER coalesces onto the in-flight lane and joins the
     /// leader's partial value.
     ///
@@ -860,7 +921,7 @@ mod tests {
                     // The leader's cold compute trips the projection budget —
                     // fold a PARTIAL into the executor's per-attempt held
                     // cold-compute scope (entered by `compute`).
-                    crate::request_context::mark_request_materialization_cache_suppress();
+                    crate::request_context::mark_request_result_partial();
                 }
                 Some(42)
             }
@@ -869,6 +930,7 @@ mod tests {
                 canonical_id: &str,
                 _overrides: Option<&FallthroughPropOverrideSet>,
                 _result: &usize,
+                _probe: &CacheabilityProbe<'_>,
             ) {
                 // Production no-poison gate mirror: refuse a partial.
                 if crate::request_context::current_cold_compute_completeness().is_partial() {
@@ -904,15 +966,18 @@ mod tests {
                     live_fp: AtomicU64::new(0xAAAA),
                 };
                 let mut visiting = FxHashSet::default();
-                run_fallthrough_request(
-                    &host,
-                    &singleflight,
-                    "/proj/Child.vue",
-                    None,
-                    &mut visiting,
-                    None,
-                    3,
-                )
+                with_scoped_probe(|probe| {
+                    run_fallthrough_request(
+                        &host,
+                        &singleflight,
+                        "/proj/Child.vue",
+                        None,
+                        &mut visiting,
+                        None,
+                        probe,
+                        3,
+                    )
+                })
             })
         };
 
@@ -938,15 +1003,18 @@ mod tests {
                 // The follower's OWN cold-compute scope: the fold MUST land
                 // here so the follower's downstream admission refuses.
                 let scope = crate::request_context::ColdComputeCompletenessScope::enter();
-                let result = run_fallthrough_request(
-                    &host,
-                    &singleflight,
-                    "/proj/Child.vue",
-                    None,
-                    &mut visiting,
-                    None,
-                    3,
-                );
+                let result = with_scoped_probe(|probe| {
+                    run_fallthrough_request(
+                        &host,
+                        &singleflight,
+                        "/proj/Child.vue",
+                        None,
+                        &mut visiting,
+                        None,
+                        probe,
+                        3,
+                    )
+                });
                 let scope_partial_after_join =
                     crate::request_context::current_cold_compute_completeness().is_partial();
                 drop(scope);
@@ -1095,7 +1163,7 @@ mod tests {
                     // Attempt 1: fold a PARTIAL into the per-attempt held
                     // scope, then advance the fingerprint so `is_stable`
                     // diverges → unstable → discarded.
-                    crate::request_context::mark_request_materialization_cache_suppress();
+                    crate::request_context::mark_request_result_partial();
                     self.live_fp.fetch_add(1, AtomicOrdering::Relaxed);
                     Some(1)
                 } else {
@@ -1109,6 +1177,7 @@ mod tests {
                 canonical_id: &str,
                 _overrides: Option<&FallthroughPropOverrideSet>,
                 _result: &usize,
+                _probe: &CacheabilityProbe<'_>,
             ) {
                 // Production no-poison gate mirror: refuse a partial.
                 if crate::request_context::current_cold_compute_completeness().is_partial() {
@@ -1134,15 +1203,18 @@ mod tests {
         // fallthrough compute analogue). A DISCARDED attempt's partiality
         // must never taint it.
         let enclosing = crate::request_context::ColdComputeCompletenessScope::enter();
-        let result = run_fallthrough_request(
-            &host,
-            &singleflight,
-            "/proj/Child.vue",
-            None,
-            &mut visiting,
-            None,
-            3,
-        );
+        let result = with_scoped_probe(|probe| {
+            run_fallthrough_request(
+                &host,
+                &singleflight,
+                "/proj/Child.vue",
+                None,
+                &mut visiting,
+                None,
+                probe,
+                3,
+            )
+        });
         // Read the enclosing scope's completeness BEFORE dropping it.
         let enclosing_partial_after =
             crate::request_context::current_cold_compute_completeness().is_partial();

@@ -217,7 +217,9 @@ export class ComponentMetaSession {
    *
    * Returns one slot per input in input order — a fully-projected
    * `VolarComponentMeta` for successful slots, the empty-meta default
-   * for missing canonicals / per-id failures.
+   * for missing canonicals. A real per-id failure (a budget overrun or
+   * a fail-closed output-materialization failure) THROWS — matching the
+   * scalar `getComponentMeta` failure semantics.
    */
   async getComponentMetaBatch(filePaths: string[]): Promise<VolarComponentMeta[]> {
     this.ensureOpen();

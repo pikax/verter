@@ -88,9 +88,9 @@ use crate::types::Hash16;
 /// and increments the host's per-host
 /// [`crate::VerterHost::signature_overflow_at_install`] counter.
 ///
-/// Returns `(return_value, finalise_result, fenced_serve_observed)` so
+/// Returns `(return_value, finalise_result, non_cacheable_read_observed)` so
 /// callers decide whether to admit the result to cache or treat it as
-/// non-cacheable. `fenced_serve_observed == true` means the traced
+/// non-cacheable. `non_cacheable_read_observed == true` means the traced
 /// compute consumed a FENCED (ReturnOnly, `store_published == false`)
 /// `IndexedReady` serve: the result's fact stamps are read from the
 /// LIVE post-mutation state while its payload was computed FROM the
@@ -104,8 +104,141 @@ pub(crate) fn install_fact_tracer<F, R>(
 where
     F: FnOnce() -> R,
 {
-    let (value, read_set) = host.with_fact_tracer(f);
-    let fenced_serve_observed = read_set.fenced_serve_observed();
+    let (value, read_set) = host.with_fact_tracer(|| {
+        #[cfg(test)]
+        force_tracer_overflow_observations(host, None);
+        f()
+    });
+    let non_cacheable_read_observed = read_set.non_cacheable_read_observed();
+    let finalise = read_set.finalise();
+    // The overflow audit event + host counter are emitted HERE and ONLY here —
+    // at the ONE signature-CONSUMING boundary per compute. The cacheability
+    // scope below deliberately uses the non-emitting `would_overflow` peek: an
+    // inner overflow fans into every enclosing tracer, so an emitting nested
+    // peek would multiply a single overflowing compute's event and counter
+    // across each nesting level.
+    if matches!(finalise, FactReadSetFinalise::Overflow) {
+        crate::host_manage::push_structured_event(
+            crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
+                candidate_size: (FACT_SIGNATURE_CAP as u32).saturating_add(1),
+                cap: FACT_SIGNATURE_CAP as u32,
+            },
+        );
+        host.signature_overflow_at_install
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    (value, finalise, non_cacheable_read_observed)
+}
+
+/// Test-only fact-injection hook read at every tracer scope entry
+/// ([`install_fact_tracer`] and [`with_cacheability_scope`]). When a knob is
+/// non-zero, fan that many synthetic `FileWholeHash` observations into the
+/// freshly-installed tracer (and every enclosing one), so the scope
+/// deterministically reports overflow once the per-signature cap is exceeded —
+/// the in-process equivalent of a compute whose observation set genuinely
+/// exceeds [`FACT_SIGNATURE_CAP`], without a pathological workspace fixture.
+///
+/// `scope` is the entering scope's ADDRESSABLE identity: `Some(_)` for a scope
+/// opened through [`named_cacheability_scope`] / [`named_fact_tracer`], `None`
+/// for every other (unnamed) scope in the crate.
+///
+/// TWO knobs, deliberately:
+///
+/// - the PER-HOST STICKY `force_fact_tracer_overflow_observations` overflows
+///   EVERY scope in the flow, named or not — the right tool when the boundary
+///   under test is the only one whose overflow can refuse the publication;
+/// - the THREAD-SCOPED TARGETED ONE-SHOT
+///   (`host_test_force::arm_fact_tracer_overflow_once`) is claimed by the NAMED
+///   scope it was armed for, on the arming thread, and overflows that scope
+///   ALONE. It is the seam for a flow with TWO tracers where either overflow
+///   would independently refuse the same write: the sticky knob is
+///   non-discriminating there (the test passes even if the boundary under test
+///   drops its overflow), while the one-shot isolates the NAMED scope and proves
+///   that boundary's rail on its own.
+///
+/// The one-shot is claimed by scope IDENTITY, never by scope ORDER. An
+/// order-keyed one-shot is silently RETARGETED by any tracer scope added
+/// upstream of the scope under test — the test keeps passing while testing a
+/// different boundary. Here an unnamed upstream scope passes `None`, claims
+/// nothing, and leaves the one-shot armed for its intended claimant; a named
+/// scope claims only when it IS the armed target.
+///
+/// Placed at the SHARED installer so EVERY traced admission boundary runs it
+/// rather than relying on a boundary-specific hook — a production site that
+/// reverts to a raw, overflow-discarding tracer still fans the observations and
+/// still fails the test. The production build compiles it out.
+#[cfg(test)]
+fn force_tracer_overflow_observations(
+    host: &crate::VerterHost,
+    scope: Option<crate::host_test_force::TracerScope>,
+) {
+    let sticky = host
+        .test_force
+        .force_fact_tracer_overflow_observations
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let once = crate::host_test_force::claim_fact_tracer_overflow_once(scope);
+    for i in 0..sticky.max(once) {
+        crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::FileWholeHash {
+            canonical_id: format!("__force_tracer_overflow_{i}.ts"),
+            hash: [(i & 0xff) as u8; 16],
+        });
+    }
+}
+
+/// [`with_cacheability_scope`] for a scope that carries an ADDRESSABLE
+/// [`TracerScope`](crate::host_test_force::TracerScope) identity, so a test can
+/// target it by NAME with the one-shot overflow knob.
+///
+/// Reached only through the [`named_cacheability_scope`] macro, whose production
+/// arm expands to the plain, unnamed opener — the identity exists in test builds
+/// alone.
+#[cfg(test)]
+fn with_cacheability_scope_named<F, R>(
+    host: &crate::VerterHost,
+    scope: crate::host_test_force::TracerScope,
+    f: F,
+) -> (R, bool)
+where
+    F: for<'t> FnOnce(&CacheabilityProbe<'t>) -> R,
+{
+    let (value, mut read_set) = host.with_fact_tracer_cell(|cell| {
+        force_tracer_overflow_observations(host, Some(scope));
+        f(&CacheabilityProbe { cell })
+    });
+    let non_cacheable = read_set.non_cacheable_read_observed() || read_set.would_overflow();
+    (value, non_cacheable)
+}
+
+/// [`install_fact_tracer_cacheability`] for an ADDRESSABLE scope. See
+/// [`with_cacheability_scope_named`].
+#[cfg(test)]
+pub(crate) fn install_fact_tracer_cacheability_named<F, R>(
+    host: &crate::VerterHost,
+    scope: crate::host_test_force::TracerScope,
+    f: F,
+) -> (R, bool)
+where
+    F: FnOnce() -> R,
+{
+    with_cacheability_scope_named(host, scope, |_probe| f())
+}
+
+/// [`install_fact_tracer`] for an ADDRESSABLE scope. See
+/// [`with_cacheability_scope_named`].
+#[cfg(test)]
+pub(crate) fn install_fact_tracer_named<F, R>(
+    host: &crate::VerterHost,
+    scope: crate::host_test_force::TracerScope,
+    f: F,
+) -> (R, FactReadSetFinalise, bool)
+where
+    F: FnOnce() -> R,
+{
+    let (value, read_set) = host.with_fact_tracer(|| {
+        force_tracer_overflow_observations(host, Some(scope));
+        f()
+    });
+    let non_cacheable_read_observed = read_set.non_cacheable_read_observed();
     let finalise = read_set.finalise();
     if matches!(finalise, FactReadSetFinalise::Overflow) {
         crate::host_manage::push_structured_event(
@@ -117,7 +250,172 @@ where
         host.signature_overflow_at_install
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    (value, finalise, fenced_serve_observed)
+    (value, finalise, non_cacheable_read_observed)
+}
+
+/// Open an [`install_fact_tracer_cacheability`] scope that a test can TARGET BY
+/// NAME.
+///
+/// ```ignore
+/// named_cacheability_scope!(host, TracerScope::ScriptFactsImportRoute, || { .. })
+/// ```
+///
+/// ZERO production footprint: the non-test arm expands to the plain
+/// [`install_fact_tracer_cacheability`] call and DROPS the scope tokens entirely
+/// — no argument, no `&'static` datum, no type. The identity exists only where a
+/// test can consume it, and the production build is byte-identical to the unnamed
+/// call it replaces.
+///
+/// Naming a scope is what makes the one-shot overflow knob TARGETED instead of
+/// positional: the knob is claimed by identity, so a tracer scope added anywhere
+/// UPSTREAM cannot silently retarget it (an unnamed scope claims nothing).
+#[cfg(test)]
+macro_rules! named_cacheability_scope {
+    ($host:expr, $scope:expr, $f:expr) => {
+        $crate::fact_signature_helpers::install_fact_tracer_cacheability_named($host, $scope, $f)
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! named_cacheability_scope {
+    ($host:expr, $scope:expr, $f:expr) => {
+        $crate::fact_signature_helpers::install_fact_tracer_cacheability($host, $f)
+    };
+}
+
+/// Open an [`install_fact_tracer`] scope that a test can TARGET BY NAME. The
+/// signature-CONSUMING sibling of [`named_cacheability_scope`]; same zero
+/// production footprint.
+#[cfg(test)]
+macro_rules! named_fact_tracer {
+    ($host:expr, $scope:expr, $f:expr) => {
+        $crate::fact_signature_helpers::install_fact_tracer_named($host, $scope, $f)
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! named_fact_tracer {
+    ($host:expr, $scope:expr, $f:expr) => {
+        $crate::fact_signature_helpers::install_fact_tracer($host, $f)
+    };
+}
+
+pub(crate) use {named_cacheability_scope, named_fact_tracer};
+
+/// Proof that the current compute runs inside a CACHEABILITY TRACER SCOPE —
+/// the token every shared-cache admission point requires.
+///
+/// A [`CacheabilityProbe`] can be minted ONLY by [`with_cacheability_scope`],
+/// and the borrow it hands out cannot outlive that scope's closure. An
+/// admission API that takes `&CacheabilityProbe` therefore CANNOT be reached
+/// from a producer that installed no tracer — the untraced-producer class is
+/// closed by the type system.
+///
+/// [`Self::non_cacheable`] reads the scope's verdict-so-far. The tracer
+/// accumulates monotonically, so a read taken at the admission point (the END
+/// of the value's compute) covers everything the compute consumed — provided
+/// the scope ENCLOSES that compute. That is the discipline every producer
+/// follows: the scope is the OUTERMOST bracket of the producer body, so key
+/// computation, gate classification, lowering, peek, and reduce all lie inside
+/// it and a pre-tracer read point cannot exist.
+///
+/// **`pub` but UNNAMEABLE.** The enclosing module is `pub(crate)`, so no
+/// out-of-crate caller can write this type — it is `pub` only so it can appear
+/// in the signature of a shared-cache funnel that IS out-of-crate reachable
+/// (`RouteDb`, `ImportedRootDb`). Such a caller obtains one the only way anyone
+/// does: by opening a real scope (`for_tests::with_cacheability_scope_for_tests`)
+/// and receiving the borrow. The `cell` field stays private, so the token
+/// cannot be constructed by struct literal either.
+pub struct CacheabilityProbe<'t> {
+    cell: &'t crate::resolver_core::FactReadSetCell,
+}
+
+impl CacheabilityProbe<'_> {
+    /// `true` when the enclosing scope's compute MUST NOT warm any shared
+    /// cache. TWO INDEPENDENT non-admission conditions fold into it:
+    ///
+    /// 1. a NON-CACHEABLE READ — a FENCED (ReturnOnly, `store_published ==
+    ///    false`) `IndexedReady` serve, a broken decl-body lease
+    ///    (`LeaseMiss`), an unrootable / unadmitted import route, or an
+    ///    unobservable contributor source env. The value was derived from a
+    ///    served-without-publication / transient basis while its fact stamps
+    ///    read the LIVE view, so the read-side fact rail cannot reject the
+    ///    entry.
+    /// 2. a fact-signature OVERFLOW — the compute observed more than
+    ///    [`FACT_SIGNATURE_CAP`] distinct facts.
+    ///
+    /// Both are CACHE-ONLY: the value stays `Complete` and flows to the caller
+    /// verbatim; only the shared-cache admission is refused (never
+    /// `ResultCompleteness::Partial`).
+    ///
+    /// # Why an overflow refuses here
+    ///
+    /// NOT because the entry would be unrootable — at these boundaries it
+    /// WOULD be rootable: the entry's `ReadSetSignature.facts` is built from
+    /// ANOTHER source (the carrier's `dep_signature` via
+    /// `engine_fact_signature_for_materialize_memo`, or the keyed canonical's
+    /// observed hash), never from this tracer's finalised set, and that
+    /// curated signature is well under the cap. The refusal is a conservative
+    /// POLICY: an over-cap observation set means the compute read MORE than
+    /// the curated signature enumerates, so we can no longer prove the
+    /// signature COVERS everything the value depends on — a warm hit could
+    /// validate the curated facts while an unenumerated dependency has moved.
+    /// The rail therefore has a real cost (a legitimately fact-heavy compute
+    /// is recomputed cold forever); it is not free correctness bookkeeping.
+    #[inline]
+    pub fn non_cacheable(&self) -> bool {
+        // Overflow is peeked, never finalised: no `Arc<[FactVersionRef]>`
+        // allocation on the hot cold-member path, and no audit event — the
+        // event stays owned by the ONE signature-consuming `install_fact_tracer`
+        // boundary per compute (see its emission site).
+        self.cell.non_cacheable_read_observed() || self.cell.would_overflow()
+    }
+}
+
+/// Open a CACHEABILITY TRACER SCOPE around a producer's ENTIRE compute and hand
+/// it the scope's [`CacheabilityProbe`].
+///
+/// **The scope must be the OUTERMOST bracket of the producing function.** An
+/// admission into a shared cache is fail-closed only if its whole compute — key
+/// computation, gate classification, lowering, peek, and reduce — runs inside a
+/// cacheability tracer. A tracer that starts LATE (after the lowering, say)
+/// leaves a pre-tracer read point whose fenced serve is never observed, and no
+/// downstream re-observation is guaranteed: structural-transit reduction does
+/// not descend into composite children, so a nested reference resolved during
+/// lowering is never re-read by the reduce.
+///
+/// Returns `(value, non_cacheable)` — the same verdict [`CacheabilityProbe`]
+/// reports, sampled once after the scope pops, for a producer that admits
+/// AFTER its compute rather than inside it.
+pub fn with_cacheability_scope<F, R>(host: &crate::VerterHost, f: F) -> (R, bool)
+where
+    F: for<'t> FnOnce(&CacheabilityProbe<'t>) -> R,
+{
+    let (value, mut read_set) = host.with_fact_tracer_cell(|cell| {
+        #[cfg(test)]
+        force_tracer_overflow_observations(host, None);
+        f(&CacheabilityProbe { cell })
+    });
+    let non_cacheable = read_set.non_cacheable_read_observed() || read_set.would_overflow();
+    (value, non_cacheable)
+}
+
+/// [`with_cacheability_scope`] for a producer whose admission happens AFTER the
+/// traced compute returns, so it needs the verdict but not the in-scope probe.
+///
+/// Use this entry at every admission boundary whose entry signature is built
+/// from ANOTHER source (the carrier's `dep_signature`, the keyed canonical's
+/// observed hash) rather than from this tracer's finalised set — those callers
+/// have no other place to see an overflow, and folding it into the verdict here
+/// makes it impossible to drop. A caller that DOES consume the finalised
+/// signature (building the entry's `ReadSetSignature` from it) uses
+/// [`install_fact_tracer`] and routes `Overflow` through
+/// [`SignatureAdmission::from_finalise`].
+pub(crate) fn install_fact_tracer_cacheability<F, R>(host: &crate::VerterHost, f: F) -> (R, bool)
+where
+    F: FnOnce() -> R,
+{
+    with_cacheability_scope(host, |_probe| f())
 }
 
 /// Fan `sig` into every active tracer on the current thread's stack.
@@ -1053,262 +1351,5 @@ impl ReadSetSignature {
 }
 
 #[cfg(test)]
-mod read_set_signature_unit_tests {
-    use super::*;
-    use crate::resolver_core::DerivedFactKind;
-
-    fn fact_filewhole(canon: &str, byte: u8) -> FactVersionRef {
-        FactVersionRef::FileWholeHash {
-            canonical_id: canon.to_string(),
-            hash: [byte; 16],
-        }
-    }
-
-    fn fact_derived(canon: &str, byte: u8) -> FactVersionRef {
-        FactVersionRef::DerivedFactHash {
-            canonical_id: canon.to_string(),
-            kind: DerivedFactKind::Route,
-            hash: [byte; 16],
-        }
-    }
-
-    fn fact_parse(canon: &str, byte: u8) -> FactVersionRef {
-        FactVersionRef::Parse(ParseFactRef {
-            canonical_id: canon.to_string(),
-            key: FactKey::SyntacticExportSet,
-            lane: FactLane::Semantic,
-            expected_hash: [byte; 16],
-        })
-    }
-
-    #[test]
-    fn read_set_signature_empty_validates_vacuously_via_facts_path() {
-        // Empty carrier: facts empty. `validate_fact_signature`
-        // returns true on empty input.
-        let sig = ReadSetSignature::empty();
-        assert!(!sig.is_overflow(), "empty carrier must NOT be overflow");
-        assert_eq!(sig.facts.len(), 0, "empty carrier carries no facts");
-        // Don't assert validate without ctx — empty carrier's
-        // `validate` short-circuits via empty fact list. Tested
-        // separately in integration with a `ResolverContext` stub.
-    }
-
-    #[test]
-    fn read_set_signature_overflow_validate_returns_false() {
-        let sig = ReadSetSignature::overflow();
-        assert!(sig.is_overflow(), "overflow carrier must report overflow");
-        // We can't trivially construct a ResolverContext here, but
-        // the overflow short-circuit doesn't even call ctx — it
-        // returns false directly. Integration tests cover the live
-        // `validate(ctx)` call.
-    }
-
-    #[test]
-    fn read_set_signature_canonical_ids_deduplicates_facts() {
-        // facts mention /a.ts twice + /b.ts once. The canonical set
-        // must collapse the duplicate /a.ts to one entry.
-        let facts: Arc<[FactVersionRef]> = Arc::from(vec![
-            fact_filewhole("/a.ts", 1),
-            fact_parse("/a.ts", 9),
-            fact_filewhole("/b.ts", 2),
-        ]);
-        let sig = ReadSetSignature::new(facts);
-        let canons: Vec<String> = sig
-            .canonical_ids()
-            .iter()
-            .map(|a| a.as_ref().to_string())
-            .collect();
-        assert_eq!(
-            canons.len(),
-            2,
-            "duplicate /a.ts across facts must collapse to one entry"
-        );
-        assert!(canons.contains(&"/a.ts".to_string()));
-        assert!(canons.contains(&"/b.ts".to_string()));
-    }
-
-    #[test]
-    fn read_set_signature_canonical_ids_covers_all_fact_variants() {
-        let facts: Arc<[FactVersionRef]> = Arc::from(vec![
-            fact_filewhole("/wholehash.ts", 1),
-            fact_derived("/derived.ts", 2),
-            fact_parse("/parse.ts", 3),
-            FactVersionRef::ResolveImports(crate::resolver_core::ResolveImportsFactRef {
-                canonical_id: "/resolve.ts".to_string(),
-                key: FactKey::SyntacticExportSet,
-                lane: FactLane::Semantic,
-                expected_hash: [0u8; 16],
-            }),
-            FactVersionRef::RouteSurface(crate::resolver_core::RouteSurfaceFactRef {
-                canonical_id: "/route.ts".to_string(),
-                key: FactKey::SyntacticExportSet,
-                lane: FactLane::Semantic,
-                expected_hash: [0u8; 16],
-            }),
-        ]);
-        let sig = ReadSetSignature::new(facts);
-        let canons: Vec<String> = sig
-            .canonical_ids()
-            .iter()
-            .map(|a| a.as_ref().to_string())
-            .collect();
-        assert!(
-            canons.contains(&"/wholehash.ts".to_string()),
-            "FileWholeHash canonical must surface"
-        );
-        assert!(
-            canons.contains(&"/derived.ts".to_string()),
-            "DerivedFactHash canonical must surface"
-        );
-        assert!(
-            canons.contains(&"/parse.ts".to_string()),
-            "Parse canonical must surface"
-        );
-        assert!(
-            canons.contains(&"/resolve.ts".to_string()),
-            "ResolveImports canonical must surface"
-        );
-        assert!(
-            canons.contains(&"/route.ts".to_string()),
-            "RouteSurface canonical must surface"
-        );
-        assert_eq!(canons.len(), 5, "all 5 distinct canonicals must be present");
-    }
-
-    #[test]
-    fn read_set_signature_canonical_ids_skips_project_generation_fact() {
-        // A `ProjectGeneration` fact references no canonical — it must
-        // contribute nothing to the reverse-index canonical set, while
-        // the sibling `FileWholeHash` fact still surfaces.
-        let facts: Arc<[FactVersionRef]> = Arc::from(vec![
-            FactVersionRef::ProjectGeneration { generation: 7 },
-            fact_filewhole("/only.ts", 1),
-        ]);
-        let sig = ReadSetSignature::new(facts);
-        let canons: Vec<String> = sig
-            .canonical_ids()
-            .iter()
-            .map(|a| a.as_ref().to_string())
-            .collect();
-        assert_eq!(
-            canons,
-            vec!["/only.ts".to_string()],
-            "ProjectGeneration contributes no canonical; only /only.ts surfaces"
-        );
-    }
-
-    #[test]
-    fn read_set_signature_new_is_fact_only() {
-        let facts: Arc<[FactVersionRef]> = Arc::from(vec![fact_filewhole("/a.ts", 1)]);
-        let sig = ReadSetSignature::new(Arc::clone(&facts));
-        assert_eq!(sig.facts.len(), 1);
-        assert!(!sig.overflowed);
-        assert!(
-            Arc::ptr_eq(&sig.facts, &facts),
-            "new() stores facts verbatim"
-        );
-        let canons = sig.canonical_ids();
-        assert_eq!(canons.len(), 1);
-        assert_eq!(canons[0].as_ref(), "/a.ts");
-    }
-}
-
-#[cfg(test)]
-mod file_source_env_observation_tests {
-    use super::*;
-    use crate::file_artifact_store::FileArtifactKey;
-    use crate::locator_identity::ParseEnvHash;
-    use crate::resolver_core::FactReadSetFinalise;
-    use crate::{HostConfig, VerterHost};
-    use std::sync::Arc as StdArc;
-
-    /// The reverse index registers a `(canonical → entry)` mapping for
-    /// every canonical the fact rail names — a `FileSourceEnv`
-    /// contributor fact must contribute its contributor canonical.
-    #[test]
-    fn canonical_ids_includes_file_source_env_contributor() {
-        let fact = FactVersionRef::FileSourceEnv {
-            canonical_id: "/contrib.d.ts".to_string(),
-            parse_env_hash: ParseEnvHash::from_env_hash([3u8; 16]),
-            parser_version: 2,
-            file_language_id: FileArtifactKey::derived_file_language_id("/contrib.d.ts"),
-        };
-        let sig = ReadSetSignature::new(StdArc::from(vec![fact]));
-        let canons = sig.canonical_ids();
-        assert_eq!(canons.len(), 1, "one contributor canonical expected");
-        assert_eq!(canons[0].as_ref(), "/contrib.d.ts");
-    }
-
-    /// The observation API sources `parser_version` / `file_language_id`
-    /// from the exact artifact key the read used — never re-derived from
-    /// the canonical/path at the call site — while the `parse_env_hash`
-    /// dimension is the canonical's LIVE per-canonical parse env (the
-    /// same dimension the contributor `LowerLocator` key folds), NEVER
-    /// the key's `parse_env_hash` slot (a base key carries the zero
-    /// sentinel there, not an env identity). The planted key carries a
-    /// non-current parser version, a language row derived from a
-    /// DIFFERENT path than the key's canonical, and a non-live
-    /// `parse_env_hash`, so any re-derivation (or a key-copied env)
-    /// would produce different field values and fail the assertions.
-    #[test]
-    fn observe_file_source_env_from_artifact_key_builds_fact_from_key_identity() {
-        let host = VerterHost::new_standalone(HostConfig::default());
-        let key = FileArtifactKey {
-            canonical: StdArc::from("/dep.ts"),
-            content_hash: [7u8; 16],
-            parse_env_hash: [3u8; 16],
-            parser_version: 9,
-            file_language_id: FileArtifactKey::derived_file_language_id("/dep.vue"),
-        };
-        let live_parse_env =
-            ParseEnvHash::from_env_hash(host.host_view_env_hashes_for("/dep.ts").parse_env_hash);
-        assert_ne!(
-            live_parse_env,
-            ParseEnvHash::from_env_hash([3u8; 16]),
-            "the planted key env must differ from the live env so the assertions \
-             below discriminate live sourcing from a key copy"
-        );
-        let (returned, read_set) =
-            host.with_fact_tracer(|| observe_file_source_env_from_artifact_key(&host, Some(&key)));
-        let expected = FactVersionRef::FileSourceEnv {
-            canonical_id: "/dep.ts".to_string(),
-            parse_env_hash: live_parse_env,
-            parser_version: 9,
-            file_language_id: FileArtifactKey::derived_file_language_id("/dep.vue"),
-        };
-        assert_eq!(
-            returned.as_ref(),
-            Some(&expected),
-            "the returned fact must carry the key's parser-version/language identity \
-             and the canonical's LIVE parse-env dimension"
-        );
-        let facts = match read_set.finalise() {
-            FactReadSetFinalise::Ok(facts) => facts,
-            FactReadSetFinalise::Overflow => panic!("one fact cannot overflow the signature cap"),
-        };
-        assert_eq!(
-            facts.as_ref(),
-            &[expected],
-            "the observation must land on the active tracer"
-        );
-    }
-
-    /// A read that cannot supply the exact artifact key it used has no
-    /// coherent source-env identity to observe: the API returns `None`
-    /// (so the caller routes the result through `ReturnOnly`) and
-    /// records nothing — never a fabricated default.
-    #[test]
-    fn observe_file_source_env_without_exact_key_returns_none_and_records_nothing() {
-        let host = VerterHost::new_standalone(HostConfig::default());
-        let (returned, read_set) =
-            host.with_fact_tracer(|| observe_file_source_env_from_artifact_key(&host, None));
-        assert!(
-            returned.is_none(),
-            "an unobservable source-env identity must surface as None, never a default"
-        );
-        assert!(
-            read_set.is_empty(),
-            "no observation may be recorded for an unobservable identity"
-        );
-    }
-}
+#[path = "fact_signature_helpers_tests.rs"]
+mod fact_signature_helpers_tests;

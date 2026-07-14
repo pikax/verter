@@ -37,10 +37,6 @@ use crate::owner_import_surface::OwnerImportSurfaceDb;
 use crate::resolver_core::imported_root_db::ImportedRootDb;
 use crate::resolver_core::route_db::RouteDb;
 use crate::semantic_query::DepVersion;
-// `HostResolvedNamedTypeKey` lives in `semantic_query` alongside the
-// `ResolvedNamedType` query variant; the shared semantic graph owns both
-// the identity mapping and the stored payloads.
-pub use crate::semantic_query::HostResolvedNamedTypeKey;
 use crate::semantic_query_memo::SemanticGraphStore;
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -196,7 +192,7 @@ pub struct IndexedReady {
     /// no dependency names, no raw surfaces — body-derived data lives on
     /// the shallow state's lazy declaration-body memo).
     pub external_type_analysis:
-        Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>,
+        Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>,
     /// Mirror of `script_analysis.flags & DECLARES_INTERFACE_APP_CONFIG`
     /// projected onto `IndexedReady` so the
     /// `AppConfigNoOverrideProofDb` production producer can short-circuit
@@ -257,7 +253,7 @@ impl IndexedReady {
         raw_source: Arc<str>,
         eval_source: Arc<str>,
         external_type_analysis: Arc<
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
         >,
     ) -> Self {
         Self {
@@ -293,14 +289,13 @@ impl IndexedReady {
     pub fn new_for_test(whole_hash: Hash16) -> Self {
         use rustc_hash::FxHashMap;
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
-            ),
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
         );
-        let shallow = crate::resolver_core::shallow_file_state::ShallowFileState::from_analysis(
-            whole_hash,
-            Arc::clone(&analysis),
-            None,
-        );
+        let shallow =
+            crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
+                whole_hash,
+                Arc::clone(&analysis),
+            );
         Self {
             whole_hash,
             shallow_state: Arc::new(shallow),
@@ -599,92 +594,11 @@ impl crate::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
 // per-canonical state is split into `ProfileState` / `DerivedRawState` /
 // `DependencyState` (D48).
 //
-// `TypeResolutionContextDb` consumes the post-lowering owned artifact
-// `crate::owned_artifacts::OwnedTypeResolutionContext`. The OXC parser
-// arena is dropped at the lowering boundary so the DB can sit on
-// `Send + Sync` host caches. There is no separate eval-env DB: the
-// per-file `EvalEnv` is not a stored field but the lazy `whole_env()`
-// demand product owned by `IndexedReady`'s `DeclBodyMemo` (a shallow
-// declaration index plus body locators), materialised on first
-// semantic demand.
+// There is no separate eval-env DB: the per-file `EvalEnv` is not a
+// stored field but the lazy `whole_env()` demand product owned by
+// `IndexedReady`'s `DeclBodyMemo` (a shallow declaration index plus
+// body locators), materialised on first semantic demand.
 // ──────────────────────────────────────────────────────────────────────────
-
-/// Cache identity for typed-DB entries that key by canonical-id +
-/// content-version. The owned-artifact typed DBs share this shape so
-/// writes validate uniformly.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct OwnedArtifactKey {
-    pub canonical_id: Arc<str>,
-    pub whole_hash: Hash16,
-}
-
-impl OwnedArtifactKey {
-    #[must_use]
-    pub fn new(canonical_id: impl Into<Arc<str>>, whole_hash: Hash16) -> Self {
-        Self {
-            canonical_id: canonical_id.into(),
-            whole_hash,
-        }
-    }
-}
-
-/// Host-owned cache for [`crate::owned_artifacts::OwnedTypeResolutionContext`].
-/// Currently populated only by tests; no production lowering path
-/// writes owned contexts here yet (the borrowed
-/// `ParsedTypeResolutionContext` is built fresh per call on the
-/// query-time element-resolver path, tracked-debt on the single-engine
-/// shrinking ledger).
-///
-/// **Invariant**: `Send + Sync + 'static` (per axiom A1 — host-owned
-/// caches only). The owned-artifact payload itself is `Send + Sync +
-/// 'static` so the cache can sit on a `DashMap` without thread-local
-/// workarounds.
-#[derive(Debug, Default)]
-pub struct TypeResolutionContextDb {
-    entries: DashMap<OwnedArtifactKey, Arc<crate::owned_artifacts::OwnedTypeResolutionContext>>,
-}
-
-impl TypeResolutionContextDb {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Look up an owned context by canonical-id + content-version.
-    /// Returns `None` when no entry is present.
-    #[must_use]
-    pub fn get(
-        &self,
-        key: &OwnedArtifactKey,
-    ) -> Option<Arc<crate::owned_artifacts::OwnedTypeResolutionContext>> {
-        self.entries.get(key).map(|r| Arc::clone(r.value()))
-    }
-
-    /// Insert an entry. The `Arc` payload may be shared — the DB itself
-    /// is the owner of that shared handle; callers should not mutate
-    /// the inner context after insertion.
-    pub fn insert(
-        &self,
-        key: OwnedArtifactKey,
-        value: Arc<crate::owned_artifacts::OwnedTypeResolutionContext>,
-    ) {
-        self.entries.insert(key, value);
-    }
-
-    /// Remove all entries — invoked by the project-generation
-    /// invalidation cascade.
-    pub fn clear(&self) {
-        self.entries.clear();
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-}
 
 /// Profile-domain DB for the per-canonical compile cache (D48).
 ///
@@ -819,89 +733,12 @@ impl DependencyCacheDb {
     }
 }
 
-/// Host-owned typed cache for resolved-type entries — the shared
-/// external-type cache backing
-/// `lookup_resolved_external_type_cache_with_view` /
-/// `store_resolved_external_type_cache_with_view` in
-/// `host_resolve::external_type_resolution`. The bounded
-/// clear-all-at-`RESOLVED_TYPE_CACHE_CAP` policy
-/// (`crate::types::RESOLVED_TYPE_CACHE_CAP`) lives INSIDE the DB so
-/// the policy travels with the storage; the DB hosts the inner mutex.
-#[derive(Debug, Default)]
-pub struct ResolvedTypeCacheDb {
-    /// The shared external-type cache map. Held behind a `Mutex`
-    /// because the bounded clear-all-at-cap policy needs an atomic
-    /// `len() >= cap → clear() → insert(...)` envelope that
-    /// `parking_lot::Mutex::lock()` provides.
-    entries: parking_lot::Mutex<
-        FxHashMap<crate::types::ResolvedTypeCacheKey, crate::types::ResolvedTypeCacheEntry>,
-    >,
-}
-
-impl ResolvedTypeCacheDb {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Look up an entry by key. Caller acquires nothing; the DB
-    /// internally locks for the read.
-    #[must_use]
-    pub(crate) fn lookup(
-        &self,
-        key: &crate::types::ResolvedTypeCacheKey,
-    ) -> Option<crate::types::ResolvedTypeCacheEntry> {
-        self.entries.lock().get(key).cloned()
-    }
-
-    /// Insert an entry. Honours the bounded clear-all-at-cap policy
-    /// (D16 — `crate::types::RESOLVED_TYPE_CACHE_CAP`): when the cache
-    /// reaches `RESOLVED_TYPE_CACHE_CAP` entries, the entire map
-    /// clears before the new entry is inserted. NOT LRU.
-    pub(crate) fn insert(
-        &self,
-        key: crate::types::ResolvedTypeCacheKey,
-        entry: crate::types::ResolvedTypeCacheEntry,
-    ) {
-        let mut guard = self.entries.lock();
-        if guard.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
-            guard.clear();
-        }
-        guard.insert(key, entry);
-    }
-
-    pub fn clear(&self) {
-        self.entries.lock().clear();
-    }
-
-    /// Drain every entry whose `dep_canonical_id` matches
-    /// `canonical_id`. Per the rehoming-doc §3.3 contract: a per-canonical
-    /// content edit invalidates the resolved-type entries that
-    /// depended on the same canonical so the next resolution pass
-    /// recomputes against fresh source.
-    pub(crate) fn evict_canonical(&self, canonical_id: &str) {
-        self.entries
-            .lock()
-            .retain(|key, _| key.dep_canonical_id != canonical_id);
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.lock().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.lock().is_empty()
-    }
-}
-
 // Compile-time `Send + Sync + 'static` guards for the typed DBs. A
 // regression that introduces a borrowed lifetime field would fail to
 // compile here.
 const _: fn() = || {
     fn assert_send_sync_static<T: Send + Sync + 'static>() {}
-    assert_send_sync_static::<TypeResolutionContextDb>();
     assert_send_sync_static::<CompileCacheDb>();
-    assert_send_sync_static::<ResolvedTypeCacheDb>();
 };
 
 // ──────────────────────────────────────────────────────────────────────
@@ -912,43 +749,6 @@ const _: fn() = || {
 // cascade in `invalidate_canonical_across_all_dbs` can dispatch to it
 // monomorphically.
 // ──────────────────────────────────────────────────────────────────────
-
-impl crate::invalidation_domain::ParticipatesInInvalidation for TypeResolutionContextDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        &[FileContent, ProjectGeneration]
-    }
-
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        match domain {
-            ProjectGeneration => self.clear(),
-            FileContent => {
-                // Per-canonical drain through InvalidationByCanonical.
-            }
-            ResolverState | TypeGraph | ComponentMeta | AppConfigInterfaceMerge => {
-                // Not declared; ignore.
-            }
-        }
-    }
-}
-
-impl crate::invalidation_domain::InvalidationByCanonical for TypeResolutionContextDb {
-    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        let mut removed = 0usize;
-        // Linear scan — O(N) is acceptable here: only tests populate
-        // this DB today, so entry counts stay tiny.
-        self.entries.retain(|key, _| {
-            if key.canonical_id.as_ref() == canonical_id {
-                removed += 1;
-                false
-            } else {
-                true
-            }
-        });
-        removed
-    }
-}
 
 impl crate::invalidation_domain::ParticipatesInInvalidation for CompileCacheDb {
     fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
@@ -1028,42 +828,6 @@ impl crate::invalidation_domain::InvalidationByCanonical for DependencyCacheDb {
         } else {
             0
         }
-    }
-}
-
-impl crate::invalidation_domain::ParticipatesInInvalidation for ResolvedTypeCacheDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        &[FileContent, TypeGraph, ProjectGeneration]
-    }
-
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
-        match domain {
-            ProjectGeneration => self.clear(),
-            FileContent | TypeGraph => {}
-            ResolverState | ComponentMeta | AppConfigInterfaceMerge => {}
-        }
-    }
-}
-
-impl crate::invalidation_domain::InvalidationByCanonical for ResolvedTypeCacheDb {
-    fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
-        // Linear scan over the mutex-protected map. The bounded
-        // clear-all-at-cap policy keeps the map small; per-canonical
-        // invalidation walks the map once and drops the matching
-        // dep_canonical entries.
-        let mut guard = self.entries.lock();
-        let mut removed = 0usize;
-        guard.retain(|key, _| {
-            if key.dep_canonical_id == canonical_id {
-                removed += 1;
-                false
-            } else {
-                true
-            }
-        });
-        removed
     }
 }
 
@@ -1215,10 +979,6 @@ pub struct ProjectTypeStore {
     /// value directly. See
     /// [`crate::app_config_proof_db::AppConfigNoOverrideProofDb`].
     app_config_no_override_proof: crate::app_config_proof_db::AppConfigNoOverrideProofDb,
-    /// Host-owned typed DB for [`crate::owned_artifacts::OwnedTypeResolutionContext`].
-    /// Currently populated only by tests; no production lowering path
-    /// writes owned contexts here yet.
-    type_resolution_context_db: TypeResolutionContextDb,
     /// Profile-domain DB for the per-canonical compile cache (D48). Holds
     /// [`crate::types::ProfileState`] entries; the §3.4.2 invalidation
     /// matrix governs eviction triggers.
@@ -1241,11 +1001,6 @@ pub struct ProjectTypeStore {
     /// resolved-type hashes, aliases, generation); the §3.4.2 invalidation
     /// matrix governs eviction triggers.
     dependency_cache_db: DependencyCacheDb,
-    /// Host-owned typed cache for resolved-type entries — the shared
-    /// external-type cache consumed by
-    /// `host_resolve::external_type_resolution`; the bounded
-    /// clear-all-at-cap policy lives inside the DB.
-    resolved_type_cache_db: ResolvedTypeCacheDb,
     /// Host-owned handle for `verter_semantic::db::SemanticDb`.
     /// **Different crate, different artifact.** This is NOT a typed-DB
     /// wrapper around the project-global graph; it is the
@@ -1378,12 +1133,10 @@ impl ProjectTypeStore {
             materialize_structure_db,
             ref_cycle_db,
             app_config_no_override_proof,
-            type_resolution_context_db: TypeResolutionContextDb::new(),
             compile_cache_db: CompileCacheDb::new(),
             compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent::new(),
             derived_raw_cache_db: DerivedRawCacheDb::new(),
             dependency_cache_db: DependencyCacheDb::new(),
-            resolved_type_cache_db: ResolvedTypeCacheDb::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             resolved_import_facts: Arc::new(
                 crate::resolved_import_facts::ResolvedImportFactsDb::new(),
@@ -1472,13 +1225,6 @@ impl ProjectTypeStore {
     // Typed-DB accessors
     // ──────────────────────────────────────────────────────────────────
 
-    /// Typed DB for [`crate::owned_artifacts::OwnedTypeResolutionContext`].
-    /// Currently populated only by tests; no production lowering path
-    /// writes owned contexts here yet.
-    pub fn type_resolution_context_cache(&self) -> &TypeResolutionContextDb {
-        &self.type_resolution_context_db
-    }
-
     /// Profile-domain DB for the per-canonical compile cache (D48).
     /// Stores [`crate::types::ProfileState`] entries; profile-flag
     /// changes invalidate, source-content changes preserve.
@@ -1507,12 +1253,6 @@ impl ProjectTypeStore {
     /// changes preserve.
     pub fn dependency_cache(&self) -> &DependencyCacheDb {
         &self.dependency_cache_db
-    }
-
-    /// Typed DB for resolved-type entries — the shared external-type
-    /// cache consumed by `host_resolve::external_type_resolution`.
-    pub fn resolved_type_cache(&self) -> &ResolvedTypeCacheDb {
-        &self.resolved_type_cache_db
     }
 
     /// Handle to the host-owned
@@ -1685,16 +1425,13 @@ impl ProjectTypeStore {
     /// - `OwnerImportSurfaceDb`: removes the owner surface.
     /// - `ComponentMetaResultDb`: removes every result keyed on the owner.
     /// - `SemanticGraphStore`: removes every memo entry whose scope
-    ///   references the canonical, and every Vue macro resolution entry
-    ///   keyed on the canonical.
+    ///   references the canonical.
     pub fn evict_canonical(&self, canonical_id: &str) {
         self.indexed.remove(canonical_id);
         self.analysis.invalidate_canonical(canonical_id);
         self.owner_import_surfaces.remove(canonical_id);
         self.component_meta_results.invalidate_owner(canonical_id);
         self.semantic_graph.invalidate_canonical(canonical_id);
-        self.semantic_graph
-            .invalidate_resolved_named_types_for_canonical(canonical_id);
         // Step 3 closure: invalidate every host-owned engine cache that
         // keys on `canonical_id` so a content edit on the file invalidates
         // its own resolved declarations / projections / materializations.
@@ -1719,12 +1456,6 @@ impl ProjectTypeStore {
         // app_config_decl_canonical_id IS this canonical.
         self.app_config_no_override_proof
             .invalidate_canonical(canonical_id);
-        // Unified cascade — F2 (resolved_type_cache) participates per
-        // the rehoming-doc §3.3 contract: per-canonical content edits
-        // drain entries whose `dep_canonical_id` references the same
-        // canonical. Pre-rehoming the off-store cache only had
-        // clear-all-at-cap; this method is the per-canonical drain.
-        self.resolved_type_cache_db.evict_canonical(canonical_id);
         // Unified cascade — F5 (semantic_db) participates per the
         // rehoming-doc §3.3 contract: a per-canonical content edit
         // invalidates the semantic-fact cache for the same canonical
@@ -1773,8 +1504,6 @@ impl ProjectTypeStore {
         self.owner_import_surfaces.remove(canonical_id);
         self.component_meta_results.invalidate_owner(canonical_id);
         self.semantic_graph.invalidate_canonical(canonical_id);
-        self.semantic_graph
-            .invalidate_resolved_named_types_for_canonical(canonical_id);
         self.imported_registry_db.invalidate_canonical(canonical_id);
         self.declaration_lookup_db
             .invalidate_canonical(canonical_id);
@@ -1786,7 +1515,6 @@ impl ProjectTypeStore {
         self.ref_cycle_db.invalidate_for_canonical(canonical_id);
         self.app_config_no_override_proof
             .invalidate_canonical(canonical_id);
-        self.resolved_type_cache_db.evict_canonical(canonical_id);
         self.semantic_db.lock().invalidate(canonical_id);
         self.member_semantic_facts
             .invalidate_canonical(canonical_id);
@@ -1921,29 +1649,11 @@ impl ProjectTypeStore {
         //   - owner import surfaces (routes they resolved may shift)
         //   - component-meta results (depend on routes / intrinsic SDK)
         //   - semantic query memo (derived from routes + intrinsics)
-        //   - Vue macro resolution artifacts (route-sensitive cross-file
-        //     resolution: a tsconfig change can redirect the same name to
-        //     a different target file)
         self.owner_import_surfaces
             .entries_drain_for_generation_bump();
         // `invalidate_all` drops every `SemanticNodeId`-keyed structure
-        // on the graph store — including the Vue macro resolved-named-type
-        // identity map — and aborts every in-flight macro-resolution
-        // build. It also advances the resolved-named-type reset epoch via
-        // `BudgetedNamedTypeIndex::clear_and_bump_generation`, which bumps
-        // the epoch INSIDE the same `retention_gate.write()` critical
-        // section that clears the identity map and its budget — bump and
-        // clear are one atomic step. A macro-resolution build aborted by
-        // this call keeps running until its next abort check, but its
-        // `HostNamedTypeCacheAdapter` snapshotted the pre-bump epoch, so
-        // any straggler `insert_resolved_named_type` it performs — however
-        // long after this bump — is rejected by the epoch fence: that
-        // fence re-reads and compares the epoch UNDER the same
-        // `retention_gate.read()` guard that performs the map insert, so a
-        // straggler is fully ordered against the clear+bump with no
-        // window. No post-`invalidate_all` re-sweep is needed: the fence
-        // prevents the stale insert from ever landing. The node arena
-        // itself is append-only and is not reset.
+        // on the graph store and aborts every in-flight build. The node
+        // arena itself is append-only and is not reset.
         let _ = self.semantic_graph.invalidate_all();
         self.component_meta_results.invalidate_all();
         // Step 3 closure: project-shape change invalidates every engine
@@ -1979,7 +1689,6 @@ impl ProjectTypeStore {
         self.compile_cache_db.clear();
         self.derived_raw_cache_db.clear();
         self.dependency_cache_db.clear();
-        self.resolved_type_cache_db.clear();
         *self.semantic_db.lock() = verter_semantic::db::SemanticDb::new();
         generation
     }
@@ -2029,14 +1738,12 @@ pub const PROJECT_TYPE_STORE_DB_INVENTORY: &[&str] = &[
     "materialize_structure_db",
     "ref_cycle_db",
     "app_config_no_override_proof",
-    "type_resolution_context_db",
     "compile_cache_db",
     // D48 split: source-content-domain and dep-closure-domain siblings
     // of `compile_cache_db`. Each fans into the unified
     // `bump_project_generation_and_evict` cascade.
     "derived_raw_cache_db",
     "dependency_cache_db",
-    "resolved_type_cache_db",
     // The `semantic_db: Mutex<verter_semantic::db::SemanticDb>`
     // handle is intentionally absent from this inventory — it is the
     // *handle* sitting inside `ProjectTypeStore`, not a typed-DB wrapper
@@ -2067,13 +1774,11 @@ impl ProjectTypeStore {
             &self.materialize_structure_db,
             &self.ref_cycle_db,
             &self.app_config_no_override_proof,
-            &self.type_resolution_context_db,
             &self.compile_cache_db,
             // Source-content-domain and dep-closure-domain siblings of
             // `compile_cache_db`.
             &self.derived_raw_cache_db,
             &self.dependency_cache_db,
-            &self.resolved_type_cache_db,
         ]
     }
 
@@ -2146,10 +1851,6 @@ impl ProjectTypeStore {
             self.app_config_no_override_proof
                 .invalidate_canonical_for(canonical_id),
         );
-        total = total.saturating_add(
-            self.type_resolution_context_db
-                .invalidate_canonical_for(canonical_id),
-        );
         total = total.saturating_add(self.compile_cache_db.invalidate_canonical_for(canonical_id));
         total = total.saturating_add(
             self.derived_raw_cache_db
@@ -2157,10 +1858,6 @@ impl ProjectTypeStore {
         );
         total = total.saturating_add(
             self.dependency_cache_db
-                .invalidate_canonical_for(canonical_id),
-        );
-        total = total.saturating_add(
-            self.resolved_type_cache_db
                 .invalidate_canonical_for(canonical_id),
         );
         total
@@ -2266,12 +1963,11 @@ mod tests {
         let hash_v1 = [1u8; 16];
         let hash_v2 = [2u8; 16];
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
-            ),
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
         );
         let shallow = Arc::new(
-            crate::resolver_core::shallow_file_state::ShallowFileState::from_analysis(
-                hash_v1, analysis, None,
+            crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
+                hash_v1, analysis,
             ),
         );
         db.insert(
@@ -2292,7 +1988,7 @@ mod tests {
                 export_signatures: None,
                 snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
                 external_type_analysis: Arc::new(
-                    verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+                    verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
                 ),
                 declares_interface_app_config: false,
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
@@ -2322,17 +2018,15 @@ mod tests {
     fn indexed_counters_reflect_insertions_and_replacements() {
         let store = ProjectTypeStore::new();
         let analysis = Arc::new(
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
-            ),
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
         );
         let mk_indexed = |hash: Hash16| {
             Arc::new(IndexedReady {
                 whole_hash: hash,
                 shallow_state: Arc::new(
-                    crate::resolver_core::shallow_file_state::ShallowFileState::from_analysis(
+                    crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
                         hash,
                         Arc::clone(&analysis),
-                        None,
                     ),
                 ),
                 import_routes: Arc::new(FxHashMap::default()),

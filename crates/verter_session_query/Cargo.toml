@@ -1,0 +1,22 @@
+[package]
+name = "verter_session_query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Query-boundary crate for the shared semantic engine — owns the host port the query layer demands of the session host; parser/compiler-free dependency closure"
+publish = false
+
+# Dependency closure is a FIREWALL contract: this crate must never reach the
+# parser/compiler front-end (`verter_parser`, `verter_compiler`,
+# `verter_session`, `verter_type_expr_oxc`, any `oxc_*` beyond the span
+# primitive `verter_span` wraps) — direct OR through any feature. Enforced
+# structurally by the resolve-graph closure guard in
+# `tests/cases/dependency_closure_guard.rs`.
+[dependencies]
+verter_type_expr = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

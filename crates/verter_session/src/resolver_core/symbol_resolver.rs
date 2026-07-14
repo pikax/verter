@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
+use verter_parser::utils::oxc::script::type_surface::ResolvedElements;
 
 use crate::resolver_core::{
     FactVersionRef, ResolutionNodeKey, ResolutionNodeKind, ResolvedTypeDeclaration,
@@ -724,7 +724,7 @@ mod tests {
         let key_member = provider_export_route_node_key(
             "/src/types.ts",
             "Props",
-            &RouteDemand::MemberPath(vec!["foo".to_string()]),
+            &RouteDemand::member_path(vec!["foo".to_string()]),
             SymbolSpace::Type,
         );
         assert_ne!(

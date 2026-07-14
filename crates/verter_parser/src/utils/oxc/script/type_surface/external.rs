@@ -30,8 +30,6 @@ use std::str;
 use oxc_ast::ast::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use verter_type_expr::TypeExprScope;
-
 use crate::common::Span;
 
 use super::{
@@ -50,36 +48,12 @@ use crate::utils::oxc::script::raw_surface::{
 /// (interface or type alias), and resolves it to structured property/emit information.
 ///
 /// Returns `None` if the file can't be parsed or the named type isn't found.
-///
-/// `external_canonical_id` is the canonical_id of the dependency file whose
-/// source is being resolved; it is stamped onto every populated `type_expr`
-/// as the paired `type_expr_scope`. Test callers without a canonical_id may
-/// pass an empty string — the pairing invariant is satisfied either way.
-pub fn resolve_external_type_with_canonical(
-    type_name: &str,
-    dep_source: &str,
-    allocator: &oxc_allocator::Allocator,
-    external_canonical_id: &str,
-) -> Option<ResolvedElements> {
-    resolve_external_type_with_companion_and_canonical(
-        type_name,
-        dep_source,
-        &FxHashMap::default(),
-        allocator,
-        external_canonical_id,
-    )
-}
-
-/// Backward-compatible wrapper that resolves without a canonical_id. The
-/// resulting `type_expr_scope` carries an empty string; production callers
-/// should prefer `resolve_external_type_with_canonical` so the paired scope
-/// is meaningful.
 pub fn resolve_external_type(
     type_name: &str,
     dep_source: &str,
     allocator: &oxc_allocator::Allocator,
 ) -> Option<ResolvedElements> {
-    resolve_external_type_with_canonical(type_name, dep_source, allocator, "")
+    resolve_external_type_with_companion(type_name, dep_source, &FxHashMap::default(), allocator)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1749,25 +1723,6 @@ pub fn resolve_external_type_with_companion(
     companion_types: &FxHashMap<String, ResolvedElements>,
     allocator: &oxc_allocator::Allocator,
 ) -> Option<ResolvedElements> {
-    resolve_external_type_with_companion_and_canonical(
-        type_name,
-        dep_source,
-        companion_types,
-        allocator,
-        "",
-    )
-}
-
-/// Like `resolve_external_type_with_companion` but stamps `type_expr_scope`
-/// with the supplied canonical_id on every populated `type_expr` in the
-/// returned `ResolvedElements`.
-pub fn resolve_external_type_with_companion_and_canonical(
-    type_name: &str,
-    dep_source: &str,
-    companion_types: &FxHashMap<String, ResolvedElements>,
-    allocator: &oxc_allocator::Allocator,
-    external_canonical_id: &str,
-) -> Option<ResolvedElements> {
     let source_type = oxc_span::SourceType::ts();
     let parsed = oxc_parser::Parser::new(allocator, dep_source, source_type).parse();
 
@@ -1777,14 +1732,13 @@ pub fn resolve_external_type_with_companion_and_canonical(
 
     let analysis = analyze_external_type_program(&parsed.program);
     let base_ctx = build_type_context(&parsed.program, dep_source.as_bytes(), 0);
-    resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical(
+    resolve_external_type_in_context_with_analyzed_symbol_companion(
         type_name,
         &parsed.program,
         dep_source.as_bytes(),
         &base_ctx,
         &analysis,
         companion_types,
-        external_canonical_id,
     )
 }
 
@@ -1796,37 +1750,14 @@ pub fn resolve_external_type_in_program_with_analyzed_symbol_companion(
     analysis: &AnalyzedExternalTypeSource,
     imported_companions: &FxHashMap<String, ResolvedElements>,
 ) -> Option<ResolvedElements> {
-    resolve_external_type_in_program_with_analyzed_symbol_companion_and_canonical(
-        type_name,
-        program,
-        source_bytes,
-        analysis,
-        imported_companions,
-        "",
-    )
-}
-
-/// Like `resolve_external_type_in_program_with_analyzed_symbol_companion`
-/// but stamps `type_expr_scope` on every populated `type_expr` with the
-/// supplied canonical_id.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub fn resolve_external_type_in_program_with_analyzed_symbol_companion_and_canonical(
-    type_name: &str,
-    program: &Program<'_>,
-    source_bytes: &[u8],
-    analysis: &AnalyzedExternalTypeSource,
-    imported_companions: &FxHashMap<String, ResolvedElements>,
-    external_canonical_id: &str,
-) -> Option<ResolvedElements> {
     let base_ctx = build_type_context(program, source_bytes, 0);
-    resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical(
+    resolve_external_type_in_context_with_analyzed_symbol_companion(
         type_name,
         program,
         source_bytes,
         &base_ctx,
         analysis,
         imported_companions,
-        external_canonical_id,
     )
 }
 
@@ -1839,44 +1770,9 @@ pub fn resolve_external_type_in_context_with_analyzed_symbol_companion<'ctx, 'a:
     analysis: &AnalyzedExternalTypeSource,
     imported_companions: &FxHashMap<String, ResolvedElements>,
 ) -> Option<ResolvedElements> {
-    resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical(
-        type_name,
-        program,
-        source_bytes,
-        base_ctx,
-        analysis,
-        imported_companions,
-        "",
-    )
-}
-
-/// Like `resolve_external_type_in_context_with_analyzed_symbol_companion`
-/// but stamps `type_expr_scope` on every populated `type_expr` with the
-/// supplied canonical_id.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub fn resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical<
-    'ctx,
-    'a: 'ctx,
->(
-    type_name: &str,
-    program: &'ctx Program<'a>,
-    source_bytes: &[u8],
-    base_ctx: &TypeResolutionContext<'ctx, 'a>,
-    analysis: &AnalyzedExternalTypeSource,
-    imported_companions: &FxHashMap<String, ResolvedElements>,
-    external_canonical_id: &str,
-) -> Option<ResolvedElements> {
     if type_name != "default" && !analysis.has_local_symbol_target(type_name) {
-        return resolve_value_declaration_type(type_name, program, source_bytes, 0, base_ctx).map(
-            |resolved| {
-                finalize_external_resolution_with_offset(
-                    resolved,
-                    source_bytes,
-                    0,
-                    external_canonical_id,
-                )
-            },
-        );
+        return resolve_value_declaration_type(type_name, program, source_bytes, 0, base_ctx)
+            .map(|resolved| finalize_external_resolution_with_offset(resolved, source_bytes, 0));
     }
 
     let target_name = analysis.local_symbol_target_name(type_name);
@@ -1886,7 +1782,6 @@ pub fn resolve_external_type_in_context_with_analyzed_symbol_companion_and_canon
         source_bytes,
         base_ctx,
         imported_companions,
-        external_canonical_id,
     )
 }
 
@@ -1897,7 +1792,6 @@ fn resolve_external_type_in_context_with_companion<'ctx, 'a: 'ctx>(
     source_bytes: &[u8],
     base_ctx: &TypeResolutionContext<'ctx, 'a>,
     imported_companions: &FxHashMap<String, ResolvedElements>,
-    external_canonical_id: &str,
 ) -> Option<ResolvedElements> {
     let mut ctx = base_ctx.clone();
     ctx.extend_companion_types(imported_companions);
@@ -1908,9 +1802,7 @@ fn resolve_external_type_in_context_with_companion<'ctx, 'a: 'ctx>(
         result = resolve_default_exported_type(program, &ctx);
     }
 
-    result.map(|resolved| {
-        finalize_external_resolution_with_offset(resolved, source_bytes, 0, external_canonical_id)
-    })
+    result.map(|resolved| finalize_external_resolution_with_offset(resolved, source_bytes, 0))
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -2023,24 +1915,7 @@ fn finalize_external_resolution_with_offset(
     mut resolved: ResolvedElements,
     source_bytes: &[u8],
     span_offset: u32,
-    external_canonical_id: &str,
 ) -> ResolvedElements {
-    // Stamp the external file's canonical_id as `type_expr_scope` on every
-    // populated `type_expr`. The lowering itself happened at construction
-    // time inside the external file's parse arena (elements.rs / decl.rs).
-    // Stamping here completes the pairing invariant
-    // `type_expr.is_some() <=> type_expr_scope.is_some()` for the external
-    // path before the result leaves the parser.
-    let scope = TypeExprScope::new(external_canonical_id);
-    resolved.stamp_type_expr_scope(&scope);
-    debug_assert!(
-        resolved.assert_typed_form_populated().is_ok(),
-        "finalize_external_resolution_with_offset must satisfy the typed-form pairing invariant: {}",
-        resolved
-            .assert_typed_form_populated()
-            .err()
-            .unwrap_or_default()
-    );
     for prop in &mut resolved.props {
         let start = prop.key.start as usize;
         let end = prop.key.end as usize;

@@ -61,28 +61,21 @@ pub(crate) fn classify_node(
     }
 }
 
-/// Graph-native sibling of the registry-symbol "stay symbolic" root
-/// predicate. Returns `true` when a registry-symbol body NODE has a
-/// root kind that the registry must publish symbolically rather than
-/// materialise eagerly — a deferred `Mapped` / `Conditional` /
-/// `IndexedAccess` shell or a `TypeOf` carrier.
+/// The registry-symbol "stay symbolic" root predicate, node-domain.
+/// Returns `true` when a registry-symbol body NODE has a root kind that
+/// the registry must publish symbolically rather than materialise
+/// eagerly — a deferred `Mapped` / `Conditional` / `IndexedAccess`
+/// shell or a `TypeOf` carrier.
 ///
-/// This is the handle-input counterpart of the `TypeExpr`-shape
-/// predicate `imported_registry_alias_should_stay_symbolic` (in
-/// `host_manage::component_meta_methods`): a consumer holding a settled
-/// body handle classifies its root through this graph-native predicate
-/// instead of reconstructing a `TypeExpr` to pattern-match. It is a
-/// ROOT-KIND classifier — it reads only the node's own root variant
-/// via [`crate::project_semantic_dispatch::node_data_for`], unwrapping a
+/// The registry walker (`host_manage::component_meta_methods`'
+/// `imported_registry_alias_should_stay_symbolic`) classifies the
+/// resolved declaration's lowered body root through this predicate; the
+/// `TypeExpr`-shape sibling below answers identically for a
+/// parser-produced shape (the handle-capable equivalence fixtures pin
+/// the agreement). It is a ROOT-KIND classifier — it reads only the
+/// node's own root variant via
+/// [`crate::project_semantic_dispatch::node_data_for`], unwrapping a
 /// single `Alias` hop, and makes NO resolution / reduction / descent.
-///
-/// Dormant-but-ready: the handle-input registry classification arm is
-/// proven by the handle-capable equivalence fixtures and becomes a
-/// production caller when the structural-lowerer producer is wired to
-/// emit handles. Until then no production path holds a settled
-/// registry-body handle, so this graph-native sibling has no non-test
-/// caller yet.
-#[allow(dead_code)]
 pub(crate) fn node_root_should_stay_symbolic(
     ctx: &dyn crate::resolver_core::ResolverContext,
     node: SemanticNodeId,
@@ -107,13 +100,13 @@ pub(crate) fn node_root_should_stay_symbolic(
 /// `TypeExpr`. A `Mapped` / `Conditional` / `IndexedAccess` / `TypeOf`
 /// root (after stripping a `Parenthesized` wrapper) stays symbolic.
 ///
-/// This is the SINGLE definition of the `TypeExpr`-arm predicate — the
-/// registry walker (`host_manage::component_meta_methods`) calls it, and
-/// the handle-capable equivalence fixture asserts it agrees with the
-/// graph-native [`node_root_should_stay_symbolic`] for every root kind.
-/// Keeping both arms reading from one source is what makes the two
-/// predicates provably equivalent (deleting a root kind from EITHER arm
-/// breaks the equivalence test).
+/// This is the SINGLE definition of the `TypeExpr`-arm predicate; the
+/// handle-capable equivalence fixture asserts it agrees with the
+/// graph-native [`node_root_should_stay_symbolic`] (the arm the
+/// registry walker classifies through) for every root kind. Keeping
+/// both arms reading from one source is what makes the two predicates
+/// provably equivalent (deleting a root kind from EITHER arm breaks
+/// the equivalence test).
 pub(crate) fn expr_root_should_stay_symbolic(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::Parenthesized(inner) => expr_root_should_stay_symbolic(inner),

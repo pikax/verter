@@ -3,9 +3,8 @@ use std::collections::BTreeSet;
 use rustc_hash::FxHashSet;
 use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_semantic::analysis::types::{AnalyzedMacroKind, MacroTypeDep};
-use verter_type_expr::{ObjectExpr, TypeExpr};
 
-use crate::resolver_core::{project_macro_surfaces, resolve_local_type_declaration};
+use crate::resolver_core::resolve_local_type_declaration;
 
 use super::direct_macro::{
     imported_declaration_surface_is_authoritative, is_direct_local_macro_type_reference,
@@ -75,7 +74,8 @@ where
         {
             continue;
         }
-        let direct_macro_reference = is_direct_macro_type_reference(macros, dep, None);
+        let direct_macro_reference =
+            is_direct_macro_type_reference(host, owner_canonical, macros, dep);
         if expanded {
             if let Some(mac) = macros.get(dep.macro_index) {
                 let authoritative_owner = macro_has_authoritative_owner_surface(
@@ -237,7 +237,7 @@ where
 
         let imported_elements = imported_surface
             .take()
-            .map(|surface| surface.elements)
+            .map(|surface| surface.resolution)
             .or_else(|| {
                 host.resolve_macro_elements(
                     owner_canonical,
@@ -249,9 +249,13 @@ where
                     &mut visiting,
                 )
             });
-        if let Some(elements) = imported_elements {
-            // Project the native-only surface (`native_props`) from the
-            // resolved `ResolvedElements`. The published props/emits/slots/
+        if let Some(resolution) = imported_elements {
+            // The native-only surface (`native_props`) rides the SAME
+            // dispatch resolution that produced the elements payload:
+            // keep-all rows built directly from the one-level
+            // `TypeInfoSurface` members (visibility carried verbatim) —
+            // no `ResolvedElements` round-trip, no separate re-resolve.
+            // The published props/emits/slots/
             // exposed surface is NOT projected here — it is owned by the
             // typeinfo macro-surface path (`vue_macro_dtos`), which
             // `component_meta_resolved_macros` consults at the session
@@ -259,17 +263,25 @@ where
             // (`TypeExpr::named`): consumers re-resolve the named root on
             // demand through the shared resolver (shallow-by-default), and
             // the typeinfo/evaluated path is the single shape authority.
-            let projected = project_macro_surfaces(None, dep.macro_kind, &elements);
             let package_backed_dep = host.workspace_is_package_backed(dep_canonical.as_str())
                 || host.workspace_is_package_backed(declaration.canonical_source.as_str());
-            if is_direct_macro_type_reference(macros, dep, None)
+            if is_direct_macro_type_reference(host, owner_canonical, macros, dep)
                 && !package_backed_dep
                 && should_seed_direct_macro_registry_entry(&declaration)
                 && seen_registry_names.insert(dep.type_name.clone())
             {
                 resolved_type_registry.push(ResolvedTypeAnalysis {
                     name: dep.type_name.clone(),
-                    type_expr: TypeExpr::named(dep.type_name.clone()),
+                    // Shallow-by-default registry seed: the content-free bare
+                    // named-reference SOURCE — consumers re-resolve the named
+                    // root on demand through the one shared dispatch.
+                    type_source: verter_type_expr::facts::SourcePosition::Present(
+                        verter_type_expr::facts::SemanticTypeSource::Closed(
+                            verter_type_expr::facts::ClosedTypeFact::Leaf(
+                                verter_type_expr::facts::LeafTypeFact::Ref(dep.type_name.clone()),
+                            ),
+                        ),
+                    ),
                     type_expansion: None,
                 });
                 resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
@@ -284,11 +296,12 @@ where
             let imported_surface_is_authoritative =
                 imported_declaration_surface_is_authoritative(&declaration);
             let keep_direct_imported_vue_macro = keep_direct_imported_vue_macro(
+                host,
+                owner_canonical,
                 projectable_owner_local,
                 purpose,
                 macros,
                 dep,
-                None,
                 &declaration,
             );
             if !projectable_owner_local || keep_direct_imported_vue_macro {
@@ -299,7 +312,7 @@ where
                     import_source: dep.import_source.clone(),
                     surface_is_authoritative: imported_surface_is_authoritative,
                     declaration,
-                    native_props: projected.native_props,
+                    native_props: resolution.native_props,
                     jsdoc,
                 });
             }
@@ -314,23 +327,33 @@ where
                 .copied()
                 .unwrap_or(false);
             let keep_direct_imported_vue_macro = keep_direct_imported_vue_macro(
+                host,
+                owner_canonical,
                 projectable_owner_local,
                 purpose,
                 macros,
                 dep,
-                None,
                 &declaration,
             );
             let package_backed_dep = host.workspace_is_package_backed(dep_canonical.as_str())
                 || host.workspace_is_package_backed(declaration.canonical_source.as_str());
-            if is_direct_macro_type_reference(macros, dep, None)
+            if is_direct_macro_type_reference(host, owner_canonical, macros, dep)
                 && !package_backed_dep
                 && should_seed_direct_macro_registry_entry(&declaration)
                 && seen_registry_names.insert(dep.type_name.clone())
             {
                 resolved_type_registry.push(ResolvedTypeAnalysis {
                     name: dep.type_name.clone(),
-                    type_expr: TypeExpr::named(dep.type_name.clone()),
+                    // Shallow-by-default registry seed: the content-free bare
+                    // named-reference SOURCE — consumers re-resolve the named
+                    // root on demand through the one shared dispatch.
+                    type_source: verter_type_expr::facts::SourcePosition::Present(
+                        verter_type_expr::facts::SemanticTypeSource::Closed(
+                            verter_type_expr::facts::ClosedTypeFact::Leaf(
+                                verter_type_expr::facts::LeafTypeFact::Ref(dep.type_name.clone()),
+                            ),
+                        ),
+                    ),
                     type_expansion: None,
                 });
                 resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
@@ -413,8 +436,14 @@ where
                 {
                     resolved_type_registry.push(ResolvedTypeAnalysis {
                         name: resolved.name.clone(),
-                        type_expr: resolved.type_expr.clone().expect(
-                            "ResolvedLocalType.type_expr populated by analyzer (W0.2 invariant)",
+                        // The analyzer's synthesized closed shape IS the
+                        // entry's source (a primitive folds to a leaf fact;
+                        // richer bodies stay shallow named-reference
+                        // locators resolved on demand).
+                        type_source: verter_type_expr::facts::SourcePosition::Present(
+                            verter_type_expr::facts::SemanticTypeSource::Synthesized(
+                                resolved.shape.clone(),
+                            ),
                         ),
                         type_expansion: None,
                     });
@@ -530,9 +559,16 @@ where
                     };
                     resolved_type_registry.push(ResolvedTypeAnalysis {
                         name: root_name.clone(),
-                        type_expr: TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                            properties: Vec::new(),
-                        })),
+                        // Owner-local authoritative placeholder: an EMPTY
+                        // synthesized object shape (the projectable
+                        // owner-local surface is the shape authority).
+                        type_source: verter_type_expr::facts::SourcePosition::Present(
+                            verter_type_expr::facts::SemanticTypeSource::Synthesized(
+                                verter_type_expr::facts::ResolvedLocalShape::Object(
+                                    std::sync::Arc::from([]),
+                                ),
+                            ),
+                        ),
                         type_expansion: None,
                     });
                     resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {

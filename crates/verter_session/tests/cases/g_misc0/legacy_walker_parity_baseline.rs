@@ -20,23 +20,59 @@
 use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 use verter_session::meta_resolve::ResolvedComponentMetaState;
 
+/// A fixture resolution paired with the host it resolved against and
+/// the owner canonical, so published sources can be demand-materialized
+/// through the ONE shared dispatch when a structural assertion needs
+/// the resolved value type.
+struct FixtureResolution {
+    host: std::sync::Arc<verter_session::VerterHost>,
+    owner: String,
+    state: ResolvedComponentMetaState,
+}
+
+impl std::ops::Deref for FixtureResolution {
+    type Target = ResolvedComponentMetaState;
+    fn deref(&self) -> &ResolvedComponentMetaState {
+        &self.state
+    }
+}
+
 /// Resolve a Vue SFC plus optional companion .ts files via
-/// `AuditedRequest::builder()`. Returns the resolution state.
-/// Returns `None` only on `ResolutionFailed`; any other error is a
-/// genuine wiring regression and panics.
-fn resolve_with_files(
-    files: &[(&str, &str)],
-    canonical: &str,
-) -> Option<ResolvedComponentMetaState> {
-    let owned: Vec<(String, String)> = files
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+/// `AuditedRequest::builder()` against an explicitly-built host
+/// (identical config + upsert flow to the builder's hermetic path, but
+/// retained so published sources can be demanded). Returns the
+/// resolution state. Returns `None` only on `ResolutionFailed`; any
+/// other error is a genuine wiring regression and panics.
+fn resolve_with_files(files: &[(&str, &str)], canonical: &str) -> Option<FixtureResolution> {
+    let workspace: std::sync::Arc<dyn verter_workspace::WorkspaceAccess> = std::sync::Arc::new(
+        verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default()),
+    );
+    let host = std::sync::Arc::new(verter_session::VerterHost::new(
+        verter_session::HostConfig {
+            audit_enabled: true,
+            footprint_capture: true,
+            ..verter_session::HostConfig::default()
+        },
+        workspace,
+    ));
+    for (path, source) in files {
+        let _ = host.upsert(verter_session::UpsertRequest {
+            canonical_id: Some((*path).to_string()),
+            input_id: (*path).to_string(),
+            source: std::sync::Arc::from(*source),
+            file_language: host.language_classifier().classify(path),
+            aliases: Vec::new(),
+        });
+    }
     match AuditedRequest::builder()
-        .files(owned)
+        .attach_to(std::sync::Arc::clone(&host))
         .resolve_component_meta(canonical)
     {
-        Ok((_analysis, resolution, _record)) => Some(resolution),
+        Ok((_analysis, resolution, _record)) => Some(FixtureResolution {
+            host,
+            owner: canonical.to_string(),
+            state: resolution,
+        }),
         Err(AuditedRequestError::ResolutionFailed) => None,
         Err(other) => panic!("unexpected audited-request error: {other:?}"),
     }
@@ -153,16 +189,25 @@ enum ResolvedValueKind<'a> {
     Unresolved,
 }
 
-/// Extract the `value` prop's `TypeExpr` from a resolution. Falls
-/// back gracefully when `evaluated_types` is `None` (Identity /
-/// Navigate / Shallow modes) — the discrimination guard skips those
-/// resolutions explicitly.
-fn extract_resolved_value_type(resolution: &ResolvedComponentMetaState) -> Option<&TypeExpr> {
+/// Extract the `value` prop's resolved `TypeExpr` from a resolution by
+/// demand-materializing its published source through the ONE shared
+/// dispatch. Falls back gracefully when `evaluated_types` is `None`
+/// (Identity / Navigate / Shallow modes) — the discrimination guard
+/// skips those resolutions explicitly.
+fn extract_resolved_value_type(resolution: &FixtureResolution) -> Option<TypeExpr> {
     resolution
+        .state
         .evaluated_types
         .as_ref()
         .and_then(|e| e.props.iter().find(|f| f.name == "value"))
-        .map(|field| &field.r#type)
+        .map(|field| {
+            verter_session::test_only::semantic_source_probe::demand_type_expr(
+                &resolution.host,
+                &resolution.owner,
+                field.r#type.present().expect("present source"),
+            )
+            .unwrap_or_else(|| panic!("`value`'s published source must demand-materialize"))
+        })
 }
 
 fn typeexpr_kind(ty: &TypeExpr) -> &'static str {
@@ -194,7 +239,7 @@ fn typeexpr_kind(ty: &TypeExpr) -> &'static str {
     }
 }
 
-fn assert_parity(resolution: &ResolvedComponentMetaState, assertion: ParityAssertion<'_>) {
+fn assert_parity(resolution: &FixtureResolution, assertion: ParityAssertion<'_>) {
     let value_ty_opt = extract_resolved_value_type(resolution);
     if matches!(assertion.expected_value_kind, ResolvedValueKind::Unresolved) {
         // Unresolved fixtures carry no concrete value type. The
@@ -208,7 +253,7 @@ fn assert_parity(resolution: &ResolvedComponentMetaState, assertion: ParityAsser
         }
         return;
     }
-    let Some(value_ty) = value_ty_opt else {
+    let Some(value_ty) = value_ty_opt.as_ref() else {
         // Non-Unresolved expected but resolution carried no value type
         // — this is a fixture-environment regression rather than a
         // discrimination mismatch. The discrimination guard skips
@@ -710,7 +755,7 @@ const FIXTURE_TYPES_HEADER: &str = "export type Foo = unknown;\n";
 fn fixture_resolve(
     value_type: &str,
     types_companion_override: Option<&str>,
-) -> Option<ResolvedComponentMetaState> {
+) -> Option<FixtureResolution> {
     let companion = types_companion_override.unwrap_or(FIXTURE_TYPES_HEADER);
     let comp = sfc(value_type);
     resolve_with_files(&[("/types.ts", companion), ("/c.vue", &comp)], "/c.vue")
@@ -720,7 +765,7 @@ fn fixture_resolve(
 /// Uses the SAME fixture inputs as `fixture_NN_*` tests so the
 /// pairwise-equivalence pre-computation is over the exact same set
 /// of resolutions the discrimination guard will check against.
-fn collect_all_fixture_resolutions() -> Vec<Option<ResolvedComponentMetaState>> {
+fn collect_all_fixture_resolutions() -> Vec<Option<FixtureResolution>> {
     vec![
         // 01 plain object
         fixture_resolve("{ a: string; b: number }", None),
@@ -814,7 +859,7 @@ fn compute_pairwise_equivalences() -> Vec<(usize, usize)> {
             let Some(ty_j) = extract_resolved_value_type(res_j) else {
                 continue;
             };
-            if structurally_equivalent(ty_i, ty_j) {
+            if structurally_equivalent(&ty_i, &ty_j) {
                 equivalent_pairs.push((i, j));
                 equivalent_pairs.push((j, i)); // symmetric
             }
@@ -1084,7 +1129,7 @@ fn dump_fixture_resolutions() {
             .as_ref()
             .and_then(|r| extract_resolved_value_type(r))
         {
-            Some(ty) => format!("kind={} ty={ty:?}", typeexpr_kind(ty)),
+            Some(ty) => format!("kind={} ty={ty:?}", typeexpr_kind(&ty)),
             None => "None".to_string(),
         };
         eprintln!("FIXTURE_{:02}: {}", i + 1, kind);

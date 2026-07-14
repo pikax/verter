@@ -216,10 +216,14 @@ pub(crate) fn carrier_parse_snapshot(
 /// available. The OXC parse lives HERE (the scheduler-bound parse module) rather
 /// than in the host body — the synth injection threads the resolved active
 /// provider set in. Syntax-only: no resolver, no capability bits.
+/// `canonical_id` is the PRODUCING canonical the captured payload-ref anchors
+/// absolutize to (producer-side, through each envelope's owning provider)
+/// before the set feeds the synthesis.
 pub(crate) fn capture_synth_script_candidates(
     active_providers: &[std::sync::Arc<
         dyn verter_semantic::analysis::framework_facts::ScriptFactProvider,
     >],
+    canonical_id: &str,
     eval_source: Option<&str>,
     module_script_region: Option<(u32, u32)>,
     source_type: SourceType,
@@ -242,12 +246,95 @@ pub(crate) fn capture_synth_script_candidates(
         })
         .parse()
         .program;
-    verter_semantic::analysis::framework_facts::capture_script_candidates_with_module_region(
-        active_providers,
-        source,
-        &program,
-        module_script_region,
-    )
+    let mut set =
+        verter_semantic::analysis::framework_facts::capture_script_candidates_with_module_region(
+            active_providers,
+            source,
+            &program,
+            module_script_region,
+        );
+    // Producer-side locator absolutization: route each envelope through its
+    // OWNING provider (typed downcast + coherent `stable_hash` rebuild) so the
+    // synthesis consumes absolute payload-ref anchors, matching the candidate
+    // store's fill at `framework::script_facts`.
+    set.per_provider = set
+        .per_provider
+        .into_iter()
+        .map(|candidates| {
+            match active_providers
+                .iter()
+                .find(|provider| provider.adapter_id() == candidates.adapter_id)
+            {
+                Some(provider) => provider.absolutize_candidates(candidates, canonical_id),
+                None => candidates,
+            }
+        })
+        .collect();
+    set
+}
+
+/// Absolutize the analyzer-emitted macro-payload locator anchors to the
+/// PRODUCING canonical, before the snapshot enters any host-owned storage.
+///
+/// The analyzer (`verter_semantic`) is path-agnostic and stamps every
+/// macro-payload locator with the local-file EMPTY-sentinel anchor
+/// (`canonical_id == ""`); the SESSION alone knows the artifact identity
+/// backing the `DeclBodyMemo` a deref will serve through, so it fills the
+/// producing canonical here — a PRODUCER-side fill, never a consumer
+/// tolerance (the deref boundary keeps rejecting a canonical mismatch).
+///
+/// Fills ONLY empty anchors: a non-empty anchor may be a cross-file
+/// resolver's canonical (the locator contract) and is never rewritten —
+/// which also makes the pass idempotent. An empty `canonical_id` (no
+/// producing identity to absolutize to) leaves the sentinel in place.
+pub(crate) fn absolutize_macro_payload_anchors(
+    macros: &mut [verter_semantic::analysis::types::AnalyzedMacro],
+    canonical_id: &str,
+) {
+    use verter_type_expr::locators::MacroPayloadLocator;
+    if canonical_id.is_empty() {
+        return;
+    }
+    let canonical: std::sync::Arc<str> = std::sync::Arc::from(canonical_id);
+    let fill = |locator: &mut MacroPayloadLocator| {
+        if locator.anchor.canonical_id.is_empty() {
+            locator.anchor.canonical_id = std::sync::Arc::clone(&canonical);
+        }
+    };
+    for mac in macros.iter_mut() {
+        if let Some(locator) = mac.parsed_type_argument.as_mut() {
+            fill(locator);
+        }
+        for field in &mut mac.prop_fields {
+            if let Some(locator) = field.payload.as_mut() {
+                fill(locator);
+            }
+        }
+        for field in &mut mac.emit_fields {
+            if let Some(locator) = field.payload.as_mut() {
+                fill(locator);
+            }
+        }
+        for field in &mut mac.slot_fields {
+            if let Some(locator) = field.payload.as_mut() {
+                fill(locator);
+            }
+            // Slot BINDING payloads are analyzer-`None` today (the flat field
+            // vocabulary cannot address a nested position); walked under the
+            // same fill-only-empty rule so a future producer-emitted binding
+            // payload absolutizes identically.
+            for binding in &mut field.bindings {
+                if let Some(locator) = binding.payload.as_mut() {
+                    fill(locator);
+                }
+            }
+        }
+        for field in &mut mac.expose_fields {
+            if let Some(locator) = field.payload.as_mut() {
+                fill(locator);
+            }
+        }
+    }
 }
 
 /// The OXC [`SourceType`] for a carrier artifact's eval-source — the first
@@ -913,6 +1000,10 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     };
     let export_signatures = script_outputs.export_signatures;
     let mut script_analysis = script_outputs.script_analysis.unwrap_or_default();
+    // Producer-side locator absolutization: fill the analyzer's empty-sentinel
+    // macro-payload anchors with THIS snapshot's producing canonical before
+    // the snapshot enters host-owned storage.
+    absolutize_macro_payload_anchors(&mut script_analysis.macros, canonical_id);
 
     // Cross-reference: mark script bindings that are referenced by CSS v-bind() in style blocks
     if !style_analyses.is_empty() && !script_analysis.bindings.is_empty() {
@@ -1559,7 +1650,7 @@ pub(crate) fn compile_template_data(
 }
 
 pub(crate) fn build_non_sfc_snapshot_from_program(
-    _canonical_id: &str,
+    canonical_id: &str,
     source: &str,
     source_type: SourceType,
     program: &Program<'_>,
@@ -1571,20 +1662,26 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
 
     let export_signatures =
         verter_semantic::analysis::build_export_signatures_from_program(source, program);
-    let script_analysis = verter_semantic::analysis::build_script_analysis_with_scope_from_program(
-        source,
-        source_type,
-        program,
-        verter_semantic::analysis::AnalysisScope::IMPORTS
-            | verter_semantic::analysis::AnalysisScope::BINDINGS
-            | verter_semantic::analysis::AnalysisScope::FUNC_RETURNS
-            | verter_semantic::analysis::AnalysisScope::REACTIVITY
-            | verter_semantic::analysis::AnalysisScope::MACROS
-            | verter_semantic::analysis::AnalysisScope::MACRO_TYPE_DEPS
-            | verter_semantic::analysis::AnalysisScope::VUE_API_USAGE
-            | verter_semantic::analysis::AnalysisScope::EXPORT_SIGNATURES
-            | verter_semantic::analysis::AnalysisScope::SCRIPT_USAGES,
-    );
+    let mut script_analysis =
+        verter_semantic::analysis::build_script_analysis_with_scope_from_program(
+            source,
+            source_type,
+            program,
+            verter_semantic::analysis::AnalysisScope::IMPORTS
+                | verter_semantic::analysis::AnalysisScope::BINDINGS
+                | verter_semantic::analysis::AnalysisScope::FUNC_RETURNS
+                | verter_semantic::analysis::AnalysisScope::REACTIVITY
+                | verter_semantic::analysis::AnalysisScope::MACROS
+                | verter_semantic::analysis::AnalysisScope::MACRO_TYPE_DEPS
+                | verter_semantic::analysis::AnalysisScope::VUE_API_USAGE
+                | verter_semantic::analysis::AnalysisScope::EXPORT_SIGNATURES
+                | verter_semantic::analysis::AnalysisScope::SCRIPT_USAGES,
+        );
+    // Producer-side locator absolutization: fill the analyzer's empty-sentinel
+    // macro-payload anchors with THIS snapshot's producing canonical before
+    // the snapshot enters host-owned storage. Covers the non-SFC script lane
+    // AND every carrier snapshot built through this walk (Svelte).
+    absolutize_macro_payload_anchors(&mut script_analysis.macros, canonical_id);
 
     ParseSnapshot {
         whole_hash,

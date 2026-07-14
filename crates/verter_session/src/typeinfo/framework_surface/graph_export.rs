@@ -50,8 +50,8 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
 use crate::typeinfo::framework_surface::results;
 use crate::typeinfo::framework_surface::results::{
-    MacroSurfaceDtos, NamedTypeMember, NormalizedSurface, NormalizedSurfaces, OriginHop,
-    ResolvedOutcome,
+    MacroSurfaceDtos, NamedTypeMember, NamedTypeMemberOutput, NormalizedSurface,
+    NormalizedSurfaces, OriginHop, ResolvedOutcome,
 };
 
 /// The bounded shallow encoder's traversal depth budget. The member value
@@ -203,6 +203,52 @@ impl GraphArena {
             // Every other node kind is structural and outside the shallow
             // member-value vocabulary: degrade to opaque, never recurse.
             _ => self.push_opaque("member value is structurally unencodable shallowly"),
+        }
+    }
+
+    /// Encode a SEALED named-member output value into a node, returning its id.
+    ///
+    /// The classification already happened at the producer boundary
+    /// ([`NamedTypeMemberOutput`] is the closed shallow vocabulary), so this is
+    /// a pure arm-to-wire-node map — byte-identical to the legacy shallow
+    /// `TypeExpr` encoding for every arm: primitive / literal leaves, a named
+    /// ref minting a deterministic `GraphSymbolNode` + `GraphReference`, the
+    /// empty `GraphObject`, and the two DISTINCT opaque diagnostics (`None` =
+    /// no resolved type at all; `Opaque` = resolved but structurally
+    /// unencodable shallowly).
+    fn encode_named_member_output(&mut self, value: Option<&NamedTypeMemberOutput>) -> u32 {
+        let Some(value) = value else {
+            // A member with no resolved type expression is structurally
+            // unencodable here — degrade to opaque, do not fabricate a ref.
+            return self.push_opaque("member has no resolved type");
+        };
+        match value {
+            NamedTypeMemberOutput::Primitive(name) => {
+                let kind = primitive_kind_for(*name);
+                self.push_node(graph_type_node::Kind::Primitive(GraphPrimitive {
+                    kind: kind as i32,
+                }))
+            }
+            NamedTypeMemberOutput::Literal(lit) => {
+                let value = self.encode_literal(lit);
+                self.push_node(graph_type_node::Kind::Literal(GraphLiteral {
+                    value: Some(value),
+                }))
+            }
+            NamedTypeMemberOutput::Ref { name } => {
+                // A named alias: mint a deterministic symbol node + a bare
+                // `GraphReference { symbol_id }`.
+                let symbol_id = self.intern_symbol(name.as_ref());
+                self.push_node(graph_type_node::Kind::Reference(GraphReference {
+                    symbol_id,
+                }))
+            }
+            NamedTypeMemberOutput::EmptyObject => {
+                self.push_node(graph_type_node::Kind::Object(GraphObject::default()))
+            }
+            NamedTypeMemberOutput::Opaque => {
+                self.push_opaque("member value is structurally unencodable shallowly")
+            }
         }
     }
 
@@ -565,9 +611,16 @@ fn encode_kind_members(
                 .collect();
             dtos.prop_fields()
                 .iter()
-                .map(|f| {
+                .map(|row| {
+                    let f = &row.analysis;
                     let name_id = arena.strings.intern(&f.name);
-                    let type_node_id = arena.encode_member_value(f.type_expr.as_ref(), 0);
+                    // A prop's typed body is an on-demand payload LOCATOR
+                    // (`AnalyzedPropField.payload`), resolved only through the
+                    // shared dispatch — this encoder is ZERO-DISPATCH, so the
+                    // member value is structurally unencodable here and takes
+                    // the same absent arm a slot value does (opaque, never a
+                    // fabricated ref, never a resolve).
+                    let type_node_id = arena.encode_member_value(None, 0);
                     let default_value_id = defaults
                         .get(f.name.as_str())
                         .map(|value| arena.strings.intern(value));
@@ -589,8 +642,11 @@ fn encode_kind_members(
             .emit_fields()
             .iter()
             .map(|f| {
-                let name_id = arena.strings.intern(&f.name);
-                let type_node_id = arena.encode_member_value(f.payload_expr.as_ref(), 0);
+                let name_id = arena.strings.intern(&f.analysis.name);
+                // An emit's typed payload is an on-demand LOCATOR
+                // (`AnalyzedEmitField.payload`) — zero-dispatch encoder, so
+                // the value takes the absent/opaque arm (see props above).
+                let type_node_id = arena.encode_member_value(None, 0);
                 wire::FrameworkSurfaceMember {
                     name_id,
                     type_node_id,
@@ -640,7 +696,10 @@ fn encode_kind_members(
                     .iter()
                     .map(|b| {
                         let name_id = arena.strings.intern(&b.name);
-                        let type_node_id = arena.encode_member_value(b.prop.type_expr.as_ref(), 0);
+                        // A model binding's prop type is an on-demand payload
+                        // LOCATOR (`AnalyzedPropField.payload`) — absent arm,
+                        // same as props/emits above.
+                        let type_node_id = arena.encode_member_value(None, 0);
                         wire::FrameworkSurfaceMember {
                             name_id,
                             type_node_id,
@@ -656,7 +715,8 @@ fn encode_kind_members(
     }
 }
 
-/// Encode an options / expose object surface's named members.
+/// Encode an options / expose object surface's named members from their
+/// SEALED shallow output values (no `TypeExpr` reaches this encoder).
 fn encode_named_members(
     arena: &mut GraphArena,
     members: &[NamedTypeMember],
@@ -665,7 +725,7 @@ fn encode_named_members(
         .iter()
         .map(|m| {
             let name_id = arena.strings.intern(&m.name);
-            let type_node_id = arena.encode_member_value(m.type_expr.as_ref(), 0);
+            let type_node_id = arena.encode_named_member_output(m.value.as_ref());
             wire::FrameworkSurfaceMember {
                 name_id,
                 type_node_id,
@@ -765,13 +825,19 @@ mod tests {
     use verter_semantic::analysis::types::AnalyzedPropField;
     use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
-    fn prop_field(name: &str, ty: Option<TypeExpr>) -> AnalyzedPropField {
+    /// A named prop field. The prop's typed body is now an on-demand payload
+    /// LOCATOR (`AnalyzedPropField.payload`), never an inline `TypeExpr`; the
+    /// zero-dispatch encoder emits every prop member value as opaque. Tests that
+    /// pin the member-value ENCODING VOCABULARY drive `encode_member_value`
+    /// directly (below); this helper supplies named fields for surface-level
+    /// tests.
+    fn prop_field(name: &str) -> AnalyzedPropField {
         AnalyzedPropField {
             name: name.to_string(),
             is_optional: false,
             span: verter_span::Span::default(),
             type_annotation: None,
-            type_expr: ty,
+            payload: None,
             type_expr_scope: None,
             description: None,
             tags: Vec::new(),
@@ -781,7 +847,25 @@ mod tests {
         }
     }
 
+    /// Encode a single member VALUE `TypeExpr` through the surviving
+    /// `GraphArena::encode_member_value` vocabulary and return the arena plus the
+    /// pushed node id — the direct driver for the per-arm encoding-vocabulary
+    /// tests (the prop-surface path no longer feeds a `TypeExpr` to the encoder;
+    /// prop members take the opaque locator arm).
+    fn encode_value(ty: &TypeExpr) -> (GraphArena, u32) {
+        let mut arena = GraphArena::new();
+        let id = arena.encode_member_value(Some(ty), 0);
+        (arena, id)
+    }
+
     fn props_surface(fields: Vec<AnalyzedPropField>) -> NormalizedSurfaces {
+        let fields = fields
+            .into_iter()
+            .map(|analysis| results::ResolvedPropField {
+                analysis,
+                type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+            })
+            .collect();
         NormalizedSurfaces {
             surfaces: vec![NormalizedSurface {
                 kind: FrameworkSurfaceKind::Props,
@@ -816,44 +900,28 @@ mod tests {
 
     #[test]
     fn named_alias_member_mints_a_symbol_node_and_a_reference() {
-        // A prop typed `MyAlias` (a named ref) must mint a GraphSymbolNode AND a
-        // GraphReference pointing at it — NOT a fabricated opaque, NOT a display
-        // string (GraphReference has only symbol_id).
-        let normalized = props_surface(vec![prop_field(
-            "thing",
-            Some(TypeExpr::Ref {
-                name: "MyAlias".into(),
-                type_arguments: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            }),
-        )]);
-        let encoded = encode_framework_surfaces(
-            &normalized,
-            crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS,
-            crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS,
-        );
-        // The props entry's single member points at a Reference node.
-        let props = encoded
-            .surfaces
-            .iter()
-            .find(|s| s.kind == FrameworkSurfaceKind::Props as i32)
-            .expect("props entry present");
-        assert_eq!(props.members.len(), 1);
-        let member = &props.members[0];
-        let node = &encoded.graph.nodes[member.type_node_id as usize];
+        // A member value typed `MyAlias` (a named ref) must mint a
+        // GraphSymbolNode AND a GraphReference pointing at it — NOT a fabricated
+        // opaque, NOT a display string (GraphReference has only symbol_id).
+        let (arena, id) = encode_value(&TypeExpr::Ref {
+            name: "MyAlias".into(),
+            type_arguments: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        });
+        let node = &arena.nodes[id as usize];
         let Some(graph_type_node::Kind::Reference(reference)) = &node.kind else {
             panic!("named alias member must encode as a Reference, got {node:?}");
         };
         // The reference points at a real symbol node carrying the alias name.
-        let symbol = &encoded.graph.symbols[reference.symbol_id as usize];
-        let name = &encoded.graph.strings.as_ref().unwrap().entries[symbol.name_id as usize];
+        let symbol = &arena.symbols[reference.symbol_id as usize];
+        let name = &arena.strings.entries[symbol.name_id as usize];
         assert_eq!(name, "MyAlias", "the minted symbol carries the alias name");
     }
 
     #[test]
     fn structural_member_degrades_to_opaque_not_a_fabricated_ref() {
-        // A prop typed as a non-empty object literal is structural and outside
-        // the shallow member-value vocabulary — it MUST degrade to GraphOpaque,
-        // never a fabricated GraphReference/GraphSymbolNode.
+        // A member value typed as a non-empty object literal is structural and
+        // outside the shallow member-value vocabulary — it MUST degrade to
+        // GraphOpaque, never a fabricated GraphReference/GraphSymbolNode.
         use std::sync::Arc;
         use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty};
         let obj = ObjectExpr {
@@ -864,49 +932,23 @@ mod tests {
                 false,
             ))],
         };
-        let normalized = props_surface(vec![prop_field(
-            "nested",
-            Some(TypeExpr::Object(Arc::new(obj))),
-        )]);
-        let encoded = encode_framework_surfaces(
-            &normalized,
-            crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS,
-            crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS,
-        );
-        let props = encoded
-            .surfaces
-            .iter()
-            .find(|s| s.kind == FrameworkSurfaceKind::Props as i32)
-            .expect("props entry present");
-        let node = &encoded.graph.nodes[props.members[0].type_node_id as usize];
+        let (arena, id) = encode_value(&TypeExpr::Object(Arc::new(obj)));
+        let node = &arena.nodes[id as usize];
         assert!(
             matches!(node.kind, Some(graph_type_node::Kind::Opaque(_))),
             "a non-empty structural object member must degrade to GraphOpaque, got {node:?}"
         );
         // No symbol node was fabricated for the structural member.
         assert!(
-            encoded.graph.symbols.is_empty(),
+            arena.symbols.is_empty(),
             "a structural member must NOT mint a symbol node"
         );
     }
 
     #[test]
     fn primitive_member_encodes_as_a_primitive_node() {
-        let normalized = props_surface(vec![prop_field(
-            "count",
-            Some(TypeExpr::Primitive(PrimitiveName::Number)),
-        )]);
-        let encoded = encode_framework_surfaces(
-            &normalized,
-            crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS,
-            crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS,
-        );
-        let props = encoded
-            .surfaces
-            .iter()
-            .find(|s| s.kind == FrameworkSurfaceKind::Props as i32)
-            .unwrap();
-        let node = &encoded.graph.nodes[props.members[0].type_node_id as usize];
+        let (arena, id) = encode_value(&TypeExpr::Primitive(PrimitiveName::Number));
+        let node = &arena.nodes[id as usize];
         let Some(graph_type_node::Kind::Primitive(p)) = &node.kind else {
             panic!("a primitive prop must encode as a Primitive node, got {node:?}");
         };
@@ -970,36 +1012,26 @@ mod tests {
 
     #[test]
     fn string_table_dedups_repeated_names() {
-        // Two props of the same alias type share one symbol node and the alias
-        // name interns once.
-        let normalized = props_surface(vec![
-            prop_field(
-                "a",
-                Some(TypeExpr::Ref {
-                    name: "Shared".into(),
-                    type_arguments: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-                }),
-            ),
-            prop_field(
-                "b",
-                Some(TypeExpr::Ref {
-                    name: "Shared".into(),
-                    type_arguments: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-                }),
-            ),
-        ]);
-        let encoded = encode_framework_surfaces(
-            &normalized,
-            crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS,
-            crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS,
-        );
+        // Two member values of the same alias type share one symbol node and the
+        // alias name interns once.
+        let mut arena = GraphArena::new();
+        let make_ref = || TypeExpr::Ref {
+            name: "Shared".into(),
+            type_arguments: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let _ = arena.encode_member_value(Some(&make_ref()), 0);
+        let _ = arena.encode_member_value(Some(&make_ref()), 0);
         assert_eq!(
-            encoded.graph.symbols.len(),
+            arena.symbols.len(),
             1,
             "two members of the same alias share one symbol node"
         );
-        let entries = &encoded.graph.strings.as_ref().unwrap().entries;
-        let shared_count = entries.iter().filter(|e| *e == "Shared").count();
+        let shared_count = arena
+            .strings
+            .entries
+            .iter()
+            .filter(|e| *e == "Shared")
+            .count();
         assert_eq!(
             shared_count, 1,
             "the shared alias name interns exactly once"
@@ -1008,34 +1040,14 @@ mod tests {
 
     #[test]
     fn literal_member_encodes_with_a_string_table_entry() {
-        let normalized = props_surface(vec![prop_field(
-            "tag",
-            Some(TypeExpr::Literal(LiteralValue::String("hello".into()))),
-        )]);
-        let encoded = encode_framework_surfaces(
-            &normalized,
-            crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS,
-            crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS,
-        );
-        let props = encoded
-            .surfaces
-            .iter()
-            .find(|s| s.kind == FrameworkSurfaceKind::Props as i32)
-            .unwrap();
-        let node = &encoded.graph.nodes[props.members[0].type_node_id as usize];
+        let (arena, id) = encode_value(&TypeExpr::Literal(LiteralValue::String("hello".into())));
+        let node = &arena.nodes[id as usize];
         assert!(
             matches!(node.kind, Some(graph_type_node::Kind::Literal(_))),
             "a string-literal prop must encode as a Literal node"
         );
         assert!(
-            encoded
-                .graph
-                .strings
-                .as_ref()
-                .unwrap()
-                .entries
-                .iter()
-                .any(|e| e == "hello"),
+            arena.strings.entries.iter().any(|e| e == "hello"),
             "the literal's string value is interned"
         );
     }
@@ -1052,13 +1064,29 @@ mod tests {
                 kind: FrameworkSurfaceKind::Props,
                 outcome: ResolvedOutcome::Resolved(MacroSurfaceDtos {
                     props: Some(PropsSurface {
-                        fields: vec![prop_field(
-                            "named",
-                            Some(TypeExpr::Primitive(PrimitiveName::String)),
-                        )],
+                        fields: vec![results::ResolvedPropField {
+                            analysis: prop_field("named"),
+                            type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+                        }],
                         index_signatures: vec![ExpandedIndexSignature {
-                            key_type: TypeExpr::Primitive(PrimitiveName::String),
-                            value_type: TypeExpr::Primitive(PrimitiveName::Number),
+                            key_type: verter_type_expr::facts::SourcePosition::Present(
+                                verter_type_expr::facts::SemanticTypeSource::Closed(
+                                    verter_type_expr::facts::ClosedTypeFact::Leaf(
+                                        verter_type_expr::facts::LeafTypeFact::Primitive(
+                                            PrimitiveName::String,
+                                        ),
+                                    ),
+                                ),
+                            ),
+                            value_type: verter_type_expr::facts::SourcePosition::Present(
+                                verter_type_expr::facts::SemanticTypeSource::Closed(
+                                    verter_type_expr::facts::ClosedTypeFact::Leaf(
+                                        verter_type_expr::facts::LeafTypeFact::Primitive(
+                                            PrimitiveName::Number,
+                                        ),
+                                    ),
+                                ),
+                            ),
                             readonly: false,
                         }],
                         ..Default::default()
@@ -1182,5 +1210,198 @@ mod tests {
         assert!(import.exported_name_id.is_none());
         assert!(import.original_name_id.is_none());
         assert!(import.alias_name_id.is_none());
+    }
+
+    /// GOLDEN wire parity for the SEALED named-member output encoding: every
+    /// [`NamedTypeMemberOutput`] arm (plus the `None` no-resolved-type state)
+    /// produces EXACTLY the wire node the legacy shallow `TypeExpr` encoding
+    /// produced — proved by a DIRECT A/B: each arm runs BOTH encoders (the
+    /// legacy `encode_member_value(&TypeExpr, 0)` and the sealed
+    /// `encode_named_member_output`) on fresh arenas and byte-compares the
+    /// produced node / symbol / string tables, so the
+    /// "wire_identical_to_legacy" claim is self-proving rather than
+    /// node-spot-checked. The end-to-end encode below then pins the same arms
+    /// through `encode_framework_surfaces`. Discriminating: pairing the two
+    /// DISTINCT opaque diagnostics (`None` vs `Opaque`) fails the byte
+    /// compare, and collapsing either into the other flips an asserted
+    /// message.
+    #[test]
+    fn sealed_named_member_output_encodes_wire_identical_to_legacy_shallow() {
+        use crate::typeinfo::framework_surface::results::OptionsSurface;
+        use verter_type_expr::ObjectExpr;
+
+        // --- DIRECT legacy A/B, arm by arm ------------------------------
+        // `encode_member_value` IS the legacy shallow `TypeExpr` encoder the
+        // sealed vocabulary replaced on the named-member route; running both
+        // on fresh arenas and comparing the WHOLE arena state (nodes +
+        // symbols + strings + the returned id) proves byte-identity per arm.
+        let legacy_vs_sealed =
+            |legacy_value: Option<&TypeExpr>, sealed_value: Option<&NamedTypeMemberOutput>| {
+                let mut legacy = GraphArena::new();
+                let legacy_id = legacy.encode_member_value(legacy_value, 0);
+                let mut sealed = GraphArena::new();
+                let sealed_id = sealed.encode_named_member_output(sealed_value);
+                assert_eq!(
+                    legacy_id, sealed_id,
+                    "the returned node id must match the legacy encoder: {legacy_value:?}"
+                );
+                assert_eq!(
+                    legacy.nodes, sealed.nodes,
+                    "the node tables must be byte-identical to the legacy encoder: {legacy_value:?}"
+                );
+                assert_eq!(
+                    legacy.symbols, sealed.symbols,
+                    "the symbol tables must be byte-identical to the legacy encoder: {legacy_value:?}"
+                );
+                assert_eq!(
+                    legacy.strings.entries, sealed.strings.entries,
+                    "the string tables must be byte-identical to the legacy encoder: {legacy_value:?}"
+                );
+            };
+        // (0) the `None` no-resolved-type state.
+        legacy_vs_sealed(None, None);
+        // (1) primitive leaf.
+        legacy_vs_sealed(
+            Some(&TypeExpr::Primitive(PrimitiveName::Number)),
+            Some(&NamedTypeMemberOutput::Primitive(PrimitiveName::Number)),
+        );
+        // (2) literal leaf (interned string value).
+        legacy_vs_sealed(
+            Some(&TypeExpr::Literal(LiteralValue::String("hello".into()))),
+            Some(&NamedTypeMemberOutput::Literal(LiteralValue::String(
+                "hello".into(),
+            ))),
+        );
+        // (3) named ref (minted symbol node + GraphReference).
+        legacy_vs_sealed(
+            Some(&TypeExpr::named("MyAlias")),
+            Some(&NamedTypeMemberOutput::Ref {
+                name: "MyAlias".into(),
+            }),
+        );
+        // (4) the empty object surface.
+        legacy_vs_sealed(
+            Some(&TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                properties: vec![],
+            }))),
+            Some(&NamedTypeMemberOutput::EmptyObject),
+        );
+        // (5) the structurally-unencodable arm (a union is outside the
+        // shallow member-value vocabulary on both encoders).
+        legacy_vs_sealed(
+            Some(&TypeExpr::Union(std::sync::Arc::from(vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::Primitive(PrimitiveName::Number),
+            ]))),
+            Some(&NamedTypeMemberOutput::Opaque),
+        );
+        // The A/B genuinely discriminates: pairing the `None` state with the
+        // `Opaque` arm (two DIFFERENT diagnostics) fails the byte compare.
+        let mut none_arena = GraphArena::new();
+        let _ = none_arena.encode_member_value(None, 0);
+        let mut opaque_arena = GraphArena::new();
+        let _ = opaque_arena.encode_named_member_output(Some(&NamedTypeMemberOutput::Opaque));
+        assert_ne!(
+            none_arena.strings.entries, opaque_arena.strings.entries,
+            "the None and Opaque diagnostics stay distinct (the A/B discriminates)"
+        );
+
+        // --- End-to-end pin through `encode_framework_surfaces` ---------
+
+        let member = |name: &str, value: Option<NamedTypeMemberOutput>| NamedTypeMember {
+            name: name.to_string(),
+            is_optional: false,
+            value,
+        };
+        let normalized = NormalizedSurfaces {
+            surfaces: vec![NormalizedSurface {
+                kind: FrameworkSurfaceKind::Options,
+                outcome: ResolvedOutcome::Resolved(MacroSurfaceDtos {
+                    options: Some(OptionsSurface {
+                        members: vec![
+                            member("unresolved", None),
+                            member(
+                                "count",
+                                Some(NamedTypeMemberOutput::Primitive(PrimitiveName::Number)),
+                            ),
+                            member(
+                                "tag",
+                                Some(NamedTypeMemberOutput::Literal(LiteralValue::String(
+                                    "hello".into(),
+                                ))),
+                            ),
+                            member(
+                                "aliased",
+                                Some(NamedTypeMemberOutput::Ref {
+                                    name: "MyAlias".into(),
+                                }),
+                            ),
+                            member("empty", Some(NamedTypeMemberOutput::EmptyObject)),
+                            member("structural", Some(NamedTypeMemberOutput::Opaque)),
+                        ],
+                    }),
+                    ..Default::default()
+                }),
+            }],
+        };
+        let encoded = encode_framework_surfaces(
+            &normalized,
+            crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS,
+            crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS,
+        );
+        let options = encoded
+            .surfaces
+            .iter()
+            .find(|s| s.kind == FrameworkSurfaceKind::Options as i32)
+            .expect("options entry present");
+        assert_eq!(options.members.len(), 6);
+        let entries = &encoded.graph.strings.as_ref().unwrap().entries;
+        let node_of = |i: usize| &encoded.graph.nodes[options.members[i].type_node_id as usize];
+        let opaque_message = |node: &GraphTypeNode| -> String {
+            let Some(graph_type_node::Kind::Opaque(op)) = &node.kind else {
+                panic!("expected an Opaque node, got {node:?}");
+            };
+            let Some(graph_query_error::Kind::Other(other)) = &op.error.as_ref().unwrap().kind
+            else {
+                panic!("expected an Other query error");
+            };
+            entries[other.message_name_id as usize].clone()
+        };
+
+        // (0) `None` — the legacy no-resolved-type opaque, VERBATIM message.
+        assert_eq!(opaque_message(node_of(0)), "member has no resolved type");
+
+        // (1) primitive leaf.
+        let Some(graph_type_node::Kind::Primitive(p)) = &node_of(1).kind else {
+            panic!("primitive arm must encode as a Primitive node");
+        };
+        assert_eq!(p.kind, PrimitiveKind::Number as i32);
+
+        // (2) literal leaf with its interned string value.
+        assert!(matches!(
+            node_of(2).kind,
+            Some(graph_type_node::Kind::Literal(_))
+        ));
+        assert!(entries.iter().any(|e| e == "hello"));
+
+        // (3) named ref: a REAL minted symbol node carrying the alias name.
+        let Some(graph_type_node::Kind::Reference(reference)) = &node_of(3).kind else {
+            panic!("ref arm must encode as a Reference node");
+        };
+        let symbol = &encoded.graph.symbols[reference.symbol_id as usize];
+        assert_eq!(entries[symbol.name_id as usize], "MyAlias");
+
+        // (4) the empty object surface.
+        assert!(matches!(
+            node_of(4).kind,
+            Some(graph_type_node::Kind::Object(_))
+        ));
+
+        // (5) `Opaque` — the legacy structurally-unencodable opaque, VERBATIM
+        // message, DISTINCT from the no-resolved-type message.
+        assert_eq!(
+            opaque_message(node_of(5)),
+            "member value is structurally unencodable shallowly"
+        );
     }
 }

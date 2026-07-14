@@ -4,8 +4,11 @@
 //! public expansion boundary instead of collapsing back into an Exact/Partial
 //! compatibility contract.
 
+use std::sync::Arc;
+
 use crate::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
-use verter_type_expr::{TypeExpr, TypeExprScope, TypeParam};
+use verter_type_expr::facts::{NarrowTypeParam, SemanticTypeSource, SourcePosition};
+use verter_type_expr::locators::AuthoredBodyLocator;
 
 pub type ExpansionExactness = SolverExactness;
 pub type ExpansionExecutionStatus = ExecutionStatus;
@@ -15,7 +18,9 @@ pub type ExpansionExecutionStatus = ExecutionStatus;
 // ---------------------------------------------------------------------------
 
 /// Materialized object surface from the solver.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedObjectShape {
     pub properties: Vec<ExpandedProperty>,
@@ -23,17 +28,24 @@ pub struct ExpandedObjectShape {
     pub call_signatures: Vec<ExpandedCallSignature>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedProperty {
     pub name: String,
-    pub ty: TypeExpr,
+    /// The member value's three-state SOURCE POSITION: a present faithful
+    /// source, a proven schema absence, or a typed source-construction
+    /// failure at this REQUIRED member-value position. A `Failed` position
+    /// fails output materialization — it is never rendered as an `unknown`
+    /// success.
+    pub ty: SourcePosition,
     pub optional: bool,
     pub readonly: bool,
     /// Declared accessibility of the member, carried verbatim from the source
     /// member ([`verter_type_expr::MemberVisibility`] on the IR
     /// `ObjectProperty` / `MethodSignature`, or the graph
-    /// `SurfaceMember::visibility` / `ProjectedMember::visibility`). `Public`
+    /// `SurfaceMember::visibility`). `Public`
     /// for every non-class origin; a class member carries its
     /// `TSAccessibility`. This is the visibility carrier the shallow-by-default
     /// shape projection MUST preserve so any DERIVATION that filters by key
@@ -50,49 +62,76 @@ pub struct ExpandedProperty {
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See
-    /// [`verter_compiler::utils::oxc::script::type_surface::ResolvedProp::declared_in_macro_type_arg`]
+    /// [`verter_parser::utils::oxc::script::type_surface::ResolvedProp::declared_in_macro_type_arg`]
     /// for the structural definition. Propagated by
     /// `macro_shapes`-side materialisation and the prepared-surface walker
-    /// from the upstream `SurfaceMember` / `ProjectedMember` source.
+    /// from the upstream `SurfaceMember` source.
     #[serde(default)]
     pub declared_in_macro_type_arg: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedIndexSignature {
-    pub key_type: TypeExpr,
-    pub value_type: TypeExpr,
+    /// The declared key domain's three-state SOURCE POSITION. A genuinely
+    /// OPEN key domain (`[key: string]`) is a PRESENT closed leaf — semantic
+    /// openness is a valid success, never a failure.
+    pub key_type: SourcePosition,
+    /// The declared value type's three-state SOURCE POSITION. A REQUIRED
+    /// index value position richer than the producer's faithful vocabulary
+    /// is a typed source-construction `Failed` — it marks the result
+    /// non-complete instead of degrading to a fabricated `unknown` success.
+    pub value_type: SourcePosition,
     pub readonly: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedCallSignature {
     pub parameters: Vec<ExpandedParameter>,
-    pub return_type: TypeExpr,
-    pub type_parameters: Vec<TypeParam>,
+    pub return_type: SemanticTypeSource,
+    /// The signature's own type parameters, narrowed to the fact-shaped
+    /// [`NarrowTypeParam`] carrier (name + ordinal) — never the raw
+    /// [`verter_type_expr::TypeParam`], which structurally owns
+    /// `constraint`/`default: Option<Arc<TypeExpr>>`. This mirrors how the
+    /// sibling [`verter_type_expr::facts::FunctionSignatureFact`] carries a
+    /// signature's type parameters and is produced by
+    /// [`crate::analysis::type_eval_build::narrow_signature_type_params`].
+    /// A signature-scoped bound has no addressable authored slot (bounds are
+    /// recovered whole-signature on demand), so `constraint`/`default`
+    /// fail closed to `None` — no producer emits a bound locator here.
+    pub type_parameters: Arc<[NarrowTypeParam]>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedParameter {
     pub name: String,
-    pub ty: TypeExpr,
+    pub ty: SemanticTypeSource,
     pub optional: bool,
     pub rest: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
+)]
 pub struct ExpandedNormalizedExpr {
-    pub expr: TypeExpr,
+    pub expr: SemanticTypeSource,
 }
 
 // ---------------------------------------------------------------------------
 // Result & diagnostics
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpansionResult<T> {
     pub value: T,
@@ -101,7 +140,9 @@ pub struct ExpansionResult<T> {
     pub diagnostics: Vec<ExpansionDiagnostic>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpansionMetadata {
     pub exactness: ExpansionExactness,
@@ -109,7 +150,9 @@ pub struct ExpansionMetadata {
     pub diagnostics: Vec<ExpansionDiagnostic>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpansionDiagnostic {
     pub reason: ExpansionStopReason,
@@ -117,7 +160,16 @@ pub struct ExpansionDiagnostic {
     pub property_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum ExpansionStopReason {
     BudgetExceeded,
@@ -224,7 +276,9 @@ impl<T> ExpansionResult<T> {
 // Component-level types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Default, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedComponentTypes {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -241,13 +295,41 @@ pub struct ExpandedComponentTypes {
     pub slot_bindings: Vec<ExpandedField>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<ExpandedField>,
+    /// Per-macro `defineExpose` projected surface lane: the projector's
+    /// published surface members for each type-based `defineExpose` macro.
+    /// The exposed-analysis join pairs entries by the stable
+    /// `(macro_index, member name)` identity to set
+    /// `ExposedAnalysis.type_source` from the projected field's `r#type`;
+    /// an authored object-literal exposure of the same name keeps its own
+    /// (binding-derived) source — the lane only fills what the literal form
+    /// does not provide.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposed: Vec<ExpandedMacroExposed>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// One `defineExpose` macro's projected surface members. `macro_index` is
+/// the macro's position in the analyzer's macro list — the same ordinal
+/// every other per-macro lane (`ExpandedMacroProps` /
+/// `ExpandedMacroObjectShape`) keys on.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpandedMacroExposed {
+    pub macro_index: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<ExpandedField>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedField {
     pub name: String,
-    pub r#type: TypeExpr,
+    /// The field value's three-state SOURCE POSITION (see
+    /// [`ExpandedProperty::ty`]). A REQUIRED payload position (an emit
+    /// field's payload) whose faithful source could not be constructed is
+    /// `Failed` — never a fabricated `unknown` success.
+    pub r#type: SourcePosition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
     #[serde(default)]
@@ -256,27 +338,20 @@ pub struct ExpandedField {
     pub execution_status: ExpansionExecutionStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<ExpansionDiagnostic>,
-    /// Shallow lowered typed form preserved alongside the post-expansion
-    /// `r#type`. Carries the bare annotation expression the user wrote
-    /// (e.g. `TypeExpr::Ref { name: "ImportedAlias" }`) so consumers that
-    /// need to recover the syntactic shape of the prop / emit / slot-binding
-    /// annotation do not have to reparse `raw_type`. Populated by the
-    /// producer at `expand_macro_types_impl_with_expander` from the
-    /// analyzer-side `AnalyzedPropField.type_expr` /
-    /// `AnalyzedEmitField.payload_expr` / `AnalyzedSlotFieldBinding.binding_expr`
-    /// shallow source. `None` when the analyzer's shallow source was
+    /// The authored SHALLOW source of the field's annotation — the single
+    /// paired identity replacing the pre-expansion syntactic sidecar: the
+    /// producing-canonical scope is subsumed by the locator anchor.
+    /// Populated by the producer at `expand_macro_types_impl_with_expander`
+    /// from the analyzer-side `AnalyzedPropField.payload` /
+    /// `AnalyzedEmitField.payload` / `AnalyzedSlotFieldBinding.payload`
+    /// authored position. `None` when the analyzer's shallow source was
     /// `None` (e.g. Options-API binding entries).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shallow_type_expr: Option<TypeExpr>,
-    /// Scope of `shallow_type_expr`: canonical_id of the file whose OXC
-    /// parse produced the shallow expression. Pairing invariant:
-    /// `shallow_type_expr.is_some() <=> shallow_type_expr_scope.is_some()`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shallow_type_expr_scope: Option<TypeExprScope>,
+    pub shallow_source: Option<AuthoredBodyLocator>,
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See
-    /// [`verter_compiler::utils::oxc::script::type_surface::ResolvedProp::declared_in_macro_type_arg`]
+    /// [`verter_parser::utils::oxc::script::type_surface::ResolvedProp::declared_in_macro_type_arg`]
     /// for the structural definition. Propagated by
     /// `expand_macro_types_impl_with_expander` and
     /// `surface_member_to_expanded_field` from the upstream `SurfaceMember`
@@ -287,14 +362,14 @@ pub struct ExpandedField {
     pub declared_in_macro_type_arg: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedMacroProps {
     pub macro_index: usize,
     pub result: ExpansionResult<ExpandedObjectShape>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedMacroObjectShape {
     pub macro_index: usize,
@@ -310,6 +385,7 @@ impl ExpandedComponentTypes {
             && self.define_slots.is_empty()
             && self.slot_bindings.is_empty()
             && self.bindings.is_empty()
+            && self.exposed.is_empty()
     }
 }
 
@@ -321,7 +397,11 @@ mod tests {
     fn expansion_result_metadata_preserves_exactness_and_execution_status() {
         let result = ExpansionResult {
             value: ExpandedNormalizedExpr {
-                expr: TypeExpr::primitive(verter_type_expr::PrimitiveName::String),
+                expr: SemanticTypeSource::Closed(verter_type_expr::facts::ClosedTypeFact::Leaf(
+                    verter_type_expr::facts::LeafTypeFact::Primitive(
+                        verter_type_expr::PrimitiveName::String,
+                    ),
+                )),
             },
             exactness: SolverExactness::ExactSymbolic,
             execution_status: ExecutionStatus::Interrupted,
@@ -343,8 +423,12 @@ mod tests {
         use crate::analysis::type_solver::result::{SolverDiagnostic, SolverResult};
 
         // A solver result that is exact but has a non-semantic diagnostic
-        let mut solver_result = SolverResult::exact_concrete(TypeExpr::primitive(
-            verter_type_expr::PrimitiveName::String,
+        let mut solver_result = SolverResult::exact_concrete(SemanticTypeSource::Closed(
+            verter_type_expr::facts::ClosedTypeFact::Leaf(
+                verter_type_expr::facts::LeafTypeFact::Primitive(
+                    verter_type_expr::PrimitiveName::String,
+                ),
+            ),
         ));
         solver_result
             .diagnostics
@@ -369,5 +453,72 @@ mod tests {
         );
         assert!(expansion.diagnostics[0].context.contains("12"));
         assert!(expansion.diagnostics[0].context.contains("8"));
+    }
+
+    // Structural witness — every struct in the serde-persisted Expanded* family
+    // derives `#[derive(verter_no_typeexpr::NoTypeExpr)]`, so the per-struct
+    // derive is itself the always-compiled rail: it fails the build if any field
+    // regresses to a raw `TypeExpr` carrier (as the former
+    // `ExpandedCallSignature.type_parameters: Vec<TypeParam>` did). These asserts
+    // pin the current family members explicitly and greppably; a NEW family
+    // struct stays closed only if it likewise derives `NoTypeExpr` (members
+    // reachable from `ExpandedComponentTypes` are additionally proven
+    // transitively through it).
+    use static_assertions::assert_impl_all;
+    use verter_no_typeexpr::NoTypeExpr;
+
+    assert_impl_all!(ExpandedObjectShape: NoTypeExpr);
+    assert_impl_all!(ExpandedProperty: NoTypeExpr);
+    assert_impl_all!(ExpandedIndexSignature: NoTypeExpr);
+    assert_impl_all!(ExpandedCallSignature: NoTypeExpr);
+    assert_impl_all!(ExpandedParameter: NoTypeExpr);
+    assert_impl_all!(ExpandedNormalizedExpr: NoTypeExpr);
+    assert_impl_all!(ExpandedField: NoTypeExpr);
+    assert_impl_all!(ExpandedComponentTypes: NoTypeExpr);
+
+    #[test]
+    fn expanded_call_signature_type_params_narrow_to_fact_carrier_with_bounds_dropped() {
+        use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact};
+        use verter_type_expr::{PrimitiveName, TypeExpr, TypeParam};
+
+        // A call signature `<T extends string, U = string>` — BOTH source params
+        // carry a raw `TypeExpr` bound (`constraint` / `default`).
+        let source_params = vec![
+            TypeParam {
+                name: "T".to_string(),
+                constraint: Some(Arc::new(TypeExpr::primitive(PrimitiveName::String))),
+                default: None,
+            },
+            TypeParam {
+                name: "U".to_string(),
+                constraint: None,
+                default: Some(Arc::new(TypeExpr::primitive(PrimitiveName::String))),
+            },
+        ];
+
+        let sig = ExpandedCallSignature {
+            parameters: Vec::new(),
+            return_type: SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
+                PrimitiveName::Void,
+            ))),
+            type_parameters: crate::analysis::type_eval_build::narrow_signature_type_params(
+                &source_params,
+            ),
+        };
+
+        // Names + ordinals are retained on the fact-shaped carrier...
+        assert_eq!(sig.type_parameters.len(), 2);
+        assert_eq!(sig.type_parameters[0].name, "T");
+        assert_eq!(sig.type_parameters[0].ordinal, 0);
+        assert_eq!(sig.type_parameters[1].name, "U");
+        assert_eq!(sig.type_parameters[1].ordinal, 1);
+
+        // ...and the raw `TypeExpr` bounds fail closed to `None` — the narrowed
+        // carrier no longer owns `constraint`/`default: Option<Arc<TypeExpr>>`.
+        // If the fix ever smuggled the bound back through, these would be `Some`.
+        assert!(sig.type_parameters[0].constraint.is_none());
+        assert!(sig.type_parameters[0].default.is_none());
+        assert!(sig.type_parameters[1].constraint.is_none());
+        assert!(sig.type_parameters[1].default.is_none());
     }
 }

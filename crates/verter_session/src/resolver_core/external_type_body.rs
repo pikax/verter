@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_compiler::utils::oxc::script::type_surface::{
+use verter_parser::utils::oxc::script::type_surface::{
     analyze_external_type_source, imported_member_name_for_required_alias,
     required_import_alias_names_for_binding, AnalyzedExternalTypeSource, ResolvedElements,
 };
@@ -10,6 +10,14 @@ use verter_workspace::ResolveRequestKind;
 #[derive(Debug, Clone, Default)]
 pub struct ExternalTypeBodyCache {
     resolved: FxHashMap<(String, String), Option<ResolvedElements>>,
+    /// Per-request memo for the component-meta MACRO-ELEMENTS rail
+    /// (`resolve_component_meta_macro_elements_target_with_view`): the
+    /// dispatch-resolved elements PLUS the keep-all `native_props` rows
+    /// projected from the same surface resolution. A DEDICATED slot family
+    /// (not `resolved`): the compile-facing loaded-files rail's entries
+    /// carry no native rows, so the two rails' values are not
+    /// interchangeable.
+    macro_elements: FxHashMap<(String, String), Option<super::ResolvedMacroElements>>,
     source_analysis:
         FxHashMap<(String, verter_semantic::analysis::Hash16), AnalyzedExternalTypeSource>,
 }
@@ -33,6 +41,25 @@ impl ExternalTypeBodyCache {
         value: Option<ResolvedElements>,
     ) -> Option<Option<ResolvedElements>> {
         self.resolved.insert(key, value)
+    }
+
+    pub fn macro_elements(
+        &self,
+        key: &(String, String),
+    ) -> Option<&Option<super::ResolvedMacroElements>> {
+        self.macro_elements.get(key)
+    }
+
+    pub fn insert_macro_elements(
+        &mut self,
+        key: (String, String),
+        value: Option<super::ResolvedMacroElements>,
+    ) -> Option<Option<super::ResolvedMacroElements>> {
+        self.macro_elements.insert(key, value)
+    }
+
+    pub fn macro_elements_len(&self) -> usize {
+        self.macro_elements.len()
     }
 
     pub fn source_analysis_len(&self) -> usize {
@@ -324,7 +351,7 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
-    use verter_compiler::utils::oxc::script::type_surface::{
+    use verter_parser::utils::oxc::script::type_surface::{
         AnalyzedExternalTypeSource, ResolvedElements, RuntimeType,
     };
     use verter_workspace::ResolveRequestKind;
@@ -371,7 +398,7 @@ mod tests {
 
         fn resolve_external_type_from_analysis(
             &self,
-            dep_canonical: &str,
+            _dep_canonical: &str,
             type_name: &str,
             effective_source: &str,
             analysis: &AnalyzedExternalTypeSource,
@@ -382,13 +409,12 @@ mod tests {
                 oxc_parser::Parser::new(&allocator, effective_source, oxc_span::SourceType::ts())
                     .parse();
             (!parsed.panicked).then(|| {
-                verter_compiler::utils::oxc::script::type_surface::resolve_external_type_in_program_with_analyzed_symbol_companion_and_canonical(
+                verter_parser::utils::oxc::script::type_surface::resolve_external_type_in_program_with_analyzed_symbol_companion(
                     type_name,
                     &parsed.program,
                     effective_source.as_bytes(),
                     analysis,
                     imported_companions,
-                    dep_canonical,
                 )
             })?
         }

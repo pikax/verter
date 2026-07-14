@@ -26,6 +26,7 @@
 
 use std::sync::Arc;
 
+use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use super::{materialize_admitted_expansion_node, AdmittedExpansionNode};
@@ -33,11 +34,19 @@ use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{DepVersion, PrimitiveKind, SemanticNodeData, SemanticNodeId};
 use crate::VerterHost;
 
+/// A caller-side fallback source clearly DISTINCT from every leaf fact the
+/// sink can project, so an assertion on the sink output discriminates
+/// "projected the resolved leaf" from "published the caller's fallback".
+fn distinct_fallback_source() -> SemanticTypeSource {
+    SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Ref(
+        "FallbackCarrier".to_string(),
+    )))
+}
+
 /// The shell-raise ORACLE for `node` — the `#[cfg(test)]` materialization
 /// mirror (`materialize_output_type_expr_for_test`, the sealed `OutputProjector`
-/// shell raise the sink itself routes through). The sink must materialise
-/// byte-equal to this, so a node-domain expansion caller that routes the sink
-/// instead of a mid-flight raise is behaviour-preserving.
+/// shell raise). Used to CONFIRM a node's resolved shape while asserting the
+/// sink's content-free SOURCE projection.
 fn shell_raise_oracle(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
@@ -45,47 +54,65 @@ fn shell_raise_oracle(
     dispatch.materialize_output_type_expr_for_test(node)
 }
 
+/// The sink publishes a content-free SOURCE: a resolved LEAF node projects to
+/// its complete closed leaf fact; a NON-leaf resolved node preserves the
+/// caller's `fallback_source` verbatim (the demand side re-raises it through the
+/// one engine). A bare-ref carrier is NOT a leaf, so the sink preserves the
+/// distinct fallback rather than materialising the ref.
+///
+/// Discriminating: a sink that materialised the node (the retired byte-parity
+/// behaviour) would publish a `Closed(Leaf(Ref("ModelValue")))` / ref source, not
+/// the DISTINCT `FallbackCarrier` fallback — the equality below would fail.
 #[test]
-fn sink_materializes_node_bearing_artifact_byte_equal_to_shell_raise_oracle() {
+fn sink_preserves_fallback_source_for_non_leaf_carrier_node() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     // A representative carrier node (a bare-ref) — the kind the expansion branch
-    // produces. The sink must materialise it to the SAME `TypeExpr` the
-    // shell-raise oracle would, wrapped in `ExpandedNormalizedExpr`.
+    // produces. It is a NON-leaf, so the sink preserves the fallback source.
     let node = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("ModelValue"),
         crate::semantic_query::NodeScopeId::Global,
         Arc::from(Vec::new().into_boxed_slice()),
     ));
+    // Confirm the node resolves to a bare ref (fixture premise).
+    assert!(
+        matches!(shell_raise_oracle(&dispatch, node), Some(TypeExpr::Ref { ref name, .. }) if name.as_ref() == "ModelValue"),
+        "fixture premise: the carrier node resolves to Ref{{name=ModelValue}}",
+    );
 
+    let fallback = distinct_fallback_source();
     let artifact =
         AdmittedExpansionNode::new(node, Arc::from(Vec::new().into_boxed_slice()), false);
-    let via_sink = materialize_admitted_expansion_node(&dispatch, &artifact)
-        .expect("sink must materialise a raisable node-bearing artifact");
-    let via_oracle = shell_raise_oracle(&dispatch, node).expect("oracle must raise the same node");
+    let via_sink = materialize_admitted_expansion_node(&dispatch, &artifact, &fallback)
+        .expect("sink must publish a source for a raisable node-bearing artifact");
 
     assert_eq!(
-        via_sink.expr, via_oracle,
-        "the sink's ExpandedNormalizedExpr.expr must be BYTE-EQUAL to the shell-raise oracle for \
-         the same node (so routing the sink instead of a mid-flight raise preserves behaviour)"
-    );
-    assert!(
-        matches!(&via_sink.expr, TypeExpr::Ref { name, .. } if name.as_ref() == "ModelValue"),
-        "the bare-ref carrier materialises to Ref{{name=ModelValue}}, got {:?}",
-        via_sink.expr
+        via_sink.expr, fallback,
+        "a NON-leaf carrier node preserves the caller's fallback source verbatim \
+         (the sink projects a content-free SOURCE, it does NOT materialise the node)"
     );
 }
 
+/// Per carrier shape: a resolved LEAF node projects to its complete closed
+/// leaf fact, and a resolved UNION whose every member is a complete leaf
+/// projects to the closed ORDERED leaf-union fact; every richer resolved
+/// shape (a union with a non-leaf arm / array / raw-fallback) preserves the
+/// caller's `fallback_source`.
+///
+/// Discriminating: the retired sink materialised each shape to a distinct
+/// `TypeExpr`; the new sink projects the closed fact only for the complete
+/// leaf/leaf-union shapes and preserves the fallback for the rest — a
+/// materialising sink would fail both the closed-fact and the fallback
+/// assertions, and a sink that still degraded the leaf union to the fallback
+/// would fail the leaf-union assertion.
 #[test]
-fn sink_matches_shell_raise_oracle_across_carrier_shapes() {
+fn sink_projects_leaf_fact_or_preserves_fallback_across_carrier_shapes() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let dispatch = ProjectSemanticDispatch::new(&host);
 
-    // A spread of node shapes the expansion branch can produce; for each, the
-    // sink's materialised expr must equal the shell-raise oracle EXACTLY.
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
@@ -95,23 +122,63 @@ fn sink_matches_shell_raise_oracle_across_carrier_shapes() {
         element: string_id,
         readonly: false,
     });
+    let mixed_union = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![string_id, array].into_boxed_slice(),
+    )));
     let raw = graph.intern_node(SemanticNodeData::RawFallback {
         raw: Arc::from("SomeText"),
     });
 
+    let fallback = distinct_fallback_source();
+
+    // The LEAF node projects its complete closed leaf fact.
+    let leaf_artifact =
+        AdmittedExpansionNode::new(string_id, Arc::from(Vec::new().into_boxed_slice()), false);
+    let leaf_out = materialize_admitted_expansion_node(&dispatch, &leaf_artifact, &fallback)
+        .expect("a leaf node publishes a source");
+    assert_eq!(
+        leaf_out.expr,
+        SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
+            PrimitiveName::String
+        ))),
+        "a resolved primitive-string leaf node projects to the closed String leaf fact",
+    );
+
+    // A UNION whose every member is a complete leaf projects to the closed
+    // ORDERED leaf-union fact — never the fallback (the union is a decided
+    // closed result, e.g. an instantiated `string | number` payload param).
+    let union_artifact =
+        AdmittedExpansionNode::new(union, Arc::from(Vec::new().into_boxed_slice()), false);
+    let union_out = materialize_admitted_expansion_node(&dispatch, &union_artifact, &fallback)
+        .expect("a leaf-union node publishes a source");
+    assert_eq!(
+        union_out.expr,
+        SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(Arc::from(
+            vec![
+                LeafTypeFact::Primitive(PrimitiveName::String),
+                LeafTypeFact::Primitive(PrimitiveName::Number),
+            ]
+            .into_boxed_slice(),
+        ))),
+        "a resolved union of complete leaves projects to the ordered closed leaf-union fact",
+    );
+
+    // Every RICHER resolved shape preserves the caller's fallback verbatim —
+    // including a union with a non-leaf arm (a partial fact is never
+    // published).
     for (label, node) in [
-        ("primitive", string_id),
-        ("union", union),
+        ("mixed-union", mixed_union),
         ("array", array),
         ("raw-fallback", raw),
     ] {
         let artifact =
             AdmittedExpansionNode::new(node, Arc::from(Vec::new().into_boxed_slice()), false);
-        let via_sink = materialize_admitted_expansion_node(&dispatch, &artifact).map(|e| e.expr);
-        let via_oracle = shell_raise_oracle(&dispatch, node);
+        let out = materialize_admitted_expansion_node(&dispatch, &artifact, &fallback)
+            .expect("a non-closed resolved node publishes a source");
         assert_eq!(
-            via_sink, via_oracle,
-            "[{label}] sink materialisation must equal the shell-raise oracle"
+            out.expr, fallback,
+            "[{label}] a resolved shape with no complete closed fact preserves the caller's \
+             fallback source",
         );
     }
 }
@@ -132,7 +199,8 @@ fn sink_none_miss_matches_oracle_none() {
     let artifact =
         AdmittedExpansionNode::new(absent, Arc::from(Vec::new().into_boxed_slice()), false);
     assert!(
-        materialize_admitted_expansion_node(&dispatch, &artifact).is_none(),
+        materialize_admitted_expansion_node(&dispatch, &artifact, &distinct_fallback_source())
+            .is_none(),
         "the sink must return None for an absent node, mirroring the oracle's None arm"
     );
 }
@@ -169,20 +237,24 @@ fn node_bearing_artifact_preserves_node_and_metadata() {
         "dep entry version round-trips"
     );
 
-    // Discrimination: a Primitive node materialises to exactly its primitive
-    // expr through the sink (proves the sink is not a constant / stub).
+    // Discrimination: a Primitive node projects to exactly its complete
+    // closed leaf fact through the sink — NOT the caller's fallback and not a
+    // constant (proves the sink is not a constant / stub).
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let dispatch = ProjectSemanticDispatch::new(&host);
     let s = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let s_artifact = AdmittedExpansionNode::new(s, Arc::from(Vec::new().into_boxed_slice()), false);
-    let expr = materialize_admitted_expansion_node(&dispatch, &s_artifact)
-        .expect("primitive materialises")
-        .expr;
+    let expr =
+        materialize_admitted_expansion_node(&dispatch, &s_artifact, &distinct_fallback_source())
+            .expect("primitive materialises")
+            .expr;
     assert_eq!(
         expr,
-        TypeExpr::Primitive(PrimitiveName::Boolean),
-        "the sink materialises a Boolean primitive node to TypeExpr::Primitive(Boolean)"
+        SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
+            PrimitiveName::Boolean,
+        ))),
+        "the sink projects a Boolean primitive node to its complete closed Boolean leaf fact"
     );
 }
 
@@ -230,9 +302,24 @@ const model = defineModel<ModelValue>()
         .position(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
         .expect("the SFC declares a defineModel macro");
 
-    // Closed-demand entrance: ctx (`&host`) + owner canonical + macro index — no
-    // node crosses in. The sink resolves the carrier head internally.
-    let outcome = expand_define_model_output(&host, "/Model.vue", macro_index);
+    // The model's fallback SOURCE is its own T — the macro type-argument
+    // payload position, exactly what the eval_env `defineModel` branch passes.
+    let model_fallback = snapshot.macros[macro_index]
+        .parsed_type_argument
+        .as_ref()
+        .map(|locator| {
+            SemanticTypeSource::Authored(
+                verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone()),
+            )
+        })
+        .unwrap_or_else(|| {
+            panic!("defineModel<ModelValue> carries a parsed type-argument payload")
+        });
+
+    // Closed-demand entrance: ctx (`&host`) + owner canonical + macro index +
+    // the authored fallback source — no node crosses in. The sink resolves the
+    // carrier head internally.
+    let outcome = expand_define_model_output(&host, "/Model.vue", macro_index, &model_fallback);
     let DefineModelOutputExpansion::Materialized {
         produced_node_id,
         normalized,
@@ -244,26 +331,59 @@ const model = defineModel<ModelValue>()
         );
     };
 
-    // The materialised expr must be BYTE-EQUAL to the shell-raise oracle of the
-    // SURFACED produced node id — the former node-bearing path set
-    // `produced_node_id = Some(node)` then materialised exactly that node, so a
-    // faithful demand method materialises the SAME node the SAME way.
-    let dispatch = ProjectSemanticDispatch::new(&host);
-    let via_oracle = shell_raise_oracle(&dispatch, produced_node_id)
-        .expect("the oracle raises the produced carrier-head node");
+    // Publication demand is Navigate-only (the
+    // `publication_routes_never_demand_expanded` guard pins ZERO
+    // `Published(Expanded)` contexts during publication), so the produced node
+    // is the model type's resolved CARRIER head — pin its identity
+    // structurally, then pin that the published source demand-materialises
+    // BYTE-EQUAL to the demand of that same identity through the one engine
+    // (the parity the former Expanded-time shell-raise oracle pinned).
+    let produced_data = crate::project_semantic_dispatch::node_data_for(&host, produced_node_id)
+        .expect("the produced carrier-head node is present in the graph");
+    let crate::semantic_query::SemanticNodeData::DeclRef { identity } = produced_data.as_ref()
+    else {
+        panic!(
+            "the Navigate-published defineModel carrier head must be the model type's \
+             DeclRef identity carrier, got {produced_data:?}"
+        );
+    };
     assert_eq!(
-        normalized.expr, via_oracle,
-        "the demand method's materialised expr must equal the shell-raise oracle of the surfaced \
-         produced_node_id (byte-identical to the former node-bearing path)"
+        identity.decl_name.as_ref(),
+        "ModelValue",
+        "the produced carrier head resolves the macro's own type argument"
+    );
+    let via_oracle = crate::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/Model.vue",
+        &SemanticTypeSource::Synthesized(verter_type_expr::facts::ResolvedLocalShape::Ref(
+            verter_type_expr::locators::SymbolBodyLocator {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: Arc::clone(&identity.canonical_id),
+                    symbol: Arc::clone(&identity.decl_name),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                },
+            },
+        )),
+    )
+    .expect("the produced carrier identity demand-materializes");
+    let via_demand = crate::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/Model.vue",
+        &normalized.expr,
+    )
+    .unwrap_or_else(|| panic!("the demand method's published source must demand-materialize"));
+    assert_eq!(
+        via_demand, via_oracle,
+        "the demand method's published source must demand-materialise to the demand of the \
+         surfaced produced_node_id's identity (the same node through the one engine)"
     );
 
     // Discrimination: the resolved model value type is the structural object, not
     // a constant/opaque — proves the demand method drove a real internal
     // resolution rather than returning a fixed expr.
     assert!(
-        !matches!(normalized.expr, TypeExpr::Unknown { .. }),
-        "the defineModel<ModelValue> carrier head resolves to a real type, not Unknown; got {:?}",
-        normalized.expr
+        !matches!(via_demand, TypeExpr::Unknown { .. }),
+        "the defineModel<ModelValue> carrier head resolves to a real type, not Unknown; got {via_demand:?}",
     );
 }
 
@@ -298,7 +418,8 @@ const x = 1
     // still returns `None`, never grows the table).
     let _ = host.get_raw_analysis_snapshot("/Empty.vue");
 
-    let outcome = expand_define_model_output(&host, "/Empty.vue", 9999);
+    let outcome =
+        expand_define_model_output(&host, "/Empty.vue", 9999, &distinct_fallback_source());
     assert!(
         matches!(outcome, DefineModelOutputExpansion::CarrierMiss),
         "an absent macro index makes the carrier hot-ref producer miss → CarrierMiss"

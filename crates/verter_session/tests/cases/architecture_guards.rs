@@ -595,27 +595,6 @@ fn phase_05d_4a_class_a_props_callers_migrated_in_host_manage() {
 }
 
 #[test]
-fn phase_05d_4a_class_a_props_callers_migrated_in_type_expansion_verter() {
-    // type_expansion_verter.rs has 2 Class A `.project_expr_surface_expr`
-    // sites pre-5d (lines 215, 272). Both migrate to dispatch in 4a.
-    let src =
-        read_workspace_file("crates/verter_session/src/resolver_core/type_expansion_verter.rs");
-    let invocations = count_callsites(
-        &src,
-        &[
-            ".project_expr_surface_expr(",
-            ".project_expr_surface_shape(",
-            ".project_expr_surface_expr_with_compound_objects(",
-        ],
-    );
-    assert_eq!(
-        invocations, 0,
-        "Phase 5d 4a: type_expansion_verter.rs must have 0 Class A engine \
-         method invocations after 4a; found {invocations}"
-    );
-}
-
-#[test]
 fn phase_05d_4b_class_a_slots_callers_migrated() {
     // Post-Phase-11a + Phase 5l + Phase 5m §5.13a.2 (final state):
     // every Class A engine-method site (slots, props, multi-macro-kind
@@ -729,7 +708,7 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     //   Pick/Omit on multi-file types). Even threading the engine's
     //   prepared-decl helper inside a Class B helper did not match the
     //   trampoline's
-    //   `dispatch_projected_surface → projected_surface_to_type_expr`
+    //   `dispatch_projected_surface → surface_view_to_registry_type_expr`
     //   path because that path flattens heritage members through the
     //   surface walker; `raise_node_to_type_expr` over a
     //   dispatch-Instantiate result did not.
@@ -941,7 +920,7 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
 /// host-threaded surface bridges were folded into) and return a violation per
 /// structural deviation. The method MUST route through
 /// `dispatch_projected_surface_with_node` (EXACTLY once) +
-/// `projected_surface_to_type_expr` (EXACTLY once), with NO fallback / rescue /
+/// `surface_view_to_registry_type_expr` (EXACTLY once), with NO fallback / rescue /
 /// retired token — a prepared-decl fallback re-added INTO this method body would
 /// otherwise resurrect the retired walker.
 ///
@@ -962,7 +941,7 @@ fn registry_whole_surface_candidate_violations(src: &str, retired_tokens: &[&str
     // surface->expr converter, the node-domain object-surface predicate, and the
     // std enum constructors (structurally inert — they cannot hide a rescue).
     const ALLOWED_FREE_CALLS: &[&str] = &[
-        "projected_surface_to_type_expr",
+        "surface_view_to_registry_type_expr",
         "component_meta_registry_node_has_explicit_object_surface",
         "Some",
         "Ok",
@@ -1054,15 +1033,15 @@ fn registry_whole_surface_candidate_violations(src: &str, retired_tokens: &[&str
             c.method_calls
         ));
     }
-    // Exactly one `projected_surface_to_type_expr` converter call.
+    // Exactly one `surface_view_to_registry_type_expr` converter call.
     let converter_calls = c
         .free_calls
         .iter()
-        .filter(|m| m.as_str() == "projected_surface_to_type_expr")
+        .filter(|m| m.as_str() == "surface_view_to_registry_type_expr")
         .count();
     if converter_calls != 1 {
         violations.push(format!(
-            "`{METHOD}` body must call `projected_surface_to_type_expr` EXACTLY once (the surface->\
+            "`{METHOD}` body must call `surface_view_to_registry_type_expr` EXACTLY once (the surface->\
              expr converter); found {converter_calls}. Free calls: {:?}",
             c.free_calls
         ));
@@ -1101,7 +1080,7 @@ fn registry_whole_surface_candidate_violations(src: &str, retired_tokens: &[&str
 /// The surviving root-surface authority `materialize_registry_whole_surface_candidate`
 /// (node_materialize.rs) resolves a root symbol's whole surface through the shared
 /// dispatch surface projector ALONE: one `dispatch_projected_surface_with_node`
-/// call plus one `projected_surface_to_type_expr` call, with NO prepared-decl
+/// call plus one `surface_view_to_registry_type_expr` call, with NO prepared-decl
 /// root-surface rescue (`cached_prepared_root_surface`) and NO `.or_else(...)`
 /// escape. The retired host-threaded surface bridges and the prepared-decl walker
 /// stay deleted from `dispatch_helpers.rs` (tombstone absence assertion below), so
@@ -1162,7 +1141,7 @@ fn registry_whole_surface_candidate_self_test_discriminates() {
     ];
 
     // GREEN: the exact composition — budget guard + one
-    // `dispatch_projected_surface_with_node` + one `projected_surface_to_type_expr`
+    // `dispatch_projected_surface_with_node` + one `surface_view_to_registry_type_expr`
     // + the node-domain object-surface predicate.
     let good = r#"
         impl E {
@@ -1173,7 +1152,7 @@ fn registry_whole_surface_candidate_self_test_discriminates() {
                     return None;
                 }
                 let (surface, node) = self.dispatch_projected_surface_with_node(scope, symbol)?;
-                let type_expr = projected_surface_to_type_expr(&surface)?;
+                let type_expr = surface_view_to_registry_type_expr(&surface)?;
                 let is_object =
                     component_meta_registry_node_has_explicit_object_surface(self.ctx, node);
                 Some((type_expr, is_object))
@@ -1192,7 +1171,7 @@ fn registry_whole_surface_candidate_self_test_discriminates() {
             fn materialize_registry_whole_surface_candidate(&mut self, scope: &str, symbol: &str) -> Option<(TypeExpr, bool)> {
                 let (surface, node) = self.dispatch_projected_surface_with_node(scope, symbol)
                     .or_else(|| self.cached_prepared_root_surface(scope, symbol))?;
-                let type_expr = projected_surface_to_type_expr(&surface)?;
+                let type_expr = surface_view_to_registry_type_expr(&surface)?;
                 Some((type_expr, false))
             }
         }
@@ -1211,7 +1190,7 @@ fn registry_whole_surface_candidate_self_test_discriminates() {
         impl E {
             fn materialize_registry_whole_surface_candidate(&mut self, scope: &str, symbol: &str) -> Option<(TypeExpr, bool)> {
                 let surface = self.cached_prepared_root_surface(scope, symbol)?;
-                let type_expr = projected_surface_to_type_expr(&surface)?;
+                let type_expr = surface_view_to_registry_type_expr(&surface)?;
                 Some((type_expr, false))
             }
         }
@@ -1777,7 +1756,10 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
 /// onto the node-domain Class-A rail; the whole connected utility-shape
 /// subgraph (the host-threaded surface bridges, the route-key fixpoint
 /// machinery, the expr-surface projectors, and their carrier node types) was
-/// retired in the same change. Re-introducing ANY of them resurrects a second
+/// retired in the same change, and the intrinsic per-member stabilise /
+/// fixpoint pair followed when intrinsic shape members became shallow
+/// semantic sources raised on demand through the dispatch bridge.
+/// Re-introducing ANY of them resurrects a second
 /// query-time resolution path the one-engine rule forbids — resolve a root /
 /// tag surface through the surviving node-domain Class-A rail
 /// (`project_expr_class_a_node_via_dispatch_threaded` +
@@ -1792,7 +1774,6 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
 /// `materialize_registry_whole_surface_candidate`,
 /// `project_admitted_route_node_to_expanded_object_shape`,
 /// `surface_view_to_expanded_shape`, `materialize_pick_member_surface`,
-/// `solve_or_project_intrinsic_member_node_until_stable`,
 /// `project_class_a_terminal_node`, `lower_and_project_to_expanded_node`,
 /// `project_admitted_node_to_expanded_node`. Whole-identifier matching keeps the
 /// retired `dispatch_projected_surface` from colliding with the live
@@ -1825,6 +1806,8 @@ const RETIRED_UTILITY_SHAPE_CLUSTER: &[&str] = &[
     "PreparedProjectionContext",
     "admit_mode_aware",
     "solve_or_project_leaf_node_until_stable",
+    "stabilize_intrinsic_member_surface",
+    "solve_or_project_intrinsic_member_node_until_stable",
 ];
 
 /// Whole-IDENTIFIER scan of one PARSED source file for any
@@ -2203,11 +2186,6 @@ mod resolver_core_recursion {
             "render_type_expr_for_projected_surface",
             "Phase 5l-supplement: bounded by TypeExpr AST depth.",
         ),
-        (
-            "direct_macro",
-            "type_expr_has_direct_macro_reference",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
         // -----------------------------------------------------------------
         // component_meta_query_engine/helpers.rs — TypeExpr walkers
         // -----------------------------------------------------------------
@@ -2229,65 +2207,37 @@ mod resolver_core_recursion {
         // component_meta_query_engine/shallow_preserve.rs — TypeExpr
         // walkers and import-route walkers.
         // -----------------------------------------------------------------
+        // Node-domain successors of the retired TypeExpr import-route walks
+        // (`contains_direct_imported_utility_route` /
+        // `fast_symbolic_imported_generic_route` /
+        // `field_references_type_params`): each carries an EXPLICIT
+        // `depth: u32` budget (`depth > 256` fail-closed) over the interned
+        // node graph; the generic route additionally carries an
+        // `active_locals` cycle set over local alias hops.
         (
             "shallow_preserve",
-            "contains_direct_imported_utility_route",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+            "node_contains_imported_utility_route",
+            "bounded by the explicit depth budget (256) over the interned node graph.",
         ),
         (
             "shallow_preserve",
-            "deep_resolve_slot_function_refs",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth + cache dedup at host.",
+            "node_is_imported_utility_arg",
+            "bounded by the explicit depth budget (256) over the interned node graph.",
         ),
         (
             "shallow_preserve",
-            "deep_resolve_type_refs",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth + cache dedup at host.",
+            "node_has_imported_generic_route",
+            "bounded by the explicit depth budget (256) + the active-set cycle guard over local alias hops.",
         ),
         (
             "shallow_preserve",
-            "fast_symbolic_imported_bare_ref_route",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "shallow_preserve",
-            "fast_symbolic_imported_generic_route",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "shallow_preserve",
-            "imported_route_arg",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (nested closure).",
-        ),
-        (
-            "shallow_preserve",
-            "imported_value_route_arg",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth (nested closure).",
-        ),
-        (
-            "shallow_preserve",
-            "rewrite_fast_shallow_alias_body",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "shallow_preserve",
-            "root_import_name",
-            "Phase 5l-supplement: bounded by TypeExpr IndexedAccess chain depth (nested closure, defined twice).",
-        ),
-        (
-            "shallow_preserve",
-            "should_preserve_imported_utility_route",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "shallow_preserve",
-            "should_preserve_shallow_field_expr_inner",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+            "node_references_type_param_names",
+            "bounded by the explicit depth budget (256) over the interned node graph.",
         ),
         // -----------------------------------------------------------------
         // component_meta_query_engine/surface.rs — TypeExpr / semantic-
-        // node-graph walkers. `projected_surface_from_semantic_node_inner`
-        // is DAG-bounded by an explicit `active: &mut FxHashSet<SemanticNodeId>`
+        // node-graph walkers. `surface_view_from_semantic_node_inner` is
+        // DAG-bounded by an explicit `active: &mut FxHashSet<SemanticNodeId>`
         // visitor set; the rest are AST-bounded.
         // -----------------------------------------------------------------
         (
@@ -2295,15 +2245,12 @@ mod resolver_core_recursion {
             "dispatch_route_expr_is_materialized",
             "Phase 5l-supplement: bounded by TypeExpr AST depth.",
         ),
+        // Successor of the retired `projected_surface_from_semantic_node_inner`
+        // (the ProjectedSurface bridge retirement): same DAG bound.
         (
             "surface",
-            "projected_surface_from_semantic_node_inner",
-            "Phase 5l-supplement: bounded by SemanticNodeId DAG (active-set cycle dedup).",
-        ),
-        (
-            "surface",
-            "type_expr_has_any_object_arm",
-            "Phase 5l-supplement: bounded by TypeExpr Parenthesized/Union/Intersection chain depth.",
+            "surface_view_from_semantic_node_inner",
+            "bounded by the SemanticNodeId alias-chain DAG (active-set cycle dedup).",
         ),
         (
             "surface",
@@ -2317,38 +2264,33 @@ mod resolver_core_recursion {
         // -----------------------------------------------------------------
         (
             "component_meta_registry",
-            "bound_generic_ref_penalty",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+            "collect_registry_refs_node_inner",
+            "bounded by the visited node-id set (each node walks at most once).",
         ),
         (
             "component_meta_registry",
-            "collect_component_meta_registry_member_surface_refs",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+            "collect_registry_member_surface_refs_node",
+            "bounded by the visited node-id set (each node walks at most once).",
         ),
         (
             "component_meta_registry",
-            "collect_component_meta_registry_public_surface_refs",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+            "node_root_has_non_object_top_level_surface",
+            "bounded by union/intersection arm nesting (interned child ids predate parents).",
         ),
         (
             "component_meta_registry",
-            "collect_component_meta_registry_refs",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
+            "node_root_has_explicit_object_surface",
+            "bounded by union/intersection arm nesting (interned child ids predate parents).",
+        ),
+        (
+            "component_meta_registry",
+            "keys_of",
+            "bounded by union arm nesting of the key argument (nested fn).",
         ),
         (
             "component_meta_registry",
             "collect_path",
             "Phase 5l-supplement: bounded by TypeExpr IndexedAccess chain depth (nested closure).",
-        ),
-        (
-            "component_meta_registry",
-            "component_meta_registry_direct_public_ref",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "component_meta_registry",
-            "component_meta_registry_expr_references_name",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
         ),
         (
             "component_meta_registry",
@@ -2362,57 +2304,12 @@ mod resolver_core_recursion {
         ),
         (
             "component_meta_registry",
-            "component_meta_registry_indexed_ref_penalty",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "component_meta_registry",
             "component_meta_registry_public_utility_route",
             "Phase 5l-supplement: bounded by TypeExpr AST depth.",
         ),
         (
             "component_meta_registry",
-            "component_meta_registry_ref_name",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "component_meta_registry",
             "component_meta_registry_string_literal_keys",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "component_meta_registry",
-            "contains_nested_resolution_targets",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "component_meta_registry",
-            "extracted_surface_property_count",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "component_meta_registry",
-            "imported_type_body_specificity_score",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "component_meta_registry",
-            "is_empty_object_surface",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "component_meta_registry",
-            "method_surface_specificity_score",
-            "Phase 5l-supplement: bounded by TypeExpr AST depth.",
-        ),
-        (
-            "component_meta_registry",
-            "navigate_object_member",
-            "Phase 5l-supplement: bounded by TypeExpr Parenthesized chain depth.",
-        ),
-        (
-            "component_meta_registry",
-            "top_level_branching_surface_score",
             "Phase 5l-supplement: bounded by TypeExpr AST depth.",
         ),
         // -----------------------------------------------------------------
@@ -2503,17 +2400,6 @@ mod resolver_core_recursion {
             "fallthrough_value_eval",
             "collect_dynamic_root_candidates_from_node_inner",
             "bounded by the shared per-call `SemanticNodeId` memo (each distinct node computed once) + the shared `request_budget` op-budget (one charge per distinct node; a trip returns the no-warm partial); `active` is the in-progress-path cycle sentinel only.",
-        ),
-        // -----------------------------------------------------------------
-        // component_meta_query_engine/registry_structural.rs — the registry
-        // structure-preserving materialiser recurses on the input
-        // `TypeExpr` tree, resolving reference / route leaves to their
-        // node-domain surfaces.
-        // -----------------------------------------------------------------
-        (
-            "registry_structural",
-            "structural_materialize",
-            "bounded by the finite input `TypeExpr` tree (structural recursion descends into strictly-smaller sub-expressions) + the `active: &mut FxHashSet<SemanticNodeId>` path-scoped Navigate-node cycle sentinel (inserted on entry, removed on unwind; a reference back-edge short-circuits to the symbolic input).",
         ),
         // -----------------------------------------------------------------
         // shallow_file_state.rs — type-expression walkers. All bodies
@@ -4999,12 +4885,10 @@ mod foundations_guards {
         // verter_type_runtime::backend::tests via meta_resolve types,
         // tests/cases/g_misc0/host_tests.rs
         "pub mod meta_resolve",
-        // `OwnedEvalProgram` / `OwnedTypeResolutionContext`
-        // owned-artifact module. Public so the typed-DB shapes on
-        // `ProjectTypeStore` can expose `OwnedArtifactKey` -> payload
-        // values to consumers in `verter_type_runtime` /
-        // `verter_napi`; production lowering does not populate the
-        // owned typed DBs yet (test-populated only).
+        // `OwnedEvalProgram` owned-artifact module. Public so the
+        // owned post-lowering IR is nameable by consumers in
+        // `verter_type_runtime` / `verter_napi` and by the Tier 1A
+        // lowering-boundary guards.
         "pub mod owned_artifacts",
         // Tier 1B — selective component-meta surface API + BFS bridge
         // wire types (D102 + D125). Public because verter_napi calls
@@ -5128,6 +5012,11 @@ mod foundations_guards {
         "pub(crate) mod host_batch_coordinator",
         "pub(crate) mod host_executor",
         "pub(crate) mod host_test_audit",
+        // Test-only per-host force-injection knobs (`TestForceKnobs`), grouped off
+        // the root `VerterHost` so the struct stays thin. Both the module's contents
+        // and the `VerterHost` field are `#[cfg(test)]`, so a release build carries
+        // none of it; the `mod` declaration itself is the only public-surface trace.
+        "pub(crate) mod host_test_force",
         "pub(crate) mod instant",
         "pub(crate) mod intrinsic_registry",
         // B1 locator substrate — session-side key identities for
@@ -5152,6 +5041,13 @@ mod foundations_guards {
         // cohort fixture exercises `OwnerImportSurfaceDb::evict_if_schema_mismatch`.
         "pub mod owner_import_surface",
         "pub(crate) mod project_semantic_dispatch",
+        // The session-side implementation of the query-owned host port
+        // (`verter_session_query::QueryHostPort`): `pub` because the
+        // composition root above BOTH crates constructs
+        // `SessionQueryHostPort` and hands it to the query layer — the
+        // inversion-of-control seam is a public surface by design (caller
+        // wiring lands with the query-layer adoption).
+        "pub mod query_host_port",
         "pub(crate) mod semantic_query_memo",
         "pub(crate) mod session_runtime",
         // Stage 4a SessionView trait surface — `HostView` and
@@ -5190,8 +5086,6 @@ mod foundations_guards {
         // DependencyResolution, DiagnosticsSnapshot, HostDiagnostic,
         // HostSeverity, FileAnalysisSnapshot, ...) — universally used.
         "pub use types::*",
-        // verter_lsp::features::hover_provenance
-        "pub use verter_compiler::utils::oxc::script::type_surface::ResolvedMemberVisibility",
         // verter_lsp::background_init,
         // verter_type_runtime::tsserver::ipc, verter_type_runtime::tsgo::ipc
         "pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS",
@@ -5486,6 +5380,28 @@ mod foundations_guards {
             "crates/verter_session/src/project_semantic_dispatch/mod.rs",
             "crates/verter_session/src/project_semantic_dispatch/raise.rs",
             "crates/verter_session/src/project_type_store.rs",
+            // The lazy declaration-body memo: the content-addressed
+            // `DeclBodyMemo` cells, the retained-parse demand cells
+            // (typedef / annotation hydration), and the lease plumbing are
+            // co-located so the fence/lease invariants stay byte-coherent.
+            // Splitting along cell-kind lines is the eventual cleanup once
+            // the residual TypeExpr bridge deletion lands.
+            "crates/verter_session/src/decl_body_memo.rs",
+            // Whole-file EvalEnv materialisation: the ordered declaration
+            // groups, augmentation scopes, and per-symbol cells share one
+            // in-file state machine (tests already extracted to the
+            // `eval_env_tests.rs` sibling).
+            "crates/verter_session/src/host_manage/eval_env.rs",
+            // The slot-binding graph builder: one coherent module owning
+            // the synthetic slot-binding carrier construction and the
+            // graph-native binding rows. Splitting would cross-cut the
+            // binding state machine.
+            "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
+            // The graph-free fact substrate (`NoTypeExpr` facts + locator
+            // kinds + fingerprints): a single closed vocabulary file by
+            // design — the fact taxonomy is deliberately co-located so the
+            // closed-enum discipline stays reviewable in one place.
+            "crates/verter_type_expr/src/facts.rs",
             "crates/verter_session/src/resolver_core/component_meta.rs",
             "crates/verter_session/src/resolver_core/component_meta_registry.rs",
             "crates/verter_session/src/resolver_core/external_type_frontier.rs",
@@ -9330,7 +9246,7 @@ fn lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves() {
 //    qualified `oxc_parser::Parser::new` OR an imported/aliased bare
 //    `Parser::new`).
 // 3. `no_owned_artifact_holds_borrowed_lifetime` — `OwnedEvalProgram`
-//    and `OwnedTypeResolutionContext` are `Send + Sync + 'static`.
+//    is `Send + Sync + 'static`.
 // 4. `macro_impacting_constructs_fail_lowering_not_silent_skip` (D107)
 //    — exercises the lowering on representative macro-impacting
 //    fixtures and asserts `Err(LoweringError::*)` instead of an empty
@@ -9347,8 +9263,7 @@ fn lsp_no_longer_embeds_mcp_AND_mcp_http_still_serves() {
 /// `ensure_indexed_ready_serve` materialise and threaded by reference within
 /// the flight; the derived `EvalEnv` lives on the published
 /// `IndexedReady`. Only `Send + Sync + 'static` owned-artifact forms
-/// (`OwnedEvalProgram` / `OwnedTypeResolutionContext`) are admissible
-/// in host-owned typed DBs.
+/// (`OwnedEvalProgram`) are admissible in host-owned typed DBs.
 ///
 /// This guard rejects any reintroduction of an OXC-parser-arena
 /// thread-local cache. It scans every `.rs` file under
@@ -9456,13 +9371,24 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
     // Rows that stop matching any live OXC `Parser::new` site must be
     // DELETED, not kept as pre-authorization for future uncounted
     // parses (the anti-vacuity check below enforces this).
-    let allow_list: [(&str, usize); 7] = [
+    let allow_list: [(&str, usize); 8] = [
         // The `ParsedEvalProgram::parse` constructor IS the
         // scheduler-bound parse entry — the single eval-program parse
         // funnel; `host_manage::eval_program::parse_eval_program` is
         // its sole production caller and counts every execution on the
         // `eval_program_parses` provenance rail.
         ("crates/verter_session/src/parsed_eval_program.rs", 1),
+        // The `#[cfg(any(test, debug_assertions))]` service-backed test
+        // constructor (`service_backed_core_for_test`): parses the
+        // fixture source ONCE at construction to build the header index
+        // + analysis the production constructor path requires. A
+        // test-support parse (release production builds compile it
+        // out), not a per-file materialise lane — the scheduler is not
+        // its authority.
+        (
+            "crates/verter_session/src/resolver_core/shallow_file_state.rs",
+            1,
+        ),
         // The Svelte rune-prelude ambient env: a FIXED process-wide
         // declaration string (NOT a workspace file, no canonical id) lowered
         // ONCE into a `OnceLock` via a one-shot OXC parse. It is not a per-file
@@ -9733,12 +9659,12 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
     );
 }
 
-/// Tier 1A guard 3 — `OwnedEvalProgram` and `OwnedTypeResolutionContext`
-/// MUST be `Send + Sync + 'static`. Compile-time `assert_impl_all!`
-/// guards in the production source files enforce this; the test here
-/// makes the assertion observable in the `cargo test` output and
-/// asserts the structural invariant via syn-AST inspection (no
-/// lifetime parameter, no `Rc`/`Cell`-typed field).
+/// Tier 1A guard 3 — `OwnedEvalProgram` MUST be `Send + Sync +
+/// 'static`. Compile-time `assert_impl_all!` guards in the production
+/// source file enforce this; the test here makes the assertion
+/// observable in the `cargo test` output and asserts the structural
+/// invariant via syn-AST inspection (no lifetime parameter, no
+/// `Rc`/`Cell`-typed field).
 #[test]
 fn no_owned_artifact_holds_borrowed_lifetime() {
     // Side 1: `assert_impl_all!`-style runtime guard. If a regression
@@ -9746,25 +9672,16 @@ fn no_owned_artifact_holds_borrowed_lifetime() {
     // would fail to compile (this test file would fail to build).
     fn assert_send_sync_static<T: Send + Sync + 'static>() {}
     assert_send_sync_static::<verter_session::owned_artifacts::eval_program::OwnedEvalProgram>();
-    assert_send_sync_static::<
-        verter_session::owned_artifacts::type_resolution_context::OwnedTypeResolutionContext,
-    >();
 
-    // Side 2: structural invariant. Walk the syn-AST of both source
-    // files and verify the canonical structs carry NO lifetime
+    // Side 2: structural invariant. Walk the syn-AST of the source
+    // file and verify the canonical struct carries NO lifetime
     // parameter. This catches future regressions where someone adds a
     // `pub struct OwnedEvalProgram<'a>` form (which would be a step
     // back toward the borrowed-form contract).
-    for (path, struct_name) in [
-        (
-            "crates/verter_session/src/owned_artifacts/eval_program.rs",
-            "OwnedEvalProgram",
-        ),
-        (
-            "crates/verter_session/src/owned_artifacts/type_resolution_context.rs",
-            "OwnedTypeResolutionContext",
-        ),
-    ] {
+    for (path, struct_name) in [(
+        "crates/verter_session/src/owned_artifacts/eval_program.rs",
+        "OwnedEvalProgram",
+    )] {
         let body = read_workspace_file(path);
         let parsed: syn::File = syn::parse_str(&body).expect("parse owned-artifact module");
         let mut found = false;
@@ -12690,8 +12607,7 @@ fn reverse_graph_not_wired_to_invalidation() {
 /// either the cross-file or the same-canonical axis.
 ///
 /// `host_upsert.rs` must not, anywhere in its body, call
-/// `reverse_deps_for`, `invalidate_canonical`, or `evict_canonical`,
-/// and must not call `resolved_type_cache().clear()`.
+/// `reverse_deps_for`, `invalidate_canonical`, or `evict_canonical`.
 ///
 /// Two retired drains map onto those identifiers:
 ///
@@ -12703,8 +12619,8 @@ fn reverse_graph_not_wired_to_invalidation() {
 /// - The own-canonical drain. An upsert eagerly evicted the upserted
 ///   canonical's own query-identity caches —
 ///   `resolver.runtime.evict_canonical(&canonical_id)`,
-///   `project_type_store.evict_canonical(&canonical_id)`,
-///   `resolved_type_cache().clear()`. A warm query-identity entry for
+///   `project_type_store.evict_canonical(&canonical_id)`. A warm
+///   query-identity entry for
 ///   the upserted canonical is now rejected on the cold-recompute read
 ///   path by its current-content self-version root.
 ///
@@ -12728,7 +12644,7 @@ fn host_upsert_performs_no_reverse_dependent_eviction() {
          `invalidate_canonical` must not reappear; cross-file consumers \
          revalidate lazily on read via `fact_dep_signature`. \
          Same-canonical: the own-canonical drain is removed — \
-         `evict_canonical(&canonical_id)` / `resolved_type_cache().clear()` \
+         `evict_canonical(&canonical_id)` \
          must not reappear; a warm query-identity entry for the upserted \
          canonical is rejected on the cold-recompute read path by its \
          current-content self-version root.",
@@ -12739,10 +12655,8 @@ fn host_upsert_performs_no_reverse_dependent_eviction() {
 /// AST scanner shared by [`host_upsert_performs_no_reverse_dependent_eviction`]
 /// and its discriminating self-test. Flags any reverse-dependent or
 /// own-canonical eager-drain method call: the bare identifiers
-/// `reverse_deps_for` / `invalidate_canonical` / `evict_canonical`, plus
-/// the `resolved_type_cache().clear()` receiver-qualified chain (a bare
-/// `.clear()` is too generic to ban — the chain over a
-/// `resolved_type_cache()` receiver is the discriminating shape).
+/// `reverse_deps_for` / `invalidate_canonical` / `evict_canonical`. A
+/// bare `.clear()` is too generic to ban and is not flagged.
 #[derive(Default)]
 struct UpsertEagerDrainScanner {
     hits: Vec<String>,
@@ -12763,17 +12677,6 @@ impl<'ast> syn::visit::Visit<'ast> for UpsertEagerDrainScanner {
         let method = mc.method.to_string();
         if Self::FORBIDDEN_DRAIN_METHODS.contains(&method.as_str()) {
             self.hits.push(method.clone());
-        }
-        // `resolved_type_cache().clear()` — a `.clear()` whose receiver
-        // is a call to `resolved_type_cache()`. This is the bulk
-        // resolved-type-cache flush that was part of the own-canonical
-        // drain; a bare `.clear()` on some other cache is not flagged.
-        if method == "clear" {
-            if let syn::Expr::MethodCall(recv) = &*mc.receiver {
-                if recv.method == "resolved_type_cache" {
-                    self.hits.push("resolved_type_cache().clear".to_string());
-                }
-            }
         }
         syn::visit::visit_expr_method_call(self, mc);
     }
@@ -12812,7 +12715,7 @@ fn host_upsert_reverse_dep_eviction_scanner_discriminates() {
     );
 
     // FORBIDDEN: the own-canonical drain shape — flagged. Reintroducing
-    // `evict_canonical(&canonical_id)` or `resolved_type_cache().clear()`
+    // `evict_canonical(&canonical_id)`
     // into the upsert path is banned: same-canonical invalidation is
     // lazy via self-version-rooted fact validation.
     let own_canonical_drain_fixture = r#"
@@ -12820,7 +12723,6 @@ fn host_upsert_reverse_dep_eviction_scanner_discriminates() {
             fn upsert(&self) {
                 self.resolver.runtime.evict_canonical(&canonical_id);
                 self.project_type_store.evict_canonical(&canonical_id);
-                self.resolved_type_cache().clear();
             }
         }
     "#;
@@ -12832,12 +12734,6 @@ fn host_upsert_reverse_dep_eviction_scanner_discriminates() {
             .count()
             == 2,
         "scanner must flag both `evict_canonical` calls, got {drain_hits:?}"
-    );
-    assert!(
-        drain_hits
-            .iter()
-            .any(|h| h == "resolved_type_cache().clear"),
-        "scanner must flag the `resolved_type_cache().clear()` chain, got {drain_hits:?}"
     );
 
     // ACCEPTED: a bare `.clear()` on an unrelated cache is not an
@@ -13188,8 +13084,8 @@ mod typed_ir_resolver_guards {
     //   analyzer → projector → registry → policy → materialiser, plus
     //   the JS compat layer in `@verter/component-meta/compat`. Within
     //   that scope the single source of workspace classification truth
-    //   is `ResolverContext::workspace_is_workspace_owned` /
-    //   `workspace_is_package_backed`. Substring tests on canonical
+    //   is `ResolverContext::workspace_is_package_backed` (workspace-owned
+    //   is its complement). Substring tests on canonical
     //   paths are banned. The producer crates (`verter_session`,
     //   `verter_semantic`) MUST route every workspace-membership
     //   decision through `WorkspaceAccess`.
@@ -16339,15 +16235,18 @@ mod single_resolution_engine_guards {
     // preceding `fn` token and are not scanned). A NEW third definition fails;
     // when Stage 4 collapses to one, the allowlist shrinks to a single entry.
     // -----------------------------------------------------------------------
+    // Line numbers re-derived after the node-domain publication-reduce rework
+    // shifted both definitions (same two files, same duplicate pair — no new
+    // definition).
     const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            468,
+            533,
             "fn read_surface_members(",
         ),
         (
             "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
-            401,
+            411,
             "fn read_surface_members(",
         ),
     ];
@@ -16375,7 +16274,7 @@ mod single_resolution_engine_guards {
     // `type_surface` is the eager OXC resolution engine module
     // `verter_parser::utils::oxc::script::type_surface` (referenced as
     // `crate::utils::oxc::script::type_surface::` within verter_parser /
-    // verter_compiler, and `verter_compiler::utils::oxc::script::type_surface::`
+    // verter_compiler, and `verter_parser::utils::oxc::script::type_surface::`
     // from verter_session). The consolidation deletes the query-time engine;
     // the lowering front-end `verter_type_expr_oxc::
     // lower_ts_type` is NOT this engine and references none of these tokens.
@@ -16426,10 +16325,7 @@ mod single_resolution_engine_guards {
     // vue-glob re-export spelling (`utils::oxc::vue::{ResolvedElements, …}`)
     // exists to hide engine-symbol imports from the imported-symbol counter,
     // so compiler consumers (`compile/mod.rs`, `tsc/script.rs`, …) are fully
-    // counted. The Vue cache-key identity module
-    // (`vue/script/named_type_keys.rs`) is Vue semantics, not the engine —
-    // its consumers carry no engine tokens of their own (decision row D-l in
-    // `docs/arch/multi-framework-adapters-plan.md`).
+    // counted.
     const TYPE_SURFACE_PATH_FILE_ALLOWLIST: &[(&str, usize)] = &[
         ("crates/verter_compiler/src/compile/mod.rs", 2),
         ("crates/verter_compiler/src/compile/types.rs", 1),
@@ -16443,13 +16339,10 @@ mod single_resolution_engine_guards {
             1,
         ),
         ("crates/verter_compiler/src/script/macros.rs", 3),
-        // Upstream's single-parse `PreparedScript` lane (`script/prepared.rs`) plus the
-        // framework-neutral import rehome made EXISTING eager-engine debt visible to this guard
-        // in a new home: the consumers it consolidates (`compile/mod.rs` 4→2,
-        // `script/macros.rs` 5→3, `script/mod.rs` 1→0) shed their direct
-        // `type_surface::ResolvedElements`/`extract_companion_types` uses onto the shared lane.
-        // Same doomed-engine symbols, relocated — NOT a new engine path (upstream `prepared.rs`
-        // already carried these sites and passed its own guard).
+        // Upstream's single-parse `PreparedScript` lane: setup + companion
+        // blocks parse once and thread their resolved companion/external
+        // surfaces to every compile consumer — pass-through of
+        // already-resolved data, NOT a new engine path.
         ("crates/verter_compiler/src/script/prepared.rs", 10),
         ("crates/verter_compiler/src/tsc/script.rs", 37),
         ("crates/verter_parser/src/utils/oxc/script/mod.rs", 1),
@@ -16460,37 +16353,25 @@ mod single_resolution_engine_guards {
         ("crates/verter_parser/src/utils/oxc/vue/script/macros.rs", 4),
         ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 3),
         (
-            "crates/verter_parser/src/utils/oxc/vue/script/named_type_keys.rs",
-            4,
-        ),
-        (
             "crates/verter_parser/src/utils/oxc/vue/script/options.rs",
             3,
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 21),
-        // The framework-adapter merge relocated the carrier snapshot builders
-        // off `eval_program.rs` (7 → 1) onto the per-file index materialise
-        // (`prepared_decl.rs` 7 → 10), the content-addressed body memo
-        // (`decl_body_memo.rs` → 3), and the overlay materialise
-        // (`overlay_materialize.rs` → 2). These are the SAME doomed-engine
-        // references in their merged homes, not new engine uses — the total
-        // is conserved across the relocation.
         ("crates/verter_session/src/decl_body_memo.rs", 3),
-        ("crates/verter_session/src/host_manage/eval_program.rs", 1),
-        ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 4),
+        ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 3),
         (
             "crates/verter_session/src/host_manage/overlay_materialize.rs",
             2,
         ),
-        ("crates/verter_session/src/host_manage/prepared_decl.rs", 10),
-        ("crates/verter_session/src/host_manage.rs", 3),
+        ("crates/verter_session/src/host_manage/prepared_decl.rs", 5),
+        ("crates/verter_session/src/host_manage.rs", 1),
         (
             "crates/verter_session/src/host_resolve/external_macro_collector.rs",
             1,
         ),
         (
             "crates/verter_session/src/host_resolve/external_type_resolution.rs",
-            6,
+            2,
         ),
         (
             "crates/verter_session/src/host_resolve/frontier_engine.rs",
@@ -16500,13 +16381,7 @@ mod single_resolution_engine_guards {
             "crates/verter_session/src/host_resolve/frontier_helpers.rs",
             4,
         ),
-        ("crates/verter_session/src/lib.rs", 1),
-        ("crates/verter_session/src/parsed_eval_program.rs", 1),
         ("crates/verter_session/src/project_type_store.rs", 3),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/mod.rs",
-            3,
-        ),
         (
             "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
             3,
@@ -16531,21 +16406,49 @@ mod single_resolution_engine_guards {
             "crates/verter_session/src/resolver_core/session_resolver_context.rs",
             2,
         ),
+        // 9 pre-existing constructor-surface sites + 1 in the
+        // `#[cfg(any(test, debug_assertions))]` service-backed test
+        // constructor (`service_backed_core_for_test` builds the
+        // `AnalyzedExternalTypeSource` the production constructor
+        // signature requires — compiled out of release builds). The
+        // count drops when the constructor signature sheds the
+        // doomed analysis carrier.
         (
             "crates/verter_session/src/resolver_core/shallow_file_state.rs",
-            7,
+            10,
         ),
+        // The `ResolvedMacroElements` carrier (elements + keep-all
+        // native_props from ONE shared-dispatch surface resolution): its
+        // `elements` field names the legacy DTO type, and the retained
+        // display renderer imports the engine module path — pass-through
+        // DTO naming, zero engine resolution. `native_props` rows are built
+        // directly from `TypeInfoSurfaceMember`s (no parser DTO
+        // round-trip).
         (
             "crates/verter_session/src/resolver_core/surface_projector.rs",
-            6,
+            2,
         ),
         (
             "crates/verter_session/src/resolver_core/symbol_resolver.rs",
             3,
         ),
-        ("crates/verter_session/src/semantic_query.rs", 1),
-        ("crates/verter_session/src/semantic_query_memo/mod.rs", 2),
-        ("crates/verter_session/src/types.rs", 1),
+        // The imported-macro-type element projection: a THIN normalize of
+        // shared-engine macro-surface results INTO the legacy compile-facing
+        // DTO shape (`shared_resolve(type) + normalise`) — a pass-through
+        // construction of already-resolved data for the parser consumer, NOT a
+        // new resolution through the doomed OXC engine (it performs zero
+        // `type_surface` resolution; it only names the DTO types it builds).
+        // Covers BOTH sanctioned positions on this bridge (emits + props,
+        // macro-argument AND per-name routes) plus the QueryResult-style
+        // `NamedTypeElementsOutcome` carrier the component-meta
+        // macro-elements rail consumes (value / recursive / genuine-miss —
+        // one added mention of the same boundary DTO, zero added
+        // resolution); the whole file deletes with the same legacy-DTO
+        // consolidation.
+        (
+            "crates/verter_session/src/typeinfo/framework_surface/vue_exec/imported_elements.rs",
+            45,
+        ),
     ];
 
     #[test]
@@ -16605,12 +16508,8 @@ mod single_resolution_engine_guards {
         ("crates/verter_parser/src/utils/oxc/vue/script/macros.rs", 2),
         ("crates/verter_parser/src/utils/oxc/vue/script/mod.rs", 2),
         (
-            "crates/verter_parser/src/utils/oxc/vue/script/named_type_keys.rs",
-            3,
-        ),
-        (
             "crates/verter_parser/src/utils/oxc/script/type_surface/decl.rs",
-            28,
+            27,
         ),
         (
             "crates/verter_parser/src/utils/oxc/script/type_surface/elements.rs",
@@ -16618,7 +16517,7 @@ mod single_resolution_engine_guards {
         ),
         (
             "crates/verter_parser/src/utils/oxc/script/type_surface/external.rs",
-            25,
+            18,
         ),
         (
             "crates/verter_parser/src/utils/oxc/script/type_surface/infer.rs",
@@ -16626,19 +16525,16 @@ mod single_resolution_engine_guards {
         ),
         (
             "crates/verter_parser/src/utils/oxc/script/type_surface/mod.rs",
-            20,
+            18,
         ),
         ("crates/verter_parser/src/utils/oxc/vue/script/setup.rs", 1),
-        ("crates/verter_session/src/host_manage/jsdoc_resolve.rs", 1),
-        ("crates/verter_session/src/host_manage/prepared_decl.rs", 4),
-        ("crates/verter_session/src/host_manage.rs", 2),
         (
             "crates/verter_session/src/host_resolve/external_macro_collector.rs",
             1,
         ),
         (
             "crates/verter_session/src/host_resolve/external_type_resolution.rs",
-            6,
+            2,
         ),
         (
             "crates/verter_session/src/host_resolve/frontier_engine.rs",
@@ -16647,10 +16543,6 @@ mod single_resolution_engine_guards {
         (
             "crates/verter_session/src/host_resolve/frontier_helpers.rs",
             1,
-        ),
-        (
-            "crates/verter_session/src/resolver_core/component_meta/mod.rs",
-            3,
         ),
         (
             "crates/verter_session/src/resolver_core/external_macro_types.rs",
@@ -16662,15 +16554,26 @@ mod single_resolution_engine_guards {
         ),
         (
             "crates/verter_session/src/resolver_core/surface_projector.rs",
-            4,
+            2,
         ),
         (
             "crates/verter_session/src/resolver_core/symbol_resolver.rs",
             3,
         ),
-        ("crates/verter_session/src/semantic_query.rs", 1),
-        ("crates/verter_session/src/semantic_query_memo/mod.rs", 2),
-        ("crates/verter_session/src/types.rs", 1),
+        // The imported-macro-type element projection: constructs the legacy
+        // `ResolvedElements` DTO FROM shared-engine macro-surface results (a
+        // pass-through of already-resolved data for the compile parser, like
+        // the `vue_bridge.rs` sidecar above) — NOT a new resolution engine.
+        // Covers BOTH sanctioned positions on this bridge (emits + props,
+        // macro-argument AND per-name routes) plus the QueryResult-style
+        // `NamedTypeElementsOutcome::Resolved` carrier arm the
+        // component-meta macro-elements rail consumes (one added mention of
+        // the same boundary DTO, zero added resolution); the whole file
+        // deletes with the same legacy-DTO consolidation.
+        (
+            "crates/verter_session/src/typeinfo/framework_surface/vue_exec/imported_elements.rs",
+            10,
+        ),
     ];
 
     #[test]
@@ -16863,37 +16766,20 @@ mod single_resolution_engine_guards {
     #[test]
     fn resolved_elements_ledger_excludes_resolved_elements_owned() {
         // PROOF for the [P1] substring-bug fix: identifier-boundary matching
-        // must NOT count `ResolvedElementsOwned`. The two owned-artifact files
-        // contain ONLY `ResolvedElementsOwned` (zero exact `ResolvedElements`),
-        // so they must be ABSENT from the live `ResolvedElements` count scan —
-        // and the `ResolvedElementsOwned` count scan must find them.
-        let re_counts = scan_file_identifier_counts("ResolvedElements");
+        // must NOT count a `ResolvedElementsOwned` embedding as a
+        // `ResolvedElements` use. The former real-tree fixture (the
+        // `owned_artifacts` arena files that contained ONLY
+        // `ResolvedElementsOwned`) was deleted with the dead owned-artifacts
+        // context cache, so the discrimination is proven at the matcher unit
+        // level plus a live-scan absence check: no production file may appear
+        // in the `ResolvedElements` scan solely via an `…Owned` embedding.
         let owned_counts = scan_file_identifier_counts("ResolvedElementsOwned");
-
-        for owned_file in [
-            "crates/verter_session/src/owned_artifacts/mod.rs",
-            "crates/verter_session/src/owned_artifacts/type_resolution_context.rs",
-        ] {
-            assert!(
-                owned_counts.iter().any(|(f, c)| f == owned_file && *c > 0),
-                "{owned_file} must contain `ResolvedElementsOwned` (the owned \
-                 arena type) — precondition for the discrimination proof"
-            );
-            assert!(
-                !re_counts.iter().any(|(f, _)| f == owned_file),
-                "{owned_file} must NOT appear in the exact `ResolvedElements` \
-                 count scan — identifier-boundary matching must reject the \
-                 `ResolvedElementsOwned` embedding (the .contains substring bug)"
-            );
-            assert!(
-                !RESOLVED_ELEMENTS_FILE_ALLOWLIST
-                    .iter()
-                    .any(|(f, _)| *f == owned_file),
-                "{owned_file} must be DROPPED from the re-derived \
-                 `ResolvedElements` allowlist — it only embeds \
-                 `ResolvedElementsOwned`"
-            );
-        }
+        assert!(
+            owned_counts.is_empty(),
+            "`ResolvedElementsOwned` (the retired owned arena type) reappeared \
+             in production source: {owned_counts:?} — delete the resurrection \
+             (the owned-artifacts context cache stays deleted)"
+        );
 
         // Unit-level: the matcher itself must reject the embedding.
         assert_eq!(
@@ -16917,7 +16803,7 @@ mod single_resolution_engine_guards {
         // MUST count it.
         assert_eq!(
             count_type_surface_module_targets(
-                "use verter_compiler::utils::oxc::script::type_surface as rt;\nfn f() { rt::go(); }"
+                "use verter_parser::utils::oxc::script::type_surface as rt;\nfn f() { rt::go(); }"
             ),
             1,
             "aliased import `use …::type_surface as rt;` must be counted (the \
@@ -16982,14 +16868,14 @@ mod single_resolution_engine_guards {
 
         // A file that imports an engine function and calls it ONCE.
         let one_call = "\
-use verter_compiler::utils::oxc::script::type_surface::analyze_external_type_program;\n\
+use verter_parser::utils::oxc::script::type_surface::analyze_external_type_program;\n\
 pub fn run(p: &Program) {\n\
     let _ = analyze_external_type_program(p);\n\
 }\n";
         // A file IDENTICAL except it adds a SECOND bare call to the same
         // already-imported engine function (the exact in-file-growth evasion).
         let two_calls = "\
-use verter_compiler::utils::oxc::script::type_surface::analyze_external_type_program;\n\
+use verter_parser::utils::oxc::script::type_surface::analyze_external_type_program;\n\
 pub fn run(p: &Program) {\n\
     let _ = analyze_external_type_program(p);\n\
     let _ = analyze_external_type_program(p);\n\
@@ -17113,7 +16999,7 @@ pub fn run(p: &Program) {\n\
         // and collect the leaf bound under `type_surface::{ … }`. (This is the
         // [P2] form the left-walk predicate previously rejected.)
         let s = collect_type_surface_imported_symbols(&preprocess(
-            "use verter_compiler::utils::oxc::vue::{type_surface::{analyze_external_type_program}};",
+            "use verter_parser::utils::oxc::vue::{type_surface::{analyze_external_type_program}};",
         ));
         assert!(
             s.contains("analyze_external_type_program"),
@@ -17163,7 +17049,7 @@ pub fn run(p: &Program) {\n\
 
         // Module alias → the alias name (its `M::foo` uses are then counted).
         let s = collect_type_surface_imported_symbols(&preprocess(
-            "use verter_compiler::utils::oxc::script::type_surface as rt;",
+            "use verter_parser::utils::oxc::script::type_surface as rt;",
         ));
         assert!(s.contains("rt") && s.len() == 1);
 
@@ -17230,7 +17116,7 @@ pub fn run(p: &Program) {\n\
         // The exact evasion form the guard must catch: engine module
         // nested one level deep.
         let nested_src = "\
-use verter_compiler::utils::oxc::vue::{type_surface::{analyze_external_type_program}};\n\
+use verter_parser::utils::oxc::vue::{type_surface::{analyze_external_type_program}};\n\
 pub fn run(p: &Program) {\n\
     let _ = analyze_external_type_program(p);\n\
 }\n";
@@ -17296,7 +17182,7 @@ pub fn run(p: &Program) {\n\
         // --- Prove the ledger actually FIRES on the nested-import file: an extra
         // bare call to the already-imported engine function must raise the count.
         let two_calls = "\
-use verter_compiler::utils::oxc::vue::{type_surface::{analyze_external_type_program}};\n\
+use verter_parser::utils::oxc::vue::{type_surface::{analyze_external_type_program}};\n\
 pub fn run(p: &Program) {\n\
     let _ = analyze_external_type_program(p);\n\
     let _ = analyze_external_type_program(p);\n\
@@ -17348,10 +17234,12 @@ pub fn run(p: &Program) {\n\
             is_test_or_probe_file("crates/x/src/tests/regress.rs"),
             "file under a `tests/` segment must be excluded"
         );
-        // A genuine production file must NOT be excluded.
+        // A genuine production file must NOT be excluded. (Pinned to
+        // `field_types.rs` after `macro_shapes.rs` was deleted with the
+        // define-shape move onto `projectors::define_shapes`.)
         assert!(
             !is_test_or_probe_file(
-                "crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs"
+                "crates/verter_session/src/meta_resolve/materialize/field_types.rs"
             ),
             "a genuine production source file must NOT be excluded"
         );
@@ -17361,7 +17249,7 @@ pub fn run(p: &Program) {\n\
         let files = collect_production_rs_files();
         let rels: BTreeSet<String> = files.into_iter().map(|(_, rel)| rel).collect();
         assert!(
-            rels.contains("crates/verter_session/src/meta_resolve/materialize/macro_shapes.rs"),
+            rels.contains("crates/verter_session/src/meta_resolve/materialize/field_types.rs"),
             "production collector must include a real production file"
         );
         assert!(
@@ -17883,531 +17771,6 @@ pub fn after() {}\n";
              NOT count as a `test_only` consumption"
         );
     }
-
-    // =======================================================================
-    // Producer-bound unreachability guard — the footprint encoder's
-    // `SemanticNodeData::VueMacroElements(Arc<ResolvedElements>)` arm
-    // (`component_meta_audit/footprint_miner.rs`) blanket-`Debug`s the
-    // `ResolvedElements` payload. The ONLY `SemanticNodeId` arena ordinal a
-    // `TypeExpr` can carry is `SyntheticCarrierKey.value_node: u64` behind
-    // `TypeExpr::SyntheticSlotBinding` (`verter_type_expr/src/lib.rs`). IF such
-    // a carrier ever reached a `ResolvedElements.props[].type_expr` /
-    // `.call_signatures[].type_expr`, that `Debug` would fold a
-    // store/generation-relative ordinal into the content-only footprint
-    // fingerprint — a cross-host byte-identity break.
-    //
-    // The architectural disposition is that this is PROVABLY UNREACHABLE, so
-    // the encoder arm stays a `Debug` (descending the second-engine result
-    // type from the encoder would force naming `ResolvedElements` /
-    // `type_surface` there, raising the single-resolution-engine shrinking
-    // ledger — the wrong fix). This guard MECHANICALLY pins the three
-    // producer-surface facts that make the leak unreachable. If any fact
-    // changes, this guard fires BEFORE the silent fingerprint break can ship,
-    // and the encoder arm must move to an explicit ordinal-free child-descending
-    // encoder (the disposition itself would have to be revisited).
-    //
-    // The three pinned facts (all over PREPROCESSED production `src/`, so
-    // comments + `#[cfg(test)]` modules + `_tests.rs`/`tests/` files are NOT
-    // counted — test fixtures that legitimately build a `SyntheticSlotBinding`
-    // never trip it):
-    //   (1) `verter_parser/src/**` AND `verter_compiler/src/**` reference the
-    //       synthetic carrier ZERO times (no `SyntheticSlotBinding` /
-    //       `SyntheticCarrierKey` / `synthetic_slot_binding` token). `ResolvedElements`
-    //       is parser-built; the parser/compiler must never mint the carrier.
-    //   (2) The ONLY production CALL site of `insert_resolved_named_type` is
-    //       `host_manage.rs` (`HostNamedTypeCacheAdapter::insert`), which forwards
-    //       the parser-provided `Arc<ResolvedElements>` UNCHANGED.
-    //   (3) The ONLY production CONSTRUCTION of
-    //       `SemanticNodeData::VueMacroElements(...)` is in
-    //       `semantic_query_memo/mod.rs` (`SemanticGraphStore::insert_resolved_named_type`).
-    //       Pattern-match arms (`VueMacroElements(_) =>`, `| ...VueMacroElements(_)`,
-    //       `matches!(.., VueMacroElements(_))`, binding `VueMacroElements(arc) =>`)
-    //       are NOT constructions and are correctly ignored.
-    // =======================================================================
-
-    /// The synthetic-carrier tokens whose absence from `verter_parser` /
-    /// `verter_compiler` production source is fact (1). `TypeExpr::SyntheticSlotBinding`
-    /// is the sole ordinal-bearing `TypeExpr` variant; `SyntheticCarrierKey`
-    /// is its payload struct (`value_node: u64` = the arena ordinal); the
-    /// `synthetic_slot_binding` constructor is the snake-case mint entry.
-    const SYNTHETIC_CARRIER_TOKENS: &[&str] = &[
-        "SyntheticSlotBinding",
-        "SyntheticCarrierKey",
-        "synthetic_slot_binding",
-    ];
-
-    /// The crates that build `ResolvedElements` and must stay carrier-free
-    /// (fact 1). Repo-relative `src/` prefixes — a production file outside
-    /// these prefixes is irrelevant to fact (1).
-    const CARRIER_FREE_CRATE_SRC_PREFIXES: &[&str] =
-        &["crates/verter_parser/src/", "crates/verter_compiler/src/"];
-
-    /// Count identifier-boundary occurrences, in PREPROCESSED `src`, of any
-    /// `SYNTHETIC_CARRIER_TOKENS` entry. Reuses `count_identifier_in_source`
-    /// so `SyntheticCarrierKeyV2` / `synthetic_slot_binding_helper` never
-    /// false-match a stale-but-renamed token. Operates on an arbitrary source
-    /// string so the discriminator can feed a synthetic parser-shaped file.
-    fn count_synthetic_carrier_tokens(src: &str) -> usize {
-        SYNTHETIC_CARRIER_TOKENS
-            .iter()
-            .map(|tok| count_identifier_in_source(src, tok))
-            .sum()
-    }
-
-    /// Count METHOD-CALL sites of `method` in PREPROCESSED `src` — occurrences
-    /// of `.<method>(` (a `.`-prefixed call, then `(`). This distinguishes a
-    /// production caller (`self.graph.insert_resolved_named_type(...)`) from the
-    /// `fn insert_resolved_named_type(` DEFINITION (preceded by `fn `, no `.`)
-    /// and from rustdoc `[`Self::insert_resolved_named_type`]` links (stripped
-    /// by `preprocess`). Identifier-bounded on the trailing side so
-    /// `.insert_resolved_named_type_v2(` never satisfies the ledger.
-    fn count_dot_call_sites(src: &str, method: &str) -> usize {
-        let bytes = src.as_bytes();
-        let mb = method.as_bytes();
-        let n = mb.len();
-        if n == 0 {
-            return 0;
-        }
-        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-        let mut count = 0usize;
-        let mut i = 0usize;
-        while i + n <= bytes.len() {
-            if &bytes[i..i + n] == mb {
-                // Must be `.`-prefixed (a method call), and the char BEFORE the
-                // dot must not extend an identifier into `.` (it never does —
-                // the dot itself is the boundary). The dot prefix is what
-                // separates a call from a `fn name(` definition.
-                let dot_ok = i >= 1 && bytes[i - 1] == b'.';
-                // Must be followed by `(` (allowing intervening whitespace for a
-                // call whose `(` wrapped to the next line), and the trailing
-                // char must be an identifier boundary.
-                let after = i + n;
-                let after_ok = after == bytes.len() || !is_ident_char(bytes[after]);
-                let mut k = after;
-                while k < bytes.len()
-                    && (bytes[k] == b' ' || bytes[k] == b'\n' || bytes[k] == b'\t')
-                {
-                    k += 1;
-                }
-                let paren_ok = k < bytes.len() && bytes[k] == b'(';
-                if dot_ok && after_ok && paren_ok {
-                    count += 1;
-                    i = after;
-                    continue;
-                }
-            }
-            i += 1;
-        }
-        count
-    }
-
-    /// The fully-qualified variant whose CONSTRUCTION sites are fact (3).
-    const VUE_MACRO_ELEMENTS_VARIANT: &str = "SemanticNodeData::VueMacroElements";
-
-    /// Count CONSTRUCTION sites (NOT pattern arms) of
-    /// `SemanticNodeData::VueMacroElements(...)` in PREPROCESSED `src`.
-    ///
-    /// Construction vs pattern is decided structurally per occurrence:
-    ///   * the variant must be tuple-applied — immediately (past whitespace)
-    ///     followed by `(`;
-    ///   * if the tuple body is the wildcard `_` it is a PATTERN (you cannot
-    ///     construct a tuple variant with `_`) — never counted;
-    ///   * otherwise the token AFTER the balanced `(...)` decides: `=>` (arm
-    ///     separator) or `|` (alternation pattern continues) ⇒ PATTERN; any
-    ///     other continuation (`)`, `;`, `,`, `.`, end) ⇒ CONSTRUCTION (the
-    ///     variant is an EXPRESSION — an argument / RHS / return value).
-    ///
-    /// This classifies every live occurrence correctly: the sole construction
-    /// (`intern_node(SemanticNodeData::VueMacroElements(elements))`, body
-    /// `elements`, followed by `)`) counts; the `Debug`/display arms (body
-    /// `elements`, followed by an arm body — i.e. the `)` is followed by `=>`),
-    /// the binding arm (`VueMacroElements(arc) =>`), the `_` arms, the `|`
-    /// alternations, and the `matches!(.., VueMacroElements(_))` macro do not.
-    /// A genuine construction can NEVER be followed by `=>` (a syntax error),
-    /// so the classifier cannot misread a construction as a pattern or vice
-    /// versa. Operates on an arbitrary source string for the discriminator.
-    fn count_vue_macro_elements_constructions(src: &str) -> usize {
-        let bytes = src.as_bytes();
-        let vb = VUE_MACRO_ELEMENTS_VARIANT.as_bytes();
-        let n = vb.len();
-        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-        let mut count = 0usize;
-        let mut i = 0usize;
-        while i + n <= bytes.len() {
-            if &bytes[i..i + n] == vb {
-                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-                let after_ok = i + n == bytes.len() || !is_ident_char(bytes[i + n]);
-                if before_ok && after_ok {
-                    // Skip whitespace to the tuple `(`.
-                    let mut k = i + n;
-                    while k < bytes.len()
-                        && (bytes[k] == b' ' || bytes[k] == b'\n' || bytes[k] == b'\t')
-                    {
-                        k += 1;
-                    }
-                    if k < bytes.len() && bytes[k] == b'(' {
-                        // Walk the balanced tuple body to its closing `)`.
-                        let body_start = k + 1;
-                        let mut depth = 1usize;
-                        let mut j = body_start;
-                        while j < bytes.len() && depth > 0 {
-                            match bytes[j] {
-                                b'(' => depth += 1,
-                                b')' => depth -= 1,
-                                _ => {}
-                            }
-                            j += 1;
-                        }
-                        let body = src[body_start..j.saturating_sub(1)].trim();
-                        // Wildcard body ⇒ pattern, never a construction.
-                        let is_wildcard = body == "_";
-                        // Token after the balanced `(...)` decides arm vs expr.
-                        let mut t = j; // `j` is one past the closing `)`
-                        while t < bytes.len()
-                            && (bytes[t] == b' ' || bytes[t] == b'\n' || bytes[t] == b'\t')
-                        {
-                            t += 1;
-                        }
-                        let tail = &src[t..];
-                        let is_arm = tail.starts_with("=>") || tail.starts_with('|');
-                        if !is_wildcard && !is_arm {
-                            count += 1;
-                        }
-                    }
-                    i += n;
-                    continue;
-                }
-            }
-            i += 1;
-        }
-        count
-    }
-
-    /// Returns `true` iff repo-relative `rel` lives under a
-    /// `CARRIER_FREE_CRATE_SRC_PREFIXES` crate `src/`.
-    fn is_carrier_free_crate_file(rel: &str) -> bool {
-        CARRIER_FREE_CRATE_SRC_PREFIXES
-            .iter()
-            .any(|p| rel.starts_with(p))
-    }
-
-    /// The single expected `insert_resolved_named_type` production caller file
-    /// (fact 2). A `.insert_resolved_named_type(` call in ANY OTHER production
-    /// file, or a SECOND call inside this file, fails the guard.
-    const EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER: &str =
-        "crates/verter_session/src/host_manage.rs";
-
-    /// The single expected `SemanticNodeData::VueMacroElements(...)` production
-    /// construction file (fact 3).
-    const EXPECTED_VUE_MACRO_ELEMENTS_CONSTRUCTION: &str =
-        "crates/verter_session/src/semantic_query_memo/mod.rs";
-
-    /// Per-file `(repo_relative_path, occurrence_count)` observation rows.
-    type FileCounts = Vec<(String, usize)>;
-
-    /// The three pinned producer-surface observation sets:
-    /// `(carrier_hits, insert_caller_counts, construction_counts)`.
-    type ProducerSurfaceObservations = (FileCounts, FileCounts, FileCounts);
-
-    /// Scan the live production tree and return, for each pinned fact, the
-    /// per-file observation set. Shared between the live guard and the
-    /// discriminator self-test (which substitutes a synthetic file set), so
-    /// the two cannot diverge.
-    ///
-    /// Returns `(carrier_hits, insert_caller_counts, construction_counts)`:
-    ///   * `carrier_hits`: `(rel, count)` for each carrier-free-crate file with
-    ///     ≥1 synthetic-carrier token (MUST be empty).
-    ///   * `insert_caller_counts`: `(rel, count)` for each file with ≥1
-    ///     `.insert_resolved_named_type(` call.
-    ///   * `construction_counts`: `(rel, count)` for each file with ≥1
-    ///     `SemanticNodeData::VueMacroElements(...)` construction.
-    fn scan_vue_macro_elements_producer_surface(
-        files: &[(String, String)],
-    ) -> ProducerSurfaceObservations {
-        let mut carrier_hits: FileCounts = Vec::new();
-        let mut insert_caller_counts: FileCounts = Vec::new();
-        let mut construction_counts: FileCounts = Vec::new();
-        for (rel, src) in files {
-            let stripped = preprocess(src);
-            if is_carrier_free_crate_file(rel) {
-                let c = count_synthetic_carrier_tokens(&stripped);
-                if c > 0 {
-                    carrier_hits.push((rel.clone(), c));
-                }
-            }
-            let calls = count_dot_call_sites(&stripped, "insert_resolved_named_type");
-            if calls > 0 {
-                insert_caller_counts.push((rel.clone(), calls));
-            }
-            let ctors = count_vue_macro_elements_constructions(&stripped);
-            if ctors > 0 {
-                construction_counts.push((rel.clone(), ctors));
-            }
-        }
-        (carrier_hits, insert_caller_counts, construction_counts)
-    }
-
-    /// Read every production `src/` file as `(rel, raw_source)` for the
-    /// producer-surface scan (the scan does its own `preprocess`).
-    fn read_production_sources() -> Vec<(String, String)> {
-        collect_production_rs_files()
-            .into_iter()
-            .filter_map(|(path, rel)| fs::read_to_string(&path).ok().map(|s| (rel, s)))
-            .collect()
-    }
-
-    /// Assert the three pinned producer-surface facts against an arbitrary
-    /// observation set. Shared by the live guard and the discriminator (fed a
-    /// synthetic file set with planted violations). PANICS on any mismatch —
-    /// the discriminator catches the panic via `guard_reports_violation`.
-    fn assert_vue_macro_elements_producer_surface(files: &[(String, String)]) {
-        let (carrier_hits, insert_caller_counts, construction_counts) =
-            scan_vue_macro_elements_producer_surface(files);
-
-        // FACT (1): parser/compiler carrier-free.
-        assert!(
-            carrier_hits.is_empty(),
-            "VueMacroElements ordinal-leak guard FACT (1) BROKEN — \
-             `verter_parser`/`verter_compiler` production src now references the \
-             synthetic carrier ({SYNTHETIC_CARRIER_TOKENS:?}). `ResolvedElements` is \
-             parser-built and feeds the footprint encoder's `VueMacroElements` arm, \
-             which blanket-`Debug`s it; a `SyntheticSlotBinding` reaching it would \
-             leak a `SemanticNodeId` arena ordinal into the content-only \
-             fingerprint. If the carrier genuinely belongs here, the encoder arm \
-             must FIRST move to an explicit ordinal-free encoder. Offending \
-             files:\n  {}",
-            carrier_hits
-                .iter()
-                .map(|(f, c)| format!("{f}  ({c} token(s))"))
-                .collect::<Vec<_>>()
-                .join("\n  "),
-        );
-
-        // FACT (2): exactly one `insert_resolved_named_type` production caller,
-        // exactly once, and it is `host_manage.rs`.
-        let insert_expected: FileCounts =
-            vec![(EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER.to_string(), 1)];
-        assert_eq!(
-            sorted(insert_caller_counts.clone()),
-            insert_expected,
-            "VueMacroElements ordinal-leak guard FACT (2) BROKEN — the production \
-             callers of `insert_resolved_named_type` are no longer EXACTLY \
-             {{ {EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER}: 1 }}. A new caller (or a \
-             second call in `host_manage.rs`) could thread a session-origin \
-             `Arc<ResolvedElements>` carrying a `SyntheticSlotBinding` into the \
-             `VueMacroElements` slot, making the encoder's ordinal `Debug` \
-             reachable. Observed: {insert_caller_counts:?}",
-        );
-
-        // FACT (3): exactly one `VueMacroElements` production construction, once,
-        // in `semantic_query_memo/mod.rs`.
-        let ctor_expected: FileCounts =
-            vec![(EXPECTED_VUE_MACRO_ELEMENTS_CONSTRUCTION.to_string(), 1)];
-        assert_eq!(
-            sorted(construction_counts.clone()),
-            ctor_expected,
-            "VueMacroElements ordinal-leak guard FACT (3) BROKEN — the production \
-             CONSTRUCTION sites of `SemanticNodeData::VueMacroElements(...)` are no \
-             longer EXACTLY {{ {EXPECTED_VUE_MACRO_ELEMENTS_CONSTRUCTION}: 1 }}. A \
-             second construction site is a new producer that could intern a \
-             carrier-bearing `ResolvedElements`. Observed: {construction_counts:?}",
-        );
-    }
-
-    /// Stable-sort a `(String, usize)` observation set for order-independent
-    /// equality against an expected set.
-    fn sorted(mut v: FileCounts) -> FileCounts {
-        v.sort();
-        v
-    }
-
-    /// CRITICAL (Macro Type Traversal Rule / single-resolution-engine): the
-    /// footprint encoder's `SemanticNodeData::VueMacroElements` `Debug` arm can
-    /// never receive a `TypeExpr::SyntheticSlotBinding` ordinal, because the
-    /// producer surface is pinned to (1) carrier-free parser/compiler, (2) a
-    /// single `insert_resolved_named_type` caller, (3) a single `VueMacroElements`
-    /// construction. This is the architecture-authority-mandated closure of the
-    /// (provably-unreachable-today) ordinal-leak class — a STATIC producer-bound
-    /// guard, NOT an encoder change and NOT a second-engine allowlist.
-    #[test]
-    fn vue_macro_elements_ordinal_leak_is_producer_unreachable() {
-        let files = read_production_sources();
-        assert_vue_macro_elements_producer_surface(&files);
-    }
-
-    /// Anti-rogue discriminator: PROVES the producer-bound guard catches a real
-    /// violation of each pinned fact, and does NOT false-positive on a bare
-    /// match arm or the real tree. A guard that cannot fail is a stub
-    /// (CLAUDE.md Stub Prevention). Each planted violation is fed to the SAME
-    /// `assert_vue_macro_elements_producer_surface` the live guard uses and is
-    /// asserted to PANIC (via `guard_reports_violation`); the real tree and a
-    /// bare-match-arm-only tree are asserted to PASS.
-    #[test]
-    fn vue_macro_elements_producer_guard_discriminates() {
-        // Baseline: the REAL production tree ACCEPTS (green baseline, and proof
-        // the planted-reject cases below are not vacuously failing on the real
-        // tree's own contents).
-        let real = read_production_sources();
-        assert!(
-            !guard_reports_violation({
-                let real = real.clone();
-                move || assert_vue_macro_elements_producer_surface(&real)
-            }),
-            "producer-surface guard must PASS on the real tree (the ruling: the \
-             leak is provably unreachable today)"
-        );
-
-        // The minimal ACCEPTED baseline file set — exactly the three real
-        // producer-surface anchors, reduced to their load-bearing lines. The
-        // discriminator perturbs THIS set so each planted reject is isolated to
-        // one fact.
-        let host_manage = (
-            EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER.to_string(),
-            "let _ = self.graph.insert_resolved_named_type(host_key, value, g);\n".to_string(),
-        );
-        let memo = (
-            EXPECTED_VUE_MACRO_ELEMENTS_CONSTRUCTION.to_string(),
-            "let node_id = self.intern_node(SemanticNodeData::VueMacroElements(elements));\n"
-                .to_string(),
-        );
-        // A production file that is NOT a parser/compiler file and only PATTERN-
-        // MATCHES the variant (the ubiquitous, allowed shape). MUST be accepted.
-        let bare_match_arm = (
-            "crates/verter_session/src/project_semantic_dispatch/raise.rs".to_string(),
-            "match data {\n    SemanticNodeData::VueMacroElements(_) => false,\n    \
-             | SemanticNodeData::VueMacroElements(_) => true,\n    \
-             SemanticNodeData::VueMacroElements(arc) => Some(arc.clone()),\n}\n\
-             let is_vue = matches!(data, SemanticNodeData::VueMacroElements(_));\n"
-                .to_string(),
-        );
-        let baseline: Vec<(String, String)> =
-            vec![host_manage.clone(), memo.clone(), bare_match_arm.clone()];
-        // ACCEPT: the minimal baseline (one insert caller, one construction, no
-        // parser carrier, plus a pure match-arm file) — proves NO false positive
-        // on pattern matches.
-        assert!(
-            !guard_reports_violation({
-                let baseline = baseline.clone();
-                move || assert_vue_macro_elements_producer_surface(&baseline)
-            }),
-            "producer-surface guard must PASS on a minimal valid baseline whose \
-             only extra `VueMacroElements` references are PATTERN-MATCH arms — a \
-             match arm is not a construction and must not false-positive"
-        );
-
-        // REJECT (a): a synthetic `verter_parser` source that MINTS the carrier
-        // (`TypeExpr::SyntheticSlotBinding(...)` + `SyntheticCarrierKey { ... }`).
-        let mut planted_carrier = baseline.clone();
-        planted_carrier.push((
-            "crates/verter_parser/src/utils/oxc/script/type_surface/elements.rs".to_string(),
-            "let carrier = TypeExpr::SyntheticSlotBinding(Arc::new(SyntheticCarrierKey {\n    \
-             value_node: id.0,\n}));\n"
-                .to_string(),
-        ));
-        assert!(
-            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
-                &planted_carrier
-            )),
-            "FACT (1) discriminator: a synthetic `verter_parser` source minting a \
-             `SyntheticSlotBinding`/`SyntheticCarrierKey` MUST be REJECTED — a \
-             guard that cannot fail is a stub"
-        );
-
-        // REJECT (b): a SECOND production `.insert_resolved_named_type(` caller
-        // (a non-test, non-`host_manage.rs` file).
-        let mut planted_second_caller = baseline.clone();
-        planted_second_caller.push((
-            "crates/verter_session/src/brand_new_named_type_writer.rs".to_string(),
-            "let _ = self.graph.insert_resolved_named_type(other_key, other_value, g);\n"
-                .to_string(),
-        ));
-        assert!(
-            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
-                &planted_second_caller
-            )),
-            "FACT (2) discriminator: a SECOND production `insert_resolved_named_type` \
-             caller MUST be REJECTED"
-        );
-
-        // REJECT (b'): a SECOND `.insert_resolved_named_type(` call INSIDE
-        // `host_manage.rs` (in-file growth, not a new file).
-        let mut planted_in_file_caller = baseline.clone();
-        if let Some(slot) = planted_in_file_caller
-            .iter_mut()
-            .find(|(rel, _)| rel == EXPECTED_INSERT_RESOLVED_NAMED_TYPE_CALLER)
-        {
-            slot.1
-                .push_str("let _ = other.graph.insert_resolved_named_type(k2, v2, g2);\n");
-        }
-        assert!(
-            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
-                &planted_in_file_caller
-            )),
-            "FACT (2) discriminator: a SECOND `insert_resolved_named_type` call \
-             INSIDE the allowlisted caller file MUST be REJECTED (in-file growth)"
-        );
-
-        // REJECT (c): a SECOND production CONSTRUCTION of
-        // `SemanticNodeData::VueMacroElements(Arc::new(...))`.
-        let mut planted_second_ctor = baseline.clone();
-        planted_second_ctor.push((
-            "crates/verter_session/src/brand_new_vue_macro_producer.rs".to_string(),
-            "let n = self.intern_node(SemanticNodeData::VueMacroElements(Arc::new(\n    \
-             other_elements,\n)));\n"
-                .to_string(),
-        ));
-        assert!(
-            guard_reports_violation(move || assert_vue_macro_elements_producer_surface(
-                &planted_second_ctor
-            )),
-            "FACT (3) discriminator: a SECOND production `VueMacroElements` \
-             construction MUST be REJECTED"
-        );
-
-        // Unit-level proof of the construction-vs-pattern classifier (the
-        // load-bearing primitive): the construction form counts, every pattern
-        // form does not.
-        assert_eq!(
-            count_vue_macro_elements_constructions(
-                "self.intern_node(SemanticNodeData::VueMacroElements(elements))"
-            ),
-            1,
-            "the construction form (variant tuple-applied to an expr, followed \
-             by `)`) MUST count as 1"
-        );
-        for pattern in [
-            "SemanticNodeData::VueMacroElements(_) => false,",
-            "| SemanticNodeData::VueMacroElements(_) => true,",
-            "SemanticNodeData::VueMacroElements(arc) => Some(arc),",
-            "let v = matches!(data, SemanticNodeData::VueMacroElements(_));",
-            "SemanticNodeData::VueMacroElements(elements) => self.push(elements),",
-        ] {
-            assert_eq!(
-                count_vue_macro_elements_constructions(pattern),
-                0,
-                "a PATTERN-MATCH form (`{pattern}`) MUST NOT count as a \
-                 construction — it is followed by `=>` or `|`, or its body is `_`"
-            );
-        }
-
-        // Unit-level proof of the call-vs-definition discriminator.
-        assert_eq!(
-            count_dot_call_sites(
-                "let _ = self.graph.insert_resolved_named_type(k, v, g);",
-                "insert_resolved_named_type"
-            ),
-            1,
-            "a `.`-prefixed call MUST count"
-        );
-        assert_eq!(
-            count_dot_call_sites(
-                "pub fn insert_resolved_named_type(&self, key: K) -> V {",
-                "insert_resolved_named_type"
-            ),
-            0,
-            "the `fn …(` DEFINITION (no `.` prefix) MUST NOT count as a call"
-        );
-    }
 }
 
 /// Architecture guard (CRITICAL: typeinfo spans-not-strings) — the typeinfo
@@ -18843,6 +18206,16 @@ const INTO_OWNED_VIEW_ALLOWLIST: &[&str] = &[
     // both the `oracle-gen` generator and the consumption guard
     // `source_admission_digest_consistent`.
     "crates/verter_session/src/typeinfo/oracle_core/source_digest.rs",
+    // Inline `#[cfg(test)]` proof only (the input-side no-poison gate test
+    // builds a quiescent bare-host owned view over a standalone host); no
+    // production code path in this file touches the raw view — the raw-text
+    // scan cannot see the cfg(test) boundary.
+    "crates/verter_session/src/meta_resolve/projectors/output_sink.rs",
+    // `#[cfg(any(test, feature = "test-support"))]` semantic-source probe
+    // only (`demand_semantic_source_type_expr` builds an overlaid quiescent
+    // view for session-published assertions); never compiled into the
+    // production consumption path.
+    "crates/verter_session/src/meta.rs",
 ];
 
 fn store_view_guard_production_rs_files() -> Vec<std::path::PathBuf> {
@@ -21576,10 +20949,12 @@ fn enum_variant_struct_body(src: &str, variant: &str) -> String {
 ///       `id: SyntheticBindingId` — no `value_node`, no `SemanticNodeId`;
 ///   (b) the `synthetic_binding_whole` constructor builds
 ///       `ShapeSubject::SyntheticBinding { id }`;
-///   (c) the `NonSyntheticTypeExpr` seal exists — a `ShapeSubject::TypeExpr`
-///       cannot be built from a synthetic-carrying `TypeExpr`, so a nested
-///       carrier can never fold its `value_node` into the `TypeExpr`-subject
-///       structural hash.
+///   (c) the `ShapeSubject::TypeExpr` structural-hash arm is DELETED and the
+///       shared `classify_type_expr_shape_subject` classifier (routed through
+///       the one `type_expr_contains_synthetic_slot_binding` walker) refuses a
+///       nested carrier with `UnkeyableNested` — so a carrier can never fold
+///       its `value_node` into any keyed subject (the carrier-free class keys
+///       its LOWERED settled node, never the expression).
 #[test]
 fn synthetic_binding_cache_subject_is_content_free_and_carrier_sealed() {
     let src = read_workspace_file("crates/verter_session/src/component_meta_caches.rs");
@@ -21659,22 +21034,29 @@ fn synthetic_binding_cache_subject_is_content_free_and_carrier_sealed() {
          is the cache key; a module-private `_seal` may follow)"
     );
 
-    // (c) The `NonSyntheticTypeExpr` seal exists and its only constructor is
-    // fallible (returns `Option`), so a synthetic-carrying `TypeExpr` can never
-    // become a `ShapeSubject::TypeExpr` structural-hash subject.
+    // (c) The `ShapeSubject::TypeExpr` structural-hash arm is DELETED — a
+    // `TypeExpr` never enters the shape-cache key — and the shared
+    // classifier refuses a nested carrier through the one depth-safe
+    // carrier walker. The carrier-free class keys its LOWERED settled
+    // node (`MemberValueNode`), so no expression hash exists to fold a
+    // `value_node` into.
     assert!(
-        src.contains("struct NonSyntheticTypeExpr"),
-        "the `NonSyntheticTypeExpr` seal (the structural confinement that keeps a \
-         `SyntheticSlotBinding`-carrying `TypeExpr` out of the `ShapeSubject::\
-         TypeExpr` hash) must exist"
+        !src.contains("ShapeSubject::TypeExpr"),
+        "the `ShapeSubject::TypeExpr` structural-hash arm is deleted — a raw \
+         `TypeExpr` must never re-enter the ShapeCacheKey subject (the \
+         TypeExpr-start route keys its lowered settled node instead)"
     );
     assert!(
-        src.contains("fn new")
-            && src.contains("NonSyntheticTypeExpr")
+        src.contains("fn classify_type_expr_shape_subject")
             && src.contains("type_expr_contains_synthetic_slot_binding"),
-        "the `NonSyntheticTypeExpr` constructor must reject a synthetic-carrying \
-         `TypeExpr` via the shared depth-safe \
+        "the shared `classify_type_expr_shape_subject` classifier must exist and \
+         route carrier detection through the one depth-safe \
          `type_expr_contains_synthetic_slot_binding` walker"
+    );
+    assert!(
+        src.contains("UnkeyableNested"),
+        "the classifier must expose the nested-carrier `UnkeyableNested` verdict \
+         (the no-sound-key cache-bypass class)"
     );
 
     // Self-discrimination: the variant extractor detects a planted

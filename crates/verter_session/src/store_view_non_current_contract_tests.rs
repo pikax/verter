@@ -103,7 +103,7 @@ where
 fn resolve_named_symbol_misses_under_sustained_non_current_view() {
     // Control: a quiescent host resolves the declaration to a node.
     let (host, canonical) = host_with_decl();
-    let quiescent = host.resolve_named_symbol(&canonical, "Widget", &[], None);
+    let quiescent = host.resolve_named_symbol(&canonical, "Widget", None);
     assert!(
         quiescent.is_some(),
         "control: a quiescent host must resolve `Widget` to a semantic node"
@@ -124,8 +124,7 @@ fn resolve_named_symbol_misses_under_sustained_non_current_view() {
         // sustained churn knob then supersedes every rebuild, deterministically
         // forcing the bounded-retry-then-miss path.
         host_for_query.bump_store_view_epoch();
-        let resolved =
-            host_for_query.resolve_named_symbol(&canonical_for_query, "Widget", &[], None);
+        let resolved = host_for_query.resolve_named_symbol(&canonical_for_query, "Widget", None);
         HostStoreView::disarm_supersede_always_for_tests();
         resolved
     });
@@ -138,7 +137,7 @@ fn resolve_named_symbol_misses_under_sustained_non_current_view() {
 
     // After the churn is disarmed a fresh resolution succeeds again — the
     // miss was the transient non-current outcome, not a permanent break.
-    let recovered = host.resolve_named_symbol(&canonical, "Widget", &[], None);
+    let recovered = host.resolve_named_symbol(&canonical, "Widget", None);
     assert!(
         recovered.is_some(),
         "a quiescent resolution after the churn is disarmed must resolve `Widget` again"

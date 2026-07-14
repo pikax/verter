@@ -553,8 +553,40 @@ pub struct FfiComponentMeta {
     pub file_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<FfiComponentMetaResolution>,
+    /// Typed status of the payload's type-resolution position: `Resolved`
+    /// when the payload was produced with the `resolution` sidecar (the
+    /// resolved type-registry overlay applied), else the typed
+    /// `Unavailable(ResolutionProviderAbsent)` — a sidecar-less payload
+    /// self-describes as partial on this axis and is NEVER an
+    /// exact/successful-looking silence. Always serialized (additive wire
+    /// field; every pre-existing field is unchanged).
+    pub resolution_status: FfiComponentMetaResolutionStatus,
     #[serde(skip_serializing_if = "origin_graph_is_empty")]
     pub origin: OriginGraphDto,
+}
+
+/// Typed resolution status of a component-meta payload — see
+/// [`FfiComponentMeta::resolution_status`].
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "reason")]
+pub enum FfiComponentMetaResolutionStatus {
+    /// The payload carries the `resolution` sidecar (the resolved
+    /// type-registry overlay is applied).
+    Resolved,
+    /// The payload was produced WITHOUT the resolution sidecar: the
+    /// type registry and declaration metadata are the un-overlaid
+    /// view — a typed partial status, never an implied exact success.
+    Unavailable(FfiResolutionUnavailableReason),
+}
+
+/// Why a payload's type-resolution position is unavailable.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum FfiResolutionUnavailableReason {
+    /// The producing entry ran without the resolution sidecar/seed (the
+    /// sidecar-less output-envelope surfaces — e.g. the plain WASM lane,
+    /// which has no filesystem/project resolver behind it).
+    ResolutionProviderAbsent,
 }
 
 fn origin_graph_is_empty(g: &OriginGraphDto) -> bool {
@@ -861,8 +893,10 @@ pub struct FfiResolvedJsdocTag {
     pub raw_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject_name: Option<String>,
+    /// The SEALED resolved-type output snapshot (display + wire-node graph) —
+    /// never a raw `TypeExpr`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolved_type: Option<verter_type_expr::TypeExpr>,
+    pub resolved_type: Option<crate::graph::snapshot::ResolvedJsdocTypeOutput>,
 }
 
 #[derive(Serialize, Clone)]

@@ -50,9 +50,12 @@ fn warm_hit_bubbles_facts_into_active_tracer() {
     // Install a tracer and call the observing variant — the warm hit must bubble
     // the stored fact into our tracer.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        db.get_or_resolve_route_observing_facts(rk("index.ts", "Bar"), &view, || {
-            unreachable!("resolve closure must not be called on warm hit")
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+            db.get_or_resolve_route_observing_facts(rk("index.ts", "Bar"), &view, probe, || {
+                unreachable!("resolve closure must not be called on warm hit")
+            })
         })
+        .0
     });
 
     assert!(result.is_some(), "warm hit must return Some");
@@ -77,9 +80,15 @@ fn cold_compute_bubbles_facts_after_resolve() {
 
     // Nothing pre-loaded — the resolve closure runs and returns facts.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        db.get_or_resolve_route_observing_facts(rk("index.ts", "Baz"), &view, move || {
-            Some((resolved_route(), vec![fact_for_closure.clone()]))
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+            db.get_or_resolve_route_observing_facts(
+                rk("index.ts", "Baz"),
+                &view,
+                probe,
+                move || Some((resolved_route(), vec![fact_for_closure.clone()])),
+            )
         })
+        .0
     });
 
     assert!(result.is_some(), "cold compute must return Some");
@@ -102,7 +111,12 @@ fn cold_miss_returns_none_and_tracer_empty() {
 
     // Resolve closure returns None — the route is unresolvable.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        db.get_or_resolve_route_observing_facts(rk("index.ts", "Unknown"), &view, || None)
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+            db.get_or_resolve_route_observing_facts(rk("index.ts", "Unknown"), &view, probe, || {
+                None
+            })
+        })
+        .0
     });
 
     assert!(result.is_none(), "unresolvable route must return None");
@@ -119,18 +133,25 @@ fn cold_miss_returns_none_and_tracer_empty() {
 }
 
 #[test]
-fn no_active_tracer_warm_hit_still_returns_value() {
+fn warm_hit_without_an_outer_tracer_still_returns_value() {
+    let host = make_host();
     let db = RouteDb::new();
     let view = PermissiveStoreView;
     let fact = route_fact();
 
     db.insert_route_with_facts(rk("index.ts", "Qux"), resolved_route(), vec![fact]);
 
-    // No tracer installed — observe_fact_signature must be a no-op, but the
-    // route must still be returned.
-    let result = db.get_or_resolve_route_observing_facts(rk("index.ts", "Qux"), &view, || {
-        unreachable!("resolve closure must not be called on warm hit")
-    });
+    // No OUTER consumer tracer is installed, so the warm hit's fact bubble has no
+    // outer scope to reach. The route must still be returned and the resolve
+    // closure must still not run. (The funnel itself always runs inside a
+    // cacheability scope — it requires the probe — so "no tracer at all" is no
+    // longer reachable here by construction.)
+    let result = verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+        db.get_or_resolve_route_observing_facts(rk("index.ts", "Qux"), &view, probe, || {
+            unreachable!("resolve closure must not be called on warm hit")
+        })
+    })
+    .0;
     assert!(
         result.is_some(),
         "must return route value even with no tracer"

@@ -355,23 +355,30 @@ fn imported_prop_type_edit_misses_warm_component_meta() {
         .iter()
         .find(|p| p.name == "a")
         .expect("recomputed meta must publish prop `a`");
+    let a_type = crate::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/workspace/src/Comp.vue",
+        a_prop
+            .type_source
+            .present()
+            .expect("recomputed prop `a` must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("`a`'s published source must demand-materialize"));
     assert!(
         matches!(
-            a_prop.type_expr,
+            a_type,
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
         ),
         "the recomputed `a` prop MUST carry the edited `string` type — a \
-         stale warm hit would still report `number`. Got {:?}",
-        a_prop.type_expr
+         stale warm hit would still report `number`. Got {a_type:?}"
     );
     assert!(
         !matches!(
-            a_prop.type_expr,
+            a_type,
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         ),
         "the recomputed `a` prop must NOT be the stale `number` type — \
-         got {:?}",
-        a_prop.type_expr
+         got {a_type:?}"
     );
 }
 

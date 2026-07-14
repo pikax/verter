@@ -125,32 +125,6 @@ fn intern_dedups_structural_values_across_contexts() {
     );
 }
 
-/// Structural-interning negative invariant — `VueMacroElements` is an
-/// identity-carrier with latest-insert-wins semantics (see
-/// [`SemanticGraphStore::insert_resolved_named_type`]). Two
-/// `intern_node` calls for the same `Arc<ResolvedElements>` payload
-/// must still return distinct [`SemanticNodeId`]s so fresh inserts
-/// under the same `HostResolvedNamedTypeKey` do not alias with prior
-/// payloads. Under naive structural dedup this would collapse — the
-/// exemption in `push_impl` short-circuits the dedup index.
-#[test]
-fn intern_does_not_dedup_vue_macro_elements_identity_carrier() {
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-    let store = SemanticGraphStore::new();
-    let payload = Arc::new(ResolvedElements::default());
-    let a = store.intern_node(SemanticNodeData::VueMacroElements(Arc::clone(&payload)));
-    let b = store.intern_node(SemanticNodeData::VueMacroElements(Arc::clone(&payload)));
-    assert_ne!(
-        a, b,
-        "VueMacroElements must allocate fresh slots on every insert — \
-         identity-carrier contract requires latest-insert-wins semantics",
-    );
-    // Sidecar stays `None` for both slots — exempt from origin-scope
-    // tracking per
-    assert_eq!(store.node_scope(a), None);
-    assert_eq!(store.node_scope(b), None);
-}
-
 #[test]
 fn node_data_is_readable_via_graph_read_trait() {
     let store = SemanticGraphStore::new();
@@ -3462,144 +3436,6 @@ fn cross_thread_joiner_waits_on_winner_publish() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// Vue macro resolution identity map (former ResolvedNamedTypesDb)
-// ──────────────────────────────────────────────────────────────────
-
-use crate::semantic_query::HostResolvedNamedTypeKey;
-use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
-
-fn make_key(canonical: &str, whole_hash: [u8; 16], name: &str) -> HostResolvedNamedTypeKey {
-    HostResolvedNamedTypeKey {
-        canonical_id: Arc::from(canonical),
-        whole_hash,
-        resolve_env_hash: Default::default(),
-        type_env_hash: Default::default(),
-        lib_env_hash: Default::default(),
-        project_identity: 0,
-        inner: ResolvedNamedTypeCacheKey {
-            name: name.as_bytes().to_vec().into_boxed_slice(),
-            surface: None,
-            base_offset: 0,
-            from_root_body: true,
-            companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
-            type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
-        },
-    }
-}
-
-/// Inserting a resolved-named-type entry stores the payload behind a
-/// `VueMacroElements` node and returns a stable [`SemanticNodeId`].
-/// Subsequent reads observe the same payload without rebuilding.
-#[test]
-fn resolved_named_type_insert_and_get_round_trip() {
-    let store = SemanticGraphStore::new();
-    let key = make_key("/w/a.ts", [1u8; 16], "Foo");
-    let payload = Arc::new(ResolvedElements::default());
-    let node_id = store
-        .insert_resolved_named_type(
-            key.clone(),
-            Arc::clone(&payload),
-            store.named_type_generation(),
-        )
-        .expect("current-generation insert is accepted");
-
-    // Identity lookup and payload lookup both succeed.
-    assert_eq!(store.resolved_named_type_node_id(&key), Some(node_id));
-    let round = store
-        .get_resolved_named_type(&key)
-        .expect("payload must be retrievable");
-    assert!(Arc::ptr_eq(&payload, &round));
-    assert_eq!(store.resolved_named_type_count(), 1);
-}
-
-/// Missing keys return `None` without allocating — the hot-path
-/// miss is refcount-free.
-#[test]
-fn resolved_named_type_missing_key_returns_none() {
-    let store = SemanticGraphStore::new();
-    let key = make_key("/w/a.ts", [0u8; 16], "Absent");
-    assert!(store.get_resolved_named_type(&key).is_none());
-    assert!(store.resolved_named_type_node_id(&key).is_none());
-}
-
-/// Per-canonical invalidation removes only matching entries; entries
-/// for unrelated canonicals stay warm.
-#[test]
-fn resolved_named_type_per_canonical_invalidation() {
-    let store = SemanticGraphStore::new();
-    let hash = [5u8; 16];
-    let key_a = make_key("/w/a.ts", hash, "Foo");
-    let key_b = make_key("/w/b.ts", hash, "Bar");
-    let gen = store.named_type_generation();
-    store
-        .insert_resolved_named_type(key_a.clone(), Arc::new(ResolvedElements::default()), gen)
-        .expect("current-generation insert is accepted");
-    store
-        .insert_resolved_named_type(key_b.clone(), Arc::new(ResolvedElements::default()), gen)
-        .expect("current-generation insert is accepted");
-    assert_eq!(store.resolved_named_type_count(), 2);
-
-    let removed = store.invalidate_resolved_named_types_for_canonical("/w/a.ts");
-    assert_eq!(removed, 1);
-    assert!(store.get_resolved_named_type(&key_a).is_none());
-    assert!(store.get_resolved_named_type(&key_b).is_some());
-}
-
-/// Global clear removes every entry (used on project-generation
-/// bumps / epoch bumps).
-#[test]
-fn resolved_named_type_global_clear() {
-    let store = SemanticGraphStore::new();
-    let key = make_key("/w/a.ts", [1u8; 16], "Foo");
-    store
-        .insert_resolved_named_type(
-            key.clone(),
-            Arc::new(ResolvedElements::default()),
-            store.named_type_generation(),
-        )
-        .expect("current-generation insert is accepted");
-    assert_eq!(store.resolved_named_type_count(), 1);
-    store.clear_resolved_named_types();
-    assert_eq!(store.resolved_named_type_count(), 0);
-    assert!(store.get_resolved_named_type(&key).is_none());
-}
-
-/// Repeat writes under the same key overwrite the identity mapping —
-/// two successive inserts leave one entry and the latest payload
-/// becomes observable. This matches the `NamedTypeCache` trait's
-/// "insert overwrites any prior entry under the same key" contract.
-#[test]
-fn resolved_named_type_repeated_insert_overwrites_identity_mapping() {
-    let store = SemanticGraphStore::new();
-    let key = make_key("/w/a.ts", [1u8; 16], "Foo");
-    let first = Arc::new(ResolvedElements::default());
-    let second = Arc::new(ResolvedElements {
-        has_call_signature: true,
-        ..ResolvedElements::default()
-    });
-
-    let gen = store.named_type_generation();
-    store
-        .insert_resolved_named_type(key.clone(), Arc::clone(&first), gen)
-        .expect("current-generation insert is accepted");
-    store
-        .insert_resolved_named_type(key.clone(), Arc::clone(&second), gen)
-        .expect("current-generation insert is accepted");
-
-    assert_eq!(
-        store.resolved_named_type_count(),
-        1,
-        "same key must not duplicate identity entries"
-    );
-    let observed = store.get_resolved_named_type(&key).unwrap();
-    assert!(
-        Arc::ptr_eq(&second, &observed),
-        "latest insert wins — identity map points at the second payload",
-    );
-}
-
-// ──────────────────────────────────────────────────────────────────
 // Family-memo backfill matrix
 // ──────────────────────────────────────────────────────────────────
 
@@ -3916,11 +3752,6 @@ fn family_cancelled_does_not_backfill_any_slot() {
     assert_cold_at(&store, base, ProjectionMode::Identity);
     assert_eq!(store.memo_entry_count(), 0);
 }
-
-// 9. ResolvedNamedType bypasses the family memo entirely.
-//    The DashMap-backed identity map remains the only cache. After a
-//    successful execute_cooperative path returning Value via the build
-//    closure, the family memo's entries map stays empty for this key.
 
 // ──────────────────────────────────────────────────────────────────
 // B2 derivation/origin layer + telemetry tests
@@ -4735,65 +4566,6 @@ fn panic_in_cold_build_does_not_leak_in_flight_stats_counter() {
     );
 }
 
-#[test]
-fn resolved_named_type_refcount_path_unchanged_after_family_rewrite() {
-    let host = ctx_host();
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-
-    let store = SemanticGraphStore::new();
-    let key = make_key("/w/named.ts", [9u8; 16], "Foo");
-    let payload = Arc::new(ResolvedElements::default());
-    let inserted_id = store
-        .insert_resolved_named_type(
-            key.clone(),
-            Arc::clone(&payload),
-            store.named_type_generation(),
-        )
-        .expect("current-generation insert is accepted");
-
-    // The family memo has zero entries — ResolvedNamedType is exempt.
-    assert_eq!(
-        store.memo_entry_count(),
-        0,
-        "ResolvedNamedType must NOT populate the family memo",
-    );
-
-    // Hot-path read still works refcount-only.
-    let observed = store.get_resolved_named_type(&key).expect("warm");
-    assert!(Arc::ptr_eq(&payload, &observed));
-
-    // Formal `execute_cooperative` path: even if the build closure
-    // succeeds with a Value, the family memo must not be populated for
-    // this variant.
-    let formal_key = SemanticQueryKey::ResolvedNamedType {
-        key: Arc::new(key.clone()),
-    };
-    let read = store.execute_cooperative(
-        &host,
-        formal_key.clone(),
-        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-        || {
-            let id = store
-                .resolved_named_type_node_id(&key)
-                .expect("identity map populated above");
-            (QueryResult::Value(id), empty_signature())
-        },
-    );
-    match read.value {
-        QueryResult::Value(id) => assert_eq!(id, inserted_id),
-        other => panic!("expected Value via build, got {other:?}"),
-    }
-    assert_eq!(
-        store.memo_entry_count(),
-        0,
-        "ResolvedNamedType warm-publish must NOT populate the family memo",
-    );
-    assert!(
-        store.get_unvalidated(&formal_key).is_none(),
-        "store.get must return None for ResolvedNamedType — it is bypassed"
-    );
-}
-
 // ──────────────────────────────────────────────────────────────────
 // NodeScopeId origin-scope sidecar
 //
@@ -4878,61 +4650,6 @@ fn node_scope_returns_origin_not_reader_scope() {
     let observed = store.node_scope(id);
     assert_eq!(observed, Some(scope_a));
     assert_ne!(observed, Some(scope_b));
-}
-
-/// `SemanticNodeData::VueMacroElements` nodes are sidecar-exempt
-///: they live on the parser's refcount-only hot path
-/// and are never consumed by dispatch builders that walk
-/// `node_scope`. The sidecar slot is forced to `None` structurally
-/// so `node_scope(vue_id)` returns `None` rather than
-/// `Some(Global)`.
-#[test]
-fn vue_macro_elements_nodes_do_not_populate_node_scope_sidecar() {
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-
-    let store = SemanticGraphStore::new();
-    let payload = Arc::new(ResolvedElements::default());
-    let vue_id = store.intern_node(SemanticNodeData::VueMacroElements(Arc::clone(&payload)));
-    assert_eq!(
-        store.node_scope(vue_id),
-        None,
-        "VueMacroElements nodes must not populate the sidecar",
-    );
-
-    // Even passing a non-Global scope via `intern_node_with_scope`
-    // has no effect — the exemption is structural.
-    let vue_id_b = store.intern_node_with_scope(
-        SemanticNodeData::VueMacroElements(Arc::clone(&payload)),
-        NodeScopeId::File {
-            canonical_id: Arc::from("/w/caller.ts"),
-            whole_hash: [0u8; 16],
-            local_scope: None,
-        },
-    );
-    assert_eq!(
-        store.node_scope(vue_id_b),
-        None,
-        "VueMacroElements exemption must be structural, not opt-in",
-    );
-
-    // Meanwhile an adjacent non-exempt intern still records its
-    // scope — the exemption does not leak into neighbouring slots.
-    let primitive_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    assert_eq!(store.node_scope(primitive_id), Some(NodeScopeId::Global));
-
-    // Hot-path access via the resolved-named-type index is
-    // unchanged — the sidecar exemption does not affect payload
-    // retrieval.
-    let key = make_key("/w/named.ts", [9u8; 16], "Foo");
-    let inserted = store
-        .insert_resolved_named_type(
-            key.clone(),
-            Arc::clone(&payload),
-            store.named_type_generation(),
-        )
-        .expect("current-generation insert is accepted");
-    assert_eq!(store.node_scope(inserted), None);
-    assert!(store.get_resolved_named_type(&key).is_some());
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -7994,8 +7711,7 @@ fn memo_admission_or_gate_refuses_benign_cache_suppress() {
 ///
 /// These pin that `Instantiate.base` / `ResolveMacroPayload.owner` key on the
 /// env-bearing, content-free `ResolvedDeclSlotIdentity` (not a content-free,
-/// env-FREE declaration key), plus the env-scoping of the
-/// `HostResolvedNamedTypeKey` resolved-named-type artifact identity. Each is
+/// env-FREE declaration key). Each is
 /// DISCRIMINATING: with an env-FREE key the two compared queries would collapse
 /// onto ONE family slot (a warm-hit collision); because the env dim enters the
 /// `FamilyKey` identity they occupy distinct slots.
@@ -8636,80 +8352,6 @@ mod env_scoped_key_identity_guards {
             "a StructuralTransit TypeOf query must cold-build, not warm-hit the Published slot"
         );
         assert_value_node(second.value, transit_result);
-    }
-
-    /// The `HostResolvedNamedTypeKey` resolved-named-type artifact identity is
-    /// env-scoped (R T L J): two resolutions of the SAME file content
-    /// (`whole_hash`) under different envs are DISTINCT identities AND the
-    /// `SemanticGraphStore` serves them as distinct entries. Pre-migration the
-    /// key carried only `(canonical_id, whole_hash, inner)` — env-blind — so the
-    /// two collided and a wrong-env macro surface could be served.
-    #[test]
-    fn resolved_named_type_key_identity_is_env_scoped() {
-        use super::super::SemanticGraphStore;
-        use crate::semantic_query::HostResolvedNamedTypeKey;
-        use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-        use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
-
-        let inner = |name: &str| ResolvedNamedTypeCacheKey {
-            name: name.as_bytes().to_vec().into_boxed_slice(),
-            surface: None,
-            base_offset: 0,
-            from_root_body: true,
-            companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
-            type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
-        };
-        let mk = |resolve: HashValue, type_e: HashValue, lib_e: HashValue, pid: u32| {
-            HostResolvedNamedTypeKey {
-                canonical_id: Arc::from("/u2b9/x.ts"),
-                whole_hash: [3u8; 16],
-                resolve_env_hash: resolve,
-                type_env_hash: type_e,
-                lib_env_hash: lib_e,
-                project_identity: pid,
-                inner: inner("Foo"),
-            }
-        };
-
-        let base = mk([0u8; 16], [1u8; 16], [0u8; 16], 0);
-        // Each env dim independently forks the key identity.
-        assert_ne!(
-            base,
-            mk([7u8; 16], [1u8; 16], [0u8; 16], 0),
-            "resolve_env scopes the key"
-        );
-        assert_ne!(
-            base,
-            mk([0u8; 16], [2u8; 16], [0u8; 16], 0),
-            "type_env scopes the key"
-        );
-        assert_ne!(
-            base,
-            mk([0u8; 16], [1u8; 16], [9u8; 16], 0),
-            "lib_env scopes the key"
-        );
-        assert_ne!(
-            base,
-            mk([0u8; 16], [1u8; 16], [0u8; 16], 5),
-            "project_identity scopes the key"
-        );
-
-        // The store serves env-distinct entries distinctly: an insert under
-        // `base` must NOT be served to a different-type_env lookup.
-        let store = SemanticGraphStore::new();
-        let other_env = mk([0u8; 16], [2u8; 16], [0u8; 16], 0);
-        let gen = store.named_type_generation();
-        store
-            .insert_resolved_named_type(base.clone(), Arc::new(ResolvedElements::default()), gen)
-            .expect("current-generation insert is accepted");
-        assert!(
-            store.get_resolved_named_type(&base).is_some(),
-            "same-env lookup hits"
-        );
-        assert!(
-            store.get_resolved_named_type(&other_env).is_none(),
-            "different-type_env lookup must MISS — the key is env-scoped, not env-blind"
-        );
     }
 }
 

@@ -16,7 +16,7 @@ use crate::resolver_core::ResolverContext;
 use crate::semantic_query::DeclIdentity;
 use crate::types::FileAnalysisSnapshot;
 
-use super::output_sink::surface_member_to_expanded_field;
+use super::output_sink::{surface_member_to_expanded_field, MemberValuePosition};
 use super::publication_authority::{
     admit_published_member, read_surface_member_candidates, resolve_macro_payload,
     resolve_payload_surface, AdmittedPublishedMember,
@@ -56,10 +56,12 @@ pub(crate) fn project_props(
     // Ref-carrier surfaces (cross-file generic payloads like
     // `defineProps<AccordionProps<T>>()`) lower to a `SemanticNodeData::Ref`
     // shell where `read_surface_members` returns empty, so admission (and its
-    // edge record) fires ZERO times. The orchestrator's
-    // [`crate::meta_resolve::materialize::macro_shapes::record_published_field_edges_for_macro_shape`]
-    // covers Ref carriers via the cross-file-resolved `shape.value.properties`.
-    let admitted: Vec<(AdmittedPublishedMember<'_>, _, _, _)> = {
+    // edge record) fires ZERO times. That is the shallow-by-default (L1)
+    // contract: the carrier is published symbolically and the consumer
+    // re-resolves it on demand, so there are no eagerly-flattened members to
+    // attach `PublishedField` edges to — only concretely enumerated surface
+    // members carry a member-edge origin here.
+    let admitted: Vec<(AdmittedPublishedMember<'_>, _, _)> = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let payload = match resolve_macro_payload(
             &dispatch,
@@ -93,31 +95,24 @@ pub(crate) fn project_props(
                     .iter()
                     .find(|p| p.name == candidate.member().name.as_ref());
                 let raw_type = analyzed.and_then(|p| p.type_annotation.clone());
-                let shallow_type_expr = analyzed.and_then(|p| p.type_expr.clone());
-                let shallow_type_expr_scope = analyzed.and_then(|p| p.type_expr_scope.clone());
+                let shallow_payload = analyzed.and_then(|p| p.payload.clone());
                 let admitted = admit_published_member(candidate, &cursor, &dispatch)?;
-                Some((
-                    admitted,
-                    raw_type,
-                    shallow_type_expr,
-                    shallow_type_expr_scope,
-                ))
+                Some((admitted, raw_type, shallow_payload))
             })
             .collect()
     };
     admitted
         .into_iter()
-        .map(
-            |(admitted, raw_type, shallow_type_expr, shallow_type_expr_scope)| {
-                surface_member_to_expanded_field(
-                    query_engine,
-                    file,
-                    &admitted,
-                    raw_type,
-                    shallow_type_expr,
-                    shallow_type_expr_scope,
-                )
-            },
-        )
+        .map(|(admitted, raw_type, shallow_payload)| {
+            surface_member_to_expanded_field(
+                query_engine,
+                file,
+                &admitted,
+                raw_type,
+                shallow_payload,
+                mac.parsed_type_argument.as_ref(),
+                MemberValuePosition::ShallowMember,
+            )
+        })
         .collect()
 }

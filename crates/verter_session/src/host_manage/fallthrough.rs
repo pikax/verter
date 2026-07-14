@@ -163,15 +163,30 @@ impl VerterHost {
         // fold below (a FOLLOWER's join folds the same partiality via
         // `fold_follower_completeness`). No stale-across-retries caller scope
         // outlives the attempt it describes.
-        let result = crate::resolver_core::run_fallthrough_request(
-            self,
-            &self.resolver_runtime().top_level_fallthrough_singleflight,
-            canonical_id,
-            prop_type_overrides,
-            visiting,
-            None,
-            STORE_VIEW_STABILITY_MAX_ATTEMPTS,
-        );
+        //
+        // No-poison CACHEABILITY scope: it BRACKETS the whole request, so the
+        // cold compute (`compute_fallthrough_surface_uncached` and every child
+        // it recurses into) runs INSIDE it and the executor's `store_stable`
+        // samples the probe AFTER that compute. A scope opened at the store
+        // site instead would start after the compute's fenced serve / broken
+        // decl-body lease / unrootable route had already been consumed and
+        // would prove nothing. Nested child scopes (`resolve_child_fallthrough`,
+        // `intrinsic_members_for_tag`, `resolve_root_consumption`) fan their
+        // non-cacheable reads out to EVERY active tracer, so a poisoned child
+        // read also refuses THIS owner's admission.
+        let (result, _non_cacheable) =
+            crate::fact_signature_helpers::with_cacheability_scope(self, |probe| {
+                crate::resolver_core::run_fallthrough_request(
+                    self,
+                    &self.resolver_runtime().top_level_fallthrough_singleflight,
+                    canonical_id,
+                    prop_type_overrides,
+                    visiting,
+                    None,
+                    probe,
+                    STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+                )
+            });
 
         if matches!(result.source, RequestSource::Cache) {
             self.provenance
@@ -869,19 +884,24 @@ impl VerterHost {
     }
 
     /// Store fallthrough resolution in the compile cache.
+    ///
+    /// `probe` is the cacheability probe of the scope opened around the whole
+    /// request in [`Self::resolve_fallthrough_surface_internal_with_overrides`]
+    /// — it therefore encloses the cold compute that produced `result`. Every
+    /// admission below (both node stores AND the legacy mirror) is gated on it.
     pub(super) fn cache_fallthrough_result(
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         result: &crate::types::FallthroughResolution,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
     ) {
-        // No-poison: a PARTIAL fallthrough (a budget/fuse trip or a fatal
-        // semantic read folded into the active cold-compute completeness scope)
-        // must NOT warm any fallthrough cache. The runtime node store self-gates
-        // on the same typed completeness signal, but the legacy
-        // `cached_fallthrough` mirror does not, so gating here on
-        // `current_cold_compute_completeness` covers both the node store and the
-        // mirror — the single no-poison rail shared with the materialiser.
+        // No-poison: a PARTIAL fallthrough (a budget/fuse trip folded into the
+        // active cold-compute completeness scope) must NOT warm any fallthrough
+        // cache. Both `store_node` and `mirror_cached_fallthrough_arc` self-gate
+        // on the same typed completeness signal — the single no-poison rail
+        // shared with the materialiser — so this early return is a short-circuit,
+        // not the only rail.
         if crate::cache_runtime::refuse_result_cache_admission_if_partial(
             crate::request_context::current_cold_compute_completeness().is_partial(),
         ) {
@@ -903,12 +923,15 @@ impl VerterHost {
                 self.config.generic_root_propagation,
             ),
             self.build_runtime_root_follow_node(result),
+            probe,
         );
-        self.resolver_runtime()
-            .fallthrough
-            .store_node(cache_key, self.build_runtime_fallthrough_node(result));
+        self.resolver_runtime().fallthrough.store_node(
+            cache_key,
+            self.build_runtime_fallthrough_node(result),
+            probe,
+        );
         if prop_type_overrides.is_none() {
-            self.mirror_cached_fallthrough_arc(canonical_id, resolution);
+            self.mirror_cached_fallthrough_arc(canonical_id, resolution, probe);
         }
     }
 
@@ -1024,7 +1047,7 @@ impl VerterHost {
 
     pub(super) fn build_runtime_intrinsic_surface_node(
         &self,
-        members: &[verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember],
+        members: &[crate::resolver_core::IntrinsicSurfaceMember],
     ) -> crate::resolver_core::fallthrough_resolver::FallthroughNodeResult {
         let mut attr_names = Vec::new();
         let mut event_names = Vec::new();
@@ -1136,7 +1159,7 @@ impl VerterHost {
     pub(super) fn runtime_intrinsic_node_to_members(
         &self,
         node: crate::resolver_core::fallthrough_resolver::FallthroughNodeResult,
-    ) -> Option<Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember>> {
+    ) -> Option<Vec<crate::resolver_core::IntrinsicSurfaceMember>> {
         match node.value {
             crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::IntrinsicSurface(
                 intrinsic,
@@ -1169,14 +1192,25 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         resolution: Arc<crate::types::FallthroughResolution>,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
     ) {
         // No-poison SELF-GATE: the mirror is a promotion site (it warms the
-        // legacy `cached_fallthrough` entry on `DerivedRawState`), so it must
-        // refuse a PARTIAL just like `store_node` / `cache_fallthrough_result`
-        // — never relying on caller discipline. A budget / fuse / fatal read
-        // folded into the active cold-compute completeness scope means this
-        // surface is incomplete; mirroring it would warm a partial as
-        // complete.
+        // legacy `cached_fallthrough` entry on `DerivedRawState`), so it carries
+        // the SAME two rails as `store_node` — never relying on caller
+        // discipline.
+        //
+        // NON-CACHEABLE: the enclosing compute consumed a fenced serve / a
+        // broken decl-body lease / an unrootable route / an unobservable
+        // contributor source env, or overflowed the fact-signature cap. The
+        // mirror's own `fact_versions` root on the LIVE view, so a poisoned
+        // entry would revalidate on every warm read forever. The resolution is
+        // still returned to the caller — mirror non-admission only.
+        if probe.non_cacheable() {
+            return;
+        }
+        // PARTIAL: a budget / fuse / fatal read folded into the active
+        // cold-compute completeness scope means this surface is incomplete;
+        // mirroring it would warm a partial as complete.
         if crate::cache_runtime::refuse_result_cache_admission_if_partial(
             crate::request_context::current_cold_compute_completeness().is_partial(),
         ) {

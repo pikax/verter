@@ -68,7 +68,7 @@ pub struct FallthroughBranchResult {
 
 #[derive(Debug, Clone, Default)]
 pub struct IntrinsicSurfaceResult {
-    pub members: Vec<verter_semantic::analysis::html_intrinsics::OwnedIntrinsicMember>,
+    pub members: Vec<crate::resolver_core::IntrinsicSurfaceMember>,
     pub attr_names: Vec<String>,
     pub event_names: Vec<String>,
 }
@@ -163,6 +163,26 @@ impl FallthroughResolverState {
         self.cache.remove(key);
     }
 
+    /// Number of KEYS currently warm in the fallthrough node cache.
+    ///
+    /// The admission observable: a no-poison refusal is visible as a count that
+    /// does NOT grow across a compute the caller was still served. Reading the
+    /// count (rather than a warm `get_cached_node`) keeps the assertion
+    /// independent of the read-side fact validation — an empty-signature
+    /// candidate validates vacuously, so a warm-read probe could not
+    /// distinguish "refused" from "admitted but stale".
+    #[cfg(test)]
+    pub fn cached_node_count(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// The candidate count currently warm under `key` — `0` when the key was
+    /// never admitted (or was refused).
+    #[cfg(test)]
+    pub fn cached_candidate_count(&self, key: &FallthroughNodeKey) -> usize {
+        self.cache.candidate_signatures_for_key(key).len()
+    }
+
     pub fn counters(&self) -> &ResolverCounters {
         &self.counters
     }
@@ -190,13 +210,42 @@ impl FallthroughResolverState {
         None
     }
 
-    pub fn store_node(&self, key: FallthroughNodeKey, result: FallthroughNodeResult) {
-        // No-poison: never admit an override-bearing-uncacheable result, and
-        // never warm a PARTIAL result (a budget/fuse trip or a fatal semantic
-        // read folded into the active cold-compute completeness scope). The
-        // typed completeness signal is the single no-poison rail shared with
-        // the component-meta materialiser — not a fallthrough-private predicate.
+    /// Warm the fallthrough node cache with `result`.
+    ///
+    /// `probe` is the [`CacheabilityProbe`](crate::fact_signature_helpers::CacheabilityProbe)
+    /// of the cacheability tracer scope that ENCLOSES the compute which
+    /// produced `result`. It cannot be forged — `with_cacheability_scope` is
+    /// its only constructor — so an untraced producer cannot reach this funnel
+    /// at all.
+    ///
+    /// THREE independent no-poison rails, all fail-closed:
+    ///
+    /// 1. **uncacheable key** — an override-bearing key whose identity is
+    ///    `Uncacheable` would alias two genuinely-different override sets.
+    /// 2. **non-cacheable compute** (`probe.non_cacheable()`) — the compute
+    ///    consumed a FENCED (ReturnOnly, `store_published == false`) serve, a
+    ///    broken decl-body lease, an unrootable import route, or an
+    ///    unobservable contributor source env; or its observation set
+    ///    overflowed the fact-signature cap. Those reasons are CONTENT-NEUTRAL:
+    ///    the artifacts stay published and content-current, so an admitted
+    ///    entry would root on the LIVE hashes and revalidate on every warm read
+    ///    FOREVER — nothing downstream can reject it. The value is still SERVED
+    ///    to the caller verbatim; only the shared-cache admission is refused.
+    ///    A non-cacheable read is NEVER a `ResultCompleteness::Partial`.
+    /// 3. **partial result** — a budget/fuse trip folded into the active
+    ///    cold-compute completeness scope. The typed completeness signal is the
+    ///    no-poison rail shared with the component-meta materialiser, not a
+    ///    fallthrough-private predicate.
+    pub fn store_node(
+        &self,
+        key: FallthroughNodeKey,
+        result: FallthroughNodeResult,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+    ) {
         if !key.is_cacheable() {
+            return;
+        }
+        if probe.non_cacheable() {
             return;
         }
         if crate::cache_runtime::refuse_result_cache_admission_if_partial(

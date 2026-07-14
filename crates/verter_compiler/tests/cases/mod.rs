@@ -1,7 +1,6 @@
 mod ide_no_baked_prefix_overwrite;
 mod ide_script_recovery_guard;
 mod indexed_prop_lookup;
-mod macro_dto_contract;
 mod no_post_codegen_string_surgery;
 mod no_session_dependency;
 mod repro_member_access_ide_codegen;

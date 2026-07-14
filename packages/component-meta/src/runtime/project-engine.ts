@@ -46,9 +46,13 @@ export interface NativeMetaSession {
   getComponentMeta(canonicalOrAlias: string): Buffer | null;
   /**
    * Batch component-meta query. Returns one buffer slot per input in
-   * input order — non-empty for a successful payload, empty for a
-   * missing canonical or per-id failure. One scheduler dispatch, one
-   * overlay view, host-owned admission caches shared across the batch.
+   * input order — non-empty for a successful payload, empty EXCLUSIVELY
+   * for a genuinely missing canonical. A real per-id failure (a budget
+   * overrun or a fail-closed output-materialization failure) THROWS —
+   * matching the scalar `getComponentMeta` failure semantics; a real
+   * failure is never collapsed onto the missing sentinel. One scheduler
+   * dispatch, one overlay view, host-owned admission caches shared
+   * across the batch.
    */
   getComponentMetaBatch(canonicalsOrAliases: string[]): Buffer[];
   /** Full resolved native query with resolution sidecars. Returns a protobuf payload. */

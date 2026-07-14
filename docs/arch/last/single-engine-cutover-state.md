@@ -1,20 +1,22 @@
 # The single-resolution-engine cutover — where it stands, and what it still owes
 
-> **⚠ The landed code contains a cache-poison REGRESSION this work introduced, and it must be fixed
-> before this branch is merged onward.** The fallthrough resolver's admission funnel lost its
-> non-cacheability rail — not by being edited (the file is byte-identical to its base) but because this
-> lineage deleted the ~31 call sites that fed the completeness signal its gate depends on. The rail's
-> absence is **proven**; an end-to-end poisoning trace was **never constructed** — so it is a
-> proven-missing safety rail, not a demonstrated exploit, and the way to settle it is a **discriminating
-> test, not another opinion**. Full mechanism:
-> [`cache-admission-closure-design.md`](cache-admission-closure-design.md) §0. **That is job one.**
+> **The cache-poison REGRESSION this work introduced is CLOSED.** An earlier revision of this document
+> led with it as shipping unfixed; that is no longer true. The fallthrough resolver's admission funnel
+> had lost its non-cacheability rail — not by being edited (the file was byte-identical to its base) but
+> because this lineage deleted the ~31 call sites that fed the completeness signal its gate depended on.
+> `store_node` now **requires an unforgeable `CacheabilityProbe`**, sampled AFTER the compute it
+> encloses, and **refuses the cache write** on a non-cacheable compute while still **serving the value**.
+> It was settled the way this document demanded — **by a discriminating test, not an opinion**:
+> `fenced_serve_fallthrough_node_is_not_admitted` in
+> `crates/verter_session/src/fallthrough_admission_tests.rs` (control + fenced + path-precision arms).
+> Full mechanism: [`cache-admission-closure-design.md`](cache-admission-closure-design.md) §0.
 >
 > **Read the rest before you believe anything else is fixed.** What landed is a **checkpoint**, not a
-> completed fix. It closes a number of real, individually-proven cache-poisoning holes, but **the poison
-> class remains OPEN and REACHABLE in the landed code**, and a reachable stack-overflow crash in the
-> shared resolver has **not been started**. Both are specified, implementer-ready, in the companion
-> documents. Read this as "the bugs were understood, half-fenced, and written down" — not as "the bugs
-> were fixed".
+> completed fix. It closes a number of real, individually-proven cache-poisoning holes — that regression
+> among them — but **the poison class remains OPEN and REACHABLE in the landed code**, and a reachable
+> stack-overflow crash in the shared resolver has **not been started**. Both are specified,
+> implementer-ready, in the companion documents. Read this as "the bugs were understood, several were
+> closed, the class was not" — not as "the bugs were fixed".
 
 ## Status of the landed code — the five facts
 
@@ -26,9 +28,9 @@ middle one — this document was written as the work was landing, and the tree i
 |---|---|---|
 | **The shared-cache poison class** | **OPEN and reachable.** Individual sites are closed; the class is not. The known hole set is **not exhaustive**. | Read [`cache-admission-closure-design.md`](cache-admission-closure-design.md). If `install_fact_tracer` still returns a bare `bool` beside the facts, §5 is not done. |
 | **The stack-overflow crash** | **NOT FIXED. Not started.** A ~200-deep authored type aborts the process. | `grep -n "fn project_view_node" crates/verter_session/src/project_semantic_dispatch/locator_view.rs` — if it still calls itself, the crash is live. |
-| **The fallthrough poison REGRESSION** — introduced by this work; the base did not have it | **UNFIXED. IT SHIPS.** The admission funnel has **no non-cacheability rail at all**. **Fix this first.** | `grep -cE "non_cacheable\|CacheabilityProbe\|with_cacheability_scope" crates/verter_session/src/resolver_core/fallthrough_resolver.rs` ⇒ **0**. See the closure design §0. |
-| **The dropped policy seam** (`PolicyContext` never constructed ⇒ workspace-ownership classification lost) | Investigation was **in flight**. **Verify** — if unfixed this is a **live regression** violating a CRITICAL rule. | `grep -rn "PolicyContext {" --include="*.rs" crates/verter_session/src/` — **empty means open.** Restore recipe is below. |
-| **Clippy** | Expect **red** (~83 dead-code errors in `verter_session`), **all pre-existing** to this work and mostly the very residue the effort exists to delete. ~13 are design-bearing. | `cargo clippy --workspace -- -D warnings`. Read the landing-hygiene section **before** deleting anything. |
+| **The fallthrough poison REGRESSION** — introduced by this work; the base did not have it | **CLOSED.** `store_node` requires an unforgeable `CacheabilityProbe`, samples it after the compute, and refuses the write on a non-cacheable compute while still serving the value. | `grep -cE "non_cacheable\|CacheabilityProbe" crates/verter_session/src/resolver_core/fallthrough_resolver.rs` ⇒ **non-zero**. Run `fenced_serve_fallthrough_node_is_not_admitted`; delete the `probe.non_cacheable()` refusal and it goes **red**. |
+| **The workspace-ownership policy seam** | **CLOSED — it was RELOCATED, not lost.** The decision sites call `workspace_is_package_backed` **directly**; the `PolicyContext` seam was genuinely orphaned and is deleted. No classification was lost. | `grep -rln "workspace_is_package_backed" --include="*.rs" crates/verter_session/src/` — the live decision sites are there (`component_meta_materialize.rs`, `framework/script_facts.rs`, `host_manage/jsdoc_resolve.rs`, `meta_resolve/graph_predicates.rs`, `meta_resolve/materialize/field_types.rs`, `meta_resolve/projectors/output_sink.rs`, `project_semantic_dispatch/raise.rs`/`walk.rs`, …). |
+| **Clippy** | **RED — 83 errors in `verter_session` (78 `dead_code` + 5 style lints).** Measured on this tree, not inherited from a report. The dead code is the orphaned `TypeExpr`-era residue this effort exists to delete; a cleanup pass was attempted and **reverted** (see below — the naive deletion breaks the TEST build while clippy stays green). **No `#[allow]` was added to hide any of it.** | `cargo clippy --workspace -- -D warnings` ⇒ exit **101**. But **`cargo check -p verter_session --lib --tests` is the command that matters** — it passes, and clippy alone would not have told you that. |
 
 ## The goal, unchanged
 
@@ -91,22 +93,23 @@ rebuilt from the prose without ever seeing the diff. **Rebuild it; do not hunt f
   brief had named** and that had no tracer at all; a temporal hole where the probe was sampled at
   funnel entry while the compute ran later; and a singleflight follower that could adopt an unadmitted
   result.
-**Open — in the landed code, reachable, and specified in the companion documents:**
-
-- **⚠ THE REGRESSION THIS WORK INTRODUCED — and it SHIPS UNFIXED.** One function used to do two things
-  at once: mark a request cache-suppressed **and** fold its result to partial. Decoupling those is
+- **The fallthrough regression this work itself introduced.** One function used to do two things at
+  once: mark a request cache-suppressed **and** fold its result to partial. Decoupling those is
   architecturally **correct** (a fenced serve should not make a result *partial*), and this lineage
-  deleted all ~31 of its call sites. But `store_node` in
+  deleted all ~31 of its call sites — but `store_node` in
   `crates/verter_session/src/resolver_core/fallthrough_resolver.rs` gated admission on exactly that
-  completeness signal — so deleting the fold **rendered its gate toothless**, while its comment still
-  claims a "single no-poison rail". The file was never edited (it is byte-identical to its base); the
-  rail was removed from underneath it. A fallthrough node computed through a fenced serve or a lease
-  miss, carrying non-empty **live-rooted** facts, is admitted and served warm indefinitely — and
-  live-rooted facts are exactly the ones the read-side rail can never reject. **The base did not have
-  this.** The missing rail is proven by inspection; an end-to-end poisoning trace was never
-  constructed, so treat it as a **proven-missing safety rail, not a demonstrated exploit** — and settle
-  it with a **discriminating test**, never another static safety argument. →
-  **[`cache-admission-closure-design.md`](cache-admission-closure-design.md) §0. This is job one.**
+  completeness signal, so deleting the fold **rendered its gate toothless**. The file had never been
+  edited; the rail was removed from underneath it. It is now closed at the funnel itself, which is the
+  durable place: `store_node` **requires** an unforgeable `CacheabilityProbe` — private field, single
+  constructor, an HRTB preventing escape — whose scope **encloses** the compute and which is sampled
+  **after** it, and it **refuses the cache write** on `probe.non_cacheable()` while still **serving the
+  value** to the caller. An untraced producer is now a **compile error** at that funnel, not a review
+  miss. Proven by `fenced_serve_fallthrough_node_is_not_admitted`
+  (`crates/verter_session/src/fallthrough_admission_tests.rs`): a **control** arm proves an ordinary
+  compute admits (so the refusal assertion cannot pass vacuously on an absent compute), a **fenced** arm
+  proves refusal-while-served, and a **path-precision** arm proves the fence does not blanket-refuse.
+
+**Open — in the landed code, reachable, and specified in the companion documents:**
 
 - **The poison class is not closed.** The probe proves a tracer was *active at admission*; it does
   **not** prove the *compute ran inside it*. A caller can compute first and then open an empty scope to
@@ -150,72 +153,136 @@ The order is not arbitrary — each step's safety argument depends on the one be
 
 ## Open defects that are not the two bugs
 
-### LIVE REGRESSION — the workspace-ownership policy seam was dropped
+### RESOLVED — the workspace-ownership policy seam was RELOCATED, not lost
 
-**This is a regression introduced by the cutover work, and it is the first thing you should check,
-because repair was in progress when this was written and may or may not have landed. Check; do not
-assume.**
+**An earlier revision of this document carried this as a possible live regression. It is not one.** It
+was settled the way this record demands — **by test, not by argument** — and the finding is recorded
+here so nobody re-opens it or "restores" a seam that should stay deleted.
 
-The CRITICAL Typed-IR-Only rule names `ResolverContext::workspace_is_workspace_owned` **by name** as
-the required alternative to `node_modules` path-substring checks: symbolic-versus-materialise
-decisions must consult workspace ownership structurally, not by sniffing paths. Before the cutover,
-the shallow-preserve path did exactly that, in
-`crates/verter_session/src/resolver_core/component_meta_query_engine/shallow_preserve.rs`:
+The concern was that the cutover had dropped workspace-ownership classification. The evidence looked
+damning: `PolicyContext` — the struct that used to carry the ownership predicates into the
+shallow-preserve path — is **never constructed anywhere** in `crates/verter_session/src/`.
 
-```rust
-let policy_ctx = crate::component_meta_resolution_policy::policy_helpers::PolicyContext {
-    is_workspace_owned: &|canonical| self.ctx.workspace_is_workspace_owned(canonical),
-    is_package_backed: &|canonical| self.ctx.workspace_is_package_backed(canonical),
-    route_preservation_context: false,
-    cycle_active_for_target: false,
-    shallow_preserve_list_entry: false,
-};
-if crate::component_meta_resolution_policy::policy_helpers::imported_ref_must_materialize_canonically(
-    &root_identity.canonical_id,
-    prepared.as_deref(),
-    &policy_ctx,
-) { /* … */ }
-```
-
-On the cutover lane **that construction is gone**: `PolicyContext` is never constructed anywhere in
-`crates/verter_session/src/`, and `workspace_is_workspace_owned` has **no production caller at all** —
-only the trait declaration and its impls. The policy seam lost its only entry point, so the
-symbolic-versus-materialise decision no longer consults workspace ownership. That is a **live
-violation of a CRITICAL rule**, not a stale rule text.
-
-Check it on the tree in front of you:
+That evidence was real but the conclusion drawn from it was wrong. **The classification did not go
+away; its delivery mechanism did.** The live decision sites now call the ownership predicate
+**directly** rather than routing it through a struct of closures:
 
 ```bash
-grep -rn "PolicyContext {" --include="*.rs" crates/verter_session/src/
-grep -rn "workspace_is_workspace_owned" --include="*.rs" crates/verter_session/src/ \
-  | grep -v "fn workspace_is_workspace_owned"
+grep -rln "workspace_is_package_backed" --include="*.rs" crates/verter_session/src/
 ```
 
-If the first returns a construction site and the second a real call site, it was repaired before
-landing and this item is closed. If either comes back empty it is **open**: restore the seam (the shape
-above is the whole of it), or establish deliberately and in writing that the decision genuinely no
-longer needs ownership classification — and if the latter, update the CRITICAL rule text that names
-the function, because the rule and the code currently disagree.
+That returns the real decision sites — among them `component_meta_materialize.rs`,
+`framework/script_facts.rs`, `host_manage/jsdoc_resolve.rs`, `meta_resolve/graph_predicates.rs`,
+`meta_resolve/materialize/field_types.rs`, `meta_resolve/projectors/output_sink.rs`,
+`project_semantic_dispatch/raise.rs` and `walk.rs`. Workspace ownership is still consulted
+structurally, exactly as the CRITICAL rule requires; `PolicyContext` was a genuinely orphaned
+indirection and is deleted. **Do not restore it.**
 
-### A sealed-capability rail may be inert — and one of them provably was
+One durable correction falls out of this, and it is the reason the investigation went the way it did:
+the CRITICAL Typed-IR-Only rule used to name `ResolverContext::workspace_is_workspace_owned` **by
+name** as the required alternative to `node_modules` substring checks — **and that function no longer
+exists on the tree.** The rule text now names `workspace_is_package_backed`, which is what actually
+survives (workspace-owned is its complement). A CRITICAL rule naming a nonexistent function is exactly
+how the next reader concludes a seam was lost when it was only moved.
 
-A sealed capability type enforces nothing if it is **never constructed**. On the cutover lane,
-`HostManageComponentMetaOutputCap` (declared in
-`crates/verter_session/src/host_manage/component_meta_methods.rs`) had **zero construction sites** —
-the lane deleted the mint in
-`crates/verter_session/src/host_manage/component_meta_methods/macro_output_expansion.rs`, where it was
-previously minted as `HostManageComponentMetaOutputCap::new(dispatch)`. A capability that is never
-minted is a decorative type, and any guard built on it enforces **nothing**.
+### THE BIGGEST OPEN CHORE: clippy is red, and the obvious way to fix it does NOT work
 
-Check with `grep -rn "HostManageComponentMetaOutputCap::new(" --include="*.rs" crates/`. If that
-returns nothing, either restore the mint or delete the type — do not land a capability rail that is
-inert while the documentation claims it is load-bearing. The same smell is worth checking on any other
-sealed capability in the tree: **a cap with no construction site is not a guard.**
+**Read this before you try to make clippy green.** Somebody already tried the obvious thing, it failed,
+and the failure is instructive. The tree you have **compiles — lib and tests both**. What it does not do
+is pass `cargo clippy --workspace -- -D warnings`, because it still carries the orphaned `TypeExpr`-era
+residue as `dead_code`.
+
+**The trap, stated up front.** `cargo clippy --workspace` checks the **lib** target only. The **test**
+target is a separate compilation. So you can delete a "dead" item, watch clippy go green, and have
+**broken the test build without ever being told**. The command that tells you the truth is:
+
+```bash
+cargo check -p verter_session --lib --tests     # ← the floor. Not clippy.
+```
+
+Deleting the residue naively produces exactly this, and it is what defeated the attempt:
+
+```
+error[E0425]: cannot find function `type_expr_materialize_reduction_context` in module `crate::meta_resolve::materialize`
+note: function `...::field_types::type_expr_materialize_reduction_context` exists but is inaccessible
+error[E0599]: no method named `eq_to_expr` found for struct `NodeShapeEq`
+error[E0599]: no method named `materialize_registry_routed_member_surface` found for struct `ComponentMetaQueryEngine`
+```
+
+**Root cause, and it is worth understanding rather than just patching.** Two independent efforts fed
+into this checkpoint:
+
+1. the cache-admission fix work (the probe rail, the poison-site closures), and
+2. a dead-code cleanup that deleted the orphaned `TypeExpr`-era residue.
+
+The cleanup computed its dead-code census **against an older base than the fix work finished on**. The
+fix work then **added tests** that exercise parts of that supposedly-dead `TypeExpr`-era cluster. So the
+census went **stale**: items the cleanup had correctly proven dead *at its base* had, by the time both
+were combined, acquired **test callers**. Deleting them therefore breaks the test build — while the
+**lib** build stays perfectly green, because the callers are all `#[cfg(test)]`.
+
+That asymmetry is the trap, and it generalises: **"dead" is relative to a target and to a base.** An
+item with no production caller but a live test caller is dead to the lib and alive to the tests.
+`cargo clippy --workspace` sees only the first.
+
+**What this checkpoint actually did — and you need to know it, because it is a deliberate NON-landing.**
+The dead-code cleanup was attempted on top of the fix work and then **reverted**. The source tree you
+have is the **fix work, unmodified**; the cleanup's deletions are **not in it**. That is why clippy is
+red: the residue the cleanup would have removed is all still here.
+
+That was not laziness, and the reasoning is the useful part. The integration was tried, and it failed in
+a way that kept getting worse the further it went. Each deletion the cleanup made, when combined with the
+fix work, broke something the fix work's tests used — and the breakages surfaced **one compile at a
+time**, because the lib kept building green while the *test* target broke. The collision set grew with
+every round (`field_types` helpers → the `raise`/`shape_engine` predicates →
+`MaterializedOutputTypeExpr::into_type_expr` → `NodeShapeEq::eq_to_expr` → the `materialize`
+re-exports → `utility_types` → the `component_meta_query_engine` surface/helpers cluster). At that point
+the honest conclusion is that **the cleanup's census and the fix work's test surface are not reconcilable
+by patching** — they need one deliberate pass, not a merge.
+
+So the checkpoint chose a tree that is **known-good and verifiable** over one that is half-merged and
+unverifiable. Nothing was silenced with `#[allow]`, and **no test was deleted to make a build pass** —
+deleting a test to satisfy a compiler is how coverage quietly dies.
+
+**The correct closing move — this is the work, and it is a real piece of work.** These items are
+genuinely residue: they have **no production caller**, and the tests that pin them are testing a
+`TypeExpr`-era path this whole effort exists to delete. Retire them as ONE change, not as a deletion
+followed by a repair:
+
+1. **Start from the test target, not clippy.** `cargo check -p verter_session --lib --tests` is the
+   floor. `cargo clippy --workspace` checks the **lib only** and will tell you everything is fine while
+   the test build is broken — that is precisely the trap that defeated the merge.
+2. For each `dead_code` item, find its test callers (`query_db_self_root_tests.rs`,
+   `field_types_tests.rs`, the shape-cache tests) and ask the only question that matters: **is this test
+   the discriminating coverage for something that still exists?** If it only pins the dead `TypeExpr`
+   path, **delete the item and its test together, in the same commit.** If it pins live behaviour, the
+   item is not dead — it is mis-placed, and belongs behind a `#[cfg(test)]` compile-gate (honest) rather
+   than an `#[allow]` (not).
+3. Do **not** blind-delete either half. The cluster contains at least one item —
+   `RegistryMemberShapeKeyCap` — about which a "never constructed" claim was already made **and was
+   wrong**: it is minted in production in `field_types.rs`. Acting on that claim unverified would have
+   deleted a live mint.
+
+**Never resolve this by deleting a live caller, and never by `#[allow(dead_code)]`.** The blanket allow
+would neuter the shrinking ledger that tracks exactly this residue — the one instrument that tells you
+whether the cutover is converging.
+
+### A sealed-capability rail may be inert — keep checking, one provably was
+
+A sealed capability type enforces nothing if it is **never constructed**. A capability that is never
+minted is a decorative type, and any guard built on it enforces **nothing**. This is a live smell in
+this tree, worth re-checking on **any** sealed capability you meet: **a cap with no construction site
+is not a guard.**
+
+The specific instance that prompted this — `HostManageComponentMetaOutputCap`, which had zero
+construction sites — was **resolved by deleting the type**, which is the right outcome for an inert
+rail: it is gone from `crates/verter_session/src/`, surviving only as a name in a residual guard's
+list. Do not go looking for it, and do not restore it.
 
 **One correction to the record, so you do not act on a false lead:** the same "never constructed" claim
 was made about `RegistryMemberShapeKeyCap`, and it is **wrong** — that one *is* constructed in
-production, in `crates/verter_session/src/meta_resolve/materialize/field_types.rs`. Verify before you
-delete.
+production, in `crates/verter_session/src/meta_resolve/materialize/field_types.rs`. It is load-bearing.
+**Verify before you delete** — that claim, acted on unverified, would have removed a live mint.
 
 ### An unverified claim — do not repeat it as fact
 
@@ -234,11 +301,22 @@ carry it forward as a finding.
 - Rebase onto the current branch and run the **full** workspace gate (`node scripts/gate.mjs`) **before**
   the squash, not after.
 - Scrub planning vocabulary from source comments and commit messages: the code reads as final state.
-- **`cargo clippy --workspace -- -D warnings` must be green at landing.** Expect it to be red on the
-  cutover work, with dead-code errors concentrated in `verter_session` — roughly 83 of them, **present
-  unchanged at the work's own base**, so the cutover introduced none of them. They are overwhelmingly
-  orphaned `TypeExpr`-era readers whose last callers earlier cutover work deleted: **the dead code is
-  precisely the residue this effort exists to delete**, so removing it is on-plan, not a workaround.
+- **`cargo clippy --workspace -- -D warnings` is RED at this checkpoint: 83 errors, exit 101** — 78
+  `dead_code` plus 5 style lints, all in `verter_session`. Measured on this tree. The library and the
+  tests both **compile**; not one of the 83 is a type error. **No `#[allow]` was added**; nothing is
+  hidden.
+
+  The dead code is the orphaned `TypeExpr`-era cluster — `materialize_component_meta_type_expr_until_stable(_full)`,
+  `stabilize_registry_member_surface_node_with_shape_cache`, `lower_type_expr_for_shape_subject`,
+  `type_expr_materialize_reduction_context`, `RegistryMemberShapeKeyCap`, the `node_root_is_typeof`
+  chain, `MaterializedOutputTypeExpr::into_type_expr`, the `synthetic_carrier_guard` walkers — i.e.
+  **precisely the residue this effort exists to delete.** Removing it is on-plan, not a workaround.
+
+  **But do not just delete it.** A cleanup that did exactly that was attempted on top of this work and
+  had to be reverted: those items have no production caller but they DO have `#[cfg(test)]` callers, so
+  deleting them breaks the **test** build while `cargo clippy --workspace` — which only checks the
+  **lib** — stays green and tells you nothing. The full account, and the way to actually close it, is in
+  the section above ("THE BIGGEST OPEN CHORE"). Read it before you touch a single `dead_code` item.
 
   Two cautions. First, **hidden debt**: because the `verter_session` library aborts under `-D warnings`,
   the crates downstream of it (`verter_ffi`, `verter_lsp`, `verter_mcp*`, `verter_wasm`, `verter_napi`)

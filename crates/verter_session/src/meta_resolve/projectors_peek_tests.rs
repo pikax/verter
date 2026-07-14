@@ -273,13 +273,53 @@ fn peek_operator_shape_warm_memo_returns_cached() {
             "nested".to_string(),
         ))),
     };
-    let key = ShapeCacheKey::type_expr_whole(
-        scope.clone(),
-        Arc::new(expr.clone()),
-        ProjectionMode::Expanded,
-    );
-
     with_bare_host_ctx_for_test(host.as_ref(), |ctx| {
+        // Build the seed key the way PRODUCTION builds it: the exact
+        // reduction context plus the shared pre-peek lowering — the peek
+        // below lowers through the same helper, so the two sides share
+        // one node identity by construction.
+        let reduction_context =
+            crate::meta_resolve::materialize::type_expr_materialize_reduction_context(
+                ctx,
+                scope.as_ref(),
+                &expr,
+                ProjectionMode::Expanded,
+            );
+        let mut seed_engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
+        let Some(seed_lowering) =
+            crate::meta_resolve::materialize::lower_type_expr_for_shape_subject(
+                &mut seed_engine,
+                scope.as_ref(),
+                &expr,
+                reduction_context,
+            )
+        else {
+            // No view-correct scope identity under this fixture: the shape
+            // route keys NO slot on the seed side, and the peek side lowers
+            // through the SAME helper — its verdict must be the consistent
+            // cold `None`.
+            let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
+            let peeked = peek_member_shape_known(
+                &mut query_engine,
+                scope.as_ref(),
+                &expr,
+                ProjectionMode::Expanded,
+            );
+            assert!(
+                peeked.is_none(),
+                "with no scope identity the shape route keys no slot — the peek must                  report cold, got: {}",
+                peek_shape_dbg(&peeked),
+            );
+            return;
+        };
+        let key = ShapeCacheKey::type_expr_whole_with_context(
+            scope.clone(),
+            &expr,
+            reduction_context,
+            || Some(seed_lowering.lowered),
+        )
+        .expect("a carrier-free expression with a lowered node keys a slot");
+
         // Seed via `get_or_compute` with an empty fact signature. Admission
         // may or may not succeed depending on the underlying gate; the
         // closure runs at least once and the `entries` substrate is
@@ -291,7 +331,7 @@ fn peek_operator_shape_warm_memo_returns_cached() {
             Arc::from(Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new()),
             false,
         );
-        let admitted = memo_db.get_or_compute(&key, ctx, || {
+        let admitted = memo_db.get_or_compute_traced_for_test(&key, ctx, || {
             Some((
                 seeded.clone(),
                 crate::fact_signature_helpers::empty_fact_signature(),
@@ -385,8 +425,8 @@ fn peek_bare_host_invocation_triggers_debug_assert() {
 
 // ---------------------------------------------------------------------------
 // 8. H1 invariant — `reduce_field_type_expr` MUST NOT admit a
-//    `BareCarrier` shape into `ShapeCacheDb` under
-//    `ShapeCacheKey::type_expr_whole(scope, Foo_expr, Expanded)`.
+//    `BareCarrier` shape into `ShapeCacheDb` under the TypeExpr-start
+//    whole-subject key (the lowered-node member-value subject).
 //
 //    Rationale: the materializer
 //    `materialize_component_meta_type_expr_until_stable_full` probes
@@ -399,8 +439,8 @@ fn peek_bare_host_invocation_triggers_debug_assert() {
 //    DISCRIMINATION property:
 //      * Pre-H1: the projector's BareCarrier arm calls
 //        `admit_type_expr_shape_if_possible` → after `getComponentMeta`
-//        finishes, peeking `ShapeCacheKey::type_expr_whole(scope,
-//        Ref{Foo}, Expanded)` returns `Some(_)` whose cached
+//        finishes, peeking the TypeExpr-start whole-subject key for
+//        `(scope, Ref{Foo}, Expanded)` returns `Some(_)` whose cached
 //        `type_expr` is the bare `Ref{Foo}` (shallow), NOT the
 //        expanded body.
 //      * Post-H1: the BareCarrier arm skips the admit → the slot
@@ -460,11 +500,6 @@ fn h1_reduce_bare_alias_does_not_poison_expanded_typeexpr_cache_slot() {
         name: Arc::from("Foo"),
         type_arguments: Arc::from(Vec::<TypeExpr>::new().into_boxed_slice()),
     };
-    let cache_key = ShapeCacheKey::type_expr_whole(
-        scope.clone(),
-        Arc::new(bare_alias.clone()),
-        ProjectionMode::Expanded,
-    );
 
     // Build a request-bound resolver context against the host so
     // `peek`'s fact-validation operates against a live observation.
@@ -484,6 +519,32 @@ fn h1_reduce_bare_alias_does_not_poison_expanded_typeexpr_cache_slot() {
         std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
     );
 
+    // Build the probe key the way PRODUCTION keys the slot: the exact
+    // reduction context plus the shared pre-peek lowering of the bare
+    // alias in the owner scope.
+    let reduction_context =
+        crate::meta_resolve::materialize::type_expr_materialize_reduction_context(
+            &ctx,
+            scope.as_ref(),
+            &bare_alias,
+            ProjectionMode::Expanded,
+        );
+    let mut probe_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&ctx);
+    let cache_key = ShapeCacheKey::type_expr_whole_with_context(
+        scope.clone(),
+        &bare_alias,
+        reduction_context,
+        || {
+            crate::meta_resolve::materialize::lower_type_expr_for_shape_subject(
+                &mut probe_engine,
+                scope.as_ref(),
+                &bare_alias,
+                reduction_context,
+            )
+            .map(|lowering| lowering.lowered)
+        },
+    )
+    .expect("the analyzed owner scope lowers the bare alias to a settled node");
     let post = mh
         .host()
         .project_type_store()
@@ -492,7 +553,7 @@ fn h1_reduce_bare_alias_does_not_poison_expanded_typeexpr_cache_slot() {
     assert!(
         post.is_none(),
         "H1: projector's BareCarrier arm MUST NOT admit a shallow Ref \
-         into ShapeCacheKey::type_expr_whole(scope, Foo_expr, Expanded). \
+         into the TypeExpr-start whole-subject slot for (scope, Foo_expr, Expanded). \
          That slot is reserved for the materializer's expanded body \
          cache. A shallow admit there causes the materializer's \
          later probe to short-circuit on the bare `Ref` and skip \
@@ -527,8 +588,8 @@ fn h1_reduce_bare_alias_does_not_poison_expanded_typeexpr_cache_slot() {
 //    check/time-of-use window. This characterisation test asserts
 //    the gate's SOURCE-LEVEL structural invariants:
 //
-//      1. The fence-collection arm of
-//         `type_expr_has_package_backed_object_like_root_with_fence`
+//      1. The fence-collection arm of the shared identity tail
+//         (`package_backed_object_like_root_identity_with_fence`)
 //         MUST observe `authoritative_current_content_hash` (the
 //         view-aware oracle consistent with the declaration
 //         lookup's internal observation), NOT
@@ -568,19 +629,14 @@ fn h2_package_backed_gate_observes_authoritative_current_content_hash_not_shallo
         &after[..end]
     }
 
-    // The fence collection now lives in the shared helper `push_decl_scope_fence`
-    // (called by the shared identity-tail). Both fronts (TypeExpr + node) feed the
-    // SAME tail, so the H2 invariant holds for BOTH through this one helper.
+    // The fence collection lives in the shared helper `push_decl_scope_fence`
+    // (called by the shared identity-tail the node front feeds), so the H2
+    // invariant holds through this one helper.
     let fence_helper = fn_body(&gate_src, "fn push_decl_scope_fence(");
     // The refusal `(verdict, None)` arms live in the shared identity-tail.
     let identity_tail = fn_body(
         &gate_src,
         "pub(crate) fn package_backed_object_like_root_identity_with_fence(",
-    );
-    // The TypeExpr-front entry that callers (and the wrapper) name.
-    let front = fn_body(
-        &gate_src,
-        "pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(",
     );
 
     // Invariant 1: the fence-collection arm consults
@@ -608,17 +664,15 @@ fn h2_package_backed_gate_observes_authoritative_current_content_hash_not_shallo
          than the declaration lookup's internal `authoritative_current_content_hash`.",
     );
 
-    // Invariant 2: both the front and the shared tail return
-    // `Option<DepSignature>` — the `Option` discriminator is the structural
-    // signal callers use to refuse admission when the gate refuses the fence.
-    for (label, body) in [("front", front), ("identity-tail", identity_tail)] {
-        assert!(
-            body.contains("Option<crate::semantic_query::DepSignature>")
-                || body.contains("Option<DepSignature>"),
-            "H2 invariant 2 ({label}): the gate's return type MUST be \
-             `(bool, Option<DepSignature>)`.",
-        );
-    }
+    // Invariant 2: the shared tail returns `Option<DepSignature>` — the
+    // `Option` discriminator is the structural signal callers use to refuse
+    // admission when the gate refuses the fence.
+    assert!(
+        identity_tail.contains("Option<crate::semantic_query::DepSignature>")
+            || identity_tail.contains("Option<DepSignature>"),
+        "H2 invariant 2 (identity-tail): the gate's return type MUST be \
+         `(bool, Option<DepSignature>)`.",
+    );
 
     // Invariant 3: the shared tail returns a `(verdict, None)` refusal arm.
     // Without this the `None` path is unreachable; with it, callers

@@ -24,15 +24,11 @@ fn meta_err(e: ComponentMetaHostError) -> Error {
     Error::new(Status::GenericFailure, e.to_string())
 }
 
-/// Shared encode function passed to session payload methods.
-fn encode_meta_payload(
-    analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-    resolved: &verter_session::meta_resolve::ResolvedComponentMetaState,
-) -> Vec<u8> {
-    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
-        analysis,
-        Some(resolved),
-    );
+/// Shared encode function passed to session payload methods: consume the
+/// session-owned output envelope (all wire type lanes already materialized
+/// under the request-bound view) and encode the mechanical FFI projection.
+fn encode_meta_payload(output: verter_session::meta_resolve::ComponentMetaOutput) -> Vec<u8> {
+    let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
     verter_protocol::component_meta::encode_component_meta_payload(&ffi)
 }
 
@@ -301,10 +297,14 @@ impl NapiMetaSession {
     /// sentinel zero-length `Buffer`
     /// (a real payload always contains the FFI envelope, so JS readers
     /// can use `buf.length === 0` as the canonical "no result"
-    /// sentinel). Per-id failures (budget overruns, alias errors)
-    /// surface as the sentinel as well.
+    /// sentinel). The sentinel is reserved EXCLUSIVELY for a genuinely
+    /// missing canonical.
     ///
-    /// Throws only on project-level shutdown.
+    /// Throws on project-level shutdown AND on a real per-id failure (a
+    /// budget overrun or a fail-closed output-materialization failure) —
+    /// batch failure semantics match the scalar `getComponentMeta` throw
+    /// (scalar ≡ batch); a real failure is never collapsed onto the
+    /// missing sentinel.
     #[napi(js_name = "getComponentMetaBatch")]
     pub fn get_component_meta_batch(
         &self,
@@ -344,14 +344,15 @@ impl NapiMetaSession {
             let (outcome, record) = session
                 .get_component_meta_with_audit(&canonical_or_alias)
                 .into_parts();
-            let Some((analysis, resolution)) = outcome.map_err(meta_err)? else {
+            let Some(output) = outcome.map_err(meta_err)? else {
                 return Ok(None);
             };
-            let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
-                analysis,
-                Some(&resolution),
-            );
-            let ffi_resolution = verter_ffi::convert::component_meta_resolution_to_ffi(&resolution);
+            let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
+            let ffi_resolution = ffi.resolution.clone().ok_or_else(|| {
+                Error::from_reason(
+                    "audited component-meta output carries no resolution sidecar".to_string(),
+                )
+            })?;
             let bundle = AuditBundle {
                 analysis: ffi,
                 resolution: ffi_resolution,
@@ -430,6 +431,13 @@ impl NapiMetaSession {
         }))?
     }
 
+    /// Plain component-meta payload under a legacy entry-point name: the
+    /// SAME lane as `getComponentMeta` (kept for wire compatibility,
+    /// identical payload). A full type-resolution pass runs and the
+    /// payload embeds the resolved type-registry overlay plus the
+    /// `resolution` sidecar; `getComponentMetaWithAudit` adds the
+    /// per-request audit record (the `{ analysis, resolution, record }`
+    /// JSON bundle), not more resolution.
     #[napi(js_name = "getResolvedComponentMeta")]
     pub fn get_resolved_component_meta(
         &self,

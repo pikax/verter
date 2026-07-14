@@ -438,18 +438,23 @@ pub fn fixture_slots_typed() -> SnapshotView {
 //   `defineModel<T>()` exposes a model entry with name from the
 //   optional first string argument (or `"modelValue"` default) and
 //   type T. Vue's documented contract additionally synthesises a
-//   matching prop with type `T | undefined` (when optional, no
-//   default) and an `update:<name>` event with payload tuple
-//   `[value: T | undefined]`.
+//   matching prop and an `update:<name>` event. The NATIVE snapshot
+//   keeps the prop type BARE `T` plus the typed flags — the
+//   `T | undefined` optional-model display is a compat/Volar-interop
+//   projection derived from `required` in
+//   `packages/component-meta/src/compat/checker.ts`, not native
+//   truth. The event's display payload tuple is
+//   `[value: T | undefined]` for an optional, undefaulted model.
 //
 //   The fixture has two calls: `defineModel<string>()` (defaults to
 //   `modelValue`) and `defineModel<number>('count')`. Both are
 //   optional (no `{ required: true }` option) and have no default,
 //   so each surfaces as:
 //     - model: name + concrete `T` (no `| undefined`).
-//     - prop: name + `T | undefined`, `required: false`,
+//     - prop: name + BARE `T`, `required: false`,
 //       `has_default: false`.
-//     - event: `update:<name>` with payload `[value: T | undefined]`.
+//     - event: `update:<name>` with display payload
+//       `[value: T | undefined]`.
 //
 //   `SnapshotView::from_analysis` sorts every collection
 //   alphabetically by name, so `count` precedes `modelValue`.
@@ -465,7 +470,7 @@ pub fn fixture_models() -> SnapshotView {
         props: vec![
             PropView {
                 name: "count".to_string(),
-                type_signature: "number | undefined".to_string(),
+                type_signature: "number".to_string(),
                 required: false,
                 has_default: false,
                 default_signature: None,
@@ -473,7 +478,7 @@ pub fn fixture_models() -> SnapshotView {
             },
             PropView {
                 name: "modelValue".to_string(),
-                type_signature: "string | undefined".to_string(),
+                type_signature: "string".to_string(),
                 required: false,
                 has_default: false,
                 default_signature: None,

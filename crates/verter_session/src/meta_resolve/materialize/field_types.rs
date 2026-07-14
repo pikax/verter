@@ -3,10 +3,10 @@
 //! Owns:
 //! - the bounded fixed-point reducer
 //!   (`materialize_component_meta_type_expr_until_stable` + `_full`),
-//! - the package-backed-root predicate that gates the projector's
-//!   reduction decision (`type_expr_has_package_backed_object_like_root`),
-//! - the migration helper `lowered_preserve_package_backed_symbolic_refs`
-//!   used by the registry-materialise path,
+//! - the shared package-backed-root identity tail
+//!   (`package_backed_object_like_root_identity_with_fence`) that gates the
+//!   projector's reduction decision behind the node-domain front
+//!   (`node_package_backed_object_like_root_with_fence`),
 //! - the test-only `MTL_CALL_COUNT` instrumentation that the
 //!   eager-entry tests count off.
 //!
@@ -18,7 +18,6 @@
 use crate::instant::Instant;
 
 use super::super::dep_signature::emit_dispatch_dep_signature_facts;
-use super::super::registry_materialize::preserve_package_backed_symbolic_refs_node;
 
 crate::project_semantic_dispatch::output_materialization::define_output_capability! {
     /// The whole-expression field-type MATERIALISER's output-sink
@@ -95,11 +94,13 @@ pub(crate) fn type_expr_materializer_context(
 /// slot-key poisoning. This helper is the single source for both the
 /// reduction and the cache key.
 pub(crate) fn type_expr_materialize_reduction_context(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
     mode: crate::semantic_query::ProjectionMode,
 ) -> crate::semantic_query::ProjectionReductionContext {
     if matches!(mode, crate::semantic_query::ProjectionMode::Navigate)
-        && type_expr_root_is_published_operator(expr)
+        && type_expr_root_is_published_operator(ctx, scope_canonical_id, expr, mode)
     {
         crate::semantic_query::ProjectionReductionContext::published(mode)
     } else {
@@ -107,27 +108,56 @@ pub(crate) fn type_expr_materialize_reduction_context(
     }
 }
 
-fn type_expr_root_is_published_operator(expr: &verter_type_expr::TypeExpr) -> bool {
+fn type_expr_root_is_published_operator(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    scope_canonical_id: &str,
+    expr: &verter_type_expr::TypeExpr,
+    mode: crate::semantic_query::ProjectionMode,
+) -> bool {
     use verter_type_expr::TypeExpr;
 
     match expr {
-        TypeExpr::Parenthesized(inner) => type_expr_root_is_published_operator(inner),
+        TypeExpr::Parenthesized(inner) => {
+            type_expr_root_is_published_operator(ctx, scope_canonical_id, inner, mode)
+        }
         TypeExpr::Ref { .. } => {
             // References that survive parser lowering are declared
             // surface roots. Builtin broad mapped carriers are handled
             // by the `Mapped` arm below after dispatch lowering.
             true
         }
-        TypeExpr::Mapped { value, .. } => {
+        TypeExpr::Mapped { .. } => {
             // Builtin broad object modifiers lower to identity mapped
-            // carriers with an opaque/miss placeholder value. Keep
-            // those as carriers at Navigate depth; publish mapped
-            // types that carry an author-visible value expression
-            // (`T[K]`, `string`, `Record<...>`, etc.).
-            !matches!(
-                value.as_ref(),
-                TypeExpr::Unknown { raw } if raw == "semanticMiss"
-            )
+            // carriers whose VALUE position is the typed miss carrier
+            // (`Opaque(QueryError::Miss)`). Keep those as carriers at
+            // Navigate depth; publish mapped types that carry an
+            // author-visible value expression (`T[K]`, `string`,
+            // `Record<...>`, etc.).
+            //
+            // Whether THIS mapped root is such a carrier is a SEMANTIC
+            // decision, so it is read off TYPED node-domain state — the
+            // shape-engine fold's `RaisedRootKind::Mapped {
+            // value_is_semantic_miss }` root class (derived from
+            // `QueryError::Miss` through the shared sentinel authority)
+            // via the node mirror [`node_root_is_published_operator`] —
+            // never by matching the raised sentinel STRING. The carrier
+            // is lowered once under a carrier-preserving
+            // structural-transit demand (`may_reduce_operator == false`,
+            // so the classification lowering never executes the mapped
+            // type or enumerates its keys). A scope with no shallow
+            // state has nothing to lower against (the whole-expression
+            // materialiser bails to the input-unchanged path there), so
+            // an unlowerable carrier stays a carrier-stop (`false`).
+            let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            dispatch
+                .lower_type_expr_in_scope_with_context(
+                    scope_canonical_id,
+                    expr,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        mode,
+                    ),
+                )
+                .is_some_and(|node| node_root_is_published_operator(ctx, node))
         }
         TypeExpr::KeyOf(_)
         | TypeExpr::IndexedAccess { .. }
@@ -267,15 +297,22 @@ pub(crate) fn stabilize_registry_member_surface_node_with_shape_cache(
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use std::sync::Arc;
 
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    let first_facts = node_raised_shape_facts_with_dispatch(&dispatch, first_node);
+    // ONE cacheability tracer scope around the WHOLE compute — the input-node shape
+    // facts, the reduction-context classification that builds the cache KEY, the
+    // peek, and the cold reduce. Scoping it to the reduce alone left the
+    // key-classification's and the shape-fact walk's serves unobserved.
+    let (value, _non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
+        ctx.host_for_fact_tracer_install(),
+        |probe| {
+            let dispatch = ProjectSemanticDispatch::new(ctx);
+            let first_facts = node_raised_shape_facts_with_dispatch(&dispatch, first_node);
 
-    // The reduction context the second pass runs under — keyed onto the slot so a
-    // stored value (reduced under this context) is only served to a consumer that
-    // reduces under the SAME context.
-    let reduction_context = node_materialize_reduction_context(ctx, first_node, mode);
-    let cap = RegistryMemberShapeKeyCap::new();
-    let key =
+            // The reduction context the second pass runs under — keyed onto the slot so a
+            // stored value (reduced under this context) is only served to a consumer that
+            // reduces under the SAME context.
+            let reduction_context = node_materialize_reduction_context(ctx, first_node, mode);
+            let cap = RegistryMemberShapeKeyCap::new();
+            let key =
         crate::component_meta_caches::ShapeCacheKey::registry_member_value_node_whole_with_context(
             Arc::<str>::from(scope_canonical_id),
             &cap,
@@ -283,66 +320,88 @@ pub(crate) fn stabilize_registry_member_surface_node_with_shape_cache(
             reduction_context,
         );
 
-    // Stabilise: peek the ShapeCacheDb member-node slot, else cold-reduce the
-    // first-pass node once through the graph-native reducer and admit.
-    let stabilized = {
-        let cache = ctx.project_type_store().shape_cache_db();
-        if let Some(cached) = cache.peek(&key, ctx) {
-            emit_dispatch_dep_signature_facts(ctx, cached.dep_signature());
-            cached
-        } else {
-            // Snapshot the request-scoped materialization suppress sticky BEFORE the
-            // reduce, and take the scope observation BEFORE computing the value —
-            // mirroring the `TypeExpr`-start
-            // `materialize_component_meta_type_expr_until_stable_full`, so the
-            // signature self-root and the admission gate root on the version the
-            // reduce actually ran under (one tear-free observation taken before the
-            // value settles, not one re-read afterward).
-            let suppress_sticky_before =
-                crate::request_context::current_materialization_cache_suppress();
-            let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
-            let materialized = reduce_member_value_graph_native_with_context(
-                ctx,
-                scope_canonical_id,
-                first_node,
-                reduction_context,
-            );
-            // Reproduce ALL THREE of `_until_stable_full`'s admission rails, not just
-            // the partial gate:
-            //   1. a GENUINE-partial reduce (budget-tripped contributing read);
-            //   2. a reduce that observed a MissingDependency (the request's
-            //      materialization suppress sticky transitioned unset→set DURING this
-            //      reduce); and
-            //   3. a `typeof <unresolved import>`-rooted member surface whose reduced
-            //      ROOT is the unmaterialised/miss sentinel.
-            // Cases 2 + 3 are `ReturnOnly` partials whose only invalidation rail is
-            // the owner's `ImportRoute` derived fact — a rail this node-keyed slot's
-            // fact signature cannot carry — so admitting them warm would stale-serve
-            // the miss after the dependency appears. The value still flows to the
-            // caller; only the shared-slot admission is refused, and the next request
-            // recomputes cold and recovers. The suppress-sticky transition alone
-            // misses a typeof miss whose sticky an EARLIER `build_typeof` sub-read in
-            // the SAME request already set, so the typeof-root-miss check is carried
-            // IN ADDITION and is scoped to a `TypeOf`-rooted first-pass node (a
-            // miss-rooted `Pick`/`Omit`/`Ref` surface is a different, already-handled
-            // class the surrounding gates cover).
-            let observed_missing_dependency = !suppress_sticky_before
-                && crate::request_context::current_materialization_cache_suppress();
-            let typeof_result_root_is_miss = node_root_is_typeof(ctx, first_node)
+            // Stabilise: peek the ShapeCacheDb member-node slot, else cold-reduce the
+            // first-pass node once through the graph-native reducer and admit.
+            let stabilized = {
+                let cache = ctx.project_type_store().shape_cache_db();
+                if let Some(cached) = cache.peek(&key, ctx) {
+                    emit_dispatch_dep_signature_facts(ctx, cached.dep_signature());
+                    cached
+                } else {
+                    // Snapshot the request-scoped materialization suppress sticky BEFORE the
+                    // reduce, and take the scope observation BEFORE computing the value —
+                    // mirroring the `TypeExpr`-start
+                    // `materialize_component_meta_type_expr_until_stable_full`, so the
+                    // signature self-root and the admission gate root on the version the
+                    // reduce actually ran under (one tear-free observation taken before the
+                    // value settles, not one re-read afterward).
+                    let suppress_sticky_before =
+                        crate::request_context::current_request_result_is_partial();
+                    let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
+                    // The cold reduce runs inside the caller's cacheability scope. A FENCED
+                    // (ReturnOnly, `store_published == false`) `IndexedReady` serve consumed
+                    // anywhere in this compute derives the member SHAPE from a
+                    // served-without-publication basis while its fact signature validates
+                    // against the LIVE view — a non-cacheable read this admission gate cannot
+                    // otherwise reject. The `MaterializedOutputTypeExpr` carrier surfaces only
+                    // `result_is_partial` (`raise.rs` deliberately folds a benign
+                    // `cache_suppress` into the inner memo's own admission and NOT the
+                    // carrier, so it MUST NOT suppress a complete component-meta result), so a
+                    // fenced-but-`Complete` shape sails through the `result_is_partial()`-only
+                    // gate below. The entry's own `ReadSetSignature` catches content-change
+                    // supersessions and `validated_at_generation` catches generation-change
+                    // ones; the residual hole the scope closes is the SAME-generation
+                    // singleflight-race window, where admitting the shape would stale-serve it
+                    // to a later same-generation warm hit.
+                    //
+                    // The scope's own observation set is NOT the entry's signature (the admit
+                    // path below builds that from the carrier's `dep_signature`), so this
+                    // boundary reads the scope's CACHEABILITY verdict — which folds the
+                    // non-cacheable-read bit together with a fact-signature overflow (a second,
+                    // INDEPENDENT non-admission condition that must not be dropped here).
+                    let materialized = reduce_member_value_graph_native_with_context(
+                        ctx,
+                        scope_canonical_id,
+                        first_node,
+                        reduction_context,
+                    );
+                    // Reproduce ALL THREE of `_until_stable_full`'s admission rails, not just
+                    // the partial gate:
+                    //   1. a GENUINE-partial reduce (budget-tripped contributing read);
+                    //   2. a reduce that observed a MissingDependency (the request's
+                    //      materialization suppress sticky transitioned unset→set DURING this
+                    //      reduce); and
+                    //   3. a `typeof <unresolved import>`-rooted member surface whose reduced
+                    //      ROOT is the unmaterialised/miss sentinel.
+                    // Cases 2 + 3 are `ReturnOnly` partials whose only invalidation rail is
+                    // the owner's `ImportRoute` derived fact — a rail this node-keyed slot's
+                    // fact signature cannot carry — so admitting them warm would stale-serve
+                    // the miss after the dependency appears. The value still flows to the
+                    // caller; only the shared-slot admission is refused, and the next request
+                    // recomputes cold and recovers. The suppress-sticky transition alone
+                    // misses a typeof miss whose sticky an EARLIER `build_typeof` sub-read in
+                    // the SAME request already set, so the typeof-root-miss check is carried
+                    // IN ADDITION and is scoped to a `TypeOf`-rooted first-pass node (a
+                    // miss-rooted `Pick`/`Omit`/`Ref` surface is a different, already-handled
+                    // class the surrounding gates cover).
+                    let observed_missing_dependency = !suppress_sticky_before
+                        && crate::request_context::current_request_result_is_partial();
+                    let typeof_result_root_is_miss = node_root_is_typeof(ctx, first_node)
                 && materialized.node_id().is_some_and(|node| {
                     crate::project_semantic_dispatch::raise::node_root_is_unmaterialized_sentinel_with_dispatch(
                         &dispatch, node,
                     )
                 });
-            if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-                materialized.result_is_partial(),
-            ) || observed_missing_dependency
-                || typeof_result_root_is_miss
-            {
-                materialized
-            } else {
-                let materialized_for_closure = materialized.clone();
-                let admitted = cache.get_or_compute(&key, ctx, move || {
+                    if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                        materialized.result_is_partial(),
+                    ) || observed_missing_dependency
+                        || typeof_result_root_is_miss
+                        || probe.non_cacheable()
+                    {
+                        materialized
+                    } else {
+                        let materialized_for_closure = materialized.clone();
+                        let admitted = cache.get_or_compute(&key, ctx, probe, move || {
                     let scope_obs = observed_scope?;
                     let parse_fact = scope_obs.syntactic_export_set.clone()?;
                     match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
@@ -356,28 +415,31 @@ pub(crate) fn stabilize_registry_member_surface_node_with_shape_cache(
                         crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
                     }
                 });
-                admitted.unwrap_or(materialized)
+                        admitted.unwrap_or(materialized)
+                    }
+                }
+            };
+
+            // The stabilised NODE is the reduced carrier's node; a reduce that settled no
+            // node falls back to the first-pass node (a degenerate reduce ⇒ publish the
+            // first pass). The carrier itself is dropped here — its dep_signature was
+            // emitted above, and the candidate sibling re-raises this node at a registered
+            // sink to reproduce its value.
+            let stable_node = stabilized.node_id().unwrap_or(first_node);
+            let stable_facts = node_raised_shape_facts_with_dispatch(&dispatch, stable_node);
+
+            // No-poison (tri-state): keep the FIRST-pass surface only when the stabilised
+            // root is CONFIDENTLY a miss AND the first-pass root is CONFIDENTLY miss-free.
+            let stable_has_miss = stable_facts.map(|f| !f.materialized());
+            let first_has_miss = first_facts.map(|f| !f.materialized());
+            if stable_has_miss == Some(true) && first_has_miss == Some(false) {
+                RegistryMemberStabilizedValue::First { node: first_node }
+            } else {
+                RegistryMemberStabilizedValue::Stable { node: stable_node }
             }
-        }
-    };
-
-    // The stabilised NODE is the reduced carrier's node; a reduce that settled no
-    // node falls back to the first-pass node (a degenerate reduce ⇒ publish the
-    // first pass). The carrier itself is dropped here — its dep_signature was
-    // emitted above, and the candidate sibling re-raises this node at a registered
-    // sink to reproduce its value.
-    let stable_node = stabilized.node_id().unwrap_or(first_node);
-    let stable_facts = node_raised_shape_facts_with_dispatch(&dispatch, stable_node);
-
-    // No-poison (tri-state): keep the FIRST-pass surface only when the stabilised
-    // root is CONFIDENTLY a miss AND the first-pass root is CONFIDENTLY miss-free.
-    let stable_has_miss = stable_facts.map(|f| !f.materialized());
-    let first_has_miss = first_facts.map(|f| !f.materialized());
-    if stable_has_miss == Some(true) && first_has_miss == Some(false) {
-        RegistryMemberStabilizedValue::First { node: first_node }
-    } else {
-        RegistryMemberStabilizedValue::Stable { node: stable_node }
-    }
+        },
+    );
+    value
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -402,6 +464,107 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
     let dispatch = ProjectSemanticDispatch::new(query_engine.ctx());
     let cap = MetaResolveFieldTypesOutputCap::new(&dispatch);
     full.into_type_expr(&cap)
+}
+
+/// The TypeExpr-START shape route's ONE pre-peek lowering: the tear-free
+/// scope observation plus the settled node the expression lowers to under
+/// it. Shared by the whole-expression materialiser
+/// ([`materialize_component_meta_type_expr_until_stable_full`], which keys,
+/// peeks, cold-reduces, and admits off this ONE lowering) and the
+/// projector peek ([`crate::meta_resolve::projectors::peek_member_shape_known`],
+/// which must build the IDENTICAL key identity the materialiser publishes
+/// under — a divergent lowering would peek a different node than the
+/// publish keyed).
+pub(crate) struct TypeExprShapeSubjectLowering {
+    /// The tear-free scope observation the lowering ran under — the SAME
+    /// observation the admit path self-roots the shared-cache entry on.
+    /// `None` = the scope has no view-correct observation (the lowering
+    /// degraded to the surviving `shallow_file_state` content version);
+    /// shared-cache admission is skipped for that case.
+    pub(crate) observed_scope: Option<crate::resolver_core::MaterializeScopeObservation>,
+    /// The settled node the expression lowered to — the shape-cache
+    /// subject AND the cold-reduce input.
+    pub(crate) lowered: crate::semantic_query::SemanticNodeId,
+}
+
+/// Lower `expr` ONCE for the TypeExpr-START shape route: ONE tear-free
+/// scope observation (`observe_materialize_scope` — overlay-aware,
+/// view-correct) sources the lowering `NodeScopeId`'s `whole_hash`, so the
+/// keyed subject node, the reduced value, and the admit fact-signature
+/// self-root all agree on one scope content identity (sourcing them from
+/// separate oracles tears: an edit landing between the reads roots a value
+/// lowered under `H1` on a signature self-rooted at `H2`).
+///
+/// A `None` observation degrades to the scope's surviving
+/// `shallow_file_state` content version — NEVER a fabricated all-zero hash
+/// (the caller then skips shared-cache admission). When the scope has
+/// neither an observation nor a surviving shallow state there is genuinely
+/// no scope identity to lower against — returns `None` and the caller
+/// produces its no-op result.
+pub(crate) fn lower_type_expr_for_shape_subject(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    expr: &verter_type_expr::TypeExpr,
+    reduction_context: crate::semantic_query::ProjectionReductionContext,
+) -> Option<TypeExprShapeSubjectLowering> {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use std::sync::Arc;
+
+    let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
+    // Capture the scope-shadowing context once for the materialize → lower
+    // pipeline from the per-scope memo, so the dispatch fast-path observes
+    // the same shadow set the route-extraction path uses. The `&mut` borrow
+    // ends here (the accessor returns an owned `Arc<ScopeShadowing>`), so
+    // the shared `ctx` borrow opened just below — held through dispatch
+    // lowering — is unaffected.
+    let shadowing = query_engine.scope_shadowing_for_scope(scope_canonical_id);
+    let ctx = query_engine.ctx();
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
+    let lowering_scope_whole_hash = match observed_scope.as_ref() {
+        Some(observation) => Some(observation.whole_hash()),
+        None => ctx
+            .shallow_file_state(scope_canonical_id)
+            .map(|state| state.whole_hash),
+    };
+    let scope = crate::semantic_query::NodeScopeId::File {
+        canonical_id: Arc::from(scope_canonical_id),
+        whole_hash: lowering_scope_whole_hash?,
+        local_scope: None,
+    };
+    let env: rustc_hash::FxHashMap<String, crate::semantic_query::SemanticNodeId> =
+        rustc_hash::FxHashMap::default();
+    let name_resolution = rustc_hash::FxHashMap::default();
+    let mut substitutions: Vec<(Arc<str>, crate::semantic_query::SemanticNodeId)> = Vec::new();
+    let _us_trace = std::env::var("VERTER_PROGRESS_STREAM").is_ok();
+    if _us_trace {
+        eprintln!(
+            "[US_LOWER_START] scope={} context={:?}",
+            scope_canonical_id, reduction_context
+        );
+    }
+    let _us_lower_t0 = Instant::now();
+    let lowered = dispatch.shallow_lower_type_expr_with_context(
+        expr,
+        &env,
+        &scope,
+        &name_resolution,
+        scope_payload.as_deref(),
+        shadowing.as_ref(),
+        &mut substitutions,
+        reduction_context,
+    );
+    let _us_lower_ms = _us_lower_t0.elapsed().as_secs_f64() * 1000.0;
+    if _us_trace {
+        eprintln!(
+            "[US_LOWER_END] scope={} context={:?} lower_ms={:.1}",
+            scope_canonical_id, reduction_context, _us_lower_ms
+        );
+    }
+    Some(TypeExprShapeSubjectLowering {
+        observed_scope,
+        lowered,
+    })
 }
 
 /// Materialize a `TypeExpr` and return both the result and the
@@ -433,13 +596,20 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     mode: crate::semantic_query::ProjectionMode,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
+    // ONE cacheability tracer scope around the WHOLE compute. This route's PRE-PEEK
+    // LOWERING (`lower_type_expr_for_shape_subject`) resolves every nested reference
+    // head through the shared carrier resolver's DIRECT `ensure_indexed_ready_serve`
+    // probe, so a FENCED serve is consumed BEFORE the reduce ever runs — and for a
+    // COMPOSITE subject the `StructuralTransit` reducer never descends into a
+    // composite child, so the reduce is NOT guaranteed to re-read it. A tracer
+    // scoped to the reduce alone therefore observed nothing and admitted the
+    // poisoned shape. The scope must enclose the context classification, the
+    // lowering, the keying, the peek, and the reduce.
     use crate::project_semantic_dispatch::output_materialization::{
         wrap_output_type_expr, OutputProjector,
     };
     use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::NodeScopeId;
-    use rustc_hash::FxHashMap;
     use std::sync::Arc;
 
     // Step 6.2 / D22: count every entry into whole-expression
@@ -449,299 +619,259 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     #[cfg(test)]
     MTL_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // The host-owned `ShapeCacheDb` is THE materialiser cache.
-    // The former request-local `materialize_memo` keyed on
-    // `(scope, expr, navigate_bool)` was a SECOND authoritative cache
-    // (a host-owned-cache-principle violation) AND keyed only on a
-    // mode-collapsed `navigate_bool` — distinct reduction contexts over
-    // the same `(scope, expr)` collided onto one cell. It is gone.
-    //
-    // The cache slot is keyed by the EXACT
-    // [`ProjectionReductionContext`] the reduction below actually runs
-    // under (`reduction_context`, computed here so the peek key and the
-    // value share one identity). Keying on `published(mode)` while
-    // reducing under `StructuralTransit(mode)` (the `Navigate` case)
-    // poisoned a published consumer with a transit-lowered value.
-    let reduction_context = type_expr_materialize_reduction_context(expr, mode);
+    let outer_ctx: &dyn crate::resolver_core::ResolverContext = query_engine.ctx;
+    let (value, _non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
+        outer_ctx.host_for_fact_tracer_install(),
+        |probe| {
+            // The host-owned `ShapeCacheDb` is THE materialiser cache.
+            // The former request-local `materialize_memo` keyed on
+            // `(scope, expr, navigate_bool)` was a SECOND authoritative cache
+            // (a host-owned-cache-principle violation) AND keyed only on a
+            // mode-collapsed `navigate_bool` — distinct reduction contexts over
+            // the same `(scope, expr)` collided onto one cell. It is gone.
+            //
+            // The cache slot is keyed by the EXACT
+            // [`ProjectionReductionContext`] the reduction below actually runs
+            // under (`reduction_context`, computed here so the peek key and the
+            // value share one identity). Keying on `published(mode)` while
+            // reducing under `StructuralTransit(mode)` (the `Navigate` case)
+            // poisoned a published consumer with a transit-lowered value.
+            let reduction_context = type_expr_materialize_reduction_context(
+                query_engine.ctx(),
+                scope_canonical_id,
+                expr,
+                mode,
+            );
 
-    // Classify the shape-cache key ONCE per materialization pass and reuse
-    // the SAME `Option<ShapeCacheKey>` for both the peek (below) and the
-    // admit (further down). The classifier runs the depth-safe synthetic-
-    // carrier walker (`NonSyntheticTypeExpr::new`) per build, so building
-    // it separately for the peek and the admit double-walked every
-    // carrier-free expression. `None` (a composite NESTING a synthetic
-    // carrier — no sound content-free key) still bypasses BOTH the peek
-    // and the admit; the value is computed and returned either way.
-    let cache_key = crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
-        std::sync::Arc::<str>::from(scope_canonical_id),
-        std::sync::Arc::new(expr.clone()),
-        reduction_context,
-    );
+            // Snapshot the request-scoped materialization suppress sticky BEFORE
+            // this compute lowers/reduces (the pre-peek shape-subject lowering
+            // below is part of the compute). A `typeof <unresolved import>` is a
+            // genuine `MissingDependency` partial whose only invalidation rail is the
+            // owner's `ImportRoute` derived fact — a rail the build-layer fence cannot
+            // carry and the consuming `raise_and_reduce`'s eager TypeOf lowering path
+            // resolves through a partial-dropping `execute_type_node`. The producer
+            // (`build_typeof`) marks THIS request's materialization suppress sticky for
+            // such a miss, so a sticky that transitions from unset→set DURING this
+            // compute is the precise signal that this materialisation observed a
+            // MissingDependency. Such a result MUST be `ReturnOnly` (refused warm
+            // admission) so the next request after the dependency appears recomputes
+            // cold and recovers. (Per the architecture ruling: an unrootable
+            // MissingDependency is `ReturnOnly`.)
+            let suppress_sticky_before =
+                crate::request_context::current_request_result_is_partial();
 
-    // Peek the universal ShapeCacheDb (TypeExpr subject,
-    // whole-subject demand under the exact reduction context).
-    {
-        // Loop-5 instrumentation — bump peek for every host-memo
-        // read attempt; bump hit only on the cached return path.
-        crate::loop5_instrumentation::MATERIALIZE_MEMO_PEEKS
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // ONE tear-free scope observation + ONE shallow lowering, shared by the
+            // cache-key subject (the LOWERED settled node), the peek, the cold
+            // reduce, and the admit self-root — so the keyed node, the value, and
+            // the fact-signature self-root all agree on one scope content identity.
+            // `None` = no view-correct scope identity to lower against (a session
+            // tombstone, an evicted / unloaded scope, or no recoverable artifact):
+            // the materialiser returns the input expression unchanged — the no-op
+            // result the surrounding code already tolerates — and no cache slot is
+            // keyed or peeked.
+            let Some(shape_lowering) = lower_type_expr_for_shape_subject(
+                query_engine,
+                scope_canonical_id,
+                expr,
+                reduction_context,
+            ) else {
+                let ctx = query_engine.ctx();
+                let dispatch = ProjectSemanticDispatch::new(ctx);
+                let cap = MetaResolveFieldTypesOutputCap::new(&dispatch);
+                return MaterializedOutputTypeExpr::from_parts(
+                    None,
+                    wrap_output_type_expr(&cap, expr.clone()),
+                    Arc::from(Vec::new()),
+                    false,
+                );
+            };
+            let TypeExprShapeSubjectLowering {
+                observed_scope,
+                lowered,
+            } = shape_lowering;
 
-        let ctx = query_engine.ctx();
-        // A composite expression that NESTS a synthetic carrier has no
-        // sound content-free cache key — bypass the cache (skip peek; the
-        // admit path below is likewise skipped) and fall through to the
-        // full cold compute. A bare carrier / carrier-free expression
-        // yields a key normally.
-        if let Some(cache_key) = &cache_key {
-            let host_db = ctx.project_type_store().shape_cache_db();
-            if let Some(cached) = host_db.peek(cache_key, ctx) {
-                crate::loop5_instrumentation::MATERIALIZE_MEMO_HITS
+            // Classify the shape-cache key ONCE per materialization pass — over the
+            // LOWERED settled node — and reuse the SAME `Option<ShapeCacheKey>` for
+            // both the peek (below) and the admit (further down). `None` (a
+            // composite NESTING a synthetic carrier — no sound content-free key)
+            // still bypasses BOTH the peek and the admit; the value is computed and
+            // returned either way.
+            let cache_key =
+                crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
+                    std::sync::Arc::<str>::from(scope_canonical_id),
+                    expr,
+                    reduction_context,
+                    || Some(lowered),
+                );
+
+            // Peek the universal ShapeCacheDb (member-value-node subject over the
+            // pre-peek lowered node, whole-subject demand under the exact
+            // reduction context).
+            {
+                // Loop-5 instrumentation — bump peek for every host-memo
+                // read attempt; bump hit only on the cached return path.
+                crate::loop5_instrumentation::MATERIALIZE_MEMO_PEEKS
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return cached;
+
+                let ctx = query_engine.ctx();
+                // A composite expression that NESTS a synthetic carrier has no
+                // sound content-free cache key — bypass the cache (skip peek; the
+                // admit path below is likewise skipped) and fall through to the
+                // full cold compute. A bare carrier / carrier-free expression
+                // yields a key normally.
+                if let Some(cache_key) = &cache_key {
+                    let host_db = ctx.project_type_store().shape_cache_db();
+                    if let Some(cached) = host_db.peek(cache_key, ctx) {
+                        crate::loop5_instrumentation::MATERIALIZE_MEMO_HITS
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return cached;
+                    }
+                }
             }
-        }
-    }
 
-    // Snapshot the request-scoped materialization suppress sticky BEFORE
-    // this compute lowers/reduces. A `typeof <unresolved import>` is a
-    // genuine `MissingDependency` partial whose only invalidation rail is the
-    // owner's `ImportRoute` derived fact — a rail the build-layer fence cannot
-    // carry and the consuming `raise_and_reduce`'s eager TypeOf lowering path
-    // resolves through a partial-dropping `execute_type_node`. The producer
-    // (`build_typeof`) marks THIS request's materialization suppress sticky for
-    // such a miss, so a sticky that transitions from unset→set DURING this
-    // compute is the precise signal that this materialisation observed a
-    // MissingDependency. Such a result MUST be `ReturnOnly` (refused warm
-    // admission) so the next request after the dependency appears recomputes
-    // cold and recovers. (Per the architecture ruling: an unrootable
-    // MissingDependency is `ReturnOnly`.)
-    let suppress_sticky_before = crate::request_context::current_materialization_cache_suppress();
+            // Step 1.5 thin dispatch wrapper. The pre-peek shape-subject lowering
+            // above already lowered the expression against the tear-free scope
+            // observation; the cold path reduces that SAME settled node — no
+            // second lowering.
+            let ctx = query_engine.ctx();
+            let dispatch = ProjectSemanticDispatch::new(ctx);
+            // Mint the field-types materialiser output capability (constructor
+            // visible only within `crate::meta_resolve::materialize::field_types`):
+            // this materialiser is a true publication sink — it reduce-then-raises
+            // into a sealed carrier and unwraps the sealed payload via the capability.
+            let cap = MetaResolveFieldTypesOutputCap::new(&dispatch);
+            let _us_trace = std::env::var("VERTER_PROGRESS_STREAM").is_ok();
+            let _us_rr_t0 = Instant::now();
+            // The cold reduce runs inside the caller's cacheability scope, alongside the
+            // pre-peek lowering. A FENCED (ReturnOnly, `store_published == false`)
+            // `IndexedReady` serve consumed anywhere in the compute derives this shape from
+            // a served-without-publication basis while its fact signature validates against
+            // the LIVE view, and a signature OVERFLOW leaves the compute unprovable against
+            // the curated signature — two independent non-cacheable states that are NOT
+            // partial, so the `result_is_partial()` gate below cannot reject either. The
+            // admit builds its signature from the carrier's `dep_signature`, never from the
+            // scope's observation set, so the boundary reads the CACHEABILITY verdict; the
+            // value still flows to the caller, only the shared `ShapeCacheDb` write is
+            // refused.
+            let materialized = cap.materialize_reduced_output_type_expr(lowered, reduction_context);
+            let _us_rr_ms = _us_rr_t0.elapsed().as_secs_f64() * 1000.0;
+            if _us_trace {
+                eprintln!(
+                    "[US_RAISE_END] scope={} mode={:?} raise_reduce_ms={:.1}",
+                    scope_canonical_id, mode, _us_rr_ms
+                );
+            }
 
-    // Step 1.5 thin dispatch wrapper. Build NodeScopeId for the file
-    // scope, then lower → raise_and_reduce in the caller's mode.
-    let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
-    // Capture the scope-shadowing context once for the materialize → lower
-    // pipeline from the per-scope memo, so the dispatch fast-path observes the
-    // same shadow set the route-extraction path uses. The `&mut` borrow ends
-    // here (the accessor returns an owned `Arc<ScopeShadowing>`), so the shared
-    // `ctx` borrow opened just below — held through dispatch lowering — is
-    // unaffected. The memo's `from_scope_payload` reuses the SAME just-cached
-    // scope payload captured above, so its shadow set is membership-identical to
-    // an inline `from_scope_payload(scope_payload)` build (same payload in, same
-    // set out).
-    let shadowing = query_engine.scope_shadowing_for_scope(scope_canonical_id);
-    let ctx = query_engine.ctx();
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    // Mint the field-types materialiser output capability (constructor
-    // visible only within `crate::meta_resolve::materialize::field_types`):
-    // this materialiser is a true publication sink — it reduce-then-raises
-    // into a sealed carrier and unwraps the sealed payload via the capability.
-    let cap = MetaResolveFieldTypesOutputCap::new(&dispatch);
-    let env: FxHashMap<String, crate::semantic_query::SemanticNodeId> = FxHashMap::default();
-    // Establish ONE tear-free observation of the scope's content
-    // identity. The scope's `whole_hash` feeds two distinct consumers
-    // that MUST agree:
-    //
-    //  1. The `NodeScopeId::File` the materialiser lowers the
-    //     `TypeExpr` against (built just below) — the lowered value's
-    //     semantic identity.
-    //  2. The `MaterializeMemoDb` entry's fact-signature self-root
-    //     (threaded into the write-through, further down) — the
-    //     view-correct SHARED-cache admission gate.
-    //
-    // Sourcing those from two separate oracles (`shallow_file_state`
-    // for the scope id, `authoritative_current_content_hash` for the
-    // signature) tears: an edit landing between the two reads roots a
-    // value lowered under `H1` on a signature self-rooted at `H2`.
-    // `observe_materialize_scope` collapses both onto ONE
-    // `Arc<IndexedReady>`: `whole_hash()` is the single source for both
-    // the lowering scope and the signature self-root, and the pinned
-    // `SyntacticExportSet` parse fact descends from the same artifact.
-    // The observation is view-correct — an overlay-bearing
-    // `SessionResolverContext` pins the overlay `IndexedReady`, so an
-    // overlay-derived memo entry roots on the overlay version (a base
-    // request mismatches it rather than reusing it).
-    //
-    // A `None` observation is a legitimate outcome (a session
-    // tombstone, an evicted / unloaded scope, or no recoverable
-    // artifact): the materialiser still runs and returns a value, but
-    // there is no view-correct scope identity to self-root a shared
-    // `MaterializeMemoDb` entry with, so the shared-cache write-through
-    // below is skipped. The lowering then degrades exactly as the
-    // missing-`scope_payload` path already does — it sources the
-    // lowering `NodeScopeId`'s `whole_hash` from the scope's surviving
-    // `shallow_file_state` content version, NEVER a fabricated all-zero
-    // hash. When the scope has neither an observation nor a surviving
-    // shallow state there is genuinely no scope identity to lower
-    // against, so the materialiser returns the input expression
-    // unchanged — the no-op result the surrounding code already
-    // tolerates.
-    let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
-    let lowering_scope_whole_hash = match observed_scope.as_ref() {
-        Some(observation) => Some(observation.whole_hash()),
-        None => ctx
-            .shallow_file_state(scope_canonical_id)
-            .map(|state| state.whole_hash),
-    };
-    let Some(observed_scope_whole_hash) = lowering_scope_whole_hash else {
-        return MaterializedOutputTypeExpr::from_parts(
-            None,
-            wrap_output_type_expr(&cap, expr.clone()),
-            Arc::from(Vec::new()),
-            false,
-        );
-    };
-    let scope = NodeScopeId::File {
-        canonical_id: Arc::from(scope_canonical_id),
-        whole_hash: observed_scope_whole_hash,
-        local_scope: None,
-    };
-    let name_resolution = rustc_hash::FxHashMap::default();
-    let mut substitutions: Vec<(Arc<str>, crate::semantic_query::SemanticNodeId)> = Vec::new();
-    let _us_trace = std::env::var("VERTER_PROGRESS_STREAM").is_ok();
-    if _us_trace {
-        eprintln!(
-            "[US_LOWER_START] scope={} mode={:?}",
-            scope_canonical_id, mode
-        );
-    }
-    // `reduction_context` was computed at function entry so the
-    // ShapeCacheDb peek/publish key shares one identity with the value.
-    let _us_lower_t0 = Instant::now();
-    let lowered = dispatch.shallow_lower_type_expr_with_context(
-        expr,
-        &env,
-        &scope,
-        &name_resolution,
-        scope_payload.as_deref(),
-        shadowing.as_ref(),
-        &mut substitutions,
-        reduction_context,
-    );
-    let _us_lower_ms = _us_lower_t0.elapsed().as_secs_f64() * 1000.0;
-    if _us_trace {
-        eprintln!(
-            "[US_LOWER_END] scope={} mode={:?} lower_ms={:.1}",
-            scope_canonical_id, mode, _us_lower_ms
-        );
-    }
-    let _us_rr_t0 = Instant::now();
-    let materialized = cap.materialize_reduced_output_type_expr(lowered, reduction_context);
-    let _us_rr_ms = _us_rr_t0.elapsed().as_secs_f64() * 1000.0;
-    if _us_trace {
-        eprintln!(
-            "[US_RAISE_END] scope={} mode={:?} raise_reduce_ms={:.1}",
-            scope_canonical_id, mode, _us_rr_ms
-        );
-    }
+            // Dual-emit dispatch facts into BOTH downstream channels:
+            // (1) the legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` drained at
+            // `compute_component_meta_state_inner` into `state.fact_versions`,
+            // and (2) the `ACTIVE_TRACERS` stack captured by the outer
+            // `with_fact_tracer` scope. The bridge helper drops route- and
+            // project-generation entries (only `WholeHash` survives the
+            // conversion); the dropped entries are R20-only signals with no
+            // `FactVersionRef` equivalent.
+            emit_dispatch_dep_signature_facts(ctx, materialized.dep_signature());
 
-    // Dual-emit dispatch facts into BOTH downstream channels:
-    // (1) the legacy `DISPATCH_DEP_SIGNATURE_ACCUMULATOR` drained at
-    // `compute_component_meta_state_inner` into `state.fact_versions`,
-    // and (2) the `ACTIVE_TRACERS` stack captured by the outer
-    // `with_fact_tracer` scope. The bridge helper drops route- and
-    // project-generation entries (only `WholeHash` survives the
-    // conversion); the dropped entries are R20-only signals with no
-    // `FactVersionRef` equivalent.
-    emit_dispatch_dep_signature_facts(ctx, materialized.dep_signature());
+            // `materialized` is the sealed reduce-then-raise carrier the boundary
+            // produced; thread it through verbatim. Its `type_expr` payload is read
+            // below only through the capability-gated accessor.
 
-    // `materialized` is the sealed reduce-then-raise carrier the boundary
-    // produced; thread it through verbatim. Its `type_expr` payload is read
-    // below only through the capability-gated accessor.
-
-    // Step 3 closure: write-through to ctx-owned MaterializeMemoDb.
-    //
-    // Gated on a `Some` scope observation. A `None` observation (a
-    // session tombstone, an evicted / unloaded scope, or no recoverable
-    // artifact) has no view-correct scope identity to self-root a
-    // shared `MaterializeMemoDb` entry with, so shared-cache admission
-    // is skipped entirely — the freshly-computed `materialized` value
-    // is still returned to the caller below. The lowering above already
-    // degraded to the scope's surviving `shallow_file_state` version
-    // for that case; admitting a shared entry rooted on that lowering
-    // hash without the observation's pinned `SyntacticExportSet` parse
-    // fact would be a mis-rooted write.
-    //
-    // Additional gate: `result_is_partial=true` on the freshly materialized
-    // value means a downstream `dispatch.execute_read(...)` exhausted the
-    // projection-op budget (or returned another fatal `QueryError` / a
-    // same-path recursion / a walker fatal). The PARTIAL outcome must NOT
-    // warm the shared `ShapeCacheDb` slot — admitting it would poison
-    // subsequent identical-key lookups against the same scope+expr+mode
-    // triple. A benign non-cacheable read (ReturnOnly / overflow /
-    // unrootable self-root) does NOT set `result_is_partial`, so a
-    // complete-but-non-cacheable materialisation still warms the shape
-    // cache here. The freshly-computed value is always returned to the
-    // caller; only the shared-cache admission is refused for a partial.
-    //
-    // Cross-batch budget determinism is enforced by COMPLETENESS-based macro
-    // admission, NOT by charging warm cache hits: a budget-exhausted macro
-    // surface carries `ResultCompleteness::Partial` and is refused admission at
-    // EVERY shared cache boundary — the `vue_surface_store` DTO boundary AND the
-    // `ComponentMetaResultDb` / resolved-meta final-result caches. A repeat
-    // batch therefore re-resolves the partial owner cold (no laundered warm
-    // replay through the surface store), so its per-result completeness is
-    // re-observed even though its per-arm `Instantiate` memos are warm.
-    //
-    // A MissingDependency observed DURING this compute (the suppress sticky
-    // transitioned unset→set) makes this materialisation a `ReturnOnly`
-    // partial: refuse the shared-cache admission so a stale miss cannot be
-    // served after the dependency appears. A request whose sticky was ALREADY
-    // set on entry (an unrelated earlier miss) does not taint this entry.
-    let observed_missing_dependency =
-        !suppress_sticky_before && crate::request_context::current_materialization_cache_suppress();
-    // A `typeof <X>` materialisation whose RESULT ROOT is the unmaterialised /
-    // semanticMiss sentinel is a `MissingDependency` (an `import X from
-    // './missing'` whose specifier does not yet resolve): its only invalidation
-    // rail is the owner's `ImportRoute` derived fact — a rail the build-layer
-    // fence cannot carry — so admitting the miss-rooted value into the shared
-    // `ShapeCacheDb` would stale-serve it after the dependency appears. (The
-    // request's materialization suppress sticky may have been set by an EARLIER
-    // `build_typeof` sub-read in the SAME request, so the unset→set transition
-    // check alone misses this.) The check is SCOPED to a `TypeOf`-rooted expr:
-    // an unresolved value-reference is the MissingDependency class; a
-    // miss-rooted `Pick`/`Omit`/`Ref` materialisation is a DIFFERENT class
-    // (genuine unresolved symbol / closed-source path-precise miss) the
-    // surrounding gates already handle, and refusing those here would regress
-    // the closed-source path-precise admission. Refuse only the typeof miss so
-    // the next request recomputes cold and recovers. The value still flows.
-    let typeof_result_root_is_miss = matches!(expr, verter_type_expr::TypeExpr::TypeOf(_))
+            // Step 3 closure: write-through to ctx-owned MaterializeMemoDb.
+            //
+            // Gated on a `Some` scope observation. A `None` observation (a
+            // session tombstone, an evicted / unloaded scope, or no recoverable
+            // artifact) has no view-correct scope identity to self-root a
+            // shared `MaterializeMemoDb` entry with, so shared-cache admission
+            // is skipped entirely — the freshly-computed `materialized` value
+            // is still returned to the caller below. The lowering above already
+            // degraded to the scope's surviving `shallow_file_state` version
+            // for that case; admitting a shared entry rooted on that lowering
+            // hash without the observation's pinned `SyntacticExportSet` parse
+            // fact would be a mis-rooted write.
+            //
+            // Additional gate: `result_is_partial=true` on the freshly materialized
+            // value means a downstream `dispatch.execute_read(...)` exhausted the
+            // projection-op budget (or returned another fatal `QueryError` / a
+            // same-path recursion / a walker fatal). The PARTIAL outcome must NOT
+            // warm the shared `ShapeCacheDb` slot — admitting it would poison
+            // subsequent identical-key lookups against the same scope+expr+mode
+            // triple. A NON-CACHEABLE read (a fenced ReturnOnly serve, a broken
+            // decl-body lease, an unrootable route) and a tracer signature OVERFLOW
+            // do NOT set `result_is_partial` — they are COMPLETE but unrootable — so
+            // this partial gate cannot reject them; they are refused on the separate
+            // CACHEABILITY rail the enclosing tracer scope produces. The
+            // freshly-computed value is always returned to the caller; only the
+            // shared-cache admission is refused.
+            //
+            // Cross-batch budget determinism is enforced by COMPLETENESS-based macro
+            // admission, NOT by charging warm cache hits: a budget-exhausted macro
+            // surface carries `ResultCompleteness::Partial` and is refused admission at
+            // EVERY shared cache boundary — the `vue_surface_store` DTO boundary AND the
+            // `ComponentMetaResultDb` / resolved-meta final-result caches. A repeat
+            // batch therefore re-resolves the partial owner cold (no laundered warm
+            // replay through the surface store), so its per-result completeness is
+            // re-observed even though its per-arm `Instantiate` memos are warm.
+            //
+            // A MissingDependency observed DURING this compute (the suppress sticky
+            // transitioned unset→set) makes this materialisation a `ReturnOnly`
+            // partial: refuse the shared-cache admission so a stale miss cannot be
+            // served after the dependency appears. A request whose sticky was ALREADY
+            // set on entry (an unrelated earlier miss) does not taint this entry.
+            let observed_missing_dependency = !suppress_sticky_before
+                && crate::request_context::current_request_result_is_partial();
+            // A `typeof <X>` materialisation whose RESULT ROOT is the unmaterialised /
+            // semanticMiss sentinel is a `MissingDependency` (an `import X from
+            // './missing'` whose specifier does not yet resolve): its only invalidation
+            // rail is the owner's `ImportRoute` derived fact — a rail the build-layer
+            // fence cannot carry — so admitting the miss-rooted value into the shared
+            // `ShapeCacheDb` would stale-serve it after the dependency appears. (The
+            // request's materialization suppress sticky may have been set by an EARLIER
+            // `build_typeof` sub-read in the SAME request, so the unset→set transition
+            // check alone misses this.) The check is SCOPED to a `TypeOf`-rooted expr:
+            // an unresolved value-reference is the MissingDependency class; a
+            // miss-rooted `Pick`/`Omit`/`Ref` materialisation is a DIFFERENT class
+            // (genuine unresolved symbol / closed-source path-precise miss) the
+            // surrounding gates already handle, and refusing those here would regress
+            // the closed-source path-precise admission. Refuse only the typeof miss so
+            // the next request recomputes cold and recovers. The value still flows.
+            let typeof_result_root_is_miss = matches!(expr, verter_type_expr::TypeExpr::TypeOf(_))
         && materialized.node_id().is_some_and(|node| {
             crate::project_semantic_dispatch::raise::node_root_is_unmaterialized_sentinel_with_dispatch(
                 &dispatch, node,
             )
         });
-    if !materialized.result_is_partial()
-        && !observed_missing_dependency
-        && !typeof_result_root_is_miss
-    {
-        if let Some(captured_scope_observation) = observed_scope {
-            // Loop-5 instrumentation — count every publish attempt. The
-            // get_or_compute path is a no-op on a concurrent winner but
-            // we count the attempt because the bench is single-threaded.
-            crate::loop5_instrumentation::MATERIALIZE_MEMO_PUBLISHES
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if !materialized.result_is_partial()
+                && !observed_missing_dependency
+                && !typeof_result_root_is_miss
+                && !probe.non_cacheable()
+            {
+                if let Some(captured_scope_observation) = observed_scope {
+                    // Loop-5 instrumentation — count every publish attempt. The
+                    // get_or_compute path is a no-op on a concurrent winner but
+                    // we count the attempt because the bench is single-threaded.
+                    crate::loop5_instrumentation::MATERIALIZE_MEMO_PUBLISHES
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            // A composite expression that NESTS a synthetic carrier has
-            // no sound content-free cache key — skip the cache admit
-            // entirely (the freshly-computed `materialized` value still
-            // flows to the caller below). A bare carrier / carrier-free
-            // expression yields a key normally. The SAME `cache_key` the
-            // peek classified at function entry is reused here — the
-            // classifier (and its synthetic-carrier walk) runs once per
-            // materialization pass, not once per peek and once per admit.
-            if let Some(cache_key) = &cache_key {
-                let host_db = ctx.project_type_store().shape_cache_db();
-                let captured_value = materialized.clone();
-                // The SINGLE tear-free scope observation taken above is threaded
-                // into the write-through. The signature builder is
-                // provenance-pure: it roots the keyed scope on the observation's
-                // `whole_hash` and pinned `SyntacticExportSet` parse fact, never
-                // on a re-read of current content. The lowering `NodeScopeId`
-                // was built from the SAME observation's `whole_hash`, so the
-                // memo value and its fact signature root on one identical scope
-                // hash — no torn read.
-                let _ = host_db.get_or_compute(cache_key, ctx, move || {
+                    // A composite expression that NESTS a synthetic carrier has
+                    // no sound content-free cache key — skip the cache admit
+                    // entirely (the freshly-computed `materialized` value still
+                    // flows to the caller below). A bare carrier / carrier-free
+                    // expression yields a key normally. The SAME `cache_key` the
+                    // peek classified at function entry is reused here — the
+                    // classifier (and its synthetic-carrier walk) runs once per
+                    // materialization pass, not once per peek and once per admit.
+                    if let Some(cache_key) = &cache_key {
+                        let host_db = ctx.project_type_store().shape_cache_db();
+                        let captured_value = materialized.clone();
+                        // The SINGLE tear-free scope observation taken above is threaded
+                        // into the write-through. The signature builder is
+                        // provenance-pure: it roots the keyed scope on the observation's
+                        // `whole_hash` and pinned `SyntacticExportSet` parse fact, never
+                        // on a re-read of current content. The lowering `NodeScopeId`
+                        // was built from the SAME observation's `whole_hash`, so the
+                        // memo value and its fact signature root on one identical scope
+                        // hash — no torn read.
+                        let _ = host_db.get_or_compute(cache_key, ctx, probe, move || {
             // The keyed scope canonical is the entry's self-root, rooted
             // on the observed materialisation-time content version;
             // every canonical the materialisation walk observed (carried
@@ -772,15 +902,18 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
                 crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
             }
         });
+                    }
+                }
             }
-        }
-    }
 
-    // No request-local write-through. The host-owned
-    // `ShapeCacheDb` get_or_compute above is the SOLE materialiser
-    // cache; the same request's later reduce calls re-peek it (a warm
-    // hit under the exact `reduction_context` identity).
-    materialized
+            // No request-local write-through. The host-owned
+            // `ShapeCacheDb` get_or_compute above is the SOLE materialiser
+            // cache; the same request's later reduce calls re-peek it (a warm
+            // hit under the exact `reduction_context` identity).
+            materialized
+        },
+    );
+    value
 }
 
 /// Reduce a per-member surface value (a settled [`SemanticNodeId`]) to
@@ -877,210 +1010,6 @@ pub(crate) fn reduce_member_value_graph_native_with_context(
     materialized
 }
 
-pub(crate) fn type_expr_has_package_backed_object_like_root(
-    expr: &verter_type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> bool {
-    type_expr_has_package_backed_object_like_root_with_fence(expr, scope_canonical_id, query_engine)
-        .0
-}
-
-/// Variant of [`type_expr_has_package_backed_object_like_root`] that
-/// also returns the observed declaration-scope dependency fence.
-///
-/// Used by the projector's gate-short-circuit admit
-/// paths to thread the package-backed gate's cross-file deps into the
-/// cache entry's `fact_dep_signature`. Records the
-/// `declaration_scope` (and, when distinct, the prepared
-/// `target_scope`) so a content edit to the declaring file
-/// invalidates the cached gate-shortcut entry.
-///
-/// The second tuple element is `Option<DepSignature>`:
-///
-///   * `Some(fence)` — the fence is rooted on `authoritative_current_content_hash`
-///     observations for every contributing canonical (consistent with
-///     `resolve_type_declaration` / `named_decl_body`'s own internal
-///     hash observation). Callers may admit a cache entry rooted on
-///     this fence.
-///   * `None` — the gate observed an unavailable
-///     `authoritative_current_content_hash` for at least one
-///     contributing canonical (e.g. evicted / tombstoned mid-gate).
-///     Callers MUST refuse shared admission of any cache entry whose
-///     validity depends on this gate verdict: rooting an admit on a
-///     stand-in hash (a `shallow_file_state.whole_hash`
-///     `unwrap_or_default()` `WholeHash(0)` sentinel does
-///     not validate the actual file state) would
-///     produce a future warm hit that returns the gate's stale verdict
-///     against a fresh whole-hash with no invalidation rail.
-///
-/// The verdict `bool` is the gate's predicate answer; it is returned
-/// regardless of whether the fence is available — non-admitting
-/// callers still steer their control flow on it.
-pub(crate) fn type_expr_has_package_backed_object_like_root_with_fence(
-    expr: &verter_type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> (bool, Option<crate::semantic_query::DepSignature>) {
-    use std::sync::Arc;
-
-    // Empty fence carries no cross-file deps but is still safe to
-    // admit on: the caller's `engine_fact_signature_for_materialize_memo`
-    // self-roots on `scope_canonical_id` alone, and there are no
-    // additional canonicals to root.
-    let empty_fence: crate::semantic_query::DepSignature = Arc::from(Vec::new());
-
-    let Some(root_identity) = type_expr_root_identity(query_engine, scope_canonical_id, expr)
-    else {
-        return (false, Some(empty_fence));
-    };
-    package_backed_object_like_root_identity_with_fence(
-        query_engine,
-        scope_canonical_id,
-        &root_identity,
-    )
-}
-
-/// Extract the package-backed gate's ROOT declaration IDENTITY from a `TypeExpr` —
-/// the `TypeExpr` front of the SHARED root-identity tail
-/// ([`package_backed_object_like_root_identity_with_fence`]). Resolver-aware: a
-/// `Pick`/`Omit` SOURCE-root descent (into `args[0]`) fires ONLY when `name`
-/// actually resolves to the builtin utility (no userland `type Pick` shadow), so
-/// it agrees with the node front's `base.canonical_id == "__builtin__"` check.
-/// `Alias`/`Parenthesized` peels and `IndexedAccess` descends to the object root,
-/// exactly as the node front does.
-fn type_expr_root_identity(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    scope_canonical_id: &str,
-    expr: &verter_type_expr::TypeExpr,
-) -> Option<crate::semantic_query::DeclIdentity> {
-    use verter_type_expr::TypeExpr;
-
-    match expr {
-        TypeExpr::Parenthesized(inner) => {
-            type_expr_root_identity(query_engine, scope_canonical_id, inner)
-        }
-        TypeExpr::IndexedAccess { object, .. } => {
-            type_expr_root_identity(query_engine, scope_canonical_id, object)
-        }
-        // `Pick<Source, K>` / `Omit<Source, K>` — descend to the SOURCE root, but
-        // ONLY when `name` is the BUILTIN utility (a userland `type Pick` shadow is
-        // its OWN root, never a source descent).
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } if type_arguments.len() == 2
-            && is_builtin_pick_or_omit(query_engine, scope_canonical_id, name) =>
-        {
-            type_expr_root_identity(query_engine, scope_canonical_id, &type_arguments[0])
-        }
-        TypeExpr::Ref { name, .. } => Some(resolve_ref_to_root_identity(
-            query_engine,
-            scope_canonical_id,
-            name,
-        )),
-        _ => None,
-    }
-}
-
-/// Whether `name` is the UNSHADOWED builtin `Pick`/`Omit` utility at
-/// `scope_canonical_id` — the SAME builtin/shadow decision dispatch's
-/// [`resolve_bare_ref_head`](crate::project_semantic_dispatch) makes before
-/// minting a `__builtin__::Pick`/`Omit` carrier: `name` is a recognised
-/// object-filter utility ([`BuiltinUtility::from_name`]) AND no userland
-/// declaration shadows it.
-///
-/// Shadowing is decided by the SINGLE-SOURCE-OF-TRUTH
-/// [`ScopeShadowing::is_shadowing_lib`](crate::resolver_core::scope_shadowing::ScopeShadowing::is_shadowing_lib),
-/// the same authority the dispatch path consults — it folds the owner scope's
-/// local type names, script-setup type bindings, AND RESOLVED import bindings (an
-/// import whose module resolves to a canonical id, even when that module does not
-/// actually export the name). So a local `type Pick`, a script-setup
-/// `generic="Pick"`, OR an imported `Pick` whose module resolves ALL shadow the
-/// builtin and resolve to their OWN root, never a source-descent into the
-/// utility's argument.
-///
-/// This is the `TypeExpr`-front mirror of the node front's
-/// `InstantiationRef.base.canonical_id == "__builtin__"` check — which reads the
-/// SAME `is_shadowing_lib`-gated identity dispatch already minted — so the two
-/// fronts agree by construction rather than via a parallel heuristic. A
-/// `resolve_type_declaration(...).kind == Unknown` check would MISCLASSIFY this:
-/// it cannot tell "imported, module resolves" (kind == Unknown, yet shadowing)
-/// apart from "ambient builtin" (kind == Unknown, NOT shadowing) — which is why
-/// the gate reads the shadow set directly.
-///
-/// [debt] Shared-`ScopeShadowing` limitation (resolver_core), shared with the
-/// dispatch path: the shadow set is built from `import_bindings`, which omits an
-/// UNRESOLVED-SPECIFIER import (`import { Pick } from "./missing"` whose module
-/// resolves to no canonical id — `prepared_decl` records a binding only when the
-/// module resolves). Such an import escapes the shadow set, so a builtin-colliding
-/// name imported from an unresolvable module is classified as the builtin here AND
-/// in dispatch's `resolve_bare_ref_head` (the two stay in agreement). Closing it
-/// is a shared-owner follow-up: carry a lexical import-name set in the scope
-/// payload (from `import_targets` / `import_locals`, independent of resolution)
-/// and consult it in `ScopeShadowing`.
-fn is_builtin_pick_or_omit(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    scope_canonical_id: &str,
-    name: &str,
-) -> bool {
-    use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
-
-    if !matches!(
-        BuiltinUtility::from_name(name),
-        Some(BuiltinUtility::Pick | BuiltinUtility::Omit)
-    ) {
-        return false;
-    }
-    // The per-scope shadow set is built ONCE (memoized on the engine beside the
-    // scope payload) and reused across every Pick/Omit probe, so this gate is
-    // O(1) per published field — a hash-set membership check — rather than
-    // folding a fresh shadow set (`FxHashSet` + `Arc<str>` entries) from the
-    // prepared-decl bundle on each field. The cached shadow set is identical to
-    // the `from_host_scope` bundle-derived one dispatch consumes: both fold the
-    // scope's local type names, script-setup type bindings, and resolved import
-    // bindings, so the `TypeExpr` front and the dispatch front agree by
-    // construction.
-    !query_engine
-        .scope_shadowing_for_scope(scope_canonical_id)
-        .is_shadowing_lib(name)
-}
-
-/// Resolve a bare `Ref` `name` (at `scope_canonical_id`) to its ROOT declaration
-/// [`crate::semantic_query::DeclIdentity`] — the resolved declaring file +
-/// declaration name + that file's whole-hash. Mirrors the cycle front's
-/// `collect_root_decl_identities` identity construction so both fronts root on
-/// the SAME identity.
-fn resolve_ref_to_root_identity(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    scope_canonical_id: &str,
-    name: &str,
-) -> crate::semantic_query::DeclIdentity {
-    use std::sync::Arc;
-
-    let declaration = query_engine.resolve_type_declaration(scope_canonical_id, name);
-    let canonical_id: Arc<str> = if declaration.canonical_source.is_empty() {
-        Arc::from(scope_canonical_id)
-    } else {
-        Arc::from(declaration.canonical_source.as_str())
-    };
-    let decl_name: Arc<str> = if declaration.resolved_name.is_empty() {
-        Arc::from(name)
-    } else {
-        Arc::from(declaration.resolved_name.as_str())
-    };
-    let whole_hash = query_engine
-        .ctx
-        .shallow_file_state(canonical_id.as_ref())
-        .map(|state| state.whole_hash)
-        .unwrap_or_default();
-    crate::semantic_query::DeclIdentity {
-        canonical_id,
-        whole_hash,
-        decl_name,
-    }
-}
-
 /// Append `canonical`'s authoritative current-content hash to `fence` (skipping
 /// the keyed `scope` self-entry + empties), or set `refused` when the hash is
 /// unavailable. The fence oracle is `authoritative_current_content_hash` — the
@@ -1114,7 +1043,7 @@ fn push_decl_scope_fence(
 
 /// The SHARED root-identity tail of the package-backed object-like gate: given a
 /// RESOLVED root declaration `root_identity` (the declaring file + name, already
-/// resolved by either front — NEVER a name re-resolved from `scope`), decide
+/// resolved by the node front — NEVER a name re-resolved from `scope`), decide
 /// whether that declaration is a package-backed object-like surface, and collect
 /// the cross-file fence.
 ///
@@ -1192,62 +1121,33 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
         &mut fence,
         &mut refused,
     );
+    // The engine hands back the decl's content-free authored-body LOCATOR;
+    // lower it through the ONE shared dispatch (transit demand — carrier-
+    // preserving) and read the object-surface verdict off the lowered node.
     let verdict = query_engine
         .named_decl_body(target_scope.as_str(), target_name.as_str())
-        .is_some_and(|body| {
-            crate::resolver_core::component_meta_registry::component_meta_registry_has_explicit_object_surface(&body)
+        .and_then(|locator| {
+            let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                query_engine.ctx,
+            );
+            dispatch.raise_authored_locator_to_hot(
+                &locator,
+                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            )
+        })
+        .is_some_and(|hot| {
+            crate::resolver_core::component_meta_query_engine::component_meta_registry_node_has_explicit_object_surface(
+                query_engine.ctx,
+                hot.node(),
+            )
         });
     if refused {
         return (verdict, None);
     }
     let fence_sig: crate::semantic_query::DepSignature = Arc::from(fence.into_boxed_slice());
     (verdict, Some(fence_sig))
-}
-
-/// Migration helper. Lowers `materialized` and `raw`
-/// TypeExpr inputs to Navigate-mode `SemanticNodeId`s, dispatches to
-/// J4's graph-native [`preserve_package_backed_symbolic_refs_node`],
-/// and raises the result back to TypeExpr.
-///
-/// Returns `materialized.clone()` (matches the deleted TypeExpr
-/// predicate's `_ => materialized.clone()` arm) when either lowering
-/// fails or the raise back to TypeExpr fails — preserves existing
-/// behaviour for shapes the dispatcher cannot lower deterministically.
-pub(crate) fn lowered_preserve_package_backed_symbolic_refs(
-    materialized: &verter_type_expr::TypeExpr,
-    raw: &verter_type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> verter_type_expr::TypeExpr {
-    use crate::project_semantic_dispatch::output_materialization::OutputProjector;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    let ctx = engine.ctx;
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    let Some(materialized_node) = dispatch.lower_type_expr_in_scope_with_mode(
-        scope_canonical_id,
-        materialized,
-        crate::semantic_query::ProjectionMode::Navigate,
-    ) else {
-        return materialized.clone();
-    };
-    let Some(raw_node) = dispatch.lower_type_expr_in_scope_with_mode(
-        scope_canonical_id,
-        raw,
-        crate::semantic_query::ProjectionMode::Navigate,
-    ) else {
-        return materialized.clone();
-    };
-    let preserved_node =
-        preserve_package_backed_symbolic_refs_node(ctx, materialized_node, raw_node, 0);
-    if preserved_node == materialized_node {
-        return materialized.clone();
-    }
-    // Publication sink: materialize into a sealed carrier and unwrap via
-    // the meta-resolve output capability.
-    let cap = MetaResolveFieldTypesOutputCap::new(&dispatch);
-    cap.materialize_output_type_expr(preserved_node)
-        .map(|carrier| carrier.into_type_expr(&cap))
-        .unwrap_or_else(|| materialized.clone())
 }
 
 /// Test-only call counter for `materialize_component_meta_type_expr_until_stable`.
@@ -1273,198 +1173,5 @@ pub(crate) fn reset_mtl_call_count_for_tests() {
 }
 
 #[cfg(test)]
-mod stabilizer_admission_tests {
-    use std::sync::Arc;
-
-    use super::{
-        node_materialize_reduction_context,
-        stabilize_registry_member_surface_node_with_shape_cache, RegistryMemberShapeKeyCap,
-    };
-    use crate::component_meta_caches::ShapeCacheKey;
-    use crate::meta::MetaProject;
-    use crate::semantic_query::{
-        PrimitiveKind, ProjectionMode, ScopeId, SemanticNodeData, SemanticNodeId, ValueRootKey,
-    };
-    use crate::types::{AnalysisLevel, HostConfig};
-    use crate::VerterHost;
-
-    /// Peek the ShapeCacheDb member-VALUE-node slot the stabiliser keys, reconstructing
-    /// the key the SAME way `stabilize_registry_member_surface_node_with_shape_cache`
-    /// does (the EXACT `node_materialize_reduction_context` + member-value-node key).
-    fn slot_warm(
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        scope: &str,
-        first_node: SemanticNodeId,
-    ) -> bool {
-        let reduction_context =
-            node_materialize_reduction_context(ctx, first_node, ProjectionMode::Navigate);
-        let cap = RegistryMemberShapeKeyCap::new();
-        let key = ShapeCacheKey::registry_member_value_node_whole_with_context(
-            Arc::<str>::from(scope),
-            &cap,
-            first_node,
-            reduction_context,
-        );
-        ctx.project_type_store()
-            .shape_cache_db()
-            .peek(&key, ctx)
-            .is_some()
-    }
-
-    /// F2: the stabiliser carries `_until_stable_full`'s extra admission rails
-    /// (`typeof_result_root_is_miss` + `observed_missing_dependency`), and this test
-    /// PROVES — discriminatingly — that the typeof-miss stale-serve the rails defend
-    /// against is UNREACHABLE in the registry-member (Navigate) stabiliser path, because
-    /// a `TypeOf` root reduces to a MATERIALISED deferred carrier (NOT a cached miss
-    /// sentinel) under the stabiliser's `Published(Navigate)` context. A deferred carrier
-    /// admitted to the slot re-resolves the typeof on demand (correct), so it is NOT the
-    /// import-route-rail-less cached miss that would stale-serve.
-    ///
-    /// Two discriminating assertions:
-    /// 1. the new `node_root_is_typeof` helper TRUE for a `TypeOf` root, FALSE for a
-    ///    non-`TypeOf` root (the typeof-scope the rail keys on);
-    /// 2. the typeof root reduces to a MATERIALISED non-sentinel (a deferred carrier) at
-    ///    the stabiliser's Navigate context — so `typeof_result_root_is_miss` is
-    ///    correctly NOT tripped and the carrier is admitted warm. If `Navigate` lowering
-    ///    ever STARTED resolving a typeof to a cached miss here, assertion (2) fails and
-    ///    surfaces that the refusal rail became load-bearing.
-    #[test]
-    fn typeof_root_reduces_to_deferred_carrier_so_stale_serve_is_unreachable() {
-        let host = VerterHost::new_standalone(HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        });
-        let project = MetaProject::new(host);
-        project
-            .upsert_base("/p.ts", "export type Anchor = number\n")
-            .unwrap();
-        let session = project.open_session_batch().unwrap();
-        let _ = session.evaluate_types("/p.ts").unwrap();
-        let host = session.host();
-        let ctx: &dyn crate::resolver_core::ResolverContext = host;
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-        let graph = ctx.project_type_store().semantic_graph();
-
-        // first_node = `typeof definitelyMissingValue` — a TypeOf carrier whose value
-        // root is unresolvable in /p.ts.
-        let typeof_node = graph.intern_node(SemanticNodeData::new_typeof(
-            ValueRootKey {
-                scope: ScopeId {
-                    canonical_id: Arc::from("/p.ts"),
-                    local_scope: None,
-                },
-                name: Arc::from("definitelyMissingValue"),
-            },
-            Arc::from(Vec::new().into_boxed_slice()),
-            Arc::from(Vec::new().into_boxed_slice()),
-        ));
-        let primitive_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-
-        // (1) The typeof-scope helper the rail keys on discriminates a TypeOf root.
-        assert!(
-            super::node_root_is_typeof(ctx, typeof_node),
-            "node_root_is_typeof must be TRUE for a TypeOf root (the rail's scope)",
-        );
-        assert!(
-            !super::node_root_is_typeof(ctx, primitive_node),
-            "node_root_is_typeof must be FALSE for a non-TypeOf root",
-        );
-
-        // (2) The typeof reduces to a MATERIALISED non-sentinel (a deferred carrier) at
-        // the stabiliser's `Published(Navigate)` context — NOT a cached miss — so
-        // `typeof_result_root_is_miss` is correctly not tripped and the carrier is
-        // admitted warm (re-resolves on demand; no stale-serve).
-        let reduction_context =
-            node_materialize_reduction_context(ctx, typeof_node, ProjectionMode::Navigate);
-        let reduced = super::reduce_member_value_graph_native_with_context(
-            ctx,
-            "/p.ts",
-            typeof_node,
-            reduction_context,
-        );
-        let result_is_sentinel = reduced.node_id().is_some_and(|n| {
-            crate::project_semantic_dispatch::raise::node_root_is_unmaterialized_sentinel_with_dispatch(
-                &dispatch, n,
-            )
-        });
-        assert!(
-            !result_is_sentinel,
-            "a typeof root reduces to a deferred carrier (NOT a cached miss) under \
-             Published(Navigate); the typeof-miss stale-serve is unreachable in this path. \
-             If this fails, the typeof now resolves to a miss here and the \
-             typeof_result_root_is_miss refusal rail became load-bearing",
-        );
-
-        let _ = stabilize_registry_member_surface_node_with_shape_cache(
-            ctx,
-            "/p.ts",
-            typeof_node,
-            ProjectionMode::Navigate,
-        );
-        assert!(
-            slot_warm(ctx, "/p.ts", typeof_node),
-            "a deferred typeof carrier IS admitted warm (it re-resolves on demand — correct, \
-             not the import-route-rail-less cached miss the rails refuse)",
-        );
-    }
-
-    /// DEPTH regression: `node_root_is_typeof` follows an `Alias` chain DEEPER than
-    /// the former fixed depth cap (32) to reach the `TypeOf` root. The visited-set
-    /// termination walks an acyclic chain of ANY depth.
-    ///
-    /// MUTATION-PROOF: reinstating a `MAX_DEPTH = 32` cap stops the walk before the
-    /// 40-deep `TypeOf` terminal, so `node_root_is_typeof` returns false instead of
-    /// true and the first assertion FAILS.
-    #[test]
-    fn node_root_is_typeof_walks_deep_alias_chain_without_depth_cutoff() {
-        let host = VerterHost::new_standalone(HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        });
-        let project = MetaProject::new(host);
-        project
-            .upsert_base("/p.ts", "export type Anchor = number\n")
-            .unwrap();
-        let session = project.open_session_batch().unwrap();
-        let _ = session.evaluate_types("/p.ts").unwrap();
-        let host = session.host();
-        let ctx: &dyn crate::resolver_core::ResolverContext = host;
-        let graph = ctx.project_type_store().semantic_graph();
-
-        // 40 > the former 32 cap.
-        const DEPTH: usize = 40;
-        let typeof_terminal = graph.intern_node(SemanticNodeData::new_typeof(
-            ValueRootKey {
-                scope: ScopeId {
-                    canonical_id: Arc::from("/p.ts"),
-                    local_scope: None,
-                },
-                name: Arc::from("definitelyMissingValue"),
-            },
-            Arc::from(Vec::new().into_boxed_slice()),
-            Arc::from(Vec::new().into_boxed_slice()),
-        ));
-        let mut deep_typeof = typeof_terminal;
-        for _ in 0..DEPTH {
-            deep_typeof = graph.intern_node(SemanticNodeData::Alias(deep_typeof));
-        }
-        assert!(
-            super::node_root_is_typeof(ctx, deep_typeof),
-            "node_root_is_typeof must follow a >32-deep alias chain to the TypeOf root \
-             (a reinstated MAX_DEPTH=32 stops short and returns false)",
-        );
-
-        // Anti-vacuity: a deep alias chain terminating in a NON-TypeOf root is not a
-        // typeof root (the visited-set walk reaches the terminal and rejects it).
-        let primitive_terminal =
-            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-        let mut deep_primitive = primitive_terminal;
-        for _ in 0..DEPTH {
-            deep_primitive = graph.intern_node(SemanticNodeData::Alias(deep_primitive));
-        }
-        assert!(
-            !super::node_root_is_typeof(ctx, deep_primitive),
-            "a deep alias chain terminating in a non-TypeOf root is NOT a typeof root",
-        );
-    }
-}
+#[path = "field_types_tests.rs"]
+mod stabilizer_admission_tests;

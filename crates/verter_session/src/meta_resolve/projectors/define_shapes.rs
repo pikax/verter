@@ -4,31 +4,34 @@
 //! (`define_props` / `define_emits` / `define_slots`). It is the sole author
 //! of those fields — the eager macro-object materialiser is retired.
 //!
-//! Each shape is built from exactly TWO already-resolved, context-aware
-//! sources, with NO solver fallback, NO source reparse, and NO `eval_source`
-//! type-parameter collection:
+//! Each shape is built from the macro's normalized DTOs
+//! ([`crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`] —
+//! the SOLE props/emits/slots member authority, resolved through the active
+//! `ResolverContext` so overlay sessions read overlay content), with NO solver
+//! fallback, NO source reparse, and NO `eval_source` type-parameter
+//! collection. The flat `evaluated_types.props` / `evaluated_types.emits`
+//! fields that [`super::project_evaluated_types`] projected contribute ONLY
+//! exactness / execution-status / diagnostics METADATA — never a semantic
+//! source (the normalized rows own every published `SourcePosition`).
 //!
-//! 1. the macro's normalized DTOs
-//!    ([`crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`] —
-//!    the SOLE props/emits/slots member authority, resolved through the active
-//!    `ResolverContext` so overlay sessions read overlay content), and
-//! 2. the flat `evaluated_types.props` / `evaluated_types.emits` fields that
-//!    [`super::project_evaluated_types`] already projected through the shared
-//!    dispatch (the authoritative per-member `TypeExpr`).
-//!
-//! `project_define_macro_shapes` MUST run AFTER `project_evaluated_types` (so
-//! the flat fields exist to draw types from) and BEFORE
+//! `project_define_macro_shapes` runs AFTER `project_evaluated_types` (so
+//! the flat metadata fields exist to fold in) and BEFORE
 //! `resolve_slot_bindings_graph_native` (which consumes the slot shape).
 //!
 //! Per-kind rules:
 //! - **Props**: properties only (a member is a property name on the DTO
-//!   surface). A call-signature-only `defineProps<{ (): void }>()` has NO
-//!   property members, so its DTO `props` is empty and the published
-//!   `define_props` shape is EMPTY — no prop is yielded.
-//! - **Emits**: event payload semantics are preserved from the DTO emit
-//!   normalization (`AnalyzedEmitField.payload_expr`), which already applied the
-//!   carrier-aware conditional path + the leading-event-name strip; the
-//!   flat `evaluated_types.emits` field supplies the projected type when present.
+//!   surface), each typed from the normalized prop row's published
+//!   member-value SOURCE
+//!   ([`crate::typeinfo::framework_surface::results::ResolvedPropField::type_source`]
+//!   — the prop-type AUTHORITY). A call-signature-only
+//!   `defineProps<{ (): void }>()` has NO property members, so its DTO
+//!   `props` is empty and the published `define_props` shape is EMPTY — no
+//!   prop is yielded.
+//! - **Emits**: the normalized emit row's published payload SOURCE
+//!   ([`crate::typeinfo::framework_surface::results::ResolvedEmitField::payload_source`])
+//!   is the payload AUTHORITY — the normalization already applied the
+//!   carrier-aware conditional path, the leading-event-name strip, and the
+//!   closed-tuple / member-path / callable-params source split.
 //! - **Slots**: one slot function entry per DTO slot; the per-slot bindings are
 //!   published separately by `resolve_slot_bindings_graph_native`.
 
@@ -68,18 +71,20 @@ pub(crate) fn project_define_macro_shapes(
         if !mac.is_type_based {
             continue;
         }
-        // Fallthrough resolution needs only the inherited-attribute surface
+        // Fallthrough resolution needs the inherited-attribute surface
         // (props/events that participate in root-attribute fallthrough). The
-        // heavy `define_props` / `define_slots` SHAPE expansion is irrelevant to
-        // the inheritance resolver and is skipped — slot BINDING identification
+        // `define_props` shape is LOAD-BEARING for it: the branch prop rows
+        // carry the finalized published SOURCE positions the props lane owns
+        // (two children's identical closed prop types must publish the
+        // identical closed source value so the output memo shares one
+        // entry). The `define_slots` SHAPE expansion stays irrelevant to the
+        // inheritance resolver and is skipped — slot BINDING identification
         // (load-bearing for inheritance) still runs in
-        // `resolve_slot_bindings_graph_native`, which the orchestrator invokes
-        // for both purposes. `define_emits` is preserved (event fallthrough).
+        // `resolve_slot_bindings_graph_native`, which the orchestrator
+        // invokes for both purposes. `define_emits` is preserved (event
+        // fallthrough).
         let skip_for_fallthrough = purpose == ComponentMetaResolutionPurpose::Fallthrough
-            && matches!(
-                mac.kind,
-                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::DefineSlots
-            );
+            && mac.kind == AnalyzedMacroKind::DefineSlots;
         if skip_for_fallthrough {
             continue;
         }
@@ -120,10 +125,19 @@ pub(crate) fn project_define_macro_shapes(
     }
 }
 
-/// Build the `define_props` shape: one [`ExpandedProperty`] per DTO prop name,
-/// typed from the matching already-projected `evaluated_types.props` field (the
-/// shared-dispatch result) and falling back to the DTO field's own lowered
-/// `type_expr` for any prop the flat projection did not surface.
+/// Build the `define_props` shape: one [`ExpandedProperty`] per DTO prop row,
+/// typed from the normalized row's published member-value SOURCE
+/// ([`crate::typeinfo::framework_surface::results::ResolvedPropField::type_source`])
+/// — the prop-type AUTHORITY. The normalization already applied the
+/// authored-candidate proof, the closed/ref upgrades, and the projected
+/// member-path replay split; a genuine miss arrives as the typed
+/// `Failed(UnrepresentableRequiredMemberValue)` position.
+///
+/// The flat `evaluated_types.props` field — when one matched by name —
+/// contributes ONLY exactness / execution-status / diagnostics metadata,
+/// NEVER the member-value source: preferring its `r#type` over the
+/// normalized row shadowed the session-resolved member source (the same
+/// competing-producer class the emit-authority rule closed).
 ///
 /// Returns `None` when the macro's type-argument surface does NOT resolve at
 /// all (a genuinely unresolved / missing macro — see [`macro_surface_resolves`]:
@@ -163,55 +177,44 @@ fn define_props_shape(
     let mut properties = Vec::with_capacity(dtos.prop_fields().len());
 
     for prop in dtos.prop_fields() {
+        // Metadata-only merge from the flat evaluated field: exactness /
+        // execution status / diagnostics fold in, the member-value source
+        // does NOT — the normalized row's `type_source` is authoritative.
         if let Some(field) = evaluated_types
             .props
             .iter()
-            .find(|field| field.name == prop.name)
+            .find(|field| field.name == prop.analysis.name)
         {
-            // Projected type from the shared dispatch (authoritative).
             exactness = exactness.merge(field.exactness);
             execution_status = merge_execution_status(execution_status, field.execution_status);
             diagnostics.extend(field.diagnostics.clone());
-            properties.push(ExpandedProperty {
-                name: field.name.clone(),
-                ty: field.r#type.clone(),
-                optional: field.optional,
-                readonly: false,
-                // A macro-published prop has no class accessibility origin —
-                // `Public` by construction.
-                visibility: verter_type_expr::MemberVisibility::Public,
-                declared_in_macro_type_arg: field.declared_in_macro_type_arg,
-            });
-        } else {
-            // The flat projection did not surface this prop — fall back to the
-            // DTO's own lowered type (Typed-IR-Only: `AnalyzedPropField.type_expr`
-            // is the authoritative typed form; never reparse `type_annotation`).
-            let ty = prop
-                .type_expr
-                .clone()
-                .unwrap_or(verter_type_expr::TypeExpr::Unknown {
-                    raw: "unknown".to_string(),
-                });
-            properties.push(ExpandedProperty {
-                name: prop.name.clone(),
-                ty,
-                optional: prop.is_optional,
-                readonly: false,
-                // A macro-published prop has no class accessibility origin —
-                // `Public` by construction.
-                visibility: verter_type_expr::MemberVisibility::Public,
-                declared_in_macro_type_arg: prop.declared_in_macro_type_arg,
-            });
         }
+        properties.push(ExpandedProperty {
+            name: prop.analysis.name.clone(),
+            ty: prop.type_source.clone(),
+            optional: prop.analysis.is_optional,
+            readonly: false,
+            // A macro-published prop has no class accessibility origin —
+            // `Public` by construction.
+            visibility: verter_type_expr::MemberVisibility::Public,
+            declared_in_macro_type_arg: prop.analysis.declared_in_macro_type_arg,
+        });
     }
 
+    // A props member is `properties + index signatures`: publish the
+    // DTO's index signatures (`defineProps<{ [k: string]: string }>()`)
+    // so an index-signature-only props surface is not dropped.
+    let index_signatures = dtos.prop_index_signatures().to_vec();
+    fail_shape_result_on_failed_member(
+        &properties,
+        &index_signatures,
+        &mut exactness,
+        &mut execution_status,
+    );
     Some(ExpansionResult {
         value: ExpandedObjectShape {
             properties,
-            // A props member is `properties + index signatures`: publish the
-            // DTO's index signatures (`defineProps<{ [k: string]: string }>()`)
-            // so an index-signature-only props surface is not dropped.
-            index_signatures: dtos.prop_index_signatures().to_vec(),
+            index_signatures,
             call_signatures: Vec::new(),
         },
         exactness,
@@ -220,10 +223,23 @@ fn define_props_shape(
     })
 }
 
-/// Build the `define_emits` shape: one [`ExpandedProperty`] per DTO emit, typed
-/// from the matching already-projected `evaluated_types.emits` field and
-/// falling back to the DTO emit's payload-preserving `payload_expr` (the
-/// carrier-aware emit normalization already applied the event-name strip).
+/// Build the `define_emits` shape: one [`ExpandedProperty`] per DTO emit,
+/// typed from the normalized emit row's published payload SOURCE — the
+/// payload AUTHORITY. The row carries the authored macro-payload position
+/// for a proven local authored property event, the closed payload tuple /
+/// leaf-union for a closed-expressible payload, the projected member-path
+/// or CALLABLE-PARAMS replay route for an inherited / merged / richer
+/// payload (Typed-IR-Only: never reparse `payload_type`), or the typed
+/// source-construction FAILURE (a realized emit's payload-tuple position is
+/// REQUIRED — an unrepresentable payload fails output materialization
+/// instead of rendering a fabricated `unknown` success).
+///
+/// The flat `evaluated_types.emits` field — when one matched by name —
+/// contributes ONLY exactness / execution-status / diagnostics metadata,
+/// NEVER the payload source: preferring its member-residue `r#type` over
+/// the normalized row shadowed the faithful session-resolved payload (an
+/// imported `save: [id: number]` published the residue instead of its real
+/// closed tuple).
 fn define_emits_shape(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
@@ -253,57 +269,48 @@ fn define_emits_shape(
     let mut properties = Vec::with_capacity(dtos.emit_fields().len());
 
     for emit in dtos.emit_fields() {
+        // Metadata-only merge from the flat evaluated field: exactness /
+        // execution status / diagnostics fold in, the payload source does
+        // NOT — the normalized row's `payload_source` is authoritative.
         if let Some(field) = evaluated_types
             .emits
             .iter()
-            .find(|field| field.name == emit.name)
+            .find(|field| field.name == emit.analysis.name)
         {
             exactness = exactness.merge(field.exactness);
             execution_status = merge_execution_status(execution_status, field.execution_status);
             diagnostics.extend(field.diagnostics.clone());
-            properties.push(ExpandedProperty {
-                name: field.name.clone(),
-                ty: field.r#type.clone(),
-                optional: false,
-                readonly: false,
-                // A macro-published emit has no class accessibility origin —
-                // `Public` by construction.
-                visibility: verter_type_expr::MemberVisibility::Public,
-                // Emit shape members do not carry own-body-vs-heritage
-                // provenance (a props-axis concern); the producer type does not
-                // encode it.
-                declared_in_macro_type_arg: false,
-            });
-        } else {
-            // Payload-preserving fallback (Typed-IR-Only: `payload_expr` is the
-            // authoritative typed form; never reparse `payload_type`).
-            let ty = emit
-                .payload_expr
-                .clone()
-                .unwrap_or(verter_type_expr::TypeExpr::Unknown {
-                    raw: "unknown".to_string(),
-                });
-            properties.push(ExpandedProperty {
-                name: emit.name.clone(),
-                ty,
-                optional: false,
-                readonly: false,
-                // A macro-published emit has no class accessibility origin —
-                // `Public` by construction.
-                visibility: verter_type_expr::MemberVisibility::Public,
-                declared_in_macro_type_arg: false,
-            });
         }
+        properties.push(ExpandedProperty {
+            name: emit.analysis.name.clone(),
+            ty: emit.payload_source.clone(),
+            optional: false,
+            readonly: false,
+            // A macro-published emit has no class accessibility origin —
+            // `Public` by construction.
+            visibility: verter_type_expr::MemberVisibility::Public,
+            // Emit shape members do not carry own-body-vs-heritage
+            // provenance (a props-axis concern); the producer type does not
+            // encode it.
+            declared_in_macro_type_arg: false,
+        });
     }
 
+    // An emits object is `events + index signatures`: publish the DTO's
+    // emit index signatures (`defineEmits<{ [event: string]: [v: number]
+    // }>()`) so an index-signature-only emits surface is not dropped (the
+    // retired materialiser surfaced it).
+    let index_signatures = dtos.emit_index_signatures().to_vec();
+    fail_shape_result_on_failed_member(
+        &properties,
+        &index_signatures,
+        &mut exactness,
+        &mut execution_status,
+    );
     Some(ExpansionResult {
         value: ExpandedObjectShape {
             properties,
-            // An emits object is `events + index signatures`: publish the DTO's
-            // emit index signatures (`defineEmits<{ [event: string]: [v: number]
-            // }>()`) so an index-signature-only emits surface is not dropped (the
-            // retired materialiser surfaced it).
-            index_signatures: dtos.emit_index_signatures().to_vec(),
+            index_signatures,
             call_signatures: Vec::new(),
         },
         exactness,
@@ -342,7 +349,7 @@ fn define_slots_shape(
         .iter()
         .map(|slot| ExpandedProperty {
             name: slot.name.clone(),
-            ty: slot_field_function_type_expr(slot),
+            ty: verter_type_expr::facts::SourcePosition::Present(slot_field_function_source(slot)),
             optional: !slot.is_required,
             readonly: false,
             // A macro-published slot has no class accessibility origin —
@@ -401,68 +408,93 @@ fn dto_request(
     }
 }
 
-/// Construct the typed `(props: { ... }) => RT` function expression for a
-/// resolved slot from the normalized Vue `defineSlots` RESOLVER DTO typed
-/// sidecars (`AnalyzedSlotFieldBinding.binding_expr` /
-/// `AnalyzedSlotField.return_expr`, produced by
-/// [`crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`]'s
-/// `slots_from_typeinfo_surface` normalizer). The resolver normalizes an
-/// unraisable value to the opaque `Unknown` carrier, so the sidecars are
-/// always `Some` — the `expect`s below assert that producer contract. No
-/// source-text reparse. Empty-bindings slots produce `() => RT` (no `props`
-/// parameter).
-pub(crate) fn slot_field_function_type_expr(
+/// The published SOURCE for a resolved slot's `(props: { ... }) => RT`
+/// callable shape: the slot's authored payload position when the resolver /
+/// analyzer stamped one (`AnalyzedSlotField.payload` — the demand side
+/// re-raises it through the one shared dispatch), else the closed FUNCTION
+/// fact shape (`SemanticTypeSource::Closed(Function)`) whose parameter /
+/// return positions are typed misses recovered on demand through the
+/// graph-native slot-binding walk (typed binding demand is host-raised — the
+/// flat payload vocabulary cannot address the nested positions). Raising the
+/// closed fact through the shared bridge interns the
+/// `SemanticNodeData::Function` carrier — node synthesis is demand-driven at
+/// the consuming dispatch, never eager here. No source-text reparse.
+pub(crate) fn slot_field_function_source(
     slot: &verter_semantic::analysis::AnalyzedSlotField,
-) -> verter_type_expr::TypeExpr {
-    use verter_type_expr::{
-        FunctionExpr, FunctionParam, MemberSpans, ObjectExpr, ObjectMember, ObjectProperty,
-        TypeExpr,
+) -> verter_type_expr::facts::SemanticTypeSource {
+    use verter_type_expr::facts::{
+        ClosedTypeFact, FunctionParamFact, FunctionSignatureFact, SemanticTypeSource,
+    };
+    use verter_type_expr::span_origins::{
+        FunctionParamSpanOrigin, FunctionSpansOrigin, SourceSynthetic,
     };
 
-    // Producer contract: the Vue slot resolver normalizes a return-absent /
-    // unraisable return to `Unknown`, never `None`. A `None` here is a
-    // producer-chain bug; panic loudly rather than silently substituting Any.
-    let return_type = slot
-        .return_expr
-        .clone()
-        .expect("Vue defineSlots resolver DTO must carry AnalyzedSlotField.return_expr");
+    if let Some(payload) = slot.payload.clone() {
+        return SemanticTypeSource::Authored(
+            verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload),
+        );
+    }
 
-    let parameters = if slot.bindings.is_empty() {
+    // Synthetic `props` parameter wrapping the slot bindings; empty-bindings
+    // slots produce `() => RT`.
+    let parameters: Vec<FunctionParamFact> = if slot.bindings.is_empty() {
         Vec::new()
     } else {
-        let properties = slot
-            .bindings
-            .iter()
-            .map(|binding| {
-                let ty = binding.binding_expr.clone().expect(
-                    "Vue defineSlots resolver DTO must carry AnalyzedSlotFieldBinding.binding_expr",
-                );
-                // The analyzed binding tracks the NAME span only.
-                ObjectMember::Property(ObjectProperty::with_spans_public(
-                    binding.name.clone(),
-                    ty,
-                    false,
-                    false,
-                    MemberSpans::name_only(binding.span),
-                ))
-            })
-            .collect();
-        let props_object = TypeExpr::Object(Arc::new(ObjectExpr { properties }));
-        // Synthetic `props` parameter wrapping the slot bindings.
-        vec![FunctionParam::synthetic(
-            Some("props".to_string()),
-            props_object,
-            false,
-            false,
-        )]
+        vec![FunctionParamFact {
+            name: Some("props".to_string()),
+            optional: false,
+            rest: false,
+            has_ts_annotation: false,
+            // The synthesized props object has no single authored slot — the
+            // typed miss; the bindings' typed values are host-raised through
+            // the graph-native slot-binding walk.
+            ty: None,
+            span_origin: FunctionParamSpanOrigin {
+                function: FunctionSpansOrigin::Synthetic(SourceSynthetic),
+                param: verter_type_expr::span_origins::FunctionParamSelector::Positional {
+                    ordinal: 0,
+                },
+            },
+        }]
     };
+    SemanticTypeSource::Closed(ClosedTypeFact::Function(FunctionSignatureFact {
+        type_parameters: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        parameters: std::sync::Arc::from(parameters.into_boxed_slice()),
+        // The return position has no addressable authored slot on a
+        // payload-less slot — the typed miss, recovered on demand.
+        return_ty: None,
+        has_implementation_body: false,
+        spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
+    }))
+}
 
-    // Synthetic slot function wrapper `(props) => return`.
-    TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
-        parameters,
-        Some(Arc::new(return_type)),
-        Vec::new(),
-    )))
+/// A macro shape carrying a FAILED required member position must not be
+/// labeled a complete/exact result: downgrade the shape's exactness to
+/// `Incomplete`, its execution status to the deterministic `HardStop`, and
+/// mark the enclosing request's completeness partial through the existing
+/// suppression rail — a failed required position is never cached or reported
+/// as a complete success (output materialization then fails it with the
+/// typed `RequiredSourceUnavailable` error).
+fn fail_shape_result_on_failed_member(
+    properties: &[ExpandedProperty],
+    index_signatures: &[verter_semantic::analysis::type_expand::ExpandedIndexSignature],
+    exactness: &mut SolverExactness,
+    execution_status: &mut ExecutionStatus,
+) {
+    let failed_property = properties.iter().any(|property| property.ty.is_failed());
+    // A REQUIRED index-signature key/value position whose producer could
+    // not construct a faithful source is the same typed failure as a failed
+    // member: the shape result is non-complete and never a fabricated
+    // `unknown` success.
+    let failed_index = index_signatures
+        .iter()
+        .any(|signature| signature.key_type.is_failed() || signature.value_type.is_failed());
+    if !failed_property && !failed_index {
+        return;
+    }
+    *exactness = SolverExactness::Incomplete;
+    *execution_status = merge_execution_status(*execution_status, ExecutionStatus::HardStop);
+    crate::request_context::mark_request_result_partial();
 }
 
 /// Severity-ordered merge of two expansion execution statuses (the worse status
@@ -483,3 +515,7 @@ fn merge_execution_status(
         current
     }
 }
+
+#[cfg(test)]
+#[path = "define_shapes_tests.rs"]
+mod tests;

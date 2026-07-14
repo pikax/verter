@@ -252,3 +252,88 @@ fn unfenced_compile_still_publishes_the_session_slot() {
     assert!(warm.cache_hit, "the published slot must serve warm");
     assert_eq!(warm.code, cold.code, "warm hit must be byte-identical");
 }
+
+/// LB3 no-false-`Partial` FLOOR (the Part A discriminator) — a fenced-but-VALID
+/// component-meta serve must stay `Complete`, NEVER a false `Partial`, while still
+/// refusing warm admission.
+///
+/// A real fenced serve on the component-meta path pre-change called the
+/// request-materialization rail (`mark_request_materialization_cache_suppress`),
+/// which injects `ResultCompleteness::partial(PROPAGATED)`; component-meta then OR-s
+/// that request flag into `synthesis_should_suppress` and converts it to a `Partial`
+/// completeness (`component_meta_methods.rs`). So a VALID fenced serve became a false
+/// `Partial` — a HARD-FLOOR violation. Part A removed that rail call from every valid
+/// ReturnOnly/non-cacheability site and routes non-cacheability through the
+/// generalized `cache_suppress`/fact-admission channel instead, keeping the result
+/// `Complete`.
+///
+/// DISCRIMINATING: `arm_fence_every_materialize` makes every `IndexedReady`
+/// materialise flight in the request FENCED (`store_published == false`) via a
+/// generation bump — the SAME real fenced-serve producer path. Post-fix the
+/// component-meta resolution stays `Complete` AND is refused warm admission (the
+/// repeat recomputes, no warm hit). RED-pre (with the request-partial rail call
+/// still at the fenced-serve sites) the resolution is a false `Partial`.
+#[test]
+fn fenced_component_meta_serve_stays_complete_not_partial_and_refuses_warm() {
+    use std::sync::atomic::Ordering;
+
+    let host = make_host();
+    upsert_fixture(&host);
+
+    let prov = host.provenance();
+    let hits_before = prov
+        .component_meta_result_cache_hits
+        .load(Ordering::Relaxed);
+
+    arm_fence_every_materialize(&host);
+    let (_analysis, resolution) = host
+        .get_component_meta_with_resolution(OWNER)
+        .expect("a fenced component-meta serve must still serve its caller (ReturnOnly)");
+
+    // THE FLOOR: a fenced-but-VALID serve is Complete, NEVER a false Partial.
+    assert!(
+        !resolution.completeness.is_partial(),
+        "a fenced-but-VALID component-meta serve MUST stay Complete — a false Partial here is the \
+         request-partial coupling a fenced serve wrongly triggered (Part A). Non-cacheability must \
+         route through cache_suppress, not partiality. got {:?}",
+        resolution.completeness
+    );
+
+    // Admission refused: the fenced (non-cacheable) result must NOT warm-admit, so a
+    // repeat under the armed fence RECOMPUTES (no warm hit).
+    let (_a2, _r2) = host
+        .get_component_meta_with_resolution(OWNER)
+        .expect("2nd fenced serve still serves ReturnOnly");
+    *host.materialize_seam_hook.lock() = None;
+    let hits_after = prov
+        .component_meta_result_cache_hits
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a fenced (non-cacheable) component-meta serve must NOT warm-admit — the repeat must \
+         recompute, not warm-hit a poisoned entry (hits {hits_before} -> {hits_after})"
+    );
+
+    // Recovery: with the fence cleared, a quiescent recompute is Complete and the
+    // next request warm-hits — proving the refusal was the admission gate acting.
+    let (_a3, r3) = host
+        .get_component_meta_with_resolution(OWNER)
+        .expect("quiescent recompute serves");
+    assert!(
+        !r3.completeness.is_partial(),
+        "the quiescent recompute is Complete"
+    );
+    let hits_recovered_before = prov
+        .component_meta_result_cache_hits
+        .load(Ordering::Relaxed);
+    let (_a4, _r4) = host
+        .get_component_meta_with_resolution(OWNER)
+        .expect("warm serve");
+    assert!(
+        prov.component_meta_result_cache_hits
+            .load(Ordering::Relaxed)
+            > hits_recovered_before,
+        "after the fence clears the quiescent recompute publishes and the next request warm-hits — \
+         the fenced refusal was the admission gate, not a broken publish path"
+    );
+}

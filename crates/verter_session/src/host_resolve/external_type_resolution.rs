@@ -14,20 +14,12 @@
 //! Each `_with_view` helper has a base wrapper (`#[cfg(test)]`-gated) that
 //! passes `view = None`; production paths reach the view-aware variant via
 //! `HostExternalMacroTypeCollector` and `HostComponentMetaResolver`.
-//!
-//! The `current_type_resolution_hash_with_view` /
-//! `lookup_resolved_external_type_cache_with_view` /
-//! `store_resolved_external_type_cache_with_view` helpers are kept here
-//! too so the cache delegation to `ProjectTypeStore::resolved_type_cache()`
-//! stays adjacent to its only callers. The cache
-//! key carries `view_fingerprint` so base (`view = None` → 0) and
-//! per-session slots co-exist; neither evicts the other.
 
 use super::frontier_helpers::{
     emit_external_type_from_loaded_files_trace_result, external_type_debug,
     external_type_trace_error_status, external_type_trace_success_status,
     DirectComponentMetaDeclarationResolver, ExternalTypeCache, ExternalTypeTraceBaseline,
-    FrontierCompanionPlans, FrontierRequestedRoutes, ResolvedExternalTypes,
+    FrontierCompanionPlans, FrontierRequestedRoutes,
 };
 use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
@@ -56,7 +48,7 @@ impl VerterHost {
         profile_hash: Option<u64>,
         depth: usize,
     ) -> Result<
-        Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
+        Option<verter_parser::utils::oxc::script::type_surface::ResolvedElements>,
         crate::types::ExternalTypeResolveError,
     > {
         // Test-only wrapper: construct a bare-host ctx so tightened tests
@@ -102,11 +94,14 @@ impl VerterHost {
         required_root_dep: bool,
         kind: verter_workspace::ResolveRequestKind,
         use_host_cache: bool,
-        profile_hash: Option<u64>,
+        // Threaded by the `ExternalMacroTypeCollectorHost` contract; this
+        // resolution body does not key on the profile (request-local dedupe
+        // only, no profile-scoped warm admission).
+        _profile_hash: Option<u64>,
         depth: usize,
         view: Option<&dyn crate::session_view::SessionView>,
     ) -> Result<
-        Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
+        Option<verter_parser::utils::oxc::script::type_surface::ResolvedElements>,
         crate::types::ExternalTypeResolveError,
     > {
         component_meta_trace_custom!(
@@ -302,55 +297,6 @@ impl VerterHost {
         tracked_deps.insert(effective_dep_canonical.clone());
         resolution_deps.insert(effective_dep_canonical.clone());
 
-        if use_host_cache {
-            if let Some(entry) = self.lookup_resolved_external_type_cache_with_view(
-                effective_dep_canonical.as_str(),
-                effective_type_name.as_str(),
-                kind,
-                view,
-            ) {
-                self.provenance
-                    .resolved_external_type_cache_hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Per-request audit attribution: differentiate a warm
-                // POSITIVE hit (entry.resolved.is_some()) from a warm
-                // NEGATIVE hit (entry.resolved.is_none()). The negative
-                // arm is the discriminating signal that would land
-                // once host-side negative caching is implemented.
-                if let Some(obs) = verter_audit::current_observer() {
-                    if entry.resolved.is_none() {
-                        obs.record_event(
-                            verter_audit::AuditEvent::ResolvedExternalTypeCacheNegativeHit,
-                        );
-                    }
-                }
-                for dep in &entry.tracked_deps {
-                    tracked_deps.insert(dep.clone());
-                    resolution_deps.insert(dep.clone());
-                }
-                let resolved = entry.resolved.clone();
-                cache.insert(cache_key.clone(), resolved.clone());
-                cache.insert(
-                    (effective_dep_canonical.clone(), effective_type_name.clone()),
-                    resolved.clone(),
-                );
-                emit_trace_result(
-                    external_type_trace_success_status(resolved.is_some()),
-                    tracked_deps.len(),
-                    resolution_deps.len(),
-                    cache.len(),
-                    visiting.len(),
-                );
-                return Ok(resolved);
-            }
-
-            if profile_hash.is_none() {
-                self.provenance
-                    .resolved_external_type_cache_misses
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-
         let final_target_key = (effective_dep_canonical.clone(), effective_type_name.clone());
         if let Some(cached) = cache.get(&final_target_key).cloned() {
             cache.insert(cache_key.clone(), cached.clone());
@@ -383,38 +329,26 @@ impl VerterHost {
             return Ok(None);
         }
 
-        let resolved = self
-            .materialize_frontier_resolved_type_with_view(
-                ctx,
-                &frontier,
-                &requested_routes,
-                &mut companion_plans,
-                effective_dep_canonical.as_str(),
-                effective_type_name.as_str(),
-                tracked_deps,
-                resolution_deps,
-                view,
-            )
-            .or_else(|| {
-                self.resolve_external_type_from_indexed_ready_with_view(
-                    effective_dep_canonical.as_str(),
-                    effective_type_name.as_str(),
-                    &ResolvedExternalTypes::default(),
-                    view,
-                )
-            });
+        // The indexed-ready fall-through that used to follow a frontier miss
+        // (the parser's structural element expander) is severed on THIS
+        // compile-facing loaded-files rail: the element payload authority for
+        // compile positions is the collector's kind-aware dispatch-backed
+        // normalizers (`imported_emits_resolved_elements` /
+        // `imported_props_resolved_elements` / the per-name companion fold).
+        // The frontier walk below still records companion routes, dependency
+        // facts, and cycle detections.
+        let resolved = self.materialize_frontier_resolved_type_with_view(
+            ctx,
+            &frontier,
+            &requested_routes,
+            &mut companion_plans,
+            effective_dep_canonical.as_str(),
+            effective_type_name.as_str(),
+            tracked_deps,
+            resolution_deps,
+            view,
+        );
         visiting.remove(&final_target_key);
-
-        if use_host_cache && profile_hash.is_none() {
-            self.store_resolved_external_type_cache_with_view(
-                effective_dep_canonical.as_str(),
-                effective_type_name.as_str(),
-                kind,
-                resolved.clone(),
-                resolution_deps.iter().cloned().collect(),
-                view,
-            );
-        }
 
         cache.insert(cache_key.clone(), resolved.clone());
         cache.insert(
@@ -438,6 +372,11 @@ impl VerterHost {
     /// `resolve_external_type_from_loaded_files_with_view` so the
     /// resolved-type cache slot and the dep-source reads observe the active
     /// session overlay.
+    ///
+    /// The resolved payload is the [`crate::resolver_core::ResolvedMacroElements`]
+    /// bundle — the legacy elements DTO PLUS the keep-all `native_props`
+    /// rows projected from the SAME dispatch surface resolution — memoized
+    /// per request in the cache's DEDICATED macro-elements slot family.
     #[allow(clippy::too_many_arguments)]
     fn resolve_component_meta_macro_elements_target_with_view(
         &self,
@@ -453,7 +392,7 @@ impl VerterHost {
         String,
         String,
         String,
-        verter_compiler::utils::oxc::script::type_surface::ResolvedElements,
+        crate::resolver_core::ResolvedMacroElements,
     )> {
         let dep_canonical = self.resolve_loaded_dependency_canonical(
             owner_canonical,
@@ -465,8 +404,8 @@ impl VerterHost {
         resolution_deps.insert(dep_canonical.clone());
 
         let cache_key = (dep_canonical.clone(), type_name.to_string());
-        if let Some(cached) = cache.get(&cache_key).cloned() {
-            let elements = cached?;
+        if let Some(cached) = cache.macro_elements(&cache_key).cloned() {
+            let resolution = cached?;
             // Re-query the project-global `ImportedRootDb` for the target
             // identity. It collapses concurrent cold requests internally, so
             // repeated calls are cheap warm hits — there is no need for a
@@ -476,7 +415,7 @@ impl VerterHost {
                 ctx.resolve_imported_type_root(dep_canonical.as_str(), type_name);
             tracked_deps.insert(target_canonical.clone());
             resolution_deps.insert(target_canonical.clone());
-            return Some((dep_canonical, target_canonical, target_name, elements));
+            return Some((dep_canonical, target_canonical, target_name, resolution));
         }
 
         let (seed_canonical, seed_type_name) =
@@ -485,10 +424,10 @@ impl VerterHost {
         resolution_deps.insert(seed_canonical.clone());
 
         let seed_target_key = (seed_canonical.clone(), seed_type_name.clone());
-        if let Some(cached) = cache.get(&seed_target_key).cloned() {
-            cache.insert(cache_key, cached.clone());
-            let elements = cached?;
-            return Some((dep_canonical, seed_canonical, seed_type_name, elements));
+        if let Some(cached) = cache.macro_elements(&seed_target_key).cloned() {
+            cache.insert_macro_elements(cache_key, cached.clone());
+            let resolution = cached?;
+            return Some((dep_canonical, seed_canonical, seed_type_name, resolution));
         }
 
         let mut requested_routes = FrontierRequestedRoutes::default();
@@ -520,7 +459,7 @@ impl VerterHost {
                     .resolver_cycle_detections
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            cache.insert(cache_key, None);
+            cache.insert_macro_elements(cache_key, None);
             return None;
         };
 
@@ -528,48 +467,94 @@ impl VerterHost {
         resolution_deps.insert(effective_dep_canonical.clone());
 
         let final_target_key = (effective_dep_canonical.clone(), effective_type_name.clone());
-        if let Some(cached) = cache.get(&final_target_key).cloned() {
-            cache.insert(cache_key, cached.clone());
-            let elements = cached?;
+        if let Some(cached) = cache.macro_elements(&final_target_key).cloned() {
+            cache.insert_macro_elements(cache_key, cached.clone());
+            let resolution = cached?;
             return Some((
                 dep_canonical,
                 effective_dep_canonical,
                 effective_type_name,
-                elements,
+                resolution,
             ));
         }
 
-        let resolved = self
-            .materialize_frontier_resolved_type_with_view(
-                ctx,
-                &frontier,
-                &requested_routes,
-                &mut companion_plans,
-                effective_dep_canonical.as_str(),
-                effective_type_name.as_str(),
-                tracked_deps,
-                resolution_deps,
-                view,
-            )
-            .or_else(|| {
-                self.resolve_external_type_from_indexed_ready_with_view(
-                    effective_dep_canonical.as_str(),
-                    effective_type_name.as_str(),
-                    &ResolvedExternalTypes::default(),
-                    view,
-                )
-            });
+        // The owner's DIRECT imports are part of its macro type environment:
+        // an ambient side-effect import (`import './aug'`) can contribute
+        // `declare module` augmentations to the routed target's declaration.
+        // Ensure them BEFORE the dispatch terminal — the `MergedDecl`
+        // augmentation stitch enumerates augmenters over INDEXED files, so
+        // resolving the target before its augmenter is indexed would memoize
+        // an un-stitched surface for the whole request.
+        self.ensure_owner_direct_imports_indexed(ctx, owner_canonical);
 
-        cache.insert(cache_key, resolved.clone());
-        cache.insert(final_target_key, resolved.clone());
-        resolved.map(|elements| {
+        // Dispatch-owned terminal (same rail as the loaded-files path above):
+        // resolve the routed target's declaration carrier through the ONE
+        // shared dispatch and request its EMPTY-PATH one-level `Shallow`
+        // surface; the thin combined normalize preserves member values as
+        // semantic carriers and projects the keep-all `native_props` rows
+        // from the SAME surface. The component-meta REGISTRY entry is
+        // published SEPARATELY as the original symbolic Ref (the cold
+        // resolver's shallow seed) — this legacy elements DTO is never the
+        // registry/type authority, so resolving here cannot fold surfaces
+        // the registry must keep shallow (the `keeps_*_symbolic` meta
+        // trackers pin that). `None` means a genuine unresolved
+        // route/declaration; a transient recursion back-edge returns
+        // un-cached.
+        let outcome = crate::typeinfo::framework_surface::vue_exec::named_type_elements_outcome(
+            ctx,
+            effective_dep_canonical.as_str(),
+            effective_type_name.as_str(),
+            // This rail's consumer (the component-meta `ResolvedMacroMeta`)
+            // publishes the keep-all `native_props` rows.
+            crate::typeinfo::framework_surface::vue_exec::NativeProjection::Include,
+        );
+        use crate::typeinfo::framework_surface::vue_exec::NamedTypeElementsOutcome;
+        let resolved = match outcome {
+            NamedTypeElementsOutcome::Resolved(resolution) => Some(resolution),
+            // Transient back-edge — never a cacheable negative.
+            NamedTypeElementsOutcome::Recursive => return None,
+            NamedTypeElementsOutcome::Miss => None,
+        };
+
+        cache.insert_macro_elements(cache_key, resolved.clone());
+        cache.insert_macro_elements(final_target_key, resolved.clone());
+        resolved.map(|resolution| {
             (
                 dep_canonical,
                 effective_dep_canonical,
                 effective_type_name,
-                elements,
+                resolution,
             )
         })
+    }
+
+    /// Ensure every DIRECT import target of `owner_canonical` is indexed —
+    /// including bindingless side-effect imports (`import './aug'`), the
+    /// carriers of ambient `declare module` augmentations. One bounded hop
+    /// over the owner's own import list (never a transitive walk); each
+    /// ensure is the canonical once-per-generation materialization.
+    fn ensure_owner_direct_imports_indexed(
+        &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        owner_canonical: &str,
+    ) {
+        let Some(serve) = ctx.ensure_indexed_ready_serve(owner_canonical) else {
+            return;
+        };
+        let specifiers: Vec<String> = serve
+            .indexed
+            .snapshot
+            .imports
+            .iter()
+            .map(|import| import.source.clone())
+            .collect();
+        for specifier in specifiers {
+            if let Some(dep_canonical) =
+                self.resolve_type_dependency_canonical(owner_canonical, specifier.as_str())
+            {
+                let _ = ctx.ensure_indexed_ready_serve(dep_canonical.as_str());
+            }
+        }
     }
 
     fn build_imported_macro_declaration_from_target(
@@ -656,11 +641,11 @@ impl VerterHost {
                 import_source,
                 type_name,
                 false,
-                cache.len(),
+                cache.macro_elements_len(),
             ),
         );
 
-        let (dep_canonical, effective_dep_canonical, effective_type_name, elements) = self
+        let (dep_canonical, effective_dep_canonical, effective_type_name, resolution) = self
             .resolve_component_meta_macro_elements_target_with_view(
                 ctx,
                 owner_canonical,
@@ -679,7 +664,7 @@ impl VerterHost {
                 effective_dep_canonical.as_str(),
                 effective_type_name.as_str(),
             ),
-            elements,
+            resolution,
         })
     }
 
@@ -693,7 +678,7 @@ impl VerterHost {
         tracked_deps: &mut std::collections::BTreeSet<String>,
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
-    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
+    ) -> Option<crate::resolver_core::ResolvedMacroElements> {
         crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
             self.resolve_component_meta_macro_elements_with_view(
                 ctx,
@@ -723,7 +708,7 @@ impl VerterHost {
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
         view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
+    ) -> Option<crate::resolver_core::ResolvedMacroElements> {
         self.resolve_component_meta_macro_elements_target_with_view(
             ctx,
             owner_canonical,
@@ -734,95 +719,6 @@ impl VerterHost {
             cache,
             view,
         )
-        .map(|(_, _, _, elements)| elements)
-    }
-
-    /// View-aware variant of the dep-source resolution hash helper.
-    ///
-    /// When `view` carries an overlay (or content hash) for `canonical`, the
-    /// returned hash reflects the overlay's content so a session-bearing cache
-    /// lookup never aliases the base-host slot.
-    fn current_type_resolution_hash_with_view(
-        &self,
-        canonical: &str,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<crate::resolver_core::ResolverHash16> {
-        if let Some(view) = view {
-            if let Some(hash) = view.content_hash_for(canonical) {
-                return Some(hash);
-            }
-        }
-        self.current_or_read_whole_hash(canonical).or_else(|| {
-            self.read_dep_source_for_type_resolution(canonical, None)
-                .map(|source| crate::hash::hash_16(source.as_bytes()))
-        })
-    }
-
-    /// View-aware resolved-external-type cache lookup.
-    ///
-    /// The cache key includes `view.fingerprint()` so base (`view = None`)
-    /// and per-session slots co-exist; the dependency source hash is read
-    /// from the active session view so an overlay's resolved-type entry
-    /// never aliases the base entry under the same `(canonical, name, kind)`
-    /// shape.
-    fn lookup_resolved_external_type_cache_with_view(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<crate::types::ResolvedTypeCacheEntry> {
-        let dep_source_hash = self.current_type_resolution_hash_with_view(dep_canonical, view)?;
-        let view_fingerprint = view.map(|v| v.fingerprint()).unwrap_or(0);
-        let key = crate::types::ResolvedTypeCacheKey {
-            dep_canonical_id: dep_canonical.to_string(),
-            dep_source_hash,
-            type_name: type_name.to_string(),
-            resolve_kind: kind,
-            view_fingerprint,
-        };
-        // Delegates to the `ResolvedTypeCacheDb` on `ProjectTypeStore`.
-        // The DB owns the bounded clear-all-at-cap policy internally.
-        self.resolved_type_cache().lookup(&key)
-    }
-
-    /// View-aware resolved-external-type cache write.
-    ///
-    /// Writes into the per-view slot. Base callers (no view) write to the
-    /// `view_fingerprint = 0` slot; session-bearing callers write to their
-    /// own fingerprint slot. Slots never evict each other.
-    fn store_resolved_external_type_cache_with_view(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-        resolved: Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
-        tracked_deps: Vec<String>,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) {
-        let Some(dep_source_hash) =
-            self.current_type_resolution_hash_with_view(dep_canonical, view)
-        else {
-            return;
-        };
-        let view_fingerprint = view.map(|v| v.fingerprint()).unwrap_or(0);
-
-        let key = crate::types::ResolvedTypeCacheKey {
-            dep_canonical_id: dep_canonical.to_string(),
-            dep_source_hash,
-            type_name: type_name.to_string(),
-            resolve_kind: kind,
-            view_fingerprint,
-        };
-        // `ResolvedTypeCacheDb::insert` honours the bounded
-        // clear-all-at-`RESOLVED_TYPE_CACHE_CAP` policy internally;
-        // the DB hosts its own `parking_lot::Mutex`.
-        self.resolved_type_cache().insert(
-            key,
-            crate::types::ResolvedTypeCacheEntry {
-                resolved,
-                tracked_deps,
-            },
-        );
+        .map(|(_, _, _, resolution)| resolution)
     }
 }

@@ -454,10 +454,6 @@ fn typed_query_error_sentinels_round_trip_to_legacy_raw() {
         semantic_query_error_raw(&QueryError::UnrepresentableSurfaceMember),
         SEMANTIC_SURFACE_MEMBER
     );
-    assert_eq!(
-        semantic_query_error_raw(&QueryError::VueMacroElementsPlaceholder),
-        "VueMacroElements"
-    );
 
     // must-not-regress: the budget-exceeded fuse keeps its sentinel prefix.
     let budget = QueryError::BudgetExceeded(BudgetExceededFailure {
@@ -506,8 +502,8 @@ fn converted_sites_have_no_bare_control_sentinel_literal() {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
     }
 
-    // The shared raise traversal — the nine converted `fold_node` /
-    // `fold_member` arms. After the swap, NONE of the six control literals may
+    // The shared raise traversal — the converted `fold_node` /
+    // `fold_member` arms. After the swap, NONE of the control literals may
     // appear inside an `alg.unknown(Arc::from(...))` construction here.
     let shape_engine = read_src("src/project_semantic_dispatch/raise/shape_engine/mod.rs");
     for forbidden in [
@@ -516,7 +512,6 @@ fn converted_sites_have_no_bare_control_sentinel_literal() {
         r#"alg.unknown(Arc::from("<raise miss>"))"#,
         "alg.unknown(Arc::from(SEMANTIC_OBJECT_SURFACE))",
         "alg.unknown(Arc::from(SEMANTIC_SURFACE_MEMBER))",
-        r#"alg.unknown(Arc::from("VueMacroElements"))"#,
     ] {
         assert!(
             !shape_engine.contains(forbidden),

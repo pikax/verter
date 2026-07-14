@@ -50,11 +50,20 @@ pub mod span_origins;
 /// Closed semantic fact families — the graph-free, content-free replacement for
 /// query-time `TypeExpr` walking.
 pub mod facts;
+pub use facts::{merge_route_demands, RouteDemand, RouteKeySet};
+
+/// Generated static-intrinsic catalog substrate — the interned-id + member-fact
+/// replacement for raw-`TypeExpr` HTML intrinsic member shapes.
+pub mod intrinsics;
 
 /// Compile-time marker witnesses + [P2] discrimination fixtures for the closed
 /// fact / locator / span-origin families.
 #[cfg(test)]
 mod fact_witnesses;
+#[cfg(test)]
+mod projected_route_witnesses;
+#[cfg(test)]
+mod source_position_witnesses;
 
 // ---------------------------------------------------------------------------
 // Send + Sync invariant
@@ -111,7 +120,18 @@ impl TypeExprScope {
 /// `defineSlots` binding publication when no parser-side binding
 /// expression is available. Used to distinguish the two surfaces on
 /// the typed-IR variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_no_storedspan::NoStoredSpan,
+)]
 pub enum SyntheticCarrierSurfaceKind {
     SlotBinding,
     Binding,
@@ -129,7 +149,17 @@ pub enum SyntheticCarrierSurfaceKind {
 /// `value_node` is stored as `u64` because `verter_type_expr` cannot
 /// depend on `verter_session`. FFI / JSON serialise `value_node` as a
 /// decimal STRING to avoid JS Number precision loss.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_no_storedspan::NoStoredSpan,
+)]
 pub struct SyntheticCarrierKey {
     pub scope_canonical_id: Arc<str>,
     pub surface_kind: SyntheticCarrierSurfaceKind,
@@ -418,7 +448,14 @@ impl fmt::Display for PrimitiveName {
 }
 
 /// A literal value in a type position.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_no_storedspan::NoStoredSpan,
+)]
 #[serde(tag = "literalKind", rename_all = "camelCase")]
 pub enum LiteralValue {
     String(String),

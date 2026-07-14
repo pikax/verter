@@ -94,9 +94,15 @@ fn warm_hit_advances_warm_counter_and_bubbles_route_facts() {
     // branch MUST bubble the cached fact into the tracer AND advance
     // the warm counter by exactly one.
     let (result, finalise) = install_fact_tracer_for_tests(&host, || {
-        db.get_or_resolve_route_observing_facts(rk("warm_provider.ts", "Bar"), &view, || {
-            unreachable!("resolve closure must not run on warm hit")
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+            db.get_or_resolve_route_observing_facts(
+                rk("warm_provider.ts", "Bar"),
+                &view,
+                probe,
+                || unreachable!("resolve closure must not run on warm hit"),
+            )
         })
+        .0
     });
     assert!(result.is_some(), "warm hit must return Some");
 

@@ -1018,10 +1018,13 @@ fn resolved_jsdoc_block_to_proto(
                 text_id: builder.string_id_opt(tag.text.as_deref()),
                 raw_type_id: builder.string_id_opt(tag.raw_type.as_deref()),
                 subject_name_id: builder.string_id_opt(tag.subject_name.as_deref()),
+                // Re-intern the SEALED producer-captured graph snapshot into
+                // the live proto graph (wire-identical to the retired direct
+                // `node_id(&TypeExpr)` walk); the proto field is unchanged.
                 resolved_type_node_id: tag
                     .resolved_type
                     .as_ref()
-                    .map(|ty| builder.node_id(ty))
+                    .map(|output| builder.append_snapshot(&output.graph))
                     .unwrap_or(0),
             })
             .collect(),
@@ -1445,6 +1448,10 @@ fn build_test_meta() -> FfiComponentMeta {
     }));
 
     FfiComponentMeta {
+        // The synthetic test payload carries no resolution seed.
+        resolution_status: crate::types::FfiComponentMetaResolutionStatus::Unavailable(
+            crate::types::FfiResolutionUnavailableReason::ResolutionProviderAbsent,
+        ),
         props: vec![FfiPropMeta {
             name: "root".to_string(),
             r#type: tree_ref.clone(),
@@ -1740,6 +1747,126 @@ mod tests {
         assert_eq!(
             strings[edge1.meta_index as usize], "SubstitutedParam(\"T\")",
             "edge meta_index resolves correctly"
+        );
+    }
+
+    /// GOLDEN call-site parity for the JSDoc resolved-type conversion: a tag
+    /// carrying the SEALED snapshot produces the SAME `resolved_type_node_id`
+    /// and the SAME final node/string tables as the retired direct
+    /// `builder.node_id(&TypeExpr)` walk on an identically-seeded builder —
+    /// the proto message field (`resolved_type_node_id = 5`) is unchanged.
+    /// Discriminating: a perturbed tag type lands on a different node id.
+    #[test]
+    fn resolved_jsdoc_tag_snapshot_conversion_matches_legacy_direct_walk() {
+        use crate::graph::snapshot::{ResolvedJsdocTypeOutput, ResolvedTypeGraphSnapshot};
+        use crate::types::{FfiResolvedJsdocBlock, FfiResolvedJsdocTag};
+        use verter_type_expr::PrimitiveName;
+
+        let tag_type = TypeExpr::Ref {
+            name: "Record".into(),
+            type_arguments: std::sync::Arc::from(vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::Ref {
+                    name: "Foo".into(),
+                    type_arguments: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                },
+            ]),
+        };
+        // Both builders carry the same PRE-EXISTING surrounding block content
+        // (the tag's own name/text strings intern before the type node in the
+        // real conversion; seeding keeps the comparison honest).
+        let seed = |builder: &mut GraphBuilder| {
+            let _ = builder.string_id("type");
+            let _ = builder.string_id("Record<string, Foo>");
+        };
+
+        // LEGACY: the retired direct walk.
+        let mut legacy = GraphBuilder::new();
+        seed(&mut legacy);
+        let legacy_node_id = legacy.node_id(&tag_type);
+
+        // NEW: producer-captured snapshot riding the tag, converted through
+        // `resolved_jsdoc_block_to_proto`.
+        let mut producer = GraphBuilder::new();
+        let producer_root = producer.node_id(&tag_type);
+        let snapshot = ResolvedTypeGraphSnapshot::from_builder(producer, producer_root)
+            .expect("valid non-synthetic snapshot");
+        let block = FfiResolvedJsdocBlock {
+            description: None,
+            tags: vec![FfiResolvedJsdocTag {
+                name: "type".to_string(),
+                text: None,
+                raw_type: Some("Record<string, Foo>".to_string()),
+                subject_name: None,
+                resolved_type: Some(ResolvedJsdocTypeOutput {
+                    display: Some("Record<string, Foo>".to_string()),
+                    graph: snapshot,
+                }),
+            }],
+        };
+        let mut live = GraphBuilder::new();
+        seed(&mut live);
+        let proto_block = super::resolved_jsdoc_block_to_proto(&mut live, &block);
+
+        assert_eq!(
+            proto_block.tags[0].resolved_type_node_id, legacy_node_id,
+            "the snapshot re-intern yields the SAME resolved_type_node_id as \
+             the legacy direct walk"
+        );
+        assert_eq!(
+            legacy.nodes(),
+            live.nodes(),
+            "the final node tables are byte-identical"
+        );
+        assert_eq!(
+            legacy.strings(),
+            live.strings(),
+            "the final string tables are byte-identical"
+        );
+
+        // An ABSENT resolved type keeps the legacy 0 sentinel.
+        let empty_block = FfiResolvedJsdocBlock {
+            description: None,
+            tags: vec![FfiResolvedJsdocTag {
+                name: "type".to_string(),
+                text: None,
+                raw_type: None,
+                subject_name: None,
+                resolved_type: None,
+            }],
+        };
+        let mut live2 = GraphBuilder::new();
+        let proto_empty = super::resolved_jsdoc_block_to_proto(&mut live2, &empty_block);
+        assert_eq!(
+            proto_empty.tags[0].resolved_type_node_id, 0,
+            "an absent resolved type keeps the 0 sentinel"
+        );
+
+        // DISCRIMINATION: a perturbed tag type produces a different node id.
+        let mut producer2 = GraphBuilder::new();
+        let perturbed = TypeExpr::Primitive(PrimitiveName::Number);
+        let root2 = producer2.node_id(&perturbed);
+        let snapshot2 = ResolvedTypeGraphSnapshot::from_builder(producer2, root2)
+            .expect("valid non-synthetic snapshot");
+        let block2 = FfiResolvedJsdocBlock {
+            description: None,
+            tags: vec![FfiResolvedJsdocTag {
+                name: "type".to_string(),
+                text: None,
+                raw_type: Some("number".to_string()),
+                subject_name: None,
+                resolved_type: Some(ResolvedJsdocTypeOutput {
+                    display: Some("number".to_string()),
+                    graph: snapshot2,
+                }),
+            }],
+        };
+        let mut live3 = GraphBuilder::new();
+        seed(&mut live3);
+        let proto_block2 = super::resolved_jsdoc_block_to_proto(&mut live3, &block2);
+        assert_ne!(
+            proto_block2.tags[0].resolved_type_node_id, proto_block.tags[0].resolved_type_node_id,
+            "a perturbed jsdoc type lands on a different graph node"
         );
     }
 }

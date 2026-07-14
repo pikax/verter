@@ -744,10 +744,13 @@ export declare class ComponentMetaSession {
   getComponentMeta(canonicalOrAlias: string): Buffer | null;
 
   /**
-   * Resolved-surface native component-meta query. Returns the same
-   * protobuf payload shape as `getComponentMeta`, but exposed under a
-   * dedicated entry-point for callers that want to address the resolved
-   * variant explicitly.
+   * Plain native component-meta query under a legacy entry-point name.
+   * Returns the same protobuf payload as `getComponentMeta` (kept for
+   * wire compatibility): a full type-resolution pass runs and the
+   * payload embeds the resolved type-registry overlay plus the
+   * `resolution` sidecar. `getComponentMetaWithAudit` adds the
+   * per-request audit record (the `{ analysis, resolution, record }`
+   * JSON bundle), not more resolution.
    */
   getResolvedComponentMeta(canonicalOrAlias: string): Buffer | null;
 

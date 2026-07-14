@@ -111,7 +111,7 @@ impl TypeResolutionRequestError {
     /// `Miss` / `RecursiveRef` / `DeclPlaceholder`, plus the typed
     /// semantic-sentinel control carriers `RaiseAliasCycle` /
     /// `TypeParamCycle` / `RaiseMiss` / `UnrepresentableSurface` /
-    /// `UnrepresentableSurfaceMember` / `VueMacroElementsPlaceholder`.
+    /// `UnrepresentableSurfaceMember`.
     ///
     /// Genuine request faults map to the matching
     /// `TypeResolutionRequestError` arm and ride the carrier's `Err`:
@@ -126,15 +126,14 @@ impl TypeResolutionRequestError {
             | QueryError::RecursiveRef { .. }
             | QueryError::DeclPlaceholder { .. }
             // The typed semantic-sentinel carriers are non-fault control
-            // signals (cycle / miss / unrepresentable / macro-placeholder);
+            // signals (cycle / miss / unrepresentable);
             // like `Miss` they surface as a well-formed `Ok(None)`, not a
             // request fault.
             | QueryError::RaiseAliasCycle
             | QueryError::TypeParamCycle
             | QueryError::RaiseMiss
             | QueryError::UnrepresentableSurface
-            | QueryError::UnrepresentableSurfaceMember
-            | QueryError::VueMacroElementsPlaceholder => None,
+            | QueryError::UnrepresentableSurfaceMember => None,
             QueryError::UnsupportedIntrinsic { name } => Some(Self::UnsupportedIntrinsic {
                 name: Arc::clone(name),
             }),
@@ -463,7 +462,6 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
         | SemanticQueryKey::TypeOf { .. }
         | SemanticQueryKey::NormalizeUnion { .. }
         | SemanticQueryKey::NormalizeIntersection { .. }
-        | SemanticQueryKey::ResolvedNamedType { .. }
         | SemanticQueryKey::Relate { .. }
         | SemanticQueryKey::ResolveEnum { .. }
         | SemanticQueryKey::ResolveOverloadSet { .. }

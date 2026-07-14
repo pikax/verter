@@ -1,54 +1,18 @@
 //! Shared route-demand model for routed-symbol resolution.
 //!
-//! This module owns the `RouteDemand` type that represents how much of
-//! an exported symbol's dependency graph is needed. It replaces the
-//! former `ExportedRoute` in `shallow_file_state.rs` and is consumed by
-//! `ShallowFileState`, `ExternalTypeFrontier`, `meta_resolve`,
-//! `component_meta_query_engine`, and fallthrough routing.
+//! The `RouteDemand` type itself is the ONE canonical
+//! `verter_type_expr::RouteDemand` (re-exported here for the resolver's
+//! consumers): `Pick`/`Omit` carry the normalized `RouteKeySet`
+//! (order-independent `Eq` + `Hash`), `MemberPath` stays an ordered
+//! sequence. `merge_route_demands` lives beside it in `verter_type_expr`
+//! (pure over the canonical type) and is re-exported the same way. This
+//! module keeps the session-only routed-resolution carriers
+//! (`SymbolSpace`, `RoutedSymbolStatus`, `RoutedSymbolResult`,
+//! `RouteProvenance*`, `RoutedExternalDep`).
 //!
 //! See architectural rule 2: "Route demand is a shared resolver-core type."
 
-use std::hash::{Hash, Hasher};
-
-/// How much of an exported symbol's dependency graph is needed.
-///
-/// `RouteDemand` is the single authority for route shape in the resolver.
-/// All consumers (frontier, shallow state, component-meta, fallthrough)
-/// must use this type — no consumer-local route-shape types allowed.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum RouteDemand {
-    /// Full export — all dependencies.
-    #[default]
-    Whole,
-    /// Indexed member path: `Type['a']['b']`.
-    /// Each element is one path segment. Must not be collapsed to a
-    /// shorter prefix during routing, caching, or materialization.
-    MemberPath(Vec<String>),
-    /// Pick subset: `Pick<Type, 'a' | 'b'>`.
-    Pick(Vec<String>),
-    /// Omit subset: `Omit<Type, 'a' | 'b'>`.
-    Omit(Vec<String>),
-}
-
-impl Hash for RouteDemand {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        core::mem::discriminant(self).hash(state);
-        match self {
-            RouteDemand::Whole => {}
-            RouteDemand::MemberPath(segments) => segments.hash(state),
-            RouteDemand::Pick(members) => {
-                let mut sorted = members.clone();
-                sorted.sort();
-                sorted.hash(state);
-            }
-            RouteDemand::Omit(members) => {
-                let mut sorted = members.clone();
-                sorted.sort();
-                sorted.hash(state);
-            }
-        }
-    }
-}
+pub use verter_type_expr::{merge_route_demands, RouteDemand, RouteKeySet};
 
 /// Symbol space for routed resolution — type-space vs value-space.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -134,169 +98,13 @@ pub struct RoutedExternalDep {
     pub exported_name: String,
 }
 
-/// Merge two route demands conservatively.
-///
-/// Used when multiple consumers request the same symbol with different routes.
-/// The result is the narrowest demand that satisfies both requests.
-pub fn merge_route_demands(a: &RouteDemand, b: &RouteDemand) -> RouteDemand {
-    if a == b {
-        return a.clone();
-    }
-    match (a, b) {
-        (RouteDemand::Whole, _) | (_, RouteDemand::Whole) => RouteDemand::Whole,
-        (RouteDemand::MemberPath(pa), RouteDemand::MemberPath(pb)) => {
-            let common_prefix = pa
-                .iter()
-                .zip(pb.iter())
-                .take_while(|(left, right)| left == right)
-                .map(|(segment, _)| segment.clone())
-                .collect::<Vec<_>>();
-            if !common_prefix.is_empty() {
-                RouteDemand::MemberPath(common_prefix)
-            } else {
-                let mut members = Vec::new();
-                if let Some(first) = pa.first() {
-                    members.push(first.clone());
-                }
-                if let Some(first) = pb.first() {
-                    members.push(first.clone());
-                }
-                members.sort();
-                members.dedup();
-                if members.is_empty() {
-                    RouteDemand::Whole
-                } else {
-                    RouteDemand::Pick(members)
-                }
-            }
-        }
-        (RouteDemand::MemberPath(p), RouteDemand::Pick(ps))
-        | (RouteDemand::Pick(ps), RouteDemand::MemberPath(p)) => {
-            let mut merged = ps.clone();
-            if let Some(first) = p.first() {
-                merged.push(first.clone());
-            }
-            merged.sort();
-            merged.dedup();
-            if merged.is_empty() {
-                RouteDemand::Whole
-            } else {
-                RouteDemand::Pick(merged)
-            }
-        }
-        (RouteDemand::Pick(a), RouteDemand::Pick(b)) => {
-            let mut merged = a.clone();
-            merged.extend(b.iter().cloned());
-            merged.sort();
-            merged.dedup();
-            RouteDemand::Pick(merged)
-        }
-        (RouteDemand::Omit(a_omit), RouteDemand::MemberPath(p)) => {
-            // Omit + MemberPath: if the member is not omitted, it's still valid
-            if p.first().is_some_and(|first| !a_omit.contains(first)) {
-                RouteDemand::Omit(a_omit.clone())
-            } else {
-                RouteDemand::Whole
-            }
-        }
-        (RouteDemand::MemberPath(p), RouteDemand::Omit(b_omit)) => {
-            if p.first().is_some_and(|first| !b_omit.contains(first)) {
-                RouteDemand::Omit(b_omit.clone())
-            } else {
-                RouteDemand::Whole
-            }
-        }
-        // Omit + Pick, Omit + Omit: conservatively widen to Whole
-        _ => RouteDemand::Whole,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn route_demand_whole_is_default() {
-        assert_eq!(RouteDemand::default(), RouteDemand::Whole);
-    }
-
-    #[test]
-    fn route_demand_member_path_preserves_full_depth() {
-        let path = RouteDemand::MemberPath(vec!["variants".to_string(), "color".to_string()]);
-        match &path {
-            RouteDemand::MemberPath(segments) => {
-                assert_eq!(segments.len(), 2);
-                assert_eq!(segments[0], "variants");
-                assert_eq!(segments[1], "color");
-            }
-            _ => panic!("expected MemberPath"),
-        }
-    }
-
-    #[test]
-    fn route_demand_pick_hash_is_order_independent() {
-        use std::collections::hash_map::DefaultHasher;
-        fn hash_demand(d: &RouteDemand) -> u64 {
-            let mut h = DefaultHasher::new();
-            d.hash(&mut h);
-            h.finish()
-        }
-        let a = RouteDemand::Pick(vec!["b".to_string(), "a".to_string()]);
-        let b = RouteDemand::Pick(vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(hash_demand(&a), hash_demand(&b));
-    }
-
-    #[test]
-    fn merge_identical_demands_returns_same() {
-        let d = RouteDemand::MemberPath(vec!["foo".to_string()]);
-        assert_eq!(merge_route_demands(&d, &d), d);
-    }
-
-    #[test]
-    fn merge_member_paths_produces_pick() {
-        let a = RouteDemand::MemberPath(vec!["foo".to_string()]);
-        let b = RouteDemand::MemberPath(vec!["bar".to_string()]);
-        let merged = merge_route_demands(&a, &b);
-        assert_eq!(
-            merged,
-            RouteDemand::Pick(vec!["bar".to_string(), "foo".to_string()])
-        );
-    }
-
-    #[test]
-    fn merge_member_paths_with_common_prefix_keeps_prefix() {
-        let a = RouteDemand::MemberPath(vec!["variants".to_string(), "color".to_string()]);
-        let b = RouteDemand::MemberPath(vec!["variants".to_string(), "size".to_string()]);
-        let merged = merge_route_demands(&a, &b);
-        assert_eq!(
-            merged,
-            RouteDemand::MemberPath(vec!["variants".to_string()])
-        );
-    }
-
-    #[test]
-    fn merge_with_whole_always_returns_whole() {
-        let a = RouteDemand::Pick(vec!["x".to_string()]);
-        assert_eq!(
-            merge_route_demands(&a, &RouteDemand::Whole),
-            RouteDemand::Whole
-        );
-        assert_eq!(
-            merge_route_demands(&RouteDemand::Whole, &a),
-            RouteDemand::Whole
-        );
-    }
-
-    #[test]
-    fn merge_pick_and_member_extends_pick() {
-        let pick = RouteDemand::Pick(vec!["a".to_string(), "b".to_string()]);
-        let member = RouteDemand::MemberPath(vec!["c".to_string()]);
-        let merged = merge_route_demands(&pick, &member);
-        assert_eq!(
-            merged,
-            RouteDemand::Pick(vec!["a".to_string(), "b".to_string(), "c".to_string()])
-        );
-    }
+    // The `RouteDemand` shape/merge unit tests moved to
+    // `verter_type_expr::fact_witnesses` with the canonical type; only the
+    // session-owned carriers are tested here.
 
     #[test]
     fn symbol_space_defaults_to_type() {

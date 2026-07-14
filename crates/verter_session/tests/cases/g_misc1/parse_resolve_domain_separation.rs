@@ -20,10 +20,8 @@ use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::{ImportTarget, ShallowFileState};
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
-    )
+) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
 }
 
 fn build_with_import(
@@ -43,7 +41,7 @@ fn build_with_import(
     );
     let mut import_locals = FxHashSet::default();
     import_locals.insert(local.to_string());
-    let shallow = ShallowFileState::new_for_test_with_routing(
+    let shallow = ShallowFileState::routing_tables_only_for_test(
         [0u8; 16],
         FxHashMap::default(),
         Vec::new(),

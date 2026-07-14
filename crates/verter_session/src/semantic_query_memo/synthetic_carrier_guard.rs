@@ -1,59 +1,20 @@
-//! Synthetic-carrier recogniser for the `VueMacroElements` construction-site
-//! invariant.
+//! Synthetic-carrier recogniser — the single depth-safe walker that decides
+//! whether a `TypeExpr` tree carries a `TypeExpr::SyntheticSlotBinding`
+//! ordinal anywhere.
 //!
 //! Extracted to a sibling so the hot-path memo logic in the crate root stays
 //! under the Tier-2 module-size budget (the same reason `arena` / `interner` /
 //! `test_gates` live beside it).
 //!
-//! [`type_expr_contains_synthetic_slot_binding`] backs the checked invariant in
-//! [`SemanticGraphStore::insert_resolved_named_type`](super::SemanticGraphStore::insert_resolved_named_type):
-//! the parser-built macro-elements surface reaching the `VueMacroElements` slot
-//! must never carry a `TypeExpr::SyntheticSlotBinding` ordinal in any member
-//! `type_expr`, because the footprint encoder Debug-folds that arm and a carrier
-//! there would leak a store/generation-relative `SemanticNodeId` arena ordinal
-//! (`SyntheticCarrierKey.value_node`) into the otherwise content-only
-//! fingerprint.
+//! [`type_expr_contains_synthetic_slot_binding`] backs
+//! [`crate::component_meta_caches`]'s `classify_type_expr_shape_subject`: an
+//! expression NESTING a slot-binding carrier has no sound content-free
+//! shape-subject key, because the carrier holds a store/generation-
+//! relative `SemanticNodeId` arena ordinal
+//! (`SyntheticCarrierKey.value_node`) that must never enter a content-only
+//! fingerprint or cache identity.
 
 use verter_type_expr::{FunctionExpr, ObjectMember, TypeExpr, TypeParam};
-
-/// Checked invariant for the `VueMacroElements` construction site: the
-/// parser-built macro-elements surface must never carry a
-/// `TypeExpr::SyntheticSlotBinding` ordinal in any member type.
-///
-/// The caller passes every member `type_expr` (each an `Option<TypeExpr>` — the
-/// props' and the named call signatures' lowered types) and this hard-`assert!`s
-/// (NOT a release-erased `debug_assert!`, so the invariant holds in release too)
-/// that none contains a carrier — because the footprint encoder Debug-folds the
-/// `VueMacroElements` arm and a carrier there would leak a
-/// store/generation-relative `SemanticNodeId` arena ordinal
-/// (`SyntheticCarrierKey.value_node`) into the otherwise content-only
-/// fingerprint and break cross-host byte identity. The producer surface is
-/// provably carrier-free today, so this is a fixed-shape, no-allocation walk
-/// that never fires on the real tree.
-///
-/// Taking an iterator of `&Option<TypeExpr>` keeps this helper
-/// container-agnostic — it names only `TypeExpr`, never the macro-elements
-/// surface type, and is NOT a resolution engine / projector / surface walker.
-/// Called immediately before
-/// [`SemanticGraphStore::intern_node`](super::SemanticGraphStore::intern_node)
-/// in [`insert_resolved_named_type`](super::SemanticGraphStore::insert_resolved_named_type)
-/// so the enforcement is synchronous at the single construction site.
-pub(crate) fn assert_no_synthetic_carrier<'a>(
-    member_type_exprs: impl Iterator<Item = &'a Option<TypeExpr>>,
-) {
-    let carrier_member = member_type_exprs
-        .filter_map(Option::as_ref)
-        .any(type_expr_contains_synthetic_slot_binding);
-    assert!(
-        !carrier_member,
-        "the parser-built macro-elements surface reaching `VueMacroElements` \
-         must never carry a `TypeExpr::SyntheticSlotBinding` ordinal — the \
-         footprint encoder Debug-hashes it; a carrier here would leak a \
-         `SemanticNodeId` arena ordinal into the content fingerprint. This is a \
-         parser-built surface and structurally must not contain a \
-         session-minted slot-binding carrier.",
-    );
-}
 
 /// Returns `true` iff `expr` IS, or transitively CONTAINS, a
 /// [`TypeExpr::SyntheticSlotBinding`] carrier.

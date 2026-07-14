@@ -3827,6 +3827,7 @@ dependencies = [
  "tempfile",
  "verter_compiler",
  "verter_diagnostics",
+ "verter_parser",
  "verter_semantic",
  "verter_session",
  "verter_span",
@@ -3866,6 +3867,7 @@ dependencies = [
  "tempfile",
  "verter_audit",
  "verter_language",
+ "verter_macro_dto",
  "verter_parser",
  "verter_span",
  "web-time",
@@ -3909,6 +3911,7 @@ version = "0.0.1-beta.1"
 dependencies = [
  "log",
  "serde",
+ "serde_json",
  "verter_actions",
  "verter_diagnostics",
  "verter_protocol",
@@ -3954,12 +3957,25 @@ dependencies = [
  "verter_audit",
  "verter_diagnostics",
  "verter_ffi",
+ "verter_protocol",
  "verter_scheduler",
  "verter_semantic",
  "verter_session",
  "verter_span",
  "verter_type_runtime",
  "verter_workspace",
+]
+
+[[package]]
+name = "verter_macro_dto"
+version = "0.0.1-beta.1"
+dependencies = [
+ "serde_json",
+ "static_assertions",
+ "verter_no_storedspan",
+ "verter_no_typeexpr",
+ "verter_span",
+ "verter_type_expr",
 ]
 
 [[package]]
@@ -4104,10 +4120,13 @@ dependencies = [
  "prost-build",
  "protoc-bin-vendored",
  "quote",
+ "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "static_assertions",
  "syn 2.0.117",
  "tempfile",
+ "verter_no_typeexpr",
  "verter_semantic",
  "verter_span",
  "verter_type_expr",
@@ -4209,6 +4228,7 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_session_oracle_macro",
+ "verter_session_query",
  "verter_span",
  "verter_type_expr",
  "verter_type_expr_oxc",
@@ -4227,6 +4247,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "verter_session_query"
+version = "0.0.1-beta.1"
+dependencies = [
+ "serde_json",
+ "verter_type_expr",
 ]
 
 [[package]]

@@ -169,10 +169,22 @@ fn prepared_value_decl_to_value_decl_info(
         signatures: prepared.signatures.clone(),
         object_shape: prepared.object_shape.clone(),
         // The prepared decl carries the FULL member inventory (every member's
-        // `EnumMemberValue` — foldable literal or deferred-and-degraded), so the
+        // scalar — foldable literal or deferred-and-degraded domain), so the
         // round-trip into the importing env is a lossless copy: a deferred member
         // of an imported enum keeps both its NAME and its degraded domain.
         enum_members: prepared.enum_members.clone(),
+        // The prepared surface carries no member-NAME inventory fact; derive
+        // it from the member inventory — lossless for the statically-named
+        // set (both rails are producer-emitted from the same member walk).
+        enum_member_names: prepared.enum_members.as_ref().map(|fact| {
+            verter_type_expr::facts::EnumMemberNamesFact {
+                names: fact
+                    .members
+                    .iter()
+                    .map(|member| member.name.clone())
+                    .collect(),
+            }
+        }),
     }
 }
 
@@ -187,6 +199,22 @@ mod tests {
         AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
     };
     use verter_span::Span;
+    use verter_type_expr::facts::{
+        ClosedTypeFact, LeafTypeFact, SemanticTypeSource, ValueAnnotationClass,
+        ValueTypeAnnotationFact,
+    };
+
+    /// A direct annotation fact carrying the closed string-literal leaf —
+    /// the fact-vocabulary spelling of an authored `"lit"` annotation.
+    fn string_literal_annotation(lit: &str) -> ValueTypeAnnotationFact {
+        ValueTypeAnnotationFact {
+            typeof_alias_target: None,
+            classification: ValueAnnotationClass::Direct,
+            annotation: Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
+                LeafTypeFact::StringLiteral(lit.to_string()),
+            ))),
+        }
+    }
 
     #[derive(Default)]
     struct TestResolver {
@@ -251,10 +279,11 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
+            type_annotation: string_literal_annotation("dark"),
             signatures: Vec::new(),
             object_shape: None,
             enum_members: None,
+            enum_member_names: None,
         });
 
         let mut resolver = TestResolver::default();
@@ -303,7 +332,7 @@ mod tests {
                     ValueDeclKind::Const,
                 );
                 decl.exported_name = Some("theme".to_string());
-                decl.type_annotation = Some(verter_type_expr::TypeExpr::string_literal("dark"));
+                decl.type_annotation = string_literal_annotation("dark");
                 Arc::new(decl)
             });
 
@@ -344,10 +373,11 @@ mod tests {
             name: "themeConfig".to_string(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
+            type_annotation: string_literal_annotation("dark"),
             signatures: Vec::new(),
             object_shape: None,
             enum_members: None,
+            enum_member_names: None,
         });
 
         let mut resolver = TestResolver::default();
@@ -360,10 +390,11 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 3,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("local")),
+            type_annotation: string_literal_annotation("local"),
             signatures: Vec::new(),
             object_shape: None,
             enum_members: None,
+            enum_member_names: None,
         });
         materialize_imported_runtime_values_into_env(
             &imports,
@@ -376,8 +407,8 @@ mod tests {
         assert_eq!(
             env.value_symbols
                 .get("theme")
-                .and_then(|value| value.primary().type_annotation.clone()),
-            Some(verter_type_expr::TypeExpr::string_literal("local"))
+                .map(|value| value.primary().type_annotation.clone()),
+            Some(string_literal_annotation("local"))
         );
     }
 
@@ -412,19 +443,21 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
+            type_annotation: string_literal_annotation("dark"),
             signatures: Vec::new(),
             object_shape: None,
             enum_members: None,
+            enum_member_names: None,
         });
         dep_env.add_value(ValueDeclInfo {
             name: "helper".to_string(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("helper")),
+            type_annotation: string_literal_annotation("helper"),
             signatures: Vec::new(),
             object_shape: None,
             enum_members: None,
+            enum_member_names: None,
         });
 
         let mut resolver = TestResolver::default();
@@ -483,20 +516,22 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("dark")),
+            type_annotation: string_literal_annotation("dark"),
             signatures: Vec::new(),
             object_shape: None,
             enum_members: None,
+            enum_member_names: None,
         });
         let mut unused_env = EvalEnv::new();
         unused_env.add_value(ValueDeclInfo {
             name: "helper".to_string(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("helper")),
+            type_annotation: string_literal_annotation("helper"),
             signatures: Vec::new(),
             object_shape: None,
             enum_members: None,
+            enum_member_names: None,
         });
 
         let mut resolver = TestResolver::default();
@@ -562,24 +597,29 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("primary")),
+            type_annotation: string_literal_annotation("primary"),
             signatures: Vec::new(),
             object_shape: None,
             enum_members: None,
+            enum_member_names: None,
         });
         dep_env.add_value(ValueDeclInfo {
             name: "default".to_string(),
             declaration_id: 2,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_type_expr::TypeExpr::TypeOf(
-                verter_type_expr::ValueRef {
-                    path: vec!["theme".to_string()],
-                    type_args: Vec::new(),
-                },
-            )),
+            type_annotation: ValueTypeAnnotationFact {
+                typeof_alias_target: Some(verter_type_expr::facts::ValueDeclIdentityPart {
+                    canonical_id: Arc::from("/src/theme.ts"),
+                    symbol: Arc::from("theme"),
+                    member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
+                }),
+                classification: ValueAnnotationClass::TypeOfAlias,
+                annotation: None,
+            },
             signatures: Vec::new(),
             object_shape: None,
             enum_members: None,
+            enum_member_names: None,
         });
 
         let mut resolver = TestResolver::default();
@@ -603,8 +643,8 @@ mod tests {
         assert_eq!(
             env.value_symbols
                 .get("theme")
-                .and_then(|value| value.primary().type_annotation.clone()),
-            Some(verter_type_expr::TypeExpr::string_literal("primary")),
+                .map(|value| value.primary().type_annotation.clone()),
+            Some(string_literal_annotation("primary")),
             "default imports should hydrate the underlying exported value, not the synthetic default wrapper",
         );
     }
@@ -631,10 +671,11 @@ mod tests {
             name: "theme".to_string(),
             declaration_id: 1,
             kind: ValueDeclKind::Const,
-            type_annotation: Some(verter_type_expr::TypeExpr::string_literal("primary")),
+            type_annotation: string_literal_annotation("primary"),
             signatures: Vec::new(),
             object_shape: None,
             enum_members: None,
+            enum_member_names: None,
         });
 
         let mut resolver = TestResolver::default();
@@ -666,10 +707,11 @@ mod tests {
                 name: "defaults".to_string(),
                 declaration_id: 0,
                 kind: ValueDeclKind::Const,
-                type_annotation: Some(verter_type_expr::TypeExpr::string_literal("cached")),
+                type_annotation: string_literal_annotation("cached"),
                 signatures: Vec::new(),
                 object_shape: None,
                 enum_members: None,
+                enum_member_names: None,
             }),
         );
 
@@ -706,8 +748,8 @@ mod tests {
         assert_eq!(
             env.value_symbols
                 .get("defaults")
-                .and_then(|v| v.primary().type_annotation.clone()),
-            Some(verter_type_expr::TypeExpr::string_literal("cached")),
+                .map(|v| v.primary().type_annotation.clone()),
+            Some(string_literal_annotation("cached")),
             "runtime value materialization should use import.resolved_canonical_id directly"
         );
     }

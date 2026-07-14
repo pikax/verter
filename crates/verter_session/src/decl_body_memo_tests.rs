@@ -8,10 +8,10 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::decl_lowering::DeclLoweringService;
 use verter_type_expr::locators::{
     AugmentationBodyLocator, AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator,
     LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot, TypeParamBoundPosition,
+    TypeParamVisibility,
 };
 
 /// The canonical id every fixture memo in this module is keyed on.
@@ -88,38 +88,20 @@ fn single(body: &locator_deref::DerefedAuthoredBody) -> &TypeExpr {
     }
 }
 
-fn memo_for(source: &str) -> (DeclBodyMemo, Arc<MetaProvenance>) {
+fn memo_for(source: &str) -> (Arc<DeclBodyMemo>, Arc<MetaProvenance>) {
     memo_for_canonical(FIXTURE_CANONICAL, source)
 }
 
-fn memo_for_canonical(canonical: &str, source: &str) -> (DeclBodyMemo, Arc<MetaProvenance>) {
-    let eval_source: Arc<str> = Arc::from(source);
-    let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
-    assert!(!parsed.panicked, "fixture must parse");
-    let header_index = Arc::new(
-        verter_semantic::analysis::decl_headers::build_decl_header_index(&parsed.program, source),
-    );
-    let provenance = Arc::new(MetaProvenance::default());
-    let memo = DeclBodyMemo::new(
-        SnapshotKey {
-            canonical: Arc::from(canonical),
-            whole_hash: [7u8; 16],
-            parse_env_hash: [0u8; 16],
-        },
-        Arc::clone(&eval_source),
-        eval_source,
-        None,
-        oxc_span::SourceType::ts(),
-        Arc::new(DeclLoweringService::new()),
-        header_index,
-        Arc::clone(&provenance),
-        // No pre-acquired lease — the memo acquires its own lazily on the
-        // first body demand (the cold-index pinning path is exercised by
-        // the host integration tests).
-        None,
-    );
-    (memo, provenance)
+/// SERVICE-backed fixture memo — the production lazy shape: the memo comes
+/// out of a full [`ShallowFileState`] construction (which installs the ONE
+/// shared lens pair from the finished state), a live lowering service
+/// retains the parse, and nothing lowers until first demand.
+fn memo_for_canonical(canonical: &str, source: &str) -> (Arc<DeclBodyMemo>, Arc<MetaProvenance>) {
+    let (state, provenance) =
+        crate::resolver_core::ShallowFileState::service_backed_with_provenance_for_test(
+            canonical, source,
+        );
+    (Arc::clone(state.decl_bodies()), provenance)
 }
 
 fn bodies(p: &MetaProvenance) -> u64 {
@@ -313,7 +295,6 @@ fn jsdoc_typedef_carries_its_dep() {
 #[test]
 fn concurrent_first_touch_lowers_once() {
     let (memo, provenance) = memo_for(FIVE_DECLS);
-    let memo = Arc::new(memo);
     let barrier = Arc::new(std::sync::Barrier::new(8));
     let mut handles = Vec::new();
     for _ in 0..8 {
@@ -355,7 +336,6 @@ fn concurrent_first_touch_lowers_once() {
 fn concurrent_broken_lease_demand_every_waiter_sees_lease_miss() {
     for _round in 0..4 {
         let (memo, _provenance) = memo_for(FIVE_DECLS);
-        let memo = Arc::new(memo);
 
         // Pin the lease with one successful demand, then break the retained
         // snapshot out-of-band so every subsequent demand lease-misses.
@@ -619,8 +599,9 @@ fn merged_same_name_enum_resolves_all_members_in_both_spaces_through_the_memo() 
         .enum_members
         .as_ref()
         .expect("value body carries enum_members")
+        .members
         .iter()
-        .map(|(name, _)| name.as_str())
+        .map(|member| member.name.as_str())
         .collect();
     assert_eq!(
         names,
@@ -628,23 +609,36 @@ fn merged_same_name_enum_resolves_all_members_in_both_spaces_through_the_memo() 
         "merged enum value-space members must union all contributors in source order"
     );
 
-    // Type space: the value-derived union, through `type_decl`.
+    // Type space, through `type_decl`: the merge-aware body must retain
+    // BOTH contributor body slots (a last-wins `merged_body()` fold would
+    // collapse to one slot and drop the first declaration's `A`/`B` arms
+    // from the value-derived projected union).
     let ty = memo.type_decl("E").expect("enum type body resolves");
-    match ty.body.primary() {
-        TypeExpr::Union(types) => {
-            assert_eq!(
-                types.len(),
-                4,
-                "type union must carry all 4 member literals"
-            );
-            for literal in [1.0, 2.0, 3.0, 4.0] {
-                assert!(
-                    types.contains(&TypeExpr::number_literal(literal)),
-                    "type union must contain literal {literal}; got {types:?}"
-                );
-            }
-        }
-        other => panic!("merged enum type body must be a 4-arm union, got {other:?}"),
+    assert_eq!(
+        ty.body.contributors().len(),
+        2,
+        "merged enum TYPE body must retain BOTH same-name contributor slots \
+         (a last-wins fold drops the first declaration); got {:?}",
+        ty.body
+    );
+    // The projected-type union derives from the merged VALUE rail: the
+    // folded member scalars must carry all 4 member literals in source
+    // order — the exact arms the value-derived type union projects.
+    let scalar_values: Vec<&verter_type_expr::facts::EnumScalar> = value
+        .enum_members
+        .as_ref()
+        .expect("value body carries enum_members")
+        .members
+        .iter()
+        .map(|member| &member.value)
+        .collect();
+    for (index, literal) in ["1", "2", "3", "4"].iter().enumerate() {
+        assert_eq!(
+            scalar_values[index],
+            &verter_type_expr::facts::EnumScalar::Number((*literal).to_string()),
+            "merged enum member {index} must fold to the numeric literal {literal}; \
+             got {scalar_values:?}"
+        );
     }
 }
 
@@ -663,19 +657,20 @@ fn raw_surfaces_merge_overload_groups_for_the_demanded_name() {
     assert!(none.is_empty());
 }
 
-#[test]
-fn seeded_memo_matches_lazy_fold() {
-    let source =
-        "interface Merged { a: string }\ninterface Merged { b: number }\nconst v = { k: 1 };\n";
+/// Seed a memo from an already-built env for `source`. Only ENUM type cells
+/// (whose fingerprint derives from scalar-union arms — lens-independent) and
+/// value cells may be seeded; a non-enum type cell fails loudly inside
+/// `lowered_type_decl_from_group` (see `seeded_non_enum_merged_type_cell_fails_loudly`).
+fn seeded_memo_for(source: &str) -> DeclBodyMemo {
     let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(source);
     let analysis =
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default();
+        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default();
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
     let header_index = Arc::new(
         verter_semantic::analysis::decl_headers::build_decl_header_index(&parsed.program, source),
     );
-    let seeded = DeclBodyMemo::seeded_from_env(
+    DeclBodyMemo::seeded_from_env(
         SnapshotKey {
             canonical: Arc::from("/ws/seeded.ts"),
             whole_hash: [9u8; 16],
@@ -684,17 +679,178 @@ fn seeded_memo_matches_lazy_fold() {
         &env,
         &analysis,
         header_index,
-    );
+    )
+}
 
-    let merged = seeded.type_decl("Merged").expect("seeded entry");
-    assert!(merged.body.is_merged());
+#[test]
+fn seeded_memo_matches_lazy_fold() {
+    // An enum is the ONE type-space shape a seeded (locator-only,
+    // transient-less) env may fingerprint: its `body_hash` derives from the
+    // scalar-union arms, which carry no `Ref` sites — the cross-decl lens is
+    // never consulted, so the seed-time `UnresolvedLens` fingerprint must be
+    // BYTE-IDENTICAL to the lazy fold's `ShallowLens` fingerprint.
+    let source = "enum E { A = 1, B = 2 }\nconst v = { k: 1 };\n";
+    let seeded = seeded_memo_for(source);
+    let (lazy, _) = memo_for(source);
+
+    let seeded_decl = seeded.type_decl("E").expect("seeded enum type entry");
+    let lazy_decl = lazy.type_decl("E").expect("lazy enum type entry");
     assert_eq!(
-        merged.body.merged_member_names(),
-        vec!["a".to_string(), "b".to_string()]
+        seeded_decl.body_hash, lazy_decl.body_hash,
+        "enum seed-time fingerprint (UnresolvedLens) must equal the lazy \
+         fold's (ShallowLens) — the arms are lens-independent"
     );
     let value = seeded.value_decl("v").expect("seeded value entry");
     assert!(value.object_shape.is_some());
     assert!(seeded.whole_env_materialized(), "seeding pre-sets the env");
+}
+
+#[test]
+fn lowered_value_decl_copies_narrowed_facts_and_fingerprints_at_lowering_time() {
+    // The lazily-served VALUE record carries narrowed FACTS copied off the
+    // registered group (never re-derived from a raw body): the single-hop
+    // `typeof base` peel target rides `type_annotation.typeof_alias_target`
+    // (the Seam-1 consumer read), and the value-body fingerprint is computed
+    // AT LOWERING TIME from the TRANSIENT lowered annotation. Dropping the
+    // per-name value-transient retention would produce the DEGRADED
+    // (`budget_exceeded = true`) fallback instead — this test fails on that
+    // regression. (Two distinct producer mechanisms, no confinement claim:
+    // the DEGRADED fallback is forced by the session fold
+    // (`lowered_value_decl_from_group`), VALUE-only; the shared encoder
+    // separately sets `budget_exceeded` on a REAL deep annotation via its
+    // `MAX_HASH_DEPTH` cap, type and value alike; the parse-domain
+    // admission's bit-drop is pre-existing — see
+    // `ValueBodyHashFact::budget_exceeded`.)
+    let source = "const base: { a: number } = { a: 1 };\nconst alias: typeof base = base;\n";
+    let (memo, _) = memo_for(source);
+
+    let alias = memo.value_decl("alias").expect("alias value body resolves");
+    assert!(matches!(
+        alias.type_annotation.classification,
+        ValueAnnotationClass::TypeOfAlias
+    ));
+    let target = alias
+        .type_annotation
+        .typeof_alias_target
+        .as_ref()
+        .expect("single-hop non-self `typeof base` mints the peel-target fact");
+    assert_eq!(target.symbol.as_ref(), "base");
+
+    let base = memo.value_decl("base").expect("base value body resolves");
+    assert!(
+        !alias.body_hash.budget_exceeded && !base.body_hash.budget_exceeded,
+        "the lazy path fingerprints the TRANSIENT annotation — never the \
+         degraded transient-less fallback"
+    );
+    assert_ne!(
+        alias.body_hash.hash, base.body_hash.hash,
+        "the fingerprint observes the annotation BODY, so distinct \
+         annotations must fingerprint distinctly"
+    );
+}
+
+#[test]
+fn seeded_annotated_value_cell_degrades_its_fingerprint_honestly() {
+    // A seeded (transient-less) env cannot fingerprint an annotated value's
+    // body — the record must carry the DEGRADED `budget_exceeded` outcome
+    // (an honest bit, never a fabricated fingerprint that would collide two
+    // different annotations), forced by the session fold
+    // (`lowered_value_decl_from_group`) — a VALUE-only mechanism, distinct
+    // from the shared encoder's `MAX_HASH_DEPTH` depth-cap; the type-side
+    // transient-less non-enum fold fails loudly instead (see
+    // `seeded_non_enum_merged_type_cell_fails_loudly`). Pre-existing
+    // admission semantics: see `ValueBodyHashFact::budget_exceeded`. An
+    // enum stays FULL-fidelity: its fingerprint derives entirely from the
+    // folded member facts.
+    let source = "const c: { a: 1 } = { a: 1 };\nenum E { A = 1 }\n";
+    let seeded = seeded_memo_for(source);
+
+    let annotated = seeded.value_decl("c").expect("seeded annotated value");
+    assert!(
+        annotated.body_hash.budget_exceeded,
+        "a transient-less annotated value must degrade, not fabricate"
+    );
+    let enum_value = seeded.value_decl("E").expect("seeded enum value");
+    assert!(
+        !enum_value.body_hash.budget_exceeded,
+        "an enum fingerprints fully from its folded member facts"
+    );
+
+    let (lazy, _) = memo_for(source);
+    let lazy_enum = lazy.value_decl("E").expect("lazy enum value");
+    assert_eq!(
+        enum_value.body_hash, lazy_enum.body_hash,
+        "the enum value-body fingerprint is fact-derived, so the seeded and \
+         lazy folds must agree byte-for-byte"
+    );
+}
+
+/// CHARACTERIZATION of the degraded (transient-less/seeded) value fold — the
+/// ACTUAL behavior, not an admission fence (none exists at the shared
+/// parse-domain body-fact admission; the bit-drop there is the pre-existing
+/// carry-forward recorded in the deferral doc): the degraded fingerprint is
+/// DETERMINISTIC with `budget_exceeded` stored honestly on the memo fact
+/// (forced by the session fold `lowered_value_decl_from_group`, VALUE-only),
+/// and FOR THIS SHALLOW FIXTURE the parse-domain fact rail's reader
+/// (`compat_value_body_hash_input` over the demand-lowered FILE memo, the
+/// one memo `LazyBodyFactSource` is wired to) serves the NON-degraded
+/// transient-fingerprinted record. (No confinement claim — the OTHER,
+/// distinct producer mechanism reaches the rail too: a REAL deep annotation
+/// on the file memo sets `budget_exceeded` honestly via the shared encoder's
+/// `MAX_HASH_DEPTH` cap, type and value alike, and reaches the rail with the
+/// bit set — dropped at the pre-existing admission.)
+#[test]
+fn degraded_seeded_value_fingerprint_is_deterministic_and_honest() {
+    let source = "const c: { a: 1 } = { a: 1 };\n";
+
+    // DETERMINISTIC + honest: two independent transient-less folds of the
+    // same source mint the SAME degraded fingerprint, bit set.
+    let seeded_a = seeded_memo_for(source);
+    let seeded_b = seeded_memo_for(source);
+    let a = seeded_a.value_decl("c").expect("seeded annotated value");
+    let b = seeded_b.value_decl("c").expect("seeded annotated value");
+    assert!(
+        a.body_hash.budget_exceeded,
+        "a transient-less annotated value fold degrades (bit stored honestly)"
+    );
+    assert_eq!(
+        a.body_hash, b.body_hash,
+        "the degraded fingerprint is deterministic — content-addressed \
+         invalidation stays sound for seeded records"
+    );
+
+    // FIXTURE-SCOPE: the fact-rail reader reads the demand-lowered FILE
+    // memo, whose fold retained the annotation transient — non-degraded for
+    // this shallow source, and a DIFFERENT fingerprint from the degraded
+    // transient-less one (so a degraded record standing in for the real one
+    // would be observable).
+    let (lazy, _) = memo_for(source);
+    let lowered = lazy.value_decl("c").expect("lazy annotated value");
+    let rail = crate::fact_emission::compat_value_body_hash_input(&lowered);
+    assert!(
+        !rail.budget_exceeded,
+        "this fixture's file-memo record is non-degraded (a shallow \
+         annotation fingerprints without hitting the shared encoder's \
+         depth cap)"
+    );
+    assert_ne!(
+        rail.hash, a.body_hash.hash,
+        "the degraded fingerprint differs from the transient-fingerprinted \
+         one (the annotation body is observed only by the real fold)"
+    );
+}
+
+/// A NON-ENUM seeded type cell has NO retained transient lowered bodies to
+/// fingerprint — the fold must fail loudly (fail-lowering) instead of
+/// hashing a fabricated fingerprint. The MERGED branch is the discriminating
+/// case: before the loud guard, `Merged(&[])` silently minted an
+/// empty-object fingerprint (the single-body branch already panicked via its
+/// `expect`).
+#[test]
+#[should_panic(expected = "never a fabricated fingerprint")]
+fn seeded_non_enum_merged_type_cell_fails_loudly() {
+    let source = "interface Merged { a: string }\ninterface Merged { b: number }\n";
+    let _ = seeded_memo_for(source);
 }
 
 /// Concurrent TYPE+VALUE demand of one merged name (`class K {}` — or
@@ -739,7 +895,6 @@ fn concurrent_type_and_value_demand_of_merged_name_does_not_deadlock() {
     }
 
     let (memo, _) = memo_for(&src);
-    let memo = Arc::new(memo);
     let barrier = Arc::new(std::sync::Barrier::new(NAMES * 2));
     let (tx, rx) = mpsc::channel::<bool>();
 
@@ -1004,11 +1159,13 @@ fn locator_deref_distinguishes_constraint_from_default_body() {
     );
 }
 
-/// The lexical env of a bound at ordinal `i` is the PREFIX of parameters
-/// declared BEFORE `i` — never the full list. `U extends keyof T` (U at
-/// ordinal 1) binds the prior sibling `T`, never `U` itself or later params.
+/// A constraint bound's deref env is the FULL sibling list plus the
+/// position-exact visibility — TS constraints may reference later siblings
+/// and self, so a pre-truncated prior-sibling prefix cannot express the
+/// lexical view. `U extends keyof T` (U at ordinal 1) carries `[T, U]`
+/// with `Constraint { ordinal: 1 }`.
 #[test]
-fn locator_deref_binds_only_prior_sibling_type_params() {
+fn locator_deref_constraint_env_is_full_sibling_list() {
     let (memo, _) = memo_for("type Foo<T, U extends keyof T> = { x: T; y: U };\n");
     let derefed = memo
         .deref_locator_body(&type_body_locator(
@@ -1024,15 +1181,22 @@ fn locator_deref_binds_only_prior_sibling_type_params() {
         "U's constraint is `keyof T`; got {:?}",
         derefed.shape
     );
+    let names: Vec<&str> = derefed
+        .type_parameters
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
     assert_eq!(
-        derefed.type_parameters.len(),
-        1,
-        "the bound at ordinal 1 binds ONLY the prior sibling prefix `[T]` — a \
-         full-list env over-binds `U` itself (a soundness defect)"
+        names,
+        ["T", "U"],
+        "the bound env carries the FULL sibling list — a prefix-truncated env \
+         cannot bind a constraint's later-sibling / self references"
     );
     assert_eq!(
-        derefed.type_parameters[0].name, "T",
-        "the sole bound param is the prior sibling `T`"
+        derefed.visibility,
+        TypeParamVisibility::Constraint { ordinal: 1 },
+        "the deref carries the bound's position-exact visibility so the \
+         binder-frame constructor reconstructs the TS lexical view"
     );
 }
 
@@ -1167,9 +1331,15 @@ fn locator_deref_descends_into_selected_type_param_bound() {
         "the constraint object's member `a` value is `string`; got {:?}",
         derefed.shape
     );
-    assert!(
-        derefed.type_parameters.is_empty(),
-        "the ordinal-0 bound binds no prior sibling params (empty prefix)"
+    // The env is the FULL sibling list even at ordinal 0 — an ordinal-0
+    // CONSTRAINT may reference the parameter itself (F-bounded), so the
+    // list is `[T]` with the position-exact visibility, never an empty
+    // prior-sibling prefix.
+    assert_eq!(derefed.type_parameters.len(), 1);
+    assert_eq!(derefed.type_parameters[0].name, "T");
+    assert_eq!(
+        derefed.visibility,
+        TypeParamVisibility::Constraint { ordinal: 0 }
     );
 }
 
@@ -1373,11 +1543,11 @@ fn aug_module_type_param_default_distinct_from_constraint() {
     assert_ne!(single(&constraint), single(&default));
 }
 
-/// The lexical env of an augmentation-scoped bound at ordinal `i` is the
-/// PREFIX of parameters declared before it — `U extends keyof T` binds the
-/// prior sibling `T`, never `U` itself.
+/// An augmentation-scoped constraint bound's deref env is the FULL sibling
+/// list plus the position-exact visibility — the same TS lexical view as a
+/// top-level decl header (one shared navigator, no augmentation fork).
 #[test]
-fn aug_module_type_param_prefix_env_for_sibling_bound() {
+fn aug_module_type_param_constraint_env_is_full_sibling_list() {
     let source =
         "declare module \"vue\" {\n  interface Foo<T, U extends keyof T> { x: T; y: U }\n}\n";
     let (memo, _) = memo_for(source);
@@ -1396,12 +1566,57 @@ fn aug_module_type_param_prefix_env_for_sibling_bound() {
         "U's constraint is `keyof T`; got {:?}",
         derefed.shape
     );
+    let names: Vec<&str> = derefed
+        .type_parameters
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
     assert_eq!(
-        derefed.type_parameters.len(),
-        1,
-        "the bound at ordinal 1 binds ONLY the prior sibling prefix `[T]`"
+        names,
+        ["T", "U"],
+        "the augmentation bound env carries the FULL sibling list, exactly as \
+         a top-level decl header's bound does"
     );
-    assert_eq!(derefed.type_parameters[0].name, "T");
+    assert_eq!(
+        derefed.visibility,
+        TypeParamVisibility::Constraint { ordinal: 1 }
+    );
+}
+
+/// A DEFAULT bound's deref env carries the same full sibling list but the
+/// `Default` visibility — the session-phase frame constructor renders prior
+/// siblings usable and self / later siblings shadow-forbidden from it. A
+/// deref that collapsed the two positions onto one visibility could not
+/// express TS's asymmetric constraint/default scoping.
+#[test]
+fn locator_deref_default_env_carries_default_visibility() {
+    let (memo, _) = memo_for("type Foo<T, U = T> = { x: T; y: U };\n");
+    let derefed = memo
+        .deref_locator_body(&type_body_locator(
+            "Foo",
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 1,
+                position: TypeParamBoundPosition::Default,
+            }],
+        ))
+        .expect("U's default `T` derefs");
+    assert!(
+        matches!(single(&derefed), TypeExpr::Ref { name, .. } if name.as_ref() == "T"),
+        "U's default is the authored `T` reference; got {:?}",
+        derefed.shape
+    );
+    let names: Vec<&str> = derefed
+        .type_parameters
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(names, ["T", "U"]);
+    assert_eq!(
+        derefed.visibility,
+        TypeParamVisibility::Default { ordinal: 1 },
+        "a default bound derefs with the DISTINCT Default visibility — never \
+         the constraint view"
+    );
 }
 
 /// After selecting an augmentation-scoped bound, the REMAINING path navigates

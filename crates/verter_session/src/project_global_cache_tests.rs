@@ -915,10 +915,6 @@ fn request_view_is_absent_from_crate_sources() {
             "resolver_core/component_meta_registry.rs",
             include_str!("resolver_core/component_meta_registry.rs"),
         ),
-        (
-            "resolver_core/type_expansion_verter.rs",
-            include_str!("resolver_core/type_expansion_verter.rs"),
-        ),
         ("resolver_store.rs", include_str!("resolver_store.rs")),
         ("lib.rs", include_str!("lib.rs")),
     ];
@@ -1423,122 +1419,19 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
     assert!(matches!(warm.value, QueryResult::Value(_)));
 }
 
-/// Vue macro resolution entries written into `SemanticGraphStore` under
-/// `HostResolvedNamedTypeKey` are per-canonical-scoped — evicting the
-/// canonical through `ProjectTypeStore::evict_canonical` drops every
-/// entry for that canonical while leaving entries for unrelated
-/// canonicals warm.
-#[test]
-fn evict_canonical_drops_resolved_named_types_for_that_canonical_only() {
-    use crate::semantic_query::HostResolvedNamedTypeKey;
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-    use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
-
-    let host = host();
-    let store = host.project_type_store();
-    let graph = store.semantic_graph();
-
-    let mk = |canonical: &str, name: &str| HostResolvedNamedTypeKey {
-        canonical_id: Arc::from(canonical),
-        whole_hash: [1u8; 16],
-        resolve_env_hash: Default::default(),
-        type_env_hash: Default::default(),
-        lib_env_hash: Default::default(),
-        project_identity: 0,
-        inner: ResolvedNamedTypeCacheKey {
-            name: name.as_bytes().to_vec().into_boxed_slice(),
-            surface: None,
-            base_offset: 0,
-            from_root_body: true,
-            companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
-            type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
-        },
-    };
-
-    let key_a = mk("/w/a.ts", "Foo");
-    let key_b = mk("/w/b.ts", "Bar");
-    let gen = graph.named_type_generation();
-    graph
-        .insert_resolved_named_type(key_a.clone(), Arc::new(ResolvedElements::default()), gen)
-        .expect("current-generation insert is accepted");
-    graph
-        .insert_resolved_named_type(key_b.clone(), Arc::new(ResolvedElements::default()), gen)
-        .expect("current-generation insert is accepted");
-    assert_eq!(graph.resolved_named_type_count(), 2);
-
-    store.evict_canonical("/w/a.ts");
-
-    assert!(graph.get_resolved_named_type(&key_a).is_none());
-    assert!(graph.get_resolved_named_type(&key_b).is_some());
-    assert_eq!(graph.resolved_named_type_count(), 1);
-}
-
-/// Project-generation bumps clear every Vue macro resolution entry — a
-/// tsconfig / SDK / workspace-folder change can shift cross-file
-/// resolution, so entries must not survive.
-#[test]
-fn bump_project_generation_clears_resolved_named_types() {
-    use crate::semantic_query::HostResolvedNamedTypeKey;
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-    use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
-
-    let host = host();
-    let store = host.project_type_store();
-    let graph = store.semantic_graph();
-    let key = HostResolvedNamedTypeKey {
-        canonical_id: Arc::from("/w/a.ts"),
-        whole_hash: [1u8; 16],
-        resolve_env_hash: Default::default(),
-        type_env_hash: Default::default(),
-        lib_env_hash: Default::default(),
-        project_identity: 0,
-        inner: ResolvedNamedTypeCacheKey {
-            name: b"Foo".to_vec().into_boxed_slice(),
-            surface: None,
-            base_offset: 0,
-            from_root_body: true,
-            companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
-            type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
-        },
-    };
-    graph
-        .insert_resolved_named_type(
-            key.clone(),
-            Arc::new(ResolvedElements::default()),
-            graph.named_type_generation(),
-        )
-        .expect("current-generation insert is accepted");
-    assert_eq!(graph.resolved_named_type_count(), 1);
-
-    store.bump_project_generation_and_evict();
-    assert_eq!(
-        graph.resolved_named_type_count(),
-        0,
-        "project-generation bumps must drop every Vue macro resolution entry"
-    );
-    assert!(graph.get_resolved_named_type(&key).is_none());
-}
-
 // ──────────────────────────────────────────────────────────────────────────
-// VueMacroElements ordinal-leak: construction-site checked invariant.
+// Synthetic-carrier recogniser: `type_expr_contains_synthetic_slot_binding`.
 //
-// `SemanticGraphStore::insert_resolved_named_type` enforces a runtime
-// invariant BEFORE interning a `VueMacroElements` node: the incoming
-// parser-built macro-elements surface must never carry a
-// `TypeExpr::SyntheticSlotBinding` ordinal in any member `type_expr`, because
-// the footprint encoder Debug-folds that arm and a carrier there would leak a
-// store/generation-relative `SemanticNodeId` arena ordinal
-// (`SyntheticCarrierKey.value_node`) into the otherwise content-only
-// fingerprint. These tests prove the invariant FIRES on a carrier (directly
-// and nested), does NOT false-positive on a carrier-free surface, and that the
-// `type_expr_contains_synthetic_slot_binding` recogniser descends nested
-// containers. Pre-fix (no construction-site check) the insert silently
-// interned a carrier-bearing surface, so each `#[should_panic]` case below
-// FAILS against the pre-fix tree and PASSES post-fix — the discriminating
-// regression for the invariant.
+// The shared depth-safe walker backs `classify_type_expr_shape_subject` in
+// `component_meta_caches` — an expression NESTING a
+// `TypeExpr::SyntheticSlotBinding` holds a store/generation-relative
+// `SemanticNodeId` arena ordinal (`SyntheticCarrierKey.value_node`) and has
+// no sound content-free shape-subject cache key. These tests prove the
+// recogniser detects a carrier directly and buried under nested containers,
+// does NOT false-positive on a carrier-free surface, and stays depth-safe.
 
 /// Build a synthetic slot-binding carrier `TypeExpr` whose `value_node`
-/// ordinal is the leak the construction-site invariant forbids.
+/// ordinal is the leak the recogniser detects.
 #[cfg(test)]
 fn carrier_type_expr() -> verter_type_expr::TypeExpr {
     verter_type_expr::TypeExpr::synthetic_slot_binding(verter_type_expr::SyntheticCarrierKey {
@@ -1550,181 +1443,6 @@ fn carrier_type_expr() -> verter_type_expr::TypeExpr {
         // value the footprint encoder must never fold.
         value_node: 4242,
     })
-}
-
-/// Build a single `ResolvedProp` whose `type_expr` is `te` (every other field
-/// is a benign placeholder). Used to thread a carrier (directly or buried)
-/// into the macro-elements surface the insert receives.
-#[cfg(test)]
-fn prop_with_type_expr(
-    name: &str,
-    te: verter_type_expr::TypeExpr,
-) -> verter_compiler::utils::oxc::script::type_surface::ResolvedProp {
-    use verter_compiler::utils::oxc::script::type_surface::{
-        ResolvedMemberVisibility, ResolvedProp,
-    };
-    ResolvedProp {
-        span: verter_span::Span::new(0, 1),
-        key: verter_span::Span::new(0, 1),
-        key_name: Some(name.to_string()),
-        optional: false,
-        types: Vec::new(),
-        visibility: ResolvedMemberVisibility::Public,
-        type_span: None,
-        type_text: None,
-        map_local: false,
-        span_is_absolute: true,
-        type_expr: Some(te),
-        type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/w/a.ts")),
-        declared_in_macro_type_arg: false,
-    }
-}
-
-/// A `HostResolvedNamedTypeKey` for the synthetic insert tests.
-#[cfg(test)]
-fn synthetic_key() -> crate::semantic_query::HostResolvedNamedTypeKey {
-    use crate::semantic_query::HostResolvedNamedTypeKey;
-    use verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey;
-    HostResolvedNamedTypeKey {
-        canonical_id: Arc::from("/w/a.ts"),
-        whole_hash: [7u8; 16],
-        resolve_env_hash: Default::default(),
-        type_env_hash: Default::default(),
-        lib_env_hash: Default::default(),
-        project_identity: 0,
-        inner: ResolvedNamedTypeCacheKey {
-            name: b"Foo".to_vec().into_boxed_slice(),
-            surface: None,
-            base_offset: 0,
-            from_root_body: true,
-            companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
-            type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
-        },
-    }
-}
-
-/// A `TypeExpr::SyntheticSlotBinding` carried DIRECTLY by a prop's `type_expr`
-/// is rejected by the construction-site invariant — the insert panics before
-/// interning the `VueMacroElements` node. Pre-fix this insert silently
-/// succeeded.
-#[test]
-#[should_panic(expected = "must never carry a `TypeExpr::SyntheticSlotBinding` ordinal")]
-fn insert_resolved_named_type_rejects_direct_synthetic_carrier() {
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-
-    let host = host();
-    let graph = host.project_type_store().semantic_graph();
-    let elements = ResolvedElements {
-        props: vec![prop_with_type_expr("row", carrier_type_expr())],
-        ..ResolvedElements::default()
-    };
-    // Passes the generation pre-filter so execution reaches the invariant.
-    let _ = graph.insert_resolved_named_type(
-        synthetic_key(),
-        Arc::new(elements),
-        graph.named_type_generation(),
-    );
-}
-
-/// A `TypeExpr::SyntheticSlotBinding` BURIED inside a `Union` in a prop's
-/// `type_expr` is still rejected — proving the recogniser descends nested
-/// containers, not just the root. Pre-fix this insert silently succeeded.
-#[test]
-#[should_panic(expected = "must never carry a `TypeExpr::SyntheticSlotBinding` ordinal")]
-fn insert_resolved_named_type_rejects_nested_synthetic_carrier() {
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-    use verter_type_expr::{PrimitiveName, TypeExpr};
-
-    let host = host();
-    let graph = host.project_type_store().semantic_graph();
-    // `string | (SyntheticSlotBinding) | number` — the carrier is the middle
-    // member of a union, and the union is wrapped in an array element, so
-    // detection must walk through both the array and the union.
-    let nested = TypeExpr::Array {
-        element: std::sync::Arc::new(TypeExpr::Union(std::sync::Arc::from(vec![
-            TypeExpr::Primitive(PrimitiveName::String),
-            carrier_type_expr(),
-            TypeExpr::Primitive(PrimitiveName::Number),
-        ]))),
-        readonly: false,
-    };
-    let elements = ResolvedElements {
-        props: vec![prop_with_type_expr("rows", nested)],
-        ..ResolvedElements::default()
-    };
-    let _ = graph.insert_resolved_named_type(
-        synthetic_key(),
-        Arc::new(elements),
-        graph.named_type_generation(),
-    );
-}
-
-/// The invariant also scans `call_signatures[].type_expr`, not only `props` —
-/// a carrier reaching the macro-elements surface via a named call signature is
-/// rejected too. Pre-fix this insert silently succeeded.
-#[test]
-#[should_panic(expected = "must never carry a `TypeExpr::SyntheticSlotBinding` ordinal")]
-fn insert_resolved_named_type_rejects_carrier_in_call_signature() {
-    use verter_compiler::utils::oxc::script::type_surface::{
-        ResolvedCallPayloadForm, ResolvedElements, ResolvedNamedCallSignature,
-    };
-
-    let host = host();
-    let graph = host.project_type_store().semantic_graph();
-    let signature = ResolvedNamedCallSignature {
-        span: verter_span::Span::new(0, 1),
-        name: "save".to_string(),
-        name_span: None,
-        signature: ResolvedCallPayloadForm::Tuple {
-            tuple_text: "[row: Row]".to_string(),
-        },
-        map_local: false,
-        span_is_absolute: true,
-        type_expr: Some(carrier_type_expr()),
-        type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/w/a.ts")),
-    };
-    let elements = ResolvedElements {
-        call_signatures: vec![signature],
-        ..ResolvedElements::default()
-    };
-    let _ = graph.insert_resolved_named_type(
-        synthetic_key(),
-        Arc::new(elements),
-        graph.named_type_generation(),
-    );
-}
-
-/// A carrier-free macro-elements surface (ordinary member `type_expr`s) inserts
-/// cleanly — proving the invariant does NOT over-fire (no false positive). This
-/// is the ACCEPT complement to the rejection cases.
-#[test]
-fn insert_resolved_named_type_accepts_carrier_free_surface() {
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-    use verter_type_expr::{PrimitiveName, TypeExpr};
-
-    let host = host();
-    let graph = host.project_type_store().semantic_graph();
-    let elements = ResolvedElements {
-        props: vec![
-            prop_with_type_expr("label", TypeExpr::Primitive(PrimitiveName::String)),
-            prop_with_type_expr(
-                "count",
-                TypeExpr::Union(std::sync::Arc::from(vec![
-                    TypeExpr::Primitive(PrimitiveName::Number),
-                    TypeExpr::Primitive(PrimitiveName::Undefined),
-                ])),
-            ),
-        ],
-        ..ResolvedElements::default()
-    };
-    graph
-        .insert_resolved_named_type(
-            synthetic_key(),
-            Arc::new(elements),
-            graph.named_type_generation(),
-        )
-        .expect("a carrier-free macro-elements surface is interned normally");
-    assert_eq!(graph.resolved_named_type_count(), 1);
 }
 
 /// Unit-test the recogniser directly: `true` for a direct carrier and for a
@@ -1800,73 +1518,6 @@ fn function_with_type_param(
             default: default.map(StdArc::new),
         }],
     )
-}
-
-/// A `TypeExpr::SyntheticSlotBinding` reached ONLY through a function type's own
-/// `<T extends SyntheticSlotBinding>` constraint is rejected by the
-/// construction-site invariant — the insert panics before interning the
-/// `VueMacroElements` node.
-///
-/// Discriminating regression: the parameters-and-return-only predecessor
-/// predicate walked a `FunctionExpr`'s `parameters` + `return_type` only, NOT
-/// its `type_parameters`, so the carrier escaped detection and the insert
-/// silently succeeded ("did not panic"). Post-fix the `type_parameters`
-/// constraint is descended, so the invariant fires. This case FAILS against the
-/// pre-fix tree and PASSES post-fix.
-#[test]
-#[should_panic(expected = "must never carry a `TypeExpr::SyntheticSlotBinding` ordinal")]
-fn insert_resolved_named_type_rejects_carrier_in_function_type_param_constraint() {
-    use std::sync::Arc as StdArc;
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-    use verter_type_expr::TypeExpr;
-
-    let host = host();
-    let graph = host.project_type_store().semantic_graph();
-    // `(...) => unknown` whose sole type parameter is `<T extends Carrier>`.
-    let func_with_constrained_param = TypeExpr::Function(StdArc::new(function_with_type_param(
-        Some(carrier_type_expr()),
-        None,
-    )));
-    let elements = ResolvedElements {
-        props: vec![prop_with_type_expr("handler", func_with_constrained_param)],
-        ..ResolvedElements::default()
-    };
-    let _ = graph.insert_resolved_named_type(
-        synthetic_key(),
-        Arc::new(elements),
-        graph.named_type_generation(),
-    );
-}
-
-/// A `TypeExpr::SyntheticSlotBinding` reached ONLY through a function type's own
-/// `<T = SyntheticSlotBinding>` DEFAULT is rejected by the construction-site
-/// invariant. Same discriminating story as the constraint case: the
-/// parameters-and-return-only predecessor predicate never looked at
-/// `type_parameters`, so the default-position carrier escaped (the insert did
-/// not panic); post-fix it is descended.
-#[test]
-#[should_panic(expected = "must never carry a `TypeExpr::SyntheticSlotBinding` ordinal")]
-fn insert_resolved_named_type_rejects_carrier_in_function_type_param_default() {
-    use std::sync::Arc as StdArc;
-    use verter_compiler::utils::oxc::script::type_surface::ResolvedElements;
-    use verter_type_expr::TypeExpr;
-
-    let host = host();
-    let graph = host.project_type_store().semantic_graph();
-    // `(...) => unknown` whose sole type parameter is `<T = Carrier>`.
-    let func_with_defaulted_param = TypeExpr::Function(StdArc::new(function_with_type_param(
-        None,
-        Some(carrier_type_expr()),
-    )));
-    let elements = ResolvedElements {
-        props: vec![prop_with_type_expr("handler", func_with_defaulted_param)],
-        ..ResolvedElements::default()
-    };
-    let _ = graph.insert_resolved_named_type(
-        synthetic_key(),
-        Arc::new(elements),
-        graph.named_type_generation(),
-    );
 }
 
 /// Unit-test the recogniser directly on a function signature's own type

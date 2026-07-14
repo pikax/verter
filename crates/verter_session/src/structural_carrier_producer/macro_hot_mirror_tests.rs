@@ -11,6 +11,7 @@ use std::sync::Arc;
 use verter_type_expr::TypeExpr;
 
 use super::macro_type_arg_hot_ref;
+use super::MacroHotMirror;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     HotTypeRef, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
@@ -51,6 +52,21 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
+impl MacroHotMirror {
+    /// Number of demanded (filled) macro cells — test observability only,
+    /// never a validity signal. A freshly published artifact reports `0`.
+    pub(crate) fn demanded_count(&self) -> usize {
+        self.cells
+            .get()
+            .map(|c| {
+                c.iter()
+                    .filter(|cell| cell.committed.get().is_some())
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+}
+
 /// The 0-based index of the first macro in `canonical` (the SFCs below each
 /// declare exactly one type-based macro).
 fn first_macro_index(host: &VerterHost, canonical: &str) -> usize {
@@ -68,16 +84,26 @@ fn first_macro_index(host: &VerterHost, canonical: &str) -> usize {
         .expect("owner SFC must declare a type-based macro")
 }
 
-/// The macro's `parsed_type_argument` (owned clone) for the eager-parity arm.
+/// The macro's parsed type argument lowered on demand for the eager-parity arm.
+///
+/// The argument's authored position is now a content-free locator
+/// (`AnalyzedMacro.parsed_type_argument`); the eager TypeExpr is the lazy
+/// body-memo lowering (`transient_macro_type_argument`) over the retained parse
+/// snapshot — the SAME lowering the mirror producer consumes internally, so this
+/// keeps the eager-vs-mirror parity comparing the two lower-to-node fronts over
+/// an identical TypeExpr input.
 fn macro_type_arg(host: &VerterHost, canonical: &str, macro_index: usize) -> Arc<TypeExpr> {
     let indexed = host.ensure_indexed_ready(canonical).expect("indexed");
     let script = indexed.script_analysis.as_ref().expect("script analysis");
-    Arc::clone(
-        script.macros[macro_index]
-            .parsed_type_argument
-            .as_ref()
-            .expect("type-based macro carries a parsed_type_argument"),
-    )
+    let macro_span = script.macros[macro_index].span;
+    match indexed
+        .shallow_state
+        .decl_bodies()
+        .transient_macro_type_argument(macro_span)
+    {
+        crate::decl_body_memo::DemandOutcome::Ready(Some(expr)) => expr,
+        _ => panic!("type-based macro must lazily lower a parsed type argument"),
+    }
 }
 
 fn node_data(
@@ -645,5 +671,190 @@ fn namespace_member_macro_arg_flows_through_mirror_smoke() {
     assert_eq!(
         via_mirror, via_eager,
         "namespace-member macro-arg re-entry must match the eager resolution"
+    );
+}
+
+/// LB3 — the macro hot mirror must NOT freeze a transient broken-lease miss as a
+/// permanent negative. `build_macro_hot_ref` returns a typed `MacroHotRefOutcome`,
+/// so a `transient_macro_type_argument` `LeaseMiss` leaves the write-once mirror
+/// slot VACANT, marks the generalized non-cacheability rail, and lets the next
+/// demand RETRY — instead of the pre-fix `OnceLock::get_or_init` committing `None`
+/// permanently.
+///
+/// DISCRIMINATING: pin the retained parse-snapshot lease with one successful
+/// decl-body demand, break it out-of-band, then demand the macro hot ref. Post-fix
+/// the demand marks non-cacheability and leaves the slot vacant (`demanded_count`
+/// stays 0), so a SECOND demand RE-RUNS and re-marks. Pre-fix the first demand
+/// commits `None` into the `OnceLock` WITHOUT marking (`demanded_count == 1`), and
+/// the second demand warm-returns that committed `None` (no re-run, no mark).
+#[test]
+fn broken_lease_macro_arg_leaves_mirror_slot_vacant_and_marks_non_cacheability() {
+    let host = host();
+    upsert_vue(
+        &host,
+        "/L.vue",
+        "<script setup lang=\"ts\">\ntype Local = { x: number };\ndefineProps<{ a: string }>()\n</script>\n<template><div /></template>\n",
+    );
+    let indexed = host
+        .ensure_indexed_ready("/L.vue")
+        .expect("owner SFC IndexedReady must materialise");
+    let macro_index = first_macro_index(&host, "/L.vue");
+
+    // Pin the retained parse-snapshot lease with one successful decl-body demand,
+    // then break it so the macro-arg transient demand lease-misses.
+    let memo = indexed.shallow_state.decl_bodies();
+    assert!(
+        memo.type_decl("Local").is_some(),
+        "the local type body must lower under a live lease (this pins the retained snapshot)"
+    );
+    memo.release_retained_snapshot_for_test();
+
+    // 1st demand under the broken lease: returns None, marks non-cacheability, and
+    // leaves the mirror slot VACANT (retryable), never a committed permanent None.
+    let (h1, rs1) = host.with_fact_tracer(|| macro_type_arg_hot_ref(&host, "/L.vue", macro_index));
+    assert!(
+        h1.is_none(),
+        "a broken-lease macro-arg demand cannot build a hot ref"
+    );
+    assert!(
+        rs1.non_cacheable_read_observed(),
+        "the broken-lease macro-arg demand MUST mark the generalized non-cacheability rail — \
+         pre-fix build_macro_hot_ref returned None with no mark"
+    );
+    assert_eq!(
+        indexed.macro_hot_mirror.demanded_count(),
+        0,
+        "the mirror slot must stay VACANT after a LeaseMiss (retryable) — pre-fix get_or_init \
+         committed None into the slot (demanded_count == 1), freezing a transient miss as a \
+         permanent negative"
+    );
+
+    // 2nd demand (lease still broken): the vacant slot RE-RUNS and re-marks — proof
+    // the transient miss was not frozen. Pre-fix the committed None short-circuits
+    // (no re-run, no mark).
+    let (h2, rs2) = host.with_fact_tracer(|| macro_type_arg_hot_ref(&host, "/L.vue", macro_index));
+    assert!(h2.is_none(), "still broken lease → still None");
+    assert!(
+        rs2.non_cacheable_read_observed(),
+        "the 2nd macro-arg demand must RE-RUN the vacant slot and re-mark non-cacheability \
+         (retry) — pre-fix it warm-returns the committed None WITHOUT re-running or marking"
+    );
+}
+
+/// LB3 — the CENTRAL `DemandOutcome::into_option` collapse marks the generalized
+/// non-cacheability rail on a broken decl-body lease. This is the ONE structural
+/// collapse point for the plain type / value / augmentation decl-body accessors
+/// (`type_decl` / `value_decl` / augmentation) that the carrier & frontier
+/// consumers ride, so a transient `LeaseMiss` consumed by an enclosing traced
+/// compute refuses that compute's shared-cache admission.
+///
+/// DISCRIMINATING: pin the retained lease with one successful demand, break it, then
+/// demand a DIFFERENT not-yet-lowered symbol through the plain `type_decl` accessor
+/// inside a fact tracer. Post-fix the tracer observed a non-cacheable read; pre-fix
+/// (`into_option` collapsed `LeaseMiss` to `None` with no mark) it did not.
+#[test]
+fn broken_lease_type_decl_accessor_marks_non_cacheability_via_into_option() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/d.ts",
+        "export type A = { x: number };\nexport type B = { y: string };\n",
+    );
+    let indexed = host.ensure_indexed_ready("/d.ts").expect("indexed");
+    let memo = indexed.shallow_state.decl_bodies();
+
+    // Pin the retained parse-snapshot lease with A, then break it so a demand for a
+    // DIFFERENT not-yet-lowered symbol (B) lease-misses through `into_option`.
+    assert!(
+        memo.type_decl("A").is_some(),
+        "A's body must lower under a live lease (pins the retained snapshot)"
+    );
+    memo.release_retained_snapshot_for_test();
+
+    let (result, read_set) = host.with_fact_tracer(|| memo.type_decl("B"));
+    assert!(
+        result.is_none(),
+        "a broken-lease type_decl demand reads as None (fail-closed)"
+    );
+    assert!(
+        read_set.non_cacheable_read_observed(),
+        "the central DemandOutcome::into_option LeaseMiss arm MUST mark the generalized \
+         non-cacheability rail so an enclosing traced compute (the carrier / frontier / plain \
+         accessor consumers) refuses shared-cache admission — pre-fix into_option collapsed \
+         LeaseMiss to None with NO mark"
+    );
+}
+
+/// SF3 — the per-slot build lock restores the SINGLEFLIGHT guarantee: concurrent
+/// FIRST demands of ONE macro's hot ref collapse onto a SINGLE cold build.
+///
+/// The `OnceLock::get_or_init` → check/build/set rewrite (which restored the
+/// vacancy-on-`LeaseMiss` retry semantics) LOST the per-slot singleflight — two
+/// threads could both pass the lock-free `committed.get() == None` warm check and
+/// both run `build_macro_hot_ref` before one commits. The per-slot `build_lock`
+/// re-serialises the cold build while KEEPING the lock-free warm read and the
+/// vacancy-on-`LeaseMiss` retry.
+///
+/// DISCRIMINATING — and DETERMINISTICALLY so: a barrier placed at the entry alone
+/// is NOT enough. It releases the threads BEFORE their lock-free warm-miss check,
+/// so the scheduler is free to let one thread build and commit while the others are
+/// still approaching the check; they then warm-HIT and a lock-free check/build/set
+/// slot reports a single lowering — the pre-change code passes and the test proves
+/// nothing.
+///
+/// The rendezvous therefore sits at the POST-WARM-MISS seam inside
+/// `macro_type_arg_hot_ref`: every thread must have MISSED the lock-free committed
+/// read before ANY of them may proceed, so all N are irrevocably committed to the
+/// cold path. From that state the slot's behaviour is fully determined: with the
+/// per-slot build lock exactly ONE `build_macro_hot_ref` runs (the rest re-check
+/// under the lock and find the commit); with the pre-change check/build/set slot ALL
+/// N build. RED-pre the counter is N, never 1.
+#[test]
+fn concurrent_first_macro_arg_demands_singleflight_one_cold_build() {
+    use std::sync::atomic::Ordering;
+
+    let host = host();
+    upsert_vue(
+        &host,
+        "/C.vue",
+        "<script setup lang=\"ts\">\ndefineProps<{ a: string; b?: number }>()\n</script>\n<template><div /></template>\n",
+    );
+    let macro_index = first_macro_index(&host, "/C.vue");
+    // Warm the owner's IndexedReady up front so the concurrent burst races the
+    // per-slot cold build, not the owner materialisation.
+    host.ensure_indexed_ready("/C.vue").expect("owner indexes");
+    host.macro_hot_lowering_count.store(0, Ordering::Relaxed);
+
+    const N: usize = 16;
+    // The POST-WARM-MISS rendezvous: N threads, released only once every one of them
+    // has observed the vacant slot. This is what makes the race deterministic rather
+    // than scheduler-dependent.
+    *host.test_force.macro_hot_post_warm_miss_barrier.lock() =
+        Some(std::sync::Arc::new(std::sync::Barrier::new(N)));
+    let handles: Vec<Option<crate::semantic_query::HotTypeRef>> = std::thread::scope(|scope| {
+        let joins: Vec<_> = (0..N)
+            .map(|_| scope.spawn(|| macro_type_arg_hot_ref(&host, "/C.vue", macro_index)))
+            .collect();
+        joins.into_iter().map(|j| j.join().unwrap()).collect()
+    });
+    *host.test_force.macro_hot_post_warm_miss_barrier.lock() = None;
+
+    // Every concurrent demand received the committed hot ref, all identical.
+    assert!(
+        handles.iter().all(|h| h.is_some()),
+        "every concurrent demand must receive the committed hot ref"
+    );
+    let first = handles[0].expect("first handle").node();
+    assert!(
+        handles.iter().all(|h| h.expect("handle").node() == first),
+        "every concurrent demand must observe the SAME committed node (one lowering)"
+    );
+    // THE PIN: the per-slot build lock collapsed the whole burst onto ONE cold build.
+    assert_eq!(
+        host.macro_hot_lowering_count.load(Ordering::Relaxed),
+        1,
+        "SINGLEFLIGHT: {N} concurrent first demands of one macro must collapse onto ONE \
+         `build_macro_hot_ref` — a count > 1 means the per-slot build lock is not serialising \
+         the cold build (the `check/build/set` regression double-lowers)"
     );
 }

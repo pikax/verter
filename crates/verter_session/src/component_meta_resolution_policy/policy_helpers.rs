@@ -1,9 +1,9 @@
-//! Shared symbolic-vs-canonical materialization predicate consumed
-//! by the component-meta materialize pipeline's bare-ref decision
-//! sites:
-//!
-//! - `resolver_core/component_meta_query_engine/shallow_preserve.rs::should_preserve_imported_bare_ref`
-//! - `meta_resolve/materialize/macro_shapes.rs::named_ref_can_use_prepared_projection`
+//! Shared symbolic-vs-canonical materialization predicate for the
+//! component-meta materialize pipeline's bare-ref decision sites: given a
+//! target declaration and a `PolicyContext`, it decides whether an imported
+//! bare reference MUST materialize canonically or MAY stay symbolic.
+//! Centralising the rule keeps every bare-ref decision site on one
+//! contract so they cannot drift.
 //!
 //! # Invariant
 //!
@@ -33,7 +33,8 @@
 //! classified as workspace-owned, NOT package-backed.
 
 use verter_semantic::analysis::type_eval::TypeDeclKind;
-use verter_semantic::analysis::type_solver::prepared::{PreparedProjectionClass, PreparedTypeDecl};
+use verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl;
+use verter_type_expr::facts::PreparedProjectionClassFact;
 
 /// Context bundle for the helper. Exposes the narrow capabilities
 /// the predicate needs without leaking `&mut ComponentMetaQueryEngine`
@@ -144,7 +145,7 @@ pub(crate) fn imported_ref_must_materialize_canonically(
         || matches!(prepared.kind, TypeDeclKind::Interface)
         || matches!(
             prepared.projection_class,
-            PreparedProjectionClass::DirectMembers
+            PreparedProjectionClassFact::DirectMembers
         )
         || !prepared.member_index.is_empty()
 }

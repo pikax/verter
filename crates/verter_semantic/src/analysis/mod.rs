@@ -32,6 +32,8 @@ pub mod html_intrinsics;
 mod imports;
 pub mod jsdoc;
 mod macros;
+pub use macros::lower_macro_type_argument_at_span;
+pub use macros::{lower_macro_field_payload_at, MacroFieldPayloadLowering};
 mod options;
 pub mod project_index;
 pub mod project_resolver;
@@ -43,7 +45,6 @@ pub mod template;
 pub mod type_eval;
 pub mod type_eval_build;
 pub mod type_expand;
-pub mod type_expr_refs;
 pub mod type_solver;
 pub mod types;
 

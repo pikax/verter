@@ -28,7 +28,7 @@ use verter_semantic::analysis::types::{
     AnalyzedEmitField, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
     AnalyzedSlotFieldBinding, TypeResolutionSource,
 };
-use verter_type_expr::{PrimitiveName, TypeExpr};
+use verter_type_expr::TypeExpr;
 
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 
@@ -38,8 +38,8 @@ use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::resolver_core::ResolverContext;
 use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
 use crate::typeinfo::framework_surface::results::{
-    EmitsSurface, MacroSurfaceDtos, ModelBinding, ModelSurface, PropsSurface, ResolvedMacroPayload,
-    ResolvedOutcome,
+    EmitsSurface, MacroSurfaceDtos, ModelBinding, ModelSurface, PropsSurface, ResolvedEmitField,
+    ResolvedMacroPayload, ResolvedOutcome,
 };
 use crate::typeinfo::framework_surface::vue_exec::{
     emits_from_typeinfo_surface, navigate_param_to_object_surface, props_from_typeinfo_surface,
@@ -132,7 +132,7 @@ pub(crate) fn resolve_svelte_surface(
 
     // Cold compute under an installed fact tracer so the CROSS-FILE facts the
     // captured-`TypeExpr` resolution reads enter the entry's `ReadSetSignature`.
-    let (outcome, finalise, fenced_serve_observed) =
+    let (outcome, finalise, non_cacheable_read_observed) =
         crate::fact_signature_helpers::install_fact_tracer(host, || {
             compute_svelte_surface(host, ctx, owner, source)
         });
@@ -141,7 +141,7 @@ pub(crate) fn resolve_svelte_surface(
     // publication (fenced) artifact must not enter the shared store (its
     // cross-file facts validate against the live view). Serve the freshly
     // computed bundle WITHOUT caching.
-    if fenced_serve_observed {
+    if non_cacheable_read_observed {
         return outcome;
     }
     // Only a complete `Resolved` bundle warms the cache, and only with a
@@ -176,7 +176,7 @@ fn compute_svelte_surface(
 
     match source {
         SvelteSurfaceSource::RunesProps => resolve_runes_props(ctx, owner, facts.as_deref()),
-        SvelteSurfaceSource::LegacyExportLet => resolve_legacy_export_let(owner, facts.as_deref()),
+        SvelteSurfaceSource::LegacyExportLet => resolve_legacy_export_let(facts.as_deref()),
         SvelteSurfaceSource::Bindable => resolve_bindable(ctx, owner, facts.as_deref()),
         SvelteSurfaceSource::SnippetProps => resolve_snippet_props(ctx, owner, facts.as_deref()),
         SvelteSurfaceSource::LegacySlotInventory => resolve_legacy_slot_inventory(ctx, owner),
@@ -300,16 +300,16 @@ fn resolve_runes_props(
     // VALUE rides the framework-neutral `prop_defaults` SIDECAR.
     let default_keys: std::collections::HashSet<&str> =
         facts.prop_defaults.iter().map(|d| d.key.as_str()).collect();
-    for field in &mut fields {
-        if default_keys.contains(field.name.as_str()) {
-            field.is_optional = true;
+    for row in &mut fields {
+        if default_keys.contains(row.analysis.name.as_str()) {
+            row.analysis.is_optional = true;
         }
     }
     let dtos = MacroSurfaceDtos {
         props: Some(PropsSurface {
             fields,
             index_signatures: Vec::new(),
-            prop_defaults: facts.prop_defaults.clone(),
+            prop_defaults: facts.prop_defaults.to_vec(),
             prop_origins,
         }),
         ..Default::default()
@@ -406,12 +406,9 @@ fn member_declaration_origin(
 }
 
 /// PROPS from legacy `export let` props. The legacy props carry no type
-/// information at the script-fact layer, so each surfaces as an `any`-typed prop
-/// (optional when it declares a default).
-fn resolve_legacy_export_let(
-    owner: &str,
-    facts: Option<&SvelteScriptFacts>,
-) -> ResolvedMacroPayload {
+/// information at the script-fact layer, so each surfaces as an
+/// annotation-less prop (optional when it declares a default).
+fn resolve_legacy_export_let(facts: Option<&SvelteScriptFacts>) -> ResolvedMacroPayload {
     let Some(facts) = facts else {
         return ResolvedOutcome::Missing;
     };
@@ -421,7 +418,7 @@ fn resolve_legacy_export_let(
     let fields = facts
         .legacy_props
         .iter()
-        .map(|prop| legacy_prop_field(owner, prop))
+        .map(legacy_prop_field)
         .collect::<Vec<_>>();
     let dtos = MacroSurfaceDtos {
         props: Some(PropsSurface {
@@ -434,25 +431,30 @@ fn resolve_legacy_export_let(
     ResolvedOutcome::Resolved(Arc::new(dtos))
 }
 
-/// One legacy `export let` prop as an `any`-typed [`AnalyzedPropField`]. The
-/// `any` value type is paired with the OWNER scope to uphold the
-/// `type_expr.is_some() <=> type_expr_scope.is_some()` pairing invariant (a
-/// primitive `any` carries no named refs, but the pairing must hold so the
-/// component-meta consumer's pairing guard is never violated).
-fn legacy_prop_field(owner: &str, prop: &SvelteLegacyProp) -> AnalyzedPropField {
-    AnalyzedPropField {
-        name: prop.name.clone(),
-        // A prop with a default value is optional.
-        is_optional: prop.has_default,
-        span: verter_span::Span::default(),
-        type_annotation: None,
-        type_expr: Some(TypeExpr::Primitive(PrimitiveName::Any)),
-        type_expr_scope: Some(verter_type_expr::TypeExprScope::new(owner)),
-        description: None,
-        tags: Vec::new(),
-        resolution_source: TypeResolutionSource::Rust,
-        resolution_error: None,
-        declared_in_macro_type_arg: false,
+/// One legacy `export let` prop as an annotation-less row. The legacy
+/// capture carries no authored type annotation, so the field is locator-less
+/// (`payload: None` paired with a `None` scope — never a fabricated
+/// position) and its source is the PROVEN unannotated absence; consumers
+/// treat the annotation-less prop as loose (`any`-equivalent).
+fn legacy_prop_field(
+    prop: &SvelteLegacyProp,
+) -> crate::typeinfo::framework_surface::results::ResolvedPropField {
+    crate::typeinfo::framework_surface::results::ResolvedPropField {
+        analysis: AnalyzedPropField {
+            name: prop.name.clone(),
+            // A prop with a default value is optional.
+            is_optional: prop.has_default,
+            span: verter_span::Span::default(),
+            type_annotation: None,
+            payload: None,
+            type_expr_scope: None,
+            description: None,
+            tags: Vec::new(),
+            resolution_source: TypeResolutionSource::Rust,
+            resolution_error: None,
+            declared_in_macro_type_arg: false,
+        },
+        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
     }
 }
 
@@ -472,7 +474,7 @@ fn resolve_bindable(
         return ResolvedOutcome::Missing;
     }
     // Resolve the props surface once and pick the bindable members from it.
-    let props_fields: Vec<AnalyzedPropField> = facts
+    let props_fields: Vec<crate::typeinfo::framework_surface::results::ResolvedPropField> = facts
         .props_type
         .as_ref()
         .and_then(|props_type| navigate_param_to_object_surface(ctx, owner, props_type))
@@ -490,19 +492,19 @@ fn resolve_bindable(
         .map(|name| {
             let prop = props_fields
                 .iter()
-                .find(|f| &f.name == name)
-                .cloned()
+                .find(|row| &row.analysis.name == name)
+                .map(|row| row.analysis.clone())
                 .unwrap_or_else(|| AnalyzedPropField {
                     name: name.clone(),
                     is_optional: false,
                     span: verter_span::Span::default(),
                     type_annotation: None,
-                    type_expr: Some(TypeExpr::Primitive(PrimitiveName::Any)),
-                    // Pair the `any` value with the OWNER scope to uphold the
-                    // `type_expr.is_some() <=> type_expr_scope.is_some()` pairing
-                    // invariant (a fallback for a `$bindable()` member with no
-                    // resolved `$props` field).
-                    type_expr_scope: Some(verter_type_expr::TypeExprScope::new(owner)),
+                    // A `$bindable()` member with no resolved `$props` field
+                    // has no authored annotation position — the honest
+                    // locator-less form (`payload: None` paired with a `None`
+                    // scope), never a fabricated position.
+                    payload: None,
+                    type_expr_scope: None,
                     description: None,
                     tags: Vec::new(),
                     resolution_source: TypeResolutionSource::Rust,
@@ -613,21 +615,23 @@ fn svelte_snippet_slots_from_typeinfo_surface(
             // A fail-closed `None` (an unresolved `Params` carrier) drops the slot.
             let params = CallableNodeView::new(&dispatch, member.value)
                 .validated_snippet_positional_params(context)?;
-            let scope = crate::typeinfo::framework_surface::scope::member_value_expr_scope(
+            // The slot member's scope (the shared member-value-scope rule) —
+            // each published binding display value is paired with it.
+            let member_scope = crate::typeinfo::framework_surface::scope::member_value_expr_scope(
                 host,
                 member,
                 macro_surface.owner_canonical.as_ref(),
             );
             // Materialize each binding node ONCE at the terminal DTO sink; this
             // normalizer makes NO decision on any materialized value.
-            let bindings = materialize_snippet_slot_bindings(ctx, &params, &scope);
+            let bindings = materialize_snippet_slot_bindings(ctx, &member_scope, &params);
             Some(AnalyzedSlotField {
                 name: member.name.as_ref().to_string(),
                 is_required: !member.optional,
                 span: verter_span::Span::default(),
                 bindings,
                 return_type: None,
-                return_expr: None,
+                payload: None,
                 return_expr_scope: None,
                 description: None,
                 tags: Vec::new(),
@@ -642,19 +646,23 @@ fn svelte_snippet_slots_from_typeinfo_surface(
 /// [`PositionalParamNode::ty`] is minted ONCE through the sealed Svelte output
 /// capability; the binding NAME is the element/param label (fallback
 /// `arg{index}`), the display `type_annotation` is rendered from the minted
-/// value via the by-name `.and_then(render_type_expr_display)` form, and both
-/// are paired with the slot member's value-node `scope` (the
-/// `binding_expr.is_some() <=> binding_expr_scope.is_some()` pairing invariant).
+/// value via the by-name `.and_then(render_type_expr_display)` form and
+/// paired with the caller-derived slot MEMBER scope (`member_scope` — the
+/// shared member-value-scope rule), so a binding's named refs resolve in the
+/// member's file. Value⇔scope pairing: an unrendered value carries no scope.
 ///
+/// The published binding is locator-less (`payload: None`): the flat
+/// field-position vocabulary cannot address a nested (slot, binding) position
+/// honestly, so typed binding demand is host-raised.
 /// It makes NO decision on any materialized value (no branch / match /
-/// shape-extract) and takes NO `&TypeExpr` param (node ids + the active `ctx` +
-/// the value-node scope). The mint cap is constructed INTERNALLY from `ctx` (the
+/// shape-extract) and takes NO `&TypeExpr` param (node ids + the active
+/// `ctx`). The mint cap is constructed INTERNALLY from `ctx` (the
 /// `raise_member_value` pattern) — a cap is a mint AUTHORITY and must not cross
 /// the boundary from the non-terminal caller.
 pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_snippet_slot_bindings(
     ctx: &dyn ResolverContext,
+    member_scope: &verter_type_expr::TypeExprScope,
     params: &[PositionalParamNode],
-    scope: &verter_type_expr::TypeExprScope,
 ) -> Vec<AnalyzedSlotFieldBinding> {
     let dispatch = ctx.dispatch();
     let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
@@ -670,20 +678,19 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_snippet_s
             let type_annotation = raised
                 .as_ref()
                 .and_then(crate::resolver_core::surface_projector::render_type_expr_display);
+            // Value⇔scope pairing: the rendered display rides with the slot
+            // member's scope; an unrendered value carries no scope.
+            let binding_expr_scope = type_annotation.as_ref().map(|_| member_scope.clone());
             let name = param
                 .label
                 .as_ref()
                 .map(|label| label.to_string())
                 .unwrap_or_else(|| format!("arg{index}"));
-            // A node that does not materialize keeps its binding SLOT with the
-            // opaque `Unknown` raise-miss value (position-preserving); a validated
-            // snippet's `Params` element node always mints, so this is robustness.
-            let binding_expr = Some(raised.unwrap_or(TypeExpr::Unknown { raw: String::new() }));
             AnalyzedSlotFieldBinding {
                 name,
                 type_annotation,
-                binding_expr,
-                binding_expr_scope: Some(scope.clone()),
+                payload: None,
+                binding_expr_scope,
                 span: verter_span::Span::default(),
             }
         })
@@ -761,9 +768,9 @@ fn resolve_legacy_slot_inventory(ctx: &dyn ResolverContext, owner: &str) -> Reso
 
 /// Recursively collect `<slot>` elements from the template tree into slot
 /// fields. Deduplicated by slot name (first-writer-wins). `raw_source` is the
-/// owner's snapshot raw source (the slot-name slice indexes it directly).
-/// `owner` is the `.svelte` canonical, used to scope the slot bindings'
-/// `binding_expr`.
+/// owner's snapshot raw source (the slot-name slice indexes it directly);
+/// `owner` is the owning component's canonical id — the resolution scope every
+/// published binding display value is paired with.
 fn collect_slot_elements(
     nodes: &[SvelteNode],
     raw_source: &str,
@@ -784,7 +791,7 @@ fn collect_slot_elements(
                             span: verter_span::Span::default(),
                             bindings,
                             return_type: None,
-                            return_expr: None,
+                            payload: None,
                             return_expr_scope: None,
                             description: None,
                             tags: Vec::new(),
@@ -836,7 +843,7 @@ fn slot_name(
 /// The forwarded slot bindings: every plain attribute other than `name` becomes
 /// a slot binding.
 ///
-/// The binding VALUE type is typed `any` — a DOCUMENTED, owner-decided
+/// The binding VALUE displays as `any` — a DOCUMENTED, owner-decided
 /// deprecated-path carve-out scoped to legacy-`<slot>` bindings ONLY (the slot
 /// NAMES are precise; only the let:-binding values are loose). Precise
 /// parse-domain forwarded-expression capture (typing each binding from its
@@ -847,10 +854,13 @@ fn slot_name(
 /// other Svelte surface stays precisely typed; this carve-out applies to nothing
 /// else (mirroring the F12 `$$props` legacy-magic `any` exception).
 ///
-/// The `any` binding value is paired with the OWNER scope (`owner`) to uphold
-/// the `binding_expr.is_some() <=> binding_expr_scope.is_some()` pairing
-/// invariant — a primitive `any` carries no named refs, but the pairing must
-/// hold so the component-meta slot-binding pairing guards are never violated.
+/// The binding is locator-less (`payload: None`): a template `<slot>`
+/// attribute has no authored TYPE position to address — never a fabricated
+/// position. Value⇔scope pairing: the published display VALUE rides with its
+/// resolution SCOPE — the owning component's canonical id (`owner`) — so even
+/// the carve-out display satisfies the documented
+/// [`AnalyzedSlotFieldBinding`] pairing invariant
+/// (`type_annotation.is_some() <=> binding_expr_scope.is_some()`).
 fn slot_bindings(
     element: &verter_compiler::svelte::parser::template_ast::SvelteElement,
     owner: &str,
@@ -865,11 +875,18 @@ fn slot_bindings(
             if name == "name" {
                 return None;
             }
+            let type_annotation = Some("any".to_string());
+            // Value⇔scope pairing: a published display value carries the
+            // owning component's resolution scope; an unpublished value
+            // carries no scope.
+            let binding_expr_scope = type_annotation
+                .as_ref()
+                .map(|_| verter_type_expr::TypeExprScope::new(owner));
             Some(AnalyzedSlotFieldBinding {
                 name: name.clone(),
-                type_annotation: Some("any".to_string()),
-                binding_expr: Some(TypeExpr::Primitive(PrimitiveName::Any)),
-                binding_expr_scope: Some(verter_type_expr::TypeExprScope::new(owner)),
+                type_annotation,
+                payload: None,
+                binding_expr_scope,
                 span: verter_span::Span::default(),
             })
         })
@@ -950,7 +967,7 @@ fn resolve_callback_prop_events(
         return ResolvedOutcome::Missing;
     };
     let fields = navigate_param_to_object_surface(ctx, owner, props_type)
-        .map(|surface| callback_events_from_props_surface(ctx, owner, &surface))
+        .map(|surface| callback_events_from_props_surface(ctx, &surface))
         .unwrap_or_default();
     let dtos = MacroSurfaceDtos {
         emits: Some(EmitsSurface {
@@ -964,7 +981,7 @@ fn resolve_callback_prop_events(
 
 /// Extract the callback-prop events from a resolved `$props` object surface: each
 /// public member named `on${E}` (NON-EMPTY `E`) whose value realises to a
-/// function-like type becomes an [`AnalyzedEmitField`] named `E` whose payload is
+/// function-like type becomes a [`ResolvedEmitField`] named `E` whose payload is
 /// the callback's parameters as a labelled tuple (every parameter — NO strip).
 ///
 /// The value is function-like in two shapes:
@@ -982,10 +999,8 @@ fn resolve_callback_prop_events(
 ///   `realize_callable_member`.
 fn callback_events_from_props_surface(
     ctx: &dyn ResolverContext,
-    owner: &str,
     surface: &TypeInfoSurface,
-) -> Vec<AnalyzedEmitField> {
-    let host = ctx.host_for_fact_tracer_install();
+) -> Vec<ResolvedEmitField> {
     let dispatch = ctx.dispatch();
     // Publication sink (DTO event payload tuples): the callable-arm decide and the
     // payload param selection are made ENTIRELY in the node domain through the
@@ -995,7 +1010,7 @@ fn callback_events_from_props_surface(
     let context = crate::semantic_query::ProjectionReductionContext::published(
         crate::semantic_query::ProjectionMode::Navigate,
     );
-    let mut events: Vec<AnalyzedEmitField> = Vec::new();
+    let mut events: Vec<ResolvedEmitField> = Vec::new();
     for member in surface.members.iter().filter(|m| m.visibility.is_public()) {
         // Structural `on${E}` callback convention: `on` prefix + a NON-EMPTY
         // suffix. The suffix is the event name (NO strip applied to the payload).
@@ -1021,38 +1036,46 @@ fn callback_events_from_props_surface(
         // Payload = the callback's PARAMETERS as a labelled tuple (ALL of them — a
         // callback prop's parameters ARE the event payload; there is no leading
         // event-name parameter to strip), materialized ONCE at the terminal sink
-        // and kept as `Option<TypeExpr>` so the DISPLAY renders through the by-name
-        // `as_ref().and_then(render_type_expr_display)` form — this normalizer
-        // NEVER decides on the materialized value.
+        // for DISPLAY ONLY (the by-name `render_type_expr_display` form — this
+        // normalizer NEVER decides on the materialized value). The tuple is a
+        // per-event SYNTHESIS over the callback's params — it has no flat
+        // authored macro-payload position, so `payload` stays the honest `None`
+        // (paired with a `None` scope); typed payload demand is host-raised
+        // through the graph surface.
         let raw_params = signature.raw_params();
-        let payload_expr = Some(materialize_payload_tuple(ctx, &raw_params));
-        let payload_type = payload_expr
-            .as_ref()
-            .and_then(crate::resolver_core::surface_projector::render_type_expr_display);
-        // Scope the payload to the `$props` member's VALUE-NODE file (the SAME
-        // scope the shared resolver navigated the member in), so a payload `Ref`
-        // (a callback parameter typed against a same-module `interface Row`)
-        // resolves precisely. `payload_expr` paired with `Some(scope)` upholds
-        // the `AnalyzedEmitField` pairing invariant (a `Some`-expr / `None`-scope
-        // mismatch would degrade the named ref to opaque on the component-meta
-        // surface). Routes through the SHARED member-scope owner
-        // (`member_value_expr_scope`).
-        let payload_expr_scope = Some(
-            crate::typeinfo::framework_surface::scope::member_value_expr_scope(host, member, owner),
-        );
-        events.push(AnalyzedEmitField {
-            name: event_name.to_string(),
-            span: verter_span::Span::default(),
-            payload_type,
-            payload_expr,
-            payload_expr_scope,
-            description: None,
-            tags: Vec::new(),
+        let payload_tuple = materialize_payload_tuple(ctx, &raw_params);
+        let payload_type =
+            crate::resolver_core::surface_projector::render_type_expr_display(&payload_tuple);
+        // The payload SOURCE: the closed tuple over the SAME callback params,
+        // projected in the node domain through the shared dispatch (leaf /
+        // leaf-union element facts, order preserved; NO strip). `None` when
+        // any param is richer than the closed element vocabulary.
+        // The realized event's payload-tuple position is REQUIRED: params
+        // richer than the closed element vocabulary have no faithful source,
+        // so the position is the typed source-construction FAILURE — never a
+        // fabricated `unknown` success.
+        let payload_source = dispatch
+            .closed_params_tuple_source(&raw_params)
+            .map(verter_type_expr::facts::SourcePosition::Present)
+            .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
+                verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+            ));
+        events.push(ResolvedEmitField {
+            analysis: AnalyzedEmitField {
+                name: event_name.to_string(),
+                span: verter_span::Span::default(),
+                payload_type,
+                payload: None,
+                payload_expr_scope: None,
+                description: None,
+                tags: Vec::new(),
+            },
+            payload_source,
         });
     }
     // De-duplicate by event name, first-writer-wins.
     let mut seen = std::collections::HashSet::new();
-    events.retain(|e| seen.insert(e.name.clone()));
+    events.retain(|e| seen.insert(e.analysis.name.clone()));
     events
 }
 
@@ -1117,7 +1140,9 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_t
 /// member of the public instance; the member type stays a shallow `Ref` to the
 /// exported binding (shallow-by-default — the consumer re-resolves on demand).
 fn resolve_instance_exports(facts: Option<&SvelteScriptFacts>) -> ResolvedMacroPayload {
-    use crate::typeinfo::framework_surface::results::{ExposeSurface, NamedTypeMember};
+    use crate::typeinfo::framework_surface::results::{
+        ExposeSurface, NamedTypeMember, NamedTypeMemberOutput,
+    };
     let Some(facts) = facts else {
         return ResolvedOutcome::Missing;
     };
@@ -1130,9 +1155,8 @@ fn resolve_instance_exports(facts: Option<&SvelteScriptFacts>) -> ResolvedMacroP
         .map(|name| NamedTypeMember {
             name: name.clone(),
             is_optional: false,
-            type_expr: Some(TypeExpr::Ref {
+            value: Some(NamedTypeMemberOutput::Ref {
                 name: Arc::from(name.as_str()),
-                type_arguments: Arc::from(Vec::new().into_boxed_slice()),
             }),
         })
         .collect();

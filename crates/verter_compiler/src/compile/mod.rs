@@ -15,15 +15,19 @@
 //! - [`CompileTarget::ANALYSIS`] — script + template data (MCP static analysis)
 
 mod helpers;
-pub mod macro_dto;
 pub mod template_data;
 mod template_expr_overlay;
 pub mod types;
 
 pub use helpers::*;
-pub use macro_dto::*;
 pub use template_data::*;
 pub use types::*;
+// The macro-codegen DTO vocabulary is owned by the dependency-neutral
+// `verter_macro_dto` leaf (shared with the resolution-side producer);
+// re-exported here so compiler-internal consumers keep the `compile::…`
+// path. New consumers outside this crate import `verter_macro_dto`
+// directly.
+pub use verter_macro_dto::*;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;

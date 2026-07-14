@@ -3,12 +3,11 @@
 //! stays under the line cap. The nested test modules are descendants of
 //! `graph_predicates`, so `super::super::` reaches its (private) items.
 
-mod node_root_gate_differential_tests {
-    //! DIFFERENTIAL EQUIVALENCE: the node-domain root gates equal the `TypeExpr`
-    //! fronts, field-for-field (verdict AND fence), on inputs that genuinely reach
-    //! each path — the `Pick`/`Omit` package SOURCE-root trap, an indexed-access
-    //! root, a bare package ref, a workspace-local ref, a non-ref, and a transitive
-    //! generic cycle.
+mod node_root_gate_tests {
+    //! Node-domain root-gate verdicts on inputs that genuinely reach each
+    //! path — the `Pick`/`Omit` package SOURCE-root trap, an indexed-access
+    //! root, a bare package ref, a workspace-local ref, a non-ref, and a
+    //! transitive generic cycle.
 
     use std::sync::Arc;
 
@@ -31,7 +30,7 @@ mod node_root_gate_differential_tests {
     }
 
     #[test]
-    fn node_package_backed_root_matches_type_expr_front_field_for_field() {
+    fn node_package_backed_root_classifies_representative_roots() {
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
@@ -66,62 +65,56 @@ mod node_root_gate_differential_tests {
         );
         let scope = "/src/App.vue";
 
-        let cases: Vec<TypeExpr> = vec![
+        let cases: Vec<(TypeExpr, bool)> = vec![
             // Pick over a PACKAGE source — the source-root trap (must inspect the
             // VendorProps source, not the `__builtin__::Pick` wrapper).
-            TypeExpr::named_with_args(
-                "Pick",
-                vec![
-                    TypeExpr::named("VendorProps"),
-                    TypeExpr::string_literal("a"),
-                ],
+            (
+                TypeExpr::named_with_args(
+                    "Pick",
+                    vec![
+                        TypeExpr::named("VendorProps"),
+                        TypeExpr::string_literal("a"),
+                    ],
+                ),
+                true,
             ),
             // indexed-access over the package source
-            TypeExpr::IndexedAccess {
-                object: Arc::new(TypeExpr::named("VendorProps")),
-                index: Arc::new(TypeExpr::string_literal("a")),
-            },
+            (
+                TypeExpr::IndexedAccess {
+                    object: Arc::new(TypeExpr::named("VendorProps")),
+                    index: Arc::new(TypeExpr::string_literal("a")),
+                },
+                true,
+            ),
             // bare package ref (interface ⇒ object-like)
-            TypeExpr::named("VendorProps"),
+            (TypeExpr::named("VendorProps"), true),
             // workspace-local ref (NOT package-backed)
-            TypeExpr::named("LocalProps"),
+            (TypeExpr::named("LocalProps"), false),
             // non-ref root (no extractable root name)
-            TypeExpr::Primitive(PrimitiveName::String),
+            (TypeExpr::Primitive(PrimitiveName::String), false),
         ];
 
-        let mut any_true = false;
-        let mut any_false = false;
-        for expr in &cases {
+        for (expr, expect) in &cases {
             let node = lower(&host, scope, expr);
             let mut qe_node = ComponentMetaQueryEngine::new(&host);
-            let node_result =
+            let (verdict, fence) =
                 node_package_backed_object_like_root_with_fence(&mut qe_node, scope, node);
-            let mut qe_expr = ComponentMetaQueryEngine::new(&host);
-            let expr_result =
-                crate::meta_resolve::materialize::type_expr_has_package_backed_object_like_root_with_fence(
-                    expr, scope, &mut qe_expr,
-                );
             assert_eq!(
-                node_result, expr_result,
-                "node package-backed gate must equal the TypeExpr front (verdict + fence) for {expr:?}"
+                verdict, *expect,
+                "node package-backed gate must classify {expr:?} as {expect}"
             );
-            if node_result.0 {
-                any_true = true;
-            } else {
-                any_false = true;
-            }
+            // Every case here resolves its contributing hashes, so the gate must
+            // hand back an admittable fence (the `None` refusal arm is for
+            // unavailable authoritative hashes only).
+            assert!(
+                fence.is_some(),
+                "the gate must return an admittable fence for {expr:?}"
+            );
         }
-        // Genuine reach: the package source IS package-backed; the local ref is NOT
-        // — the cases are not vacuously all-equal.
-        assert!(
-            any_true && any_false,
-            "the differential must exercise BOTH a package-backed root and a non-package-backed \
-             one (genuine reach), not a single verdict"
-        );
     }
 
     #[test]
-    fn node_transitive_cycle_matches_type_expr_front() {
+    fn node_transitive_cycle_detects_cyclic_generic_root() {
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
@@ -152,16 +145,6 @@ mod node_root_gate_differential_tests {
         for (expr, expect_cycle) in [(&cyclic, true), (&acyclic, false)] {
             let node = lower(&host, scope, expr);
             let node_cycle = node_root_reaches_transitive_cycle_with_fence(&host, scope, node).0;
-            let mut qe = ComponentMetaQueryEngine::new(&host);
-            // The bool variant `lowered_root_reaches_transitive_cycle` is the
-            // production interface (it forwards to the `_with_fence` body and
-            // returns `.0`), so the differential pins the same verdict.
-            let expr_cycle =
-                crate::meta_resolve::lowered_root_reaches_transitive_cycle(&mut qe, scope, expr);
-            assert_eq!(
-                node_cycle, expr_cycle,
-                "node cycle gate must equal the TypeExpr front for {expr:?}"
-            );
             assert_eq!(
                 node_cycle, expect_cycle,
                 "case {expr:?} must GENUINELY reach the expected cycle verdict (not vacuous)"
@@ -246,14 +229,14 @@ mod node_root_gate_differential_tests {
     }
 
     /// §3 PACKAGE-ROOT CANONICAL-ID CORRECTION: a userland `type Pick` is NOT the
-    /// builtin utility. With a userland `Pick` shadow declared locally, BOTH fronts
+    /// builtin utility. With a userland `Pick` shadow declared locally, the gate
     /// must treat `Pick<VendorProps, 'a'>` as the (workspace-local, NOT
     /// package-backed) userland root — NEVER a builtin source-descent to the
     /// package `VendorProps`. The unshadowed builtin `Omit<VendorProps, 'a'>` in
-    /// the SAME scope still descends to the package source. The former string-only
-    /// `matches!(name, "Pick" | "Omit")` check descended the userland `Pick` to
-    /// `VendorProps` (TRUE), diverging from the node front (FALSE); the
-    /// resolver-aware check makes both fronts agree.
+    /// the SAME scope still descends to the package source. A string-only
+    /// `matches!(name, "Pick" | "Omit")` check would descend the userland `Pick`
+    /// to `VendorProps` (TRUE); the resolver-aware builtin/shadow decision keeps
+    /// the userland root its own root.
     #[test]
     fn node_package_backed_root_distinguishes_builtin_omit_from_userland_pick_shadow() {
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -314,16 +297,6 @@ mod node_root_gate_differential_tests {
             let mut qe_node = ComponentMetaQueryEngine::new(&host);
             let node_result =
                 node_package_backed_object_like_root_with_fence(&mut qe_node, scope, node);
-            let mut qe_expr = ComponentMetaQueryEngine::new(&host);
-            let expr_result =
-                crate::meta_resolve::materialize::type_expr_has_package_backed_object_like_root_with_fence(
-                    expr, scope, &mut qe_expr,
-                );
-            // BOTH fronts agree on the resolver-aware builtin/userland decision.
-            assert_eq!(
-                node_result, expr_result,
-                "node front must equal TypeExpr front (resolver-aware Pick/Omit) for {expr:?}"
-            );
             assert_eq!(
                 node_result.0, expect,
                 "{expr:?}: userland Pick is its own (non-package) root; builtin Omit descends to \
@@ -340,17 +313,15 @@ mod node_root_gate_differential_tests {
     /// exported), so `ScopeShadowing::is_shadowing_lib("Pick")` is `true` and
     /// dispatch's `resolve_bare_ref_head` suppresses the `__builtin__` route. The
     /// node front therefore returns `false` (NO builtin source-descent to the
-    /// package `VendorProps`). The `TypeExpr` front MUST agree via the SAME shadow
-    /// predicate.
+    /// package `VendorProps`).
     ///
     /// A `resolve_type_declaration(scope, name).kind == Unknown` builtin heuristic
     /// MISCLASSIFIES this case: it cannot tell "imported, module resolves" (kind ==
     /// Unknown, yet shadowing) apart from "ambient builtin" (kind == Unknown, NOT
     /// shadowing), so it would treat the imported `Pick` as the builtin, descend
-    /// into `VendorProps`, and report package-backed — disagreeing with the node
-    /// front. This test pins both fronts to `ScopeShadowing::is_shadowing_lib`; it
-    /// FAILS against a `kind == Unknown` helper and PASSES through the shadow
-    /// predicate.
+    /// into `VendorProps`, and report package-backed. This test pins the gate to
+    /// `ScopeShadowing::is_shadowing_lib`; it FAILS against a `kind == Unknown`
+    /// helper and PASSES through the shadow predicate.
     #[test]
     fn unresolved_imported_pick_shadow_is_not_a_builtin_source_descent() {
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -411,30 +382,12 @@ mod node_root_gate_differential_tests {
         let mut qe_node = ComponentMetaQueryEngine::new(&host);
         let node_result =
             node_package_backed_object_like_root_with_fence(&mut qe_node, scope, node);
-        let mut qe_expr = ComponentMetaQueryEngine::new(&host);
-        let expr_result =
-            crate::meta_resolve::materialize::type_expr_has_package_backed_object_like_root_with_fence(
-                &imported_pick, scope, &mut qe_expr,
-            );
 
-        // BOTH fronts agree on the resolver-aware shadow decision (the node front
-        // already returns `false` via dispatch's `__builtin__` suppression).
-        assert_eq!(
-            node_result, expr_result,
-            "node front must equal the TypeExpr front for a module-resolved, symbol-absent `Pick` shadow \
-             (verdict + fence)"
-        );
         // The imported `Pick` shadow is the root — NOT a builtin descent to the
         // package `VendorProps`.
         assert!(
             !node_result.0,
             "node front: a module-resolved, symbol-absent `Pick` shadow is not a package-backed root"
-        );
-        assert!(
-            !expr_result.0,
-            "TypeExpr front: a module-resolved, symbol-absent `Pick` shadow must NOT descend into the \
-             package `VendorProps` — the `kind == Unknown` heuristic wrongly reported \
-             package-backed here"
         );
     }
 

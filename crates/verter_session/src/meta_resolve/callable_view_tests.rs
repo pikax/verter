@@ -12,13 +12,15 @@ use verter_type_expr::{MemberVisibility, PrimitiveName, TypeExpr};
 
 use super::{ArmCombineNode, CallableNodeView};
 use crate::meta_resolve::dispatch_helpers::realize_callable_member;
-use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use crate::project_semantic_dispatch::{
+    node_data_for, ProjectSemanticDispatch, StructuralFactDemandOutcome,
+};
 use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext, ResolverContext};
 use crate::resolver_store::CurrentHostStoreView;
 use crate::semantic_query::{
-    DeclIdentity, FunctionParam, HashValue, LiteralValue, PrimitiveKind, ProjectionMode,
-    ProjectionReductionContext, QueryError, SemanticNodeData, SemanticNodeId, SurfaceMember,
-    SurfaceView, TupleElement,
+    DeclIdentity, FunctionParam, HashValue, LiteralValue, PartialReasonSet, PrimitiveKind,
+    ProjectionMode, ProjectionReductionContext, QueryError, SemanticNodeData, SemanticNodeId,
+    SurfaceMember, SurfaceView, TupleElement,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::typeinfo::framework_surface::vue_exec::navigate_param_to_object_surface;
@@ -1000,7 +1002,9 @@ fn signature_accessors_read_function_facts() {
         Some(span),
         "return_type_span reads the stored span (not a constant None)"
     );
-    let positions = sig.positional_params_expanded(navigate());
+    let positions = sig
+        .positional_params_expanded(navigate())
+        .expect("a fully-resolvable positional read is Some");
     assert_eq!(positions.len(), 1, "the single positional param surfaces");
     assert_eq!(positions[0].ty, row);
 }
@@ -1075,7 +1079,9 @@ fn raw_params_preserves_this_optional_and_rest_verbatim() {
     // and EXPANDS the rest tuple element-wise — a genuinely different shape (4
     // entries, `this` gone, `a`/`b`/`c` inlined), proving `raw_params` is NOT
     // that method.
-    let expanded = sig.positional_params_expanded(navigate());
+    let expanded = sig
+        .positional_params_expanded(navigate())
+        .expect("a fully-resolvable positional read is Some");
     let expanded_labels: Vec<Option<&str>> = expanded.iter().map(|p| p.label.as_deref()).collect();
     assert_eq!(
         expanded_labels,
@@ -1600,8 +1606,10 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
     // DIRECT node-domain golden: the resolved arm is the Function CONSTITUENT
     // of the normalized `Union(Function, undefined)` body — the exact interned
     // node, not a re-interned copy and not the union itself.
-    let normalized =
-        dispatch.normalize_node_for_structural_fact_demand(member("onmaybe"), navigate());
+    let normalized = dispatch
+        .normalize_node_for_structural_fact_demand(member("onmaybe"), navigate())
+        .into_complete_node()
+        .expect("a fully-resolvable member demand is Complete");
     let norm_data = node_data_for(dispatch.ctx, normalized).expect("normalized member node data");
     let SemanticNodeData::Union(union_arms) = norm_data.as_ref() else {
         panic!("the normalized `MaybeFn` body is a nullish Union, got {norm_data:?}");
@@ -1921,7 +1929,10 @@ fn normalize_node_for_fact_demand_resolves_carrier_chains() {
     );
 
     for name in ["chain", "geninst"] {
-        let resolved = dispatch.normalize_node_for_structural_fact_demand(member(name), navigate());
+        let resolved = dispatch
+            .normalize_node_for_structural_fact_demand(member(name), navigate())
+            .into_complete_node()
+            .unwrap_or_else(|| panic!("`{name}` resolves COMPLETE through its carrier chain"));
         assert!(
             matches!(
                 node_data_for(dispatch.ctx, resolved).as_deref(),
@@ -1935,12 +1946,15 @@ fn normalize_node_for_fact_demand_resolves_carrier_chains() {
 
 #[test]
 fn normalize_node_for_fact_demand_circular_and_deep_fail_closed() {
-    // FAIL-CLOSED boundedness: a mutual-recursion cycle (`MutA = MutB; MutB =
-    // MutA`) terminates via the primitive's `visited` set and carrier-stops at a
-    // `DeclRef` (never a fabricated concrete type, never a hang). A `T0..T80`
-    // alias chain LONGER than `STRUCTURAL_FACT_DEMAND_FUSE` (64) trips the step
-    // fuse and carrier-stops at an INTERMEDIATE `DeclRef` — it does NOT reach the
-    // `'leaf'` terminal, proving the fuse fired rather than running to completion.
+    // FAIL-CLOSED boundedness, TYPED: a mutual-recursion cycle (`MutA = MutB;
+    // MutB = MutA`) terminates via the primitive's `visited` set and reports
+    // `Partial(SAME_PATH_RECURSION)` — the outcome exposes NO node, so a
+    // consumer can never classify the unsettled carrier (never a fabricated
+    // concrete type, never a hang). A `T0..T80` alias chain LONGER than
+    // `STRUCTURAL_FACT_DEMAND_FUSE` (64) trips the step fuse and reports
+    // `Partial(STRUCTURAL_FACT_DEMAND_LIMIT)` — it does NOT reach the `'leaf'`
+    // terminal (the short-chain control in the sibling test DOES), proving the
+    // fuse fired rather than running to completion.
     let (host, view) = primitive_carrier_host();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
@@ -1980,46 +1994,46 @@ fn normalize_node_for_fact_demand_circular_and_deep_fail_closed() {
         "the `deepchain` member raw node is a `DeclRef` carrier (the `T0` alias) before resolution"
     );
 
-    // Mutual recursion → carrier-stop (a `DeclRef`, NOT a fabricated concrete
-    // Function / Object / Literal).
+    // Mutual recursion → typed cycle partial. The outcome hides the reached
+    // node entirely: no consumer can classify the unsettled carrier.
     let mutual = dispatch.normalize_node_for_structural_fact_demand(member("mutual"), navigate());
-    assert!(
-        matches!(
-            node_data_for(dispatch.ctx, mutual).as_deref(),
-            Some(SemanticNodeData::DeclRef { .. })
+    match mutual {
+        StructuralFactDemandOutcome::Partial(reasons) => assert!(
+            reasons.contains(PartialReasonSet::SAME_PATH_RECURSION),
+            "the cycle stop carries SAME_PATH_RECURSION, got {reasons:?}"
         ),
-        "a mutual-recursion cycle terminates fail-closed at a `DeclRef` carrier, got {:?}",
-        node_data_for(dispatch.ctx, mutual).as_deref()
-    );
+        StructuralFactDemandOutcome::Complete(node) => panic!(
+            "a mutual-recursion cycle must be Partial, not Complete({:?})",
+            node_data_for(dispatch.ctx, node).as_deref()
+        ),
+    }
 
-    // Over-fuse alias chain → carrier-stop at an intermediate `DeclRef`, NOT the
-    // `'leaf'` literal terminal (the discriminator: a short chain WOULD reach the
-    // leaf — see `normalize_node_for_fact_demand_resolves_carrier_chains`).
+    // Over-fuse alias chain → typed step-fuse partial, NEVER a Complete node
+    // (the discriminator: a short chain reaches the `'leaf'` terminal Complete —
+    // see `normalize_node_for_fact_demand_resolves_carrier_chains`).
     let deep = dispatch.normalize_node_for_structural_fact_demand(member("deepchain"), navigate());
-    assert!(
-        matches!(
-            node_data_for(dispatch.ctx, deep).as_deref(),
-            Some(SemanticNodeData::DeclRef { .. })
+    match deep {
+        StructuralFactDemandOutcome::Partial(reasons) => assert!(
+            reasons.contains(PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT),
+            "the step-fuse stop carries STRUCTURAL_FACT_DEMAND_LIMIT, got {reasons:?}"
         ),
-        "a >FUSE-deep alias chain carrier-stops at an intermediate `DeclRef`, got {:?}",
-        node_data_for(dispatch.ctx, deep).as_deref()
-    );
-    assert!(
-        !matches!(
-            node_data_for(dispatch.ctx, deep).as_deref(),
-            Some(SemanticNodeData::Literal(_))
+        StructuralFactDemandOutcome::Complete(node) => panic!(
+            "a >FUSE-deep alias chain must be Partial, not Complete({:?})",
+            node_data_for(dispatch.ctx, node).as_deref()
         ),
-        "the step fuse prevented the deep chain from reaching the `'leaf'` literal terminal"
-    );
+    }
 }
 
 #[test]
-fn normalize_node_for_fact_demand_unresolvable_declref_fails_closed() {
-    // ERROR-path fail-closed: a `DeclRef` to a non-existent declaration (a
-    // synthetic identity whose `canonical_id` names no workspace file) MISSES the
-    // `ResolveDecl` query; the primitive breaks fail-closed, returning the input
-    // carrier (or an `Opaque` miss) — never a panic, never a fabricated concrete
-    // type. Standalone host: no workspace file backs the synthetic identity.
+fn normalize_node_for_fact_demand_unresolvable_declref_is_stable_complete() {
+    // STABLE-MISS anti-over-partialization: a `DeclRef` to a non-existent
+    // declaration (a synthetic identity whose `canonical_id` names no workspace
+    // file) MISSES the `ResolveDecl` query honestly. An unresolved authored
+    // name is a valid semantic `Unknown` — a STABLE stop, so the outcome is
+    // `Complete(carrier)` (the input carrier / an `Opaque` miss), NEVER
+    // `Partial`: over-partializing an honest miss would wrongly refuse every
+    // read touching a genuinely-unknown name. Standalone host: no workspace
+    // file backs the synthetic identity.
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -2027,7 +2041,13 @@ fn normalize_node_for_fact_demand_unresolvable_declref_fails_closed() {
     let fake = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity::synthetic("Nonexistent"),
     });
-    let resolved = dispatch.normalize_node_for_structural_fact_demand(fake, navigate());
+    let outcome = dispatch.normalize_node_for_structural_fact_demand(fake, navigate());
+    let resolved = match outcome {
+        StructuralFactDemandOutcome::Complete(node) => node,
+        StructuralFactDemandOutcome::Partial(reasons) => {
+            panic!("an honest miss must stay Complete, got Partial({reasons:?})")
+        }
+    };
     assert!(
         matches!(
             node_data_for(dispatch.ctx, resolved).as_deref(),
@@ -2035,6 +2055,189 @@ fn normalize_node_for_fact_demand_unresolvable_declref_fails_closed() {
         ),
         "an unresolvable `DeclRef` fails closed to a carrier / opaque (never a fabricated type), got {:?}",
         node_data_for(dispatch.ctx, resolved).as_deref()
+    );
+}
+
+#[test]
+fn normalize_node_for_fact_demand_over_cap_template_behind_declref_is_partial() {
+    // ADVANCED-PARTIAL: an over-cap template-literal product behind a `DeclRef`
+    // alias. The demand ADVANCES past the `DeclRef` (resolving `TooWide` through
+    // `ResolveDecl` to its `TemplateLiteral` body) and drives the shared
+    // `TemplateLiteralReduce`, whose 40x40 product deterministically exceeds the
+    // fixed keyspace cap and carrier-stops with `result_is_partial`. The reached
+    // node is ADVANCED (a `TemplateLiteral` shell, NOT the input `DeclRef`) yet
+    // NOT fully classified — its keyspace was never enumerated.
+    //
+    // The point: a fixed-cap deferred op behind a carrier yields an ADVANCED
+    // non-carrier. Returning it as a bare node lets a consumer classify a
+    // confident-but-truncated string-ish template (fail-open). The node-hiding
+    // outcome is `Partial` instead — no node escapes the primitive, so no
+    // consumer can classify a truncated resolution. The over-cap partiality
+    // surfaces through the reduce read's `result_is_partial` (the boolean
+    // bridge, lifted `PROPAGATED`).
+    //
+    // DISCRIMINATING: the negative arm panics on `Complete`; a completeness-
+    // erasing regression (surfacing the advanced shell as a bare classifiable
+    // node) classifies Complete and trips it. The interpolated unions are
+    // INLINE literal unions (finite at reduce time), so the keyspace cap
+    // deterministically fires — a residual `DeclRef` interpolation would instead
+    // be a non-finite honest carrier-stop (`Complete`), which is NOT this case.
+    let wide = |prefix: &str| -> String {
+        (0..40)
+            .map(|i| format!("\"{prefix}{i}\""))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let types = format!(
+        "export type TooWide = `cell:${{{a}}}-${{{b}}}`;\n",
+        a = wide("a"),
+        b = wide("b"),
+    );
+    let component = "/workspace/OverCap.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { TooWide } from './types';\n\
+         interface Props {\n\
+           toowide: TooWide;\n\
+         }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[("/workspace/types.ts", types.as_str())],
+    );
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let dispatch = ctx.dispatch();
+    let toowide = surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "toowide")
+        .expect("the `toowide` member is present")
+        .value;
+
+    // Precondition: the raw member node is a `DeclRef(TooWide)` carrier BEFORE
+    // resolution — so the demand genuinely advances past a carrier rather than
+    // reading a pre-reduced shape.
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, toowide).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "the `toowide` member raw node is a `DeclRef` carrier (the `TooWide` alias) before \
+         resolution, got {:?}",
+        node_data_for(dispatch.ctx, toowide).as_deref()
+    );
+
+    let outcome = dispatch.normalize_node_for_structural_fact_demand(toowide, navigate());
+    match outcome {
+        StructuralFactDemandOutcome::Partial(reasons) => assert!(
+            reasons.contains(PartialReasonSet::PROPAGATED),
+            "the over-cap template keyspace surfaces via the reduce read's result_is_partial \
+             (lifted PROPAGATED), got {reasons:?}"
+        ),
+        StructuralFactDemandOutcome::Complete(node) => panic!(
+            "an over-cap template-literal product behind a DeclRef must be Partial (never a \
+             confident classification of the advanced-but-unenumerated shell), got Complete({:?})",
+            node_data_for(dispatch.ctx, node).as_deref()
+        ),
+    }
+}
+
+#[test]
+fn positional_params_partial_rest_demand_fails_whole_read() {
+    // CONSUMER (rest-tuple): a rest param whose type is a mutual-recursion
+    // `DeclRef` cycle (`MutA = MutB; MutB = MutA`) yields a PARTIAL
+    // structural-fact demand. The whole positional read FAILS (`None`) — never
+    // a silent SHORT VECTOR of just the leading params (the incomplete rest
+    // expansion presented as a complete positional contract).
+    //
+    // DISCRIMINATING: pre-change the rest demand returned the bare `DeclRef`
+    // carrier, which is not a `Tuple`, so the rest contributed no entries and
+    // the leading `a` alone surfaced as `Some([a])`. Post-change the node-hiding
+    // `Partial` fails the whole read to `None`.
+    let (host, view) = primitive_carrier_host();
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
+        .expect("props surface");
+    let dispatch = ctx.dispatch();
+    let mut_ref = surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "mutual")
+        .expect("the `mutual` member is present")
+        .value;
+    // Precondition: the rest param type is the mutual-cycle `DeclRef` carrier.
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, mut_ref).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "the rest param type `MutA` is a `DeclRef` carrier before resolution"
+    );
+
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let void = prim(&graph, PrimitiveKind::Void);
+    let number = prim(&graph, PrimitiveKind::Number);
+    let leading = param(Some("a"), number, false, false);
+    let rest = param(Some("rest"), mut_ref, false, true);
+    let f = function(&graph, vec![leading, rest], void);
+
+    let positions = CallableNodeView::new(&dispatch, f).positional_params(navigate());
+    assert_eq!(
+        positions, None,
+        "a PARTIAL rest-param demand fails the WHOLE positional read (never a short vector \
+         of just the leading `a` param)"
+    );
+}
+
+#[test]
+fn demand_validated_structural_node_partial_yields_none() {
+    // CONSUMER (structural validation): a mutual-recursion `DeclRef` cycle
+    // yields a PARTIAL demand, so `demand_validated_structural_node` returns
+    // `None` BEFORE any shape match / composite recursion — a truncated
+    // resolution's reached node must never validate as a confident structural
+    // fact.
+    //
+    // DISCRIMINATING: pre-change the demand returned the bare cycle carrier,
+    // which the validator classified on its own (validating an
+    // operationally-incomplete carrier). Post-change the node-hiding `Partial`
+    // short-circuits to `None`.
+    let (host, view) = primitive_carrier_host();
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
+        .expect("props surface");
+    let dispatch = ctx.dispatch();
+    let mut_ref = surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "mutual")
+        .expect("the `mutual` member is present")
+        .value;
+
+    assert_eq!(
+        dispatch.demand_validated_structural_node(mut_ref, navigate()),
+        None,
+        "a PARTIAL (mutual-cycle) structural-fact demand fails validation to `None`, never a \
+         confident classification of the unsettled carrier"
     );
 }
 
@@ -2346,8 +2549,10 @@ fn event_names_residual_carrier_arm_fails_whole_not_partial() {
     // test's `None` premise. (Excluding it is unreachable in practice — a
     // synthetic miss yields `Opaque(Miss)` / a residual `DeclRef` — but pinned so
     // the precondition EXACTLY characterizes "unresolvable residual".)
-    let normalized_arm =
-        dispatch.normalize_node_for_structural_fact_demand(unresolvable, navigate());
+    let normalized_arm = dispatch
+        .normalize_node_for_structural_fact_demand(unresolvable, navigate())
+        .into_complete_node()
+        .expect("a nonexistent `DeclRef` is a stable honest miss (Complete), never Partial");
     let arm_is_unresolvable_residual = match node_data_for(dispatch.ctx, normalized_arm).as_deref()
     {
         Some(SemanticNodeData::DeclRef { .. }) => true,
@@ -2496,7 +2701,10 @@ fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
         .expect("the `row` member is present")
         .value;
 
-    let peeled = dispatch.peel_node_for_uninstantiated_carrier_fact_demand(row, navigate());
+    let peeled = dispatch
+        .peel_node_for_uninstantiated_carrier_fact_demand(row, navigate())
+        .into_complete_node()
+        .expect("the peel reaches the `Snippet` `InstantiationRef` carrier (Complete)");
     assert!(
         matches!(
             node_data_for(dispatch.ctx, peeled).as_deref(),
@@ -2505,7 +2713,10 @@ fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
         "the peel STOPS at the `Snippet<Params>` `InstantiationRef` (does not instantiate it), got {:?}",
         node_data_for(dispatch.ctx, peeled).as_deref()
     );
-    let normalized = dispatch.normalize_node_for_structural_fact_demand(row, navigate());
+    let normalized = dispatch
+        .normalize_node_for_structural_fact_demand(row, navigate())
+        .into_complete_node()
+        .expect("the demand primitive instantiates the `Snippet` carrier (Complete)");
     assert!(
         !matches!(
             node_data_for(dispatch.ctx, normalized).as_deref(),
@@ -2534,7 +2745,12 @@ fn peel_unwraps_alias_to_instantiation_ref() {
     let instref = instantiation_ref(&graph, "Snippet", vec![tup]);
     let aliased = alias(&graph, instref);
 
-    let peeled = dispatch.peel_node_for_uninstantiated_carrier_fact_demand(aliased, navigate());
+    let peeled = dispatch
+        .peel_node_for_uninstantiated_carrier_fact_demand(aliased, navigate())
+        .into_complete_node()
+        .expect(
+            "the peel unwraps the `Alias` to the un-instantiated `InstantiationRef` (Complete)",
+        );
     assert_eq!(
         peeled, instref,
         "the peel unwraps the `Alias` to reach the un-instantiated `InstantiationRef`"
@@ -2543,8 +2759,10 @@ fn peel_unwraps_alias_to_instantiation_ref() {
 
 #[test]
 fn peel_bounded_fail_closed_on_declref_cycle() {
-    // A mutual `DeclRef` cycle terminates fail-closed at a carrier (never a hang,
-    // never a fabricated concrete type) — the peel shares the bounded loop.
+    // A mutual `DeclRef` cycle terminates fail-closed as a typed
+    // `Partial(SAME_PATH_RECURSION)` (never a hang, never a fabricated concrete
+    // type, and — node-hiding — never a classifiable carrier): the peel shares
+    // the bounded loop, whose `visited` set names the cycle stop.
     let (host, view) = primitive_carrier_host();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::from_current(&host, &view, overlay);
@@ -2563,14 +2781,17 @@ fn peel_bounded_fail_closed_on_declref_cycle() {
         .value;
 
     let peeled = dispatch.peel_node_for_uninstantiated_carrier_fact_demand(mutual, navigate());
-    assert!(
-        matches!(
-            node_data_for(dispatch.ctx, peeled).as_deref(),
-            Some(SemanticNodeData::DeclRef { .. })
+    match peeled {
+        StructuralFactDemandOutcome::Partial(reasons) => assert!(
+            reasons.contains(PartialReasonSet::SAME_PATH_RECURSION),
+            "a mutual-recursion `DeclRef` cycle is a typed cycle partial, got {reasons:?}"
         ),
-        "a mutual-recursion `DeclRef` cycle carrier-stops fail-closed (bounded), got {:?}",
-        node_data_for(dispatch.ctx, peeled).as_deref()
-    );
+        StructuralFactDemandOutcome::Complete(node) => panic!(
+            "a mutual-recursion `DeclRef` cycle must be Partial(SAME_PATH_RECURSION), not \
+             Complete({:?})",
+            node_data_for(dispatch.ctx, node).as_deref()
+        ),
+    }
 }
 
 // ─────────── validated_snippet_positional_params ───────────
@@ -2641,6 +2862,72 @@ fn validated_snippet_params_complete_nontuple_arg_is_present_bindingless() {
         CallableNodeView::new(&dispatch, snippet).validated_snippet_positional_params(navigate()),
         Some(Vec::new()),
         "a complete non-tuple `Params` yields a present, binding-less slot"
+    );
+}
+
+#[test]
+fn validated_snippet_params_partial_arg_fails_closed_not_bindingless() {
+    // CONSUMER (snippet peel): a `Snippet<Params>` whose `Params` is an over-cap
+    // template-literal behind a `DeclRef` yields a PARTIAL structural-fact demand
+    // on the `Params` arg. The whole snippet read fails closed (`None`), NEVER a
+    // present binding-less `Some([])` slot — a truncated `Params` could still be
+    // a tuple we could not reach.
+    //
+    // DISCRIMINATING: a COMPLETE non-tuple `Params` IS a present binding-less
+    // slot (`Some([])` — see the sibling test above). Pre-change the partial
+    // `Params` carrier-stopped to the (non-tuple) `TemplateLiteral` shell and was
+    // bucketed present-binding-less `Some([])`; post-change the node-hiding
+    // `Partial` fails the whole read to `None`. The inline finite unions
+    // guarantee the keyspace cap fires deterministically.
+    let wide = |prefix: &str| -> String {
+        (0..40)
+            .map(|i| format!("\"{prefix}{i}\""))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let types = format!(
+        "export type TooWide = `cell:${{{a}}}-${{{b}}}`;\n",
+        a = wide("a"),
+        b = wide("b"),
+    );
+    let component = "/workspace/SnippetOverCap.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { TooWide } from './types';\n\
+         interface Props {\n\
+           toowide: TooWide;\n\
+         }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[("/workspace/types.ts", types.as_str())],
+    );
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let dispatch = ctx.dispatch();
+    let toowide = surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "toowide")
+        .expect("the `toowide` member is present")
+        .value;
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    // `Snippet<TooWide>` — the over-cap template alias as the single `Params` arg.
+    let snippet = instantiation_ref(&graph, "Snippet", vec![toowide]);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, snippet).validated_snippet_positional_params(navigate()),
+        None,
+        "a PARTIAL (over-cap template) `Params` fails the whole snippet read closed — never a \
+         present binding-less `Some([])` slot off a truncated resolution"
     );
 }
 

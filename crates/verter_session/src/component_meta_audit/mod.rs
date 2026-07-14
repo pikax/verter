@@ -1077,7 +1077,6 @@ pub fn audit_key_for_node(
         SemanticNodeData::Conditional { distributive, .. } => {
             format!("Conditional(distributive={distributive})")
         }
-        SemanticNodeData::VueMacroElements(_) => format!("VueMacroElements#{}", id.0),
         SemanticNodeData::Function { params, .. } => format!("Function[{}p]", params.len()),
         SemanticNodeData::DeclRef { identity } => {
             format!("DeclRef({}::{})", identity.canonical_id, identity.decl_name)

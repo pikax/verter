@@ -132,7 +132,70 @@ impl<'a> CarrierResolverContext<'a> {
     }
 }
 
+/// Head-resolution outcome fed to the ONE shared reference-head carrier
+/// interner ([`ProjectSemanticDispatch::intern_ref_head_carrier`]).
+pub(super) enum RefHeadResolution {
+    /// The head resolved to a real declaration slot identity.
+    Resolved(DeclIdentity),
+    /// The head is an unshadowed global lib type (`Promise` / a builtin
+    /// utility) — always the nominal `__builtin__` `InstantiationRef`
+    /// carrier, even with zero applied arguments.
+    Builtin(DeclIdentity),
+    /// The head is CURRENTLY unresolvable in the raise scope.
+    Unresolved,
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
+    /// The ONE shared reference-head carrier interner. Both locator-shape
+    /// lowering ([`Self::resolve_locator_ref_head`]) and the shared
+    /// bare-ref head resolver ([`Self::resolve_bare_ref_head`] — reached
+    /// from the eager `Ref` lowering arm, carrier-subject normalization,
+    /// and closed-leaf raising) intern their head-resolution results
+    /// through this single helper:
+    ///
+    /// - a RESOLVED user declaration interns the transparent `DeclRef`
+    ///   (0-arg) / terminal `InstantiationRef` (n-arg) identity carrier;
+    /// - a BUILTIN head interns the nominal `__builtin__`
+    ///   `InstantiationRef` carrier;
+    /// - a currently-UNRESOLVED authored reference stays a scoped
+    ///   `BareRef` carrier — name / already-lowered args / scope are
+    ///   PRESERVED, never collapsed to an `Opaque(Miss)` (which destroys
+    ///   the authored head). The demand points own its resolution: a
+    ///   later `Navigate` demand retries identity, a later `Expanded`
+    ///   demand resolves and executes the carrier.
+    pub(super) fn intern_ref_head_carrier(
+        &self,
+        head: RefHeadResolution,
+        name: &Arc<str>,
+        scope: &NodeScopeId,
+        args: Arc<[SemanticNodeId]>,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        match head {
+            RefHeadResolution::Resolved(identity) if args.is_empty() => {
+                graph.intern_node_with_scope(SemanticNodeData::DeclRef { identity }, scope.clone())
+            }
+            RefHeadResolution::Resolved(identity) => graph.intern_node_with_scope(
+                SemanticNodeData::InstantiationRef {
+                    base: identity,
+                    args,
+                },
+                scope.clone(),
+            ),
+            RefHeadResolution::Builtin(identity) => graph.intern_node_with_scope(
+                SemanticNodeData::InstantiationRef {
+                    base: identity,
+                    args,
+                },
+                scope.clone(),
+            ),
+            RefHeadResolution::Unresolved => graph.intern_node_with_scope(
+                SemanticNodeData::new_bare_ref(Arc::clone(name), scope.clone(), args),
+                scope.clone(),
+            ),
+        }
+    }
+
     /// Resolve a `BareRef` head (`name` / `name<args>`) to its semantic node —
     /// the SOLE shared resolver for an unresolved bare-name reference, reached
     /// from BOTH the eager `TypeExpr::Ref` lowering arm AND carrier-subject
@@ -173,7 +236,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         arg_count: usize,
         lower_args: impl FnOnce() -> Arc<[SemanticNodeId]>,
     ) -> SemanticNodeId {
-        let graph = self.graph();
         let scope = ctx.scope();
         let name_resolution = ctx.name_resolution();
         let scope_payload = ctx.scope_payload();
@@ -191,16 +253,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             && !shadowing.is_shadowing_lib(name.as_ref())
             && self.is_promise_global_name(name.as_ref())
         {
-            return graph.intern_node_with_scope(
-                SemanticNodeData::InstantiationRef {
-                    base: DeclIdentity {
-                        canonical_id: Arc::from("__builtin__"),
-                        whole_hash: HashValue::default(),
-                        decl_name: Arc::clone(name),
-                    },
-                    args: lower_args(),
-                },
-                scope.clone(),
+            return self.intern_ref_head_carrier(
+                RefHeadResolution::Builtin(DeclIdentity {
+                    canonical_id: Arc::from("__builtin__"),
+                    whole_hash: HashValue::default(),
+                    decl_name: Arc::clone(name),
+                }),
+                name,
+                scope,
+                lower_args(),
             );
         }
 
@@ -254,12 +315,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         )
                     }));
             if build_carrier {
-                return graph.intern_node_with_scope(
-                    SemanticNodeData::InstantiationRef {
-                        base: builtin_identity,
-                        args: type_args,
-                    },
-                    scope.clone(),
+                return self.intern_ref_head_carrier(
+                    RefHeadResolution::Builtin(builtin_identity),
+                    name,
+                    scope,
+                    type_args,
                 );
             }
             return match self.execute_type_node(SemanticQueryKey::Instantiate(
@@ -309,10 +369,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // loadable — which is the external ambient-module case the augmentation
         // hook below handles.
         let resolves_to_file = match resolved_root.as_ref() {
-            Some((canonical, _)) if !canonical.is_empty() => self
-                .ctx
-                .ensure_indexed_ready_serve(canonical.as_ref())
-                .is_some(),
+            Some((canonical, _)) if !canonical.is_empty() => {
+                // The DIRECT carrier serve (the LB3 poison shape): the head
+                // probes `IndexedReady` availability, then Navigate/Skeleton/
+                // Shallow interns a `DeclRef`/`InstantiationRef` and returns
+                // with NO nested `execute_read` — so a FENCED serve here marks
+                // ONLY the fan-out tracer, never the `CacheRead` funnel. The
+                // `IndexedReadyServe` is retained (not immediately `.is_some()`)
+                // so the test seam can consult it before presence collapses.
+                let serve = self.ctx.ensure_indexed_ready_serve(canonical.as_ref());
+                // Test-only: an armed fence treats a present serve as
+                // `store_published == false` and fans a non-cacheable read onto
+                // every active tracer — the deterministic in-process equivalent
+                // of a mid-flight-supersession fenced serve consumed AT this
+                // direct probe. Presence still governs `resolves_to_file`, so
+                // the production resolution shape is byte-identical; placing the
+                // injection AT the probe proves the direct serve lies inside the
+                // evaluator's nested-tracer scope.
+                #[cfg(test)]
+                if serve.is_some()
+                    && self
+                        .ctx
+                        .host_for_fact_tracer_install()
+                        .test_force
+                        .force_carrier_direct_serve_fence_for_tests
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                        crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                    );
+                }
+                serve.is_some()
+            }
             _ => false,
         };
         if !resolves_to_file {
@@ -358,6 +446,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     );
                 }
             }
+            // Currently-unresolved authored reference. Under the carrier
+            // modes the head STAYS a scoped `BareRef` carrier — the authored
+            // name / args / scope are semantic content the demand points
+            // retry (`Navigate` retries identity, `Expanded` resolves +
+            // executes); collapsing to `Opaque(Miss)` here would destroy
+            // them at raise time. The eager modes (`Expanded` / `Identity`)
+            // ARE the demand point: a head that still does not resolve there
+            // is an honest miss.
+            if matches!(
+                mode,
+                ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
+            ) {
+                return self.intern_ref_head_carrier(
+                    RefHeadResolution::Unresolved,
+                    name,
+                    scope,
+                    lower_args(),
+                );
+            }
             return self.opaque(QueryError::Miss);
         };
 
@@ -391,20 +498,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             mode,
             ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
         ) {
-            if arg_count == 0 {
-                return graph.intern_node_with_scope(
-                    SemanticNodeData::DeclRef {
-                        identity: decl_identity,
-                    },
-                    scope.clone(),
-                );
-            }
-            return graph.intern_node_with_scope(
-                SemanticNodeData::InstantiationRef {
-                    base: decl_identity,
-                    args: lower_args(),
-                },
-                scope.clone(),
+            let args = if arg_count == 0 {
+                Arc::from(Vec::new().into_boxed_slice())
+            } else {
+                lower_args()
+            };
+            return self.intern_ref_head_carrier(
+                RefHeadResolution::Resolved(decl_identity),
+                name,
+                scope,
+                args,
             );
         }
 
@@ -606,6 +709,101 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// value-root `FileWholeHash` / `ImportRoute` facts into the active tracer so
     /// they bubble into the outer component-meta result signature.
     pub(crate) fn resolve_carrier_subject_node(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        // ORDINARY (non-evaluator) callers (~19 walk / raise / enumerate /
+        // graph-predicate / slot-binding / output-sink sites): a local
+        // `BuildLocalTaint` observation frame + re-fold into the enclosing
+        // frame, and NO nested non-cacheability tracer. Every nested read here
+        // funnels through the shared read boundary into the local frame; these
+        // callers always run inside an enclosing cold build whose OWN tracer a
+        // direct fenced / lease-miss serve marks through the fan-out, so they
+        // need no dedicated tracer (the ~19 keep their current cost).
+        let observation =
+            crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let resolved = self.resolve_carrier_subject_node_inner(node, context);
+        let observed = observation.finish();
+        self.fold_into_top_build_local_taint(observed.result_is_partial, observed.cache_suppress);
+        resolved
+    }
+
+    /// Suppress/partial-CAPTURING variant of
+    /// [`Self::resolve_carrier_subject_node`] — the EVALUATOR-only entry.
+    ///
+    /// The head resolution performs NESTED reads — the `TypeOf` value-root +
+    /// dotted-path `execute_read`s, the `BareRef` builtin `Instantiate`, and the
+    /// `ImportType` qualified-path `ProjectPath` (`carrier.rs`
+    /// `resolve_import_type_head`) — whose `CacheRead.cache_suppress` /
+    /// `result_is_partial` the bare `resolve_carrier_subject_node` return type
+    /// (a single node) cannot carry. Every one of those FUNNEL reads folds its
+    /// rails into the TOP `build_local_taint` frame this variant pushes, making
+    /// the "OR of every nested read" aggregation STRUCTURALLY true.
+    ///
+    /// But the head ALSO performs DIRECT serves (the `ensure_indexed_ready_serve`
+    /// `resolves_to_file` probe, the bare-name resolver's indexed/export/prepared
+    /// serves, frontier route reads) that mark the fan-out non-cacheability
+    /// tracer, NOT the `CacheRead` funnel — and in Navigate/Skeleton/Shallow the
+    /// head interns a `DeclRef` / `InstantiationRef` and returns with NO nested
+    /// `execute_read`, so the local `build_local_taint` frame is EMPTY. Because
+    /// the evaluator calls this DIRECTLY (not through the query-entry key
+    /// normalization, which installs its own tracer), such a direct fenced /
+    /// lease-miss serve would be invisible to the returned suppress the
+    /// `evaluate_deferred_memo` publish gate consults — the cache-poison hole.
+    /// This variant therefore installs a NESTED fact / non-cacheability tracer
+    /// around the whole inner resolution and folds its bit (and any tracer
+    /// overflow) into the returned suppress.
+    ///
+    /// It re-folds the merged observation into the ENCLOSING frame (idempotent
+    /// OR) and RETURNS the aggregated
+    /// [`BuildLocalTaint`](crate::project_semantic_dispatch::BuildLocalTaint) so
+    /// the deferred-shell evaluator's `BareRef` / `ImportType` arm can OR the
+    /// suppress / partial into its OWN [`EvaluateDeferredOutcome`] accumulators —
+    /// the publish gate is a SEPARATE admission authority from any enclosing
+    /// build frame. `cache_suppress` stays ORTHOGONAL to completeness: a fenced /
+    /// non-cacheable but VALID head resolution keeps `result_is_partial = false`
+    /// (Complete) and only refuses memo admission.
+    pub(super) fn resolve_carrier_subject_node_capturing_suppress(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> (
+        SemanticNodeId,
+        crate::project_semantic_dispatch::BuildLocalTaint,
+    ) {
+        let host = self.ctx.host_for_fact_tracer_install();
+        let observation =
+            crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let (resolved, finalise, non_cacheable_read_observed) =
+            crate::fact_signature_helpers::install_fact_tracer(host, || {
+                self.resolve_carrier_subject_node_inner(node, context)
+            });
+        // Order is LOAD-BEARING: finish the local frame, OR the nested tracer's
+        // non-cacheability AND its overflow into `observed.cache_suppress`, and
+        // ONLY THEN re-fold the merged observation into the enclosing frame.
+        // Re-folding the Rail-1-only frame before adding the tracer bits would
+        // recreate the gap the nested tracer exists to close.
+        let mut observed = observation.finish();
+        if non_cacheable_read_observed {
+            observed.cache_suppress = true;
+        }
+        if matches!(
+            finalise,
+            crate::resolver_core::FactReadSetFinalise::Overflow
+        ) {
+            observed.cache_suppress = true;
+        }
+        self.fold_into_top_build_local_taint(observed.result_is_partial, observed.cache_suppress);
+        (resolved, observed)
+    }
+
+    /// Carrier-subject head-resolution body (see
+    /// [`Self::resolve_carrier_subject_node`] for the contract). Wrapped by
+    /// [`Self::resolve_carrier_subject_node_capturing_suppress`] under an
+    /// observation taint frame; never called directly except through those two
+    /// entry points.
+    fn resolve_carrier_subject_node_inner(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,

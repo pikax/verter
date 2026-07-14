@@ -15,7 +15,3 @@
 pub mod bindings;
 pub mod raw_surface;
 pub mod type_surface;
-
-#[cfg(test)]
-#[path = "type_surface_typed_form_tests.rs"]
-mod type_surface_typed_form_tests;

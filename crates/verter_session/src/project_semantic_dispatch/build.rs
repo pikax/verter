@@ -10,7 +10,7 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_solver::host::{ResolvedRootIdentity, UtilitySource};
 use verter_semantic::analysis::type_solver::PreparedTypeDecl;
-use verter_type_expr::{FunctionExpr, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
 use super::walk::PathWalker;
 use super::{
@@ -19,10 +19,10 @@ use super::{
 };
 use crate::semantic_query::demand::{Demand, MaterializedPoint, MaterializedSet, ProjectionPath};
 use crate::semantic_query::{
-    BranchSelection, DepSignature, HostResolvedNamedTypeKey, IndexKey, IndexSignature,
-    LiteralValue, NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind,
-    ProjectionMode, QueryError, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
+    BranchSelection, DepSignature, IndexKey, IndexSignature, LiteralValue, NodeScopeId,
+    OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode, QueryError,
+    QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeData, SemanticNodeId,
+    SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
 };
 
 /// One folded cross-file augmentation contributor: its version self-root
@@ -67,8 +67,14 @@ struct AugmentationContributions {
 /// One resolved heritage base from a class's `extends` clause
 /// ([`ProjectSemanticDispatch::class_heritage_bases`]): the base decl's
 /// `(canonical, symbol)` identity plus the heritage clause's authored
-/// type-arguments (`extends Base<string>`), still un-lowered `TypeExpr`s.
-type HeritageBase = (Arc<str>, Arc<str>, Arc<[TypeExpr]>);
+/// type-argument LOCATORS (`extends Base<string>` — producer-minted
+/// content-free positions; the Static composer derefs + lowers them on
+/// demand, never an embedded body).
+type HeritageBase = (
+    Arc<str>,
+    Arc<str>,
+    Arc<[verter_type_expr::locators::TypeArgLocator]>,
+);
 
 /// Upper bound on the template-literal keyspace product width
 /// `∏ |choice_set_i|` enumerated by
@@ -522,7 +528,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // MissingDependency result is `ReturnOnly`.)
                         output.result_is_partial = true;
                         output.cache_suppress = true;
-                        crate::request_context::mark_request_materialization_cache_suppress();
+                        crate::request_context::mark_request_result_partial();
                     }
                     return output;
                 }
@@ -602,23 +608,90 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 QueryResult::Value(id) => id,
                 _ => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
             }
-        } else if let Some(ty_ann) = prepared.type_annotation.as_ref() {
-            self.shallow_lower_type_expr_with_context(
-                ty_ann,
+        } else if !matches!(
+            prepared.type_annotation.classification,
+            verter_type_expr::facts::ValueAnnotationClass::Absent
+        ) {
+            // The annotation FACT carries either a trivially-closed leaf (an
+            // inferred primitive/literal annotation) or routes to the authored
+            // value-annotation POSITION — lowered through the ONE located body
+            // source (`LowerLocator` deref of the value anchor), never a
+            // stored typed body.
+            match prepared.type_annotation.annotation.as_ref() {
+                Some(verter_type_expr::facts::SemanticTypeSource::Closed(
+                    verter_type_expr::facts::ClosedTypeFact::Leaf(leaf),
+                )) => self.shallow_lower_type_expr_with_context(
+                    &super::lower::leaf_type_fact_expr(leaf),
+                    &empty_env,
+                    &scope,
+                    &prepared.name_resolution,
+                    scope_payload.as_ref(),
+                    &shadowing,
+                    &mut substitutions,
+                    context,
+                ),
+                Some(verter_type_expr::facts::SemanticTypeSource::Authored(locator)) => self
+                    .lower_located_body_with_provenance(
+                        locator.clone(),
+                        verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                        &[],
+                        &prepared.name_resolution,
+                        &empty_env,
+                        &scope,
+                        scope_payload.as_ref(),
+                        &shadowing,
+                        &mut substitutions,
+                        context,
+                    ),
+                // A complex INFERRED annotation carries no closed fact — it is
+                // recovered by demand through the SAME authored value-position
+                // locator (the transient value-part re-borrow serves the
+                // initializer-inferred typed IR).
+                _ => self.lower_located_body_with_provenance(
+                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                        verter_type_expr::locators::TypeBodySlot {
+                            anchor: verter_type_expr::locators::AuthoredAnchor {
+                                canonical_id: Arc::from(
+                                    prepared.root_identity.canonical_id.as_str(),
+                                ),
+                                symbol: Arc::from(prepared.root_identity.symbol_name.as_str()),
+                                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                            },
+                            path: Arc::from(Vec::new().into_boxed_slice()),
+                        },
+                    ),
+                    verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                    &[],
+                    &prepared.name_resolution,
+                    &empty_env,
+                    &scope,
+                    scope_payload.as_ref(),
+                    &shadowing,
+                    &mut substitutions,
+                    context,
+                ),
+            }
+        } else if prepared.object_shape.is_some() {
+            // Const-object shape: the members' value positions are content-
+            // free locators of the authored object — lower the WHOLE authored
+            // value position through the located body source (the transient
+            // value-part re-borrow serves the object initializer's typed IR).
+            self.lower_located_body_with_provenance(
+                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                    verter_type_expr::locators::TypeBodySlot {
+                        anchor: verter_type_expr::locators::AuthoredAnchor {
+                            canonical_id: Arc::from(prepared.root_identity.canonical_id.as_str()),
+                            symbol: Arc::from(prepared.root_identity.symbol_name.as_str()),
+                            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                        },
+                        path: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                ),
+                verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                &[],
+                &prepared.name_resolution,
                 &empty_env,
                 &scope,
-                &prepared.name_resolution,
-                scope_payload.as_ref(),
-                &shadowing,
-                &mut substitutions,
-                context,
-            )
-        } else if let Some(shape) = prepared.object_shape.as_ref() {
-            self.shallow_lower_type_expr_with_context(
-                &TypeExpr::Object(Arc::new(shape.clone())),
-                &empty_env,
-                &scope,
-                &prepared.name_resolution,
                 scope_payload.as_ref(),
                 &shadowing,
                 &mut substitutions,
@@ -628,68 +701,100 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Overload visibility (projection-time rule): a lone signature is
             // always visible (even if bodied); a multi-signature overload group
             // surfaces every bodiless overload in source order and HIDES the
-            // trailing implementation signature. `FunctionSignature` carries
-            // per-parameter spans (preserved by the clone) but no
-            // whole-signature span, so the signature span stays `None` here.
+            // trailing implementation signature. Each visible signature lowers
+            // through the located body source at its GROUP-level
+            // `ValueSignature` ordinal (the whole-signature deref recovers the
+            // function IR from the retained snapshot); the composed
+            // constructor-like object is interned directly.
             let is_class =
                 prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class;
-            let visible: Vec<&verter_semantic::analysis::type_eval::FunctionSignature> =
-                if prepared.signatures.len() == 1 {
-                    prepared.signatures.iter().collect()
+            let visible: Vec<usize> = if prepared.signatures.len() == 1 {
+                vec![0]
+            } else {
+                let bodiless: Vec<usize> = prepared
+                    .signatures
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, sig)| !sig.has_implementation_body)
+                    .map(|(ordinal, _)| ordinal)
+                    .collect();
+                // Defensive: an overload set with no bodiless members is
+                // ill-formed TS; surface every signature rather than none.
+                if bodiless.is_empty() {
+                    (0..prepared.signatures.len()).collect()
                 } else {
-                    let bodiless: Vec<_> = prepared
-                        .signatures
-                        .iter()
-                        .filter(|sig| !sig.has_implementation_body)
-                        .collect();
-                    // Defensive: an overload set with no bodiless members is
-                    // ill-formed TS; surface every signature rather than none.
-                    if bodiless.is_empty() {
-                        prepared.signatures.iter().collect()
-                    } else {
-                        bodiless
-                    }
-                };
-            let properties = visible
-                .into_iter()
-                .map(|sig| {
-                    let function_expr = FunctionExpr::synthetic(
-                        sig.parameters.clone(),
-                        sig.return_type.clone().map(Arc::new),
-                        sig.type_parameters.clone(),
+                    bodiless
+                }
+            };
+            let signature_nodes: Vec<crate::semantic_query::SemanticNodeId> =
+                visible
+                    .into_iter()
+                    .map(|ordinal| {
+                        let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                        verter_type_expr::locators::TypeBodySlot {
+                            anchor: verter_type_expr::locators::AuthoredAnchor {
+                                canonical_id: Arc::from(
+                                    prepared.root_identity.canonical_id.as_str(),
+                                ),
+                                symbol: Arc::from(prepared.root_identity.symbol_name.as_str()),
+                                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                            },
+                            path: Arc::from(
+                                vec![verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
+                                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                                }]
+                                .into_boxed_slice(),
+                            ),
+                        },
                     );
-                    if is_class {
-                        ObjectMember::ConstructSignature(function_expr)
-                    } else {
-                        ObjectMember::CallSignature(function_expr)
-                    }
-                })
-                .collect();
-            let object_expr = ObjectExpr { properties };
-            self.shallow_lower_type_expr_with_context(
-                &TypeExpr::Object(Arc::new(object_expr)),
-                &empty_env,
-                &scope,
-                &prepared.name_resolution,
-                scope_payload.as_ref(),
-                &shadowing,
-                &mut substitutions,
-                context,
-            )
+                        self.lower_located_body_with_provenance(
+                            locator,
+                            verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                            &[],
+                            &prepared.name_resolution,
+                            &empty_env,
+                            &scope,
+                            scope_payload.as_ref(),
+                            &shadowing,
+                            &mut substitutions,
+                            context,
+                        )
+                    })
+                    .collect();
+            let surface = crate::semantic_query::SurfaceView {
+                members: Arc::from(Vec::new().into_boxed_slice()),
+                call_signatures: if is_class {
+                    Arc::from(Vec::new().into_boxed_slice())
+                } else {
+                    Arc::from(signature_nodes.clone().into_boxed_slice())
+                },
+                construct_signatures: if is_class {
+                    Arc::from(signature_nodes.into_boxed_slice())
+                } else {
+                    Arc::from(Vec::new().into_boxed_slice())
+                },
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            };
+            self.graph()
+                .intern_node_with_scope(SemanticNodeData::Object(surface), scope.clone())
         } else if let Some(members) = prepared.enum_members.as_ref() {
             let object_expr = ObjectExpr {
                 properties: members
+                    .members
                     .iter()
-                    .map(|(name, value)| {
+                    .map(|entry| {
                         // One synthetic property per member — EVERY member, not
                         // just the foldable subset. A foldable member carries its
                         // literal; a deferred member its degraded sound primitive
-                        // (`EnumMemberValue::projected_type`), so `keyof typeof
-                        // Enum` surfaces every declared name. The prepared enum
-                        // member inventory carries no per-member source span.
+                        // (the stored scalar via `enum_scalar_type_expr`), so
+                        // `keyof typeof Enum` surfaces every declared name. The
+                        // prepared enum member inventory carries no per-member
+                        // source span.
                         ObjectMember::Property(ObjectProperty::synthetic_public(
-                            name.clone(),
-                            value.projected_type().clone(),
+                            entry.name.clone(),
+                            super::lower::enum_scalar_type_expr(&entry.value),
                             false,
                             true,
                         ))
@@ -865,49 +970,57 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// Build a `.vue` SFC's synthesized `default` PUBLIC INSTANCE surface for
-    /// `Instantiate{ .vue, "default", [] }`.
+    /// Build a synthesized component-default PUBLIC INSTANCE surface for
+    /// `Instantiate{ <component>, "default", [] }` (the `.vue` SFC and every
+    /// framework synth leg share this one production site).
     ///
-    /// The `.vue`'s `IndexedReady` carries a synthesized `default` VALUE symbol
-    /// (`resolver_core::vue_default_synth`) whose construct-signature return type
-    /// IS the instance object `{ $props, $emit, $slots }`. This lowers that
-    /// instance object through the SHARED lowering pipeline (no second resolver)
-    /// in the `.vue`'s scope, returning a normal
-    /// [`SemanticNodeData::Object`]`(SurfaceView)` so `ProjectPath` / walkers
-    /// navigate `$props` / `$emit` / `$slots`.
+    /// The canonical's `IndexedReady` carries a synthesized `default` VALUE
+    /// symbol (`resolver_core::vue_default_synth` /
+    /// `resolver_core::svelte_default_synth`) whose annotation FACT carries the
+    /// fabricated instance shape `{ $props, $emit, $slots, … }` as a
+    /// closed/synthesized source; the authored member payloads inside it are
+    /// content-free locators. This raises that source through the SHARED
+    /// source-raising bridge (no second resolver) in the component's scope,
+    /// returning a normal [`SemanticNodeData::Object`]`(SurfaceView)` so
+    /// `ProjectPath` / walkers navigate `$props` / `$emit` / `$slots`.
     ///
     /// Returns `None` when the canonical carries no synthesized `default` with an
     /// instance shape (a `.vue` with no type-based macros), letting
     /// `build_instantiate` fall through to its ordinary `resolve_prepared_type_decl`
     /// miss handling.
     ///
-    /// Termination is by QUERY IDENTITY, not a depth bound. A circular `.vue`
-    /// import is bounded by one of THREE outcomes depending on HOW the cycle
-    /// re-enters this identity — do not over-claim that every cycle reaches the
+    /// Termination is by QUERY IDENTITY, not a depth bound. Under the lazy
+    /// design a circular `.vue` import is a FINITE SHALLOW SURFACE containing
+    /// recursive `DeclRef` carriers, NOT an error: the common bound is the
+    /// lazy route itself, with two guards reserved for genuine in-flight
+    /// re-entry — do not over-claim that a cycle reaches the
     /// active-instantiation guard:
     ///
-    /// - **lazy bare-`Ref` / mutual cross-file cycle** (the COMMON shape — e.g.
-    ///   `defineProps<{ peer: Other }>()` with a reciprocal `E ↔ F`): the inner
-    ///   cyclic reference lowers in `Navigate` to a shallow `DeclRef` carrier
-    ///   (`Ref { name: "default" }`) instead of re-dispatching `Instantiate`, and
-    ///   each `Instantiate(.vue default)` side completes and pops before the next
-    ///   is demanded — so the SAME `(decl_canonical, "default")` frame is NEVER
-    ///   active at the back-edge. The result is a bounded SHALLOW `Object`, NOT a
-    ///   `RecursiveRef`. This branch's `push_instantiate_active` is paired
-    ///   correctly but is not the bound for this shape.
-    /// - **memo same-key `Instantiate` sentinel** (`semantic_query_memo`): when a
-    ///   re-entry dispatches the SAME `Instantiate{ .vue default, [], context }`
-    ///   KEY (identical context) that is already in flight, the memo's same-key
-    ///   recursion sentinel returns `Opaque(RecursiveRef)`.
-    /// - **`push_instantiate_active` / `is_instantiate_active` guard** (below):
-    ///   when the instance shape re-references this same `(decl_canonical,
-    ///   "default")` identity EAGERLY while this frame is still on the stack — the
-    ///   `InstanceType<typeof Self>` same-file self-cycle projected
-    ///   `Published(Expanded)`, where `typeof Self` routes through
-    ///   `build_synthesized_vue_default_construct_object` back into
-    ///   `Instantiate(.vue default)` under a DIFFERENT context key (so the memo
-    ///   sentinel does not fire) — the active-instantiation guard short-circuits
-    ///   to `Opaque(RecursiveRef)` before recursing.
+    /// - **lazy cycle** (the PRODUCTION shape — a mutual bare-`Ref`
+    ///   `defineProps<{ peer: Other }>()` with a reciprocal `E ↔ F`, an
+    ///   `InstanceType<typeof Peer>` pair, or a same-file self-cycle): the
+    ///   inner cyclic reference stays / presents as the shallow
+    ///   instance-identity `DeclRef` carrier (`Ref { name: "default" }`)
+    ///   instead of re-dispatching `Instantiate`, and each
+    ///   `Instantiate(.vue default)` frame completes and pops before the next
+    ///   is demanded — so the SAME `(decl_canonical, "default")` frame is
+    ///   NEVER active at the back-edge. The result is a bounded SHALLOW
+    ///   `Object`, NOT a `RecursiveRef`. This branch's
+    ///   `push_instantiate_active` is paired correctly but is not the bound
+    ///   for this shape.
+    /// - **memo same-key `Instantiate` sentinel** (`semantic_query_memo`):
+    ///   when a re-entry dispatches the SAME
+    ///   `Instantiate{ .vue default, [], context }` KEY (identical context)
+    ///   that is already in flight, the memo's same-key recursion sentinel
+    ///   returns `Opaque(RecursiveRef)`.
+    /// - **`push_instantiate_active` / `is_instantiate_active` guard**
+    ///   (below): the residual same-identity re-entry backstop — when a
+    ///   re-dispatch reaches this same `(decl_canonical, "default")` identity
+    ///   under a DIFFERENT context key while this frame is still on the stack
+    ///   (so the memo sentinel does not fire), the guard short-circuits to
+    ///   `Opaque(RecursiveRef)` before recursing. Genuine in-flight re-entry
+    ///   ONLY (the same semantic op cannot progress); the lazy production
+    ///   routes above never reach it.
     ///
     /// None of the three is a depth bound.
     fn build_vue_default_instance(
@@ -937,33 +1050,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return None;
         }
         let default_body = indexed.shallow_state.value_decl("default")?;
-        let instance_shape: TypeExpr = default_body
-            .signatures
-            .first()?
-            .return_type
-            .as_ref()?
-            .clone();
+        // The synthesized instance shape rides the annotation FACT as the
+        // closed/synthesized four-source arm
+        // (`lowered_value_decl_for_synthesised_default`): the fabricated
+        // member skeleton is a closed fact, and each authored member payload
+        // (the macro type arguments) is a content-free locator lowered on
+        // demand through the ONE dispatch. An absent annotation source (a
+        // synth without a recoverable instance source) is a fail-closed miss:
+        // no instance surface, never a fabricated shape.
+        let instance_source: verter_type_expr::facts::SemanticTypeSource =
+            default_body.type_annotation.annotation.clone()?;
         let observed_hash = indexed.whole_hash;
-
-        // Body-lowering context for the `.vue` scope — mirrors the prepared-decl
-        // path's scope-payload + shadowing capture so a synthesized instance
-        // member that REFERENCES an imported `.vue` (`InstanceType<typeof Foo>`)
-        // resolves through the SAME bare-name / import resolution every decl body
-        // uses.
-        let scope_payload = self
-            .ctx
-            .prepared_decl_bundle(decl_canonical.as_ref())
-            .map(|bundle| {
-                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                    &bundle,
-                )
-            });
-        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
-            scope_payload.as_ref(),
-        );
-        let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-        let name_resolution: FxHashMap<String, ResolvedRootIdentity> = FxHashMap::default();
-        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
 
         // Query-identity recursion control: push `(decl_canonical, "default")`
         // before lowering. A circular `.vue` import whose instance shape
@@ -985,20 +1082,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
 
-        // Lower the instance object through the shared pipeline. An inline
-        // `ObjectExpr` lowers directly to `SemanticNodeData::Object(SurfaceView)`,
-        // so the result is a normal object the walkers navigate.
-        let result = self.shallow_lower_type_expr_with_context(
-            &instance_shape,
-            &env,
-            scope,
-            &name_resolution,
-            scope_payload.as_ref(),
-            &shadowing,
-            &mut substitutions,
-            context,
+        // Raise the synthesized instance source through the shared
+        // source-raising bridge: the fabricated skeleton composes directly and
+        // every authored member payload lowers through the single-engine
+        // authored-locator routing (the macro hot-mirror producer / the
+        // memoized locator deref) — inert shallow carriers the consuming
+        // walkers resolve on demand, so the result is a normal object
+        // `ProjectPath` navigates.
+        let raised = self.raise_semantic_type_source_to_hot(
+            &instance_source,
+            super::semantic_source::SourceRaiseContext {
+                scope_canonical_id: decl_canonical.as_ref(),
+                context,
+                interior_failures: None,
+            },
         );
         self.pop_instantiate_active();
+        // A source with no live graph representation under the current view is
+        // the same fail-closed miss as an absent source (a `Synthesized`
+        // skeleton always raises; only a bare authored/projected source can
+        // miss here).
+        let result = raised?.node();
 
         // Origin edge + dep signature, mirroring `build_instantiate`'s shell. The
         // instance object is synthesized from the `.vue`'s macro type arguments,
@@ -1016,15 +1120,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             OriginMeta::None,
             Arc::clone(&fence),
         );
-        for (param_name, arg_id) in substitutions {
-            self.graph().record_origin_edge(
-                result,
-                OriginEdgeKind::SubstituteTypeParam,
-                Arc::from(vec![arg_id].into_boxed_slice()),
-                OriginMeta::SubstitutedParam(param_name),
-                Arc::clone(&fence),
-            );
-        }
 
         // `decl_whole_hash` (re-sourced live at value-compute from
         // `ensure_indexed_ready_serve(base.defining_canonical)`'s serve
@@ -1304,12 +1399,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let lowered_args: Vec<SemanticNodeId> = if base_args.is_empty() {
                         Vec::new()
                     } else {
-                        self.lower_class_heritage_args(
+                        match self.lower_class_heritage_args(
                             own_canonical.as_ref(),
                             own_symbol.as_ref(),
                             base_args.as_ref(),
                             context.mode,
-                        )
+                        ) {
+                            Some(nodes) => nodes,
+                            // The authored argument positions could not be
+                            // re-borrowed (broken lease / drift) — never
+                            // fabricate a differently-instantiated base; this
+                            // base contributes nothing.
+                            None => continue,
+                        }
                     };
                     let base_slot =
                         self.type_slot_for(Arc::clone(&base_canonical), Arc::clone(&base_name));
@@ -1580,19 +1682,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
             scope_payload.as_ref(),
         );
-        let shape = prepared.object_shape.as_ref()?;
+        // The constructor-object SHAPE is a narrowed fact whose member value
+        // positions are content-free locators — the authored surface lowers
+        // through the ONE located body source (the value anchor's whole
+        // position; the transient value-part re-borrow serves the
+        // constructor shape when no annotation shadows it).
+        prepared.object_shape.as_ref()?;
         // Bind the class's OWN type parameters as `TypeParam` shells so a
         // declared `constructor(x: T)` lowers `T` to the substitutable
         // binder node (the heritage hop specializes it through the key's
         // `type_args`). Statics cannot legally reference class type
-        // parameters, so the shells surface only through the ctor.
+        // parameters, so the shells surface only through the ctor. The
+        // located pipeline re-derives the SAME binder identities from the
+        // class's narrow parameter facts and substitutes these shells in.
         let env = self.class_type_param_shell_env(canonical, symbol, indexed.whole_hash, &scope);
+        let class_type_params = self
+            .ctx
+            .prepared_type_decl(canonical, symbol)
+            .map(|type_side| type_side.type_parameters.clone())
+            .unwrap_or_default();
         let mut substitutions = Vec::new();
-        Some(self.shallow_lower_type_expr_with_context(
-            &TypeExpr::Object(Arc::new(shape.clone())),
+        Some(self.lower_located_body_with_provenance(
+            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                verter_type_expr::locators::TypeBodySlot {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::from(canonical),
+                        symbol: Arc::from(symbol),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    path: Arc::from(Vec::new().into_boxed_slice()),
+                },
+            ),
+            verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+            &class_type_params,
+            &prepared.name_resolution,
             &env,
             &scope,
-            &prepared.name_resolution,
             scope_payload.as_ref(),
             &shadowing,
             &mut substitutions,
@@ -1643,23 +1768,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// derived class's own type parameters bind as shells (`class Mid<U>
     /// extends Base<U>` lowers `U` to Mid's binder shell, which Mid's own
     /// `type_args` substitution later specializes).
+    ///
+    /// The arguments arrive as producer-minted content-free
+    /// [`TypeArgLocator`](verter_type_expr::locators::TypeArgLocator)s (the
+    /// heritage-base FACT's argument positions): each derefs LAZILY here —
+    /// only when the Static composer demands the base — through the ONE
+    /// shared locator-deref (lease-only), then lowers through the shared
+    /// lowering path. Fail-closed: `None` when an authored argument position
+    /// cannot be re-borrowed (broken lease / drift) — the caller must not
+    /// fabricate a differently-instantiated base.
     fn lower_class_heritage_args(
         &self,
         canonical: &str,
         symbol: &str,
-        args: &[TypeExpr],
+        args: &[verter_type_expr::locators::TypeArgLocator],
         mode: crate::semantic_query::ProjectionMode,
-    ) -> Vec<SemanticNodeId> {
-        let Some(indexed) = self
+    ) -> Option<Vec<SemanticNodeId>> {
+        let indexed = self
             .ctx
             .ensure_indexed_ready_serve(canonical)
-            .map(|serve| serve.indexed)
-        else {
-            return Vec::new();
-        };
-        let Some(type_decl) = self.ctx.prepared_type_decl(canonical, symbol) else {
-            return Vec::new();
-        };
+            .map(|serve| serve.indexed)?;
+        let type_decl = self.ctx.prepared_type_decl(canonical, symbol)?;
+        // Deref each authored argument position through the shared
+        // locator-deref — a typed deref failure fails the whole argument
+        // list closed (never a fabricated / partially-instantiated base).
+        let mut authored: Vec<TypeExpr> = Vec::with_capacity(args.len());
+        for locator in args {
+            match indexed.shallow_state.decl_bodies().deref_type_arg(locator) {
+                Ok(expr) => authored.push(expr),
+                Err(_) => return None,
+            }
+        }
         let scope = NodeScopeId::File {
             canonical_id: Arc::from(canonical),
             whole_hash: indexed.whole_hash,
@@ -1673,20 +1812,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
         let env = self.class_type_param_shell_env(canonical, symbol, indexed.whole_hash, &scope);
         let mut substitutions = Vec::new();
-        args.iter()
-            .map(|arg| {
-                self.shallow_lower_type_expr_with_context(
-                    arg,
-                    &env,
-                    &scope,
-                    &type_decl.name_resolution,
-                    scope_payload.as_ref(),
-                    &shadowing,
-                    &mut substitutions,
-                    crate::semantic_query::ProjectionReductionContext::published(mode),
-                )
-            })
-            .collect()
+        Some(
+            authored
+                .iter()
+                .map(|arg| {
+                    self.shallow_lower_type_expr_with_context(
+                        arg,
+                        &env,
+                        &scope,
+                        &type_decl.name_resolution,
+                        scope_payload.as_ref(),
+                        &shadowing,
+                        &mut substitutions,
+                        crate::semantic_query::ProjectionReductionContext::published(mode),
+                    )
+                })
+                .collect(),
+        )
     }
 
     /// Substitute a class's OWN type parameters positionally with the
@@ -1721,16 +1863,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         result
     }
 
-    /// The class's heritage bases, base-first, read from the type-side
-    /// sibling slot's `PreparedTypeDecl.body` (the producer's Intersection
-    /// fold puts heritage `Ref` arms before the own `Object` arm). Each
-    /// base ref resolves through the prepared decl's own `name_resolution`
-    /// (import-aware); an unresolved bare name falls back to the same file.
-    /// The third element carries the heritage clause's type-arguments
-    /// (`extends Base<string>` — preserved by the producer as
-    /// `named_with_args`), still as authored `TypeExpr`s; the Static
-    /// composer lowers them in the derived class's scope. Non-class decls
-    /// and heritage-free classes return an empty list.
+    /// The class's heritage bases, base-first, read from the PRODUCER-MINTED
+    /// content-free heritage-base FACTS on the type-side sibling slot's
+    /// prepared decl (`PreparedTypeDecl.heritage_bases`, extracted once at
+    /// lazy decl-body lowering from the class body's Intersection fold —
+    /// heritage `Ref` arms before the own `Object` arm). This reader makes
+    /// ZERO query-time `TypeExpr` decision: each fact's HEAD resolves here
+    /// through the prepared decl's own `name_resolution` (import-aware; an
+    /// unresolved bare name falls back to the same file), and the third
+    /// element carries the fact's authored type-argument LOCATORS
+    /// (`extends Base<string>`) — the Static composer derefs + lowers only
+    /// the demanded arguments in the derived class's scope. Non-class decls
+    /// and heritage-free classes return an empty list (the producer mints no
+    /// facts for them).
     fn class_heritage_bases(&self, canonical: &str, symbol: &str) -> Vec<HeritageBase> {
         let Some(prepared) = self.ctx.prepared_type_decl(canonical, symbol) else {
             return Vec::new();
@@ -1738,30 +1883,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if prepared.kind != verter_semantic::analysis::type_eval::TypeDeclKind::Class {
             return Vec::new();
         }
-        let TypeExpr::Intersection(parts) = &prepared.body else {
-            return Vec::new();
-        };
-        parts
+        prepared
+            .heritage_bases
             .iter()
-            .filter_map(|part| match part {
-                TypeExpr::Ref {
-                    name,
-                    type_arguments,
-                } => match prepared.name_resolution.get(name.as_ref()) {
-                    Some(root) => Some((
+            .map(|fact| {
+                match prepared
+                    .name_resolution
+                    .get(fact.name_resolution_ref.as_str())
+                {
+                    Some(root) => (
                         Arc::<str>::from(root.canonical_id.as_str()),
                         Arc::<str>::from(root.symbol_name.as_str()),
-                        Arc::clone(type_arguments),
-                    )),
+                        Arc::clone(&fact.type_args),
+                    ),
                     // Same-file base not in the name-resolution map —
                     // resolve locally.
-                    None => Some((
+                    None => (
                         Arc::<str>::from(canonical),
-                        Arc::clone(name),
-                        Arc::clone(type_arguments),
-                    )),
-                },
-                _ => None,
+                        Arc::<str>::from(fact.name.as_str()),
+                        Arc::clone(&fact.type_args),
+                    ),
+                }
             })
             .collect()
     }
@@ -2246,20 +2388,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         for (index, param) in prepared.type_parameters.iter().enumerate() {
             let arg_id = if let Some(explicit) = args.get(index).copied() {
                 explicit
-            } else if let Some(default) = param.default.as_deref() {
-                // Propagate the full
-                // `ProjectionReductionContext` through default-param
-                // lowering so a `StructuralTransit` instantiation
-                // survives. The legacy `body_mode`-only wrapper at
-                // [`Self::shallow_lower_type_expr`] rebuilds
-                // `Published(mode)` and would clobber the demand axis.
-                // Provenance downgrades to structural: a type-parameter default is a substituted value, not
-                // the macro-T own body.
-                self.shallow_lower_type_expr_with_context(
-                    default,
+            } else if let Some(default) = param.default.as_ref() {
+                // The default bound is a content-free locator of the authored
+                // `T = D` position — lowered through the ONE located body
+                // source. The prior-sibling PREFIX params re-derive the
+                // bound's own binder frame; `env` (the arguments bound so
+                // far) substitutes an earlier parameter referenced by the
+                // default (`<T, U = T>`). Propagate the full
+                // `ProjectionReductionContext` so a `StructuralTransit`
+                // instantiation survives; provenance downgrades to
+                // structural — a type-parameter default is a substituted
+                // value, not the macro-T own body.
+                self.lower_located_body_with_provenance(
+                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(default.clone()),
+                    prepared.kind,
+                    &prepared.type_parameters[..index],
+                    &prepared.name_resolution,
                     &env,
                     &scope,
-                    &prepared.name_resolution,
                     scope_payload.as_ref(),
                     &shadowing,
                     &mut substitutions,
@@ -2491,6 +2637,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // semantics: the value is served, never published warm.
         if augmentation_source_env_unobservable {
             output.cache_suppress = true;
+            // Fan the generalized non-cacheability rail onto EVERY active tracer.
+            // This is the SINGLE consumer of the relative stitch's
+            // `source_env_unobservable`, so firing here covers every unobservable
+            // source (an unservable / unhealable augmenter, a LeaseMiss
+            // contributor). The build-local `cache_suppress` above refuses only
+            // THIS build's inner memo; without this fan-out the enclosing
+            // component-meta tracer would launder the under-merged augmentation
+            // into its warm cache (the read-side fact rail cannot reject it — the
+            // facts validate live while a contributor's source-env is
+            // unobservable). Same rail as the external augmentation collector
+            // (`collect_augmentation_contributions`).
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+            );
         }
         output
     }
@@ -2683,7 +2843,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             else {
                 // A set member the live view cannot serve is a torn state:
                 // its contribution (and source-env identity) cannot be
-                // observed coherently — the parent result must not warm.
+                // observed coherently — the parent result must not warm. The
+                // generalized non-cacheability rail is fanned ONCE at the single
+                // CONSUMER (`instantiate_shell`, where this flag becomes
+                // `output.cache_suppress`), covering every unobservable source.
                 source_env_unobservable = true;
                 continue;
             };
@@ -2708,7 +2871,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .augmenter_artifacts_self_healing(&augmenter.artifact_key, indexed.whole_hash)
             else {
                 // Unhealable captured key: the augmenter's exact artifact
-                // identity is unobservable — refuse warm admission.
+                // identity is unobservable — refuse warm admission. The
+                // generalized non-cacheability rail is fanned ONCE at the
+                // consumer (see the unservable arm above).
                 source_env_unobservable = true;
                 continue;
             };
@@ -2782,8 +2947,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // ReturnOnly'd): the augmenter's source-env is UNOBSERVABLE —
                     // fold into the fold's no-warm rail so the enclosing query's
                     // `cache_suppress` is set, rather than silently dropping the
-                    // contributor and warm-admitting an under-merged surface. A
-                    // later demand under a live lease recovers.
+                    // contributor and warm-admitting an under-merged surface. The
+                    // generalized non-cacheability rail is fanned ONCE at the
+                    // consumer (`instantiate_shell`) for every unobservable
+                    // source, so the enclosing component-meta tracer refuses the
+                    // final result too. A later demand under a live lease recovers.
                     crate::resolver_core::prepared_decl::PreparedDeclOutcome::LeaseMiss => {
                         source_env_unobservable = true;
                         continue;
@@ -3068,15 +3236,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // frame — the SAME semantic `QueryBuildOutput.cache_suppress` rail the
         // relative stitch uses (`instantiate_shell` sets `output.cache_suppress`
         // from the collector's `source_env_unobservable`). That is the rail memo
-        // admission actually consults; the earlier request-materialisation
-        // sticky alone did NOT gate the enclosing `Instantiate` memo. The
+        // admission actually consults; it also reaches the evaluator-scoped
+        // carrier observation frame when this augmentation resolves under a
+        // carrier subject. An unobservable source-env is a VALID (Complete)
+        // but non-cacheable serve: fold ONLY `cache_suppress` (the
+        // `(false, true)` classification), NEVER the request-partial rail —
+        // marking partiality here would false-`Partial` a complete result. The
         // completion fence separately covers a mid-flight torn contributor
-        // (revalidate-before-publish). Also mark the request-materialisation
-        // sticky as a fail-closed backstop for the (unreachable-by-construction)
-        // case where no enclosing cold-build frame is active.
+        // (revalidate-before-publish).
+        //
+        // ALSO fan the generalized non-cacheability onto every active tracer:
+        // the build-local fold marks only the enclosing build's frame, but the
+        // component-meta entry's admission consults its OWN fact tracer's
+        // `non_cacheable_read_observed` bit — the rail that (with the
+        // request-partial mark removed here) now carries the torn-augmenter
+        // refusal to the component-meta warm gate WITHOUT false-`Partial`ing it.
         if source_env_unobservable {
             self.fold_into_top_build_local_taint(false, true);
-            crate::request_context::mark_request_materialization_cache_suppress();
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+            );
         }
         // A tainted-EMPTY collection (augmenters targeted the specifier but were
         // all unobservable) produces no body: the taint is already folded, so
@@ -3161,24 +3340,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        // Dual-leg parity seam (test builds only): while the oracle's
-        // legacy-leg RAII guard is active on this thread, the retained
-        // prepared-body implementation serves the body so the parity
-        // harness can compare both body sources over live published
-        // surfaces. Never compiled into production or plain debug builds.
-        #[cfg(test)]
-        if super::stage10_parity_oracle::legacy_prepared_body_leg_active() {
-            return self.legacy_lower_decl_body_from_prepared(
-                prepared,
-                env,
-                scope,
-                scope_payload,
-                shadowing,
-                substitutions,
-                context,
-            );
-        }
-
         // The declaration's OWN decl-body locator (whole body).
         let canonical: Arc<str> = match scope {
             NodeScopeId::File { canonical_id, .. } => Arc::clone(canonical_id),
@@ -3208,6 +3369,77 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
+    /// Re-derive a declaration's ordered `(name, binder)` bindings from its
+    /// NARROW type-parameter FACTS — the fact-side entry into the ONE
+    /// shared binder-frame constructor (`build_type_param_binder_frame`,
+    /// which the shape build's inline bound lowering also routes through).
+    /// Binder identity is content-addressed over the same scope + owner +
+    /// ordinal + display name + bound NODES: each constraint / default
+    /// bound is a content-free locator lowered through the memoized
+    /// `LowerLocator` query, whose build derefs the bound position and
+    /// lowers it under the SAME TS-exact per-position frame the shape
+    /// build's inline bound lowering used — so the two derivations intern
+    /// the SAME binder ids and the substitution step rewrites the fetched
+    /// shape's binders exactly. A bound-lowering miss (a broken lease pin)
+    /// leaves that binder's bound `None`; the resulting identity divergence
+    /// degrades substitution to a no-op for that parameter while the
+    /// read-boundary fold (`lower_locator`'s `execute_read`) taints the
+    /// enclosing build's warm admission — degraded, never poisoned.
+    fn locator_binder_frame_from_narrow_params(
+        &self,
+        scope: &NodeScopeId,
+        owner_symbol: &Arc<str>,
+        type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
+    ) -> Vec<(Arc<str>, SemanticNodeId)> {
+        use crate::project_semantic_dispatch::locator_shape::{
+            BinderIdentityMode, TypeParamBinderSpec,
+        };
+        let specs: Vec<TypeParamBinderSpec> = type_parameters
+            .iter()
+            .map(|param| TypeParamBinderSpec {
+                name: Arc::from(param.name.as_str()),
+                has_constraint: param.constraint.is_some(),
+                has_default: param.default.is_some(),
+            })
+            .collect();
+        // The facts carry no lexical-resolution inputs — bound lowering
+        // happens inside the memoized query, not inline — so the base
+        // context is frame-empty and resolution-input-free.
+        let base = crate::project_semantic_dispatch::locator_shape::LocatorShapeCtx::new(
+            scope,
+            &[],
+            None,
+            None,
+        );
+        let (_frame, built) = self.build_type_param_binder_frame(
+            &base,
+            BinderIdentityMode::DeclHeader { owner_symbol },
+            &specs,
+            verter_type_expr::locators::TypeParamVisibility::Body,
+            |ordinal, position, _bound_ctx| {
+                let param = type_parameters.get(ordinal as usize)?;
+                let slot = match position {
+                    verter_type_expr::locators::TypeParamBoundPosition::Constraint => {
+                        param.constraint.as_ref()
+                    }
+                    verter_type_expr::locators::TypeParamBoundPosition::Default => {
+                        param.default.as_ref()
+                    }
+                }?;
+                match self.lower_locator(verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                    slot.clone(),
+                )) {
+                    QueryResult::Value(node) => Some(node),
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => None,
+                }
+            },
+        );
+        built
+            .into_iter()
+            .map(|binder| (binder.name, binder.binder))
+            .collect()
+    }
+
     /// Lower an authored body named by `locator` under the caller's demand:
     /// fetch the ROLE-FREE unsubstituted shape through the memoized
     /// `LowerLocator` query, apply the caller's `env` bindings via semantic
@@ -3225,7 +3457,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         locator: verter_type_expr::locators::AuthoredBodyLocator,
         decl_kind: verter_semantic::analysis::type_eval::TypeDeclKind,
-        type_parameters: &[verter_type_expr::TypeParam],
+        type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
         name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
@@ -3240,6 +3472,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(aug) => {
                 Arc::clone(&aug.anchor.symbol)
+            }
+            verter_type_expr::locators::AuthoredBodyLocator::JsdocTypedefBody(typedef) => {
+                Arc::clone(&typedef.anchor.symbol)
             }
             verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload) => {
                 Arc::clone(&payload.anchor.symbol)
@@ -3257,17 +3492,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // 2. Apply the caller's bindings via semantic type-param
         //    substitution. Binder identity is re-derived deterministically
-        //    from the declaration's parameter list (content-addressed
+        //    from the declaration's NARROW parameter facts (content-addressed
         //    interning — the same ids the shape build bound). An unbound
         //    parameter substitutes the shared miss sentinel, mirroring the
         //    "unbound param propagates a miss through the body" rule.
-        let (_, bindings) = self.locator_shape_binder_frame(
-            scope,
-            &owner_symbol,
-            type_parameters,
-            Some(name_resolution),
-            scope_payload,
-        );
+        let bindings =
+            self.locator_binder_frame_from_narrow_params(scope, &owner_symbol, type_parameters);
         let mut substituted = shape;
         for (name, binder) in bindings {
             let bound = env.get(name.as_ref()).copied();
@@ -3360,17 +3590,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // (2) APPEND own-body members not yet on the surface. Member
         // VALUE lowering downgrades to structural provenance: a nested
         // object inside the member's type is NOT the macro-T own body —
-        // only the member's PRESENCE on this declaration is.
+        // only the member's PRESENCE on this declaration is. The member
+        // fact's `ty` is the content-free locator of its authored value
+        // position (lowered through the ONE located body source); its
+        // declaration-site spans are RECOVERED from the declaring file's
+        // retained parse via the fact's span-recovery origin.
+        let member_span_memo = self
+            .ctx
+            .ensure_indexed_ready_serve(prepared.root_identity.canonical_id.as_str())
+            .map(|serve| serve.indexed);
         let mut added: Vec<SurfaceMember> = prepared
             .member_index
             .iter()
             .filter(|(name, _)| !existing.contains(name.as_str()))
             .map(|(name, member)| {
-                let value = self.shallow_lower_type_expr_with_context(
-                    &member.ty,
+                let value = self.lower_located_body_with_provenance(
+                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
+                    prepared.kind,
+                    &prepared.type_parameters,
+                    &prepared.name_resolution,
                     env,
                     scope,
-                    &prepared.name_resolution,
                     scope_payload,
                     shadowing,
                     substitutions,
@@ -3382,16 +3622,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     optional: member.optional,
                     readonly: member.readonly,
                     is_method: member.is_method,
-                    // The `PreparedMember` carries the IR member's declared
+                    // The `PreparedMemberFact` carries the IR member's declared
                     // accessibility verbatim, so the overlay append preserves
                     // it (Public for every non-class origin).
                     visibility: member.visibility,
-                    // The `PreparedMember` (the `member_index` entry) now
-                    // carries the IR member's OXC declaration-site spans + the
-                    // declaration's defining file, so the append is span-rich.
-                    spans: member.spans,
-                    declaration_origin: (!member.declaration_origin.is_empty())
-                        .then(|| Arc::from(member.declaration_origin.as_str())),
+                    // Spans are recovered on demand from the retained parse
+                    // via the fact's span-recovery origin; any recovery miss
+                    // is the honest all-absent default, never a fabricated
+                    // byte range.
+                    spans: member_span_memo
+                        .as_ref()
+                        .map(|indexed| {
+                            indexed
+                                .shallow_state
+                                .decl_bodies()
+                                .recover_member_spans_or_absent(&member.span_origin)
+                        })
+                        .unwrap_or_default(),
+                    declaration_origin: match &member.declaration_origin {
+                        verter_type_expr::facts::DeclarationOrigin::Declared(canonical) => {
+                            Some(Arc::clone(canonical))
+                        }
+                        verter_type_expr::facts::DeclarationOrigin::Synthetic => None,
+                    },
                     declared_in_macro_type_arg: context.own_body_stamp(),
                     // `member_index` is the declaration's OWN-body direct
                     // member index (heritage `extends` arms are excluded), so
@@ -3904,8 +4157,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // distributes correctly. Typed-IR only — the case transform applies
             // to the interned literal value, never to source/display text.
             "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize" if args.len() == 1 => {
-                let resolved_arg =
-                    self.evaluate_deferred_semantic_node_with_context(args[0], context);
+                let resolved_arg = self
+                    .evaluate_deferred_semantic_node_with_context(args[0], context)
+                    .into_active_query_build_node(self);
                 let result = if matches!(
                     graph.node_data(resolved_arg).as_deref(),
                     Some(SemanticNodeData::TypeParam { .. })
@@ -4048,8 +4302,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `Published(Expanded)`, breaking context propagation
                 // when the outer caller dispatched with
                 // `StructuralTransit(Shallow)`).
-                let source_resolved =
-                    self.evaluate_deferred_semantic_node_with_context(source, context);
+                let source_resolved = self
+                    .evaluate_deferred_semantic_node_with_context(source, context)
+                    .into_active_query_build_node(self);
                 // `Pick<any, K>` (pinned tsgo): a CLOSED surface holding
                 // exactly the enumerated keys, each `any` and required —
                 // `Pick<any, "x">` = `{ x: any }`, `Pick<any, never>` = `{}`.
@@ -4151,8 +4406,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 // Context-propagating deferred
                 // resolution (see Pick comment above for chain).
-                let source_resolved =
-                    self.evaluate_deferred_semantic_node_with_context(source, context);
+                let source_resolved = self
+                    .evaluate_deferred_semantic_node_with_context(source, context)
+                    .into_active_query_build_node(self);
                 // `Omit<any, K-literals>` (pinned tsgo): the index-signature
                 // surface `{ [x: string]: any; [x: number]: any;
                 // [x: symbol]: any }`, independent of WHICH literal keys are
@@ -4252,8 +4508,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let filter_arg = args[1];
                 // Context-propagating deferred
                 // resolution (see Pick comment above for chain).
-                let source_resolved =
-                    self.evaluate_deferred_semantic_node_with_context(source_arg, context);
+                let source_resolved = self
+                    .evaluate_deferred_semantic_node_with_context(source_arg, context)
+                    .into_active_query_build_node(self);
+                // The FILTER operand resolves through the same deferred
+                // evaluator: a carrier filter (`R` still a reference shell)
+                // would judge every per-member relation `Unknown` and defer
+                // the whole utility even when the source is fully settled.
+                let filter_resolved = self
+                    .evaluate_deferred_semantic_node_with_context(filter_arg, context)
+                    .into_active_query_build_node(self);
                 let source_data = graph.node_data(source_resolved);
                 let arms: Vec<SemanticNodeId> = match source_data.as_deref() {
                     Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
@@ -4272,7 +4536,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let keep_assignable = name == "Extract";
                 let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
                 for arm in arms.iter().copied() {
-                    let (relation, _arm_fence) = self.relate_nodes(arm, filter_arg);
+                    let (relation, _arm_fence) = self.relate_nodes(arm, filter_resolved);
                     match relation {
                         crate::semantic_query::RelationResult::Assignable { .. } => {
                             if keep_assignable {
@@ -4321,7 +4585,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // canonical shape before the nullish filter; a genuinely
                 // unsettled operand returns its carrier and keeps the
                 // deferred shell below.
-                let arg = self.evaluate_deferred_semantic_node_with_context(args[0], context);
+                let arg = self
+                    .evaluate_deferred_semantic_node_with_context(args[0], context)
+                    .into_active_query_build_node(self);
                 // `NonNullable<T>` is `T & {}`: `unknown & {}` collapses to
                 // the empty-object base (the trap row — NOT `unknown`, NOT
                 // `never`). `any`/`never` pass through the settled arms
@@ -4440,11 +4706,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let mut current = self.evaluate_deferred_semantic_node_with_context(node, context);
-        // Carrier chains are short (alias → DeclRef → instantiated body);
-        // 8 hops mirrors the alias-peek budget.
-        // bounded-loop: at most 8 carrier-resolution hops.
-        for _ in 0..8 {
+        let mut current = self
+            .evaluate_deferred_semantic_node_with_context(node, context)
+            .into_active_query_build_node(self);
+        // Sound termination on the residual chain: a `visited` set detects
+        // resolution cycles, and the shared per-demand step fuse
+        // (`STRUCTURAL_FACT_DEMAND_FUSE` — the same bound the structural-fact
+        // demand loop carries) bounds fresh-node regrowth the visited set
+        // cannot (each `Instantiate` step can mint a NEW node id). Both
+        // abnormal stops are TYPED: they fold a partial into the enclosing
+        // query build's taint frame (refusing warm admission) instead of
+        // silently returning an intermediate carrier the signature-utility
+        // caller would classify as settled.
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut steps: u32 = 0;
+        // bounded-loop: visited-set cycle detection + the shared
+        // STRUCTURAL_FACT_DEMAND_FUSE step fuse, both typed-partial on trip.
+        loop {
             let (slot, inst_args, owner_canonical) = match self
                 .graph()
                 .node_data(current)
@@ -4463,8 +4741,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     Arc::clone(args),
                     Arc::clone(&base.canonical_id),
                 ),
+                // Settled (non-carrier) — the stable stop; checked BEFORE the
+                // fuse so a chain that settles on exactly the last permitted
+                // step is never falsely partial.
                 _ => return current,
             };
+            if !visited.insert(current) {
+                // Residual-carrier resolution cycle: the chain can never
+                // settle — typed partial, never a silent carrier return.
+                self.fold_local_partial_completeness(
+                    crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
+                );
+                return current;
+            }
+            if steps >= crate::project_semantic_dispatch::evaluate::STRUCTURAL_FACT_DEMAND_FUSE {
+                // Step-fuse trip on fresh-node regrowth: the reached node is
+                // an INTERMEDIATE carrier — typed partial.
+                self.fold_local_partial_completeness(
+                    crate::semantic_query::PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT,
+                );
+                return current;
+            }
+            steps += 1;
             let read = self.execute_read(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     slot,
@@ -4481,9 +4779,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if next == current {
                 return current;
             }
-            current = self.evaluate_deferred_semantic_node_with_context(next, context);
+            current = self
+                .evaluate_deferred_semantic_node_with_context(next, context)
+                .into_active_query_build_node(self);
         }
-        current
     }
 
     /// Registry classification: `name` is the global lib `Promise` type
@@ -4555,7 +4854,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if depth >= AWAITED_UNWRAP_BUDGET {
             return self.opaque(QueryError::Miss);
         }
-        let resolved = self.evaluate_deferred_semantic_node_with_context(node, context);
+        let resolved = self
+            .evaluate_deferred_semantic_node_with_context(node, context)
+            .into_active_query_build_node(self);
         if let Some((kind, special)) = self.peek_special(resolved) {
             return match kind {
                 // `any` / `never` / `unknown` and the dominating error
@@ -5234,7 +5535,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let IndexKey::TypeNode(index_node) = index else {
             return None;
         };
-        let resolved = self.evaluate_deferred_semantic_node_with_context(*index_node, context);
+        let resolved = self
+            .evaluate_deferred_semantic_node_with_context(*index_node, context)
+            .into_active_query_build_node(self);
         let members = match self.graph().node_data(resolved).as_deref() {
             Some(SemanticNodeData::Union(members)) => Arc::clone(members),
             _ => return None,
@@ -6065,8 +6368,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let value_expr_is_k_independent = !value_is_identity
             && !self.subtree_references_node(mapper.value_expr, mapper.parameter_node);
         let shared_value: Option<SemanticNodeId> = if value_expr_is_k_independent {
-            let evaluated =
-                self.evaluate_deferred_semantic_node_with_context(mapper.value_expr, context);
+            let evaluated = self
+                .evaluate_deferred_semantic_node_with_context(mapper.value_expr, context)
+                .into_active_query_build_node(self);
             let resolved = match graph.node_data(evaluated).as_deref() {
                 Some(SemanticNodeData::InstantiationRef { base, args }) => {
                     let slot = self
@@ -6403,7 +6707,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let substituted =
             self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
-        let evaluated = self.evaluate_deferred_semantic_node_with_context(substituted, context);
+        let evaluated = self
+            .evaluate_deferred_semantic_node_with_context(substituted, context)
+            .into_active_query_build_node(self);
         let resolved = match self.graph().node_data(evaluated).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
                 let slot =
@@ -6539,7 +6845,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let substituted =
             self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
-        let evaluated = self.evaluate_deferred_semantic_node_with_context(substituted, context);
+        let evaluated = self
+            .evaluate_deferred_semantic_node_with_context(substituted, context)
+            .into_active_query_build_node(self);
         let resolved = match self.graph().node_data(evaluated).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
                 let slot =
@@ -6572,7 +6880,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // nested-infer arm binds the `infer P` then substitutes into
         // the true branch — closing the conditional to a `Function`
         // so consumers see the realised body rather than the shell.
-        let realized = self.evaluate_deferred_semantic_node_with_context(resolved, context);
+        let realized = self
+            .evaluate_deferred_semantic_node_with_context(resolved, context)
+            .into_active_query_build_node(self);
         if matches!(
             self.graph().node_data(realized).as_deref(),
             Some(SemanticNodeData::Opaque(_))
@@ -6615,8 +6925,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         mapper: &crate::semantic_query::MapperKey,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let evaluated =
-            self.evaluate_deferred_semantic_node_with_context(mapper.value_expr, context);
+        let evaluated = self
+            .evaluate_deferred_semantic_node_with_context(mapper.value_expr, context)
+            .into_active_query_build_node(self);
         let resolved = match self.graph().node_data(evaluated).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
                 let slot =
@@ -6636,7 +6947,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             _ => evaluated,
         };
-        let realized = self.evaluate_deferred_semantic_node_with_context(resolved, context);
+        let realized = self
+            .evaluate_deferred_semantic_node_with_context(resolved, context)
+            .into_active_query_build_node(self);
         if matches!(
             self.graph().node_data(realized).as_deref(),
             Some(SemanticNodeData::Opaque(_))
@@ -6770,8 +7083,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .intern_node(SemanticNodeData::Literal(key.literal.clone()));
         let substituted_remap =
             self.substitute_semantic_type_param(remap_node, mapper.parameter_node, key_literal);
-        let evaluated_remap =
-            self.evaluate_deferred_semantic_node_with_context(substituted_remap, context);
+        let evaluated_remap = self
+            .evaluate_deferred_semantic_node_with_context(substituted_remap, context)
+            .into_active_query_build_node(self);
         self.classify_remap_outcome(evaluated_remap, context)
     }
 
@@ -6803,8 +7117,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let members = Arc::clone(members);
                 let mut keys: Vec<Arc<str>> = Vec::new();
                 for member in members.iter() {
-                    let evaluated =
-                        self.evaluate_deferred_semantic_node_with_context(*member, context);
+                    let evaluated = self
+                        .evaluate_deferred_semantic_node_with_context(*member, context)
+                        .into_active_query_build_node(self);
                     match self.classify_remap_outcome(evaluated, context) {
                         MappedKeyRemapOutcome::Keys(ks) => keys.extend(ks),
                         // A `never` arm contributes no key (filtered);
@@ -6961,7 +7276,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // value: a partial member taints the request so the
                 // fall-through deferred-shell result does not warm.
                 if distribution_is_partial {
-                    crate::request_context::mark_request_materialization_cache_suppress();
+                    crate::request_context::mark_request_result_partial();
                 }
                 // Fall through to the deferred-shell path below.
             }
@@ -7205,6 +7520,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     *arg,
                                     operand_context,
                                 )
+                                .into_active_query_build_node(self)
                             })
                             .collect::<Vec<_>>()
                             .into_boxed_slice(),
@@ -7451,8 +7767,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // Union arms are raw member nodes — resolve each once
                         // before transforming (the entry node was resolved by
                         // the caller, but its members were not).
-                        let resolved_member =
-                            self.evaluate_deferred_semantic_node_with_context(*m, context);
+                        let resolved_member = self
+                            .evaluate_deferred_semantic_node_with_context(*m, context)
+                            .into_active_query_build_node(self);
                         self.apply_string_intrinsic(intrinsic, resolved_member, context)
                     })
                     .collect();
@@ -7673,7 +7990,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<Vec<Arc<str>>> {
         let graph = self.graph();
-        let mut resolved = self.evaluate_deferred_semantic_node_with_context(arg, eval_context);
+        let mut resolved = self
+            .evaluate_deferred_semantic_node_with_context(arg, eval_context)
+            .into_active_query_build_node(self);
         if let Some(SemanticNodeData::InstantiationRef { base, args }) =
             graph.node_data(resolved).as_deref()
         {
@@ -7710,38 +8029,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(out)
             }
             _ => None,
-        }
-    }
-
-    /// Vue macro resolution lookup.
-    ///
-    /// Hot-path reads go through
-    /// [`SemanticGraphStore::get_resolved_named_type`](crate::semantic_query_memo::SemanticGraphStore::get_resolved_named_type)
-    /// directly from the parser's
-    /// [`NamedTypeCache`](verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache)
-    /// adapter — the formal `execute` path stays available as an entry
-    /// point for callers that want to check presence through the shared
-    /// query API but must not be relied on in the refcount-only hot
-    /// path. Writes enter from the adapter side via
-    /// [`SemanticGraphStore::insert_resolved_named_type`](crate::semantic_query_memo::SemanticGraphStore::insert_resolved_named_type).
-    ///
-    /// Returns a warm node id when the identity map has an entry, or
-    /// [`QueryError::Miss`] when the entry has not been written yet.
-    /// Carries a dispatch fence fragment capturing
-    /// `(canonical_id, whole_hash, project_generation)` so warm-read
-    /// validation against the live `StoreView` catches stale hits if
-    /// any downstream layer memoizes this dispatch path.
-    pub(super) fn build_resolved_named_type(
-        &self,
-        key: &HostResolvedNamedTypeKey,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
-        let graph = self.graph();
-        match graph.resolved_named_type_node_id(key) {
-            Some(node_id) => (
-                QueryResult::Value(node_id),
-                self.dep_signature_for(&key.canonical_id, key.whole_hash),
-            ),
-            None => (QueryResult::Error(QueryError::Miss), empty_signature()),
         }
     }
 

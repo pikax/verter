@@ -516,7 +516,6 @@ impl ProjectSemanticDispatch<'_> {
     /// match has NO catch-all: leaf carriers
     /// ([`Primitive`](SemanticNodeData::Primitive), literals,
     /// [`Opaque`](SemanticNodeData::Opaque),
-    /// [`VueMacroElements`](SemanticNodeData::VueMacroElements),
     /// [`DeclRef`](SemanticNodeData::DeclRef),
     /// [`RawFallback`](SemanticNodeData::RawFallback)) hold no nested
     /// infer-bearing node id and stop the walk explicitly, so a future variant
@@ -642,7 +641,6 @@ impl ProjectSemanticDispatch<'_> {
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Opaque(_)
-                | SemanticNodeData::VueMacroElements(_)
                 // `DeclRef` carries only a declaration identity (no args); the
                 // raw-fallback / synthetic-binding carriers hold no
                 // infer-bearing child node id.

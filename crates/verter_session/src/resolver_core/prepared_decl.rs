@@ -59,10 +59,20 @@ impl<T> PreparedDeclOutcome<T> {
     /// (`prepare_exported_*`, tests) that do NOT admit into the write-once
     /// slot cache: a lease-miss reads as `None` there (they recompute on the
     /// next call, warm-poisoning nothing).
+    ///
+    /// The `LeaseMiss` arm marks the generalized non-cacheability rail so an
+    /// enclosing traced compute that folds this transient miss refuses its
+    /// own shared-cache admission; a `Ready(None)` cacheable absence marks
+    /// nothing.
     fn into_option(self) -> Option<T> {
         match self {
             PreparedDeclOutcome::Ready(value) => value,
-            PreparedDeclOutcome::LeaseMiss => None,
+            PreparedDeclOutcome::LeaseMiss => {
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+                );
+                None
+            }
         }
     }
 }
@@ -353,15 +363,14 @@ fn prepare_type_decl_from_lowered(
     let mut prepared = PreparedTypeDecl::new(
         ResolvedRootIdentity::new(canonical_id, symbol_name),
         lowered.kind,
-        lowered.body.lookup_object().into_owned(),
     );
-    // A merged interface carries its ordered contributor bodies so body
-    // lowering interns a `MergedDecl` peer-merge carrier rather than collapsing
-    // to a bare intersection.
+    // A merged interface carries its ordered contributor SLOTS so body
+    // lowering interns a `MergedDecl` peer-merge carrier rather than
+    // collapsing to a bare intersection.
     if lowered.body.is_merged() {
-        prepared.merged_contributors = lowered.body.contributors().to_vec();
+        prepared.set_merged_contributors(lowered.body.contributors().len());
     }
-    prepared.type_parameters = lowered.type_parameters.clone();
+    prepared.type_parameters = lowered.narrow_type_parameters.clone();
     let empty_deps = ClassifiedTypeDeps::default();
     let deps = deps.unwrap_or(&empty_deps);
     prepared.local_deps = deps.local_deps.clone();
@@ -437,9 +446,17 @@ fn prepare_type_decl_from_lowered(
     prepared.cache_deps.defining_file = Some((canonical_id.to_string(), hash_u64));
     prepared.cache_deps.local_closure_participants = deps.local_deps.clone();
 
-    prepared.build_member_index();
-    prepared.classify_wrapper_shape();
-    prepared.classify_projection();
+    // The classification FACTS (member index / wrapper shape / projection
+    // class) were produced ONCE at lazy decl-body lowering time from the
+    // transient contributor bodies (the shared `verter_semantic` classifiers
+    // over the same lowering that minted the fingerprint) and stored on the
+    // memo record — the prepared surface COPIES them. No re-classification,
+    // no locator deref, no dispatch, no eager `Instantiate` at prepare time.
+    prepared.member_index = lowered.member_index.clone();
+    prepared.wrapper_shape = lowered.wrapper_shape.clone();
+    prepared.projection_class = lowered.projection_class.clone();
+    prepared.heritage_bases = Arc::clone(&lowered.heritage_bases);
+    prepared.key_domain_closedness = lowered.key_domain_closedness.clone();
     prepared
 }
 
@@ -740,7 +757,16 @@ impl PreparedTypeDeclCache {
             (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
             &self.import_canonicalization,
         ) {
-            PreparedDeclOutcome::LeaseMiss => None,
+            PreparedDeclOutcome::LeaseMiss => {
+                // Broken decl-body lease: leave the write-once slot VACANT
+                // (retry on the next live-lease demand) AND mark the
+                // generalized non-cacheability rail so an enclosing traced
+                // compute refuses admission.
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+                );
+                None
+            }
             PreparedDeclOutcome::Ready(value) => {
                 let committed = value.map(Arc::new);
                 let _ = slot.value.set(committed.clone());
@@ -815,7 +841,16 @@ impl PreparedValueDeclCache {
             (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
             &self.import_canonicalization,
         ) {
-            PreparedDeclOutcome::LeaseMiss => None,
+            PreparedDeclOutcome::LeaseMiss => {
+                // Broken decl-body lease: leave the write-once slot VACANT
+                // (retry on the next live-lease demand) AND mark the
+                // generalized non-cacheability rail so an enclosing traced
+                // compute refuses admission.
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+                );
+                None
+            }
             PreparedDeclOutcome::Ready(value) => {
                 let committed = value.map(Arc::new);
                 let _ = slot.value.set(committed.clone());

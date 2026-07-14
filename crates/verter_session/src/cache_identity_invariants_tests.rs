@@ -79,14 +79,12 @@ fn route_db_and_imported_root_db_share_arc_identity_across_runtime_and_store() {
     );
 }
 
-// ─── F3 eviction-cascade regression (lands in 6b.B3, REGRESSION) ─────────
+// ─── F3 eviction-cascade regression ──────────────────────────────────────
 //
-// The brief's mention of `host.clear_compile_cache()` is incorrect against
-// HEAD `3147c02f`: `clear_compile_cache` (lib.rs:1149-1163) only clears
-// compile_cache / resolved_type_cache / eval_env_cache and explicitly
+// `clear_compile_cache` only clears the compile-side caches and explicitly
 // preserves resolver caches. The actual clear-all paths that touch
-// `RouteDb` / `ImportedRootDb` are `host.close()` (lib.rs:1175) and
-// `host.configure_projects()` (lib.rs:1219), both via
+// `RouteDb` / `ImportedRootDb` are `host.close()` and
+// `host.configure_projects()`, both via
 // `self.resolver.reset_all() -> runtime.clear_caches() ->
 // routes.clear() + imported_roots.clear()`.
 //
@@ -655,7 +653,7 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
     // Seed the stale leftover: a barrel artifact whose baked wildcard
     // edge points at the REAL augmenter file.
     let shallow =
-        crate::resolver_core::shallow_file_state::ShallowFileState::new_for_test_with_routing(
+        crate::resolver_core::shallow_file_state::ShallowFileState::routing_tables_only_for_test(
             [9u8; 16],
             FxHashMap::default(),
             vec![crate::resolver_core::shallow_file_state::WildcardReexport {
@@ -665,7 +663,7 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
             rustc_hash::FxHashSet::default(),
             FxHashMap::default(),
             StdArc::new(
-                verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
+                verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
                 ),
             ),
         );
@@ -675,8 +673,7 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
         Arc::from("export * from \"./real_aug\";\n"),
         Arc::from("export * from \"./real_aug\";\n"),
         StdArc::new(
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(
-            ),
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
         ),
     );
     host.project_type_store()

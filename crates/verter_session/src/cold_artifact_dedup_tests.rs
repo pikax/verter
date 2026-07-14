@@ -134,8 +134,7 @@ fn cold_resolve_builds_each_artifact_once() {
     upsert(&host, SCRATCH_ID, SCRATCH);
     host.provenance().reset();
 
-    let node =
-        host.resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded));
+    let node = host.resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded));
     assert!(node.is_some(), "Unrelated must resolve");
 
     assert_single_build(&snap(&host), "cold_resolve_builds_each_artifact_once");
@@ -146,16 +145,14 @@ fn warm_resolve_builds_nothing() {
     let host = make_host(&[]);
     upsert(&host, SCRATCH_ID, SCRATCH);
 
-    let cold =
-        host.resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded));
+    let cold = host.resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded));
     let cold_node = cold.expect("cold resolve must succeed");
     let cold_expr = host
         .project_node_to_type_expr_for_test(cold_node)
         .expect("cold node must project");
 
     host.provenance().reset();
-    let warm =
-        host.resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded));
+    let warm = host.resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded));
     let warm_node = warm.expect("warm resolve must succeed");
     let warm_expr = host
         .project_node_to_type_expr_for_test(warm_node)
@@ -199,8 +196,7 @@ fn clear_compile_cache_retains_fresh_indexed_ready() {
     let host = make_host(&[]);
     upsert(&host, SCRATCH_ID, SCRATCH);
 
-    let cold =
-        host.resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded));
+    let cold = host.resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded));
     let cold_node = cold.expect("cold resolve must succeed");
     let cold_expr = host
         .project_node_to_type_expr_for_test(cold_node)
@@ -224,8 +220,7 @@ fn clear_compile_cache_retains_fresh_indexed_ready() {
     );
 
     host.provenance().reset();
-    let warm =
-        host.resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded));
+    let warm = host.resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded));
     let warm_node = warm.expect("post-clear resolve must succeed");
     let warm_expr = host
         .project_node_to_type_expr_for_test(warm_node)
@@ -394,13 +389,15 @@ fn vue_tsx_sfc_canonical_state_parses_under_authoritative_source_type() {
     );
 }
 
-/// `<script setup generic="T">` type parameters must reach the env the
-/// CANONICAL artifact carries — the single `IndexedReady` build runs
-/// `apply_sfc_script_setup_type_params` on the eval env it publishes, so
-/// the script-setup generic binding `T` lands on the one artifact every
-/// consumer reads.
+/// `<script setup generic="T">` type parameters must reach the shared
+/// artifact rail every consumer resolves through. Generic substitution is
+/// graph-native (`Instantiate` dispatch): the binding rides the
+/// prepared-decl bundle's `script_setup_type_bindings` (the
+/// `DeclarationScopePayload` source), NOT the whole-file eval env — so the
+/// probe asserts the bundle carries `T` while the env-build dedup counters
+/// stay pinned.
 #[test]
-fn vue_generic_sfc_canonical_env_carries_script_setup_type_params() {
+fn vue_generic_sfc_prepared_bundle_carries_script_setup_type_params() {
     let host = make_host(&[]);
     let canonical = "/workspace/src/Generic.vue";
     upsert(
@@ -416,23 +413,9 @@ fn vue_generic_sfc_canonical_env_carries_script_setup_type_params() {
     let indexed = host
         .ensure_indexed_ready(canonical)
         .expect("generic vue canonical must materialise");
-    assert!(
-        indexed
-            .shallow_state
-            .decl_bodies()
-            .whole_env()
-            .type_bindings
-            .contains_key("T"),
-        "the INDEXED artifact's eval env must carry the script-setup \
-         generic binding `T`; bindings = {:?}",
-        indexed
-            .shallow_state
-            .decl_bodies()
-            .whole_env()
-            .type_bindings
-            .keys()
-            .collect::<Vec<_>>(),
-    );
+    // Materialise the whole env once: the dedup counters below still pin
+    // exactly ONE env build for the generic SFC.
+    let _env = indexed.shallow_state.decl_bodies().whole_env();
     let provenance = snap(&host);
     assert_eq!(
         provenance.eval_env_builds, 1,
@@ -444,6 +427,22 @@ fn vue_generic_sfc_canonical_env_carries_script_setup_type_params() {
         "the cold build must REUSE the scheduler's SFC structure parse for \
          an upserted generic .vue — no second `parse_sfc` (got {})",
         provenance.sfc_parses,
+    );
+
+    // The script-setup generic binding `T` lands on the prepared-decl
+    // bundle rail (the `DeclarationScopePayload` source every consumer's
+    // dispatch scope consults).
+    let mut carries_t = false;
+    crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        let bundle = ctx
+            .prepared_decl_bundle(canonical)
+            .expect("generic vue canonical must materialise a prepared-decl bundle");
+        carries_t = bundle.script_setup_type_bindings.contains_key("T");
+    });
+    assert!(
+        carries_t,
+        "the prepared-decl bundle must carry the script-setup generic \
+         binding `T` for dispatch scope resolution"
     );
 }
 
@@ -457,7 +456,7 @@ fn route_then_deepen_is_one_build_per_file() {
     host.provenance().reset();
 
     // Resolve through the barrel, terminal deepening in the leaf.
-    let node = host.resolve_named_symbol(barrel, "Props", &[], Some(ProjectionMode::Expanded));
+    let node = host.resolve_named_symbol(barrel, "Props", Some(ProjectionMode::Expanded));
     assert!(node.is_some(), "Props must resolve through the barrel");
 
     let provenance = snap(&host);
@@ -490,7 +489,7 @@ fn edit_invalidates_exactly_once() {
     let host = make_host(&[]);
     upsert(&host, SCRATCH_ID, SCRATCH);
     let _ = host
-        .resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded))
+        .resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded))
         .expect("cold resolve must succeed");
 
     upsert(
@@ -499,8 +498,7 @@ fn edit_invalidates_exactly_once() {
         "export type Unrelated = { a: 2 };\ntype Var0 = { a: 2 };\n",
     );
     host.provenance().reset();
-    let node =
-        host.resolve_named_symbol(SCRATCH_ID, "Unrelated", &[], Some(ProjectionMode::Expanded));
+    let node = host.resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded));
     assert!(node.is_some(), "post-edit resolve must succeed");
 
     assert_single_build(&snap(&host), "edit_invalidates_exactly_once");
@@ -1252,13 +1250,15 @@ fn unmoved_parse_env_through_the_gate_seam_still_publishes_the_edge_refresh() {
 /// Sustained-churn bounded fallback: a claimant that loses the lane
 /// election on EVERY bounded attempt, with every won flight fenced by a
 /// fresh mutation, is finally served the last fenced artifact ReturnOnly.
-/// That serve must carry its non-admissible status to the enclosing cold
-/// compute: the claimant's request POST-dates the supersessions, so a
-/// downstream compute would record live facts while having computed from
-/// superseded data — a poisoned admission the read-side fact rail cannot
-/// catch. Deterministic schedule: three sequential leaders each park at
-/// the pre-fence seam, a mutation lands, the follower (parked on the
-/// retry seam between attempts) re-joins each fresh lane.
+/// That serve must carry its NON-CACHEABLE status to the enclosing cold
+/// compute via the generalized non-cacheability rail — NOT partiality: the
+/// serve is a VALID (Complete) result, only non-admissible to shared caches.
+/// The claimant's request POST-dates the supersessions, so a downstream
+/// compute would record live facts while having computed from superseded
+/// data — a poisoned admission the read-side fact rail cannot catch.
+/// Deterministic schedule: three sequential leaders each park at the
+/// pre-fence seam, a mutation lands, the follower (parked on the retry seam
+/// between attempts) re-joins each fresh lane.
 #[test]
 fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1341,76 +1341,103 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
         );
     };
 
-    let (follower_result, follower_partial) = std::thread::scope(|scope| {
-        // Leader 1 claims the lane and parks pre-fence.
-        let l1 = {
-            let host = Arc::clone(&host);
-            scope.spawn(move || host.ensure_indexed_ready(owner))
-        };
-        spin_until("leader 1 parked", || {
-            flight_parked[0].load(Ordering::SeqCst)
-        });
-        // The follower joins leader 1's parked lane under an enclosing
-        // cold-compute completeness scope (the admission-gate signal).
-        let follower = {
-            let host = Arc::clone(&host);
-            scope.spawn(move || {
-                let scope_guard = crate::request_context::ColdComputeCompletenessScope::enter();
-                let result = host.ensure_indexed_ready(owner);
-                let partial =
-                    crate::request_context::current_cold_compute_completeness().is_partial();
-                drop(scope_guard);
-                (result, partial)
-            })
-        };
-        spin_until("follower joined lane 1", || lane_count(&host) >= 3);
-        mutate(&host, dep2);
-        flight_release[0].store(true, Ordering::SeqCst);
-        let _ = l1.join().unwrap();
-        spin_until("follower parked after attempt 1", || {
-            retry_parked[0].load(Ordering::SeqCst)
-        });
+    let (follower_result, follower_non_cacheable, follower_result_is_partial) =
+        std::thread::scope(|scope| {
+            // Leader 1 claims the lane and parks pre-fence.
+            let l1 = {
+                let host = Arc::clone(&host);
+                scope.spawn(move || host.ensure_indexed_ready(owner))
+            };
+            spin_until("leader 1 parked", || {
+                flight_parked[0].load(Ordering::SeqCst)
+            });
+            // The follower joins leader 1's parked lane under an enclosing fact
+            // tracer — the admission-gate signal. A fenced ReturnOnly fallback
+            // serve marks the generalized non-cacheability rail (NOT partiality:
+            // a fenced-but-VALID serve stays Complete), which any enclosing
+            // traced cold compute consults to refuse shared-cache admission. A
+            // `RequestContext` is installed on the follower thread so the
+            // request-partial sticky (`current_request_result_is_partial`) is
+            // observable — a fenced-but-VALID fallback must leave it UNSET
+            // (Complete), the decoupled invariant this test pins.
+            let follower = {
+                let host = Arc::clone(&host);
+                scope.spawn(move || {
+                    use crate::request_context::{RequestContext, RequestContextGuard};
+                    let rctx = RequestContext::new(1, Arc::from(owner), false, None);
+                    let _req_guard = RequestContextGuard::install(rctx);
+                    let (result, read_set) =
+                        host.with_fact_tracer(|| host.ensure_indexed_ready(owner));
+                    let non_cacheable = read_set.non_cacheable_read_observed();
+                    let result_is_partial =
+                        crate::request_context::current_request_result_is_partial();
+                    (result, non_cacheable, result_is_partial)
+                })
+            };
+            spin_until("follower joined lane 1", || lane_count(&host) >= 3);
+            mutate(&host, dep2);
+            flight_release[0].store(true, Ordering::SeqCst);
+            let _ = l1.join().unwrap();
+            spin_until("follower parked after attempt 1", || {
+                retry_parked[0].load(Ordering::SeqCst)
+            });
 
-        // Leader 2 claims a fresh lane; the follower re-joins it.
-        let l2 = {
-            let host = Arc::clone(&host);
-            scope.spawn(move || host.ensure_indexed_ready(owner))
-        };
-        spin_until("leader 2 parked", || {
-            flight_parked[1].load(Ordering::SeqCst)
-        });
-        mutate(&host, dep);
-        retry_release[0].store(true, Ordering::SeqCst);
-        spin_until("follower joined lane 2", || lane_count(&host) >= 3);
-        flight_release[1].store(true, Ordering::SeqCst);
-        let _ = l2.join().unwrap();
-        spin_until("follower parked after attempt 2", || {
-            retry_parked[1].load(Ordering::SeqCst)
-        });
+            // Leader 2 claims a fresh lane; the follower re-joins it.
+            let l2 = {
+                let host = Arc::clone(&host);
+                scope.spawn(move || host.ensure_indexed_ready(owner))
+            };
+            spin_until("leader 2 parked", || {
+                flight_parked[1].load(Ordering::SeqCst)
+            });
+            mutate(&host, dep);
+            retry_release[0].store(true, Ordering::SeqCst);
+            spin_until("follower joined lane 2", || lane_count(&host) >= 3);
+            flight_release[1].store(true, Ordering::SeqCst);
+            let _ = l2.join().unwrap();
+            spin_until("follower parked after attempt 2", || {
+                retry_parked[1].load(Ordering::SeqCst)
+            });
 
-        // Leader 3: the follower's final bounded attempt.
-        let l3 = {
-            let host = Arc::clone(&host);
-            scope.spawn(move || host.ensure_indexed_ready(owner))
-        };
-        spin_until("leader 3 parked", || {
-            flight_parked[2].load(Ordering::SeqCst)
-        });
-        mutate(&host, dep2);
-        retry_release[1].store(true, Ordering::SeqCst);
-        spin_until("follower joined lane 3", || lane_count(&host) >= 3);
-        flight_release[2].store(true, Ordering::SeqCst);
-        let _ = l3.join().unwrap();
+            // Leader 3: the follower's final bounded attempt.
+            let l3 = {
+                let host = Arc::clone(&host);
+                scope.spawn(move || host.ensure_indexed_ready(owner))
+            };
+            spin_until("leader 3 parked", || {
+                flight_parked[2].load(Ordering::SeqCst)
+            });
+            mutate(&host, dep2);
+            retry_release[1].store(true, Ordering::SeqCst);
+            spin_until("follower joined lane 3", || lane_count(&host) >= 3);
+            flight_release[2].store(true, Ordering::SeqCst);
+            let _ = l3.join().unwrap();
 
-        follower.join().unwrap()
-    });
+            follower.join().unwrap()
+        });
 
     let follower_result =
         follower_result.expect("the bounded fallback must still serve the caller");
     assert!(
-        follower_partial,
-        "a ReturnOnly fallback serve must fold partiality into the \
-         enclosing cold-compute scope so downstream admission is suppressed",
+        follower_non_cacheable,
+        "a ReturnOnly (fenced) fallback serve must mark the generalized non-cacheability rail so \
+         downstream shared-cache admission is refused — a fenced-but-VALID serve is Complete, NOT \
+         partial (the request-partial rail is decoupled from fenced serves; non-cacheability \
+         routes through the fact-tracer/cache_suppress channel instead)",
+    );
+    // Completeness scope (the decoupled invariant): a fenced-but-VALID fallback
+    // serve stays COMPLETE. The request-partial sticky must remain UNSET —
+    // non-cacheability routes through the fact-tracer / cache_suppress rail,
+    // never the request-partial rail. This assertion DISCRIMINATES the
+    // specifically-removed coupling: RED if the fenced-serve fallback re-adds a
+    // `mark_request_result_partial()` call (the pre-decouple behaviour), which
+    // would flip this to `true` while `follower_non_cacheable` stays satisfied.
+    assert!(
+        !follower_result_is_partial,
+        "a fenced-but-VALID (ReturnOnly) fallback serve MUST stay Complete — the request-partial \
+         sticky must remain UNSET. Re-adding `mark_request_result_partial()` to the fenced-serve \
+         fallback (the removed coupling) would make this `true` and falsely report a complete \
+         serve as Partial",
     );
     // ReturnOnly never publishes: every flight was fenced, so the store
     // must hold NO artifact for the owner.
@@ -1423,17 +1450,17 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
         "the served fallback is a known-superseded surface",
     );
 
-    // Negative control: a clean serve folds NO partiality.
+    // Negative control: a clean (published) serve marks NO non-cacheability.
     *host.materialize_seam_hook.lock() = None;
     *host.flight_retry_seam_hook.lock() = None;
-    let scope_guard = crate::request_context::ColdComputeCompletenessScope::enter();
-    let clean = host.ensure_indexed_ready(owner);
+    let (clean, clean_read_set) = host.with_fact_tracer(|| host.ensure_indexed_ready(owner));
     assert!(clean.is_some(), "the clean re-run must serve");
     assert!(
-        !crate::request_context::current_cold_compute_completeness().is_partial(),
-        "a published serve must not fold partiality",
+        !clean_read_set.non_cacheable_read_observed(),
+        "a published (store_published == true) serve must NOT mark non-cacheability — only a \
+         fenced ReturnOnly serve does (proves the positive assertion is fence-specific, not a \
+         blanket mark)",
     );
-    drop(scope_guard);
 }
 
 /// `set_import_dependencies` mutates per-canonical route state without a
@@ -1960,7 +1987,7 @@ fn route_fact_producer_matches_validator_snapshot() {
     upsert(&host, leaf, "export type Props = { label: string };\n");
     upsert(&host, barrel, "export type { Props } from './leaf';\n");
 
-    let node = host.resolve_named_symbol(barrel, "Props", &[], Some(ProjectionMode::Expanded));
+    let node = host.resolve_named_symbol(barrel, "Props", Some(ProjectionMode::Expanded));
     assert!(node.is_some(), "Props must resolve through the barrel");
 
     let view = host.resolver_store_view_read().into_owned_view();

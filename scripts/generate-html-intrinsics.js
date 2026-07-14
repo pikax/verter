@@ -270,6 +270,15 @@ function generate(root) {
     lines.push("");
   }
 
+  lines.push("/// Every generated member table, in generated (sorted-interface) order — the");
+  lines.push("/// deterministic iteration the static intrinsic catalog interns shapes from.");
+  lines.push("pub(crate) const ALL_MEMBER_TABLES: &[&[RawIntrinsicMember]] = &[");
+  for (const interfaceName of renderedInterfaces) {
+    lines.push(`    ${constName(interfaceName)}_MEMBERS,`);
+  }
+  lines.push("];");
+  lines.push("");
+
   const sortedTags = Array.from(tagInterfaces.entries()).sort(([leftTag], [rightTag]) =>
     stableCompare(leftTag, rightTag),
   );
@@ -284,7 +293,14 @@ function generate(root) {
   lines.push("}");
   lines.push("");
 
-  const outPath = path.join(root, "crates", "verter_analysis", "src", "html_intrinsics_data.rs");
+  const outPath = path.join(
+    root,
+    "crates",
+    "verter_semantic",
+    "src",
+    "analysis",
+    "html_intrinsics_data.rs",
+  );
   fs.writeFileSync(outPath, lines.join("\n"));
   return outPath;
 }

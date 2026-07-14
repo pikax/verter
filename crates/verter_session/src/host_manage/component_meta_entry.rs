@@ -33,12 +33,56 @@ thread_local! {
     };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only hook: runs ONCE (consuming itself) at the top of the two
+    /// SHARED cold bodies (`component_meta_via_view_cold` /
+    /// `component_meta_with_resolution_cold`) — AFTER the entry captured its
+    /// fixed store view, BEFORE the pinned resolve dispatches. Lets a
+    /// barrier-controlled view-consistency test land a dependency mutation
+    /// in exactly the capture→resolve window and assert the response is
+    /// view-CONSISTENT (fully the captured view's world — never a
+    /// fresh-view analysis paired with capture-bound materialization).
+    pub(crate) static COLD_BODY_PRE_RESOLVE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run (and consume) the test-only pre-resolve hook. No-op when disarmed.
+#[cfg(test)]
+pub(crate) fn run_cold_body_pre_resolve_hook() {
+    if let Some(hook) = COLD_BODY_PRE_RESOLVE_HOOK.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only hook: runs ONCE (consuming itself) on the WARM arm of the
+    /// output-bearing view entry — AFTER the warm cache entry validated
+    /// against the captured view, BEFORE the output materializes. Lets a
+    /// view-consistency test land a dependency mutation in exactly that
+    /// window and assert the materialization runs under the SAME capture
+    /// the validation used (an old-analysis/fresh-view implementation
+    /// materializes the mutated world and tears).
+    pub(crate) static WARM_OUTPUT_PRE_MATERIALIZE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run (and consume) the test-only warm pre-materialize hook. No-op when
+/// disarmed.
+#[cfg(test)]
+pub(crate) fn run_warm_output_pre_materialize_hook() {
+    if let Some(hook) = WARM_OUTPUT_PRE_MATERIALIZE_HOOK.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
 /// The publish fence a cold component-meta compute must pass before its
 /// result may warm the shared cache.
 ///
-/// Both fields are derived from ONE store-view read (see
-/// [`VerterHost::cold_seed_view_and_fence`]): `token` is reconstructed
-/// from the seed view itself and `current` is the
+/// Both fields are derived from ONE captured
+/// [`crate::resolver_store::BatchFixedView`]: `token` is the capture's
+/// validation token and `current` is the capture's
 /// [`crate::resolver_store::StoreViewRead`] arm, so neither can describe
 /// a different snapshot than the one the cold compute ran under.
 #[derive(Debug, Clone, Copy)]
@@ -48,6 +92,18 @@ pub(super) struct ColdSeedFence {
     /// Whether the manager proved that view current. A non-current
     /// (`ReturnOnly`) seed is never promoted.
     current: bool,
+}
+
+impl ColdSeedFence {
+    /// Assemble a fence from a token + currentness pair that provably came
+    /// from ONE store-view read (entries derive the pair from a shared
+    /// [`crate::resolver_store::BatchFixedView`] capture).
+    pub(super) fn new(
+        token: crate::resolver_store::StoreViewValidationToken,
+        current: bool,
+    ) -> Self {
+        Self { token, current }
+    }
 }
 
 /// Strip the OWNER's own `DerivedFactHash { kind: Route }` fact from a
@@ -162,28 +218,16 @@ impl VerterHost {
             false,
         );
 
-        // Cold build under the existing `with_fact_tracer` scope.
-        // The tracer continues to fan observations into any outer
-        // scope (R24 fan-out). The FINALISED tracer read set is the
-        // authoritative `fact_dep_signature` source: it records the
-        // exact, deduplicated union of every cross-file fact the cold
-        // compute observed — dispatch dual-emit `FileWholeHash` facts,
-        // resolver-tier `Parse` / `ResolveImports` / `RouteSurface`
-        // facts, and every sub-cache's bubbled signature. The curated
-        // `resolved.fact_versions` is NOT consulted for the published
-        // signature. The single fact the tracer-owned signature CAN
-        // carry that does not round-trip on warm validation is the
-        // owner's OWN `DerivedFactHash{Route}` — the cold compute's
-        // macro-root route walk observes it whenever the owner is a
-        // route participant — so `publish_component_meta_cache_entry`
-        // drops exactly that fact before cache admission (see
-        // `strip_owner_route_fact`). Cross-file route facts round-trip
-        // and are retained.
-        //
-        // R24 contract: the tracer is installed on COLD paths only.
-        // The warm-hit fast path above returned before reaching
-        // here, so no tracer is installed for hot reads (zero
-        // allocation per hit).
+        // Cold build through the SHARED pinned cold body
+        // (`component_meta_via_view_cold`) with a base `HostViewRef` view
+        // and ONE captured `BatchFixedView`: the publish fence, the
+        // extraction context, AND the resolve executor all derive from that
+        // single capture, so the resolve can never open a second unrelated
+        // store view and pair a fresh-view analysis with the capture-bound
+        // extraction context (the torn-result race). The cold body installs
+        // the `with_fact_tracer` scope (R24: cold-path only — the warm-hit
+        // fast path above returned before reaching here) and routes the
+        // seal + admission decision through `publish_if_admissible`.
         //
         // Snapshot the project generation BEFORE the cold compute
         // dispatches any work. The carrier
@@ -197,68 +241,24 @@ impl VerterHost {
         // snapshotted generation; `ComponentMetaResultDb::get_with_view`
         // rejects on warm read when the live generation differs.
         let validated_at_generation = self.project_type_store.current_project_generation();
-        // Publish fence + cold-seed view in ONE read. The fence token is
-        // derived from the seed view itself and the currentness is the
-        // `StoreViewRead` arm, so the snapshot the publish fence rechecks
-        // and the snapshot the cold compute runs under cannot diverge. A
-        // mismatch against the live host token at promotion time (epoch /
-        // generation / env / identity / overlay shifted mid-flight), OR a
-        // non-current seed, routes to return-only — the result is handed
-        // to the caller but never promoted, so a superseded or
-        // unprovable snapshot can never warm the shared cache. The
-        // `validated_at_generation` gate above is a SUBSET of the token
-        // recheck.
-        //
-        // The seed view is also threaded into the `HostResolverContext`
-        // BEFORE `with_fact_tracer` opens so the extract step (which runs
-        // under the tracer) binds its engine constructions to the same
-        // overlay-aware ctx the inner `resolve_component_meta_with_view`
-        // builds — without this the extract path would construct bare-host
-        // engines under the tracer, inflating `store_merge_ms` +
-        // `prepared_type_decls` per request.
-        let (store_view, seed_fence) = self.cold_seed_view_and_fence();
+        let view = crate::session_view::HostViewRef::new(self);
+        let fixed = self.capture_batch_fixed_view(&view);
+        let seed_fence = ColdSeedFence::new(fixed.captured_validation_token(), fixed.is_current());
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx =
-            crate::resolver_core::HostResolverContext::from_cold_seed(self, &store_view, overlay);
+        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+            self,
+            fixed.cold_seed(),
+            overlay,
+        );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        let ((resolved_opt, meta_opt), read_set) = self.with_fact_tracer(|| {
-            let resolved = match self
-                .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
-            {
-                Some(r) => r,
-                None => return (None, None),
-            };
-            let extract = extract_component_meta_from_resolved(
-                self,
-                canonical.as_str(),
-                &resolved,
-                true, // include_fallthrough
-                ctx,
-            );
-            (
-                Some(resolved),
-                Some((extract.analysis, extract.completeness)),
-            )
-        });
-        let resolved = resolved_opt?;
-        let (meta, extract_completeness) = meta_opt?;
-        // ONE merged admission signal: the resolve-phase completeness merged
-        // with the whole-extract scope (macro-DTO read + fallthrough compute).
-        let final_completeness = resolved.completeness.merge(extract_completeness);
-
-        // Seal + admission decision (the by-value fenced-serve consult
-        // + the R20 finalise) live in ONE place — `publish_if_admissible`.
-        self.publish_if_admissible(canonical.as_str(), "base path", read_set, |sig| {
-            self.publish_component_meta_cache_entry(
-                canonical.as_str(),
-                &resolved,
-                meta.clone(),
-                sig,
-                validated_at_generation,
-                &seed_fence,
-                final_completeness,
-            );
-        });
+        let (_resolved, meta) = self.component_meta_via_view_cold(
+            canonical.as_str(),
+            &view,
+            &fixed,
+            ctx,
+            &seed_fence,
+            validated_at_generation,
+        )?;
 
         if let Some(started) = started {
             component_meta_debug(format!(
@@ -268,6 +268,191 @@ impl VerterHost {
             ));
         }
         Some(meta)
+    }
+
+    /// Output-bearing BASE-HOST component-meta entry: produce the
+    /// session-owned [`crate::meta_resolve::ComponentMetaOutput`] envelope
+    /// (all 11 materialized wire type lanes), warm-cache-aware, with the
+    /// materialization ALWAYS driven inside the same validated view the
+    /// analysis was served under. The envelope carries no resolution
+    /// sidecar (the audited
+    /// [`Self::get_component_meta_output_with_resolution`] entry and the
+    /// payload entries carry it); the materialized type lanes are fully
+    /// resolved either way.
+    ///
+    /// Wraps the shared view-core with a base [`crate::session_view::HostViewRef`]
+    /// and ONE captured [`crate::resolver_store::BatchFixedView`] — the warm
+    /// probe validates against that capture's proven-current view and the
+    /// materialization context seeds from the SAME capture, so a warm
+    /// analysis can never be paired with a different view's dispatch.
+    ///
+    /// A materialization failure is the typed
+    /// [`crate::meta_resolve::ComponentMetaOutputError`] (fail-closed; a
+    /// present-but-unraisable source never silently materializes as
+    /// `Unknown`). `Ok(None)` = the component does not resolve. An output
+    /// failure never suppresses the independently-complete ANALYSIS cache
+    /// entry the cold path publishes.
+    pub fn get_component_meta_output(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<
+        Option<crate::meta_resolve::ComponentMetaOutput>,
+        crate::meta_resolve::ComponentMetaOutputError,
+    > {
+        let view = crate::session_view::HostViewRef::new(self);
+        let fixed = self.capture_batch_fixed_view(&view);
+        self.get_component_meta_output_via_view_with_fixed_store_view(
+            canonical_or_alias,
+            &view,
+            &fixed,
+            false,
+        )
+    }
+
+    /// Output-bearing VIEW entry pinned to a caller-captured
+    /// [`crate::resolver_store::BatchFixedView`]: the overlay/session,
+    /// fixed-view scalar, and fixed-view batch surfaces all route here (the
+    /// batch threads ONE capture into every per-item call — no extra
+    /// per-item store-view reads).
+    ///
+    /// View fence (both arms):
+    ///
+    /// - **Warm.** The warm probe validates against the capture's
+    ///   proven-current OVERLAID view; on a hit the output materializes
+    ///   under a request context seeded from the SAME capture's cold seed —
+    ///   the analysis and the materialization dispatch observe one snapshot.
+    /// - **Cold.** The shared cold body resolves + extracts + publishes the
+    ///   analysis under the capture's cold seed, then the output
+    ///   materializes under that SAME context BEFORE it drops — never
+    ///   "resolve, return, then materialize under a second unrelated view".
+    ///
+    /// Cache rails: the ANALYSIS cache publish happens inside the cold body
+    /// BEFORE materialization and is never suppressed by an output failure;
+    /// the output materialization runs in its OWN fact-tracer scope so its
+    /// dependencies never fold into the analysis entry's fact signature
+    /// (output dependencies are traced separately by the encoded-payload
+    /// lane that admits encoded results).
+    ///
+    /// `with_resolution` selects whether the envelope carries the narrowed
+    /// resolution sidecar (and the session-owned registry name-overlay
+    /// finalize that comes with it).
+    pub(crate) fn get_component_meta_output_via_view_with_fixed_store_view(
+        &self,
+        canonical_or_alias: &str,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+        with_resolution: bool,
+    ) -> Result<
+        Option<crate::meta_resolve::ComponentMetaOutput>,
+        crate::meta_resolve::ComponentMetaOutputError,
+    > {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        if view.is_tombstoned(canonical.as_str()) {
+            return Ok(None);
+        }
+
+        // Budget context spans the warm-path materialization AND the cold
+        // resolve+extract+materialize — the projection-op fuse is armed for
+        // every output raise. Install-if-none so a batch / outer caller
+        // keeps its context.
+        let _budget_ctx_guard = self.install_request_budget_context_if_none(
+            crate::meta_resolve::next_component_meta_audit_request_id(),
+            canonical.as_str(),
+            self.config.audit_timing_capture && self.config.audit_enabled,
+        );
+
+        // Warm probe against the capture's proven-current overlaid view.
+        if let Some(cached) =
+            self.try_component_meta_cache_entry_with_view(canonical.as_str(), view, fixed)
+        {
+            #[cfg(test)]
+            run_warm_output_pre_materialize_hook();
+            let overlay =
+                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            // SESSION-BOUND materialization context (the session-bound
+            // counterpart of `HostResolverContext::from_cold_seed`, same
+            // fence: the overlaid cold seed + its currentness): an
+            // output-time raise that replays a producing route
+            // (`ensure_indexed_ready_serve` on the owning SFC — the macro
+            // hot mirror, the member-path / callable-params replays) must
+            // observe the SAME session view the analysis was served under;
+            // the base-bound context cannot serve an overlay-only
+            // canonical, failing those raises typed. A base-passthrough
+            // view falls through to the host's standard reads — identical
+            // behavior for non-overlay callers.
+            let host_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
+                self,
+                view,
+                fixed.cold_seed(),
+                overlay,
+            );
+            let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+            let seed = with_resolution.then(|| {
+                crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
+                    &cached.resolution_template,
+                )
+            });
+            // Output-dependency tracing stays SEPARATE from any outer
+            // analysis tracer scope (none is active on the warm path).
+            let (output, _output_read_set) = self.with_fact_tracer(|| {
+                crate::meta_resolve::projectors::build_component_meta_output(
+                    ctx,
+                    canonical.as_str(),
+                    cached.analysis.clone(),
+                    seed,
+                )
+            });
+            return output.map(Some);
+        }
+
+        // Cold: shared cold body (publishes the analysis cache entry
+        // independently of the output result), then materialize under the
+        // SAME capture — the OUTPUT context is the session-bound wrapper
+        // (see the warm arm) while the extract keeps the established
+        // base-bound binder.
+        let validated_at_generation = self.project_type_store.current_project_generation();
+        let seed_fence = ColdSeedFence::new(fixed.captured_validation_token(), fixed.is_current());
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+            self,
+            fixed.cold_seed(),
+            std::sync::Arc::clone(&overlay),
+        );
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let Some((resolved, meta)) = self.component_meta_via_view_cold(
+            canonical.as_str(),
+            view,
+            fixed,
+            ctx,
+            &seed_fence,
+            validated_at_generation,
+        ) else {
+            return Ok(None);
+        };
+        let seed = with_resolution.then(|| {
+            crate::meta_resolve::output::ComponentMetaResolutionSeed::from_resolved_state(&resolved)
+        });
+        // SEPARATE tracer scope: output-materialization dependencies never
+        // fold into the analysis entry's fact signature (the cold body's
+        // tracer already sealed + published above). SESSION-BOUND output
+        // context (same capture, same fence — see the warm arm).
+        let output_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
+            self,
+            view,
+            fixed.cold_seed(),
+            overlay,
+        );
+        let output_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
+            &output_ctx;
+        let (output, _output_read_set) = self.with_fact_tracer(|| {
+            crate::meta_resolve::projectors::build_component_meta_output(
+                output_ctx_ref,
+                canonical.as_str(),
+                meta,
+                seed,
+            )
+        });
+        output.map(Some)
     }
 
     /// View-aware variant of [`get_component_meta`].
@@ -348,9 +533,22 @@ impl VerterHost {
         // fixed view — re-running it per job would defeat the O(1) goal AND
         // could publish overlay artifacts the captured fixed view cannot
         // observe (it was snapshotted before the per-job pre-warm). Skip it.
-        if fixed.is_none() {
-            crate::host_manage::overlay_priority::prewarm_view_overlays(self, view);
-        }
+        //
+        // The direct (non-batch) caller pre-warms, then captures its OWN
+        // fixed view (AFTER the pre-warm so the capture observes the
+        // pre-warmed overlay candidates): downstream, the warm probe, the
+        // extraction context, the publish fence, AND the pinned resolve
+        // executor all derive from ONE capture — never a per-stage fresh
+        // read that a concurrent mutation could tear apart.
+        let captured_fixed;
+        let fixed = match fixed {
+            Some(fixed) => fixed,
+            None => {
+                crate::host_manage::overlay_priority::prewarm_view_overlays(self, view);
+                captured_fixed = self.capture_batch_fixed_view(view);
+                &captured_fixed
+            }
+        };
 
         // Try the view-aware warm cache fast path.
         if let Some(warm) =
@@ -404,43 +602,82 @@ impl VerterHost {
         // strand a stale-by-project-generation entry whose carrier
         // still validates on file-content terms.
         let validated_at_generation = self.project_type_store.current_project_generation();
-        // Publish fence + cold-seed view from ONE read — see
-        // `get_component_meta` above for the divergence-free derivation.
-        // The base token recheck covers any epoch / generation / env /
-        // identity shift landing during this cold window; the session
-        // overlay identity is fixed for the request (`view` does not
-        // change mid-request), so the base token is the sound recheck
-        // rail here too. A non-current base seed declines promotion.
-        //
-        // With a caller-captured fixed view, the cold-seed + fence come
-        // from that ONE batch capture (its captured token + currentness)
-        // instead of a fresh per-job read — the same single-snapshot the
-        // executor's promotion fence gates on. Without one, take a fresh
-        // read here.
-        let (store_view, seed_fence) = match fixed {
-            Some(fixed) => (
-                fixed.cold_seed().clone(),
-                ColdSeedFence {
-                    token: fixed.captured_validation_token(),
-                    current: fixed.is_current(),
-                },
-            ),
-            None => self.cold_seed_view_and_fence(),
+        // Publish fence + cold-seed view from the ONE capture (batch-
+        // supplied or the direct caller's own, above): its captured token +
+        // currentness — the same single-snapshot the executor's promotion
+        // fence gates on. The base token recheck covers any epoch /
+        // generation / env / identity shift landing during this cold
+        // window; the session overlay identity is fixed for the request
+        // (`view` does not change mid-request), so the base token is the
+        // sound recheck rail here too. A non-current capture declines
+        // promotion.
+        let seed_fence = ColdSeedFence {
+            token: fixed.captured_validation_token(),
+            current: fixed.is_current(),
         };
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx =
-            crate::resolver_core::HostResolverContext::from_cold_seed(self, &store_view, overlay);
+        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+            self,
+            fixed.cold_seed(),
+            overlay,
+        );
         let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        // Pin the request executor to the same fixed view (FENCED) when one
-        // was supplied, so the resolved-meta promotion shares the batch
-        // snapshot rather than re-reading per job.
-        let executor_fixed = fixed.map(|fixed| {
-            let (view, fp) = fixed.executor_fixed_view();
-            (view, fp, fixed.is_current())
-        });
+        let (_resolved, meta) = self.component_meta_via_view_cold(
+            canonical.as_str(),
+            view,
+            fixed,
+            ctx,
+            &seed_fence,
+            validated_at_generation,
+        )?;
+
+        if let Some(started) = started {
+            component_meta_debug(format!(
+                "get_component_meta_via_view owner={} cold took {:?}",
+                canonical,
+                started.elapsed(),
+            ));
+        }
+        Some(meta)
+    }
+
+    /// The SHARED view-path cold body: resolve PINNED to the caller's
+    /// captured fixed view, extract under the caller's request-bound
+    /// `ctx`, and publish the analysis result to the shared cache under the
+    /// caller's fence — returning BOTH the resolved state and the analysis
+    /// so an output-bearing caller can materialize the envelope under the
+    /// SAME still-alive `ctx` (invariant: the analysis-cache publish is
+    /// INDEPENDENT of any later output-materialization outcome).
+    ///
+    /// `fixed` is REQUIRED: every caller derives `ctx` / `seed_fence` from
+    /// ONE captured [`crate::resolver_store::BatchFixedView`] and the
+    /// resolve executor pins to that same capture — an unpinned resolve
+    /// here would open its own store view and could pair a fresh-view
+    /// analysis with the capture-bound extraction/materialization context
+    /// (the torn-result race).
+    fn component_meta_via_view_cold(
+        &self,
+        canonical: &str,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        seed_fence: &ColdSeedFence,
+        validated_at_generation: u64,
+    ) -> Option<(
+        crate::meta_resolve::ResolvedComponentMetaState,
+        verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    )> {
+        #[cfg(test)]
+        run_cold_body_pre_resolve_hook();
+        // Pin the request executor to the caller's fixed view (FENCED), so
+        // the resolve shares the capture's snapshot rather than re-reading.
+        let executor_fixed = {
+            let (executor_view, executor_fp) = fixed.executor_fixed_view();
+            Some((executor_view, executor_fp, fixed.is_current()))
+        };
         let ((resolved_opt, meta_opt), read_set) = self.with_fact_tracer(|| {
             let resolved = match self.resolve_component_meta_with_view_and_fixed(
-                canonical.as_str(),
+                canonical,
                 crate::types::ProjectionMode::Expanded,
                 view,
                 executor_fixed,
@@ -449,10 +686,7 @@ impl VerterHost {
                 None => return (None, None),
             };
             let extract = extract_component_meta_from_resolved(
-                self,
-                canonical.as_str(),
-                &resolved,
-                true, // include_fallthrough
+                self, canonical, &resolved, true, // include_fallthrough
                 ctx,
             );
             (
@@ -468,27 +702,19 @@ impl VerterHost {
 
         // Seal + admission decision — `publish_if_admissible` (by-value
         // fenced-serve consult + R20 finalise).
-        self.publish_if_admissible(canonical.as_str(), "view-aware path", read_set, |sig| {
+        self.publish_if_admissible(canonical, "view-aware path", read_set, |sig| {
             self.publish_component_meta_cache_entry_with_view(
-                canonical.as_str(),
+                canonical,
                 view,
                 &resolved,
                 meta.clone(),
                 sig,
                 validated_at_generation,
-                &seed_fence,
+                seed_fence,
                 final_completeness,
             );
         });
-
-        if let Some(started) = started {
-            component_meta_debug(format!(
-                "get_component_meta_via_view owner={} cold took {:?}",
-                canonical,
-                started.elapsed(),
-            ));
-        }
-        Some(meta)
+        Some((resolved, meta))
     }
 
     /// Canonical builder for the
@@ -574,22 +800,37 @@ impl VerterHost {
     /// from the view falls through to the base host's
     /// `shallow_file_state` — but the increment fires either way so
     /// callers observe that the consumer path consulted the view.
-    /// View-aware warm-cache probe with an optional caller-captured fixed
-    /// view.
+    /// View-aware warm-cache probe against a caller-captured fixed view.
     ///
-    /// When `fixed` is `Some`, the warm probe validates against the fixed
-    /// view's PROVEN-CURRENT base snapshot (overlay-re-rooted for `view`)
-    /// instead of taking a fresh `resolver_store_view_read()` — the
-    /// per-job read elimination for the analysis path. A fixed view whose
-    /// capture was non-current (`current_view() == None`) misses to cold,
-    /// exactly as a fresh non-current read would. `None` takes a fresh
-    /// read (the direct, non-batch caller).
+    /// The warm probe validates against the fixed view's PROVEN-CURRENT
+    /// overlaid snapshot instead of taking a fresh
+    /// `resolver_store_view_read()` — the per-job read elimination for the
+    /// analysis path (the direct, non-batch caller captures its own fixed
+    /// view once per call). A fixed view whose capture was non-current
+    /// (`current_view() == None`) misses to cold, exactly as a fresh
+    /// non-current read would.
     fn try_component_meta_cache_hit_with_view_inner(
         &self,
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
-        fixed: Option<&crate::resolver_store::BatchFixedView>,
+        fixed: &crate::resolver_store::BatchFixedView,
     ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
+        self.try_component_meta_cache_entry_with_view(canonical, view, fixed)
+            .map(|cached| cached.analysis.clone())
+    }
+
+    /// Entry-returning core of the view-aware warm probe: the FULL cached
+    /// payload (analysis + resolution template), for consumers that need
+    /// more than the analysis projection (the output-bearing entries seed
+    /// their resolution sidecar from the cached template without a
+    /// rehydrate). Validation semantics identical to
+    /// [`Self::try_component_meta_cache_hit_with_view_inner`].
+    fn try_component_meta_cache_entry_with_view(
+        &self,
+        canonical: &str,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+    ) -> Option<std::sync::Arc<crate::component_meta_result_db::CachedComponentMetaResult>> {
         // Owner-canonical tombstone short-circuit: a canonical the
         // session deleted has no meaningful component-meta result and
         // must NOT collapse onto a base cache slot. `content_hash_for`
@@ -637,34 +878,25 @@ impl VerterHost {
         // miss-to-cold runs FIRST, so the overlay can never LAUNDER a
         // `ReturnOnly` base into a validating view.
         let results = self.project_type_store.component_meta_results();
-        // The proven-current OVERLAY-AWARE view for validation. The batch
-        // path's `fixed.current_view()` is ALREADY overlaid once by
+        // The proven-current OVERLAY-AWARE view for validation. The capture
+        // (`fixed.current_view()`) is ALREADY overlaid once by
         // `capture_batch_fixed_view` and shared across jobs, so it is used
         // directly with NO per-job copy-on-write (re-applying the overlay per
-        // job was the O(N²) regression); the direct non-batch caller has no
-        // shared capture, so its fresh read is overlaid HERE, once. A
-        // non-current capture / fresh `ReturnOnly` read exposes no current
+        // job was the O(N²) regression); the direct non-batch caller
+        // captures its own fixed view once per call, so the same single-COW
+        // discipline holds there. A non-current capture exposes no current
         // view and misses to cold, so the overlay can never LAUNDER a
         // non-current base into a validating view (the `current()` miss runs
         // FIRST).
-        let current_view = match fixed {
-            Some(fixed) => match fixed.current_view() {
-                Some(current) => current.clone(),
-                None => {
-                    results.record_non_current_view_miss(self);
-                    return None;
-                }
-            },
-            None => match self.resolver_store_view_read().current() {
-                Some(current) => current.with_session_overlay(self, view),
-                None => {
-                    results.record_non_current_view_miss(self);
-                    return None;
-                }
-            },
+        let current_view = match fixed.current_view() {
+            Some(current) => current,
+            None => {
+                results.record_non_current_view_miss(self);
+                return None;
+            }
         };
-        let entry = results.get_with_view(self, &current_view, &key, owner_whole_hash)?;
-        Some(entry.payload.analysis.clone())
+        let entry = results.get_with_view(self, current_view, &key, owner_whole_hash)?;
+        Some(std::sync::Arc::clone(&entry.payload))
     }
 
     /// Publish-fence token recheck.
@@ -751,35 +983,6 @@ impl VerterHost {
         false
     }
 
-    /// Read the host base store view ONCE for a cold component-meta
-    /// compute and bundle the seed view with the publish fence it must be
-    /// validated under.
-    ///
-    /// The fence token is derived from the returned view itself
-    /// ([`crate::resolver_store::HostStoreView::validation_token`]), and
-    /// the currentness is the [`crate::resolver_store::StoreViewRead`]
-    /// arm — so the token the publish fence rechecks and the view the
-    /// cold compute runs under CANNOT diverge (they are the same read).
-    /// This is the structural fix for the prior pattern that sampled a
-    /// live token BEFORE the seed-view read: a mutation landing between
-    /// the two reads could either refuse a fresh result or, worse, let a
-    /// stale `ReturnOnly` seed promote against a still-matching pre-read
-    /// sample.
-    ///
-    /// A non-current (`ReturnOnly`) read is still returned as a usable
-    /// cold-seed view (the cold compute's own coherence still runs), but
-    /// `ColdSeedFence::current` is `false` so
-    /// [`Self::validation_token_still_live`] declines promotion.
-    pub(super) fn cold_seed_view_and_fence(
-        &self,
-    ) -> (crate::resolver_store::ColdSeedHostStoreView, ColdSeedFence) {
-        let read = self.resolver_store_view_read();
-        let current = read.is_current_for_promotion();
-        let view = read.into_cold_seed_view();
-        let token = view.view().validation_token();
-        (view, ColdSeedFence { token, current })
-    }
-
     /// Seal a cold producer's tracer and run `publish` only when the
     /// result is admissible to the shared cache — the single admission
     /// decision point for the three component-meta cold producers.
@@ -808,7 +1011,7 @@ impl VerterHost {
         read_set: crate::resolver_core::FactReadSet,
         publish: impl FnOnce(Arc<[crate::resolver_core::FactVersionRef]>),
     ) {
-        if read_set.fenced_serve_observed() {
+        if read_set.non_cacheable_read_observed() {
             tracing::debug!(
                 target: "verter::audit::record",
                 file = %canonical,

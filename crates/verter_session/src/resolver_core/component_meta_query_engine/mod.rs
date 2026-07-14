@@ -24,7 +24,7 @@
 //!   — final `ComponentMetaAnalysis` payloads keyed by `(canonical, profile)`.
 //!   `get_component_meta` consults this first; the engine only runs on cold misses.
 //! - [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore)
-//!   — interned semantic-node arena and resolved-named-type identity map.
+//!   — interned semantic-node arena.
 //!   Engine subqueries dispatch via
 //!   [`ProjectSemanticDispatch`](crate::project_semantic_dispatch::ProjectSemanticDispatch)
 //!   which deduplicates against this store.
@@ -81,7 +81,6 @@ use std::collections::BTreeSet;
 
 use rustc_hash::FxHashMap;
 use verter_semantic::analysis::type_eval::DeclarationId;
-use verter_type_expr::TypeExpr;
 
 use super::declaration_metadata::{
     DeclarationMetadataResolver, ResolvedDeclarationKind, ResolvedLocalTypeSymbolMetadata,
@@ -113,21 +112,26 @@ mod fallthrough_value_eval;
 mod helpers;
 mod intrinsic_surface;
 mod node_materialize;
+// The node-domain object-surface classifier — re-exported for the
+// meta_resolve consumers that lower a decl-body locator through the shared
+// dispatch and read the object-surface verdict off the lowered node.
+pub(crate) use node_materialize::component_meta_registry_node_has_explicit_object_surface;
+mod registry_cache_producers;
 mod registry_decl;
-mod registry_structural;
+mod registry_route_scoped;
 mod route_admission;
 mod shallow_preserve;
 mod surface;
 
 // The surface-PROJECTION helpers stay confined to this query-engine subtree:
-// `projected_surface_from_semantic_node` (raw `SemanticNodeId` → surface) and
-// `surface_view_to_projected_surface` (forgeable `&SurfaceView` → surface) are
-// the raw forgeable-input helpers; `projected_surface_to_type_expr` /
-// `projected_surface_to_expanded_shape` are their DTO-side companions. None are
-// re-exported (the `surface` module is private; in-subtree callers reach them
-// via `use super::surface::`). Out-of-subtree callers route through the
-// engine's sink-local methods (`materialize_registry_whole_surface_candidate`
-// for the whole-surface candidate / the routed-surface methods).
+// `surface_view_from_semantic_node` (raw `SemanticNodeId` → `SurfaceView`) and
+// `compound_root_surface_view_via_dispatch` (decl-anchor compound composition)
+// are the raw forgeable-input helpers; `surface_view_to_registry_type_expr` is
+// their terminal publication sink. None are re-exported (the `surface` module
+// is private; in-subtree callers reach them via `use super::surface::`).
+// Out-of-subtree callers route through the engine's sink-local methods
+// (`materialize_registry_whole_surface_candidate` for the whole-surface
+// candidate / the routed-surface methods).
 // `materialize_route_projection_node` is NOT re-exported: it is scoped
 // `pub(in …::component_meta_query_engine)` so only in-subtree route/surface
 // adapters and the route fixpoint reach the node→`TypeExpr` materialisation
@@ -141,17 +145,19 @@ mod surface;
 pub(crate) use route_admission::AdmittedRouteProjectionNode;
 pub(crate) use surface::{
     lower_and_project_to_expanded_node, project_class_a_published, project_class_a_terminal_node,
-    semantic_query_error_raw, type_expr_contains_semantic_miss,
-    type_expr_is_budget_exceeded_sentinel,
+    semantic_query_error_raw, type_expr_is_budget_exceeded_sentinel,
 };
-// `type_expr_is_expanded_surface` and `type_expr_root_is_unmaterialized_sentinel`
-// survive only as `#[cfg(test)]` parity ORACLES the raised-shape suite compares
-// the bottom-up node-domain facts against — production gates read the node-domain
-// facts (`shape_engine` `expanded_surface` / `node_root_is_unmaterialized_sentinel_with_dispatch`),
-// so their re-exports are test-only.
+// `type_expr_contains_semantic_miss`, `type_expr_is_expanded_surface`, and
+// `type_expr_root_is_unmaterialized_sentinel` survive only as parity ORACLES the
+// raised-shape suite compares the bottom-up node-domain facts against —
+// production gates read the node-domain facts (`shape_engine`
+// `node_contains_semantic_miss_with_dispatch` / `expanded_surface` /
+// `node_root_is_unmaterialized_sentinel_with_dispatch`), so their re-exports are
+// test-only.
 #[cfg(test)]
 pub(crate) use surface::{
-    type_expr_is_expanded_surface, type_expr_root_is_unmaterialized_sentinel,
+    type_expr_contains_semantic_miss, type_expr_is_expanded_surface,
+    type_expr_root_is_unmaterialized_sentinel,
 };
 // Re-export ONLY the per-sink output capability TYPES so the
 // `output_materialization` owner module can name them for its explicit
@@ -176,7 +182,7 @@ pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
 /// The exact `TypeExpr::Unknown { raw }` prefix `semantic_query_error_raw`
 /// emits for a `QueryError::BudgetExceeded` sentinel (`format!("budgetExceeded({:?})", …)`).
 /// This is the SINGLE source of truth for the budget-exceeded spelling:
-/// the production recognizer (`dispatch_route_expr_is_materialized`) and
+/// the owner classifier (`raise_sentinel::raw_is_unmaterialized_sentinel`) and
 /// every test that scans a published surface for a leaked budget sentinel
 /// reference this constant, so the spelling can never silently drift.
 pub(crate) const BUDGET_EXCEEDED_SENTINEL_PREFIX: &str = "budgetExceeded(";
@@ -229,13 +235,33 @@ pub(crate) fn engine_fact_signature_for_exported_type(
 /// provenance-pure signature builder. The `decl` and the `whole_hash`
 /// are sourced from a single prepared-decl bundle, so they are
 /// provably the same content version (untorn against a racing
-/// `upsert`). `decl` is `Option` because a prepared decl may
-/// legitimately be absent for a bundled canonical (the requested
-/// symbol does not exist); the absence is still rooted on `whole_hash`
-/// so a later declaration is detected.
+/// `upsert`).
+///
+/// ## `decl: None` is NOT uniformly a legitimate absence
+///
+/// Two causes are indistinguishable at this type, and conflating them is a
+/// cache-poison:
+///
+/// - the requested symbol genuinely does not exist in the bundled canonical —
+///   a real absence. It IS soundly rooted on `whole_hash`: a later declaration
+///   edits the file, the hash shifts, and the entry misses.
+/// - the symbol's body demand hit a BROKEN DECL-BODY LEASE.
+///   `PreparedDeclBundle::get` fans `LeaseMiss` and leaves its slot VACANT so a
+///   later demand under a live lease recovers. This absence is
+///   **CONTENT-NEUTRAL**: nothing is superseded, the artifact stays published,
+///   and `whole_hash` does NOT move. An entry rooted on it validates on every
+///   warm read forever — the recoverable declaration is shadowed as a permanent
+///   absence at that content version, and no read-side rail can reject it.
+///
+/// So rooting does NOT make the absence safe. The cacheability rail does: the
+/// producer's tracer scope ENCLOSES the `observed_prepared_type_decl` call, the
+/// lease miss fans onto that scope, and the funnel's post-compute verdict
+/// refuses the write while still serving the value.
 pub(crate) struct ObservedPreparedTypeDecl {
-    /// The prepared type declaration, or `None` when the requested
-    /// symbol is absent from the keyed canonical.
+    /// The prepared type declaration, or `None` when the requested symbol is
+    /// absent from the keyed canonical — a genuine absence OR a broken-lease
+    /// transient (see the type docs; the two are told apart by the
+    /// cacheability rail, never by this field).
     pub(crate) decl:
         Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
     /// The keyed canonical the prepared decl was resolved for.
@@ -447,7 +473,12 @@ use std::cell::Cell;
 pub struct ResolvedImportedRegistrySymbol {
     pub canonical_id: String,
     pub exported_name: String,
-    pub body: TypeExpr,
+    /// The resolved declaration's narrowed body FACTS: classification plus the
+    /// content-free authored body-slot locator (never an embedded body).
+    /// Consumers lower the slot through the one shared dispatch on demand and
+    /// classify node-domain; the carrier itself stays `Send + Sync`
+    /// cache-safe (`ImportedRegistryDb` stores it cross-request).
+    pub body: verter_type_expr::facts::PreparedTypeBodyFacts,
     pub canonical_dependencies: BTreeSet<String>,
 }
 
@@ -457,34 +488,37 @@ pub(crate) enum FastShallowFieldExprExactness {
     Concrete,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The fast-path publication carrier for one macro field: the transient
+/// session handle (`hot` — the node the fast-path decision was made on; used
+/// by session-side node decisions, never persisted, never a cache key) plus
+/// the content-free `semantic_source` the publication boundary writes into
+/// `ExpandedNormalizedExpr.expr` (the warm/persisted identity), plus the
+/// exactness discriminant.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FastShallowFieldExpr {
-    pub expr: TypeExpr,
+    pub hot: crate::semantic_query::HotTypeRef,
+    pub semantic_source: verter_type_expr::facts::SemanticTypeSource,
     pub exactness: FastShallowFieldExprExactness,
 }
 
 /// Query-local component-meta solve engine.
 ///
 /// Declaration-scoped lookups resolve through dispatch via
-/// [`project_type_surface_expr`]. retired the
-/// request-scoped owner engine bridge; all solve-like operations now
-/// route through `ProjectSemanticDispatch`. Imported registry entries
+/// [`project_type_surface_expr`]: every solve-like operation routes
+/// through `ProjectSemanticDispatch`, and imported registry entries
 /// memoize by declaration scope so the same textual reference does not
 /// alias across files.
 ///
 /// **Engine-local cache audit.**
 ///
-/// The plan's binary partition (a = request-local non-semantic scratch,
-/// b = reusable semantic producer cache subsumed by dispatch) classifies
-/// each field as follows. Fields marked **(a)** are scratch state and
-/// retained; fields marked **(b)** are pre-lowering-level memos that
-/// genuinely complement dispatch's post-lowering memo (the two operate
-/// on different identity spaces — `TypeExpr` vs. `SemanticNodeId` — so
-/// dispatch cannot subsume them). The CLAUDE.md "ctx-owned cache
-/// principle" violation (these are `FxHashMap` rather than DashMap-backed
-/// ctx caches) is documented architectural debt distinct from the
-/// dispatch-routing scope of this commit; migrating the (b) entries to
-/// ctx-owned `DashMap`s is its own follow-up plan.
+/// The engine's fields split into two classes: **(a)** request-local
+/// non-semantic scratch, held as-is, and **(b)** pre-lowering-level memos
+/// that complement dispatch's post-lowering memo — the two operate on
+/// different identity spaces (`TypeExpr` vs. `SemanticNodeId`), so dispatch
+/// cannot subsume them. The (b) caches are `FxHashMap`s rather than
+/// DashMap-backed ctx-owned caches; consolidating them onto the ctx-owned
+/// cache substrate is tracked architectural debt (the CLAUDE.md ctx-owned
+/// cache principle), not a live dual-resolution path.
 ///
 /// | Field | Class | Rationale |
 /// |---|---|---|
@@ -502,11 +536,8 @@ pub(crate) struct FastShallowFieldExpr {
 /// pre-lowering `TypeExpr` identity space, which dispatch's
 /// `SemanticNodeId`-keyed memo cannot subsume. They are NOT dual-path
 /// duplicates of dispatch's work; they are a complementary memoization
-/// layer. The plan's "delete (b) fields" directive applies only when
-/// dispatch can replace the work — for these fields it cannot. The
-/// (b) → ctx-owned migration is documented architectural debt
-/// (CLAUDE.md ctx-owned cache principle) addressed in a separate
-/// follow-up plan.
+/// layer whose consolidation onto the ctx-owned cache substrate is the
+/// tracked debt noted above.
 pub struct ComponentMetaQueryEngine<'a> {
     pub(crate) ctx: &'a dyn ResolverContext,
     // The caches below are read-through views over the host-owned
@@ -525,9 +556,13 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// Cached resolvability checks (read-through view; authority is
     /// `ProjectTypeStore::resolvable_db()`).
     resolvable: RefCell<FxHashMap<(String, String), bool>>,
-    /// Cached owner collection expressions (read-through view;
-    /// authority is `ProjectTypeStore::owner_collection_db()`).
-    owner_collection_exprs: RefCell<FxHashMap<String, Option<verter_type_expr::TypeExpr>>>,
+    /// Cached owner collection-body locators (read-through view;
+    /// authority is `ProjectTypeStore::owner_collection_db()`). The value
+    /// mirrors the DB's content-free `AuthoredBodyLocator` — consumers
+    /// lower it on demand through the ONE shared dispatch; no body is
+    /// stored here.
+    owner_collection_exprs:
+        RefCell<FxHashMap<String, Option<verter_type_expr::locators::AuthoredBodyLocator>>>,
     /// Request-local cache of declaration-scope payloads per scope canonical id.
     /// The prepared bundle stays authoritative; this cache only reuses the
     /// bundle-derived names/bindings within one request so repeated projections
@@ -929,8 +964,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// built ONCE from the cached [`scope_payload_for_scope`] entry and
     /// memoized for the engine's request lifetime.
     ///
-    /// The Pick/Omit package-root gate
-    /// ([`crate::meta_resolve::materialize`]'s `is_builtin_pick_or_omit`)
+    /// The materialize → lower pipeline
+    /// ([`crate::meta_resolve::materialize`]'s shape-subject lowering)
     /// probes this per published field; folding the scope's local type
     /// names, script-setup type bindings, and resolved import bindings into a
     /// fresh shadow set on every probe is O(fields × scope names/imports).
@@ -968,13 +1003,13 @@ fn local_type_symbol_metadata_for_known_source(
     let analysis = ctx.external_type_analysis(canonical_source)?;
     let symbol = analysis.local_type_symbol(resolved_name)?;
     let kind = match symbol.kind {
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::TypeAlias => {
+        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::TypeAlias => {
             ResolvedDeclarationKind::TypeAlias
         }
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Interface => {
+        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Interface => {
             ResolvedDeclarationKind::Interface
         }
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Class => {
+        verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Class => {
             ResolvedDeclarationKind::Class
         }
     };

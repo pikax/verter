@@ -345,31 +345,12 @@ impl RouteDb {
         result
     }
 
-    /// Look up or materialize a route for `(provider, name)`.
-    ///
-    /// `resolve` is `Fn` (not `FnOnce`): a claimant that received an
-    /// UNADMITTED flight outcome as a follower re-runs it against fresh
-    /// state (see [`Self::resolve_route_singleflight_inner`]).
-    pub fn get_or_resolve_route<V, F>(
-        &self,
-        key: RouteNameKey,
-        view: &V,
-        resolve: F,
-    ) -> Option<Arc<RouteResult>>
-    where
-        V: StoreView + ?Sized,
-        F: Fn() -> Option<RouteResult>,
-    {
-        self.get_or_resolve_route_with_facts(key, view, || {
-            resolve().map(|result| (result, Vec::new()))
-        })
-    }
-
     /// Look up or materialize a route for `key` with fact validation.
     pub fn get_or_resolve_route_with_facts<V, F>(
         &self,
         key: RouteNameKey,
         view: &V,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
@@ -380,7 +361,7 @@ impl RouteDb {
             return Some(result);
         }
 
-        let run_result = self.resolve_route_singleflight_inner(key, view, resolve)?;
+        let run_result = self.resolve_route_singleflight_inner(key, view, probe, resolve)?;
         Some(Arc::clone(&run_result.value.route))
     }
 
@@ -404,15 +385,40 @@ impl RouteDb {
     /// Retention mirrors admission (the bounded re-validation loop the
     /// IndexedReady and prepared-decl-bundle lanes use): an ADMITTED
     /// outcome is retained as a joinable rendezvous for the burst; an
-    /// UNADMITTED outcome serves only the LEADER (ReturnOnly — its own
-    /// request consumed the resolve on its own thread, so any fenced
-    /// serve already marked that thread's suppression rails); a FOLLOWER
+    /// UNADMITTED outcome serves only the LEADER (ReturnOnly); a FOLLOWER
     /// receives the unadmitted outcome by value and re-runs `resolve`
     /// against fresh state on a fresh lane. Under sustained churn the
-    /// bounded fallback adopts the last unadmitted outcome ReturnOnly,
-    /// carrying the suppression status onto THIS thread's request-sticky
-    /// and traced-scope rails (the original resolve ran on the leader's
-    /// thread, not this one).
+    /// bounded fallback adopts the last unadmitted outcome ReturnOnly.
+    ///
+    /// EVERY unadmitted outcome — leader-produced or follower-adopted —
+    /// marks the non-cacheability rail of the thread it is served to.
+    /// Both refusal reasons need it, for different halves of the same
+    /// hazard:
+    ///
+    /// - `probe.non_cacheable()` (fenced serve / broken lease /
+    ///   unrootable route): the reads that set it already fanned out to
+    ///   every tracer on the LEADER's stack, so the leader's re-mark is a
+    ///   harmless no-op — but an ADOPTING FOLLOWER never ran that walk,
+    ///   and nothing has marked its tracers.
+    /// - `facts.is_empty()`: the RESULT is unrootable and NO
+    ///   non-cacheable read need have occurred at all, so NEITHER thread
+    ///   is marked. `build_named_type_export_route_entry` hand-marks its
+    ///   fenced and unrootable-wildcard exits, but its NORMAL exit
+    ///   returns whatever the participant walk produced — EMPTY when no
+    ///   participant yields a whole-hash or a route-surface hash. An
+    ///   empty signature also FANS NOTHING, so an enclosing traced
+    ///   compute observes no fact for the route, warm-admits a result
+    ///   folding a route it cannot root, and revalidates against the live
+    ///   view forever.
+    ///
+    /// Marking on `!admitted` — rather than per reason — is the
+    /// structural floor: no unadmitted value leaves this funnel without
+    /// marking the thread that receives it, whatever refused it and
+    /// whichever producer supplied it. The producer-side empty-facts
+    /// convention is a discipline; this is the floor that does not depend
+    /// on a producer remembering it. The mark is cache non-admission
+    /// only, never request partiality: the value served is VALID
+    /// (Complete).
     ///
     /// Returns `Some(SingleflightRunResult { value, role, .. })` on success
     /// (callers that need to discriminate leader vs follower for provenance
@@ -422,6 +428,7 @@ impl RouteDb {
         &self,
         key: RouteNameKey,
         view: &V,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
         resolve: F,
     ) -> Option<SingleflightRunResult<RouteFlightOutcome>>
     where
@@ -438,13 +445,24 @@ impl RouteDb {
             match resolve() {
                 Some((result, facts)) => {
                     let arc = Arc::new(result);
-                    // Strict admission. Routes resolved with
-                    // non-empty fact signatures admit through the
-                    // strict entry-point; empty-signature resolves
-                    // are NOT admitted — the route surface is
-                    // still returned to the caller, but the entry is
-                    // not persisted as a fact-validated cache hit.
-                    let admitted = !facts.is_empty();
+                    // Admission is TWO independent gates, both fail-closed:
+                    //
+                    // - a non-empty fact signature (an empty one gives a warm
+                    //   read nothing to validate against);
+                    // - the cacheability verdict of the scope enclosing this
+                    //   resolve, sampled AFTER the walk ran. A fenced serve, a
+                    //   broken decl-body lease, an unrootable route or an
+                    //   unobservable contributor source env consumed anywhere in
+                    //   the walk means the route's basis cannot be soundly
+                    //   rooted — and three of those four are CONTENT-NEUTRAL, so
+                    //   the entry would root on the LIVE hash and validate on
+                    //   every warm read forever. The empty-facts convention is a
+                    //   producer-side discipline; this gate is the structural
+                    //   floor that does not depend on a producer remembering it.
+                    //
+                    // The route surface is still returned to the caller either
+                    // way; only the persist is refused.
+                    let admitted = !facts.is_empty() && !probe.non_cacheable();
                     if admitted {
                         self.routes.insert_arc_with_kind(
                             key.clone(),
@@ -488,9 +506,40 @@ impl RouteDb {
                 return Some(run_result);
             }
             if matches!(run_result.role, SingleflightRole::Leader) {
-                // Unadmitted leader: serve its own caller. The resolve
-                // ran on this thread, so any fenced serve it consumed
-                // already marked this thread's suppression rails.
+                // Unadmitted leader: serve its own caller, and carry the
+                // non-cacheability onto that caller's rails.
+                //
+                // The mark is NOT redundant with "the resolve ran on this
+                // thread". That reasoning covers only ONE of the two refusal
+                // reasons. `admitted = !facts.is_empty() && !probe.non_cacheable()`:
+                //
+                // - `probe.non_cacheable()` — the walk consumed a fenced serve /
+                //   broken lease / unrootable route. Each of those fanned out to
+                //   EVERY tracer on this thread's stack at the point of the read,
+                //   before the funnel ever sampled the probe. Re-marking here is a
+                //   harmless no-op (the rail is a bool).
+                // - `facts.is_empty()` — the RESULT is unrootable. NO non-cacheable
+                //   read need have occurred: `build_named_type_export_route_entry`
+                //   marks its fenced and unrootable-wildcard exits by hand, but its
+                //   NORMAL exit returns whatever `append_route_participant_fact_versions`
+                //   produced — and that is EMPTY when no participant yields either a
+                //   whole-hash or a route-surface hash (an evicted provider with no
+                //   resolvable surface). An empty signature FANS NOTHING, so the
+                //   enclosing traced compute observes no fact for the route at all,
+                //   warm-admits a result folding a route it cannot root, and
+                //   revalidates against the live view forever — nothing moved.
+                //
+                // Marking on `!admitted` (rather than on the empty-facts reason
+                // alone) is the structural floor: no unadmitted value leaves this
+                // funnel without marking the thread that receives it, whatever
+                // reason refused it and whichever producer supplied it — the
+                // producer-side empty-facts convention is a discipline, this is the
+                // floor that does not depend on a producer remembering it. This is a
+                // VALID (Complete) route, NOT a partial result — cache non-admission
+                // only, never request partiality.
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                );
                 return Some(run_result);
             }
             last_unadmitted = Some(run_result);
@@ -499,12 +548,14 @@ impl RouteDb {
             // Sustained-churn bounded fallback (FOLLOWER adoption): the
             // adopted route is unadmitted — fenced-derived or unrootable
             // — and this thread never ran the resolve that produced it.
-            // Carry the ReturnOnly status onto this request's
-            // suppression rails by hand so an enclosing traced cold
-            // compute refuses shared-cache admission of any result
-            // folding a route it cannot root.
-            crate::request_context::mark_request_materialization_cache_suppress();
-            crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+            // Carry the non-cacheability by hand so an enclosing traced
+            // cold compute refuses shared-cache admission of any result
+            // folding a route it cannot root. This is a VALID (Complete)
+            // adopted route, NOT a partial result — cache non-admission
+            // only, never request partiality.
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+            );
         }
         last_unadmitted
     }
@@ -531,6 +582,41 @@ impl RouteDb {
     ) -> usize {
         self.route_singleflight
             .test_flight_strong_count(key, view.compat_token())
+    }
+
+    /// **Test-only.** Run `f` while a participation pin is held on the
+    /// route singleflight lane for `key` — modelling a concurrent burst
+    /// sibling whose in-flight claim keeps the lane alive across the
+    /// leader's publish.
+    ///
+    /// That sibling pin is what makes the RETENTION decision observable
+    /// at all. With no other pin on the lane, a lone follower's own
+    /// unpin reaps the lane the instant it reads the leader's terminal,
+    /// so its next bounded attempt re-elects a fresh leader whether the
+    /// terminal was retained or discarded — the two are indistinguishable
+    /// from the consumer loop. Holding a pin keeps a RETAINED
+    /// `Done(unadmitted)` joinable across the claimant's bounded
+    /// attempts, which is the state in which adopting an unrooted route
+    /// becomes observable.
+    ///
+    /// Exposed under `cfg(any(test, debug_assertions))` so integration
+    /// tests in `tests/` (which compile without `cfg(test)`) can reach
+    /// the private singleflight group. The pin is released when `f`
+    /// returns.
+    #[cfg(any(test, debug_assertions))]
+    pub fn test_with_pinned_route_lane<V, R>(
+        &self,
+        key: RouteNameKey,
+        view: &V,
+        f: impl FnOnce() -> R,
+    ) -> R
+    where
+        V: StoreView + ?Sized,
+    {
+        let _pin = self
+            .route_singleflight
+            .participate(key, view.compat_token());
+        f()
     }
 
     /// Look up a route and return both the result and its recorded
@@ -571,6 +657,7 @@ impl RouteDb {
         &self,
         key: RouteNameKey,
         view: &V,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
@@ -589,7 +676,8 @@ impl RouteDb {
         // Cold path: delegate to the shared singleflight helper, then
         // observe the leader / follower role and bump the matching
         // provenance counter on the post-admission re-read.
-        let run_result = self.resolve_route_singleflight_inner(key.clone(), view, resolve)?;
+        let run_result =
+            self.resolve_route_singleflight_inner(key.clone(), view, probe, resolve)?;
 
         // Post-admission re-read: fan the just-stored facts into the
         // current thread's tracer stack. Leader: the closure ran here
@@ -613,6 +701,46 @@ impl RouteDb {
             }
         }
         Some(Arc::clone(&run_result.value.route))
+    }
+
+    /// Test-only: drive [`Self::get_or_resolve_route_with_facts`] the way a
+    /// production producer does — inside a REAL cacheability tracer scope
+    /// opened around the whole resolve.
+    ///
+    /// A `CacheabilityProbe` cannot be forged (private field, one constructor),
+    /// so these wrappers are not an escape hatch around the admission contract:
+    /// they ARE the contract, spelled for a test that has no surrounding
+    /// producer. A test whose resolve consumes a non-cacheable read is refused
+    /// admission here exactly as production is.
+    #[cfg(test)]
+    fn get_or_resolve_route_with_facts_probe_for_test<V, F>(
+        &self,
+        key: RouteNameKey,
+        view: &V,
+        resolve: F,
+    ) -> Option<Arc<RouteResult>>
+    where
+        V: StoreView + ?Sized,
+        F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
+    {
+        test_cacheability_scope(|probe| {
+            self.get_or_resolve_route_with_facts(key, view, probe, resolve)
+        })
+    }
+
+    /// Test-only traced sibling of [`Self::get_or_build_barrel_surface`].
+    #[cfg(test)]
+    fn get_or_build_barrel_surface_probe_for_test<V, F>(
+        &self,
+        key: BarrelSurfaceKey,
+        view: &V,
+        build: F,
+    ) -> Option<Arc<BarrelRouteSurface>>
+    where
+        V: StoreView,
+        F: FnOnce() -> Option<BarrelRouteSurface>,
+    {
+        test_cacheability_scope(|probe| self.get_or_build_barrel_surface(key, view, probe, build))
     }
 
     /// Insert a pre-resolved route. **Test-only**: the empty-facts variant
@@ -696,6 +824,7 @@ impl RouteDb {
         &self,
         key: BarrelSurfaceKey,
         view: &V,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
         build: F,
     ) -> Option<Arc<BarrelRouteSurface>>
     where
@@ -716,13 +845,16 @@ impl RouteDb {
                     Some(surface) => {
                         let arc = Arc::new(surface);
                         let facts = self.barrel_validation_facts(&arc);
-                        // Strict admission. Barrel surfaces with a
-                        // non-empty fact-dep signature admit through
-                        // the strict entry-point; an empty signature
-                        // (no dependency facts to validate against)
-                        // skips admission rather than caching a
-                        // phantom-fact entry.
-                        if !facts.is_empty() {
+                        // Strict admission, TWO fail-closed gates: a non-empty
+                        // fact-dep signature (an empty one gives a warm read
+                        // nothing to validate against), AND the cacheability
+                        // verdict of the enclosing scope, sampled after the
+                        // build ran — a barrel surface built over a fenced
+                        // serve / broken lease / unrootable route cannot be
+                        // soundly rooted, and those reasons are content-neutral,
+                        // so the entry would validate forever. The surface is
+                        // still returned; only the persist is refused.
+                        if !facts.is_empty() && !probe.non_cacheable() {
                             self.barrel_surfaces.insert_arc_with_kind(
                                 key.clone(),
                                 arc.clone(),
@@ -879,6 +1011,21 @@ impl crate::invalidation_domain::InvalidationByCanonical for RouteDb {
     }
 }
 
+/// Open a cacheability tracer scope for the in-crate cache unit tests.
+///
+/// The scope is the ONLY mint for a `CacheabilityProbe`. The host it needs is
+/// created once per process: these tests exercise the cache substrate itself, so
+/// the host is a scope carrier, not a fixture under test.
+#[cfg(test)]
+fn test_cacheability_scope<R>(
+    f: impl for<'t> FnOnce(&crate::fact_signature_helpers::CacheabilityProbe<'t>) -> R,
+) -> R {
+    static TEST_SCOPE_HOST: std::sync::OnceLock<crate::VerterHost> = std::sync::OnceLock::new();
+    let host = TEST_SCOPE_HOST
+        .get_or_init(|| crate::VerterHost::new_standalone(crate::types::HostConfig::default()));
+    crate::fact_signature_helpers::with_cacheability_scope(host, f).0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -982,58 +1129,73 @@ mod tests {
             canonical_id: "bar.ts".to_owned(),
             hash: [0u8; 16],
         };
-        let result = db.get_or_resolve_route_with_facts(rk("index.ts", "Bar"), &view, || {
-            call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Some((
-                RouteResult::Resolved {
-                    defining_canonical: "bar.ts".to_owned(),
-                    defining_symbol: "Bar".to_owned(),
-                },
-                vec![dummy_fact.clone()],
-            ))
-        });
+        let result =
+            db.get_or_resolve_route_with_facts_probe_for_test(rk("index.ts", "Bar"), &view, || {
+                call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some((
+                    RouteResult::Resolved {
+                        defining_canonical: "bar.ts".to_owned(),
+                        defining_symbol: "Bar".to_owned(),
+                    },
+                    vec![dummy_fact.clone()],
+                ))
+            });
         assert!(result.is_some());
 
         // Second call should hit cache because we admitted with a
         // non-empty fact signature on the first pass.
-        let result2 = db.get_or_resolve_route_with_facts(rk("index.ts", "Bar"), &view, || {
-            call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Some((RouteResult::Miss, vec![dummy_fact.clone()]))
-        });
+        let result2 =
+            db.get_or_resolve_route_with_facts_probe_for_test(rk("index.ts", "Bar"), &view, || {
+                call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some((RouteResult::Miss, vec![dummy_fact.clone()]))
+            });
         assert!(result2.is_some());
         assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]
     fn get_or_resolve_route_with_empty_facts_does_not_cache() {
-        // Strict-admission discrimination: the zero-facts variant
-        // must NOT admit a cache entry. The second call re-invokes
-        // the resolver because the first call skipped admission.
+        // Strict-admission discrimination: a resolve that returns an EMPTY
+        // fact signature — the exact shape `build_named_type_export_route_entry`
+        // produces for a route it cannot root — must NOT admit a cache entry.
+        // The second call re-invokes the resolver because the first skipped
+        // admission.
         let db = RouteDb::new();
         let view = TestView::accepting_all(1);
         let call_count = std::sync::atomic::AtomicU32::new(0);
 
-        let _result = db.get_or_resolve_route(rk("index.ts", "Bar"), &view, || {
+        let resolve_unrootable = || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Some(RouteResult::Resolved {
-                defining_canonical: "bar.ts".to_owned(),
-                defining_symbol: "Bar".to_owned(),
-            })
-        });
-        let _result2 = db.get_or_resolve_route(rk("index.ts", "Bar"), &view, || {
-            call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Some(RouteResult::Resolved {
-                defining_canonical: "bar.ts".to_owned(),
-                defining_symbol: "Bar".to_owned(),
-            })
-        });
+            Some((
+                RouteResult::Resolved {
+                    defining_canonical: "bar.ts".to_owned(),
+                    defining_symbol: "Bar".to_owned(),
+                },
+                Vec::new(),
+            ))
+        };
+
+        let result = db.get_or_resolve_route_with_facts_probe_for_test(
+            rk("index.ts", "Bar"),
+            &view,
+            resolve_unrootable,
+        );
+        assert!(
+            result.is_some(),
+            "refusal keeps the VALUE — an unrootable route is still served to its caller"
+        );
+        let result2 = db.get_or_resolve_route_with_facts_probe_for_test(
+            rk("index.ts", "Bar"),
+            &view,
+            resolve_unrootable,
+        );
+        assert!(result2.is_some());
         assert_eq!(
             call_count.load(std::sync::atomic::Ordering::Relaxed),
             2,
-            "Zero-fact route resolves are not cached under strict \
+            "Empty-fact route resolves are not cached under strict \
              admission; the second call MUST re-invoke the resolver. \
-             Migrate to `get_or_resolve_route_with_facts` with a \
-             non-empty fact signature to opt back into caching."
+             A non-empty fact signature is what opts a resolve into caching."
         );
     }
 
@@ -1076,10 +1238,14 @@ mod tests {
         // Call 1: the resolve returns the never-persisted empty-facts
         // shape (the carrier the fenced frontier walk produces). The
         // caller is still served its own result.
-        let first = db.get_or_resolve_route_with_facts(rk("provider.ts", "Foo"), &view, || {
-            resolves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Some((superseded.clone(), Vec::new()))
-        });
+        let first = db.get_or_resolve_route_with_facts_probe_for_test(
+            rk("provider.ts", "Foo"),
+            &view,
+            || {
+                resolves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some((superseded.clone(), Vec::new()))
+            },
+        );
         assert_eq!(
             first.as_deref(),
             Some(&superseded),
@@ -1089,10 +1255,14 @@ mod tests {
         // Call 2 (a late claimant on the pinned lane): must NOT adopt
         // the unadmitted result — it re-resolves cold against fresh
         // state and its admitted result serves warm afterwards.
-        let second = db.get_or_resolve_route_with_facts(rk("provider.ts", "Foo"), &view, || {
-            resolves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Some((live.clone(), vec![live_fact.clone()]))
-        });
+        let second = db.get_or_resolve_route_with_facts_probe_for_test(
+            rk("provider.ts", "Foo"),
+            &view,
+            || {
+                resolves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some((live.clone(), vec![live_fact.clone()]))
+            },
+        );
         assert_eq!(
             resolves.load(std::sync::atomic::Ordering::Relaxed),
             2,
@@ -1159,7 +1329,7 @@ mod tests {
         let view = TestView::accepting_all(1);
         let call_count = std::sync::atomic::AtomicU32::new(0);
 
-        let result = db.get_or_build_barrel_surface(bk("barrel.ts"), &view, || {
+        let result = db.get_or_build_barrel_surface_probe_for_test(bk("barrel.ts"), &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(BarrelRouteSurface {
                 barrel_canonical: "barrel.ts".to_owned(),
@@ -1175,7 +1345,7 @@ mod tests {
         });
         assert!(result.is_some());
 
-        let result2 = db.get_or_build_barrel_surface(bk("barrel.ts"), &view, || {
+        let result2 = db.get_or_build_barrel_surface_probe_for_test(bk("barrel.ts"), &view, || {
             call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             None
         });

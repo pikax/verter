@@ -390,7 +390,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::Opaque(_)
             | SemanticNodeData::Infer { .. }
-            | SemanticNodeData::VueMacroElements(_)
             | SemanticNodeData::SyntheticBinding { .. } => node,
 
             // An authored raw fallback carries no lowerable structure; the

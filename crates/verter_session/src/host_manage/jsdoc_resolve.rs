@@ -133,13 +133,13 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
         let analysis = self.ctx.external_type_analysis(canonical_source)?;
         let symbol = analysis.local_type_symbol(resolved_name)?;
         let kind = match symbol.kind {
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::TypeAlias => {
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::TypeAlias => {
                 crate::resolver_core::ResolvedDeclarationKind::TypeAlias
             }
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Interface => {
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Interface => {
                 crate::resolver_core::ResolvedDeclarationKind::Interface
             }
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Class => {
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSymbolKind::Class => {
                 crate::resolver_core::ResolvedDeclarationKind::Class
             }
         };
@@ -332,6 +332,29 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         }
     }
 
+    fn macro_type_arg_has_direct_reference(
+        &self,
+        owner_canonical: &str,
+        mac: &verter_semantic::analysis::types::AnalyzedMacro,
+        type_name: &str,
+    ) -> Option<bool> {
+        let locator = mac.parsed_type_argument.as_ref()?;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+        let payload = dispatch.raise_authored_locator_to_hot(
+            &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+                absolutize_macro_payload_locator(locator, owner_canonical),
+            ),
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        )?;
+        Some(node_has_direct_macro_reference(
+            self.ctx,
+            payload.node(),
+            type_name,
+        ))
+    }
+
     fn projectable_owner_local_macro_roots(
         &self,
         owner_canonical: &str,
@@ -447,7 +470,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
-    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
+    ) -> Option<crate::resolver_core::ResolvedMacroElements> {
         let _ = visiting;
         // Route through the view-aware variant so the resolved-type cache
         // slot, dep-source reads, and the route-frontier closure observe
@@ -536,6 +559,124 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         self.host
             .current_dependency_fact_versions(canonical, tracked_deps)
     }
+}
+
+/// Absolutize a producer-local (empty-anchored) macro-payload locator against
+/// the owning canonical: the analyzer's local-file convention stamps
+/// `canonical_id: ""`; every payload deref requires the producing canonical.
+fn absolutize_macro_payload_locator(
+    locator: &verter_type_expr::locators::MacroPayloadLocator,
+    owner_canonical: &str,
+) -> verter_type_expr::locators::MacroPayloadLocator {
+    if !locator.anchor.canonical_id.is_empty() {
+        return locator.clone();
+    }
+    verter_type_expr::locators::MacroPayloadLocator {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: std::sync::Arc::from(owner_canonical),
+            symbol: std::sync::Arc::clone(&locator.anchor.symbol),
+            space: locator.anchor.space,
+        },
+        macro_index: locator.macro_index,
+        payload: locator.payload,
+    }
+}
+
+/// Node-domain "direct macro reference" walk: whether the raised macro
+/// payload node carries a top-level reference to `needle`, reachable through
+/// reference heads / arrays / tuples / unions / intersections / conditionals
+/// / mapped / keyof / indexed-access / function signatures — never through
+/// Object MEMBERS, which encode "nested" deps. Visited-guarded (graph nodes
+/// may be shared or cyclic).
+fn node_has_direct_macro_reference(
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    node: crate::semantic_query::SemanticNodeId,
+    needle: &str,
+) -> bool {
+    use crate::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
+
+    let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+    let mut worklist: Vec<SemanticNodeId> = vec![node];
+    while let Some(node) = worklist.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        if let Some((name, args)) =
+            crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(
+                ctx, node,
+            )
+        {
+            if name == needle {
+                return true;
+            }
+            worklist.extend(args);
+            continue;
+        }
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
+            continue;
+        };
+        match data.as_ref() {
+            SemanticNodeData::TypeOf(_) => {
+                if let Some((value_root, path)) = data.typeof_head() {
+                    if value_root.name.as_ref() == needle
+                        || path.iter().any(|segment| segment.as_ref() == needle)
+                    {
+                        return true;
+                    }
+                }
+                worklist.extend(data.carrier_type_args().iter().copied());
+            }
+            SemanticNodeData::Alias(target) => worklist.push(*target),
+            SemanticNodeData::Array { element, .. } | SemanticNodeData::KeyOf { base: element } => {
+                worklist.push(*element)
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                worklist.extend(elements.iter().map(|element| element.value));
+            }
+            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                worklist.extend(arms.iter().copied());
+            }
+            SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                worklist.extend(expressions.iter().copied());
+            }
+            SemanticNodeData::IndexedAccess { object, index } => {
+                worklist.push(*object);
+                if let IndexKey::TypeNode(index_node) = index {
+                    worklist.push(*index_node);
+                }
+            }
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                ..
+            } => {
+                worklist.push(*check);
+                worklist.push(*extends);
+                worklist.push(*true_branch_ref);
+                worklist.push(*false_branch_ref);
+            }
+            SemanticNodeData::Mapped { source, .. } => worklist.push(*source),
+            SemanticNodeData::Function {
+                params,
+                return_type,
+                type_parameters,
+                ..
+            } => {
+                worklist.extend(params.iter().map(|param| param.ty));
+                worklist.push(*return_type);
+                for param in type_parameters.iter() {
+                    worklist.extend(param.constraint);
+                    worklist.extend(param.default);
+                }
+            }
+            SemanticNodeData::ConstructorType { signature } => worklist.push(*signature),
+            // Object MEMBERS encode "nested" deps — never walked.
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Test-only bare wrapper. Production callers go through
@@ -765,7 +906,7 @@ pub(crate) fn resolve_jsdoc_tag_type(
     canonical_source: &str,
     raw_type: &str,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-) -> Option<verter_type_expr::TypeExpr> {
+) -> Option<verter_protocol::graph::snapshot::ResolvedJsdocTypeOutput> {
     // `raw_type` is the display string reconstructed by `parse_jsdoc_tag_payload`
     // (the JSDoc comment text line-joined and re-trimmed), NOT a contiguous slice
     // of the source file — there is no honest file position for its members.
@@ -793,7 +934,7 @@ pub(crate) fn resolve_jsdoc_tag_type(
     // route directly through the shared
     // dispatch ProjectPath helper. Falls back to the raw parsed
     // annotation when projection misses so the caller still receives
-    // the unresolved TypeExpr rather than `None`.
+    // the unresolved payload rather than `None`.
     //
     // Route the dispatch helper through the
     // request-bound `ctx` rather than `host: &VerterHost`. Passing
@@ -802,7 +943,33 @@ pub(crate) fn resolve_jsdoc_tag_type(
     // `cfg(not(any(test, debug_assertions)))` (release) once
     // `project_expr_class_a_via_dispatch` reaches
     // `ctx.prepared_decl_bundle(...)` deeper in the call graph.
-    Some(project_expr_class_a_via_dispatch(ctx, canonical_source, &parsed).unwrap_or(parsed))
+    let resolved =
+        project_expr_class_a_via_dispatch(ctx, canonical_source, &parsed).unwrap_or(parsed);
+
+    // OUTPUT-BOUNDARY materialisation: the resolved symbolic IR is TRANSIENT
+    // producer-local state. Render its display string, capture its wire-node
+    // graph snapshot through the shared `GraphBuilder` (the SAME builder every
+    // proto graph rides — the proto conversion later re-interns this snapshot
+    // wire-identically), and DISCARD the `TypeExpr`. No raw symbolic IR
+    // survives past this point.
+    let display = crate::resolver_core::surface_projector::render_type_expr_display(&resolved);
+    let mut builder = verter_protocol::graph::GraphBuilder::new();
+    let root_node_id = builder.node_id(&resolved);
+    // Validated capture is fail-closed: `.ok()?` maps `SnapshotCaptureError`
+    // to `None` (no resolved-type output) DELIBERATELY — never a partial
+    // snapshot admitted. Both error arms are unreachable from this producer,
+    // so no `Result` is threaded through a dead path: a resolved JSDoc
+    // `{Type}` payload can never legitimately contain a `SyntheticSlotBinding`
+    // carrier (`NonPersistableNode` unreachable), and a `GraphBuilder`-
+    // captured snapshot is well-formed by construction (the malformed-table
+    // arms guard hand-built tables, never builder captures). The error arm is
+    // defense-in-depth only.
+    let graph = verter_protocol::graph::snapshot::ResolvedTypeGraphSnapshot::from_builder(
+        builder,
+        root_node_id,
+    )
+    .ok()?;
+    Some(verter_protocol::graph::snapshot::ResolvedJsdocTypeOutput { display, graph })
 }
 
 #[cfg(test)]

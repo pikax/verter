@@ -2336,7 +2336,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Opaque(_)
-                | SemanticNodeData::VueMacroElements(_)
                 | SemanticNodeData::TemplateLiteral { .. }
                 | SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::Infer { .. }
@@ -2388,8 +2387,30 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 current = self.resolve_expanded_terminal_carrier(current);
             }
             current = self.expand_empty_path_terminal(current);
+            if self.original_path_non_empty {
+                // Terminal-surface carrier PRESENTATION: the demanded
+                // terminal projection materialises its own surface one
+                // level; INNER member values that reference an imported
+                // synthesized component default (a bare `.vue`-as-type
+                // reference, or `InstanceType<typeof C>` over one) present
+                // as the shallow instance-identity `DeclRef` carrier
+                // (`Ref { name: "default" }`) — the consumer re-resolves it
+                // on demand. Non-owning normalization only (names resolve
+                // to declaration identities; no body lowers, no surface
+                // expands, no `Instantiate` re-dispatch) — this is what
+                // bounds a mutual `.vue` import cycle SHALLOW at the
+                // back-edge under the lazy design.
+                current = self.present_terminal_member_carriers(current);
+            }
         } else if matches!(self.mode(), ProjectionMode::Shallow) {
             current = self.expand_empty_path_shallow_terminal_surface(current);
+        } else if matches!(self.mode(), ProjectionMode::Navigate) && self.original_path_non_empty {
+            // Navigate terminal of a projected path: retry IDENTITY for an
+            // unresolved-reference carrier (`BareRef` / `ImportType`) so a
+            // demanded terminal finishes at its `DeclRef` /
+            // `InstantiationRef` identity carrier — never a body
+            // execution, and carrier-preserving on failure.
+            current = self.resolve_navigate_terminal_reference_identity(current);
         }
         results.push(current);
     }
@@ -2456,11 +2477,278 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     QueryResult::Recursive(_) | QueryResult::Error(_) => node,
                 }
             }
+            // Unresolved-reference carriers reached as a NON-EMPTY-path
+            // TERMINAL re-enter the SAME shared
+            // `resolve_carrier_subject_node` normalization the in-loop
+            // arm (`walk_path`) uses — under the caller's published
+            // mode — so a closed utility terminal (e.g. a `Pick<...>`
+            // projected value surfacing as a `BareRef` carrier)
+            // resolves through the one shared dispatch and the
+            // subsequent `expand_empty_path_terminal` can materialise
+            // it. Open-domain safety stays owned by
+            // `resolve_bare_ref_head` / `build_instantiate`'s
+            // `Pick`/`Omit` carrier-stop. Carrier-preserving on
+            // failure: a head that does not resolve, or resolves to an
+            // opaque miss (e.g. an import route with no reachable
+            // target), keeps the shallow carrier — the published
+            // terminal stays the bare `Ref` per the shallow-by-default
+            // rule, mirroring the `DeclRef` arm's Error fallback above.
+            SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
+                drop(data);
+                let resolved = self.dispatch.resolve_carrier_subject_node(
+                    node,
+                    crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                );
+                // A resolved `DeclPlaceholder` is PROGRESS, not failure: the
+                // head resolved to a declaration identity whose body the
+                // subsequent `expand_empty_path_terminal` materialises via
+                // `Instantiate` (its `DeclPlaceholder` arm). Every OTHER
+                // opaque (a genuine `Miss`, a recursive back-edge, …) keeps
+                // the shallow carrier per the shallow-by-default rule.
+                if resolved == node
+                    || matches!(
+                        self.graph().node_data(resolved).as_deref(),
+                        Some(SemanticNodeData::Opaque(err))
+                            if !matches!(err, QueryError::DeclPlaceholder { .. })
+                    )
+                {
+                    node
+                } else {
+                    resolved
+                }
+            }
             _ => {
                 drop(data);
                 node
             }
         }
+    }
+
+    /// Retry IDENTITY resolution for an unresolved-reference carrier
+    /// reached as a NON-EMPTY-path terminal under `Navigate`.
+    ///
+    /// Path-precision rule: the terminal segment runs in the caller's
+    /// mode. A `Navigate` demand on a `BareRef` / `ImportType` terminal
+    /// retries WHO the reference is through the SAME shared
+    /// `resolve_carrier_subject_node` normalization — which, under the
+    /// `Navigate` carrier mode, resolves the head to its `DeclRef` /
+    /// `InstantiationRef` identity carrier WITHOUT executing the body
+    /// (`resolve_bare_ref_head`'s carrier-mode branch). Carrier-preserving
+    /// on failure: a head that still does not resolve (normalization
+    /// returns the carrier or an opaque) keeps the shallow `BareRef`.
+    /// Non-carrier terminals are returned unchanged — `Navigate` promises
+    /// no terminal-surface synthesis.
+    fn resolve_navigate_terminal_reference_identity(
+        &mut self,
+        node: SemanticNodeId,
+    ) -> SemanticNodeId {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)) => {}
+            _ => return node,
+        }
+        let resolved = self.dispatch.resolve_carrier_subject_node(
+            node,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
+        );
+        if resolved == node
+            || matches!(
+                self.graph().node_data(resolved).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            )
+        {
+            node
+        } else {
+            resolved
+        }
+    }
+
+    /// TERMINAL-surface carrier presentation for a NON-empty-path
+    /// `Expanded` terminal (see the call site above): rebuild the terminal
+    /// Object's INLINE structure so member values referencing an imported
+    /// SYNTHESIZED COMPONENT DEFAULT present as the shallow
+    /// instance-identity `DeclRef` carrier. Narrow by design — only the
+    /// two `.vue`-as-type member shapes normalize (a bare component
+    /// reference, and `InstanceType<typeof C>` over a component import);
+    /// every other member value is untouched. Non-owning normalization:
+    /// names resolve to declaration identities through the existing shared
+    /// routes; nothing lowers, nothing instantiates.
+    fn present_terminal_member_carriers(&mut self, node: SemanticNodeId) -> SemanticNodeId {
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        self.present_terminal_surface_carriers(node, &mut visited, 0)
+    }
+
+    fn present_terminal_surface_carriers(
+        &mut self,
+        node: SemanticNodeId,
+        visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
+        depth: usize,
+    ) -> SemanticNodeId {
+        if depth >= 8 || !visited.insert(node) {
+            return node;
+        }
+        let view = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Object(view)) => view.clone(),
+            _ => return node,
+        };
+        let mut changed = false;
+        let mut members: Vec<SurfaceMember> = Vec::with_capacity(view.members.len());
+        for member in view.members.iter() {
+            let value = self.present_terminal_member_value(member.value, visited, depth);
+            if value != member.value {
+                changed = true;
+            }
+            members.push(SurfaceMember {
+                value,
+                ..member.clone()
+            });
+        }
+        if !changed {
+            return node;
+        }
+        self.graph().intern_preserving_scope(
+            node,
+            SemanticNodeData::Object(SurfaceView {
+                members: Arc::from(members.into_boxed_slice()),
+                ..view
+            }),
+        )
+    }
+
+    fn present_terminal_member_value(
+        &mut self,
+        value: SemanticNodeId,
+        visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
+        depth: usize,
+    ) -> SemanticNodeId {
+        enum MemberShape {
+            /// Inline structural interior — recurse.
+            Inline,
+            /// An unresolved bare reference — identity-resolve; adopt only a
+            /// synthesized-component-default target.
+            Unresolved,
+            /// `InstanceType<typeof <value-root>>` — resolve the value root's
+            /// import to a synthesized component default.
+            InstanceTypeOf(crate::semantic_query::ValueRootKey),
+        }
+        let shape = match self.graph().node_data(value).as_deref() {
+            Some(SemanticNodeData::Object(_)) => MemberShape::Inline,
+            Some(data @ (SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_))) => {
+                let head_name = data.bare_ref_head().map(|(name, _)| Arc::clone(name));
+                let args = data.carrier_type_args();
+                match (head_name, args.len()) {
+                    (Some(name), 1) if name.as_ref() == "InstanceType" => {
+                        match self.graph().node_data(args[0]).as_deref() {
+                            Some(arg_data @ SemanticNodeData::TypeOf(_)) => {
+                                match arg_data.typeof_head() {
+                                    Some((value_root, path)) if path.is_empty() => {
+                                        MemberShape::InstanceTypeOf(value_root.clone())
+                                    }
+                                    _ => return value,
+                                }
+                            }
+                            _ => return value,
+                        }
+                    }
+                    (_, 0) => MemberShape::Unresolved,
+                    _ => return value,
+                }
+            }
+            Some(SemanticNodeData::InstantiationRef { base, args })
+                if base.canonical_id.as_ref() == "__builtin__"
+                    && base.decl_name.as_ref() == "InstanceType"
+                    && args.len() == 1 =>
+            {
+                let arg = args[0];
+                match self.graph().node_data(arg).as_deref() {
+                    Some(arg_data @ SemanticNodeData::TypeOf(_)) => match arg_data.typeof_head() {
+                        Some((value_root, path)) if path.is_empty() => {
+                            MemberShape::InstanceTypeOf(value_root.clone())
+                        }
+                        _ => return value,
+                    },
+                    _ => return value,
+                }
+            }
+            _ => return value,
+        };
+        match shape {
+            MemberShape::Inline => {
+                self.present_terminal_surface_carriers(value, visited, depth + 1)
+            }
+            MemberShape::Unresolved => {
+                let resolved = self.dispatch.resolve_carrier_subject_node(
+                    value,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Navigate,
+                    ),
+                );
+                let identity = match self.graph().node_data(resolved).as_deref() {
+                    Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+                    Some(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                        canonical_id,
+                        name,
+                        whole_hash,
+                    })) => crate::semantic_query::DeclIdentity {
+                        canonical_id: Arc::clone(canonical_id),
+                        whole_hash: *whole_hash,
+                        decl_name: Arc::clone(name),
+                    },
+                    _ => return value,
+                };
+                if !self.synthesized_component_default_identity(&identity) {
+                    return value;
+                }
+                self.graph()
+                    .intern_preserving_scope(value, SemanticNodeData::DeclRef { identity })
+            }
+            MemberShape::InstanceTypeOf(value_root) => {
+                let Some((dep_canonical, exported)) =
+                    self.dispatch.ctx.resolve_owner_direct_import(
+                        value_root.scope.canonical_id.as_ref(),
+                        value_root.name.as_ref(),
+                    )
+                else {
+                    return value;
+                };
+                let Some(serve) = self
+                    .dispatch
+                    .ctx
+                    .ensure_indexed_ready_serve(dep_canonical.as_str())
+                else {
+                    return value;
+                };
+                let Some(symbol) = serve.indexed.shallow_state.value_symbol(exported.as_str())
+                else {
+                    return value;
+                };
+                if !symbol.is_synthesised_component_default {
+                    return value;
+                }
+                let identity = crate::semantic_query::DeclIdentity {
+                    canonical_id: Arc::from(dep_canonical.as_str()),
+                    whole_hash: serve.indexed.whole_hash,
+                    decl_name: Arc::from(exported.as_str()),
+                };
+                self.graph()
+                    .intern_preserving_scope(value, SemanticNodeData::DeclRef { identity })
+            }
+        }
+    }
+
+    /// Whether a resolved declaration identity names a SYNTHESIZED component
+    /// default value (the `.vue` public-instance `default` symbol).
+    fn synthesized_component_default_identity(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> bool {
+        if identity.decl_name.as_ref() != "default" {
+            return false;
+        }
+        self.dispatch
+            .ctx
+            .ensure_indexed_ready_serve(identity.canonical_id.as_ref())
+            .and_then(|serve| serve.indexed.shallow_state.value_symbol("default"))
+            .is_some_and(|symbol| symbol.is_synthesised_component_default)
     }
 
     /// Combine the top `arm_count` entries from `results` into the
@@ -3653,6 +3941,55 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     });
                 }
             }
+            // A deferred `IndexedAccess` NAVIGATES its member hop through
+            // the shared `IndexedAccess` query — including a heritage
+            // `DeclRef` arm inside the object's intersection (heritage is
+            // composed at surface observation, so `JSX.IntrinsicElements
+            // extends NativeElements {}` reaches the tag member through the
+            // heritage arm rather than terminating at the empty own-body
+            // arm) — and the RESOLVED value contributes its surface. An
+            // access the query cannot close contributes nothing (the honest
+            // unresolvable fallback).
+            SemanticNodeData::IndexedAccess { object, index } => {
+                let object = *object;
+                let index = index.clone();
+                drop(data);
+                let resolved =
+                    match self.execute_read_folding_partial(SemanticQueryKey::IndexedAccess {
+                        base: object,
+                        index,
+                        mode: ProjectionMode::Navigate,
+                    }) {
+                        QueryResult::Value(id) => Some(id),
+                        _ => None,
+                    };
+                match resolved.filter(|id| {
+                    *id != cur
+                        && !matches!(
+                            self.graph().node_data(*id).as_deref(),
+                            Some(SemanticNodeData::Opaque(_))
+                        )
+                }) {
+                    Some(resolved) => {
+                        work.push(Frame::Visit {
+                            node: resolved,
+                            target,
+                            member_role_override,
+                            heritage_overlay_body,
+                            provenance_override,
+                        });
+                    }
+                    None => {
+                        self.contribute_surface(
+                            target,
+                            root_contribution,
+                            intersection_buffers,
+                            union_buffers,
+                            None,
+                        );
+                    }
+                }
+            }
             // Non-Object terminals contribute nothing to the merged
             // surface — under TS rules a primitive arm in an
             // intersection drops out (the contributor rule), and a
@@ -3661,7 +3998,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::Opaque(_)
-            | SemanticNodeData::VueMacroElements(_)
             | SemanticNodeData::Array { .. }
             | SemanticNodeData::Tuple { .. }
             | SemanticNodeData::TemplateLiteral { .. }
@@ -3669,7 +4005,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::Function { .. }
             | SemanticNodeData::KeyOf { .. }
-            | SemanticNodeData::IndexedAccess { .. }
             | SemanticNodeData::TypeOf(_)
             // Raw-fallback / constructor / synthetic-binding carriers contribute
             // no shallow surface members (a raw-fallback holds no surface; a

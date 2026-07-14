@@ -1,7 +1,8 @@
 //! Per-surface `.vue` macro NORMALIZERS — the thin transforms that turn the
 //! shared resolver's one-level macro surface into the published per-kind field
-//! shapes (`AnalyzedPropField` / `AnalyzedEmitField` / `AnalyzedSlotField` /
-//! `AnalyzedExposeField` / `NamedTypeMember` / index signatures / model props).
+//! shapes (`AnalyzedPropField` / `AnalyzedEmitField` / `AnalyzedExposeField` /
+//! `NamedTypeMember` / index signatures / model props; the slot normalizer
+//! lives in the sibling [`super::normalize_slots`]).
 //!
 //! These are NOT resolvers — they slice JSDoc spans and raise each member's
 //! already-resolved value node to a `TypeExpr` through the active `ctx`. The
@@ -11,38 +12,56 @@
 use std::sync::Arc;
 
 use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
-use verter_semantic::analysis::types::{
-    AnalyzedEmitField, AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding,
-};
+use verter_semantic::analysis::types::{AnalyzedEmitField, AnalyzedPropField};
 use verter_semantic::analysis::AnalyzedMacroKind;
-use verter_type_expr::{LiteralValue, TypeExpr, TypeExprScope};
+use verter_type_expr::{TypeExpr, TypeExprScope};
 
-use super::{
-    member_jsdoc_from_spans, raise_member_value, signature_jsdoc_from_spans, slice_canonical_span,
-};
-use crate::meta_resolve::callable_view::{ArmCombineNode, CallableNodeView};
+use super::{member_jsdoc_from_spans, raise_member_value, signature_jsdoc_from_spans};
+use crate::meta_resolve::callable_view::CallableNodeView;
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::surface_projector::render_type_expr_display;
 use crate::semantic_query::{
-    FunctionParam, PathSegment, ProjectionMode, ProjectionReductionContext, SemanticNodeData,
-    SemanticNodeId,
+    FunctionParam, ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
 };
 use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
-use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurfaceMember};
-use crate::VerterHost;
+use crate::typeinfo::framework_surface::results::ResolvedEmitField;
+use crate::typeinfo::surface::TypeInfoSurfaceMember;
 
 /// Normalize a `.vue` props macro surface into the published
-/// [`AnalyzedPropField`] set.
+/// [`ResolvedPropField`] set — one row per named member, pairing the prop
+/// analysis field with its session-resolved member-value SOURCE.
 ///
 /// Reproduces the eager rail's `AnalyzedPropField` stream over the typeinfo
 /// surface: one field per named member, carrying the surface's `optional` /
-/// `readonly` / `declared_in_macro_type_arg`, the member value raised to a
-/// `TypeExpr` scoped to its VALUE-NODE file (see
-/// [`VueMacroSurface::member_expr_scope`]), the display `type_annotation`
-/// rendered from that typed form, and JSDoc sliced from the surface spans.
+/// `readonly` / `declared_in_macro_type_arg`, the display `type_annotation`
+/// rendered from the member value minted ONCE at this terminal sink, and JSDoc
+/// sliced from the surface spans. The published field is SHALLOW; the display
+/// VALUE is paired with its resolution scope (the member's VALUE-NODE file —
+/// where its `Ref`s resolve, see [`VueMacroSurface::member_expr_scope`]).
 /// Own-body-vs-heritage ordering + shadowing + union-common membership are
 /// ALREADY resolved on the surface — this is a thin per-member transform.
+///
+/// Per-row member-value SOURCE (the prop-type AUTHORITY —
+/// `define_props_shape` publishes it directly):
+///
+/// - a LOCAL AUTHORED member — one addressed by EXACTLY ONE analyzer
+///   prop-field candidate with a stamped byte-precise payload locator —
+///   carries that EXACT authored macro-payload position, on BOTH the
+///   analysis row's `payload` locator and the `Authored(MacroPayload(..))`
+///   source (mirrors [`property_style_emit_fields`]). A MERGE-CAPABLE
+///   member value (a composite / object — the shapes the surface merge
+///   interns for multiple same-name contributors) additionally requires the
+///   candidate's authored payload to PROVABLY cover the merged member
+///   ([`authored_candidate_matches_member_value`]) — a resolvable local arm
+///   never masks a FAILED same-name sibling into a concrete success;
+/// - every other member (inherited / substituted / merged / structural)
+///   publishes the graph-native closed / shallow-ref / projected member-path
+///   source ([`member_value_source`]) and keeps the honest locator-less
+///   analysis row;
+/// - a genuine miss carries the typed
+///   `Failed(UnrepresentableRequiredMemberValue)` position — a REQUIRED
+///   value-type position never degrades to a fabricated `unknown` success.
 ///
 /// `defineModel` does NOT carry an object type argument; its surface has no
 /// named members and the synthesized model prop is appended from the analyzer
@@ -51,17 +70,34 @@ use crate::VerterHost;
 pub(crate) fn props_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     resolved: &impl ResolvedSurfaceAccess,
-) -> Vec<AnalyzedPropField> {
+) -> Vec<crate::typeinfo::framework_surface::results::ResolvedPropField> {
     let macro_surface = resolved.macro_surface();
     // Host-level reads (graph node scope, JSDoc source slicing) go through the
     // host the active `ctx` is installed against; the view-sensitive type
     // resolution (`raise_member_value`) flows through `ctx`.
     let host = ctx.host_for_fact_tracer_install();
+    let dispatch = ctx.dispatch();
     // `defineModel` contributes its synthesized model prop directly from the
     // analyzer facts (the type argument is the model VALUE type).
     if macro_surface.macro_kind == AnalyzedMacroKind::DefineModel {
         return model_prop_fields(ctx, resolved);
     }
+
+    // The SFC's analyzer macro facts: the byte-precise authored payload
+    // positions the analyzer could address in THIS file plus the macro's
+    // STAMPED type-argument locator (the authored base the projected
+    // member-path route replays off). Read through the ACTIVE `ctx` so an
+    // overlay session sees the overlay facts.
+    let indexed = ctx
+        .ensure_indexed_ready_serve(macro_surface.owner_canonical.as_ref())
+        .map(|serve| serve.indexed);
+    let analyzed_macro = indexed
+        .as_ref()
+        .and_then(|indexed| indexed.snapshot.macros.get(macro_surface.macro_index));
+    let analyzer_prop_fields: &[AnalyzedPropField] = analyzed_macro
+        .map(|mac| mac.prop_fields.as_slice())
+        .unwrap_or(&[]);
+    let type_arg_base = analyzed_macro.and_then(|mac| mac.parsed_type_argument.as_ref());
 
     macro_surface
         .surface
@@ -72,11 +108,119 @@ pub(crate) fn props_from_typeinfo_surface(
         // `protected` class fields as props.
         .filter(|member| member.visibility.is_public())
         .map(|member| {
-            let type_expr = raise_member_value(ctx, member);
-            let type_expr_scope = type_expr
+            // Display-only render of the member's one-level value, minted ONCE
+            // at this terminal sink (the by-name `.and_then` form — no decision
+            // on the materialized value).
+            let raised = raise_member_value(ctx, member);
+            let type_annotation = raised.as_ref().and_then(render_type_expr_display);
+            // LOCAL authored position candidates: analyzer prop fields
+            // addressing this member name WITH a stamped payload locator.
+            let candidates: Vec<&AnalyzedPropField> = analyzer_prop_fields
+                .iter()
+                .filter(|field| field.name == member.name.as_ref() && field.payload.is_some())
+                .collect();
+            // A contributor locator is published for EXACTLY ONE analyzer
+            // candidate — the flat member sink's authored-position parity
+            // (the analyzer's by-name field payload IS the member's own
+            // authored annotation). Multiple candidates (duplicate /
+            // intersection same-name contributors — any single contributor
+            // would misrepresent the MERGED member) keep the row
+            // locator-less — the graph-native member-value ladder below
+            // represents the merged member instead.
+            //
+            // MERGE-CAPABLE value shapes additionally require the coverage
+            // proof: a member VALUE encoded as a composite / object is
+            // exactly how the surface merge combines multiple same-name
+            // contributors (`merge_value_nodes_recursive` — distinct values
+            // intern an `Intersection`, all-object values a merged
+            // `Object`, union type arguments a `Union`), so the sole
+            // candidate publishes ONLY when its authored payload provably
+            // covers the merged member
+            // ([`authored_candidate_matches_member_value`] — the same proof
+            // the property-style emit rows apply): a resolvable local arm
+            // can never mask a FAILED same-name sibling into a concrete
+            // success. Every other value shape (a leaf, a reference
+            // carrier, a symbolic access, a function) is single-contributor
+            // by construction — the merge never encodes multiple distinct
+            // contributors as those shapes — so the authored-position
+            // parity holds unproven, exactly as the flat member sink
+            // publishes it (a symbolic surface value folds differently from
+            // its Navigate-raised authored form, so an unconditional proof
+            // would false-negative the single-contributor classes).
+            let member_value_is_merge_capable = matches!(
+                node_data_for(dispatch.ctx, member.value).as_deref(),
+                Some(
+                    SemanticNodeData::Intersection(_)
+                        | SemanticNodeData::Union(_)
+                        | SemanticNodeData::Object(_)
+                )
+            );
+            let authored_payload = match candidates.as_slice() {
+                [candidate] if !member_value_is_merge_capable => candidate.payload.clone(),
+                [candidate] => candidate.payload.clone().filter(|locator| {
+                    authored_candidate_matches_member_value(
+                        ctx,
+                        &dispatch,
+                        macro_surface.owner_canonical.as_ref(),
+                        locator,
+                        member.value,
+                    )
+                }),
+                _ => None,
+            };
+            // Value⇔scope pairing: the display value rides with the member's
+            // VALUE-NODE scope (where its `Ref`s resolve — the deriving file
+            // for a substituted generic inherited member); a locator-bearing
+            // row is paired with the SFC owner (the file whose OXC parse
+            // produced the authored payload); an unrendered locator-less
+            // value carries no scope.
+            let type_expr_scope = type_annotation
                 .as_ref()
-                .map(|_| macro_surface.member_expr_scope(host, member));
-            let type_annotation = type_expr.as_ref().and_then(render_type_expr_display);
+                .map(|_| macro_surface.member_expr_scope(host, member))
+                .or_else(|| {
+                    authored_payload
+                        .as_ref()
+                        .map(|_| TypeExprScope::new(macro_surface.owner_canonical.as_ref()))
+                });
+            // The published member-value SOURCE POSITION: the complete
+            // CLOSED leaf / leaf-union fact when the member's value node
+            // decided one (the ratified published shape — the publication
+            // finalize upgrades an authored position to exactly this fact,
+            // and two files' identical closed members must publish the
+            // IDENTICAL source value so the output memo shares one entry);
+            // else the exact authored macro-payload position for a
+            // single-contributor local authored member; else the
+            // graph-native shallow-ref / use-site / projected member-path
+            // source. A type-based macro member's value-type position is
+            // REQUIRED — with no faithful source the position is the typed
+            // source-construction FAILURE, never a fabricated `unknown`
+            // success.
+            let type_source = dispatch
+                .node_leaf_fact(member.value)
+                .map(|leaf| {
+                    verter_type_expr::facts::SemanticTypeSource::Closed(
+                        verter_type_expr::facts::ClosedTypeFact::Leaf(leaf),
+                    )
+                })
+                .or_else(|| {
+                    dispatch.node_leaf_union_fact(member.value).map(|leaves| {
+                        verter_type_expr::facts::SemanticTypeSource::Closed(
+                            verter_type_expr::facts::ClosedTypeFact::LeafUnion(leaves),
+                        )
+                    })
+                })
+                .or_else(|| {
+                    authored_payload.clone().map(|locator| {
+                        verter_type_expr::facts::SemanticTypeSource::Authored(
+                            verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator),
+                        )
+                    })
+                })
+                .or_else(|| member_value_source(&dispatch, member, type_arg_base))
+                .map(verter_type_expr::facts::SourcePosition::Present)
+                .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
+                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+                ));
             let (description, tags) = member_jsdoc_from_spans(host, member);
             // `declared_in_macro_type_arg`: a member belongs to the macro-T own
             // body iff it is NOT heritage-reached. The terminal
@@ -86,21 +230,82 @@ pub(crate) fn props_from_typeinfo_surface(
             // is an own-body `member_index` member).
             let declared_in_macro_type_arg = member.declared_in_macro_type_arg
                 && member.origin.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
-            AnalyzedPropField {
-                name: member.name.as_ref().to_string(),
-                is_optional: member.optional,
-                span: verter_span::Span::default(),
-                type_annotation,
-                type_expr,
-                type_expr_scope,
-                description,
-                tags,
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-                resolution_error: None,
-                declared_in_macro_type_arg,
+            crate::typeinfo::framework_surface::results::ResolvedPropField {
+                analysis: AnalyzedPropField {
+                    name: member.name.as_ref().to_string(),
+                    is_optional: member.optional,
+                    span: verter_span::Span::default(),
+                    type_annotation,
+                    payload: authored_payload,
+                    type_expr_scope,
+                    description,
+                    tags,
+                    resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+                    resolution_error: None,
+                    declared_in_macro_type_arg,
+                },
+                type_source,
             }
         })
         .collect()
+}
+
+/// The graph-native member-value SOURCE for a props / expose / options
+/// surface member with no PROVEN single-contributor authored position:
+///
+/// - the complete CLOSED fact when the member's VALUE node decides one — a
+///   LEAF, a LEAF-UNION, or a TUPLE whose elements are all complete closed
+///   element facts;
+/// - else the demand-validated structural source
+///   ([`crate::meta_resolve::projectors::structural_member_value_source`] —
+///   the shallow symbol-reference carrier for a resolvable reference, or the
+///   projected MEMBER-PATH replay route off the macro's stamped
+///   type-argument base for every remaining KNOWN structural shape);
+/// - else (no authored type argument to replay off) the arg-preserving
+///   authored USE-SITE body slot;
+/// - else `None` — a genuine miss; the caller types the REQUIRED position's
+///   source-construction failure; a partial fact is never published and a
+///   locator is never fabricated.
+///
+/// All decisions are NODE-domain; no `TypeExpr` is materialized here.
+fn member_value_source(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    member: &TypeInfoSurfaceMember,
+    type_arg_base: Option<&verter_type_expr::locators::MacroPayloadLocator>,
+) -> Option<verter_type_expr::facts::SemanticTypeSource> {
+    use verter_type_expr::facts::{ClosedTypeFact, SemanticTypeSource};
+    if let Some(leaf) = dispatch.node_leaf_fact(member.value) {
+        return Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(leaf)));
+    }
+    if let Some(leaves) = dispatch.node_leaf_union_fact(member.value) {
+        return Some(SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(
+            leaves,
+        )));
+    }
+    if let Some(tuple) = closed_tuple_fact(dispatch, member.value) {
+        return Some(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(tuple)));
+    }
+    // The arg-preserving authored USE-SITE body slot (the declaring
+    // declaration's member-value slot, whose deref replays the authored
+    // generic instantiation WITH its type arguments through the one shared
+    // dispatch) is the ratified publication for an instantiation-valued
+    // member — preferred over the member-path replay when recoverable.
+    if let Some(slot) = crate::meta_resolve::arg_preserving_member_use_site_slot(
+        dispatch,
+        member.name.as_ref(),
+        member.origin.canonical_file.as_deref(),
+        member.value,
+    ) {
+        return Some(SemanticTypeSource::Authored(
+            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot),
+        ));
+    }
+    crate::meta_resolve::projectors::structural_member_value_source(
+        dispatch,
+        member.value,
+        member.name.as_ref(),
+        type_arg_base,
+    )
 }
 
 /// Normalize a `defineOptions<T>()` / `defineExpose<T>()` macro surface into the
@@ -112,9 +317,13 @@ pub(crate) fn props_from_typeinfo_surface(
 /// argument through the SHARED resolver (no special-case there — only
 /// `defineModel` is). This is the thin per-member normalize: one
 /// [`NamedTypeMember`] per public named member carrying its name, optionality,
-/// and the member value raised to a `TypeExpr` through the active `ctx`. The
-/// shallow-by-default rule holds — `raise_member_value` raises the member's
-/// one-level value node, it does not eagerly expand it.
+/// and the member value raised through the active `ctx` and classified INTO
+/// the sealed shallow
+/// [`NamedTypeMemberOutput`](crate::typeinfo::framework_surface::results::NamedTypeMemberOutput)
+/// vocabulary at this publication boundary — the raised form is transient and
+/// discarded here; no raw `TypeExpr` enters the DTO. The shallow-by-default
+/// rule holds — `raise_member_value` raises the member's one-level value node,
+/// it does not eagerly expand it.
 #[must_use]
 pub(crate) fn object_members_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
@@ -133,51 +342,80 @@ pub(crate) fn object_members_from_typeinfo_surface(
             |member| crate::typeinfo::framework_surface::results::NamedTypeMember {
                 name: member.name.as_ref().to_string(),
                 is_optional: member.optional,
-                type_expr: raise_member_value(ctx, member),
+                value: raise_member_value(ctx, member).map(|raised| {
+                    crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::classify_shallow(&raised)
+                }),
             },
         )
         .collect()
 }
 
-/// Normalize a `defineExpose<T>()` macro surface into [`AnalyzedExposeField`]s:
-/// one field per named public member, carrying the member's surface type raised
-/// through the active `ctx` (overlay-aware, scoped to its value-node file like
-/// props/emits) and its JSDoc sliced from the enriched typeinfo spans.
+/// Normalize a `defineExpose<T>()` macro surface into
+/// [`ResolvedExposeField`](crate::typeinfo::framework_surface::results::ResolvedExposeField)
+/// rows: one field per named public member, carrying its JSDoc sliced from
+/// the enriched typeinfo spans plus the member VALUE's session-resolved
+/// SOURCE POSITION (the exposed-type authority the extraction layer
+/// publishes for type-argument-only members).
 ///
 /// The pass-through [`NamedTypeMember`] surface ([`object_members_from_typeinfo_surface`])
-/// is a REDUCED shape that drops the `type_expr_scope` and JSDoc the
-/// component-meta extract layer's `AnalyzedExposeField` pairing invariant
-/// (`type_expr.is_some() <=> type_expr_scope.is_some()`) requires, so expose
-/// carries this richer per-member normalize alongside it. The field's `span` is
-/// `None`: the surface member's spans index its DECLARATION file, not the SFC,
-/// so there is no SFC-absolute key span to report; downstream,
-/// `extract_exposed_from_macro` publishes the union of the SFC object-literal
-/// fields (which DO carry a span) and these surface members.
+/// is a REDUCED shape that drops the JSDoc the component-meta extract layer
+/// publishes, so expose carries this richer per-member normalize alongside it.
+/// The analysis row is SHALLOW: a resolved-surface member has no flat
+/// authored macro-payload position (expose analyzer fields never stamp a
+/// payload), so `payload` stays the honest `None` (paired with a `None`
+/// scope); the typed member source rides `type_source` — the graph-native
+/// closed / shallow-ref / projected member-path ladder
+/// ([`member_value_source`]), or the typed
+/// `Failed(UnrepresentableRequiredMemberValue)` for a genuine miss. The
+/// field's `span` is `None`: the surface member's spans index its
+/// DECLARATION file, not the SFC, so there is no SFC-absolute key span to
+/// report; downstream, `extract_exposed_from_macro` publishes the union of
+/// the SFC object-literal fields (which DO carry a span) and these surface
+/// members.
 #[must_use]
 pub(crate) fn exposed_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     resolved: &impl ResolvedSurfaceAccess,
-) -> Vec<verter_semantic::analysis::types::AnalyzedExposeField> {
+) -> Vec<crate::typeinfo::framework_surface::results::ResolvedExposeField> {
     let macro_surface = resolved.macro_surface();
     let host = ctx.host_for_fact_tracer_install();
+    let dispatch = ctx.dispatch();
+    // The macro's STAMPED type-argument locator — the authored base the
+    // projected member-path route replays off.
+    let type_arg_base = ctx
+        .ensure_indexed_ready_serve(macro_surface.owner_canonical.as_ref())
+        .map(|serve| serve.indexed)
+        .as_ref()
+        .and_then(|indexed| indexed.snapshot.macros.get(macro_surface.macro_index))
+        .and_then(|mac| mac.parsed_type_argument.clone());
     macro_surface
         .surface
         .members
         .iter()
         .filter(|member| member.visibility.is_public())
         .map(|member| {
-            let type_expr = raise_member_value(ctx, member);
-            let type_expr_scope = type_expr
-                .as_ref()
-                .map(|_| macro_surface.member_expr_scope(host, member));
             let (description, tags) = member_jsdoc_from_spans(host, member);
-            verter_semantic::analysis::types::AnalyzedExposeField {
-                name: member.name.as_ref().to_string(),
-                span: None,
-                type_expr,
-                type_expr_scope,
-                description,
-                tags,
+            // The published member-value SOURCE POSITION: the graph-native
+            // closed / shallow-ref / projected member-path source. An
+            // exposed type-argument member's value-type position is
+            // REQUIRED — with no faithful source the position is the typed
+            // source-construction FAILURE, never a fabricated `unknown`
+            // success.
+            let type_source = member_value_source(&dispatch, member, type_arg_base.as_ref())
+                .map(verter_type_expr::facts::SourcePosition::Present)
+                .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
+                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+                ));
+            crate::typeinfo::framework_surface::results::ResolvedExposeField {
+                analysis: verter_semantic::analysis::types::AnalyzedExposeField {
+                    name: member.name.as_ref().to_string(),
+                    span: None,
+                    payload: None,
+                    type_expr_scope: None,
+                    description,
+                    tags,
+                },
+                type_source,
             }
         })
         .collect()
@@ -186,37 +424,162 @@ pub(crate) fn exposed_from_typeinfo_surface(
 /// Normalize a macro surface's INDEX SIGNATURES into the published
 /// [`ExpandedIndexSignature`] set. A props member is `properties + index
 /// signatures` and an emits object is `events + index signatures`. Kind-neutral:
-/// it raises whatever index signatures the surface carries. Each signature's
-/// `key_type` / `value_type` graph node is raised to a `TypeExpr` through the
-/// ACTIVE `ctx` (overlay-aware); a node that does not raise is skipped (no
-/// phantom signature).
+/// it publishes whatever index signatures the surface carries. Each signature's
+/// `key_type` / `value_type` graph node projects to its content-free
+/// [`SourcePosition`](verter_type_expr::facts::SourcePosition) — see
+/// [`index_position_source`] for the faithful-vs-failed decision.
 pub(crate) fn index_signatures_from_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<ExpandedIndexSignature> {
     let macro_surface = resolved.macro_surface();
     let dispatch = ctx.dispatch();
-    // Publication sink (DTO index signatures): materialize into sealed
-    // carriers and unwrap via the typeinfo output capability.
-    let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
+    // The macro's STAMPED type-argument locator — the authored base the
+    // projected INDEX-POSITION replay route addresses (mirrors the emit
+    // callable-params base read; a parse-domain fact lookup through the
+    // ACTIVE `ctx`, never a resolution).
+    let type_arg_base = ctx
+        .ensure_indexed_ready_serve(macro_surface.owner_canonical.as_ref())
+        .map(|serve| serve.indexed)
+        .as_ref()
+        .and_then(|indexed| indexed.snapshot.macros.get(macro_surface.macro_index))
+        .and_then(|mac| mac.parsed_type_argument.clone());
     macro_surface
         .surface
         .index_signatures
         .iter()
-        .filter_map(|sig| {
-            let key_type = cap
-                .materialize_output_type_expr(sig.key_type)?
-                .into_type_expr(&cap);
-            let value_type = cap
-                .materialize_output_type_expr(sig.value_type)?
-                .into_type_expr(&cap);
-            Some(ExpandedIndexSignature {
-                key_type,
-                value_type,
-                readonly: sig.readonly,
-            })
+        .enumerate()
+        .map(|(signature_ordinal, sig)| ExpandedIndexSignature {
+            key_type: index_position_source(
+                &dispatch,
+                sig.key_type,
+                type_arg_base.as_ref(),
+                signature_ordinal as u32,
+                verter_type_expr::facts::IndexSignaturePosition::Key,
+            ),
+            value_type: index_position_source(
+                &dispatch,
+                sig.value_type,
+                type_arg_base.as_ref(),
+                signature_ordinal as u32,
+                verter_type_expr::facts::IndexSignaturePosition::Value,
+            ),
+            readonly: sig.readonly,
         })
         .collect()
+}
+
+/// The published SOURCE POSITION for one index-signature key/value position:
+/// `Present` with the complete CLOSED fact when the node is one — a LEAF
+/// (primitive / literal, mirroring the projector `published_source_for_node`
+/// policy; a genuinely-OPEN `[key: string]` domain is the present `string`
+/// leaf — semantic openness is a valid success), or a TUPLE whose element
+/// values are all complete closed element facts (the emit payload-tuple
+/// shape `[v: number]` of `defineEmits<{ [event: string]: [v: number] }>()`
+/// — leaf and leaf-union elements are complete by themselves, so the fact
+/// demands back to the typed tuple through the shared raise bridge). A
+/// RICHER position (a nested object, a function, a composite, a reference)
+/// demand-validates through the shared structural-fact primitive and
+/// publishes the projected INDEX-POSITION replay route
+/// ([`ProjectedTypeFact::IndexPosition`](verter_type_expr::facts::ProjectedTypeFact)
+/// — the macro's STAMPED type-argument base + the signature's
+/// declaration-order SURFACE ordinal + the key/value role, replayed through
+/// the one shared dispatch on demand; the published position stays SHALLOW).
+/// ONLY a genuine miss — an unresolvable residual carrier, an
+/// unknown-materializing failure, or no stamped base to replay off — is the
+/// typed source-construction FAILURE
+/// (`UnrepresentableRequiredMemberValue`): a REQUIRED index key/value
+/// position with no faithful projected source marks the result non-complete
+/// instead of degrading to a fabricated `unknown` success. All decisions are
+/// NODE-DOMAIN (`node_leaf_fact` / `node_leaf_fact_or_union` /
+/// `node_data_for` / the structural-fact demand) — no `TypeExpr` is
+/// materialized here.
+fn index_position_source(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    type_arg_base: Option<&verter_type_expr::locators::MacroPayloadLocator>,
+    signature_ordinal: u32,
+    position: verter_type_expr::facts::IndexSignaturePosition,
+) -> verter_type_expr::facts::SourcePosition {
+    use verter_type_expr::facts::{
+        ClosedTypeFact, ProjectedTypeFact, SemanticSourceFailure, SemanticTypeSource,
+        SourcePosition,
+    };
+    if let Some(leaf) = dispatch.node_leaf_fact(node) {
+        return SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(leaf)));
+    }
+    // A tuple whose element values are ALL complete closed element facts
+    // (leaf or leaf-union) is complete by itself: publish the closed tuple
+    // fact (label/optional/rest preserved). Any richer element falls through
+    // to the projected replay route — a partial fact is never published.
+    if let Some(tuple) = closed_tuple_fact(dispatch, node) {
+        return SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(tuple)));
+    }
+    // A richer position that demand-validates to KNOWN structure publishes
+    // the content-free replay address off the stamped type-argument base;
+    // a genuine miss (unresolvable carrier / unknown-materializing / no
+    // base) stays the typed failure. STRUCTURAL TRANSIT, not `Published`:
+    // validation is a carrier-preserving classification, never consumer
+    // demand — operator reduction stays deferred so no library keyspace is
+    // enumerated at publication.
+    if let Some(base) = type_arg_base {
+        let validated = dispatch
+            .demand_validated_structural_node(
+                node,
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+            )
+            .is_some();
+        if validated {
+            return SourcePosition::Present(SemanticTypeSource::Projected(
+                ProjectedTypeFact::IndexPosition {
+                    base: verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+                        base.clone(),
+                    ),
+                    signature_ordinal,
+                    position,
+                },
+            ));
+        }
+    }
+    SourcePosition::Failed(SemanticSourceFailure::UnrepresentableRequiredMemberValue)
+}
+
+/// The complete closed TUPLE fact for a `Tuple`-shaped node whose element
+/// values are ALL complete closed element facts (leaf or leaf-union) —
+/// label / optionality / rest / ORDER preserved. `None` for a non-tuple
+/// node, or when ANY element is richer than the closed element vocabulary:
+/// the whole tuple fails closed — a partial fact is never published. Pure
+/// node→fact projection (`node_data_for` + `node_leaf_fact_or_union`); no
+/// reduction, no dispatch execution, no `TypeExpr` materialization. Shared
+/// by the index-signature positions ([`index_position_source`]) and the
+/// inherited property-style emit payloads
+/// ([`inherited_emit_payload_source`]).
+fn closed_tuple_fact(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<verter_type_expr::facts::TuplePayloadFact> {
+    use verter_type_expr::facts::{TupleElementFact, TuplePayloadFact};
+    let data = node_data_for(dispatch.ctx, node)?;
+    let SemanticNodeData::Tuple { elements, readonly } = data.as_ref() else {
+        return None;
+    };
+    let element_facts: Option<Vec<TupleElementFact>> = elements
+        .iter()
+        .map(|element| {
+            dispatch
+                .node_leaf_fact_or_union(element.value)
+                .map(|ty| TupleElementFact {
+                    label: element.label.as_ref().map(|label| label.to_string()),
+                    optional: element.optional,
+                    rest: element.rest,
+                    ty,
+                })
+        })
+        .collect();
+    Some(TuplePayloadFact {
+        readonly: *readonly,
+        elements: Arc::from(element_facts?.into_boxed_slice()),
+    })
 }
 
 /// Build the `defineModel` synthesized prop field from the analyzer facts.
@@ -232,7 +595,7 @@ pub(crate) fn index_signatures_from_surface(
 pub(crate) fn model_prop_fields(
     ctx: &dyn crate::resolver_core::ResolverContext,
     resolved: &impl ResolvedSurfaceAccess,
-) -> Vec<AnalyzedPropField> {
+) -> Vec<crate::typeinfo::framework_surface::results::ResolvedPropField> {
     let macro_surface = resolved.macro_surface();
     let Some(indexed) = ctx
         .ensure_indexed_ready_serve(macro_surface.owner_canonical.as_ref())
@@ -247,36 +610,74 @@ pub(crate) fn model_prop_fields(
         .iter()
         .map(|field| {
             // The analyzer stamps an empty scope on the synthesized model prop;
-            // re-anchor it to the SFC owner so the pairing invariant holds with
-            // a real scope.
+            // re-anchor it to the SFC owner so the pairing invariant
+            // (`payload.is_some() <=> type_expr_scope.is_some()`) holds with a
+            // real scope.
             let type_expr_scope = field
-                .type_expr
+                .payload
                 .as_ref()
                 .map(|_| TypeExprScope::new(macro_surface.owner_canonical.as_ref()));
-            AnalyzedPropField {
-                type_expr_scope,
-                ..field.clone()
+            // The synthesized model prop's SOURCE is its own authored
+            // type-argument payload position (`defineModel<T>()`'s T); an
+            // UNTYPED `defineModel()` has no annotation — a PROVEN
+            // unannotated schema absence, never a fabricated `unknown`
+            // value and never a required-position failure.
+            let type_source = field
+                .payload
+                .clone()
+                .map(|payload| {
+                    verter_type_expr::facts::SourcePosition::Present(
+                        verter_type_expr::facts::SemanticTypeSource::Authored(
+                            verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload),
+                        ),
+                    )
+                })
+                .unwrap_or_else(verter_type_expr::facts::SourcePosition::unannotated);
+            crate::typeinfo::framework_surface::results::ResolvedPropField {
+                analysis: AnalyzedPropField {
+                    type_expr_scope,
+                    ..field.clone()
+                },
+                type_source,
             }
         })
         .collect()
 }
 
 /// Normalize a `.vue` emits macro surface into the published
-/// [`AnalyzedEmitField`] set.
+/// [`ResolvedEmitField`] set — the UNION of both authored emit forms, each row
+/// pairing the emit analysis field with its session-resolved payload SOURCE.
 ///
 /// 1. **Call-signature emits FIRST.** Each call signature's first parameter is
 ///    the event name (a `String` literal, or a `Union` of `String` literals);
-///    the typed `payload_expr` is the call-signature function with the leading
-///    event-name parameter STRIPPED. The event name is NEVER read from `keyof`.
-///    The display `payload_type` is a CONSISTENT source-span slice.
-/// 2. **Property-style emits as a FALLBACK** — only when no call-signature emit
-///    was found.
-/// 3. **De-duplicate by event name, first-writer-wins.**
+///    the display `payload_type` renders the call-signature params with the
+///    leading event-name parameter STRIPPED. The event name is NEVER read from
+///    `keyof`. The payload SOURCE is the closed tuple built from the SAME
+///    post-event-name params in the node domain (label / optionality / rest /
+///    order preserved; leaf and leaf-union element facts) when every param is
+///    closed-expressible; a signature with a RICHER param (a named reference,
+///    a composite, a nested object, an array/callback, an instantiated
+///    generic) publishes the projected CALLABLE-PARAMS replay route instead
+///    ([`ProjectedTypeFact::CallableParams`](verter_type_expr::facts::ProjectedTypeFact)
+///    — the macro's STAMPED type-argument base + the signature's
+///    declaration-order SURFACE ordinal + `first_param = 1`, replayed through
+///    the one shared dispatch on demand). A partial fact is never published.
+/// 2. **Property-style emits ALWAYS.** A property member inside a
+///    `defineEmits<T>` object surface IS an emit — a mixed surface publishes
+///    BOTH forms (never an either/or gate on call-signature discovery). A
+///    LOCAL authored property event's payload SOURCE is its exact authored
+///    macro-payload position (the analyzer-stamped locator); an INHERITED /
+///    substituted member publishes the graph-native closed/use-site source
+///    projected from its value node; `None` only when no faithful source
+///    exists (see [`property_style_emit_fields`]).
+/// 3. **De-duplicate by event name, first-writer-wins.** Call-signature emits
+///    are pushed first, so a duplicate name takes CALL-SIGNATURE precedence;
+///    order is deterministic (signature order, then member order).
 #[must_use]
 pub(crate) fn emits_from_typeinfo_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     resolved: &impl ResolvedSurfaceAccess,
-) -> Vec<AnalyzedEmitField> {
+) -> Vec<ResolvedEmitField> {
     let macro_surface = resolved.macro_surface();
     // View-sensitive type resolution flows through the active `ctx`
     // (`ctx.dispatch()`). Host-level reads (JSDoc source slicing, node scope)
@@ -295,15 +696,25 @@ pub(crate) fn emits_from_typeinfo_surface(
     // minted shallow at the sink regardless of this mode.
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
 
-    let mut emits: Vec<AnalyzedEmitField> = Vec::new();
-    // Node-domain DISCOVERY fact: set at the `event_names` acceptance below —
-    // BEFORE any payload materialization — and consumed by the property-style
-    // fallback gate. Never derived from `emits` cardinality (a DTO collection
-    // carrying terminal-materialized payloads is not a decide surface).
-    let mut call_signature_emit_found = false;
+    // The macro's STAMPED type-argument locator — the authored base the
+    // projected CALLABLE-PARAMS replay route addresses (mirrors the
+    // property-style member-path base read; a parse-domain fact lookup
+    // through the ACTIVE `ctx`, never a resolution).
+    let type_arg_base = ctx
+        .ensure_indexed_ready_serve(macro_surface.owner_canonical.as_ref())
+        .map(|serve| serve.indexed)
+        .as_ref()
+        .and_then(|indexed| indexed.snapshot.macros.get(macro_surface.macro_index))
+        .and_then(|mac| mac.parsed_type_argument.clone());
 
-    // (1) Call-signature emits — decided in the NODE domain.
-    for sig in macro_surface.surface.call_signatures.iter() {
+    let mut emits: Vec<ResolvedEmitField> = Vec::new();
+
+    // (1) Call-signature emits — decided in the NODE domain. The enumeration
+    // ordinal is the SURFACE's declaration-order call-signature sequence —
+    // the exact pre-expansion index the CallableParams replay re-selects —
+    // so a signature that contributes no emit row (no event-name literal)
+    // still occupies its ordinal.
+    for (signature_ordinal, sig) in macro_surface.surface.call_signatures.iter().enumerate() {
         let view = CallableNodeView::new(&dispatch, sig.node);
         // The event name(s): the realized callable's FIRST-param string literal /
         // union, carrier-resolved (fail-closed-whole). `None` (no first param, or
@@ -312,8 +723,6 @@ pub(crate) fn emits_from_typeinfo_surface(
         let Some(names) = view.event_names(context) else {
             continue;
         };
-        // `Some` means at least one event name — node-domain discovery succeeded.
-        call_signature_emit_found = true;
         // Payload = the realized signature's params AFTER the leading event-name
         // param (`[1..]`), materialized ONCE at the terminal sink. `event_names`
         // above already realized the signature (its `first_param`), so `signature`
@@ -322,48 +731,94 @@ pub(crate) fn emits_from_typeinfo_surface(
             continue;
         };
         let raw_params = signature.raw_params();
-        // Materialize the payload tuple ONCE at the terminal sink, kept as an
-        // `Option<TypeExpr>` so the DISPLAY renders through the by-name
-        // `as_ref().and_then(render_type_expr_display)` form — the SAME shape
-        // `props_from_typeinfo_surface` uses. This normalizer NEVER decides on the
-        // materialized value (no direct reader call on it).
-        let payload_expr = Some(materialize_payload_tuple(ctx, &raw_params[1..]));
-        // Scope the payload to the call signature's DECLARATION-origin file so an
-        // inherited cross-file emit signature's payload `Ref`s resolve in the base
-        // file. Falls back to the SFC owner.
-        let payload_scope = macro_surface.signature_expr_scope(sig);
+        // Materialize the payload tuple ONCE at the terminal sink for DISPLAY
+        // ONLY (the by-name `render_type_expr_display` form — no decision on
+        // the materialized value). The tuple is a per-event SYNTHESIS over the
+        // signature's params — it has no flat authored macro-payload position,
+        // so the `payload` LOCATOR stays the honest `None`; typed payload
+        // demand is host-raised through the graph surface.
+        let payload_tuple = materialize_payload_tuple(ctx, &raw_params[1..]);
         // `payload_type` (→ `rawType`) is DISPLAY-ONLY — no consumer parses it.
         // It mirrors the payload TUPLE rendered as `[label: T, ...]`.
-        let payload_type = payload_expr.as_ref().and_then(render_type_expr_display);
+        let payload_type = render_type_expr_display(&payload_tuple);
+        // The payload SOURCE POSITION: the closed tuple over the SAME
+        // post-event-name params, projected in the node domain through the
+        // shared dispatch (leaf / leaf-union element facts, order preserved)
+        // — complete by itself when every param is closed-expressible
+        // (including the zero-payload empty tuple). A signature with a
+        // RICHER param publishes the projected CALLABLE-PARAMS replay route
+        // off the macro's stamped type-argument base: the content-free
+        // `(base, surface signature ordinal, first_param = 1)` address the
+        // demand side replays through the one shared dispatch — labels /
+        // optionality / rest / order / nesting / generic substitutions all
+        // ride the replay, so the faithful payload never degrades. The
+        // realized signature's payload-tuple position is REQUIRED — with no
+        // stamped type-argument base to replay off (no authored macro type
+        // argument), the position is the typed source-construction FAILURE
+        // (fails output materialization), never a partial fact and never a
+        // fabricated `unknown` success.
+        let payload_source = dispatch
+            .closed_params_tuple_source(&raw_params[1..])
+            .map(verter_type_expr::facts::SourcePosition::Present)
+            .or_else(|| {
+                type_arg_base.as_ref().map(|base| {
+                    verter_type_expr::facts::SourcePosition::Present(
+                        verter_type_expr::facts::SemanticTypeSource::Projected(
+                            verter_type_expr::facts::ProjectedTypeFact::CallableParams {
+                                base: verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+                                    base.clone(),
+                                ),
+                                signature_ordinal: signature_ordinal as u32,
+                                first_param: 1,
+                            },
+                        ),
+                    )
+                })
+            })
+            .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
+                verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+            ));
+        // The published display VALUE is paired with its resolution scope: the
+        // call signature's DECLARATION-origin file (a cross-file emit
+        // interface's payload `Ref`s resolve in the base file the signature
+        // was declared in, not the SFC owner). Value⇔scope pairing: a display
+        // that did not render carries no scope.
+        let payload_expr_scope = payload_type
+            .as_ref()
+            .map(|_| macro_surface.signature_expr_scope(sig));
         // The event's JSDoc rides on the call signature itself, sliced from the
         // signature's typeinfo JSDoc spans. A union of event-name literals on ONE
         // signature shares that signature's JSDoc across each event.
         let (description, tags) = signature_jsdoc_from_spans(host, sig);
         for name in names {
-            emits.push(AnalyzedEmitField {
-                name: name.to_string(),
-                span: verter_span::Span::default(),
-                payload_type: payload_type.clone(),
-                payload_expr: payload_expr.clone(),
-                payload_expr_scope: Some(payload_scope.clone()),
-                description: description.clone(),
-                tags: tags.clone(),
+            emits.push(ResolvedEmitField {
+                analysis: AnalyzedEmitField {
+                    name: name.to_string(),
+                    span: verter_span::Span::default(),
+                    payload_type: payload_type.clone(),
+                    payload: None,
+                    payload_expr_scope: payload_expr_scope.clone(),
+                    description: description.clone(),
+                    tags: tags.clone(),
+                },
+                payload_source: payload_source.clone(),
             });
         }
     }
 
-    // (2) Property-style emits — fallback gated on the node-domain DISCOVERY
-    // fact (`call_signature_emit_found`), NOT on `emits` cardinality: a payload
-    // materialization miss on a DISCOVERED emit does not reroute to the property
-    // rail. The member materialization lives in the terminal
-    // `property_style_emit_fields` sink so this normalizer mints nothing directly.
-    if !call_signature_emit_found {
-        emits = property_style_emit_fields(ctx, resolved);
-    }
+    // (2) Property-style emits — ALWAYS unioned in (a property member inside a
+    // `defineEmits<T>` object surface IS an emit; a mixed surface publishes
+    // both forms). The member materialization AND the per-row payload-source
+    // decision live in the terminal `property_style_emit_fields` sink so this
+    // normalizer mints nothing directly. Appended AFTER the call-signature
+    // emits so the de-dup below gives duplicate names call-signature
+    // precedence.
+    emits.extend(property_style_emit_fields(ctx, resolved));
 
-    // (3) De-duplicate by event name, first-writer-wins.
+    // (3) De-duplicate by event name, first-writer-wins (call-signature emits
+    // were pushed first, so they win duplicate names).
     let mut seen = std::collections::HashSet::new();
-    emits.retain(|emit| seen.insert(emit.name.clone()));
+    emits.retain(|emit| seen.insert(emit.analysis.name.clone()));
     emits
 }
 
@@ -422,23 +877,63 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_payload_tupl
     }
 }
 
-/// Build the property-style Vue emit fields — the FALLBACK used when a `.vue`
-/// `defineEmits<{ … }>()` object surface declares NO call signature. A GENUINE
-/// decide-free terminal one-shot sink: it iterates the surface's PUBLIC members
-/// (a node-domain visibility fact), mints each member value ONCE through the
-/// registered `raise_member_value` sink, and builds the `AnalyzedEmitField` DTO
-/// (name from the member, payload = the raised member value, scope + JSDoc from
-/// the surface). It makes NO decision on any materialized `TypeExpr` (the raised
-/// value is stored + display-rendered, never branched on) and takes NO
-/// `&TypeExpr` param — structurally identical to the [`props_from_typeinfo_surface`]
-/// member loop — so the non-terminal `emits_from_typeinfo_surface` delegates here
-/// instead of minting inline.
+/// Build the property-style Vue emit rows — the property HALF of the emit
+/// UNION (`emits_from_typeinfo_surface` always appends these after the
+/// call-signature emits; duplicate names resolve by first-writer-wins there).
+/// A GENUINE decide-free terminal one-shot sink: it iterates the surface's
+/// PUBLIC members (a node-domain visibility fact), mints each member value ONCE
+/// through the registered `raise_member_value` sink for the DISPLAY
+/// `payload_type`, and builds the [`ResolvedEmitField`] row (name + JSDoc from
+/// the surface, the analysis payload locator, and the published payload
+/// SOURCE). It makes NO decision on any materialized `TypeExpr` (the raised
+/// value is display-rendered, never branched on) and takes NO `&TypeExpr`
+/// param — structurally identical to the [`props_from_typeinfo_surface`]
+/// member loop — so the non-terminal `emits_from_typeinfo_surface` delegates
+/// here instead of minting inline.
+///
+/// Per-row payload SOURCE (the faithful fallback `define_emits_shape`
+/// publishes when the evaluated-field match is absent):
+///
+/// - a LOCAL AUTHORED property event — one addressed by EXACTLY ONE analyzer
+///   emit-field candidate with a stamped byte-precise payload locator, whose
+///   authored payload PROVABLY raises to the same complete shape as the
+///   surface member's value (the node-domain raised-shape proof,
+///   [`authored_candidate_matches_member_value`]) — carries that EXACT
+///   authored macro-payload position, on BOTH the analysis row's `payload`
+///   locator and the `Authored(MacroPayload(..))` source. Multiple
+///   candidates (duplicate / intersection same-name contributors — any
+///   single contributor would misrepresent the MERGED member) or a failed /
+///   unprovable equality publish NO contributor locator;
+/// - every other member (inherited / substituted / merged) publishes the
+///   graph-native closed fact, the projected member-path route, or the
+///   use-site source projected from its VALUE node
+///   ([`inherited_emit_payload_source`]) and keeps the honest locator-less
+///   analysis row;
+/// - `None` only when no faithful source exists (the consumer's honest
+///   degraded fallback applies — never a partial or fabricated fact).
 pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fields(
     ctx: &dyn crate::resolver_core::ResolverContext,
     resolved: &impl ResolvedSurfaceAccess,
-) -> Vec<AnalyzedEmitField> {
+) -> Vec<ResolvedEmitField> {
     let macro_surface = resolved.macro_surface();
     let host = ctx.host_for_fact_tracer_install();
+    let dispatch = ctx.dispatch();
+    // The SFC's analyzer macro facts: the byte-precise authored payload
+    // positions the analyzer could address in THIS file (locally-declared
+    // property events and local-registry-resolved bodies; cross-file members
+    // never appear here) plus the macro's STAMPED type-argument locator (the
+    // authored base the projected member-path route replays off). Read
+    // through the ACTIVE `ctx` so an overlay session sees the overlay facts.
+    let indexed = ctx
+        .ensure_indexed_ready_serve(macro_surface.owner_canonical.as_ref())
+        .map(|serve| serve.indexed);
+    let analyzed_macro = indexed
+        .as_ref()
+        .and_then(|indexed| indexed.snapshot.macros.get(macro_surface.macro_index));
+    let analyzer_emit_fields: &[AnalyzedEmitField] = analyzed_macro
+        .map(|mac| mac.emit_fields.as_slice())
+        .unwrap_or(&[]);
+    let type_arg_base = analyzed_macro.and_then(|mac| mac.parsed_type_argument.as_ref());
     macro_surface
         .surface
         .members
@@ -447,518 +942,226 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
         // recorded on the shared surface must NOT leak as a published emit.
         .filter(|member| member.visibility.is_public())
         .map(|member| {
-            let payload_expr = raise_member_value(ctx, member);
-            let payload_expr_scope = payload_expr
-                .as_ref()
-                .map(|_| macro_surface.member_expr_scope(host, member));
-            let payload_type = payload_expr.as_ref().and_then(render_type_expr_display);
-            let (description, tags) = member_jsdoc_from_spans(host, member);
-            AnalyzedEmitField {
-                name: member.name.as_ref().to_string(),
-                span: verter_span::Span::default(),
-                payload_type,
-                payload_expr,
-                payload_expr_scope,
-                description,
-                tags,
-            }
-        })
-        .collect()
-}
-
-/// Normalize a `.vue` slots macro surface into the published
-/// [`AnalyzedSlotField`] set.
-///
-/// Keep FUNCTION-LIKE members only (the value raises to a `TypeExpr::Function`;
-/// non-function members are filtered); the slot's `bindings` come from resolving
-/// the function's first-parameter type to its object surface (a literal object,
-/// a `Pick<…>`, or a named alias — see [`binding_fields_from_param_node`]); the
-/// `return_expr` / `return_type` come from the function's return type. Bindings +
-/// return are scoped to the slot member's VALUE-NODE file (see
-/// [`VueMacroSurface::member_expr_scope`]).
-#[must_use]
-pub(crate) fn slots_from_typeinfo_surface(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    resolved: &impl ResolvedSurfaceAccess,
-) -> Vec<AnalyzedSlotField> {
-    let macro_surface = resolved.macro_surface();
-    // View-sensitive slot type resolution flows through the active `ctx`.
-    // Host-level reads (JSDoc / return-type source slicing, node scope) use the
-    // host the `ctx` is installed against.
-    let host = ctx.host_for_fact_tracer_install();
-    let dispatch = ctx.dispatch();
-    // Node-domain demand identity: `Navigate` carrier-resolves an aliased /
-    // generic slot callable before the function-like filter.
-    let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
-    macro_surface
-        .surface
-        .members
-        .iter()
-        // Public-only publication: a `private` / `protected` class member must
-        // NOT leak as a published slot.
-        .filter(|member| member.visibility.is_public())
-        .filter_map(|member| {
-            // The slot callable decisions are made ENTIRELY in the node domain
-            // through the shared `CallableNodeView`; the display return `TypeExpr`
-            // is minted ONCE at the terminal sink. A slot member may be a
-            // non-`Function` carrier shell under the transit-shallow surface (a
-            // generic slot alias lowering to an `InstantiationRef` / alias
-            // carrier) — the view realizes it BEFORE the function-like filter.
-            let view = CallableNodeView::new(&dispatch, member.value);
-            // Function-like FILTER + return-combiner selection (node-domain): a
-            // member that does not realize to a callable is not a slot (dropped).
-            // The realized root's top-level kind selects the return combiner — a
-            // `Union` of function arms unions returns; a single `Function` or an
-            // `Intersection` of function arms intersects them. (The first params
-            // are ALWAYS intersected — a template binding must hold across arms.)
-            let realized_root = view.realized_callable_root(context)?;
-            let combine = match node_data_for(dispatch.ctx, realized_root).as_deref() {
-                Some(SemanticNodeData::Union(_)) => ArmCombineNode::Union,
-                _ => ArmCombineNode::Intersection,
-            };
-            // The across-arms first-param + return NODES (fails closed to drop
-            // the slot when any arm is non-callable).
-            let parts = view.slot_param_and_return_by_arm(combine, context)?;
-            let scope = macro_surface.member_expr_scope(host, member);
-            // Bindings from the (across-arms-intersected) first-param NODE.
-            let bindings = parts
-                .first_param
-                .map(|first_param| binding_fields_from_param_node(ctx, first_param, &scope))
-                .unwrap_or_default();
-            // `return_expr`: materialize the return NODE ONCE at the terminal sink
-            // (the normalizer only stores + renders it, never decides on its
-            // variant; a return-absent slot normalizes to the opaque `Unknown`
-            // carrier — see `normalized_slot_return_parts`).
-            let (return_expr, return_expr_scope) =
-                normalized_slot_return_parts(ctx, parts.return_type, &scope);
-            // Display `return_type`: prefer the EXACT source text sliced from the
-            // return-type annotation span (single-arm) — this preserves a name the
-            // typed return cannot surface (an unresolved imported `VNode`). Fall
-            // back to rendering the materialized return (composed multi-arm — no
-            // single span). Display-only; the by-name `.and_then` render form makes
-            // no decision on the materialized value.
-            let return_type = parts
-                .return_type_span
-                .map(|span| CanonicalSpan::new(scope.as_str().into(), span))
-                .and_then(|cspan| slice_canonical_span(host, &cspan))
-                .map(|text| text.trim().to_string())
-                .filter(|text| !text.is_empty())
-                .or_else(|| return_expr.as_ref().and_then(render_type_expr_display));
-            let (description, tags) = member_jsdoc_from_spans(host, member);
-            Some(AnalyzedSlotField {
-                name: member.name.as_ref().to_string(),
-                is_required: !member.optional,
-                span: verter_span::Span::default(),
-                bindings,
-                return_type,
-                return_expr,
-                return_expr_scope,
-                description,
-                tags,
-            })
-        })
-        .collect()
-}
-
-/// Normalize a slot's (optional) return NODE into the published
-/// `return_expr` / `return_expr_scope` sidecar pair.
-///
-/// The resolver-published invariant: `return_expr` is never `None` — a
-/// return-absent slot publishes the opaque `Unknown` carrier with its paired
-/// scope (`return_expr.is_some() == return_expr_scope.is_some()` holds). A
-/// syntactically absent return type is a DEGRADED slot return, not a graph
-/// raise miss, so it does NOT suppress warm admission (unlike the binding
-/// raise-miss normalization in [`slot_binding_field`]'s non-Pick arm). The
-/// display `return_type` field is computed separately at the call site and is
-/// untouched by this normalization (`Unknown` renders no display text).
-fn normalized_slot_return_parts(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    return_type: Option<SemanticNodeId>,
-    scope: &TypeExprScope,
-) -> (Option<TypeExpr>, Option<TypeExprScope>) {
-    let return_expr = return_type
-        .map(|return_node| materialize_slot_return_node(ctx, return_node))
-        .unwrap_or(TypeExpr::Unknown { raw: String::new() });
-    (Some(return_expr), Some(scope.clone()))
-}
-
-/// Materialize a Vue slot RETURN node into its display `TypeExpr` — a GENUINE
-/// decide-free terminal one-shot sink (the single-node twin of
-/// [`materialize_payload_tuple`]). The return `SemanticNodeId` is minted ONCE
-/// through the sealed output cap; it makes NO decision on the materialized value
-/// and takes NO `&TypeExpr` param (a node id + the active `ctx`). The mint cap is
-/// constructed INTERNALLY from `ctx` (the `raise_member_value` pattern).
-fn materialize_slot_return_node(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    return_node: SemanticNodeId,
-) -> TypeExpr {
-    let dispatch = ctx.dispatch();
-    let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
-    // A node that does not materialize keeps the opaque `Unknown` raise-miss value
-    // (the shared raise-miss convention); a realized slot's return node always
-    // mints, so the fallback is robustness only.
-    cap.materialize_output_type_expr(return_node)
-        .map(|raised| raised.into_type_expr(&cap))
-        .unwrap_or(TypeExpr::Unknown { raw: String::new() })
-}
-
-/// Reconstruct a slot's binding fields from its function's first-parameter NODE.
-/// Each member of the parameter's OBJECT surface becomes one
-/// [`AnalyzedSlotFieldBinding`] carrying that member's value `TypeExpr` as
-/// `binding_expr`.
-///
-/// The first parameter is the slot-props object. It can be written several ways —
-/// a literal object, a `Pick<T, 'k'>` / `Omit<…>` over a named type, an aliased
-/// `Ref`, or a parenthesized form — plus the multi-arm intersected node a `Union`
-/// / `Intersection` slot produces. To cover all of them WITHOUT a nominal
-/// shape-sniff, the binding object is the first-param node's one-level SHALLOW
-/// object surface, projected through the shared carrier-preserving
-/// [`VerterHost::project_shallow_surface_from_base`]; each surface member becomes
-/// a binding.
-///
-/// NODE-DOMAIN: the first param is a `SemanticNodeId` (the across-arms-intersected
-/// slot first-param node from [`CallableNodeView::slot_param_and_return_by_arm`]),
-/// NOT a materialised `TypeExpr`. The shallow projection uniformly covers a
-/// literal object, a `Pick<…>`, an aliased param, AND the multi-arm intersected
-/// node (which [`CallableNodeView::first_param_object_surface`] does NOT cover),
-/// applying the SAME open-generic gate (`slot_param_root_is_symbolic_only`) both
-/// binding paths use. A first-param node that does not project to an object
-/// surface yields no bindings. Each per-member binding `TypeExpr` is minted ONCE
-/// at the registered terminal [`slot_binding_field`]; this navigator holds NO
-/// mint.
-fn binding_fields_from_param_node(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    first_param: SemanticNodeId,
-    scope: &TypeExprScope,
-) -> Vec<AnalyzedSlotFieldBinding> {
-    let dispatch = ctx.dispatch();
-    let host = ctx.host_for_fact_tracer_install();
-    // Open-generic gate: a symbolic-only param root (an open Conditional / mapped
-    // / indexed / free `TypeParam`) must NOT be materialised into a committed
-    // object surface — the SAME gate `navigate_param_to_object_surface` /
-    // `first_param_object_surface` apply, keeping every binding path in agreement.
-    if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(
-        &dispatch,
-        first_param,
-        0,
-    ) {
-        return Vec::new();
-    }
-    // Project the first-param node's one-level SHALLOW object surface (STAYS
-    // Shallow / carrier-preserving — the root is NOT carrier-resolved, preserving
-    // the `AppProps['avatar']` symbolic-access policy).
-    let Some(surface) = host.project_shallow_surface_from_base(
-        ctx,
-        &dispatch,
-        first_param,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        ProjectionReductionContext::published(ProjectionMode::Shallow),
-    ) else {
-        return Vec::new();
-    };
-    // Shallow-by-default Pick member publication: when the slot param is a
-    // `Pick<NamedRoot, K>` the picked members stay SYMBOLIC at the published
-    // binding surface — the terminal sink builds each binding's value as the typed
-    // indexed access `NamedRoot['member']`. The Pick source-root is read
-    // NODE-DOMAIN from the first-param node (a thin structural `InstantiationRef`
-    // read under the Vue Pick DTO policy — never a `"Pick<"` text sniff).
-    let pick_root = pick_source_root_node(&dispatch, first_param);
-    surface
-        .members
-        .iter()
-        // Public-only publication.
-        .filter(|member| member.visibility.is_public())
-        .map(|member| slot_binding_field(ctx, member, pick_root, scope))
-        .collect()
-}
-
-/// The Pick source-root NODE the Vue Pick DTO policy publishes each picked member
-/// against. Peels the first-param node through the carrier-PRESERVING
-/// [`ProjectSemanticDispatch::peel_node_for_uninstantiated_carrier_fact_demand`]
-/// to reach an un-instantiated `Pick<Root, K>` `InstantiationRef`, then returns
-/// its source-root arg (`args[0]`) ONLY when BOTH hold:
-///
-/// - **Builtin-Pick identity** — the carrier is the BUILTIN `Pick`
-///   (`base.canonical_id == "__builtin__"` AND `base.decl_name == "Pick"`, two
-///   args): the SAME builtin-utility identity the resolver's route extractors read
-///   (`extract_route_root_identity_node` / `node_root_identity` in
-///   `meta_resolve::graph_predicates`). A USERLAND `type Pick<T, K>` that shadows
-///   the builtin is NOT a builtin `Pick` — its carrier base is the declaring file,
-///   not `__builtin__`, so it fails here and each member mints its own concrete
-///   (userland-Pick body) value instead of a symbolic access.
-/// - **Nominal source root** — `args[0]` is a NOMINAL named reference (`DeclRef` /
-///   `InstantiationRef` / the unresolved macro-carrier `BareRef`) — the reachable
-///   breadth of an authored named-reference source. An INLINE macro-authored
-///   `Pick<Source, K>` (in the `defineSlots` payload itself) lowers its source
-///   root to `SemanticNodeData::BareRef` — the node-domain mirror of an authored
-///   named reference — and the published binding shape must NOT depend on
-///   inline-vs-named authorship, so `BareRef` is in the nominal set. A
-///   STRUCTURAL source (`Pick<{ foo: string }, "foo">`) lowers `args[0]` to an
-///   object/structural node — NOT nominal — so publishing a symbolic
-///   `<object>['foo']` access would be bogus: return `None` and let each member
-///   mint its own concrete member value.
-///
-/// NOTE: this predicate does NOT mirror `extract_pick_omit_route`'s arm set. In
-/// that route extractor a non-nominal root returns `None` to PRESERVE the
-/// carrier; here `None` means CONCRETE materialization — the OPPOSITE
-/// consequence — so the arm sets are intentionally different.
-///
-/// A typed-IR STRUCTURAL match (node-domain `canonical_id` / `decl_name` + the
-/// source-root shape) — NOT a `"Pick<"` text sniff and NOT a
-/// materialise-then-decide. Any other shape (a literal object, a multi-arm
-/// `Intersection` first param, a userland or non-Pick alias) returns `None`.
-fn pick_source_root_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    first_param: SemanticNodeId,
-) -> Option<SemanticNodeId> {
-    let peeled = dispatch.peel_node_for_uninstantiated_carrier_fact_demand(
-        first_param,
-        ProjectionReductionContext::published(ProjectionMode::Navigate),
-    );
-    match node_data_for(dispatch.ctx, peeled).as_deref() {
-        Some(SemanticNodeData::InstantiationRef { base, args })
-            if base.canonical_id.as_ref() == "__builtin__"
-                && base.decl_name.as_ref() == "Pick"
-                && args.len() == 2 =>
-        {
-            // Nominal-root restriction: publish the symbolic
-            // `NamedRoot['member']` access for a nominal named-reference source
-            // root — `DeclRef` / `InstantiationRef` / the unresolved
-            // macro-carrier `BareRef` (an inline macro-authored source); a
-            // structural source mints each member's own concrete value at the
-            // sink instead. NOT `extract_pick_omit_route`'s arm set — there
-            // `None` PRESERVES the carrier, here `None` means CONCRETE
-            // materialization.
-            let root = args[0];
-            match node_data_for(dispatch.ctx, root).as_deref() {
-                Some(
-                    SemanticNodeData::DeclRef { .. }
-                    | SemanticNodeData::InstantiationRef { .. }
-                    | SemanticNodeData::BareRef(_),
-                ) => Some(root),
+            let raised = raise_member_value(ctx, member);
+            let payload_type = raised.as_ref().and_then(render_type_expr_display);
+            // LOCAL authored position candidates: analyzer emit fields
+            // addressing this event name WITH a stamped payload locator
+            // (duplicate / intersection contributors stamp several same-name
+            // fields — one per arm, in source order).
+            let candidates: Vec<&AnalyzedEmitField> = analyzer_emit_fields
+                .iter()
+                .filter(|field| field.name == member.name.as_ref() && field.payload.is_some())
+                .collect();
+            // A contributor locator is published ONLY when it provably
+            // denotes the resolved member: EXACTLY ONE candidate whose
+            // authored payload raises to the SAME complete shape as the
+            // surface member's VALUE node. Multiple candidates or a failed /
+            // unprovable equality keep the row locator-less — the projected
+            // member-path route below represents the MERGED member instead.
+            let authored_payload = match candidates.as_slice() {
+                [candidate] => candidate.payload.clone().filter(|locator| {
+                    authored_candidate_matches_member_value(
+                        ctx,
+                        &dispatch,
+                        macro_surface.owner_canonical.as_ref(),
+                        locator,
+                        member.value,
+                    )
+                }),
                 _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Build ONE published slot binding for a surface member — a GENUINE decide-free
-/// terminal one-shot sink. It takes NO `&TypeExpr` param (a surface member, the
-/// node-domain `Option<SemanticNodeId>` Pick source-root, and the scope) and
-/// makes NO decision on any materialised value:
-///
-/// - a `Pick` member (`pick_root == Some`) publishes the SYMBOLIC
-///   `NamedRoot['member']` indexed access — the source root is minted ONCE
-///   (internally) and the `IndexedAccess` is a pure syntactic display build (NOT
-///   a reverse-materialisation), the shallow-by-default Pick policy;
-/// - any other member mints its own value ONCE through the registered
-///   [`raise_member_value`] sink, raise-miss-normalized: a published binding
-///   never carries `binding_expr: None` (a miss publishes the opaque `Unknown`
-///   carrier with its paired scope and marks the materialization-cache
-///   suppress — see the non-Pick arm).
-///
-/// The `pick_root` branch is a NODE-DOMAIN `Option` match, never a `TypeExpr`
-/// decide; the display renders through the by-name `.and_then` form. The mint cap
-/// is constructed INTERNALLY from `ctx` (the `raise_member_value` pattern).
-fn slot_binding_field(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    member: &TypeInfoSurfaceMember,
-    pick_root: Option<SemanticNodeId>,
-    scope: &TypeExprScope,
-) -> AnalyzedSlotFieldBinding {
-    let Some(root_node) = pick_root else {
-        // Non-Pick member: mint the member's own value ONCE through the
-        // registered [`raise_member_value`] sink, with resolver-owned
-        // RAISE-MISS normalization. The resolver-published invariant: slot
-        // bindings never carry `binding_expr: None`, and
-        // `binding_expr.is_some() == binding_expr_scope.is_some()` holds (the
-        // same normalization the Svelte snippet bindings apply). On a raise
-        // miss — the member's value node does not materialize, a torn graph
-        // read — the binding publishes the opaque `Unknown` carrier with its
-        // paired scope and NO fabricated display text, and marks the request's
-        // materialization-cache suppress so the torn result is never admitted
-        // warm as complete metadata (the no-poison completion fence).
-        let raised = raise_member_value(ctx, member);
-        // Display renders through the by-name `.and_then` form BEFORE the
-        // miss fold, so an unraisable value fabricates no display text (no
-        // decision on the materialized value).
-        let type_annotation = raised.as_ref().and_then(render_type_expr_display);
-        // Raise-miss fold: the absent-value arm supplies the opaque `Unknown`
-        // carrier AND marks the materialization-cache suppress — a pure
-        // default fold on absence, never a variant decide on the materialized
-        // value.
-        let binding_expr = Some(raised.unwrap_or_else(|| {
-            crate::request_context::mark_request_materialization_cache_suppress();
-            TypeExpr::Unknown { raw: String::new() }
-        }));
-        let host = ctx.host_for_fact_tracer_install();
-        return AnalyzedSlotFieldBinding {
-            name: member.name.as_ref().to_string(),
-            type_annotation,
-            binding_expr,
-            binding_expr_scope: Some(macro_member_value_scope(host, member, scope)),
-            span: verter_span::Span::default(),
-        };
-    };
-    // Mint the Pick source-root ONCE, then build the symbolic
-    // `NamedRoot['member']` display access (a pure syntactic build).
-    let dispatch = ctx.dispatch();
-    let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
-    let named_root = cap
-        .materialize_output_type_expr(root_node)
-        .map(|raised| raised.into_type_expr(&cap))
-        .unwrap_or(TypeExpr::Unknown { raw: String::new() });
-    let symbolic = TypeExpr::IndexedAccess {
-        object: Arc::new(named_root),
-        index: Arc::new(TypeExpr::Literal(LiteralValue::String(
-            member.name.as_ref().to_string(),
-        ))),
-    };
-    let type_annotation = render_type_expr_display(&symbolic);
-    AnalyzedSlotFieldBinding {
-        name: member.name.as_ref().to_string(),
-        type_annotation,
-        binding_expr: Some(symbolic),
-        binding_expr_scope: Some(scope.clone()),
-        span: verter_span::Span::default(),
-    }
-}
-
-/// The [`TypeExprScope`] a navigated binding member's `binding_expr` binds to —
-/// its value-node scope (matching [`VueMacroSurface::member_expr_scope`]),
-/// falling back to the slot's scope when the member's value node is
-/// structural / scope-less.
-fn macro_member_value_scope(
-    host: &VerterHost,
-    member: &TypeInfoSurfaceMember,
-    fallback: &TypeExprScope,
-) -> TypeExprScope {
-    host.project_type_store()
-        .semantic_graph()
-        .node_scope(member.value)
-        .and_then(|scope| scope.canonical_file())
-        .map(|canonical| TypeExprScope::new(canonical.as_ref()))
-        .or_else(|| {
-            member
-                .origin
-                .canonical_file
+            };
+            // Value⇔scope pairing: the display value rides with the member's
+            // VALUE-NODE scope (where its `Ref`s resolve); a locator-bearing
+            // row is paired with the file whose OXC parse produced the
+            // authored payload (the SFC owner); an unrendered locator-less
+            // value carries no scope.
+            let payload_expr_scope = payload_type
                 .as_ref()
-                .map(|canonical| TypeExprScope::new(canonical.as_ref()))
+                .map(|_| macro_surface.member_expr_scope(host, member))
+                .or_else(|| {
+                    authored_payload
+                        .as_ref()
+                        .map(|_| TypeExprScope::new(macro_surface.owner_canonical.as_ref()))
+                });
+            // The published payload SOURCE POSITION: the exact authored
+            // macro-payload position for a PROVEN single-contributor local
+            // authored event, else the graph-native closed / projected
+            // member-path / use-site source for an inherited / substituted /
+            // merged member. A property event's payload position is
+            // REQUIRED — with no faithful source the position is the typed
+            // source-construction FAILURE, never a fabricated `unknown`
+            // success.
+            let payload_source = authored_payload
+                .clone()
+                .map(|locator| {
+                    verter_type_expr::facts::SemanticTypeSource::Authored(
+                        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator),
+                    )
+                })
+                .or_else(|| inherited_emit_payload_source(&dispatch, member, type_arg_base))
+                .map(verter_type_expr::facts::SourcePosition::Present)
+                .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
+                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+                ));
+            let (description, tags) = member_jsdoc_from_spans(host, member);
+            ResolvedEmitField {
+                analysis: AnalyzedEmitField {
+                    name: member.name.as_ref().to_string(),
+                    span: verter_span::Span::default(),
+                    payload_type,
+                    payload: authored_payload,
+                    payload_expr_scope,
+                    description,
+                    tags,
+                },
+                payload_source,
+            }
         })
-        .unwrap_or_else(|| fallback.clone())
+        .collect()
 }
 
-#[cfg(test)]
-mod raise_miss_normalization_tests {
-    use std::sync::Arc;
-
-    use verter_type_expr::{MemberVisibility, TypeExpr, TypeExprScope};
-
-    use super::{normalized_slot_return_parts, slot_binding_field};
-    use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
-    use crate::semantic_query::{MemberMergeRole, SemanticNodeId};
-    use crate::typeinfo::surface::{JsdocTagSpan, SurfaceMemberOrigin, TypeInfoSurfaceMember};
-    use crate::types::HostConfig;
-    use crate::VerterHost;
-
-    fn make_host() -> Arc<VerterHost> {
-        Arc::new(VerterHost::new_standalone(HostConfig::default()))
+/// The graph-native payload SOURCE for a property-style emit member with no
+/// PROVEN single-contributor authored position (inherited / substituted /
+/// merged same-name members):
+///
+/// - the complete CLOSED fact when the member's VALUE node decides one — a
+///   LEAF, a LEAF-UNION, or a TUPLE whose elements are all complete closed
+///   element facts (the emit payload-tuple shape `[id: number]` of an
+///   imported emits interface); closed facts are computed from the MERGED
+///   value node, so they stay faithful for a merged member too;
+/// - else, with a STAMPED macro type-argument base AND a merged value that
+///   DEMAND-VALIDATES through the shared structural-fact primitive, the
+///   projected MEMBER-PATH route
+///   ([`ProjectedTypeFact::MemberPath`](verter_type_expr::facts::ProjectedTypeFact) —
+///   base + event-name path, replayed through the one dispatch's EXISTING
+///   `ProjectPath` query on demand): the faithful source for merged
+///   same-name members, inherited referenced tuples / objects, and
+///   substituted generic surfaces, which the closed vocabulary cannot
+///   express and a single contributor locator would misrepresent. A merged
+///   value that FAILS validation (an unresolvable contributor) publishes NO
+///   replay route — the caller types the required-payload failure;
+/// - else (no authored type argument to replay off) the arg-preserving
+///   authored USE-SITE body slot
+///   ([`crate::meta_resolve::arg_preserving_member_use_site_slot`] — the
+///   declaring declaration's member-value slot, whose deref replays the
+///   authored generic instantiation WITH its type arguments through the one
+///   shared dispatch);
+/// - else `None` — genuinely unraisable; the consumer publishes its honest
+///   degraded source; a partial fact is never published and a locator is
+///   never fabricated.
+///
+/// All decisions are NODE-domain (`node_leaf_fact` / `node_leaf_union_fact`
+/// / `node_data_for` over the member's value node); no `TypeExpr` is
+/// materialized here.
+fn inherited_emit_payload_source(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    member: &TypeInfoSurfaceMember,
+    type_arg_base: Option<&verter_type_expr::locators::MacroPayloadLocator>,
+) -> Option<verter_type_expr::facts::SemanticTypeSource> {
+    use verter_type_expr::facts::{ClosedTypeFact, ProjectedTypeFact, SemanticTypeSource};
+    if let Some(leaf) = dispatch.node_leaf_fact(member.value) {
+        return Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(leaf)));
     }
-
-    /// A synthetic surface member whose `value` node id was never interned in
-    /// the host's semantic graph, so `raise_member_value` genuinely MISSES
-    /// (`materialize_output_type_expr` returns `None` for an absent node).
-    fn raise_miss_member() -> TypeInfoSurfaceMember {
-        TypeInfoSurfaceMember {
-            name: Arc::from("item"),
-            name_span: None,
-            value: SemanticNodeId(u64::MAX),
-            type_annotation_span: None,
-            optional: false,
-            readonly: false,
-            is_method: false,
-            visibility: MemberVisibility::Public,
-            declared_in_macro_type_arg: false,
-            jsdoc_description_span: None,
-            jsdoc_tag_spans: Arc::from(Vec::<JsdocTagSpan>::new().into_boxed_slice()),
-            origin: SurfaceMemberOrigin {
-                canonical_file: None,
-                declaration_span: None,
-                merge_role: MemberMergeRole::Authored,
+    if let Some(leaves) = dispatch.node_leaf_union_fact(member.value) {
+        return Some(SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(
+            leaves,
+        )));
+    }
+    if let Some(tuple) = closed_tuple_fact(dispatch, member.value) {
+        return Some(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(tuple)));
+    }
+    if let Some(base) = type_arg_base {
+        // The projected replay route denotes the MERGED member — publish it
+        // ONLY when the merged value demand-validates through the shared
+        // structural-fact primitive (the same per-root validation the
+        // structural member-source projection applies). A merged value with
+        // a FAILED contributor (`[id: number] & <unresolvable import>`) must
+        // fail the REQUIRED payload position typed (`None` here) instead of
+        // riding a replay whose demand-side reduction would drop the failed
+        // arm and mask it with the resolvable sibling's tuple.
+        dispatch.demand_validated_structural_node(
+            member.value,
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        )?;
+        return Some(SemanticTypeSource::Projected(
+            ProjectedTypeFact::MemberPath {
+                base: verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(base.clone()),
+                path: std::sync::Arc::from(
+                    vec![member.name.as_ref().to_string()].into_boxed_slice(),
+                ),
             },
+        ));
+    }
+    crate::meta_resolve::arg_preserving_member_use_site_slot(
+        dispatch,
+        member.name.as_ref(),
+        member.origin.canonical_file.as_deref(),
+        member.value,
+    )
+    .map(|slot| {
+        SemanticTypeSource::Authored(verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            slot,
+        ))
+    })
+}
+
+/// Raised-shape COVERAGE proof for a SINGLE local authored candidate (the
+/// shared proof of the props and property-style emit rows): the candidate's
+/// authored payload locator (absolutized to the SFC owner) raises through
+/// the shared authored-locator routing under a memoized `Navigate`
+/// structural transit — one member annotation, never a body expansion — and
+/// must fold to the SAME interned raised shape as the surface member's
+/// VALUE node
+/// ([`crate::project_semantic_dispatch::raise::raised_shape_eq_nodes`]), OR
+/// — for a merged COMPOSITE member value — to the same raised shape as
+/// EVERY contributing arm (identical-shape same-name contributors are all
+/// denoted exactly by the one authored annotation, e.g. an own-body member
+/// merged with a shape-identical heritage duplicate interns
+/// `Intersection([v, v'])` over two same-shape nodes).
+///
+/// Only a proven coverage publishes the contributor locator; an unraisable
+/// candidate or an unprovable / failed equality (`None` / `Some(false)`,
+/// including ANY composite arm that does not match — a FAILED contributor
+/// can never be covered by its resolvable sibling) fails CLOSED — the
+/// caller publishes the graph-native merged-member route instead.
+/// Node-domain only; no `TypeExpr` is materialized here.
+fn authored_candidate_matches_member_value(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    owner_canonical: &str,
+    locator: &verter_type_expr::locators::MacroPayloadLocator,
+    member_value: SemanticNodeId,
+) -> bool {
+    let Some(raised) = dispatch.raise_authored_locator_to_hot(
+        &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
+            .absolutized_against(owner_canonical),
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    ) else {
+        return false;
+    };
+    if crate::project_semantic_dispatch::raise::raised_shape_eq_nodes(
+        ctx,
+        raised.node(),
+        member_value,
+    ) == Some(true)
+    {
+        return true;
+    }
+    // Composite coverage: the authored candidate denotes the merged member
+    // when EVERY contributing arm folds to the candidate's own raised shape
+    // (an agree-duplicate merge). A single non-matching arm — a different
+    // shape, or an unresolvable failed contributor — fails the proof.
+    match node_data_for(dispatch.ctx, member_value).as_deref() {
+        Some(SemanticNodeData::Intersection(arms) | SemanticNodeData::Union(arms)) => {
+            !arms.is_empty()
+                && arms.iter().all(|&arm| {
+                    crate::project_semantic_dispatch::raise::raised_shape_eq_nodes(
+                        ctx,
+                        raised.node(),
+                        arm,
+                    ) == Some(true)
+                })
         }
-    }
-
-    /// The resolver-published slot-binding invariant on a raise MISS: the
-    /// binding publishes the opaque `Unknown` carrier (never
-    /// `binding_expr: None`), keeps its paired scope, fabricates no display
-    /// text, and marks the cold compute PARTIAL so the torn graph read is
-    /// never warmed as complete metadata (the no-poison fence). Exercised
-    /// through the non-Pick arm of the registered [`slot_binding_field`]
-    /// terminal (`pick_root: None`).
-    #[test]
-    fn slot_binding_raise_miss_publishes_unknown_carrier_scope_and_cache_suppress() {
-        let host = make_host();
-        let member = raise_miss_member();
-        let scope = TypeExprScope::new("/w/Owner.vue");
-
-        let guard = ColdComputeCompletenessScope::enter();
-        let binding = slot_binding_field(&*host, &member, None, &scope);
-        let completeness = current_cold_compute_completeness();
-        drop(guard);
-
-        assert_eq!(
-            binding.binding_expr,
-            Some(TypeExpr::Unknown { raw: String::new() }),
-            "a raise miss must publish the opaque Unknown carrier, never binding_expr: None"
-        );
-        assert_eq!(
-            binding.binding_expr_scope,
-            Some(scope),
-            "the miss binding keeps its paired scope (pairing invariant: \
-             binding_expr.is_some() == binding_expr_scope.is_some())"
-        );
-        assert!(
-            binding.type_annotation.is_none(),
-            "no display text is fabricated for an unraisable binding value"
-        );
-        assert!(
-            completeness.is_partial(),
-            "a raise miss must mark the cold compute partial so the torn \
-             result is never admitted warm"
-        );
-    }
-
-    /// A RETURN-ABSENT slot publishes `return_expr: Some(Unknown)` with its
-    /// paired scope — never `None` — but does NOT suppress warm admission: a
-    /// syntactically absent return type is a degraded slot return, not a
-    /// graph raise miss.
-    #[test]
-    fn slot_return_absent_publishes_unknown_carrier_without_cache_suppress() {
-        let host = make_host();
-        let scope = TypeExprScope::new("/w/Owner.vue");
-
-        let guard = ColdComputeCompletenessScope::enter();
-        let (return_expr, return_expr_scope) = normalized_slot_return_parts(&*host, None, &scope);
-        let completeness = current_cold_compute_completeness();
-        drop(guard);
-
-        assert_eq!(
-            return_expr,
-            Some(TypeExpr::Unknown { raw: String::new() }),
-            "a return-absent slot publishes the opaque Unknown carrier, never return_expr: None"
-        );
-        assert_eq!(
-            return_expr_scope,
-            Some(scope),
-            "the normalized return keeps its paired scope (pairing invariant: \
-             return_expr.is_some() == return_expr_scope.is_some())"
-        );
-        assert!(
-            !completeness.is_partial(),
-            "a return-absent slot must NOT mark the cold compute partial — \
-             absence is a degraded return, not a torn graph read"
-        );
+        _ => false,
     }
 }

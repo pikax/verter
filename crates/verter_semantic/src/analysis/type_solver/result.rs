@@ -20,7 +20,17 @@ use std::fmt;
 ///
 /// Important: "infinite keyspace" is `ExactSymbolic`, not `Incomplete`.
 /// "Operator stayed symbolic" is `ExactSymbolic` if the symbolic form is exact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum SolverExactness {
     ExactConcrete,
@@ -63,7 +73,17 @@ impl fmt::Display for SolverExactness {
 ///
 /// This prevents operational interruption from being modeled as a semantic
 /// approximation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum ExecutionStatus {
     /// Query completed normally within all operational guards.

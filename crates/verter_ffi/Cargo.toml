@@ -22,3 +22,6 @@ verter_protocol = { path = "../verter_protocol", version = "0.0.1-beta.1" }
 verter_span = { path = "../verter_span" }
 log = "0.4"
 serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

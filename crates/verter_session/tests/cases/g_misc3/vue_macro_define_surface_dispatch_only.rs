@@ -47,22 +47,39 @@ fn define_props_member_names(evaluated: &ExpandedComponentTypes) -> Vec<String> 
 }
 
 /// Resolve the property type published on the `define_props` mirror for
-/// `name`, if present.
-fn define_props_member_type<'a>(
-    evaluated: &'a ExpandedComponentTypes,
+/// `name`, if present, demand-materializing its published source
+/// through the ONE shared dispatch.
+fn define_props_member_type(
+    host: &verter_session::VerterHost,
+    owner: &str,
+    evaluated: &ExpandedComponentTypes,
     name: &str,
-) -> Option<&'a TypeExpr> {
+) -> Option<TypeExpr> {
     evaluated
         .define_props
         .iter()
         .flat_map(|entry| entry.result.value.properties.iter())
         .find(|prop| prop.name == name)
-        .map(|prop| &prop.ty)
+        .map(|prop| {
+            verter_session::test_only::semantic_source_probe::demand_type_expr(
+                host,
+                owner,
+                prop.ty.present().expect("present source"),
+            )
+            .unwrap_or_else(|| panic!("`{name}`'s published source must demand-materialize"))
+        })
 }
 
 /// Collect event names from a `define_emits` macro-object shape:
-/// property-style members plus call-signature leading-name literals.
-fn define_emits_event_names(shape: &ExpandedMacroObjectShape) -> Vec<String> {
+/// property-style members plus call-signature leading-name literals
+/// (demand-materialized from the parameter's published source through
+/// the ONE shared dispatch; a non-literal parameter type contributes
+/// no event name, exactly as before).
+fn define_emits_event_names(
+    host: &verter_session::VerterHost,
+    owner: &str,
+    shape: &ExpandedMacroObjectShape,
+) -> Vec<String> {
     let mut names: Vec<String> = shape
         .result
         .value
@@ -74,7 +91,12 @@ fn define_emits_event_names(shape: &ExpandedMacroObjectShape) -> Vec<String> {
         let Some(first) = sig.parameters.first() else {
             continue;
         };
-        match &first.ty {
+        let Some(first_ty) = verter_session::test_only::semantic_source_probe::demand_type_expr(
+            host, owner, &first.ty,
+        ) else {
+            continue;
+        };
+        match &first_ty {
             TypeExpr::Literal(LiteralValue::String(name)) => names.push(name.to_string()),
             TypeExpr::Union(types) => {
                 for ty in types.iter() {
@@ -209,7 +231,9 @@ fn dispatch_only_generic_carrier_define_props_instantiates_surface() {
     // remain a bare unresolved type parameter. Generic substitution is
     // part of semantic meaning — the dispatch instantiation path must
     // carry the `T := string` substitution.
-    if let Some(selected_ty) = define_props_member_type(&evaluated, "selected") {
+    if let Some(selected_ty) =
+        define_props_member_type(&host, "/Accordion.vue", &evaluated, "selected")
+    {
         assert!(
             !matches!(selected_ty, TypeExpr::TypeParameter(_)),
             "`selected: T` substituted with `string` MUST NOT publish \
@@ -276,7 +300,7 @@ fn dispatch_only_inherited_emits_conditional_branch_merge_define_shape() {
          define_emits."
     );
     let shape = &evaluated.define_emits[0];
-    let event_names = define_emits_event_names(shape);
+    let event_names = define_emits_event_names(&host, "/ConditionalEmits.vue", shape);
 
     for required in ["itemEdited", "itemViewed"] {
         assert!(
@@ -324,7 +348,11 @@ fn dispatch_only_non_conditional_inherited_emits_define_shape() {
         "non-conditional imported `defineEmits<BaseEmits>()` MUST \
          produce a define_emits mirror via the single-dispatch path. Got empty."
     );
-    let event_names = define_emits_event_names(&evaluated.define_emits[0]);
+    let event_names = define_emits_event_names(
+        &host,
+        "/NonConditionalEmits.vue",
+        &evaluated.define_emits[0],
+    );
     for required in ["change", "reset"] {
         assert!(
             event_names.iter().any(|n| n == required),
@@ -550,9 +578,13 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
         let evaluated = host.evaluate_types("/AuthorityEmitsProp.vue").unwrap();
         assert!(
             !evaluated.define_emits.is_empty()
-                && define_emits_event_names(&evaluated.define_emits[0])
-                    .iter()
-                    .any(|n| n == "change"),
+                && define_emits_event_names(
+                    &host,
+                    "/AuthorityEmitsProp.vue",
+                    &evaluated.define_emits[0]
+                )
+                .iter()
+                .any(|n| n == "change"),
             "owner-local emits root (property form) MUST expose a \
              non-empty dispatch surface (gate=true)."
         );
@@ -570,7 +602,11 @@ fn owner_local_macro_root_authority_uses_typeinfo_surface() {
             "owner-local emits root (call-signature form) MUST produce \
              a define_emits mirror."
         );
-        let event_names = define_emits_event_names(&evaluated.define_emits[0]);
+        let event_names = define_emits_event_names(
+            &host,
+            "/AuthorityEmitsCallsig.vue",
+            &evaluated.define_emits[0],
+        );
         for required in ["click", "hover"] {
             assert!(
                 event_names.iter().any(|n| n == required),
@@ -692,7 +728,11 @@ fn p2a_aliased_union_define_props_enumerates_both_arms() {
         root_identity: [0u8; 16],
         level: TypeInfoQueryLevel::FullMetadata,
     });
-    let dto_names: Vec<&str> = dtos.prop_fields().iter().map(|p| p.name.as_str()).collect();
+    let dto_names: Vec<&str> = dtos
+        .prop_fields()
+        .iter()
+        .map(|p| p.analysis.name.as_str())
+        .collect();
     // The common member is always present (it is in both arms).
     assert!(
         dto_names.contains(&"tag"),
@@ -788,7 +828,11 @@ fn open_conditional_props_root_enumerates_both_branches() {
         root_identity: [0u8; 16],
         level: TypeInfoQueryLevel::FullMetadata,
     });
-    let dto_names: Vec<&str> = dtos.prop_fields().iter().map(|p| p.name.as_str()).collect();
+    let dto_names: Vec<&str> = dtos
+        .prop_fields()
+        .iter()
+        .map(|p| p.analysis.name.as_str())
+        .collect();
     for required in ["a", "b"] {
         assert!(
             dto_names.contains(&required),
@@ -808,14 +852,14 @@ fn open_conditional_props_root_enumerates_both_branches() {
         let prop = dtos
             .prop_fields()
             .iter()
-            .find(|p| p.name == required)
+            .find(|p| p.analysis.name == required)
             .unwrap_or_else(|| panic!("prop `{required}` must be present"));
         assert!(
-            prop.is_optional,
+            prop.analysis.is_optional,
             "open-conditional branch member `{required}` is present in \
              only ONE of the two branches, so it MUST be OPTIONAL on the merged \
              macro object surface. Got is_optional={}",
-            prop.is_optional
+            prop.analysis.is_optional
         );
     }
 

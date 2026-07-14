@@ -12,8 +12,7 @@
 //!   `upsert`.
 //!
 //! The byte-identical fast path is a true no-op: it does NOT clear
-//! `compile_slots`, `cached_resolved_meta`, route-mirroring state, the
-//! project-wide `resolved_type_cache_db` or
+//! `compile_slots`, `cached_resolved_meta`, route-mirroring state, or
 //! the semantic-fact cache, and does NOT bump `store_view_epoch`. None
 //! of those mutations fire on a byte-identical re-upsert.
 //!
@@ -174,58 +173,6 @@ fn byte_identical_re_upsert_preserves_db_entry_counts() {
     assert_eq!(
         indexed_count_after, indexed_count_before,
         "R1: byte-identical re-upsert MUST NOT change FileArtifactStore entry count"
-    );
-}
-
-/// R1 — byte-identical re-upsert MUST NOT clear the project-wide
-/// `resolved_type_cache_db`.
-///
-/// A fast path that called `self.resolved_type_cache().clear()` would
-/// do a project-wide wipe, not a per-canonical drain. We seed the cache
-/// by driving real semantic work that populates it, then re-upsert and
-/// assert the count is preserved. This is a hostile probe: a wiping
-/// fast path would drop the count to zero after the first byte-identical
-/// re-upsert.
-#[test]
-fn byte_identical_re_upsert_preserves_resolved_type_cache_len() {
-    // Build a host with one file whose semantic resolution will populate
-    // some resolved-type-cache entries. The exact entry count varies with
-    // implementation; what matters is "non-zero before, equal after".
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    let _ = host
-        .upsert(UpsertRequest {
-            canonical_id: Some(CANONICAL.to_string()),
-            input_id: CANONICAL.to_string(),
-            source: Arc::from(SFC_SOURCE),
-            file_language: verter_session::LanguageRegistry::global()
-                .classify_static(CANONICAL)
-                .static_resolution(),
-            aliases: Vec::new(),
-        })
-        .expect("initial upsert succeeds");
-
-    // Drive component-meta resolution to seed resolved_type_cache_db.
-    // The probe may legitimately produce zero cache entries on a simple
-    // fixture; the test still discriminates because a wipe resets the
-    // count to 0 while the correct no-op fast path keeps it at the seed
-    // value (whatever that is).
-    let _ = host.get_component_meta_with_resolution(CANONICAL);
-
-    let count_before = host.project_type_store().resolved_type_cache().len();
-
-    for _ in 0..10 {
-        re_upsert_byte_identical(&host);
-    }
-
-    let count_after = host.project_type_store().resolved_type_cache().len();
-
-    assert_eq!(
-        count_after, count_before,
-        "R1: byte-identical re-upsert MUST NOT clear the project-wide \
-         resolved_type_cache_db. count_before={count_before}, count_after={count_after}. \
-         A fast path that called `self.resolved_type_cache().clear()` \
-         wipes the entire DB project-wide; this assertion fails for such \
-         a path if the cache had any non-zero entries pre-upsert."
     );
 }
 

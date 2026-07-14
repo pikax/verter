@@ -170,32 +170,39 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
 
     let leader_db = Arc::clone(&db);
     let leader = thread::spawn(move || {
+        // A cacheability scope carrier: the funnel requires a probe, and a probe can
+        // only be minted by opening a real tracer scope (which is per-thread).
+        let host = VerterHost::new_standalone(Default::default());
         let view = PermissiveStoreView;
-        leader_db.get_or_resolve_route_observing_facts(
-            rk("join_provider.ts", "Joined"),
-            &view,
-            || {
-                // We have claimed the singleflight slot and are
-                // inside the resolve closure. Signal the driver, then
-                // wait for the release before publishing.
-                tx_leader_in_closure
-                    .send(())
-                    .expect("leader: signal in-closure");
-                // Bounded wait for the driver's release. A bare `recv()` would
-                // hang forever if the driver stalled before releasing; the
-                // deadline makes a genuine stall PANIC within ~10s instead.
-                match rx_release_leader.recv_timeout(Duration::from_secs(10)) {
-                    Ok(()) => {}
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        panic!("leader: timed out waiting for driver release (10s)")
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+            leader_db.get_or_resolve_route_observing_facts(
+                rk("join_provider.ts", "Joined"),
+                &view,
+                probe,
+                || {
+                    // We have claimed the singleflight slot and are
+                    // inside the resolve closure. Signal the driver, then
+                    // wait for the release before publishing.
+                    tx_leader_in_closure
+                        .send(())
+                        .expect("leader: signal in-closure");
+                    // Bounded wait for the driver's release. A bare `recv()` would
+                    // hang forever if the driver stalled before releasing; the
+                    // deadline makes a genuine stall PANIC within ~10s instead.
+                    match rx_release_leader.recv_timeout(Duration::from_secs(10)) {
+                        Ok(()) => {}
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            panic!("leader: timed out waiting for driver release (10s)")
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            panic!("leader: driver dropped the release channel before releasing")
+                        }
                     }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        panic!("leader: driver dropped the release channel before releasing")
-                    }
-                }
-                Some((resolved_route(), vec![leader_fact()]))
-            },
-        )
+                    Some((resolved_route(), vec![leader_fact()]))
+                },
+            )
+        })
+        .0
     });
 
     // Wait until the leader is inside its resolve closure. This
@@ -222,20 +229,24 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
         let host = VerterHost::new_standalone(Default::default());
         let view = PermissiveStoreView;
         let (route_result, finalise) = install_fact_tracer_for_tests(&host, || {
-            follower_db.get_or_resolve_route_observing_facts(
-                rk("join_provider.ts", "Joined"),
-                &view,
-                || {
-                    // The follower's resolve closure MUST NOT run.
-                    // If it does, the test isn't exercising the
-                    // singleflight-join path. Use `unreachable!` so
-                    // a regression panics with a clear message.
-                    unreachable!(
-                        "follower's resolve closure must not run — \
+            verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+                follower_db.get_or_resolve_route_observing_facts(
+                    rk("join_provider.ts", "Joined"),
+                    &view,
+                    probe,
+                    || {
+                        // The follower's resolve closure MUST NOT run.
+                        // If it does, the test isn't exercising the
+                        // singleflight-join path. Use `unreachable!` so
+                        // a regression panics with a clear message.
+                        unreachable!(
+                            "follower's resolve closure must not run — \
                          singleflight should join the leader's flight"
-                    )
-                },
-            )
+                        )
+                    },
+                )
+            })
+            .0
         });
         (route_result, finalise)
     });

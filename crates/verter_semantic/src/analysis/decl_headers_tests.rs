@@ -247,6 +247,7 @@ fn type_param_headers_match_lowered_group_params() {
     let env_params: Vec<String> = env.type_symbols["G"]
         .primary()
         .type_parameters
+        .params
         .iter()
         .map(|p| p.name.clone())
         .collect();
@@ -271,10 +272,11 @@ fn type_param_headers_match_lowered_group_params() {
 }
 
 #[test]
-fn member_headers_match_lowered_lookup_object_names() {
+fn member_header_facts_match_production_index_across_body_shapes() {
     // Alias bodies: literal members, intersection descent; mapped /
-    // utility bodies contribute NO syntactic members — same as the
-    // lowered body's direct-object projection.
+    // utility bodies contribute NO syntactic members — the stored
+    // member-header FACT inventory must agree with the production
+    // parse-time index (names AND flags) for every body shape.
     for (source, name) in [
         ("type T = { a: 1; b?: string; readonly c: boolean };\n", "T"),
         ("type T = { a: 1 } & ({ b: 2 });\n", "T"),
@@ -286,19 +288,137 @@ fn member_headers_match_lowered_lookup_object_names() {
     ] {
         let env = parse_and_build_env(source);
         let index = index_for(source);
-        let env_members = env.type_symbols[name].merged_body().merged_member_names();
-        let header_members: Vec<String> = index
+        let env_members: Vec<MemberHeader> = env.type_symbols[name]
+            .merged_member_header_facts()
+            .into_iter()
+            .map(|fact| MemberHeader {
+                name: fact.name,
+                kind: if fact.is_method {
+                    MemberHeaderKind::Method
+                } else {
+                    MemberHeaderKind::Property
+                },
+                optional: fact.optional,
+                readonly: fact.readonly,
+            })
+            .collect();
+        let header_members = &index
             .type_header(name)
             .unwrap_or_else(|| panic!("{name} header"))
-            .member_headers
-            .iter()
-            .map(|m| m.name.clone())
-            .collect();
+            .member_headers;
         assert_eq!(
-            env_members, header_members,
-            "member-header names must match the lowered merged_member_names for:\n{source}"
+            &env_members, header_members,
+            "member-header facts must match the production index for:\n{source}"
         );
     }
+}
+
+#[test]
+fn seeded_member_headers_carry_fact_flags_and_match_production_index() {
+    // The env-seeded header mirror reads the stored `MemberHeaderFact`
+    // inventory — real syntactic flags (method kind, `?`, `readonly`) — not a
+    // body walk with hard-coded defaults. Parity target: the production
+    // parse-time index over the same source.
+    let source = "interface I { p?: string; readonly c: boolean; m(): void }\n";
+    let env = parse_and_build_env(source);
+    let seeded = DeclHeaderIndex::from_eval_env(&env);
+    let production = index_for(source);
+
+    let seeded_headers = &seeded.type_header("I").expect("seeded I").member_headers;
+    let production_headers = &production
+        .type_header("I")
+        .expect("production I")
+        .member_headers;
+    assert_eq!(
+        seeded_headers, production_headers,
+        "seeded member headers must equal the production parse-time headers (names AND flags)"
+    );
+
+    // Explicit per-flag discrimination (not just parity): the fact carries
+    // the real syntactic flags.
+    let by_name = |name: &str| {
+        seeded_headers
+            .iter()
+            .find(|h| h.name == name)
+            .unwrap_or_else(|| panic!("member {name}"))
+    };
+    assert!(by_name("p").optional, "`p?` must be optional");
+    assert_eq!(by_name("p").kind, MemberHeaderKind::Property);
+    assert!(!by_name("p").readonly);
+    assert!(by_name("c").readonly, "`readonly c` must be readonly");
+    assert!(!by_name("c").optional);
+    assert_eq!(
+        by_name("m").kind,
+        MemberHeaderKind::Method,
+        "`m()` must be a Method header"
+    );
+    assert!(!by_name("m").optional);
+
+    // Negative: exactly the three declared members — nothing fabricated.
+    let mut names: Vec<&str> = seeded_headers.iter().map(|h| h.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["c", "m", "p"]);
+}
+
+#[test]
+fn seeded_member_headers_keep_own_members_under_heritage_and_skip_base_names() {
+    // A heritage-carrying contributor (`interface X extends Base { a }`)
+    // contributes its OWN members only: the heritage `Ref` is not a member
+    // header (inherited members surface through the semantic reducer, never
+    // the shallow index). Merged same-name contributors union first-seen.
+    let source = "interface Base { b: string }\ninterface X extends Base { a: number }\ninterface X { m(): void }\n";
+    let env = parse_and_build_env(source);
+    let seeded = DeclHeaderIndex::from_eval_env(&env);
+
+    let x = seeded.type_header("X").expect("X header");
+    let names: Vec<&str> = x.member_headers.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["a", "m"],
+        "own members across merged contributors, first-seen order, no base names"
+    );
+    assert!(
+        !names.contains(&"b") && !names.contains(&"Base"),
+        "heritage members/names must not enter the shallow header index"
+    );
+    // Production-index parity for the merged + heritage case.
+    let production = index_for(source);
+    assert_eq!(
+        x.member_headers,
+        production
+            .type_header("X")
+            .expect("production X")
+            .member_headers
+    );
+}
+
+#[test]
+fn seeded_enum_headers_read_the_stored_member_names_fact() {
+    // Enum member names reach the seeded index through the stored
+    // `EnumMemberNamesFact` (the presence rail), including unfoldable-value
+    // members; merged same-name enums union first-seen.
+    let source = "enum E { A, B = compute() }\nenum E { C = 'c' }\n";
+    let env = parse_and_build_env(source);
+
+    // The stored per-contributor facts exist and union across contributors.
+    let group = &env.value_symbols["E"];
+    let fact = group
+        .merged_enum_member_names_fact()
+        .expect("enum name fact");
+    assert_eq!(fact.names.as_ref(), ["A", "B", "C"]);
+
+    let seeded = DeclHeaderIndex::from_eval_env(&env);
+    assert_eq!(
+        seeded.enum_headers["E"].member_names,
+        ["A", "B", "C"],
+        "seeded enum headers read the stored fact (presence rail superset)"
+    );
+    // Production parity.
+    let production = index_for(source);
+    assert_eq!(
+        seeded.enum_headers["E"].member_names,
+        production.enum_headers["E"].member_names
+    );
 }
 
 #[test]
@@ -513,12 +633,20 @@ interface Merged { b: number }
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
     let index = build_decl_header_index(&ret.program, source);
-    let whole = build_eval_env(&ret.program, source);
+    let build_ctx =
+        crate::analysis::type_eval_build::BuildEvalEnvContext::new("inline:selective-parity");
+    let whole = build_eval_env(&ret.program, source, &build_ctx);
 
     let mut scratch = EvalEnv::new();
     for stmt_index in &index.type_header("Merged").expect("Merged").contributors {
+        // Selective lowering passes the statement's ORIGINAL top-level index
+        // (the recorded contributor locator), never a renumbered position.
         crate::analysis::type_eval_build::lower_top_level_statement(
             &ret.program.body[*stmt_index as usize],
+            crate::analysis::type_eval_build::StatementLowerCtx {
+                build: &build_ctx,
+                contributor_index: *stmt_index,
+            },
             source,
             &mut scratch,
         );
@@ -531,8 +659,8 @@ interface Merged { b: number }
     );
     assert!(selective_group.merged_body().is_merged());
     assert_eq!(
-        selective_group.merged_body().merged_member_names(),
-        whole_group.merged_body().merged_member_names()
+        selective_group.merged_member_header_facts(),
+        whole_group.merged_member_header_facts()
     );
     // NEGATIVE: the un-demanded sibling was never lowered.
     assert!(

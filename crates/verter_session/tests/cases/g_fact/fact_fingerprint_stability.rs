@@ -18,117 +18,42 @@
 //!   decls in reverse declaration order produces byte-identical
 //!   fact set.
 //!
-//! Tests synthesise `IndexedReady` directly via `build_indexed`
-//! (no parser invocation) and run `emit_parse_facts` to inspect the
-//! emitted `FileFacts.registry()`. Without the fact emitter,
-//! these tests would fail because every variant lookup would
-//! return `None`.
+//! Tests build a real `IndexedReady` from AUTHORED source through the
+//! production-shaped service-backed construction path and run
+//! `emit_parse_facts` to inspect the emitted `FileFacts.registry()`.
+//! Without the fact emitter, these tests would fail because every
+//! variant lookup would return `None`.
 //!
 //! Architectural rules bound: R10, R11, R12, R13, R14, R16, R28.
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_eval::{EnumMemberValue, TypeDeclKind, ValueDeclKind};
 use verter_semantic::facts::{FactKey, FactRegistry, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedName;
 use verter_session::project_type_store::IndexedReady;
-use verter_session::resolver_core::shallow_file_state::{ExportTarget, ShallowFileState};
-use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
+use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 
 fn empty_external(
-) -> Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
-    Arc::new(
-        verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
-    )
+) -> Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource> {
+    Arc::new(verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default())
 }
 
-/// Builder for a synthetic `IndexedReady` that drives parse-time fact
-/// emission. The `member_bodies` map per-symbol describes the
-/// member name list (used by `MemberShape` + `MemberPresence`) and
-/// the synthesized body `TypeExpr`.
-struct TypeDecl<'a> {
-    name: &'a str,
-    kind: TypeDeclKind,
-    body: TypeExpr,
-}
-
-fn build_type_decl<'a>(name: &'a str, members: Vec<(&'a str, TypeExpr)>) -> TypeDecl<'a> {
-    // Synthesize an interface-shaped body from the members.
-    let body = TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: members
-            .iter()
-            .map(|(n, ty)| {
-                ObjectMember::Property(ObjectProperty::synthetic_public(
-                    n.to_string(),
-                    ty.clone(),
-                    false,
-                    false,
-                ))
-            })
-            .collect(),
-    }));
-    TypeDecl {
-        name,
-        kind: TypeDeclKind::Interface,
-        body,
-    }
-}
-
-fn build_indexed(
-    type_decls: Vec<TypeDecl<'_>>,
-    value_symbols: Vec<(&str, ValueDeclKind)>,
-    exports: Vec<(&str, ExportTarget)>,
-    raw_source: &str,
-) -> Arc<IndexedReady> {
-    // Env-seeded construction: the synthetic header inventory + seeded
-    // declaration-body memo mirror the production header walk + lazy
-    // memo for the same declarations.
-    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
-    for decl in type_decls {
-        env.add_type(verter_semantic::analysis::type_eval::TypeDeclInfo {
-            name: decl.name.to_string(),
-            declaration_id: 0,
-            kind: decl.kind,
-            type_parameters: Vec::new(),
-            body: decl.body,
-        });
-    }
-    for (name, kind) in value_symbols {
-        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
-            name: name.to_string(),
-            declaration_id: 0,
-            kind,
-            type_annotation: None,
-            signatures: Vec::new(),
-            object_shape: None,
-            enum_members: None,
-        });
-    }
-    let mut exports_map: FxHashMap<String, ExportTarget> = FxHashMap::default();
-    for (name, target) in exports {
-        exports_map.insert(name.to_string(), target);
-    }
-    let mut shallow = ShallowFileState::from_analysis([0u8; 16], empty_external(), Some(&env));
-    shallow.exports = exports_map;
+/// Build a real `IndexedReady` from authored source through the
+/// production-shaped service-backed construction path (parse → header
+/// index → lazy decl-body memo): the header inventory + exports come
+/// from the real walk; declaration bodies lower lazily on the fact
+/// path's first demand.
+fn indexed_from_source(source: &str) -> Arc<IndexedReady> {
+    let shallow =
+        ShallowFileState::service_backed_for_test_with_hash("/facts.ts", source, [0u8; 16]);
     Arc::new(IndexedReady::new_for_test_with_state(
         [0u8; 16],
-        Arc::new(shallow),
-        Arc::from(raw_source),
-        Arc::from(""),
+        shallow,
+        Arc::from(source),
+        Arc::from(source),
         empty_external(),
     ))
-}
-
-fn export_local(name: &str) -> ExportTarget {
-    ExportTarget::Local {
-        symbol_name: name.to_string(),
-    }
-}
-
-fn prim(p: PrimitiveName) -> TypeExpr {
-    TypeExpr::Primitive(p)
 }
 
 fn registry_of(indexed: &IndexedReady) -> FactRegistry {
@@ -153,19 +78,8 @@ fn raw_source_only_change_does_not_change_semantic_hash() {
     // whitespace, and JSDoc; the shallow walk has already
     // extracted the structural shape so semantic emission is
     // invariant.
-    let make = |raw: &str| {
-        build_indexed(
-            vec![build_type_decl(
-                "Foo",
-                vec![("a", prim(PrimitiveName::String))],
-            )],
-            vec![],
-            vec![("Foo", export_local("Foo"))],
-            raw,
-        )
-    };
-    let a = make("// comment A\nexport interface Foo { a: string }");
-    let b = make("// comment B (cosmetic edit)\nexport interface Foo { a: string }");
+    let a = indexed_from_source("// comment A\nexport interface Foo { a: string }");
+    let b = indexed_from_source("// comment B (cosmetic edit)\nexport interface Foo { a: string }");
     let facts_a = facts_of(&a);
     let facts_b = facts_of(&b);
     let key = FactKey::Export {
@@ -191,27 +105,8 @@ fn adding_member_adds_new_presence_keeps_existing_unchanged() {
     // R28: `MemberPresence(Foo, "a")` MUST be invariant under adding
     // sibling `b`. `MemberShape` MUST change (whole-surface
     // observation); existing per-member presence MUST NOT.
-    let only_a = build_indexed(
-        vec![build_type_decl(
-            "Foo",
-            vec![("a", prim(PrimitiveName::String))],
-        )],
-        vec![],
-        vec![("Foo", export_local("Foo"))],
-        "interface Foo { a: string }",
-    );
-    let a_and_b = build_indexed(
-        vec![build_type_decl(
-            "Foo",
-            vec![
-                ("a", prim(PrimitiveName::String)),
-                ("b", prim(PrimitiveName::Number)),
-            ],
-        )],
-        vec![],
-        vec![("Foo", export_local("Foo"))],
-        "interface Foo { a: string; b: number }",
-    );
+    let only_a = indexed_from_source("export interface Foo { a: string }");
+    let a_and_b = indexed_from_source("export interface Foo { a: string; b: number }");
     let reg_a = registry_of(&only_a);
     let reg_ab = registry_of(&a_and_b);
 
@@ -261,22 +156,8 @@ fn adding_member_adds_new_presence_keeps_existing_unchanged() {
 
 #[test]
 fn adding_export_bumps_syntactic_export_set_and_adds_export_fact() {
-    let one_export = build_indexed(
-        vec![build_type_decl(
-            "Foo",
-            vec![("a", prim(PrimitiveName::String))],
-        )],
-        vec![],
-        vec![("Foo", export_local("Foo"))],
-        "export interface Foo { a: string }",
-    );
-    let two_exports = build_indexed(
-        vec![
-            build_type_decl("Foo", vec![("a", prim(PrimitiveName::String))]),
-            build_type_decl("Bar", vec![("b", prim(PrimitiveName::Number))]),
-        ],
-        vec![],
-        vec![("Foo", export_local("Foo")), ("Bar", export_local("Bar"))],
+    let one_export = indexed_from_source("export interface Foo { a: string }");
+    let two_exports = indexed_from_source(
         "export interface Foo { a: string }\nexport interface Bar { b: number }",
     );
     let facts_one = facts_of(&one_export);
@@ -317,15 +198,7 @@ fn type_and_value_namespace_keys_coexist_for_same_name() {
     // approximate this with `type Foo` + `const Foo` — distinct
     // declarations sharing the name. The emitter MUST produce two
     // facts under different SymbolSpace keys.
-    let indexed = build_indexed(
-        vec![build_type_decl(
-            "Foo",
-            vec![("a", prim(PrimitiveName::String))],
-        )],
-        vec![("Foo", ValueDeclKind::Const)],
-        vec![("Foo", export_local("Foo"))],
-        "export type Foo = { a: string }\nexport const Foo = 1",
-    );
+    let indexed = indexed_from_source("export type Foo = { a: string }\nexport const Foo = 1");
     let facts = facts_of(&indexed);
 
     let type_key = FactKey::Export {
@@ -356,33 +229,15 @@ fn decl_reorder_does_not_change_emitted_fact_set() {
     // type symbols and value symbols by name before emission, so
     // the same file rewritten with decls in reverse declaration
     // order produces a byte-identical fact set.
-    let in_order = build_indexed(
-        vec![
-            build_type_decl("Alpha", vec![("a", prim(PrimitiveName::String))]),
-            build_type_decl("Bravo", vec![("b", prim(PrimitiveName::Number))]),
-            build_type_decl("Charlie", vec![("c", prim(PrimitiveName::Boolean))]),
-        ],
-        vec![],
-        vec![
-            ("Alpha", export_local("Alpha")),
-            ("Bravo", export_local("Bravo")),
-            ("Charlie", export_local("Charlie")),
-        ],
-        "alpha bravo charlie",
+    let in_order = indexed_from_source(
+        "export interface Alpha { a: string }\n\
+         export interface Bravo { b: number }\n\
+         export interface Charlie { c: boolean }\n",
     );
-    let reversed = build_indexed(
-        vec![
-            build_type_decl("Charlie", vec![("c", prim(PrimitiveName::Boolean))]),
-            build_type_decl("Bravo", vec![("b", prim(PrimitiveName::Number))]),
-            build_type_decl("Alpha", vec![("a", prim(PrimitiveName::String))]),
-        ],
-        vec![],
-        vec![
-            ("Charlie", export_local("Charlie")),
-            ("Bravo", export_local("Bravo")),
-            ("Alpha", export_local("Alpha")),
-        ],
-        "alpha bravo charlie",
+    let reversed = indexed_from_source(
+        "export interface Charlie { c: boolean }\n\
+         export interface Bravo { b: number }\n\
+         export interface Alpha { a: string }\n",
     );
     let reg_a = registry_of(&in_order);
     let reg_b = registry_of(&reversed);
@@ -412,24 +267,10 @@ fn removing_export_drops_export_fact_key() {
     // None). This is the cache-invalidation semantics — the
     // consumer's signature includes the export key; the post-
     // removal registry returns None at that key; validation fails.
-    let with_bar = build_indexed(
-        vec![
-            build_type_decl("Foo", vec![("a", prim(PrimitiveName::String))]),
-            build_type_decl("Bar", vec![("b", prim(PrimitiveName::Number))]),
-        ],
-        vec![],
-        vec![("Foo", export_local("Foo")), ("Bar", export_local("Bar"))],
-        "",
+    let with_bar = indexed_from_source(
+        "export interface Foo { a: string }\nexport interface Bar { b: number }",
     );
-    let without_bar = build_indexed(
-        vec![build_type_decl(
-            "Foo",
-            vec![("a", prim(PrimitiveName::String))],
-        )],
-        vec![],
-        vec![("Foo", export_local("Foo"))],
-        "",
-    );
+    let without_bar = indexed_from_source("export interface Foo { a: string }");
     let facts_with = facts_of(&with_bar);
     let facts_without = facts_of(&without_bar);
     let bar_key = FactKey::Export {
@@ -472,38 +313,8 @@ fn cosmetic_edit_comment_fixture_declares_documented_shape() {
 
 // ── enum member values fold into the value-body fingerprint ──
 
-/// Build a synthetic `IndexedReady` for a single exported `enum Color`,
-/// seeding the value symbol with the given (member name, value-literal) pairs
-/// as FOLDED members so the value-body fact fold (`value_body_for_hash`)
-/// observes them.
-fn build_indexed_enum(members: Vec<(&str, TypeExpr)>, raw_source: &str) -> Arc<IndexedReady> {
-    let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
-    env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
-        name: "Color".to_string(),
-        declaration_id: 0,
-        kind: ValueDeclKind::Enum,
-        type_annotation: None,
-        signatures: Vec::new(),
-        object_shape: None,
-        enum_members: Some(
-            members
-                .into_iter()
-                .map(|(name, ty)| (name.to_string(), EnumMemberValue::Folded(ty)))
-                .collect(),
-        ),
-    });
-    let mut exports_map: FxHashMap<String, ExportTarget> = FxHashMap::default();
-    exports_map.insert("Color".to_string(), export_local("Color"));
-    let mut shallow = ShallowFileState::from_analysis([0u8; 16], empty_external(), Some(&env));
-    shallow.exports = exports_map;
-    Arc::new(IndexedReady::new_for_test_with_state(
-        [0u8; 16],
-        Arc::new(shallow),
-        Arc::from(raw_source),
-        Arc::from(""),
-        empty_external(),
-    ))
-}
+// (enum fixtures below author the `export enum Color { ... }` source
+// directly — the real binder folds the member values.)
 
 #[test]
 fn enum_member_edit_moves_value_body_fingerprint() {
@@ -513,7 +324,6 @@ fn enum_member_edit_moves_value_body_fingerprint() {
     // hash — a constant body would leave a warm `typeof Color` / `Color.Red`
     // consumer serving STALE after an edit. It MUST discriminate every foldable
     // member edit.
-    let num = TypeExpr::number_literal;
     let key = FactKey::Export {
         name: InternedName::from("Color"),
         space: SymbolSpace::Value,
@@ -525,14 +335,11 @@ fn enum_member_edit_moves_value_body_fingerprint() {
             .semantic_hash
     };
 
-    let red0 = build_indexed_enum(vec![("Red", num(0.0))], "enum Color { Red = 0 }");
-    let red0_again = build_indexed_enum(vec![("Red", num(0.0))], "enum Color { Red = 0 }");
-    let red1 = build_indexed_enum(vec![("Red", num(1.0))], "enum Color { Red = 1 }");
-    let crimson0 = build_indexed_enum(vec![("Crimson", num(0.0))], "enum Color { Crimson = 0 }");
-    let red_green = build_indexed_enum(
-        vec![("Red", num(0.0)), ("Green", num(1.0))],
-        "enum Color { Red, Green }",
-    );
+    let red0 = indexed_from_source("export enum Color { Red = 0 }");
+    let red0_again = indexed_from_source("export enum Color { Red = 0 }");
+    let red1 = indexed_from_source("export enum Color { Red = 1 }");
+    let crimson0 = indexed_from_source("export enum Color { Crimson = 0 }");
+    let red_green = indexed_from_source("export enum Color { Red, Green }");
 
     // Identical enums → identical fingerprint (no spurious churn).
     assert_eq!(

@@ -37,12 +37,15 @@ use super::{
 /// computed from the LIVE post-mutation state while its payload was
 /// computed FROM the superseded artifact, an entry the read-side fact
 /// rail cannot reject. The flag flows by VALUE, so the gate works with
-/// or without an installed `RequestContext` (the request-sticky
-/// `mark_request_materialization_cache_suppress` channel additionally
-/// carries the same fences to the component-meta admission gates, but is
-/// a silent no-op without a context and is request-coarse by design —
-/// see `request_context::observe_component_meta_read_suppress` for why
-/// shared-cache gates must not key on it).
+/// or without an installed `RequestContext`. A fenced serve ALSO fans the
+/// generalized non-cacheability rail (`note_non_cacheable_read_fan_out`)
+/// onto every active fact tracer, so enclosing traced cold computes (the
+/// semantic-memo build, the component-meta admission gate) refuse warm
+/// admission independently. The request-sticky `mark_request_result_partial`
+/// channel is partiality-ONLY and no longer carries fences — see
+/// `request_context::observe_component_meta_read_suppress` for why
+/// shared-cache gates must key on the fact-tracer / `cache_suppress`
+/// channel, never the request-coarse partial sticky.
 #[derive(Clone)]
 pub(crate) struct IndexedReadyServe {
     pub(crate) indexed: Arc<crate::project_type_store::IndexedReady>,
@@ -369,10 +372,13 @@ impl VerterHost {
         if last_unpublished.is_some() {
             // Sustained-churn bounded fallback (FOLLOWER adoption): the
             // adopted bundle is fenced-derived and this thread never saw
-            // the original fenced serve — carry the ReturnOnly status
-            // onto this request's suppression rails by hand.
-            crate::request_context::mark_request_materialization_cache_suppress();
-            crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+            // the original fenced serve — carry the non-cacheability by
+            // hand onto every enclosing traced compute's suppress rail. A
+            // fenced-but-VALID serve is Complete, NOT partial: it refuses
+            // shared-cache admission only, never marks request partiality.
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+            );
         }
         last_unpublished.map(std::sync::Arc::new)
     }
@@ -1096,7 +1102,7 @@ impl VerterHost {
         // view — so the read-side fact rail cannot reject the entry and
         // the admission gate is the only correct refusal point. The gate
         // keys on the VALUE-flowed `store_published` flag, not the
-        // request-sticky `current_materialization_cache_suppress` channel:
+        // request-sticky `current_request_result_is_partial` channel:
         // the value flag needs no installed `RequestContext` (the suppress
         // mark is a silent no-op without one) and stays per-serve-precise,
         // whereas the request flag is sticky-coarse (an unrelated earlier
@@ -1564,7 +1570,7 @@ impl VerterHost {
     pub(crate) fn external_type_analysis(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>>
+    ) -> Option<Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>>
     {
         component_meta_trace_custom!(
             "external_type_analysis",
@@ -1621,7 +1627,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<Arc<verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>>
+    ) -> Option<Arc<verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource>>
     {
         component_meta_trace_custom!(
             "external_type_analysis_with_view",
@@ -1794,7 +1800,7 @@ impl VerterHost {
         whole_hash: Hash16,
         snapshot: &crate::types::FileAnalysisSnapshot,
         external_type_analysis: &Arc<
-            verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
+            verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
         >,
         decl_bodies: &Arc<crate::decl_body_memo::DeclBodyMemo>,
         eval_source: Option<&str>,
@@ -2294,6 +2300,40 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<IndexedReadyServe> {
+        let serve = self.ensure_indexed_ready_serve_uninstrumented(canonical_id);
+        // Test-only deterministic fenced-serve override: convert a would-be
+        // PUBLISHED serve into a FENCED one (fire the non-cacheability fan-out +
+        // `store_published = false`) WITHOUT a `project_generation` bump, so a
+        // consumer's `GenerationSuperseded` admission gate cannot mask the
+        // fenced-serve refusal. The served `indexed` is preserved so the value
+        // still resolves (ReturnOnly). Already-fenced serves are unchanged.
+        #[cfg(test)]
+        if self
+            .test_force
+            .force_indexed_ready_serve_fence_for_tests
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Some(serve) = serve {
+                if serve.store_published {
+                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                        crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                    );
+                    return Some(IndexedReadyServe {
+                        indexed: serve.indexed,
+                        store_published: false,
+                    });
+                }
+                return Some(serve);
+            }
+            return None;
+        }
+        serve
+    }
+
+    fn ensure_indexed_ready_serve_uninstrumented(
+        &self,
+        canonical_id: &str,
+    ) -> Option<IndexedReadyServe> {
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
 
@@ -2473,7 +2513,7 @@ impl VerterHost {
             struct ColdIndexProducts {
                 header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
                 analysis:
-                    verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
+                    verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource,
                 snapshot: Option<crate::types::FileAnalysisSnapshot>,
             }
 
@@ -2517,7 +2557,7 @@ impl VerterHost {
                                     body,
                                     parsed.source_str(),
                                 ),
-                                verter_compiler::utils::oxc::script::type_surface::analyze_external_type_program_headers(body),
+                                verter_parser::utils::oxc::script::type_surface::analyze_external_type_program_headers(body),
                             )
                         }
                         // Fatal parse: empty index, default analysis — no
@@ -2897,20 +2937,23 @@ impl VerterHost {
                 // (the request pre-dates the mutation, and the leader's
                 // recorded facts match the data it computed FROM — the
                 // read-side fact rail is the stated authority), but mark
-                // admission suppression anyway as cheap defense-in-depth:
-                // an enclosing cold compute that folds this ReturnOnly
-                // artifact into a broader result must not warm shared
-                // caches with it (symmetric with the follower fallback
-                // below). The ReturnOnly status ALSO flows by value
-                // (`store_published == false`) so value-derived shared
-                // admissions (the prepared-decl bundle gate) decline even
-                // without an installed `RequestContext`.
-                crate::request_context::mark_request_materialization_cache_suppress();
+                // cache non-admission anyway as cheap defense-in-depth: an
+                // enclosing cold compute that folds this ReturnOnly artifact
+                // into a broader result must not warm shared caches with it
+                // (symmetric with the follower fallback below). This is a
+                // VALID (Complete) fenced serve — the non-cacheability rail
+                // only, NEVER request partiality. The ReturnOnly status ALSO
+                // flows by value (`store_published == false`) so
+                // value-derived shared admissions (the prepared-decl bundle
+                // gate) decline even without an installed `RequestContext`.
+                //
                 // Chokepoint: flag every enclosing traced cold compute
                 // (semantic-memo builds, the owner-import-surface and
                 // component-meta proof producers) so their admission
                 // gates refuse the fenced-derived result by value.
-                crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                    crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                );
                 return Some(IndexedReadyServe {
                     indexed: outcome.indexed,
                     store_published: false,
@@ -2930,110 +2973,22 @@ impl VerterHost {
             // facts while having computed FROM the superseded data, an
             // entry the read-side fact rail cannot catch (the recorded
             // facts genuinely match the live view). Carry the ReturnOnly
-            // status to the admission gates through the established
-            // suppression channel (the request-sticky flag plus the
-            // per-cold-compute completeness scope) AND by value
-            // (`store_published == false`).
-            crate::request_context::mark_request_materialization_cache_suppress();
+            // status to the admission gates through the non-cacheability
+            // fan-out (every enclosing traced cold compute) AND by value
+            // (`store_published == false`). A fenced-but-VALID serve is
+            // Complete, NOT partial — the non-cacheability rail only, never
+            // request partiality.
+            //
             // Chokepoint: flag every enclosing traced cold compute —
             // same rail as the fenced-leader arm above.
-            crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+            );
         }
         last_fenced.map(|indexed| IndexedReadyServe {
             indexed,
             store_published: false,
         })
-    }
-
-    /// Base wrapper that fixes `view = None`. Test-only — production paths
-    /// reach the view-aware variant directly.
-    #[cfg(test)]
-    pub(crate) fn resolve_external_type_from_indexed_ready(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        imported_companions: &rustc_hash::FxHashMap<
-            String,
-            verter_compiler::utils::oxc::script::type_surface::ResolvedElements,
-        >,
-    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
-        self.resolve_external_type_from_indexed_ready_with_view(
-            dep_canonical,
-            type_name,
-            imported_companions,
-            None,
-        )
-    }
-
-    /// View-aware variant of resolve_external_type_from_indexed_ready.
-    ///
-    /// Reads the dependency's parse artifacts through the session view when
-    /// `view` carries an overlay candidate; this is the path that lets a
-    /// session-bearing component-meta cold compute see overlay-rooted
-    /// resolved elements.
-    pub(crate) fn resolve_external_type_from_indexed_ready_with_view(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        imported_companions: &rustc_hash::FxHashMap<
-            String,
-            verter_compiler::utils::oxc::script::type_surface::ResolvedElements,
-        >,
-        view: Option<&dyn crate::session_view::SessionView>,
-    ) -> Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements> {
-        component_meta_trace_custom!(
-            "resolve_external_type_from_indexed_ready",
-            format!(
-                "owner={} type={} store_view={}",
-                dep_canonical, type_name, false
-            ),
-        );
-        let inputs = self.external_type_resolution_inputs_with_view(dep_canonical, view)?;
-        let normalized_canonical_id = self.normalized_analysis_canonical(dep_canonical);
-        let canonical_id_for_source_type = normalized_canonical_id.as_ref();
-        let source_type = self.imported_eval_source_type_for(
-            canonical_id_for_source_type,
-            inputs.framework_parse.as_deref(),
-        );
-        let Some(type_context) = self.build_type_resolution_context(
-            canonical_id_for_source_type,
-            inputs.whole_hash,
-            &inputs.eval_source,
-            source_type,
-        ) else {
-            component_meta_trace_custom!(
-                "resolve_external_type_from_indexed_ready_result",
-                format!(
-                    "owner={} type={} hit=false local_symbol_target={} parse_failed_or_missing_type_context=true",
-                    dep_canonical,
-                    type_name,
-                    inputs.analysis.has_local_symbol_target(type_name),
-                ),
-            );
-            return None;
-        };
-        let program = type_context.borrow_owner().borrow_dependent();
-        let base_ctx = type_context.borrow_dependent();
-        let resolved = verter_compiler::utils::oxc::script::type_surface::resolve_external_type_in_context_with_analyzed_symbol_companion_and_canonical(
-            type_name,
-            program,
-            type_context.borrow_owner().source_bytes(),
-            base_ctx,
-            inputs.analysis.as_ref(),
-            imported_companions,
-            dep_canonical,
-        );
-        component_meta_trace_custom!(
-            "resolve_external_type_from_indexed_ready_result",
-            format!(
-                "owner={} type={} hit={} local_symbol_target={} parse_failed=false",
-                dep_canonical,
-                type_name,
-                resolved.is_some(),
-                inputs.analysis.has_local_symbol_target(type_name),
-            ),
-        );
-        resolved
     }
 
     pub(crate) fn resolve_direct_type_reexport_target(
@@ -3543,7 +3498,7 @@ impl VerterHost {
                 unrooted_route_walk,
             )
         };
-        let (cold_output, finalise, fenced_serve_observed) =
+        let (cold_output, finalise, non_cacheable_read_observed) =
             crate::fact_signature_helpers::install_fact_tracer(self, cold_body);
         self.provenance
             .owner_import_surface_fact_tracer_installs
@@ -3596,7 +3551,7 @@ impl VerterHost {
         // validate against the live view, an entry the read-side fact
         // rail cannot reject; the next request cold-recomputes against
         // the live workspace.
-        if fenced_serve_observed || unrooted_route_walk {
+        if non_cacheable_read_observed || unrooted_route_walk {
             self.provenance
                 .owner_import_surface_fenced_serve_refusals
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3649,12 +3604,14 @@ impl VerterHost {
                     // missing target appears — so a value folding this
                     // surface (e.g. "this binding is not an imported
                     // root") would publish warm with no read-side rail to
-                    // reject it. Mark the request-sticky and
-                    // per-cold-compute suppression rails by hand, exactly
-                    // as the unrootable-wildcard route exit does for the
-                    // route-walk shape of the same hole.
-                    crate::request_context::mark_request_materialization_cache_suppress();
-                    crate::resolver_core::resolver_context::note_fenced_serve_fan_out();
+                    // reject it. Mark the non-cacheability rail by hand,
+                    // exactly as the unrootable-wildcard route exit does for
+                    // the route-walk shape of the same hole. This is a VALID
+                    // (Complete) unrootable surface, NOT a partial result —
+                    // cache non-admission only, never request partiality.
+                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                        crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                    );
                     let surface = crate::owner_import_surface::build_owner_import_surface(
                         Arc::from(owner_canonical),
                         whole_hash,

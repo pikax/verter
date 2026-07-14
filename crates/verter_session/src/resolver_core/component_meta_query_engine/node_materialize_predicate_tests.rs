@@ -205,7 +205,12 @@ fn node_reduction_context_mirrors_type_expr_reduction_context_on_raised_value() 
         };
         assert_eq!(
             node_materialize_reduction_context(ctx, node, ProjectionMode::Navigate),
-            type_expr_materialize_reduction_context(&raised, ProjectionMode::Navigate),
+            type_expr_materialize_reduction_context(
+                ctx,
+                "/p.ts",
+                &raised,
+                ProjectionMode::Navigate
+            ),
             "node reduction context must mirror the TypeExpr reduction context on the raised \
              value for {expr:?} (raised={raised:?})",
         );
@@ -485,7 +490,12 @@ fn raised_root_mirrors_match_type_expr_predicate_on_collapsed_intersection_roots
         );
         assert_eq!(
             node_materialize_reduction_context(ctx, node, ProjectionMode::Navigate),
-            type_expr_materialize_reduction_context(&raised, ProjectionMode::Navigate),
+            type_expr_materialize_reduction_context(
+                ctx,
+                "/p.ts",
+                &raised,
+                ProjectionMode::Navigate
+            ),
             "node reduction context (published-operator mirror) must mirror the TypeExpr context \
              for {raised:?}",
         );
@@ -1053,7 +1063,12 @@ fn node_reduction_context_walks_deep_alias_chain_without_depth_cutoff() {
 
     assert_eq!(
         node_materialize_reduction_context(ctx, deep_indexed_node, ProjectionMode::Navigate),
-        type_expr_materialize_reduction_context(&deep_indexed_expr, ProjectionMode::Navigate),
+        type_expr_materialize_reduction_context(
+            ctx,
+            "/p.ts",
+            &deep_indexed_expr,
+            ProjectionMode::Navigate
+        ),
         "node reduction context must EQUAL the uncapped TypeExpr reduction context on a >32-deep \
          alias chain (a reinstated MAX_DEPTH=32 flips Published(Navigate) to StructuralTransit)",
     );
@@ -1063,5 +1078,116 @@ fn node_reduction_context_walks_deep_alias_chain_without_depth_cutoff() {
         node_materialize_reduction_context(ctx, deep_indexed_node, ProjectionMode::Navigate),
         ProjectionReductionContext::published(ProjectionMode::Navigate),
         "the deep alias chain root IS a published operator ⇒ Published(Navigate)",
+    );
+}
+
+/// The Navigate reduction-context MAPPED carrier decision branches on TYPED
+/// node-domain state — the shape-engine fold's
+/// `RaisedRootKind::Mapped { value_is_semantic_miss }` root class, derived
+/// from `QueryError::Miss` through the shared sentinel authority — never on
+/// the raised sentinel STRING:
+///
+/// - a builtin broad-modifier carrier (a mapped whose VALUE position is the
+///   miss carrier) stays a carrier-stop ⇒ `StructuralTransit(Navigate)`, both
+///   for the `TypeExpr`-start entry (whose value position re-enters as the
+///   raised `Unknown { raw: "semanticMiss" }` leaf, classified once at the
+///   node-domain boundary) AND for a directly-interned mapped node whose
+///   mapper value is the TYPED `Opaque(QueryError::Miss)` — no sentinel
+///   string exists anywhere on that second decision path;
+/// - an author-visible mapped value (`string`) publishes ⇒
+///   `Published(Navigate)` at the `TypeExpr`-start entry.
+#[test]
+fn mapped_miss_carrier_reduction_context_decides_on_typed_node_state() {
+    use crate::meta_resolve::materialize::{
+        node_materialize_reduction_context, type_expr_materialize_reduction_context,
+    };
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, MapperKey, MapperKind, OptionalityMod, ProjectionReductionContext,
+        QueryError, ReadonlyMod, SemanticNodeData,
+    };
+    use verter_type_expr::MappedModifier;
+
+    let project = open_host();
+    let session = project.open_session_batch().unwrap();
+    let _ = session.evaluate_types("/p.ts").unwrap();
+    let host = session.host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let graph = ctx.project_type_store().semantic_graph();
+
+    let mapped_with_value = |value: TypeExpr| TypeExpr::Mapped {
+        parameter: "K".to_string(),
+        source: StdArc::new(one_prop_object("a")),
+        value: StdArc::new(value),
+        optional: MappedModifier::None,
+        readonly: MappedModifier::None,
+        name_type: None,
+    };
+
+    // TypeExpr-start entry: the value position of a broad-modifier carrier
+    // re-enters as the raised miss leaf ⇒ carrier-stop at Navigate depth.
+    assert_eq!(
+        type_expr_materialize_reduction_context(
+            ctx,
+            "/p.ts",
+            &mapped_with_value(TypeExpr::Unknown {
+                raw: "semanticMiss".to_string(),
+            }),
+            ProjectionMode::Navigate,
+        ),
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        "a mapped carrier whose value is the miss carrier must carrier-stop at Navigate depth",
+    );
+    // An author-visible mapped value publishes.
+    assert_eq!(
+        type_expr_materialize_reduction_context(
+            ctx,
+            "/p.ts",
+            &mapped_with_value(TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
+            ProjectionMode::Navigate,
+        ),
+        ProjectionReductionContext::published(ProjectionMode::Navigate),
+        "an author-visible mapped value must publish at Navigate depth",
+    );
+
+    // Node entry, TYPED origin: the mapper value is `Opaque(QueryError::Miss)` —
+    // the decision derives from the typed error variant, and no sentinel string
+    // exists anywhere on this path.
+    let source = dispatch
+        .lower_type_expr_in_scope_with_mode(
+            "/p.ts",
+            &one_prop_object("a"),
+            ProjectionMode::Navigate,
+        )
+        .expect("object lowers");
+    let param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity {
+            canonical_id: StdArc::from("/p.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: StdArc::from("<mapper-param>"),
+        },
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: StdArc::from("K"),
+    });
+    let miss_value = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let mapped_miss_node = graph.intern_node(SemanticNodeData::Mapped {
+        source,
+        mapper: MapperKey {
+            parameter_node: param,
+            key_space: source,
+            value_expr: miss_value,
+            optionality: OptionalityMod::Keep,
+            readonly: ReadonlyMod::Keep,
+            name_remap: None,
+            kind: MapperKind::classify_value_expr(graph.as_ref(), miss_value, source, param),
+        },
+    });
+    assert_eq!(
+        node_materialize_reduction_context(ctx, mapped_miss_node, ProjectionMode::Navigate),
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        "a mapped node whose mapper value is the TYPED Opaque(QueryError::Miss) carrier must \
+         carrier-stop — the decision derives from the typed error, not a raised string",
     );
 }

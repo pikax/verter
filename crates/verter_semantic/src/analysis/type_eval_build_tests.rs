@@ -1,8 +1,8 @@
 use super::type_eval::*;
-use super::type_eval_build::parse_and_build_env;
+use super::type_eval_build::{parse_and_build_env, parse_and_lower_parts};
 use crate::analysis::type_eval_build::{
-    expand_macro_types_impl_with_expander, FieldExpansionContext, FieldKind, MacroExpansionScope,
-    PathSegment,
+    expand_macro_types_impl_with_expander, FieldExpansionContext, FieldKind, LoweredFileParts,
+    MacroExpansionScope, PathSegment,
 };
 use crate::analysis::type_expand::{ExpandedNormalizedExpr, ExpansionResult};
 use crate::analysis::types::{
@@ -10,7 +10,23 @@ use crate::analysis::types::{
     AnalyzedSlotFieldBinding, TypeResolutionSource,
 };
 use std::sync::Arc;
+use verter_type_expr::facts::{
+    ClosedTypeFact, EnumPrimitiveDomain, EnumScalar, LeafTypeFact, SemanticTypeSource,
+    ValueAnnotationClass,
+};
+use verter_type_expr::locators::{
+    AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeParamBoundPosition,
+};
 use verter_type_expr::*;
+
+/// The fixture canonical `parse_and_build_env` anchors minted locators at.
+const FIXTURE_CANONICAL: &str = "inline:parse-and-build-env";
+
+/// The TRANSIENT lowered typed-IR view of `source` — the pre-fact-minting
+/// parts the producer derives the stored facts/locators from.
+fn lowered(source: &str) -> LoweredFileParts {
+    parse_and_lower_parts(source)
+}
 
 // =============================================================================
 // Type alias extraction
@@ -18,17 +34,31 @@ use verter_type_expr::*;
 
 #[test]
 fn extracts_type_alias() {
-    let env = parse_and_build_env("type Color = \"red\" | \"blue\" | \"green\"");
+    let source = "type Color = \"red\" | \"blue\" | \"green\"";
+    let env = parse_and_build_env(source);
     assert!(env.type_symbols.contains_key("Color"));
     let decl = env.type_symbols["Color"].primary();
     assert_eq!(decl.kind, TypeDeclKind::Alias);
-    assert!(decl.type_parameters.is_empty());
-    match &decl.body {
+    assert!(decl.type_parameters.params.is_empty());
+
+    // STORED form: the content-free whole-body slot of the authored decl —
+    // anchored at the fixture canonical + declared symbol, type space, empty
+    // path. A producer that fabricated a different anchor or a sub-path would
+    // fail these equalities.
+    assert_eq!(&*decl.body.anchor.canonical_id, FIXTURE_CANONICAL);
+    assert_eq!(&*decl.body.anchor.symbol, "Color");
+    assert_eq!(decl.body.anchor.space, LocatorSymbolSpace::Type);
+    assert!(decl.body.path.is_empty(), "whole-body slot has no sub-path");
+
+    // TRANSIENT lowering (what the minting consumed): the union body.
+    let parts = lowered(source);
+    let body = &parts.type_decl("Color").expect("lowered Color").body;
+    match body {
         TypeExpr::Union(types) => {
             assert_eq!(types.len(), 3);
             assert!(types.contains(&TypeExpr::string_literal("red")));
         }
-        _ => panic!("expected union, got {:?}", decl.body),
+        _ => panic!("expected union, got {body:?}"),
     }
 }
 
@@ -36,8 +66,51 @@ fn extracts_type_alias() {
 fn extracts_generic_type_alias() {
     let env = parse_and_build_env("type Box<T> = { value: T }");
     let decl = env.type_symbols["Box"].primary();
-    assert_eq!(decl.type_parameters.len(), 1);
-    assert_eq!(decl.type_parameters[0].name, "T");
+    assert_eq!(decl.type_parameters.params.len(), 1);
+    assert_eq!(decl.type_parameters.params[0].name, "T");
+    assert_eq!(decl.type_parameters.params[0].ordinal, 0);
+    // No authored bound ⇒ no bound locator (never a fabricated slot).
+    assert!(decl.type_parameters.params[0].constraint.is_none());
+    assert!(decl.type_parameters.params[0].default.is_none());
+}
+
+#[test]
+fn decl_header_type_param_bounds_mint_type_param_bound_slots() {
+    // A decl-header type parameter's AUTHORED constraint / default bound
+    // positions mint `[TypeParamBound { ordinal, position }]` slots rooted at
+    // the declaration's own anchor; an unauthored bound mints NONE. A producer
+    // that swapped positions, dropped ordinals, or fabricated slots for absent
+    // bounds fails below.
+    let env = parse_and_build_env("type Box<T extends Item = DefaultItem, U> = { value: T }");
+    let params = &env.type_symbols["Box"].primary().type_parameters.params;
+    assert_eq!(params.len(), 2);
+
+    let t = &params[0];
+    assert_eq!(t.name, "T");
+    let constraint = t.constraint.as_ref().expect("T has an authored constraint");
+    assert_eq!(&*constraint.anchor.symbol, "Box");
+    assert_eq!(constraint.anchor.space, LocatorSymbolSpace::Type);
+    assert_eq!(
+        &*constraint.path,
+        &[TypeBodyPathStep::TypeParamBound {
+            ordinal: 0,
+            position: TypeParamBoundPosition::Constraint,
+        }],
+    );
+    let default = t.default.as_ref().expect("T has an authored default");
+    assert_eq!(
+        &*default.path,
+        &[TypeBodyPathStep::TypeParamBound {
+            ordinal: 0,
+            position: TypeParamBoundPosition::Default,
+        }],
+    );
+
+    let u = &params[1];
+    assert_eq!(u.name, "U");
+    assert_eq!(u.ordinal, 1);
+    assert!(u.constraint.is_none(), "U authored no constraint");
+    assert!(u.default.is_none(), "U authored no default");
 }
 
 #[test]
@@ -118,15 +191,29 @@ fn parse_and_build_env_assigns_stable_value_declaration_ids_for_unchanged_source
 
 #[test]
 fn extracts_interface() {
-    let env = parse_and_build_env("interface User { id: number; name: string; email?: string }");
+    let source = "interface User { id: number; name: string; email?: string }";
+    let env = parse_and_build_env(source);
     assert!(env.type_symbols.contains_key("User"));
     let decl = env.type_symbols["User"].primary();
     assert_eq!(decl.kind, TypeDeclKind::Interface);
 
-    match &decl.body {
+    // STORED facts: the direct member-header inventory carries every member's
+    // header flags (the `email` optionality survives narrowing).
+    let headers = &decl.direct_member_headers;
+    assert_eq!(headers.len(), 3);
+    let email = headers
+        .iter()
+        .find(|h| h.name == "email")
+        .expect("email header fact");
+    assert!(email.optional);
+    assert!(!email.is_method);
+
+    // TRANSIENT lowering: the object body the header facts derive from.
+    let parts = lowered(source);
+    let body = &parts.type_decl("User").expect("lowered User").body;
+    match body {
         TypeExpr::Object(obj) => {
             assert_eq!(obj.properties.len(), 3);
-            // Check optional property
             let email = obj.properties.iter().find_map(|m| match m {
                 ObjectMember::Property(p) if p.name == "email" => Some(p),
                 _ => None,
@@ -134,28 +221,27 @@ fn extracts_interface() {
             assert!(email.is_some());
             assert!(email.unwrap().optional);
         }
-        _ => panic!("expected object, got {:?}", decl.body),
+        _ => panic!("expected object, got {body:?}"),
     }
 }
 
 #[test]
 fn extracts_interface_with_extends() {
-    let env = parse_and_build_env(
+    let parts = lowered(
         r#"
         interface Base { id: number }
         interface User extends Base { name: string }
         "#,
     );
-    assert!(env.type_symbols.contains_key("Base"));
-    assert!(env.type_symbols.contains_key("User"));
+    assert!(parts.type_decl("Base").is_some());
 
-    let user = env.type_symbols["User"].primary();
+    let user = parts.type_decl("User").expect("lowered User");
     // Should be intersection of Base & { name: string }
     match &user.body {
-        TypeExpr::Intersection(parts) => {
-            assert_eq!(parts.len(), 2);
-            assert_eq!(parts[0], TypeExpr::named("Base"));
-            assert!(matches!(&parts[1], TypeExpr::Object(_)));
+        TypeExpr::Intersection(intersection_parts) => {
+            assert_eq!(intersection_parts.len(), 2);
+            assert_eq!(intersection_parts[0], TypeExpr::named("Base"));
+            assert!(matches!(&intersection_parts[1], TypeExpr::Object(_)));
         }
         _ => panic!("expected intersection, got {:?}", user.body),
     }
@@ -163,9 +249,9 @@ fn extracts_interface_with_extends() {
 
 #[test]
 fn extracts_interface_with_methods() {
-    let env =
-        parse_and_build_env("interface Logger { log(msg: string): void; warn(msg: string): void }");
-    let decl = env.type_symbols["Logger"].primary();
+    let source = "interface Logger { log(msg: string): void; warn(msg: string): void }";
+    let parts = lowered(source);
+    let decl = parts.type_decl("Logger").expect("lowered Logger");
     match &decl.body {
         TypeExpr::Object(obj) => {
             assert_eq!(obj.properties.len(), 2);
@@ -175,10 +261,90 @@ fn extracts_interface_with_methods() {
         }
         _ => panic!("expected object, got {:?}", decl.body),
     }
+
+    // The stored header facts classify both members as METHODS.
+    let env = parse_and_build_env(source);
+    let headers = &env.type_symbols["Logger"].primary().direct_member_headers;
+    assert_eq!(headers.len(), 2);
+    assert!(headers.iter().all(|h| h.is_method));
 }
 
 // =============================================================================
-// Class member visibility (B4.5) — `extract_class` RECORDS non-public class
+// Merged-group body carrier: per-contributor slots
+// =============================================================================
+
+#[test]
+fn merged_interface_group_body_mints_per_contributor_slots() {
+    // Two same-name interfaces fold to the `Merged` carrier whose
+    // per-contributor slots address each ordered contributor
+    // (`[MergedContributor { ordinal }]`); an alias-bearing group keeps the
+    // last-wins `Single` whole-body slot. A producer that collapsed the merged
+    // carrier to one slot (or minted wrong ordinals) fails here.
+    let env = parse_and_build_env(
+        "interface Config { a: string }\ninterface Config { b: number }\ntype Alias = string",
+    );
+    let merged = env.type_symbols["Config"].merged_body();
+    assert!(merged.is_merged());
+    let TypeDeclBody::Merged(body) = &merged else {
+        panic!("expected merged carrier");
+    };
+    assert_eq!(body.contributors.len(), 2);
+    assert_eq!(
+        body.kinds,
+        vec![TypeDeclKind::Interface, TypeDeclKind::Interface]
+    );
+    for (ordinal, slot) in body.contributors.iter().enumerate() {
+        assert_eq!(&*slot.anchor.symbol, "Config");
+        assert_eq!(
+            &*slot.path,
+            &[TypeBodyPathStep::MergedContributor {
+                ordinal: ordinal as u32
+            }],
+        );
+    }
+
+    // Single-contributor group: the whole-body slot, no contributor path.
+    let single = env.type_symbols["Alias"].merged_body();
+    assert!(!single.is_merged());
+    assert!(single.primary().path.is_empty());
+}
+
+#[test]
+fn merged_enum_group_body_mints_per_contributor_slots_under_dual_space_hint() {
+    // Same-name `enum` declarations merge in TypeScript, but the enum's
+    // type-space contributor registers as the structural `Alias` — invisible
+    // to the kind-based mergeable predicate. The dual-space caller (which
+    // derives the enum's projected-type union from the VALUE sibling) passes
+    // `is_enum = true` and gets EVERY contributor slot with the ordered
+    // `MergedContributor` path; the plain `merged_body()` read (no dual-space
+    // knowledge) stays last-wins `Single`.
+    let env = parse_and_build_env("enum E { A = 1, B = 2 }\nenum E { C = 3, D = 4 }\n");
+    let group = &env.type_symbols["E"];
+
+    let merged = group.merged_body_dual_space(true);
+    let TypeDeclBody::Merged(body) = &merged else {
+        panic!("dual-space enum group must fold to the Merged carrier, got {merged:?}");
+    };
+    assert_eq!(body.contributors.len(), 2);
+    assert_eq!(body.kinds, vec![TypeDeclKind::Alias, TypeDeclKind::Alias]);
+    for (ordinal, slot) in body.contributors.iter().enumerate() {
+        assert_eq!(&*slot.anchor.symbol, "E");
+        assert_eq!(
+            &*slot.path,
+            &[TypeBodyPathStep::MergedContributor {
+                ordinal: ordinal as u32
+            }],
+        );
+    }
+
+    // Without the dual-space hint the same group keeps last-wins Single —
+    // authored same-name aliases are a TS duplicate-identifier error, never
+    // a merge.
+    assert!(!group.merged_body().is_merged());
+}
+
+// =============================================================================
+// Class member visibility — the class lowering RECORDS non-public class
 // members with their declared accessibility on the shared IR surface, instead
 // of dropping them. Static members and the constructor are NOT surface
 // members. Interface members are always Public.
@@ -208,12 +374,11 @@ fn class_method<'a>(body: &'a TypeExpr, name: &str) -> Option<&'a MethodSignatur
 
 #[test]
 fn extract_class_records_non_public_members_with_visibility() {
-    // The producer-level discriminator: pre-change `extract_class` DROPS
-    // `b`/`c` (only `a` survives, all Public); post-change it RECORDS all three
+    // The producer-level discriminator: a lowering that DROPS `b`/`c` (only
+    // `a` surviving, all Public) fails; the class lowering RECORDS all three
     // instance members with their declared accessibility. Static members and
     // the constructor are excluded from the surface entirely.
-    let env = parse_and_build_env(
-        r#"
+    let source = r#"
         class C {
             public a: string = "";
             protected b: number = 0;
@@ -221,10 +386,9 @@ fn extract_class_records_non_public_members_with_visibility() {
             static s: string = "";
             constructor() {}
         }
-        "#,
-    );
-    let decl = env.type_symbols["C"].primary();
-    let body = &decl.body;
+        "#;
+    let parts = lowered(source);
+    let body = &parts.type_decl("C").expect("lowered C").body;
 
     let a = class_property(body, "a").expect("public field `a` must be recorded");
     assert_eq!(a.visibility, MemberVisibility::Public);
@@ -246,21 +410,35 @@ fn extract_class_records_non_public_members_with_visibility() {
             && class_method(body, "constructor").is_none(),
         "the constructor must not appear as a surface member"
     );
+
+    // The stored header FACTS carry the same visibility flags.
+    let env = parse_and_build_env(source);
+    let headers = &env.type_symbols["C"].primary().direct_member_headers;
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|h| h.name == name)
+            .unwrap_or_else(|| panic!("{name} header"))
+    };
+    assert_eq!(header("a").visibility, MemberVisibility::Public);
+    assert_eq!(header("b").visibility, MemberVisibility::Protected);
+    assert_eq!(header("c").visibility, MemberVisibility::Private);
+    assert!(!headers.iter().any(|h| h.name == "s"));
 }
 
 #[test]
 fn extract_class_default_accessibility_is_public() {
     // A field with no accessibility modifier is Public (mirrors
     // `None | Some(Public) => Public`).
-    let env = parse_and_build_env(r#"class C { a: string = ""; }"#);
-    let body = &env.type_symbols["C"].primary().body;
+    let parts = lowered(r#"class C { a: string = ""; }"#);
+    let body = &parts.type_decl("C").expect("lowered C").body;
     let a = class_property(body, "a").expect("field `a` must be recorded");
     assert_eq!(a.visibility, MemberVisibility::Public);
 }
 
 #[test]
 fn extract_class_records_non_public_methods_with_visibility() {
-    let env = parse_and_build_env(
+    let parts = lowered(
         r#"
         class C {
             public pub(): void {}
@@ -270,7 +448,7 @@ fn extract_class_records_non_public_methods_with_visibility() {
         }
         "#,
     );
-    let body = &env.type_symbols["C"].primary().body;
+    let body = &parts.type_decl("C").expect("lowered C").body;
 
     assert_eq!(
         class_method(body, "pub")
@@ -299,8 +477,8 @@ fn extract_class_records_non_public_methods_with_visibility() {
 #[test]
 fn extract_class_interface_members_stay_public() {
     // Interface members have no accessibility — always Public.
-    let env = parse_and_build_env("interface I { a: string; m(): void }");
-    let body = &env.type_symbols["I"].primary().body;
+    let parts = lowered("interface I { a: string; m(): void }");
+    let body = &parts.type_decl("I").expect("lowered I").body;
     assert_eq!(
         class_property(body, "a")
             .expect("interface field")
@@ -319,7 +497,7 @@ fn extract_class_interface_members_stay_public() {
 fn extract_class_with_heritage_records_non_public_own_members() {
     // `class C extends Base { protected own }` folds to `Base & { own }`; the
     // own-body Object arm records `own` with its accessibility.
-    let env = parse_and_build_env(
+    let parts = lowered(
         r#"
         class Base { x: number = 0; }
         class C extends Base {
@@ -328,12 +506,12 @@ fn extract_class_with_heritage_records_non_public_own_members() {
         }
         "#,
     );
-    let body = &env.type_symbols["C"].primary().body;
-    let TypeExpr::Intersection(parts) = body else {
+    let body = &parts.type_decl("C").expect("lowered C").body;
+    let TypeExpr::Intersection(intersection) = body else {
         panic!("expected intersection (heritage fold), got {body:?}");
     };
-    assert_eq!(parts[0], TypeExpr::named("Base"));
-    let own = &parts[1];
+    assert_eq!(intersection[0], TypeExpr::named("Base"));
+    let own = &intersection[1];
     assert_eq!(
         class_property(own, "a")
             .expect("public own field")
@@ -375,8 +553,7 @@ fn shape_method<'a>(shape: &'a ObjectExpr, name: &str) -> Option<&'a MethodSigna
 
 #[test]
 fn extract_class_folds_static_members_into_constructor_shape() {
-    let env = parse_and_build_env(
-        r#"
+    let source = r#"
         class C {
             a: string = "";
             static initial: string = "0";
@@ -385,9 +562,9 @@ fn extract_class_folds_static_members_into_constructor_shape() {
             private static secret: boolean = false;
             constructor(id: string) {}
         }
-        "#,
-    );
-    let value = env.value_symbols["C"].primary();
+        "#;
+    let parts = lowered(source);
+    let value = parts.value_decl("C").expect("lowered class value");
     let shape = value
         .object_shape
         .as_ref()
@@ -443,10 +620,46 @@ fn extract_class_folds_static_members_into_constructor_shape() {
     );
 
     // NEGATIVE: the instance surface still excludes statics.
-    let body = &env.type_symbols["C"].primary().body;
+    let body = &parts.type_decl("C").expect("lowered C").body;
     assert!(
         class_property(body, "initial").is_none() && class_method(body, "describe").is_none(),
         "static members must stay excluded from the instance surface"
+    );
+
+    // STORED form: the minted shape FACT mirrors the transient shape — the
+    // same member set (construct signature + the four statics) with member
+    // value locators addressing each member's own shape ordinal.
+    let env = parse_and_build_env(source);
+    let stored = env.value_symbols["C"]
+        .primary()
+        .object_shape
+        .as_ref()
+        .expect("stored constructor-shape fact");
+    assert_eq!(stored.members.len(), shape.properties.len());
+    assert!(matches!(
+        stored.members[0],
+        verter_type_expr::facts::ObjectMemberFact::ConstructSignature(_)
+    ));
+    let stored_initial = stored
+        .members
+        .iter()
+        .find_map(|m| match m {
+            verter_type_expr::facts::ObjectMemberFact::Property(p) if p.name == "initial" => {
+                Some(p)
+            }
+            _ => None,
+        })
+        .expect("stored `initial` member fact");
+    assert_eq!(stored_initial.visibility, MemberVisibility::Public);
+    assert_eq!(&*stored_initial.ty.anchor.symbol, "C");
+    assert_eq!(stored_initial.ty.anchor.space, LocatorSymbolSpace::Value);
+    assert_eq!(
+        &*stored_initial.ty.path,
+        &[
+            TypeBodyPathStep::Member { ordinal: 1 },
+            TypeBodyPathStep::MemberValue,
+        ],
+        "the member value locator addresses the member's own shape ordinal"
     );
 }
 
@@ -456,7 +669,7 @@ fn extract_class_static_private_hash_and_accessor_members_stay_excluded() {
     // `accessor` keyword produces an AccessorProperty — neither is folded
     // into the constructor shape, and the instance accessor stays off the
     // instance surface (current producer contract: accessors drop).
-    let env = parse_and_build_env(
+    let parts = lowered(
         r#"
         class C {
             static #tag: number = 0;
@@ -466,7 +679,7 @@ fn extract_class_static_private_hash_and_accessor_members_stay_excluded() {
         }
         "#,
     );
-    let value = env.value_symbols["C"].primary();
+    let value = parts.value_decl("C").expect("lowered class value");
     let shape = value.object_shape.as_ref().expect("constructor shape");
 
     assert!(
@@ -481,7 +694,7 @@ fn extract_class_static_private_hash_and_accessor_members_stay_excluded() {
         shape_property(shape, "sv").is_none(),
         "static accessor must not be folded (accessor lowering is out of scope)"
     );
-    let body = &env.type_symbols["C"].primary().body;
+    let body = &parts.type_decl("C").expect("lowered C").body;
     assert!(
         class_property(body, "v").is_none(),
         "instance accessor must stay off the instance surface"
@@ -492,14 +705,14 @@ fn extract_class_static_private_hash_and_accessor_members_stay_excluded() {
 fn extract_class_static_only_class_keeps_synthesized_construct_signature() {
     // A class with no explicit constructor still synthesizes the implicit
     // `new () => C` construct signature next to its folded statics.
-    let env = parse_and_build_env(
+    let parts = lowered(
         r#"
         class GenericStatic {
             static make(value: string): { wrapped: string } { return { wrapped: value }; }
         }
         "#,
     );
-    let value = env.value_symbols["GenericStatic"].primary();
+    let value = parts.value_decl("GenericStatic").expect("lowered value");
     let shape = value.object_shape.as_ref().expect("constructor shape");
     assert!(
         shape
@@ -520,11 +733,10 @@ fn extract_class_static_only_class_keeps_synthesized_construct_signature() {
 
 #[test]
 fn extract_class_decorated_class_lowers_normally() {
-    // Decorator-capture checkpoint: a decorated class flows through
-    // `extract_class` exactly like an undecorated one — surfaces are
+    // Decorator-capture checkpoint: a decorated class flows through the class
+    // lowering exactly like an undecorated one — surfaces are
     // decorator-invariant; decorators are ignored, never a lowering failure.
-    let env = parse_and_build_env(
-        r#"
+    let source = r#"
         function logged(ctor: any, ctx: any) { return ctor; }
         @logged
         class LoggedItem {
@@ -532,19 +744,19 @@ fn extract_class_decorated_class_lowers_normally() {
             static version: string = "1";
             label(): string { return "label"; }
         }
-        "#,
-    );
-    let decl = env.type_symbols.get("LoggedItem");
+        "#;
+    let env = parse_and_build_env(source);
     assert!(
-        decl.is_some(),
+        env.type_symbols.contains_key("LoggedItem"),
         "decorated class must register a type symbol"
     );
-    let body = &decl.unwrap().primary().body;
+    let parts = lowered(source);
+    let body = &parts.type_decl("LoggedItem").expect("lowered").body;
     assert!(
         class_property(body, "id").is_some() && class_method(body, "label").is_some(),
         "decorated class instance members must lower normally"
     );
-    let value = env.value_symbols["LoggedItem"].primary();
+    let value = parts.value_decl("LoggedItem").expect("lowered value");
     let shape = value.object_shape.as_ref().expect("constructor shape");
     assert!(
         shape_property(shape, "version").is_some(),
@@ -554,8 +766,7 @@ fn extract_class_decorated_class_lowers_normally() {
 
 #[test]
 fn extracts_namespace_qualified_interfaces() {
-    let env = parse_and_build_env(
-        r#"
+    let source = r#"
         interface NativeElements {
           div: { id?: string }
         }
@@ -566,8 +777,8 @@ fn extracts_namespace_qualified_interfaces() {
             children: {}
           }
         }
-        "#,
-    );
+        "#;
+    let env = parse_and_build_env(source);
 
     assert!(
         env.type_symbols.contains_key("JSX.IntrinsicElements"),
@@ -579,16 +790,19 @@ fn extracts_namespace_qualified_interfaces() {
         "nested namespace members should remain addressable from the eval env"
     );
 
-    let decl = env.type_symbols["JSX.IntrinsicElements"].primary();
+    let parts = lowered(source);
+    let decl = parts
+        .type_decl("JSX.IntrinsicElements")
+        .expect("lowered qualified interface");
     match &decl.body {
-        TypeExpr::Intersection(parts) => {
+        TypeExpr::Intersection(intersection) => {
             assert_eq!(
-                parts[0],
+                intersection[0],
                 TypeExpr::named("NativeElements"),
                 "namespace interfaces should preserve their extends clauses"
             );
             assert!(
-                matches!(parts[1], TypeExpr::Object(_)),
+                matches!(intersection[1], TypeExpr::Object(_)),
                 "qualified namespace interfaces should still lower their local members structurally"
             );
         }
@@ -605,8 +819,7 @@ fn extracts_declare_global_namespace_jsx_into_global_augmentation_scope() {
     // global-augmentation fallback. Discriminating: were the nested namespace not
     // registered under its qualified name, the `(Global, "JSX.IntrinsicElements")`
     // key would be absent and this assertion would fail.
-    let env = parse_and_build_env(
-        r#"
+    let source = r#"
         export {};
         declare global {
           namespace JSX {
@@ -619,8 +832,8 @@ fn extracts_declare_global_namespace_jsx_into_global_augmentation_scope() {
             }
           }
         }
-        "#,
-    );
+        "#;
+    let env = parse_and_build_env(source);
 
     let key_intrinsic = (
         AugmentationScopeKind::Global,
@@ -657,7 +870,28 @@ fn extracts_declare_global_namespace_jsx_into_global_augmentation_scope() {
         1,
         "a single declare-global block contributes one decl"
     );
-    match &group.primary().body {
+    // The stored header FACTS carry both members.
+    let header_names: Vec<&str> = group
+        .primary()
+        .direct_member_headers
+        .iter()
+        .map(|h| h.name.as_str())
+        .collect();
+    assert!(
+        header_names.contains(&"div"),
+        "div header, got {header_names:?}"
+    );
+    assert!(
+        header_names.contains(&"span"),
+        "span header, got {header_names:?}"
+    );
+
+    // The TRANSIENT lowering carries the structural members.
+    let parts = lowered(source);
+    let aug = parts
+        .aug_type_decl(&AugmentationScopeKind::Global, "JSX.IntrinsicElements")
+        .expect("lowered global-augmentation interface");
+    match &aug.body {
         TypeExpr::Object(obj) => {
             let names: Vec<&str> = obj
                 .properties
@@ -685,8 +919,7 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
     // unions the `div` member from the first declaration with the `customCard`
     // member from the second downstream. Discriminating: a walk that drops the
     // nested namespace would leave the key absent entirely (zero contributors).
-    let env = parse_and_build_env(
-        r#"
+    let source = r#"
         export {};
         declare global {
           namespace JSX {
@@ -702,8 +935,8 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
             }
           }
         }
-        "#,
-    );
+        "#;
+    let env = parse_and_build_env(source);
 
     let key = (
         AugmentationScopeKind::Global,
@@ -721,10 +954,35 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
     // The ordered group must carry BOTH blocks' members so the downstream
     // `MergedDecl` peer-merge can union them: the first block's `div` and the
     // second block's `customCard`. Asserting only `len() == 2` would pass even
-    // if both contributors carried identical (or empty) bodies — collect every
-    // contributor's object members and require the union surface.
+    // if both contributors carried identical (or empty) header sets — union the
+    // per-contributor header FACTS and require the union surface.
     let union_members: Vec<&str> = group
         .contributors
+        .iter()
+        .flat_map(|decl| {
+            decl.direct_member_headers
+                .iter()
+                .map(|h| h.name.as_str())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        union_members.contains(&"div"),
+        "the first block's `div` member must be retained in the ordered group, \
+         got {union_members:?}"
+    );
+    assert!(
+        union_members.contains(&"customCard"),
+        "the second block's `customCard` member must be retained in the ordered \
+         group, got {union_members:?}"
+    );
+
+    // The TRANSIENT lowering retains both contributor bodies structurally.
+    let parts = lowered(source);
+    let contributors =
+        parts.aug_type_contributors(&AugmentationScopeKind::Global, "JSX.IntrinsicElements");
+    assert_eq!(contributors.len(), 2);
+    let lowered_union: Vec<&str> = contributors
         .iter()
         .flat_map(|decl| match &decl.body {
             TypeExpr::Object(obj) => obj
@@ -738,16 +996,8 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
             _ => Vec::new(),
         })
         .collect();
-    assert!(
-        union_members.contains(&"div"),
-        "the first block's `div` member must be retained in the ordered group, \
-         got {union_members:?}"
-    );
-    assert!(
-        union_members.contains(&"customCard"),
-        "the second block's `customCard` member must be retained in the ordered \
-         group, got {union_members:?}"
-    );
+    assert!(lowered_union.contains(&"div"));
+    assert!(lowered_union.contains(&"customCard"));
 }
 
 /// Build the shallow declaration-header index for `source` (mirrors the
@@ -773,7 +1023,7 @@ fn extracts_declare_global_namespace_jsx_value_into_global_value_augmentation_sc
     // `value_symbols` — mirroring the type-side interface/alias path. The JSX
     // typeinfo fixture is interface-only, so this is the discriminating cover for
     // the VALUE arm (`ExportNamedDeclaration` → `VariableDeclaration` in
-    // `extract_namespaced_declaration_into_augmentation`, plus its header-index
+    // `collect_namespaced_declaration_into_augmentation`, plus its header-index
     // mirror): were that arm removed, `(Global, "JSX.VERSION")` would be absent
     // and these assertions would fail.
     let source = r#"
@@ -789,7 +1039,7 @@ fn extracts_declare_global_namespace_jsx_value_into_global_value_augmentation_sc
     let key = (AugmentationScopeKind::Global, "JSX.VERSION".to_string());
 
     // (a) registers in the global VALUE-augmentation scope, with the const's
-    //     declared body type intact.
+    //     authored annotation classified + carried as its decl-body source.
     let group = env.augmentation_value_scopes.get(&key).expect(
         "declare-global namespace exported VALUE member must register under its \
          qualified name in the global value-augmentation scope",
@@ -797,7 +1047,25 @@ fn extracts_declare_global_namespace_jsx_value_into_global_value_augmentation_sc
     let decl = group.primary();
     assert_eq!(decl.kind, ValueDeclKind::Const);
     assert_eq!(
-        decl.type_annotation,
+        decl.type_annotation.classification,
+        ValueAnnotationClass::Direct,
+        "the augmented const carries its authored annotation classification"
+    );
+    match &decl.type_annotation.annotation {
+        Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(slot))) => {
+            assert_eq!(&*slot.anchor.symbol, "JSX.VERSION");
+            assert_eq!(slot.anchor.space, LocatorSymbolSpace::Value);
+        }
+        other => panic!("authored annotation must carry its decl-body source, got {other:?}"),
+    }
+
+    // The TRANSIENT lowering retains the declared `string` body.
+    let parts = lowered(source);
+    let aug_value = parts
+        .aug_value_decl(&AugmentationScopeKind::Global, "JSX.VERSION")
+        .expect("lowered global-augmentation value");
+    assert_eq!(
+        aug_value.type_annotation,
         Some(TypeExpr::Primitive(PrimitiveName::String)),
         "the augmented const must retain its declared `string` body"
     );
@@ -853,14 +1121,22 @@ fn extracts_declare_global_namespace_jsx_value_into_global_value_augmentation_sc
 
 #[test]
 fn extracts_function_declaration() {
-    let env =
-        parse_and_build_env("function greet(name: string, age?: number): string { return name }");
+    let source = "function greet(name: string, age?: number): string { return name }";
+    let env = parse_and_build_env(source);
     assert!(env.value_symbols.contains_key("greet"));
     let decl = env.value_symbols["greet"].primary();
     assert_eq!(decl.kind, ValueDeclKind::Function);
     assert!(!decl.signatures.is_empty());
 
-    let sig = decl.signatures.first().unwrap();
+    // TRANSIENT lowering: the typed parameter/return forms.
+    let parts = lowered(source);
+    let sig = parts
+        .value_decl("greet")
+        .expect("lowered greet")
+        .signatures
+        .first()
+        .expect("one signature")
+        .clone();
     assert_eq!(sig.parameters.len(), 2);
     assert_eq!(sig.parameters[0].name.as_deref(), Some("name"));
     assert_eq!(
@@ -873,6 +1149,192 @@ fn extracts_function_declaration() {
         sig.return_type,
         Some(TypeExpr::Primitive(PrimitiveName::String))
     );
+
+    // STORED fact: parameter/return locators address the signature's authored
+    // positions (`[ValueSignature{0}, FunctionParam{j} / FunctionReturn]`),
+    // and the authored return annotation mints a return slot.
+    let fact = &decl.signatures[0];
+    assert_eq!(fact.parameters.len(), 2);
+    assert_eq!(fact.parameters[0].name.as_deref(), Some("name"));
+    assert!(fact.parameters[1].optional);
+    let param_ty = fact.parameters[0]
+        .ty
+        .as_ref()
+        .expect("authored positional annotation mints a slot");
+    assert_eq!(
+        &*param_ty.path,
+        &[
+            TypeBodyPathStep::ValueSignature { ordinal: 0 },
+            TypeBodyPathStep::FunctionParam { ordinal: 0 },
+        ],
+    );
+    let return_ty = fact.return_ty.as_ref().expect("authored return slot");
+    assert_eq!(
+        &*return_ty.path,
+        &[
+            TypeBodyPathStep::ValueSignature { ordinal: 0 },
+            TypeBodyPathStep::FunctionReturn,
+        ],
+    );
+    assert_eq!(&*return_ty.anchor.symbol, "greet");
+    assert_eq!(return_ty.anchor.space, LocatorSymbolSpace::Value);
+}
+
+#[test]
+fn inferred_return_mints_no_authored_return_slot() {
+    // `function inferred() { return "" }` has NO authored return annotation:
+    // the transient lowering still INFERS the return type, but the stored fact
+    // must NOT mint a `FunctionReturn` locator (there is no authored `TSType`
+    // position to address — a fabricated slot would deref to a wrong miss).
+    let source = r#"function inferred(name: string) { return name }"#;
+    let parts = lowered(source);
+    let sig = &parts.value_decl("inferred").expect("lowered").signatures[0];
+    assert!(
+        sig.return_type.is_some(),
+        "the transient lowering still infers the return type"
+    );
+    assert!(!sig.has_authored_return);
+
+    let env = parse_and_build_env(source);
+    let fact = &env.value_symbols["inferred"].primary().signatures[0];
+    assert!(
+        fact.return_ty.is_none(),
+        "no authored return annotation ⇒ no minted return slot"
+    );
+    // The authored parameter still mints its slot.
+    assert_eq!(fact.parameters.len(), 1);
+    assert!(fact.parameters[0].has_ts_annotation);
+}
+
+#[test]
+fn unannotated_parameter_mints_no_type_slot() {
+    // `function f(x) {}` — `x` has NO authored TS annotation, so there is no
+    // authored `TSType` position for a `FunctionParam` locator to address.
+    // A producer that minted a slot for every parameter would store a
+    // fabricated position whose deref is a guaranteed miss — the fact must
+    // carry the typed miss (`ty: None`) instead.
+    let env = parse_and_build_env("function f(x) {}");
+    let fact = &env.value_symbols["f"].primary().signatures[0];
+    assert_eq!(fact.parameters.len(), 1);
+    assert!(!fact.parameters[0].has_ts_annotation);
+    assert!(
+        fact.parameters[0].ty.is_none(),
+        "unannotated parameter must not mint a type slot"
+    );
+}
+
+#[test]
+fn annotated_positional_parameter_mints_its_slot() {
+    // `function f(x: string) {}` — the authored positional annotation is the
+    // exact position `[ValueSignature{0}, FunctionParam{0}]` derefs
+    // (`params.items[0].type_annotation`), so the slot mints.
+    let env = parse_and_build_env("function f(x: string) {}");
+    let fact = &env.value_symbols["f"].primary().signatures[0];
+    assert_eq!(fact.parameters.len(), 1);
+    assert!(fact.parameters[0].has_ts_annotation);
+    let ty = fact.parameters[0]
+        .ty
+        .as_ref()
+        .expect("authored positional annotation mints a slot");
+    assert_eq!(&*ty.anchor.symbol, "f");
+    assert_eq!(ty.anchor.space, LocatorSymbolSpace::Value);
+    assert_eq!(
+        &*ty.path,
+        &[
+            TypeBodyPathStep::ValueSignature { ordinal: 0 },
+            TypeBodyPathStep::FunctionParam { ordinal: 0 },
+        ],
+    );
+}
+
+#[test]
+fn rest_parameter_mints_no_type_slot_even_when_annotated() {
+    // `function f(...xs: string[]) {}` — the rest parameter lives PAST
+    // `params.items` (the one list the `FunctionParam` step derefs), so even
+    // its authored annotation has no addressable positional slot; the
+    // annotation is recovered whole-signature. The fact stores the typed miss
+    // while keeping the honest `rest` + `has_ts_annotation` header facts.
+    let env = parse_and_build_env("function f(...xs: string[]) {}");
+    let fact = &env.value_symbols["f"].primary().signatures[0];
+    assert_eq!(fact.parameters.len(), 1);
+    assert!(fact.parameters[0].rest);
+    assert!(fact.parameters[0].has_ts_annotation);
+    assert!(
+        fact.parameters[0].ty.is_none(),
+        "rest parameter must not mint a positional type slot"
+    );
+}
+
+#[test]
+fn signature_scoped_type_param_bounds_store_the_typed_miss() {
+    // `function f<T extends Foo = Bar>() {}` — `TypeParamBound` is a
+    // type-space DECL-HEADER first-step-only position, so a SIGNATURE-scoped
+    // type parameter's authored bounds have no addressable slot. The stored
+    // fact records the intentional typed miss (`constraint: None` /
+    // `default: None`; the bounds are recovered whole-signature on demand) —
+    // a producer that minted decl-header bound slots for a signature-scoped
+    // parameter would fabricate positions and fail below.
+    let source = "function f<T extends Foo = Bar>() {}";
+
+    // The transient lowering DID capture both bounds — the miss is a
+    // deliberate narrowing decision, not a parse gap.
+    let parts = lowered(source);
+    let transient = &parts.value_decl("f").expect("lowered f").signatures[0].type_parameters[0];
+    assert_eq!(transient.name, "T");
+    assert!(
+        transient.constraint.is_some(),
+        "transient constraint lowered"
+    );
+    assert!(transient.default.is_some(), "transient default lowered");
+
+    let env = parse_and_build_env(source);
+    let fact = &env.value_symbols["f"].primary().signatures[0];
+    assert_eq!(fact.type_parameters.len(), 1);
+    assert_eq!(fact.type_parameters[0].name, "T");
+    assert_eq!(fact.type_parameters[0].ordinal, 0);
+    assert!(
+        fact.type_parameters[0].constraint.is_none(),
+        "signature-scoped constraint bound stores the typed miss"
+    );
+    assert!(
+        fact.type_parameters[0].default.is_none(),
+        "signature-scoped default bound stores the typed miss"
+    );
+}
+
+#[test]
+fn overload_group_signature_locators_take_group_ordinals() {
+    // Three same-name function contributors form ONE overload group; each
+    // stored signature fact's leading `ValueSignature` locator ordinal is its
+    // GROUP position (0/1/2), maintained at registration time — a producer
+    // that kept contributor-local ordinals would store `0` on every fact and
+    // fail below.
+    let env = parse_and_build_env(
+        "function f(a: string): void;\nfunction f(a: number): void;\nfunction f(a: unknown) {}",
+    );
+    let merged = env.value_symbols["f"].merged_signatures();
+    assert_eq!(merged.len(), 3);
+    for (expected_ordinal, fact) in merged.iter().enumerate() {
+        let param_ty = fact.parameters[0]
+            .ty
+            .as_ref()
+            .expect("authored positional annotation mints a slot");
+        assert_eq!(
+            &*param_ty.path,
+            &[
+                TypeBodyPathStep::ValueSignature {
+                    ordinal: expected_ordinal as u32
+                },
+                TypeBodyPathStep::FunctionParam { ordinal: 0 },
+            ],
+            "signature {expected_ordinal} must carry its group ordinal"
+        );
+    }
+    // The trailing implementation carries the visibility flag; the bodiless
+    // overloads do not.
+    assert!(!merged[0].has_implementation_body);
+    assert!(!merged[1].has_implementation_body);
+    assert!(merged[2].has_implementation_body);
 }
 
 #[test]
@@ -888,20 +1350,43 @@ fn extracts_async_function() {
 
 #[test]
 fn extracts_const_with_type_annotation() {
-    let env = parse_and_build_env("const MAX_SIZE: number = 100");
+    let source = "const MAX_SIZE: number = 100";
+    let env = parse_and_build_env(source);
     assert!(env.value_symbols.contains_key("MAX_SIZE"));
     let decl = env.value_symbols["MAX_SIZE"].primary();
     assert_eq!(decl.kind, ValueDeclKind::Const);
+
+    // TRANSIENT lowering: the authored annotation typed IR.
+    let parts = lowered(source);
     assert_eq!(
-        decl.type_annotation,
+        parts
+            .value_decl("MAX_SIZE")
+            .expect("lowered")
+            .type_annotation,
         Some(TypeExpr::Primitive(PrimitiveName::Number))
     );
+
+    // STORED fact: an AUTHORED annotation classifies Direct and carries its
+    // decl-body source (the value-space whole-decl slot).
+    assert_eq!(
+        decl.type_annotation.classification,
+        ValueAnnotationClass::Direct
+    );
+    match &decl.type_annotation.annotation {
+        Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(slot))) => {
+            assert_eq!(&*slot.anchor.canonical_id, FIXTURE_CANONICAL);
+            assert_eq!(&*slot.anchor.symbol, "MAX_SIZE");
+            assert_eq!(slot.anchor.space, LocatorSymbolSpace::Value);
+            assert!(slot.path.is_empty());
+        }
+        other => panic!("authored annotation must carry the decl-body source, got {other:?}"),
+    }
 }
 
 #[test]
 fn extracts_const_arrow_function() {
-    let env = parse_and_build_env("const add = (a: number, b: number): number => a + b");
-    let decl = env.value_symbols["add"].primary();
+    let parts = lowered("const add = (a: number, b: number): number => a + b");
+    let decl = parts.value_decl("add").expect("lowered add");
     assert!(!decl.signatures.is_empty());
     let sig = decl.signatures.first().unwrap();
     assert_eq!(sig.parameters.len(), 2);
@@ -913,17 +1398,41 @@ fn extracts_const_arrow_function() {
 
 #[test]
 fn extracts_const_object_literal() {
-    let env = parse_and_build_env(r#"const defaults = { theme: "dark", debug: false }"#);
-    let decl = env.value_symbols["defaults"].primary();
+    let source = r#"const defaults = { theme: "dark", debug: false }"#;
+    let parts = lowered(source);
+    let decl = parts.value_decl("defaults").expect("lowered defaults");
     assert!(decl.object_shape.is_some());
     let shape = decl.object_shape.as_ref().unwrap();
     assert_eq!(shape.properties.len(), 2);
+
+    // STORED fact: the object-shape fact mirrors the two members; each member
+    // value locator addresses its own shape ordinal under the value anchor.
+    let env = parse_and_build_env(source);
+    let stored = env.value_symbols["defaults"]
+        .primary()
+        .object_shape
+        .as_ref()
+        .expect("stored shape fact");
+    assert_eq!(stored.members.len(), 2);
+    let theme = match &stored.members[0] {
+        verter_type_expr::facts::ObjectMemberFact::Property(p) => p,
+        other => panic!("expected property fact, got {other:?}"),
+    };
+    assert_eq!(theme.name, "theme");
+    assert_eq!(&*theme.ty.anchor.symbol, "defaults");
+    assert_eq!(
+        &*theme.ty.path,
+        &[
+            TypeBodyPathStep::Member { ordinal: 0 },
+            TypeBodyPathStep::MemberValue,
+        ],
+    );
 }
 
 #[test]
 fn extracts_const_asserted_object_literal_without_degrading_to_unknown_const() {
-    let env = parse_and_build_env(r#"const theme = { color: { primary: "" } } as const"#);
-    let decl = env.value_symbols["theme"].primary();
+    let parts = lowered(r#"const theme = { color: { primary: "" } } as const"#);
+    let decl = parts.value_decl("theme").expect("lowered theme");
 
     assert!(
         decl.object_shape.is_some(),
@@ -945,8 +1454,8 @@ fn extracts_let_variable() {
 
 #[test]
 fn infers_non_empty_array_element_types() {
-    let env = parse_and_build_env("const items = [1, 2, 3]");
-    let decl = env.value_symbols["items"].primary();
+    let parts = lowered("const items = [1, 2, 3]");
+    let decl = parts.value_decl("items").expect("lowered items");
     let Some(TypeExpr::Array { element, .. }) = decl.type_annotation.as_ref() else {
         panic!(
             "expected inferred array type, got {:?}",
@@ -977,8 +1486,8 @@ fn infers_non_empty_array_element_types() {
 
 #[test]
 fn infers_mixed_array_element_union() {
-    let env = parse_and_build_env(r#"const mixed = [1, "hello", true]"#);
-    let decl = env.value_symbols["mixed"].primary();
+    let parts = lowered(r#"const mixed = [1, "hello", true]"#);
+    let decl = parts.value_decl("mixed").expect("lowered mixed");
     let Some(TypeExpr::Array { element, .. }) = decl.type_annotation.as_ref() else {
         panic!(
             "expected inferred array type, got {:?}",
@@ -1024,8 +1533,8 @@ fn infers_mixed_array_element_union() {
 
 #[test]
 fn infers_array_spread_literal_element_types() {
-    let env = parse_and_build_env(r#"const mixed = [...[1, 2], "hello"]"#);
-    let decl = env.value_symbols["mixed"].primary();
+    let parts = lowered(r#"const mixed = [...[1, 2], "hello"]"#);
+    let decl = parts.value_decl("mixed").expect("lowered mixed");
     let Some(TypeExpr::Array { element, .. }) = decl.type_annotation.as_ref() else {
         panic!(
             "expected inferred array type, got {:?}",
@@ -1057,8 +1566,8 @@ fn infers_array_spread_literal_element_types() {
 
 #[test]
 fn empty_array_stays_any_array() {
-    let env = parse_and_build_env("const empty = []");
-    let decl = env.value_symbols["empty"].primary();
+    let parts = lowered("const empty = []");
+    let decl = parts.value_decl("empty").expect("lowered empty");
 
     assert_eq!(
         decl.type_annotation,
@@ -1071,8 +1580,8 @@ fn empty_array_stays_any_array() {
 
 #[test]
 fn infers_template_literal_with_expressions_as_string() {
-    let env = parse_and_build_env(r#"const name = "world"; const label = `hello ${name}`"#);
-    let decl = env.value_symbols["label"].primary();
+    let parts = lowered(r#"const name = "world"; const label = `hello ${name}`"#);
+    let decl = parts.value_decl("label").expect("lowered label");
 
     assert_eq!(
         decl.type_annotation,
@@ -1087,8 +1596,9 @@ fn infers_template_literal_with_expressions_as_string() {
 
 #[test]
 fn const_preserves_literal_initializer_type() {
-    let env = parse_and_build_env(r#"const greeting = "hello""#);
-    let decl = env.value_symbols["greeting"].primary();
+    let source = r#"const greeting = "hello""#;
+    let parts = lowered(source);
+    let decl = parts.value_decl("greeting").expect("lowered greeting");
 
     assert_eq!(
         decl.type_annotation,
@@ -1099,12 +1609,24 @@ fn const_preserves_literal_initializer_type() {
         Some(TypeExpr::Primitive(PrimitiveName::String)),
         "const literal initializers should remain literal types"
     );
+
+    // STORED fact: an INFERRED trivially-closed literal is carried as the
+    // closed leaf source (never a fabricated authored locator).
+    let env = parse_and_build_env(source);
+    let fact = &env.value_symbols["greeting"].primary().type_annotation;
+    assert_eq!(fact.classification, ValueAnnotationClass::Direct);
+    assert_eq!(
+        fact.annotation,
+        Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
+            LeafTypeFact::StringLiteral("hello".to_string())
+        ))),
+    );
 }
 
 #[test]
 fn let_widens_string_literal_initializer() {
-    let env = parse_and_build_env(r#"let greeting = "hello""#);
-    let decl = env.value_symbols["greeting"].primary();
+    let parts = lowered(r#"let greeting = "hello""#);
+    let decl = parts.value_decl("greeting").expect("lowered greeting");
 
     assert_eq!(
         decl.type_annotation,
@@ -1119,8 +1641,8 @@ fn let_widens_string_literal_initializer() {
 
 #[test]
 fn let_widens_number_literal_initializer() {
-    let env = parse_and_build_env("let count = 42");
-    let decl = env.value_symbols["count"].primary();
+    let parts = lowered("let count = 42");
+    let decl = parts.value_decl("count").expect("lowered count");
 
     assert_eq!(
         decl.type_annotation,
@@ -1135,8 +1657,8 @@ fn let_widens_number_literal_initializer() {
 
 #[test]
 fn let_widens_boolean_literal_initializer() {
-    let env = parse_and_build_env("let enabled = true");
-    let decl = env.value_symbols["enabled"].primary();
+    let parts = lowered("let enabled = true");
+    let decl = parts.value_decl("enabled").expect("lowered enabled");
 
     assert_eq!(
         decl.type_annotation,
@@ -1151,8 +1673,8 @@ fn let_widens_boolean_literal_initializer() {
 
 #[test]
 fn var_widens_string_literal_initializer() {
-    let env = parse_and_build_env(r#"var greeting = "hello""#);
-    let decl = env.value_symbols["greeting"].primary();
+    let parts = lowered(r#"var greeting = "hello""#);
+    let decl = parts.value_decl("greeting").expect("lowered greeting");
 
     assert_eq!(
         decl.type_annotation,
@@ -1174,15 +1696,14 @@ fn var_widens_string_literal_initializer() {
 /// `widen_literal_type` runs on analyzer-side lowered IR (the `as`
 /// expression lowers via `lower_ts_type`), BEFORE the dispatch lower
 /// collapses `Function`/`ConstructorType` to `SemanticNodeData::Function`.
-/// Pre-fix the catch-all `_ => expr` arm forwarded the whole
-/// `ConstructorType` untouched, so the inner `kind: "x"` literal was
-/// silently NOT widened. Discriminator: the inner `kind` member must be
-/// `string`, never the `"x"` literal — and the outer node must remain a
-/// `ConstructorType`.
+/// A catch-all `_ => expr` arm would forward the whole `ConstructorType`
+/// untouched, so the inner `kind: "x"` literal would silently NOT widen.
+/// Discriminator: the inner `kind` member must be `string`, never the `"x"`
+/// literal — and the outer node must remain a `ConstructorType`.
 #[test]
 fn let_widens_constructor_type_return_literal_members() {
-    let env = parse_and_build_env(r#"let C = value as new () => { kind: "x" }"#);
-    let decl = env.value_symbols["C"].primary();
+    let parts = lowered(r#"let C = value as new () => { kind: "x" }"#);
+    let decl = parts.value_decl("C").expect("lowered C");
 
     let Some(TypeExpr::ConstructorType(function)) = decl.type_annotation.as_ref() else {
         panic!(
@@ -1223,8 +1744,8 @@ fn let_widens_constructor_type_return_literal_members() {
 /// arm rather than diverging.
 #[test]
 fn let_widens_function_type_return_literal_members_parity() {
-    let env = parse_and_build_env(r#"let F = value as () => { kind: "x" }"#);
-    let decl = env.value_symbols["F"].primary();
+    let parts = lowered(r#"let F = value as () => { kind: "x" }"#);
+    let decl = parts.value_decl("F").expect("lowered F");
 
     let Some(TypeExpr::Function(function)) = decl.type_annotation.as_ref() else {
         panic!(
@@ -1249,8 +1770,8 @@ fn let_widens_function_type_return_literal_members_parity() {
 
 #[test]
 fn let_widens_nested_object_literal_properties() {
-    let env = parse_and_build_env(r#"let settings = { mode: "dark", nested: { count: 1 } }"#);
-    let decl = env.value_symbols["settings"].primary();
+    let parts = lowered(r#"let settings = { mode: "dark", nested: { count: 1 } }"#);
+    let decl = parts.value_decl("settings").expect("lowered settings");
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
             "expected object type for let object initializer, got {:?}",
@@ -1280,8 +1801,8 @@ fn let_widens_nested_object_literal_properties() {
 
 #[test]
 fn let_widens_array_element_literals() {
-    let env = parse_and_build_env("let flags = [true, false]");
-    let decl = env.value_symbols["flags"].primary();
+    let parts = lowered("let flags = [true, false]");
+    let decl = parts.value_decl("flags").expect("lowered flags");
     let Some(TypeExpr::Array { element, .. }) = decl.type_annotation.as_ref() else {
         panic!(
             "expected array type for let array initializer, got {:?}",
@@ -1301,10 +1822,9 @@ fn let_widens_array_element_literals() {
 
 #[test]
 fn satisfies_preserves_underlying_value_type() {
-    let env = parse_and_build_env(
-        r#"const config = { x: 1, y: "hello" } satisfies { x: number; y: string }"#,
-    );
-    let decl = env.value_symbols["config"].primary();
+    let parts =
+        lowered(r#"const config = { x: 1, y: "hello" } satisfies { x: number; y: string }"#);
+    let decl = parts.value_decl("config").expect("lowered config");
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
             "satisfies should infer the underlying object literal type, got {:?}",
@@ -1334,8 +1854,8 @@ fn satisfies_preserves_underlying_value_type() {
 #[test]
 fn satisfies_does_not_use_annotation_type() {
     // When using satisfies, the expression type should win, not the annotation
-    let env = parse_and_build_env(r#"const label = "hello" satisfies string"#);
-    let decl = env.value_symbols["label"].primary();
+    let parts = lowered(r#"const label = "hello" satisfies string"#);
+    let decl = parts.value_decl("label").expect("lowered label");
 
     // Should be the literal "hello", not widened string
     assert_eq!(
@@ -1356,8 +1876,8 @@ fn satisfies_does_not_use_annotation_type() {
 
 #[test]
 fn object_spread_identifier_produces_intersection() {
-    let env = parse_and_build_env(r#"const extended = { ...base, extra: true }"#);
-    let decl = env.value_symbols["extended"].primary();
+    let parts = lowered(r#"const extended = { ...base, extra: true }"#);
+    let decl = parts.value_decl("extended").expect("lowered extended");
 
     // Should not lose the spread source — at minimum, the explicit props must be present
     // AND the spread source should be represented (as typeof base in an intersection)
@@ -1391,8 +1911,8 @@ fn object_spread_identifier_produces_intersection() {
 
 #[test]
 fn object_spread_object_literal_merges_properties() {
-    let env = parse_and_build_env(r#"const merged = { ...{ a: 1, b: 2 }, c: 3 }"#);
-    let decl = env.value_symbols["merged"].primary();
+    let parts = lowered(r#"const merged = { ...{ a: 1, b: 2 }, c: 3 }"#);
+    let decl = parts.value_decl("merged").expect("lowered merged");
 
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
@@ -1431,8 +1951,8 @@ fn object_spread_object_literal_merges_properties() {
 
 #[test]
 fn object_spread_later_property_overrides_spread_property() {
-    let env = parse_and_build_env(r#"const merged = { ...{ a: 1 }, a: "override" }"#);
-    let decl = env.value_symbols["merged"].primary();
+    let parts = lowered(r#"const merged = { ...{ a: 1 }, a: "override" }"#);
+    let decl = parts.value_decl("merged").expect("lowered merged");
 
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
@@ -1465,8 +1985,8 @@ fn object_spread_later_property_overrides_spread_property() {
 
 #[test]
 fn object_spread_later_spread_overrides_earlier_property() {
-    let env = parse_and_build_env(r#"const merged = { a: 1, ...{ a: "override" } }"#);
-    let decl = env.value_symbols["merged"].primary();
+    let parts = lowered(r#"const merged = { a: 1, ...{ a: "override" } }"#);
+    let decl = parts.value_decl("merged").expect("lowered merged");
 
     let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
         panic!(
@@ -1503,8 +2023,9 @@ fn object_spread_later_spread_overrides_earlier_property() {
 
 #[test]
 fn static_member_expression_infers_typeof_path() {
-    let env = parse_and_build_env(r#"const value = obj.foo"#);
-    let decl = env.value_symbols["value"].primary();
+    let source = r#"const value = obj.foo"#;
+    let parts = lowered(source);
+    let decl = parts.value_decl("value").expect("lowered value");
 
     match decl.type_annotation.as_ref() {
         Some(TypeExpr::TypeOf(vr)) => {
@@ -1521,12 +2042,47 @@ fn static_member_expression_infers_typeof_path() {
         Some(TypeExpr::Primitive(PrimitiveName::Any)),
         "member expression should not degrade to any"
     );
+
+    // STORED fact: a MULTI-HOP `typeof obj.foo` is a member projection, not a
+    // value-alias peel — no peel target is stored (the B5 termination-parity
+    // seam).
+    let env = parse_and_build_env(source);
+    let fact = &env.value_symbols["value"].primary().type_annotation;
+    assert_eq!(fact.classification, ValueAnnotationClass::Direct);
+    assert_eq!(fact.typeof_alias_target, None);
+}
+
+#[test]
+fn single_hop_value_alias_stores_typeof_peel_target() {
+    // `const alias = source` infers `typeof source` — a SINGLE-HOP non-self
+    // value peel. The stored annotation fact must carry the precomputed peel
+    // target (`typeof_alias_target = Some(source @ producing canonical)`) and
+    // classify `TypeOfAlias` — the exact three-condition rule the shared
+    // `value_type_annotation_fact` producer owns. Discriminators: the multi-hop
+    // case above stores None; the SELF-hop case below breaks the peel.
+    let env = parse_and_build_env("const alias = source");
+    let fact = &env.value_symbols["alias"].primary().type_annotation;
+    assert_eq!(fact.classification, ValueAnnotationClass::TypeOfAlias);
+    let target = fact
+        .typeof_alias_target
+        .as_ref()
+        .expect("single-hop non-self typeof stores the peel target");
+    assert_eq!(&*target.canonical_id, FIXTURE_CANONICAL);
+    assert_eq!(&*target.symbol, "source");
+    assert!(target.member_path.is_empty());
+
+    // SELF-REFERENCE BREAK: `const own: typeof own` must NOT produce a follow
+    // edge — the Some/None decision IS the termination guard.
+    let env = parse_and_build_env("const own: typeof own = x");
+    let fact = &env.value_symbols["own"].primary().type_annotation;
+    assert_eq!(fact.classification, ValueAnnotationClass::Direct);
+    assert_eq!(fact.typeof_alias_target, None, "self-peel must break");
 }
 
 #[test]
 fn nested_member_expression_infers_deep_typeof_path() {
-    let env = parse_and_build_env(r#"const value = a.b.c"#);
-    let decl = env.value_symbols["value"].primary();
+    let parts = lowered(r#"const value = a.b.c"#);
+    let decl = parts.value_decl("value").expect("lowered value");
 
     match decl.type_annotation.as_ref() {
         Some(TypeExpr::TypeOf(vr)) => {
@@ -1543,8 +2099,8 @@ fn nested_member_expression_infers_deep_typeof_path() {
 #[test]
 fn member_on_call_expression_degrades_to_any() {
     // fn().prop — the root is a CallExpression, not an Identifier, so we can't build a simple path
-    let env = parse_and_build_env(r#"const value = getObj().prop"#);
-    let decl = env.value_symbols["value"].primary();
+    let parts = lowered(r#"const value = getObj().prop"#);
+    let decl = parts.value_decl("value").expect("lowered value");
 
     // Should not produce a broken partial path like ["prop"] without the root
     // Any or None is acceptable — the key assertion is no broken partial path.
@@ -1562,8 +2118,8 @@ fn member_on_call_expression_degrades_to_any() {
 
 #[test]
 fn simple_call_expression_does_not_degrade_to_any() {
-    let env = parse_and_build_env(r#"const result = someFunction()"#);
-    let decl = env.value_symbols["result"].primary();
+    let parts = lowered(r#"const result = someFunction()"#);
+    let decl = parts.value_decl("result").expect("lowered result");
 
     // For unknown function calls, should produce ReturnType<typeof someFunction>
     // rather than degrading to Any
@@ -1581,8 +2137,9 @@ fn simple_call_expression_does_not_degrade_to_any() {
 
 #[test]
 fn method_call_expression_does_not_degrade_to_any() {
-    let env = parse_and_build_env(r#"const result = obj.create()"#);
-    let decl = env.value_symbols["result"].primary();
+    let source = r#"const result = obj.create()"#;
+    let parts = lowered(source);
+    let decl = parts.value_decl("result").expect("lowered result");
 
     assert!(
         decl.type_annotation.is_some(),
@@ -1593,6 +2150,15 @@ fn method_call_expression_does_not_degrade_to_any() {
         Some(TypeExpr::Primitive(PrimitiveName::Any)),
         "method call expression should not degrade to any"
     );
+
+    // STORED fact: a non-leaf inferred annotation stays classification-only
+    // (Direct, no source) — never a fabricated authored locator for a type
+    // with no authored `TSType` node; the declaration itself is the demand
+    // route.
+    let env = parse_and_build_env(source);
+    let fact = &env.value_symbols["result"].primary().type_annotation;
+    assert_eq!(fact.classification, ValueAnnotationClass::Direct);
+    assert_eq!(fact.annotation, None);
 }
 
 // =============================================================================
@@ -1601,23 +2167,25 @@ fn method_call_expression_does_not_degrade_to_any() {
 
 #[test]
 fn extracts_class_as_type_and_value() {
-    let env = parse_and_build_env(
-        r#"
+    let source = r#"
         class Widget {
             readonly id: number;
             name?: string;
             constructor(id: number) {}
             render(): void {}
         }
-        "#,
-    );
+        "#;
+    let env = parse_and_build_env(source);
     // Should be in both type and value symbols
     assert!(env.type_symbols.contains_key("Widget"));
     assert!(env.value_symbols.contains_key("Widget"));
 
     let type_decl = env.type_symbols["Widget"].primary();
     assert_eq!(type_decl.kind, TypeDeclKind::Class);
-    match &type_decl.body {
+
+    let parts = lowered(source);
+    let body = &parts.type_decl("Widget").expect("lowered Widget").body;
+    match body {
         TypeExpr::Object(obj) => {
             // id, name, render (constructor is not a member)
             assert_eq!(obj.properties.len(), 3);
@@ -1627,7 +2195,7 @@ fn extracts_class_as_type_and_value() {
             });
             assert!(id_prop.unwrap().readonly);
         }
-        _ => panic!("expected object, got {:?}", type_decl.body),
+        _ => panic!("expected object, got {body:?}"),
     }
 
     let value_decl = env.value_symbols["Widget"].primary();
@@ -1659,21 +2227,20 @@ fn extracts_exported_interfaces() {
 
 #[test]
 fn extracts_export_default_object_expression_as_default_value() {
-    let env = parse_and_build_env(
-        r#"
+    let source = r#"
         export default {
             item: "item",
             body: "body",
         }
-        "#,
+        "#;
+    let env = parse_and_build_env(source);
+    assert!(
+        env.value_symbols.contains_key("default"),
+        "export default object should register a synthetic default value"
     );
 
-    let decl = env
-        .value_symbols
-        .get("default")
-        .expect("export default object should register a synthetic default value")
-        .primary();
-
+    let parts = lowered(source);
+    let decl = parts.value_decl("default").expect("lowered default value");
     let ty = decl
         .type_annotation
         .as_ref()
@@ -1714,20 +2281,22 @@ fn no_value_symbols_for_type_aliases() {
 
 #[test]
 fn parse_and_build_env_preserves_union_type_aliases_with_local_interface_refs() {
-    let env = parse_and_build_env(
-        r#"
+    let source = r#"
 export interface St { path: string }
 export interface vt { name: string }
 type RouteLocationRaw = string | St | vt
 export { RouteLocationRaw as Lt, St, vt }
-"#,
+"#;
+    let env = parse_and_build_env(source);
+    assert!(
+        env.type_symbols.contains_key("RouteLocationRaw"),
+        "RouteLocationRaw alias should be registered"
     );
 
-    let route = env
-        .type_symbols
-        .get("RouteLocationRaw")
-        .expect("RouteLocationRaw alias should be registered")
-        .primary();
+    let parts = lowered(source);
+    let route = parts
+        .type_decl("RouteLocationRaw")
+        .expect("lowered RouteLocationRaw");
     let TypeExpr::Union(types) = &route.body else {
         panic!(
             "RouteLocationRaw should stay a union before evaluation, got {:?}",
@@ -1768,30 +2337,56 @@ export { RouteLocationRaw as Lt, St, vt }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Discriminating invariant: `expand_macro_types_impl_with_expander`
-// reads `field.type_expr` / `field.payload_expr` / `binding.binding_expr`
-// directly, never reparsing `type_annotation` text. The probe is to
-// populate every typed field with a structural shape that the matching
-// raw `*_annotation` text does NOT describe — if expansion ever falls
-// back to reparsing the text it would produce the WRONG shape; the
-// expected behaviour is that it walks the typed form and the closure
-// receives the producer-supplied expression unchanged.
+// Discriminating invariant: `expand_macro_types_impl_with_expander` hands the
+// closure each field's AUTHORED payload locator (never a lowered body) and
+// stamps the same position onto `ExpandedField.shallow_source`. The closure is
+// the dispatch seam: this suite's stand-in returns the authored source, so a
+// producer regression that stops threading the locator (or fabricates one)
+// fails the position assertions below.
 // ───────────────────────────────────────────────────────────────────────────
-fn passthrough_expander(
-) -> impl FnMut(FieldExpansionContext, &TypeExpr) -> ExpansionResult<ExpandedNormalizedExpr> {
-    |_ctx, expr| ExpansionResult::exact(ExpandedNormalizedExpr { expr: expr.clone() })
+fn passthrough_expander() -> impl FnMut(
+    FieldExpansionContext,
+    Option<&verter_type_expr::locators::MacroPayloadLocator>,
+) -> ExpansionResult<ExpandedNormalizedExpr> {
+    |_ctx, payload| {
+        let expr = payload
+            .map(|locator| {
+                verter_type_expr::facts::SemanticTypeSource::Authored(
+                    verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone()),
+                )
+            })
+            .unwrap_or_else(|| {
+                verter_type_expr::facts::SemanticTypeSource::Closed(
+                    verter_type_expr::facts::ClosedTypeFact::Leaf(
+                        verter_type_expr::facts::LeafTypeFact::Ref("unresolved".to_string()),
+                    ),
+                )
+            });
+        ExpansionResult::exact(ExpandedNormalizedExpr { expr })
+    }
 }
 
-fn make_synth_typed_prop(name: &str, typed: TypeExpr) -> AnalyzedPropField {
+fn synth_payload(field_index: u32) -> verter_type_expr::locators::MacroPayloadLocator {
+    verter_type_expr::locators::MacroPayloadLocator {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: std::sync::Arc::from(""),
+            symbol: std::sync::Arc::from("default"),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        macro_index: 0,
+        payload: verter_type_expr::locators::MacroPayloadPosition::Field { field_index },
+    }
+}
+
+fn make_synth_typed_prop(name: &str, field_index: u32) -> AnalyzedPropField {
     AnalyzedPropField {
         name: name.to_string(),
         is_optional: false,
         span: verter_span::Span::default(),
-        // `type_annotation` text deliberately does NOT describe the typed
-        // shape: a regression that reparses the text would produce a
-        // different structure; the typed form must survive end-to-end.
+        // Display text never participates in the typed channel; the payload
+        // POSITION is the producer's authored emission.
         type_annotation: Some("garbage<<<unparseable".to_string()),
-        type_expr: Some(typed),
+        payload: Some(synth_payload(field_index)),
         type_expr_scope: Some(TypeExprScope::new("test:fixture")),
         description: None,
         tags: Vec::new(),
@@ -1801,23 +2396,19 @@ fn make_synth_typed_prop(name: &str, typed: TypeExpr) -> AnalyzedPropField {
     }
 }
 
-fn make_synth_typed_emit(name: &str, typed: TypeExpr) -> AnalyzedEmitField {
+fn make_synth_typed_emit(name: &str, field_index: u32) -> AnalyzedEmitField {
     AnalyzedEmitField {
         name: name.to_string(),
         span: verter_span::Span::default(),
         payload_type: Some("garbage<<<unparseable".to_string()),
-        payload_expr: Some(typed),
+        payload: Some(synth_payload(field_index)),
         payload_expr_scope: Some(TypeExprScope::new("test:fixture")),
         description: None,
         tags: Vec::new(),
     }
 }
 
-fn make_synth_typed_slot(
-    name: &str,
-    binding_name: &str,
-    binding_typed: TypeExpr,
-) -> AnalyzedSlotField {
+fn make_synth_typed_slot(name: &str, binding_name: &str) -> AnalyzedSlotField {
     AnalyzedSlotField {
         name: name.to_string(),
         is_required: false,
@@ -1826,13 +2417,15 @@ fn make_synth_typed_slot(
             name: binding_name.to_string(),
             type_annotation: Some("garbage<<<unparseable".to_string()),
             span: verter_span::Span::default(),
-            binding_expr: Some(binding_typed),
-            binding_expr_scope: Some(TypeExprScope::new("test:fixture")),
+            // A nested (slot, binding) position is not addressable by the
+            // flat payload vocabulary — bindings carry no payload.
+            payload: None,
+            binding_expr_scope: None,
         }],
         return_type: None,
         description: None,
         tags: Vec::new(),
-        return_expr: None,
+        payload: None,
         return_expr_scope: None,
     }
 }
@@ -1864,20 +2457,10 @@ fn make_synth_macro(
 }
 
 #[test]
-fn expand_macro_types_reads_prop_field_type_expr_directly_without_reparse() {
-    // A shape the producer captured (e.g. via cross-file external
-    // resolution) that text reparsing cannot reproduce.
-    let typed_indexed_access = TypeExpr::IndexedAccess {
-        object: Arc::new(TypeExpr::Ref {
-            name: "ImportedAlias".into(),
-            type_arguments: Vec::<TypeExpr>::new().into(),
-        }),
-        index: Arc::new(TypeExpr::Literal(LiteralValue::String("a".to_string()))),
-    };
-
+fn expand_macro_types_threads_prop_payload_locator_to_the_closure() {
     let macros = vec![make_synth_macro(
         AnalyzedMacroKind::DefineProps,
-        vec![make_synth_typed_prop("foo", typed_indexed_access.clone())],
+        vec![make_synth_typed_prop("foo", 3)],
         Vec::new(),
         Vec::new(),
     )];
@@ -1894,49 +2477,38 @@ fn expand_macro_types_reads_prop_field_type_expr_directly_without_reparse() {
     assert_eq!(
         result.props.len(),
         1,
-        "the prop field's typed expression should drive expansion, got {result:?}"
+        "the prop field's payload position should drive expansion, got {result:?}"
+    );
+    // The closure received the field's OWN payload locator (position 3), not a
+    // fabricated or renumbered one — the stand-in echoes it as the authored
+    // source, so a threading regression shifts the position and fails here.
+    assert_eq!(
+        result.props[0].r#type,
+        verter_type_expr::facts::SourcePosition::Present(
+            verter_type_expr::facts::SemanticTypeSource::Authored(
+                verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(3)),
+            )
+        ),
+        "the closure must receive the producer-supplied payload position unchanged"
     );
     assert_eq!(
-        result.props[0].r#type, typed_indexed_access,
-        "expand_macro_types_impl_with_expander must consume field.type_expr directly, not reparse type_annotation"
+        result.props[0].shallow_source,
+        Some(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(3),)),
+        "shallow_source must carry the same authored position"
     );
     assert_eq!(
         result.props[0].raw_type.as_deref(),
         Some("garbage<<<unparseable"),
         "raw_type passthrough should preserve the original annotation text"
     );
-
-    // Negative discrimination: prove the typed shape differs from what
-    // the text parser would have produced. If they happened to coincide,
-    // the test would not be characterising the typed-read change.
-    let from_text =
-        crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("garbage<<<unparseable", None);
-    assert_ne!(
-        from_text, typed_indexed_access,
-        "annotation text MUST NOT round-trip back to the typed shape; otherwise the test does not discriminate"
-    );
 }
 
 #[test]
-fn expand_macro_types_reads_emit_payload_expr_directly_without_reparse() {
-    let typed_tuple = TypeExpr::Tuple {
-        elements: vec![TupleElement {
-            label: Some("payload".to_string()),
-            ty: TypeExpr::Ref {
-                name: "ImportedPayload".into(),
-                type_arguments: Vec::<TypeExpr>::new().into(),
-            },
-            optional: false,
-            rest: false,
-        }]
-        .into(),
-        readonly: false,
-    };
-
+fn expand_macro_types_threads_emit_payload_locator_to_the_closure() {
     let macros = vec![make_synth_macro(
         AnalyzedMacroKind::DefineEmits,
         Vec::new(),
-        vec![make_synth_typed_emit("update", typed_tuple.clone())],
+        vec![make_synth_typed_emit("update", 1)],
         Vec::new(),
     )];
 
@@ -1949,40 +2521,32 @@ fn expand_macro_types_reads_emit_payload_expr_directly_without_reparse() {
         passthrough_expander(),
     );
 
+    assert_eq!(result.emits.len(), 1, "emit should expand from its payload");
     assert_eq!(
-        result.emits.len(),
-        1,
-        "emit should expand from payload_expr"
+        result.emits[0].r#type,
+        verter_type_expr::facts::SourcePosition::Present(
+            verter_type_expr::facts::SemanticTypeSource::Authored(
+                verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(1)),
+            )
+        ),
     );
     assert_eq!(
-        result.emits[0].r#type, typed_tuple,
-        "expand_macro_types_impl_with_expander must consume field.payload_expr directly"
+        result.emits[0].shallow_source,
+        Some(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(1),)),
     );
-
-    let from_text =
-        crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("garbage<<<unparseable", None);
-    assert_ne!(from_text, typed_tuple);
 }
 
 #[test]
-fn expand_macro_types_reads_slot_binding_expr_directly_without_reparse() {
-    let typed_indexed_access = TypeExpr::IndexedAccess {
-        object: Arc::new(TypeExpr::Ref {
-            name: "SlotProps".into(),
-            type_arguments: Vec::<TypeExpr>::new().into(),
-        }),
-        index: Arc::new(TypeExpr::Literal(LiteralValue::String("item".to_string()))),
-    };
-
+fn expand_macro_types_produces_no_slot_binding_entries_without_payload_positions() {
+    // Nested (slot, binding) positions are not addressable by the flat
+    // payload vocabulary, so analyzer slot bindings carry no payload and the
+    // expander produces NO per-binding entries — the typed binding channel is
+    // host-raised. A fabricated position here would be a producer defect.
     let macros = vec![make_synth_macro(
         AnalyzedMacroKind::DefineSlots,
         Vec::new(),
         Vec::new(),
-        vec![make_synth_typed_slot(
-            "default",
-            "item",
-            typed_indexed_access.clone(),
-        )],
+        vec![make_synth_typed_slot("default", "item")],
     )];
 
     let result = expand_macro_types_impl_with_expander(
@@ -1994,25 +2558,15 @@ fn expand_macro_types_reads_slot_binding_expr_directly_without_reparse() {
         passthrough_expander(),
     );
 
-    assert_eq!(
-        result.slot_bindings.len(),
-        1,
-        "slot binding should expand from binding_expr"
+    assert!(
+        result.slot_bindings.is_empty(),
+        "no payload position -> no per-binding expansion entry, got {result:?}"
     );
-    assert_eq!(result.slot_bindings[0].name, "default.item");
-    assert_eq!(
-        result.slot_bindings[0].r#type, typed_indexed_access,
-        "expand_macro_types_impl_with_expander must consume binding.binding_expr directly"
-    );
-
-    let from_text =
-        crate::analysis::jsdoc::parse_jsdoc_tag_type_payload("garbage<<<unparseable", None);
-    assert_ne!(from_text, typed_indexed_access);
 }
 
 #[test]
 fn expand_macro_types_skips_field_when_typed_form_is_absent_or_unknown() {
-    // Producer left `type_expr` unset — the function does NOT fall back
+    // Producer emitted no payload position — the function does NOT fall back
     // to reparsing `type_annotation` text. The expansion vector stays
     // empty.
     let macros = vec![make_synth_macro(
@@ -2022,7 +2576,7 @@ fn expand_macro_types_skips_field_when_typed_form_is_absent_or_unknown() {
             is_optional: false,
             span: verter_span::Span::default(),
             type_annotation: Some("string".to_string()),
-            type_expr: None,
+            payload: None,
             type_expr_scope: None,
             description: None,
             tags: Vec::new(),
@@ -2051,10 +2605,9 @@ fn expand_macro_types_skips_field_when_typed_form_is_absent_or_unknown() {
 
 #[test]
 fn expand_macro_types_threads_field_kind_and_path_through_closure() {
-    let typed_string = TypeExpr::Primitive(PrimitiveName::String);
     let macros = vec![make_synth_macro(
         AnalyzedMacroKind::DefineProps,
-        vec![make_synth_typed_prop("alpha", typed_string.clone())],
+        vec![make_synth_typed_prop("alpha", 0)],
         Vec::new(),
         Vec::new(),
     )];
@@ -2066,7 +2619,7 @@ fn expand_macro_types_threads_field_kind_and_path_through_closure() {
         &[],
         None,
         MacroExpansionScope::Full,
-        |ctx, expr| {
+        |ctx, payload| {
             let path: Vec<String> = ctx
                 .output_path
                 .iter()
@@ -2075,38 +2628,30 @@ fn expand_macro_types_threads_field_kind_and_path_through_closure() {
                 })
                 .collect();
             captured.push((ctx.kind, path));
-            ExpansionResult::exact(ExpandedNormalizedExpr { expr: expr.clone() })
+            let expr = payload
+                .map(|locator| {
+                    verter_type_expr::facts::SemanticTypeSource::Authored(
+                        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+                            locator.clone(),
+                        ),
+                    )
+                })
+                .expect("prop fields carry payload positions");
+            ExpansionResult::exact(ExpandedNormalizedExpr { expr })
         },
     );
 
     assert_eq!(captured, vec![(FieldKind::Prop, vec!["alpha".to_string()])]);
 }
 
-// ── W1.1c: `ExpandedField.shallow_type_expr` carries the analyzer-side
-//          shallow typed sidecar through the expander ──
-//
-// The producer at `expand_macro_types_impl_with_expander` reads
-// `field.type_expr` / `field.payload_expr` / `binding.binding_expr`
-// (shallow, analyzer-populated) and stamps each onto
-// `ExpandedField.shallow_type_expr` (+ paired scope). Pre-W1.1c the
-// field did not exist; consumers fell back to reparsing `raw_type`.
-// Post-W1.1c the bare alias `Ref` is preserved alongside the
-// (potentially distinct) post-expansion `r#type`.
+// ── `ExpandedField.shallow_source` carries the analyzer-side authored
+//    payload position through the expander ──
 
 #[test]
-fn expand_macro_types_props_publish_shallow_type_expr_from_prop_field_typed_form() {
-    // The analyzer captured a bare `Ref` for `foo: ImportedAlias`. The
-    // passthrough expander leaves `r#type` equal to the input, but the
-    // discriminating assertion is that `shallow_type_expr` is
-    // independently populated from the producer's analyzer-side
-    // `field.type_expr` and survives all the way to the `ExpandedField`.
-    let bare_ref = TypeExpr::Ref {
-        name: "ImportedAlias".into(),
-        type_arguments: Vec::<TypeExpr>::new().into(),
-    };
+fn expand_macro_types_props_publish_shallow_source_from_prop_payload_position() {
     let macros = vec![make_synth_macro(
         AnalyzedMacroKind::DefineProps,
-        vec![make_synth_typed_prop("foo", bare_ref.clone())],
+        vec![make_synth_typed_prop("foo", 2)],
         Vec::new(),
         Vec::new(),
     )];
@@ -2121,38 +2666,19 @@ fn expand_macro_types_props_publish_shallow_type_expr_from_prop_field_typed_form
     );
 
     assert_eq!(result.props.len(), 1);
-    // Discriminator: pre-W1.1c the field did not exist; post-W1.1c it
-    // carries the bare alias `Ref` from `field.type_expr`.
     assert_eq!(
-        result.props[0].shallow_type_expr.as_ref(),
-        Some(&bare_ref),
-        "shallow_type_expr must surface the analyzer-side bare alias Ref directly"
-    );
-    // Pairing invariant: scope present iff expr present.
-    assert!(
-        result.props[0].shallow_type_expr_scope.is_some(),
-        "shallow_type_expr_scope must be populated when shallow_type_expr is Some"
-    );
-    assert_eq!(
-        result.props[0]
-            .shallow_type_expr_scope
-            .as_ref()
-            .map(|s| s.as_str()),
-        Some("test:fixture"),
-        "shallow_type_expr_scope must inherit the analyzer field's scope"
+        result.props[0].shallow_source,
+        Some(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(2),)),
+        "shallow_source must surface the analyzer-side authored payload position"
     );
 }
 
 #[test]
-fn expand_macro_types_emits_publish_shallow_type_expr_from_emit_field_typed_form() {
-    let bare_ref = TypeExpr::Ref {
-        name: "ImportedPayload".into(),
-        type_arguments: Vec::<TypeExpr>::new().into(),
-    };
+fn expand_macro_types_emits_publish_shallow_source_from_emit_payload_position() {
     let macros = vec![make_synth_macro(
         AnalyzedMacroKind::DefineEmits,
         Vec::new(),
-        vec![make_synth_typed_emit("update", bare_ref.clone())],
+        vec![make_synth_typed_emit("update", 4)],
         Vec::new(),
     )];
 
@@ -2167,17 +2693,9 @@ fn expand_macro_types_emits_publish_shallow_type_expr_from_emit_field_typed_form
 
     assert_eq!(result.emits.len(), 1);
     assert_eq!(
-        result.emits[0].shallow_type_expr.as_ref(),
-        Some(&bare_ref),
-        "shallow_type_expr must surface the analyzer-side bare alias Ref for emits"
-    );
-    assert!(result.emits[0].shallow_type_expr_scope.is_some());
-    assert_eq!(
-        result.emits[0]
-            .shallow_type_expr_scope
-            .as_ref()
-            .map(|s| s.as_str()),
-        Some("test:fixture")
+        result.emits[0].shallow_source,
+        Some(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(synth_payload(4),)),
+        "shallow_source must surface the authored payload position for emits"
     );
 }
 
@@ -2198,14 +2716,12 @@ fn expand_macro_types_emits_publish_shallow_type_expr_from_emit_field_typed_form
 /// discriminates the c3 fix.
 #[test]
 fn r21_c3_expand_macro_types_propagates_declared_in_macro_type_arg_per_field() {
-    let typed_string = TypeExpr::Primitive(PrimitiveName::String);
-
     // Build two AnalyzedPropFields differing only in the structural
     // own-body flag.
-    let mut own_body = make_synth_typed_prop("own_body", typed_string.clone());
+    let mut own_body = make_synth_typed_prop("own_body", 0);
     own_body.declared_in_macro_type_arg = true;
 
-    let mut heritage = make_synth_typed_prop("heritage", typed_string.clone());
+    let mut heritage = make_synth_typed_prop("heritage", 1);
     heritage.declared_in_macro_type_arg = false;
 
     let macros = vec![make_synth_macro(
@@ -2256,27 +2772,34 @@ fn r21_c3_expand_macro_types_propagates_declared_in_macro_type_arg_per_field() {
 }
 
 // =============================================================================
-// Enum extraction (dual-space: value-side member name→value pairs + type-side value union)
+// Enum extraction (dual-space: value-side member name→scalar pairs + type-side
+// scalar-arm union)
 // =============================================================================
 
-fn enum_member_value<'a>(env: &'a EvalEnv, enum_name: &str, member: &str) -> &'a TypeExpr {
+/// The folded [`EnumScalar`] of one enum member. The member inventory carries
+/// the NAME for every member plus a scalar (`Number`/`String` = a statically
+/// folded literal, `Primitive` = deferred/degraded); this helper asserts the
+/// member has a FOLDABLE value, so it unwraps through
+/// [`EnumMemberValue::folded_literal`].
+fn enum_member_value(env: &EvalEnv, enum_name: &str, member: &str) -> EnumScalar {
     let value = env.value_symbols[enum_name].primary();
     assert_eq!(
         value.kind,
         ValueDeclKind::Enum,
         "value decl must be an enum"
     );
-    // The member inventory carries the NAME for every member plus an
-    // `EnumMemberValue` (`Folded` = a statically folded literal, `Deferred` =
-    // degraded); this helper asserts the member has a FOLDABLE value, so it
-    // unwraps through `folded_literal`.
     value
         .enum_members
         .as_ref()
         .expect("enum value decl carries the ordered member inventory")
+        .members
         .iter()
-        .find(|(name, _)| name == member)
-        .and_then(|(_, value)| value.folded_literal())
+        .find(|entry| entry.name == member)
+        .and_then(|entry| {
+            EnumMemberValue::from_scalar(&entry.value)
+                .folded_literal()
+                .cloned()
+        })
         .unwrap_or_else(|| panic!("enum {enum_name} has no foldable member {member}"))
 }
 
@@ -2284,17 +2807,30 @@ fn enum_member_value<'a>(env: &'a EvalEnv, enum_name: &str, member: &str) -> &'a
 /// value Verter statically folded (`EnumMemberValue::Folded`). A member whose
 /// value is deferred is OMITTED here, so this is the authority for which members
 /// survived value folding. (The FULL member-NAME set — including deferred-value
-/// members — is the presence rail; see `merged_enum_member_names`.)
-fn enum_member_names<'a>(env: &'a EvalEnv, enum_name: &str) -> Vec<&'a str> {
+/// members — is the presence rail; see `merged_enum_member_names_fact`.)
+fn enum_member_names(env: &EvalEnv, enum_name: &str) -> Vec<String> {
     env.value_symbols[enum_name]
         .primary()
         .enum_members
         .as_ref()
         .expect("enum value decl carries the ordered member inventory")
+        .members
         .iter()
-        .filter(|(_, value)| value.folded_literal().is_some())
-        .map(|(name, _)| name.as_str())
+        .filter(|entry| {
+            EnumMemberValue::from_scalar(&entry.value)
+                .folded_literal()
+                .is_some()
+        })
+        .map(|entry| entry.name.clone())
         .collect()
+}
+
+fn number_scalar(repr: &str) -> EnumScalar {
+    EnumScalar::Number(repr.to_string())
+}
+
+fn string_scalar(value: &str) -> EnumScalar {
+    EnumScalar::String(value.to_string())
 }
 
 #[test]
@@ -2304,24 +2840,19 @@ fn extracts_numeric_enum_member_map_with_auto_increment() {
         env.value_symbols.contains_key("Color"),
         "enum registers a VALUE symbol (the eval-env enum arm is the producer)"
     );
-    let members = env.value_symbols["Color"]
+    let members = &env.value_symbols["Color"]
         .primary()
         .enum_members
         .as_ref()
-        .expect("numeric enum carries enum_members");
+        .expect("numeric enum carries enum_members")
+        .members;
     assert_eq!(members.len(), 3);
+    assert_eq!(enum_member_value(&env, "Color", "Red"), number_scalar("0"));
     assert_eq!(
-        *enum_member_value(&env, "Color", "Red"),
-        TypeExpr::number_literal(0.0)
+        enum_member_value(&env, "Color", "Green"),
+        number_scalar("1")
     );
-    assert_eq!(
-        *enum_member_value(&env, "Color", "Green"),
-        TypeExpr::number_literal(1.0)
-    );
-    assert_eq!(
-        *enum_member_value(&env, "Color", "Blue"),
-        TypeExpr::number_literal(2.0)
-    );
+    assert_eq!(enum_member_value(&env, "Color", "Blue"), number_scalar("2"));
 }
 
 #[test]
@@ -2330,16 +2861,16 @@ fn extracts_string_enum_member_map() {
         "export enum Status { Idle = \"idle\", Active = \"active\", Done = \"done\" }",
     );
     assert_eq!(
-        *enum_member_value(&env, "Status", "Idle"),
-        TypeExpr::string_literal("idle")
+        enum_member_value(&env, "Status", "Idle"),
+        string_scalar("idle")
     );
     assert_eq!(
-        *enum_member_value(&env, "Status", "Active"),
-        TypeExpr::string_literal("active")
+        enum_member_value(&env, "Status", "Active"),
+        string_scalar("active")
     );
     assert_eq!(
-        *enum_member_value(&env, "Status", "Done"),
-        TypeExpr::string_literal("done")
+        enum_member_value(&env, "Status", "Done"),
+        string_scalar("done")
     );
 }
 
@@ -2348,12 +2879,12 @@ fn const_enum_members_lower_identically_to_a_regular_enum() {
     let env = parse_and_build_env("export const enum Direction { Up = \"UP\", Down = \"DOWN\" }");
     // The `const` modifier does NOT change the type-level value.
     assert_eq!(
-        *enum_member_value(&env, "Direction", "Up"),
-        TypeExpr::string_literal("UP")
+        enum_member_value(&env, "Direction", "Up"),
+        string_scalar("UP")
     );
     assert_eq!(
-        *enum_member_value(&env, "Direction", "Down"),
-        TypeExpr::string_literal("DOWN")
+        enum_member_value(&env, "Direction", "Down"),
+        string_scalar("DOWN")
     );
 }
 
@@ -2362,22 +2893,10 @@ fn numeric_enum_resumes_auto_increment_after_explicit_value() {
     // TS rule: a bare member is `previous numeric + 1`; an explicit numeric
     // reseeds the counter. So A=5, B=6, C=10, D=11.
     let env = parse_and_build_env("export enum E { A = 5, B, C = 10, D }");
-    assert_eq!(
-        *enum_member_value(&env, "E", "A"),
-        TypeExpr::number_literal(5.0)
-    );
-    assert_eq!(
-        *enum_member_value(&env, "E", "B"),
-        TypeExpr::number_literal(6.0)
-    );
-    assert_eq!(
-        *enum_member_value(&env, "E", "C"),
-        TypeExpr::number_literal(10.0)
-    );
-    assert_eq!(
-        *enum_member_value(&env, "E", "D"),
-        TypeExpr::number_literal(11.0)
-    );
+    assert_eq!(enum_member_value(&env, "E", "A"), number_scalar("5"));
+    assert_eq!(enum_member_value(&env, "E", "B"), number_scalar("6"));
+    assert_eq!(enum_member_value(&env, "E", "C"), number_scalar("10"));
+    assert_eq!(enum_member_value(&env, "E", "D"), number_scalar("11"));
 }
 
 #[test]
@@ -2391,37 +2910,30 @@ fn enum_type_space_is_union_of_member_value_literals() {
     );
     let decl = env.type_symbols["Color"].primary();
     assert_eq!(decl.kind, TypeDeclKind::Alias);
-    // The eager eval-env type body is a NON-SERVED placeholder, NOT the
-    // value-literal union: a per-declaration walk cannot see same-name merged
-    // contributors, so the union is derived ONCE from the value members by
-    // `ValueDeclGroup::enum_type_union` (the single source of truth) and the
-    // lazily-served body memo defers to it. (An eager body union here would be
-    // last-wins for merged enums — a divergence trap this placeholder avoids.)
-    assert!(
-        !matches!(decl.body, TypeExpr::Union(_)),
-        "the eager enum type body must be a non-served placeholder, not the value-literal \
-         union; got {:?}",
-        decl.body
-    );
+    // The stored type-space binding carries only its declaration LOCATOR (the
+    // union is not eagerly stored anywhere): a per-declaration walk cannot see
+    // same-name merged contributors, so the union is derived ONCE from the
+    // value members by `ValueDeclGroup::enum_type_union` (the single source of
+    // truth) and served on demand. The binding's body slot addresses the enum
+    // declaration itself and it carries NO member headers (member NAMES live
+    // on the value decl's names fact).
+    assert_eq!(&*decl.body.anchor.symbol, "Color");
+    assert!(decl.body.path.is_empty());
+    assert!(decl.direct_member_headers.is_empty());
 
-    // The PRODUCTION type-space derivation (the body the memo actually
-    // serves): the union of the member value literals, from the SAME merged
+    // The PRODUCTION type-space derivation (the arm set the body service
+    // serves): the union of the member value scalars, from the SAME merged
     // value-space member set.
     let union = env.value_symbols["Color"]
         .enum_type_union()
         .expect("enum value group derives a type union");
-    match &union {
-        TypeExpr::Union(types) => {
-            assert_eq!(types.len(), 3);
-            assert!(types.contains(&TypeExpr::number_literal(0.0)));
-            assert!(types.contains(&TypeExpr::number_literal(1.0)));
-            assert!(types.contains(&TypeExpr::number_literal(2.0)));
-            // Negative assertion: the union is the member VALUES, NOT the
-            // member NAMES (a value-from-name confusion would put "Red" here).
-            assert!(!types.contains(&TypeExpr::string_literal("Red")));
-        }
-        other => panic!("expected value-literal union, got {other:?}"),
-    }
+    assert_eq!(
+        union,
+        vec![number_scalar("0"), number_scalar("1"), number_scalar("2")],
+    );
+    // Negative assertion: the union is the member VALUES, NOT the member NAMES
+    // (a value-from-name confusion would put "Red" here).
+    assert!(!union.contains(&string_scalar("Red")));
 }
 
 #[test]
@@ -2429,75 +2941,57 @@ fn string_enum_type_space_is_union_of_string_value_literals() {
     let env = parse_and_build_env(
         "export enum Status { Idle = \"idle\", Active = \"active\", Done = \"done\" }",
     );
-    // The eager type body is the non-served placeholder; the served type union
-    // is derived from the value members by `ValueDeclGroup::enum_type_union`.
-    assert!(
-        !matches!(
-            env.type_symbols["Status"].primary().body,
-            TypeExpr::Union(_)
-        ),
-        "the eager enum type body must be a non-served placeholder, not the union"
-    );
     let union = env.value_symbols["Status"]
         .enum_type_union()
         .expect("enum value group derives a type union");
-    match &union {
-        TypeExpr::Union(types) => {
-            assert_eq!(types.len(), 3);
-            assert!(types.contains(&TypeExpr::string_literal("idle")));
-            assert!(types.contains(&TypeExpr::string_literal("active")));
-            assert!(types.contains(&TypeExpr::string_literal("done")));
-        }
-        other => panic!("expected string value-literal union, got {other:?}"),
-    }
+    assert_eq!(
+        union,
+        vec![
+            string_scalar("idle"),
+            string_scalar("active"),
+            string_scalar("done")
+        ],
+    );
 }
 
 #[test]
 fn negative_numeric_enum_initializer_folds_signed_literal_and_reseeds_auto_increment() {
     // TS represents `A = -1` as a unary `-` over a numeric literal. The
-    // member must fold to `number_literal(-1)` (NOT be skipped), and the
+    // member must fold to the signed literal (NOT be skipped), and the
     // auto-increment must continue from the signed value: after `B = -3`, a
     // bare `C` is `-3 + 1 = -2`.
     let env = parse_and_build_env("export enum E { A = -1, B = -3, C }");
     assert_eq!(
-        *enum_member_value(&env, "E", "A"),
-        TypeExpr::number_literal(-1.0),
+        enum_member_value(&env, "E", "A"),
+        number_scalar("-1"),
         "negative initializer must fold to the signed literal, not be skipped"
     );
+    assert_eq!(enum_member_value(&env, "E", "B"), number_scalar("-3"));
     assert_eq!(
-        *enum_member_value(&env, "E", "B"),
-        TypeExpr::number_literal(-3.0)
-    );
-    assert_eq!(
-        *enum_member_value(&env, "E", "C"),
-        TypeExpr::number_literal(-2.0),
+        enum_member_value(&env, "E", "C"),
+        number_scalar("-2"),
         "auto-increment resumes from the previous (negative) numeric"
     );
     // A leading unary `+` is also a numeric initializer.
     let env_plus = parse_and_build_env("export enum P { A = +5, B }");
-    assert_eq!(
-        *enum_member_value(&env_plus, "P", "A"),
-        TypeExpr::number_literal(5.0)
-    );
-    assert_eq!(
-        *enum_member_value(&env_plus, "P", "B"),
-        TypeExpr::number_literal(6.0)
-    );
+    assert_eq!(enum_member_value(&env_plus, "P", "A"), number_scalar("5"));
+    assert_eq!(enum_member_value(&env_plus, "P", "B"), number_scalar("6"));
 }
 
 #[test]
 fn enum_members_preserve_source_declaration_order() {
     // TS enum members are ordered. A non-alphabetical declaration order must
-    // be preserved verbatim (the value-space `enum_members` is a source-order
-    // `Vec`, not a hash-ordered map) so `typeof Enum` surfaces members in
-    // declaration order and auto-increment positions stay correct.
+    // be preserved verbatim (the value-space `enum_members` fact is a
+    // source-order sequence, not a hash-ordered map) so `typeof Enum` surfaces
+    // members in declaration order and auto-increment positions stay correct.
     let env = parse_and_build_env("export enum E { Zed, Alpha, Mid }");
-    let members = env.value_symbols["E"]
+    let members = &env.value_symbols["E"]
         .primary()
         .enum_members
         .as_ref()
-        .expect("enum carries enum_members");
-    let order: Vec<&str> = members.iter().map(|(name, _)| name.as_str()).collect();
+        .expect("enum carries enum_members")
+        .members;
+    let order: Vec<&str> = members.iter().map(|entry| entry.name.as_str()).collect();
     assert_eq!(
         order,
         vec!["Zed", "Alpha", "Mid"],
@@ -2521,8 +3015,9 @@ fn merged_same_name_enum_unions_all_contributor_members_in_both_spaces() {
         .enum_members
         .as_ref()
         .expect("enum")
+        .members
         .iter()
-        .map(|(name, _)| name.as_str())
+        .map(|entry| entry.name.as_str())
         .collect();
     assert_eq!(
         primary_only,
@@ -2540,35 +3035,27 @@ fn merged_same_name_enum_unions_all_contributor_members_in_both_spaces() {
         vec!["A", "B", "C", "D"],
         "merged value-space enum_members must contain ALL contributors' members in source order"
     );
-    assert_eq!(merged[0].1, TypeExpr::number_literal(1.0));
-    assert_eq!(merged[3].1, TypeExpr::number_literal(4.0));
+    assert_eq!(merged[0].1, number_scalar("1"));
+    assert_eq!(merged[3].1, number_scalar("4"));
 
     // Type space: assert on the PRODUCTION derivation — `enum_type_union`, the
-    // single source of truth the lazily-served body memo serves — NOT a union
-    // rebuilt from `merged` inside the test, which would be tautological (it
-    // would exercise `TypeExpr::union` + the test's own data, not the
-    // production fold, and would still pass if `enum_type_union` were broken).
-    // The derived union must carry every contributor's value literal, never
-    // just the last declaration's.
+    // single source of truth the demand-served body derives from — NOT a union
+    // rebuilt from `merged` inside the test, which would be tautological. The
+    // derived union must carry every contributor's value literal, never just
+    // the last declaration's.
     let type_union = env.value_symbols["E"]
         .enum_type_union()
         .expect("merged enum value group derives a type union");
-    match &type_union {
-        TypeExpr::Union(types) => {
-            assert_eq!(
-                types.len(),
-                4,
-                "type union must carry all 4 member literals"
-            );
-            for literal in [1.0, 2.0, 3.0, 4.0] {
-                assert!(
-                    types.contains(&TypeExpr::number_literal(literal)),
-                    "type union must contain literal {literal}; got {types:?}"
-                );
-            }
-        }
-        other => panic!("expected a 4-arm value-literal union, got {other:?}"),
-    }
+    assert_eq!(
+        type_union,
+        vec![
+            number_scalar("1"),
+            number_scalar("2"),
+            number_scalar("3"),
+            number_scalar("4")
+        ],
+        "type union must carry all 4 member literals"
+    );
 }
 
 #[test]
@@ -2591,16 +3078,13 @@ fn unsupported_initializer_makes_running_auto_increment_unknown_not_fabricated()
     // Negative: B must NOT be present in the FOLDABLE rail with a fabricated-0
     // literal — its value is deferred, not invented.
     assert!(
-        !names.contains(&"B"),
+        !names.iter().any(|n| n == "B"),
         "a bare member after an unknown running value must NOT be fabricated into the foldable rail"
     );
+    assert_eq!(enum_member_value(&env, "E", "C"), number_scalar("5"));
     assert_eq!(
-        *enum_member_value(&env, "E", "C"),
-        TypeExpr::number_literal(5.0)
-    );
-    assert_eq!(
-        *enum_member_value(&env, "E", "D"),
-        TypeExpr::number_literal(6.0),
+        enum_member_value(&env, "E", "D"),
+        number_scalar("6"),
         "auto-increment resumes from the explicit C = 5, not from the deferred A/B"
     );
 }
@@ -2621,13 +3105,10 @@ fn bitwise_not_initializer_defers_member_and_following_bare_members() {
         "B (~1 unfoldable) and C (bare after an unknown running value) are both deferred, not folded"
     );
     assert!(
-        !names.contains(&"C"),
+        !names.iter().any(|n| n == "C"),
         "a bare member after an unknown running value must NOT be fabricated into the foldable rail"
     );
-    assert_eq!(
-        *enum_member_value(&env, "F", "A"),
-        TypeExpr::number_literal(0.0)
-    );
+    assert_eq!(enum_member_value(&env, "F", "A"), number_scalar("0"));
 }
 
 #[test]
@@ -2646,14 +3127,8 @@ fn computed_string_enum_member_names_resolve_via_static_name_and_fold_values() {
         vec!["A", "B"],
         "computed-string member names resolve to their static identity (NOT dropped)"
     );
-    assert_eq!(
-        *enum_member_value(&env, "E", "A"),
-        TypeExpr::number_literal(1.0)
-    );
-    assert_eq!(
-        *enum_member_value(&env, "E", "B"),
-        TypeExpr::number_literal(2.0)
-    );
+    assert_eq!(enum_member_value(&env, "E", "A"), number_scalar("1"));
+    assert_eq!(enum_member_value(&env, "E", "B"), number_scalar("2"));
 }
 
 #[test]
@@ -2663,10 +3138,7 @@ fn computed_template_enum_member_name_resolves_to_static_single_quasi() {
     // `static_name`, so it folds `T.X == 7` exactly as `index_enum` records it.
     let env = parse_and_build_env("export enum T { [`X`] = 7 }");
     assert_eq!(enum_member_names(&env, "T"), vec!["X"]);
-    assert_eq!(
-        *enum_member_value(&env, "T", "X"),
-        TypeExpr::number_literal(7.0)
-    );
+    assert_eq!(enum_member_value(&env, "T", "X"), number_scalar("7"));
 }
 
 #[test]
@@ -2675,44 +3147,58 @@ fn enum_member_inventory_records_all_static_names_folding_or_degrading_each_valu
     // including ones whose VALUE is deferred — so the name rail is the SUPERSET
     // the foldable rail filters. For `enum E { A = 1 << 2, B, C = 5, D }`: all
     // four NAMES are recorded; `A` (unfoldable `1 << 2`) and `B` (bare after an
-    // unknown running value) are `Deferred`, each carrying the degraded `number`
-    // domain; `C = 5` reseeds and `D = 6` fold.
+    // unknown running value) are deferred, each carrying the degraded `number`
+    // domain scalar; `C = 5` reseeds and `D = 6` fold.
     let env = parse_and_build_env("export enum E { A = 1 << 2, B, C = 5, D }");
-    let inventory = env.value_symbols["E"]
+    let inventory = &env.value_symbols["E"]
         .primary()
         .enum_members
         .as_ref()
-        .expect("enum carries the member inventory");
-    let all_names: Vec<&str> = inventory.iter().map(|(name, _)| name.as_str()).collect();
+        .expect("enum carries the member inventory")
+        .members;
+    let all_names: Vec<&str> = inventory.iter().map(|entry| entry.name.as_str()).collect();
     assert_eq!(
         all_names,
         vec!["A", "B", "C", "D"],
         "every statically-named member is recorded, even with a deferred value"
     );
     assert_eq!(
-        inventory[0].1,
-        EnumMemberValue::Deferred(TypeExpr::Primitive(PrimitiveName::Number)),
+        inventory[0].value,
+        EnumScalar::Primitive(EnumPrimitiveDomain::Number),
         "A's value is DEFERRED and degrades to `number` (the numeric `1 << 2`)"
     );
     assert_eq!(
-        inventory[1].1,
-        EnumMemberValue::Deferred(TypeExpr::Primitive(PrimitiveName::Number)),
+        inventory[1].value,
+        EnumScalar::Primitive(EnumPrimitiveDomain::Number),
         "B is DEFERRED (bare after an unknown running value) and degrades to `number`"
     );
     assert_eq!(
-        inventory[2].1,
-        EnumMemberValue::Folded(TypeExpr::number_literal(5.0)),
+        inventory[2].value,
+        number_scalar("5"),
         "C = 5 folds and reseeds the counter"
     );
     assert_eq!(
-        inventory[3].1,
-        EnumMemberValue::Folded(TypeExpr::number_literal(6.0)),
+        inventory[3].value,
+        number_scalar("6"),
         "D resumes auto-increment from the reseeded C"
+    );
+
+    // The rail-explicit view is a lossless bijection over the stored scalar:
+    // a `Primitive` scalar classifies back to `Deferred`, a literal to
+    // `Folded`.
+    assert_eq!(
+        EnumMemberValue::from_scalar(&inventory[0].value),
+        EnumMemberValue::Deferred(EnumPrimitiveDomain::Number),
+    );
+    assert_eq!(
+        EnumMemberValue::from_scalar(&inventory[2].value),
+        EnumMemberValue::Folded(number_scalar("5")),
     );
 
     // The rails derive consistently from this single inventory: the FOLDABLE
     // rail (`merged_enum_members`) is the `Folded` subset, the NAME rail
-    // (`merged_enum_member_names`) is the full superset.
+    // (the stored `EnumMemberNamesFact`, unioned by
+    // `merged_enum_member_names_fact`) is the full superset.
     let value_rail = env.value_symbols["E"]
         .merged_enum_members()
         .expect("foldable rail");
@@ -2723,44 +3209,43 @@ fn enum_member_inventory_records_all_static_names_folding_or_degrading_each_valu
         "the foldable rail filters out deferred members"
     );
     let presence_names = env.value_symbols["E"]
-        .merged_enum_member_names()
+        .merged_enum_member_names_fact()
         .expect("name rail");
     assert_eq!(
-        presence_names,
-        vec!["A", "B", "C", "D"],
-        "the name rail is the full member-name superset"
+        presence_names.names.as_ref(),
+        ["A", "B", "C", "D"],
+        "the name-rail fact is the full member-name superset"
     );
 }
 
 #[test]
 fn all_deferred_numeric_enum_type_union_degrades_to_number_not_never() {
     // `enum Flags { A = 1 << 0, B = 1 << 1 }` — BOTH members carry a computed
-    // (deferred) value, so NO member folds to a literal. The enum's TYPE body
-    // must NOT collapse to `never` (a confident-wrong bottom type) just because
-    // no value folded: a non-empty enum is inhabited. Each deferred
+    // (deferred) value, so NO member folds to a literal. The enum's TYPE arm
+    // set must NOT collapse to empty (a confident-wrong bottom type) just
+    // because no value folded: a non-empty enum is inhabited. Each deferred
     // numeric-expression member degrades to its narrowest sound domain
-    // (`number`), so the deduped union is exactly `number`.
+    // (`number`), so the deduped arm set is exactly `[number]`.
     let env = parse_and_build_env("export enum Flags { A = 1 << 0, B = 1 << 1 }");
     let union = env.value_symbols["Flags"]
         .enum_type_union()
         .expect("enum value group derives a type union");
-    assert_ne!(
-        union,
-        TypeExpr::Primitive(PrimitiveName::Never),
-        "an all-deferred NON-EMPTY enum must NOT resolve to `never`"
+    assert!(
+        !union.is_empty(),
+        "an all-deferred NON-EMPTY enum must NOT resolve to the empty (never) arm set"
     );
     assert_eq!(
         union,
-        TypeExpr::Primitive(PrimitiveName::Number),
+        vec![EnumScalar::Primitive(EnumPrimitiveDomain::Number)],
         "two numeric-expression members both degrade to `number`; the deduped \
-         union is `number`, not `never` and not the empty bottom"
+         arm set is `[number]`, not empty and not one arm per member"
     );
 }
 
 #[test]
 fn partial_deferred_enum_type_union_keeps_degraded_arm_for_deferred_member() {
     // `enum P { A = "x", B = someFn() }` — `A` folds to `"x"`, `B`'s value is a
-    // computed call (deferred). The TYPE body must NOT narrow to just `"x"`
+    // computed call (deferred). The TYPE arm set must NOT narrow to just `"x"`
     // (silently dropping `B` is false absence). It carries the folded `"x"` arm
     // PLUS a DEGRADED arm for `B` — an unclassifiable call initializer proves no
     // narrower domain than `unknown`.
@@ -2768,51 +3253,42 @@ fn partial_deferred_enum_type_union_keeps_degraded_arm_for_deferred_member() {
     let union = env.value_symbols["P"]
         .enum_type_union()
         .expect("enum value group derives a type union");
-    match &union {
-        TypeExpr::Union(arms) => {
-            assert!(
-                arms.contains(&TypeExpr::string_literal("x")),
-                "the folded `A` literal must remain an arm: {arms:?}"
-            );
-            assert!(
-                arms.iter()
-                    .any(|arm| matches!(arm, TypeExpr::Primitive(PrimitiveName::Unknown))),
-                "the deferred `B` must contribute a DEGRADED arm, never vanish: {arms:?}"
-            );
-        }
-        other => panic!(
-            "the type body must NOT narrow to the single folded literal `\"x\"`; \
-             expected a union carrying a degraded arm for `B`, got {other:?}"
-        ),
-    }
+    assert!(
+        union.contains(&string_scalar("x")),
+        "the folded `A` literal must remain an arm: {union:?}"
+    );
+    assert!(
+        union.contains(&EnumScalar::Primitive(EnumPrimitiveDomain::Unknown)),
+        "the deferred `B` must contribute a DEGRADED arm, never vanish: {union:?}"
+    );
+    assert_eq!(
+        union.len(),
+        2,
+        "the arm set must NOT narrow to the single folded literal `\"x\"`"
+    );
 }
 
 #[test]
 fn deferred_members_degrade_into_enum_type_union_alongside_folded_literals() {
     // `enum E { A = 1 << 2, B, C = 5, D }` — `A` (computed) and `B` (bare after
     // a deferred running value) are deferred; `C = 5`, `D = 6` fold. The TYPE
-    // union must carry the folded literals `5`/`6` AND a degraded `number` arm
-    // for the deferred members — never drop `A`/`B`.
+    // arm set must carry the folded literals `5`/`6` AND a degraded `number`
+    // arm for the deferred members — never drop `A`/`B`.
     let env = parse_and_build_env("export enum E { A = 1 << 2, B, C = 5, D }");
     let union = env.value_symbols["E"]
         .enum_type_union()
         .expect("enum value group derives a type union");
-    let arms = match &union {
-        TypeExpr::Union(arms) => arms.clone(),
-        other => panic!("expected a union of literal + degraded arms, got {other:?}"),
-    };
     assert!(
-        arms.contains(&TypeExpr::number_literal(5.0)),
-        "the folded `C = 5` literal arm must be present: {arms:?}"
+        union.contains(&number_scalar("5")),
+        "the folded `C = 5` literal arm must be present: {union:?}"
     );
     assert!(
-        arms.contains(&TypeExpr::number_literal(6.0)),
-        "the folded `D = 6` literal arm must be present: {arms:?}"
+        union.contains(&number_scalar("6")),
+        "the folded `D = 6` literal arm must be present: {union:?}"
     );
     assert!(
-        arms.iter()
-            .any(|arm| matches!(arm, TypeExpr::Primitive(PrimitiveName::Number))),
-        "the deferred `A`/`B` members degrade to a `number` arm: {arms:?}"
+        union.contains(&EnumScalar::Primitive(EnumPrimitiveDomain::Number)),
+        "the deferred `A`/`B` members degrade to a `number` arm: {union:?}"
     );
 }
 
@@ -2825,27 +3301,46 @@ fn tagged_template_enum_member_degrades_to_unknown_not_string() {
     // Both members are VALUE-deferred (neither folds to a literal), so
     // `degraded_member_domain` classifies each from its initializer kind.
     let env = parse_and_build_env("export enum E { A = tag`x`, B = `y` }");
-    let inventory = env.value_symbols["E"]
+    let inventory = &env.value_symbols["E"]
         .primary()
         .enum_members
         .as_ref()
-        .expect("enum carries the member inventory");
-    let all_names: Vec<&str> = inventory.iter().map(|(name, _)| name.as_str()).collect();
+        .expect("enum carries the member inventory")
+        .members;
+    let all_names: Vec<&str> = inventory.iter().map(|entry| entry.name.as_str()).collect();
     assert_eq!(
         all_names,
         vec!["A", "B"],
         "both statically-named members are recorded with deferred values"
     );
     assert_eq!(
-        inventory[0].1,
-        EnumMemberValue::Deferred(TypeExpr::Primitive(PrimitiveName::Unknown)),
+        inventory[0].value,
+        EnumScalar::Primitive(EnumPrimitiveDomain::Unknown),
         "a TAGGED template is a call returning an arbitrary type; `string` would \
          under-approximate, so `A` degrades to the sound `unknown`"
     );
     assert_eq!(
-        inventory[1].1,
-        EnumMemberValue::Deferred(TypeExpr::Primitive(PrimitiveName::String)),
+        inventory[1].value,
+        EnumScalar::Primitive(EnumPrimitiveDomain::String),
         "a PLAIN template literal (no tag) is a string expression; `B` keeps the \
          `string` domain — the soundness fix touches only the tagged case"
+    );
+}
+
+#[test]
+fn plus_initializer_degrades_to_number_or_string_domain() {
+    // `A = x + y` is numeric add OR string concat — the narrowest sound bound
+    // is the `number | string` domain, encoded by the dedicated
+    // `NumberOrString` arm (neither `Number` nor `String` alone is sound).
+    let env = parse_and_build_env("export enum E { A = x + y }");
+    let inventory = &env.value_symbols["E"]
+        .primary()
+        .enum_members
+        .as_ref()
+        .expect("enum carries the member inventory")
+        .members;
+    assert_eq!(
+        inventory[0].value,
+        EnumScalar::Primitive(EnumPrimitiveDomain::NumberOrString),
     );
 }

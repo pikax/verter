@@ -33,35 +33,77 @@ impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroT
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
         profile_hash: Option<u64>,
     ) -> Result<
-        Option<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>,
+        Option<verter_parser::utils::oxc::script::type_surface::ResolvedElements>,
         Self::Error,
     > {
-        self.host.resolve_external_type_from_loaded_files_with_view(
-            self.ctx,
-            owner_canonical,
-            &dep.import_source,
-            &dep.type_name,
-            tracked_deps,
-            resolution_deps,
-            cache,
-            visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            // `use_host_cache = false`: this legacy `ResolvedElements`
-            // compatibility path is NOT an admissible persistent
-            // `ResolvedTypeCacheDb` producer. A broken decl-body lease pin
-            // reaches it and collapses to a `ResolvedSymbol { body: None }`;
-            // admitted into the persistent content-keyed `ResolvedTypeCacheDb`
-            // that would be a false-warm "resolved but empty" entry the
-            // read-side fact rail cannot reject (a lease-miss never advances
-            // the key's `dep_source_hash`). Persistent warm admission is
-            // therefore denied on this path: request-local dedupe (the `cache`
-            // above) is allowed, persistent warm admission is not.
-            false,
-            profile_hash,
-            0,
-            self.view,
-        )
+        // The legacy path runs FIRST: it owns dependency tracking (the
+        // frontier closure records `tracked_deps` for invalidation) and the
+        // missing-dependency error semantics (`Err` propagates unchanged).
+        let legacy = self
+            .host
+            .resolve_external_type_from_loaded_files_with_view(
+                self.ctx,
+                owner_canonical,
+                &dep.import_source,
+                &dep.type_name,
+                tracked_deps,
+                resolution_deps,
+                cache,
+                visiting,
+                true,
+                verter_workspace::ResolveRequestKind::TypeImport,
+                // `use_host_cache = false`: this legacy `ResolvedElements`
+                // compatibility path has no persistent warm admission;
+                // request-local dedupe (the `cache` above) is allowed.
+                false,
+                profile_hash,
+                0,
+                self.view,
+            )?;
+        if legacy.is_some() {
+            return Ok(legacy);
+        }
+        // The legacy frontier element payload is severed (an honest miss), so
+        // an imported macro type argument resolves through the ONE shared
+        // engine instead: the shared macro-surface authority + the shared
+        // shallow-surface projection, thin-normalized into the parser-consumed
+        // `ResolvedElements` shape (`shared_resolve(type) + normalise`).
+        match dep.macro_kind {
+            verter_semantic::analysis::types::AnalyzedMacroKind::DefineEmits => Ok(
+                crate::typeinfo::framework_surface::vue_exec::imported_emits_resolved_elements(
+                    self.ctx,
+                    owner_canonical,
+                    dep.macro_index,
+                    &dep.type_name,
+                ),
+            ),
+            verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps => {
+                // Bare-named macro argument (`defineProps<Props>()`) — the
+                // macro-surface route (own-body provenance, indexed-access
+                // support). A COMPOSITE argument (`defineProps<A & B>()`)
+                // misses the by-name gate and resolves PER NAME instead —
+                // the parser folds each referenced name independently.
+                if let Some(elements) =
+                    crate::typeinfo::framework_surface::vue_exec::imported_props_resolved_elements(
+                        self.ctx,
+                        owner_canonical,
+                        dep.macro_index,
+                        &dep.type_name,
+                    )
+                {
+                    return Ok(Some(elements));
+                }
+                Ok(
+                    crate::typeinfo::framework_surface::vue_exec::imported_named_props_resolved_elements(
+                        self.ctx,
+                        owner_canonical,
+                        &dep.import_source,
+                        &dep.type_name,
+                    ),
+                )
+            }
+            _ => Ok(None),
+        }
     }
 
     fn map_external_macro_type_error(

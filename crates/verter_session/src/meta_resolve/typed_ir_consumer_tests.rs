@@ -1,176 +1,137 @@
 //! Discriminating regression tests for the projector + materialiser
-//! consumers that drive semantic decisions from the typed IR sidecars
-//! (`AnalyzedSlotField.return_expr`, `AnalyzedSlotFieldBinding.binding_expr`,
-//! `ExpandedField.shallow_type_expr`) rather than from raw source text.
+//! consumers that publish content-free typed SOURCES
+//! (`SemanticTypeSource` on the `*Analysis` / `Expanded*` carriers) and
+//! re-raise them through the ONE shared dispatch on demand.
 //!
-//! Each test in this file pins a single semantic decision that the
-//! Typed-IR-Only Resolver Rule (see CLAUDE.md) makes structural rather
-//! than text-driven. The discriminator in every test is the absence
-//! of a source-text reparse: each test is engineered to FAIL if a
-//! future change reintroduces text-mode reparse such as
-//! `parse_jsdoc_tag_type_payload(raw_text)` or
-//! `format!(...).parse_jsdoc_tag_type_payload(...)` round-trips inside
-//! the projector / materialiser pipeline.
+//! Each test pins a single semantic decision the source-carrier
+//! publication makes structural rather than text-driven, and each is
+//! engineered to FAIL if a future change reintroduces a text-mode
+//! reparse or a materialised-`TypeExpr` publication in these positions.
 
 use std::sync::Arc;
 
-use verter_type_expr::{FunctionParam, ObjectMember, PrimitiveName, TypeExpr};
+use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};
+use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
-use super::projectors::define_shapes::slot_field_function_type_expr;
+use super::projectors::define_shapes::slot_field_function_source;
 
 // ---------------------------------------------------------------------------
-// Test 1 — `slot_field_function_type_expr` direct typed construction.
-//
-// The function constructs `TypeExpr::Function` directly from
-// `AnalyzedSlotField.return_expr` and `AnalyzedSlotFieldBinding.binding_expr`.
-// No `format!()` of synthetic source text and no text-mode reparse
-// (e.g. `parse_jsdoc_tag_type_payload`) round-trip.
-//
-// Discriminator: this test supplies `binding_expr` typed forms WITHOUT
-// `type_annotation` text. A reparse path keyed off `type_annotation`
-// would synthesise `format!("(props: { item: unknown, index: unknown })
-// => any")` and reparse, producing object members whose `ty` is
-// `Unknown`. The typed path uses the supplied typed bindings directly,
-// so the resulting Function carries `Primitive(String)` for `item`
-// and `Primitive(Number)` for `index`. `contains_unknown` walks the
-// structure to catch any `TypeExpr::Unknown` shell introduced by a
-// regressed reparse fallback.
+// Test 1 — `slot_field_function_source` publishes the slot's content-free
+// SOURCE: the authored payload position when the resolver stamped one, else
+// the closed FUNCTION fact whose composition through the shared bridge
+// interns a real `SemanticNodeData::Function` carrier (node synthesis is
+// demand-driven at the raise, never an eager `TypeExpr`).
 // ---------------------------------------------------------------------------
 
-#[test]
-fn slot_field_function_type_expr_constructs_typed_function_directly() {
-    let slot = verter_semantic::analysis::AnalyzedSlotField {
+fn slot_with_payload(
+    payload: Option<verter_type_expr::locators::MacroPayloadLocator>,
+) -> verter_semantic::analysis::AnalyzedSlotField {
+    verter_semantic::analysis::AnalyzedSlotField {
         name: "default".to_string(),
         is_required: true,
-        bindings: vec![
-            verter_semantic::analysis::AnalyzedSlotFieldBinding {
-                name: "item".to_string(),
-                // Discriminator: leave annotation None — only the typed
-                // form is the authority. A reparse path collapses to
-                // `unknown`.
-                type_annotation: None,
-                binding_expr: Some(TypeExpr::Primitive(PrimitiveName::String)),
-                binding_expr_scope: Some(verter_type_expr::TypeExprScope::new("/c.vue")),
-                span: verter_span::Span::default(),
-            },
-            verter_semantic::analysis::AnalyzedSlotFieldBinding {
-                name: "index".to_string(),
-                type_annotation: None,
-                binding_expr: Some(TypeExpr::Primitive(PrimitiveName::Number)),
-                binding_expr_scope: Some(verter_type_expr::TypeExprScope::new("/c.vue")),
-                span: verter_span::Span::default(),
-            },
-        ],
+        bindings: vec![verter_semantic::analysis::AnalyzedSlotFieldBinding {
+            name: "item".to_string(),
+            type_annotation: None,
+            payload: None,
+            binding_expr_scope: None,
+            span: verter_span::Span::default(),
+        }],
         span: verter_span::Span::default(),
         return_type: None,
-        return_expr: Some(TypeExpr::Primitive(PrimitiveName::Void)),
-        return_expr_scope: Some(verter_type_expr::TypeExprScope::new("/c.vue")),
+        payload,
+        return_expr_scope: None,
         description: None,
         tags: Vec::new(),
-    };
-
-    let ty = slot_field_function_type_expr(&slot);
-
-    // Top-level shape must be a Function — NOT a Ref `unknown`, NOT a
-    // primitive, NOT a generic wrapper. A reparse round-trip whose
-    // synthesised source lost the bindings would produce a different
-    // top-level shape.
-    let func = match &ty {
-        TypeExpr::Function(f) => f,
-        other => panic!(
-            "expected TypeExpr::Function, got `{other:?}` — typed constructor must produce a Function directly",
-        ),
-    };
-
-    // Exactly one `props` parameter, taking the typed Object built
-    // from the bindings.
-    assert_eq!(
-        func.parameters.len(),
-        1,
-        "function must take exactly one `props` parameter"
-    );
-    let param: &FunctionParam = &func.parameters[0];
-    assert_eq!(param.name.as_deref(), Some("props"));
-    assert!(!param.optional);
-    assert!(!param.rest);
-
-    // The `props` parameter is a typed Object with the two bindings.
-    let object = match &param.ty {
-        TypeExpr::Object(obj) => obj,
-        other => panic!(
-            "expected props param to be TypeExpr::Object, got `{other:?}` — the typed constructor must NOT reparse",
-        ),
-    };
-    assert_eq!(object.properties.len(), 2, "must carry both bindings");
-
-    let mut iter = object.properties.iter();
-    let first = iter.next().expect("first property");
-    let second = iter.next().expect("second property");
-    let ObjectMember::Property(item_prop) = first else {
-        panic!("first member must be a Property, got {first:?}");
-    };
-    let ObjectMember::Property(index_prop) = second else {
-        panic!("second member must be a Property, got {second:?}");
-    };
-    assert_eq!(item_prop.name, "item");
-    assert_eq!(item_prop.ty, TypeExpr::Primitive(PrimitiveName::String));
-    assert_eq!(index_prop.name, "index");
-    assert_eq!(index_prop.ty, TypeExpr::Primitive(PrimitiveName::Number));
-
-    // Return type comes from `return_expr`. A reparse fallback with no
-    // source text would default to `any` — here it must be the typed
-    // `void` we supplied.
-    let return_ty: &TypeExpr = func
-        .return_type
-        .as_ref()
-        .expect("return type populated from return_expr")
-        .as_ref();
-    assert_eq!(*return_ty, TypeExpr::Primitive(PrimitiveName::Void));
-
-    // Negative assertion: the typed constructor must NOT round-trip
-    // through the analyzer's display strings. Walking the structure
-    // for `TypeExpr::Unknown` shells catches any reparse fallback for
-    // missing text.
-    assert!(
-        !contains_unknown(&ty),
-        "typed constructor must not introduce `TypeExpr::Unknown` shells anywhere — got {ty:?}",
-    );
-}
-
-fn contains_unknown(expr: &TypeExpr) -> bool {
-    match expr {
-        TypeExpr::Unknown { .. } => true,
-        TypeExpr::Function(f) => {
-            f.parameters.iter().any(|p| contains_unknown(&p.ty))
-                || f.return_type.as_deref().is_some_and(contains_unknown)
-        }
-        TypeExpr::Object(o) => o.properties.iter().any(|m| match m {
-            ObjectMember::Property(p) => contains_unknown(&p.ty),
-            _ => false,
-        }),
-        _ => false,
     }
 }
 
+#[test]
+fn slot_field_function_source_publishes_payload_else_closed_function_fact() {
+    // (a) An authored payload position publishes AS the authored source —
+    // never re-synthesised.
+    let payload = verter_type_expr::locators::MacroPayloadLocator {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from("/c.vue"),
+            symbol: Arc::from("default"),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        macro_index: 0,
+        payload: verter_type_expr::locators::MacroPayloadPosition::Field { field_index: 0 },
+    };
+    let authored = slot_field_function_source(&slot_with_payload(Some(payload.clone())));
+    assert_eq!(
+        authored,
+        SemanticTypeSource::Authored(
+            verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload)
+        ),
+        "a payload-stamped slot must publish its authored position verbatim"
+    );
+
+    // (b) A payload-less slot publishes the closed FUNCTION fact with a
+    // synthetic `props` parameter (typed-miss positions recovered on demand).
+    let closed = slot_field_function_source(&slot_with_payload(None));
+    let SemanticTypeSource::Closed(ClosedTypeFact::Function(signature)) = &closed else {
+        panic!("a payload-less slot must publish a closed Function fact, got {closed:?}");
+    };
+    assert_eq!(signature.parameters.len(), 1, "one synthetic props param");
+    assert_eq!(signature.parameters[0].name.as_deref(), Some("props"));
+    assert!(
+        signature.parameters[0].ty.is_none(),
+        "the synthesized props object has no authored slot — the typed miss"
+    );
+    assert!(signature.return_ty.is_none(), "return recovered on demand");
+
+    // (c) Raising the closed fact through the shared bridge interns a REAL
+    // `Function` carrier node — the demand-driven node synthesis.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/c.vue".to_string(),
+            source: Arc::from(
+                "<script setup lang=\"ts\"></script>\n<template><div /></template>\n",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert /c.vue");
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let raised = dispatch
+        .raise_semantic_type_source_to_hot(
+            &closed,
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: "/c.vue",
+                context:
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                interior_failures: None,
+            },
+        )
+        .expect("the closed Function fact must raise through the bridge");
+    let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
+    assert!(
+        matches!(
+            data.as_deref(),
+            Some(crate::semantic_query::SemanticNodeData::Function { params, .. }) if params.len() == 1
+        ),
+        "the raised closed Function fact must intern a Function carrier with the props param, got {data:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
-// Test 2 — `reduce_published_field_types` publishes the typed sidecar
-// when the expanded `r#type` reduces to an unresolved mapped shell.
+// Test 2 — `reduce_published_field_types` upgrades a field's published
+// SOURCE to the complete closed leaf fact when the node-domain reduction
+// resolves one.
 //
 // Driving `defineProps<Partial<Source>>()` end-to-end through
 // `get_component_meta` and asserting each prop publishes the per-prop
-// primitive type (`string`, `number`) rather than the unresolved
-// `Mapped { source: Unknown }` shell. The projector reads
-// `field.shallow_type_expr` — the typed per-prop form lowered by the
-// analyzer at OXC visit time — when the post-expansion `r#type`
-// strictly underperforms the typed sidecar. A regression that
-// reintroduced source-text reparse would also produce a passing
-// result, but the architecture guard
-// `no_parse_jsdoc_tag_type_payload_outside_jsdoc`
-// blocks that escape hatch; together this fixture and the guard pin
-// the typed-IR-only contract.
+// closed primitive leaf (`string`, `number`) rather than an unresolved
+// carrier: the publication finaliser raised each field's source through
+// the shared bridge, reduced it node-domain, and leaf-projected the result.
 // ---------------------------------------------------------------------------
 
 const PARTIAL_SOURCE_VUE: &str = r#"<script setup lang="ts">
@@ -184,7 +145,7 @@ defineProps<Partial<Source>>();
 "#;
 
 #[test]
-fn reduce_published_field_types_uses_shallow_typed_form_authoritatively() {
+fn reduce_published_field_types_leaf_projects_the_resolved_source() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
 
     let _ = host
@@ -213,52 +174,33 @@ fn reduce_published_field_types_uses_shallow_typed_form_authoritatively() {
         .find(|p| p.name == "b")
         .expect("prop `b` published");
 
-    // The post-reduction value-node form fails to lift `Partial`,
-    // leaving `Mapped { source: Unknown }`. The typed shallow sidecar
-    // is the authority: each prop publishes its per-prop primitive
-    // directly. The assertion that the published TypeExpr for `a` is
-    // `Primitive(String)` and for `b` is `Primitive(Number)` pins the
-    // typed-form publication contract and discriminates against the
-    // unreduced Mapped-shell publication.
     assert_eq!(
-        prop_a.type_expr,
-        TypeExpr::Primitive(PrimitiveName::String),
-        "prop `a` must publish the typed primitive `string`, not a Mapped shell; got {:?}",
-        prop_a.type_expr,
+        prop_a.type_source,
+        verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
+            ClosedTypeFact::Leaf(LeafTypeFact::Primitive(PrimitiveName::String))
+        )),
+        "prop `a` must publish the complete closed `string` leaf fact; got {:?}",
+        prop_a.type_source,
     );
     assert_eq!(
-        prop_b.type_expr,
-        TypeExpr::Primitive(PrimitiveName::Number),
-        "prop `b` must publish the typed primitive `number`, not a Mapped shell; got {:?}",
-        prop_b.type_expr,
-    );
-
-    // Negative assertion: must not leak the Mapped shell anywhere.
-    assert!(
-        !matches!(prop_a.type_expr, TypeExpr::Mapped { .. }),
-        "Partial<Source> must not leak the Mapped shell for prop `a`"
-    );
-    assert!(
-        !matches!(prop_b.type_expr, TypeExpr::Mapped { .. }),
-        "Partial<Source> must not leak the Mapped shell for prop `b`"
+        prop_b.type_source,
+        verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
+            ClosedTypeFact::Leaf(LeafTypeFact::Primitive(PrimitiveName::Number))
+        )),
+        "prop `b` must publish the complete closed `number` leaf fact; got {:?}",
+        prop_b.type_source,
     );
 }
 
 // ---------------------------------------------------------------------------
-// Test 3 — Registry shallow walker reads the typed shallow sidecar.
+// Test 3 — an imported alias field's published SOURCE re-raises through the
+// ONE dispatch to the resolved union.
 //
-// `collect_component_meta_registry_public_field_refs` recovers the
-// bare `Ref` form from `field.shallow_type_expr` when the
-// post-expansion `field.r#type` carries no actionable route. The
-// typed sidecar replaces the legacy source-text reparse path.
-//
-// Discriminator: an SFC that imports a typed alias and consumes it
-// via `defineProps`. The published prop's `field.r#type` post-expansion
-// inlines the imported declaration's union arms. The walker must
-// have enqueued `ButtonProps` as an import root for the materialiser
-// to inline those arms — and the route from "this field's r#type
-// carries no actionable shape" to "enqueue the import root" runs
-// through `field.shallow_type_expr` reading.
+// The imported `variant` literal-union member publishes a SHALLOW source
+// (never an eagerly-inlined union); DEMANDING it — raising the source
+// through the shared bridge and materialising at the sealed output seam —
+// yields the resolved `"primary" | "secondary"` union. This pins the whole
+// source→engine→output chain without any stored `TypeExpr`.
 // ---------------------------------------------------------------------------
 
 const REGISTRY_SHALLOW_OWNER_VUE: &str = r#"<script setup lang="ts">
@@ -275,7 +217,7 @@ const REGISTRY_SHALLOW_TYPES_TS: &str = r#"export interface ButtonProps {
 "#;
 
 #[test]
-fn registry_walker_collects_imported_ref_via_typed_shallow_form() {
+fn imported_alias_source_demands_to_the_resolved_union_through_the_bridge() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
 
     let _ = host
@@ -302,36 +244,64 @@ fn registry_walker_collects_imported_ref_via_typed_shallow_form() {
         .get_component_meta("/c.vue")
         .expect("get_component_meta /c.vue");
 
-    // The imported `ButtonProps` alias must be materialised into the
-    // owner's published props surface. Both `label` and `variant`
-    // must be published — and the walker must have enqueued
-    // `ButtonProps` as an import root via the typed shallow walk.
+    // `label` resolves to a primitive — the finaliser leaf-projects it.
     let label = meta
         .props
         .iter()
         .find(|p| p.name == "label")
         .expect("imported `label` must surface in published props");
+    assert_eq!(
+        label.type_source,
+        verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
+            ClosedTypeFact::Leaf(LeafTypeFact::Primitive(PrimitiveName::String))
+        )),
+        "imported `label` must publish the closed `string` leaf fact; got {:?}",
+        label.type_source,
+    );
+
+    // `variant` is a literal union — no complete closed fact exists for it,
+    // so the published source stays SHALLOW; DEMANDING it through the shared
+    // bridge + the sealed output seam yields the resolved union arms.
     let variant = meta
         .props
         .iter()
         .find(|p| p.name == "variant")
         .expect("imported `variant` must surface in published props");
-
-    // `label` publishes the imported primitive type from the typed
-    // shallow walker.
-    assert_eq!(
-        label.type_expr,
-        TypeExpr::Primitive(PrimitiveName::String),
-        "imported `label` must publish its typed primitive `string` via the shallow walker; got {:?}",
-        label.type_expr,
+    let source = variant
+        .type_source
+        .present()
+        .expect("imported `variant` must carry a typed source");
+    assert!(
+        !matches!(
+            source,
+            SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(_)))
+        ),
+        "a literal union must NOT collapse to a primitive leaf fact"
     );
 
-    // `variant` is a literal union — its descriptor MUST resolve to
-    // the union arms, NOT to a bare `Unknown` shell. If the shallow
-    // walker fails to enqueue `ButtonProps`, the materialiser never
-    // inlines the union arms and `variant` is published as an
-    // unresolved Ref or Unknown.
-    let arms_present = matches!(&variant.type_expr, TypeExpr::Union(arms) if arms
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    let raised = dispatch
+        .raise_semantic_type_source_to_hot(
+            source,
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: "/c.vue",
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Expanded,
+                ),
+                interior_failures: None,
+            },
+        )
+        .expect("the variant source must raise through the bridge");
+    let resolved = dispatch.resolve_hot_handle_with_context(
+        raised,
+        crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    );
+    let materialized = dispatch
+        .materialize_output_type_expr_for_test(resolved)
+        .expect("the resolved variant node materialises at the sealed output seam");
+    let arms_present = matches!(&materialized, TypeExpr::Union(arms) if arms
         .iter()
         .any(|a| matches!(a, TypeExpr::Literal(verter_type_expr::LiteralValue::String(s)) if s == "primary"))
         && arms
@@ -339,14 +309,7 @@ fn registry_walker_collects_imported_ref_via_typed_shallow_form() {
             .any(|a| matches!(a, TypeExpr::Literal(verter_type_expr::LiteralValue::String(s)) if s == "secondary")));
     assert!(
         arms_present,
-        "imported `variant` must publish union arms `\"primary\" | \"secondary\"` resolved through the imported `ButtonProps` alias; got {:?}",
-        variant.type_expr,
-    );
-
-    // Negative: must NOT be Unknown — that would indicate the shallow
-    // walker missed the import-root enqueue.
-    assert!(
-        !matches!(variant.type_expr, TypeExpr::Unknown { .. }),
-        "imported `variant` must not leak `Unknown` — the typed shallow walker must enqueue the import root"
+        "demanding the imported `variant` source must resolve the union arms \
+         `\"primary\" | \"secondary\"` through the one dispatch; got {materialized:?}",
     );
 }

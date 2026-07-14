@@ -1134,7 +1134,7 @@ pub(crate) fn materialize_component_meta_structure(
         // host's `materialize_force_in_scope_partial` knob is armed, fold
         // a partial into the active `ColdComputeCompletenessScope` via the
         // EXACT production rail a budget-tripped child read uses
-        // (`mark_request_materialization_cache_suppress`). This is not a
+        // (`mark_request_result_partial`). This is not a
         // side channel: it drives the same fold a real budget trip drives,
         // so the per-cold-compute completeness goes `Partial` and the
         // wrapper's `refuse_result_cache_admission_if_partial` gate must
@@ -1144,7 +1144,7 @@ pub(crate) fn materialize_component_meta_structure(
             .materialize_force_in_scope_partial
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            crate::request_context::mark_request_materialization_cache_suppress();
+            crate::request_context::mark_request_result_partial();
         }
 
         // Test-only ADMISSION-REFUSAL injection hook: model a
@@ -1252,7 +1252,7 @@ pub(crate) fn materialize_component_meta_structure(
                     // body_id + keys in caller's mode. Caller's
                     // mode (typically Expanded) drives the final
                     // projection's expansion behavior.
-                    let keys_node = crate::meta_resolve::build_keys_union_node(graph, keys);
+                    let keys_node = crate::meta_resolve::build_keys_union_node(graph, keys.as_slice());
                     let pick_or_omit_name = match &extraction.route {
                         RouteDemand::Pick(_) => "Pick",
                         RouteDemand::Omit(_) => "Omit",
@@ -1522,7 +1522,7 @@ pub(crate) fn materialize_component_meta_structure(
             // (the singleflight winner's thread).
             let _completeness_scope =
                 crate::request_context::ColdComputeCompletenessScope::enter();
-            let (admission, finalise, fenced_serve_observed) =
+            let (admission, finalise, non_cacheable_read_observed) =
                 crate::fact_signature_helpers::install_fact_tracer(host, compute);
             provenance
                 .materialize_structure_fact_tracer_installs
@@ -1534,7 +1534,7 @@ pub(crate) fn materialize_component_meta_structure(
             // validates against the live view. Convert a Cacheable
             // outcome to ReturnOnly (value served, entry never
             // admitted) — same shape as the Overflow arm below.
-            if fenced_serve_observed {
+            if non_cacheable_read_observed {
                 return match admission {
                     crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
                         let result_is_partial =
@@ -3644,7 +3644,7 @@ export type C<T> = A<T>
 
     // ─────────────────────────────────────────────────────────────────
     // MaterializeStructureDb partial-admission gate + materializer child
-    // rails. The partial sticky (`materialization_cache_suppress`) is a
+    // rails. The partial sticky (`request_result_is_partial`) is a
     // GENUINE-partial signal; `finish_materialize_admission` must refuse
     // `Cacheable` admission when it is set, routing the valid outcome
     // through `ReturnOnly` so the next cold-miss recomputes against a
@@ -3671,7 +3671,7 @@ export type C<T> = A<T>
     /// `component_meta_pick_omit_tests::genuine_runaway_budget_trip_still_refused_warm_admission`.
     ///
     /// MUTATION CHECK: re-introducing the retired
-    /// `current_materialization_cache_suppress()` OR-in inside
+    /// `current_request_result_is_partial()` OR-in inside
     /// `refuse_result_cache_admission_if_partial` would make this complete
     /// materialise refuse admission while the sticky is set — the "entry
     /// admitted / peekable" assertions then fail.
@@ -3717,9 +3717,9 @@ export type C<T> = A<T>
         {
             let ctx = RequestContext::new(1, StdArc::from("/m1_types.ts"), false, None);
             let _guard = RequestContextGuard::install(ctx);
-            crate::request_context::mark_request_materialization_cache_suppress();
+            crate::request_context::mark_request_result_partial();
             assert!(
-                crate::request_context::current_materialization_cache_suppress(),
+                crate::request_context::current_request_result_is_partial(),
                 "fixture invariant: outer request sticky armed",
             );
             let read = materialize_component_meta_structure(host, key.clone());
@@ -3824,7 +3824,7 @@ export type C<T> = A<T>
             "the rejected entry must NOT be admitted into MaterializeStructureDb",
         );
         assert!(
-            !crate::request_context::current_materialization_cache_suppress(),
+            !crate::request_context::current_request_result_is_partial(),
             "the request partial sticky must stay CLEAR — admission refusal must \
              not gate the whole component-meta result's warm promotion",
         );
@@ -3931,7 +3931,7 @@ export type C<T> = A<T>
     ///
     /// It drives a GENUINE in-scope partial through the SAME fold path a
     /// budget-tripped child read uses: the cold compute folds
-    /// `mark_request_materialization_cache_suppress()` into its OWN active
+    /// `mark_request_result_partial()` into its OWN active
     /// `ColdComputeCompletenessScope` (armed by the per-host
     /// `materialize_force_in_scope_partial` knob — the structural analogue
     /// of the budget-trip fold, NOT a side channel). The per-cold-compute
@@ -4075,7 +4075,7 @@ export type C<T> = A<T>
         let rctx = RequestContext::new(1, StdArc::from("/m2_types.ts"), false, None);
         let _guard = RequestContextGuard::install(rctx);
         assert!(
-            !crate::request_context::current_materialization_cache_suppress(),
+            !crate::request_context::current_request_result_is_partial(),
             "fixture invariant: partial sticky clear before the recursive child rail",
         );
 
@@ -4092,7 +4092,7 @@ export type C<T> = A<T>
             "fixture invariant: a Recursive child is remapped to the input child id (symbolic)",
         );
         assert!(
-            crate::request_context::current_materialization_cache_suppress(),
+            crate::request_context::current_request_result_is_partial(),
             "a same-key recursive child MUST raise the request partial sticky via the \
              materialize_child_at_nested rail (removing observe_component_meta_read_suppress \
              leaves it clear)",

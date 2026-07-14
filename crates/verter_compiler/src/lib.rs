@@ -3,8 +3,11 @@
 //! Compiler crate for the Verter Vue compiler. Handles codegen, lowering,
 //! IDE output, style processing, and source maps.
 //!
-//! Parser-owned modules (tokenizer, parser, ast, cursor, types, utils, common,
-//! diagnostics) are re-exported from `verter_parser` for backward compatibility.
+//! Parser-owned modules (tokenizer, parser, ast, cursor, types, common,
+//! diagnostics) are re-exported from `verter_parser` for backward
+//! compatibility. `verter_parser::utils` is crate-internal only: consumers
+//! that need the parser's script/type-surface utilities depend on
+//! `verter_parser` directly.
 
 // ── Re-exports from verter_parser ──────────────────────────────────────────
 pub use verter_parser::ast;
@@ -14,7 +17,7 @@ pub use verter_parser::diagnostics;
 pub use verter_parser::parser;
 pub use verter_parser::tokenizer;
 pub use verter_parser::types;
-pub use verter_parser::utils;
+pub(crate) use verter_parser::utils;
 
 // ── Compiler-owned modules ─────────────────────────────────────────────────
 

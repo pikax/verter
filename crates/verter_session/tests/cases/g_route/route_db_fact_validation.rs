@@ -35,6 +35,7 @@ use verter_session::resolver_core::{
     EffectiveExportSetScope, FactVersionRef, RouteDb, RouteResult, RouteSurfaceFactRef, StoreView,
     StoreViewCompatToken,
 };
+use verter_session::VerterHost;
 
 fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
     verter_session::resolver_core::RouteNameKey::new(
@@ -138,25 +139,29 @@ impl StoreView for RejectRouteSurfaceFingerprintView {
 
 #[test]
 fn cross_consumer_route_hit_produces_one_entry() {
+    let host = VerterHost::new_standalone(Default::default());
     let db = RouteDb::new();
     let view = AcceptAllView::new(1);
 
     // Two consumers query the same `(provider, name)`.
     let compute_count = std::sync::atomic::AtomicU32::new(0);
     let do_query = |_label: &str| {
-        db.get_or_resolve_route_with_facts(rk("provider.ts", "Foo"), &view, || {
-            compute_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Some((
-                RouteResult::Resolved {
-                    defining_canonical: "foo.ts".to_owned(),
-                    defining_symbol: "Foo".to_owned(),
-                },
-                vec![FactVersionRef::FileWholeHash {
-                    canonical_id: "provider.ts".to_owned(),
-                    hash: [1u8; 16],
-                }],
-            ))
-        });
+        verter_session::for_tests::with_cacheability_scope_for_tests(&host, |probe| {
+            db.get_or_resolve_route_with_facts(rk("provider.ts", "Foo"), &view, probe, || {
+                compute_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some((
+                    RouteResult::Resolved {
+                        defining_canonical: "foo.ts".to_owned(),
+                        defining_symbol: "Foo".to_owned(),
+                    },
+                    vec![FactVersionRef::FileWholeHash {
+                        canonical_id: "provider.ts".to_owned(),
+                        hash: [1u8; 16],
+                    }],
+                ))
+            })
+        })
+        .0;
     };
     do_query("consumer-1");
     do_query("consumer-2");

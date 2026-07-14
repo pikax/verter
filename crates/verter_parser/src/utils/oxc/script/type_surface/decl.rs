@@ -23,7 +23,6 @@ use oxc_span::GetSpan;
 
 use crate::common::Span;
 
-use super::elements::{lower_method_signature_for_class, lower_ts_type_from_bytes};
 use super::{
     callable_signature_text, component_meta_core_trace_enabled, component_meta_core_trace_event,
     extract_string_literal_keys_with_ctx, get_property_key_name, get_property_key_span,
@@ -152,53 +151,15 @@ pub(super) fn resolve_named_local_type_with_ctx_ref<'ctx, 'a: 'ctx>(
     from_root_body: bool,
     recursion_guard: &mut Vec<String>,
 ) -> Option<Arc<ResolvedElements>> {
-    resolve_named_local_type_with_ctx_ref_inner(
-        type_name,
-        type_args,
-        base_offset,
-        ctx,
-        from_root_body,
-        recursion_guard,
-        true,
-    )
-}
-
-pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
-    type_name: &str,
-    type_args: Option<&'ctx TSTypeParameterInstantiation<'a>>,
-    base_offset: u32,
-    ctx: &TypeResolutionContext<'ctx, 'a>,
-    from_root_body: bool,
-    recursion_guard: &mut Vec<String>,
-    store_result: bool,
-) -> Option<Arc<ResolvedElements>> {
     let type_name_bytes = type_name.as_bytes();
 
     if let Some((aliased_type, type_params)) = ctx.find_type_alias(type_name_bytes) {
         let child = instantiate_type_params_ctx(ctx, type_params, type_args);
-        if let Some(cached) =
-            child.cached_named_resolution(type_name_bytes, base_offset, from_root_body)
-        {
-            if component_meta_core_trace_enabled() {
-                component_meta_core_trace_event(
-                    "core_named_resolution",
-                    format!(
-                        "file={} kind=alias cache=hit name={} from_root_body={} bindings={} companions={}",
-                        child.trace_label.as_deref().unwrap_or("<unknown>"),
-                        type_name,
-                        from_root_body,
-                        child.type_param_bindings.len(),
-                        child.companion_types.len()
-                    ),
-                );
-            }
-            return Some(cached);
-        }
         if component_meta_core_trace_enabled() {
             component_meta_core_trace_event(
                 "core_named_resolution",
                 format!(
-                    "file={} kind=alias cache=miss name={} from_root_body={} bindings={} companions={}",
+                    "file={} kind=alias name={} from_root_body={} bindings={} companions={}",
                     child.trace_label.as_deref().unwrap_or("<unknown>"),
                     type_name,
                     from_root_body,
@@ -215,44 +176,16 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
             &child,
             from_root_body,
         ));
-        if store_result {
-            child.store_named_resolution(
-                type_name_bytes,
-                base_offset,
-                from_root_body,
-                Arc::clone(&resolved),
-            );
-        }
         return Some(resolved);
     }
 
     if let Some((members, _extends, heritage, type_params)) = ctx.find_interface(type_name_bytes) {
         let child = instantiate_type_params_ctx(ctx, type_params, type_args);
-        if let Some(cached) =
-            child.cached_named_resolution(type_name_bytes, base_offset, from_root_body)
-        {
-            if component_meta_core_trace_enabled() {
-                component_meta_core_trace_event(
-                    "core_named_resolution",
-                    format!(
-                        "file={} kind=interface cache=hit name={} from_root_body={} bindings={} companions={} members={} extends={}",
-                        child.trace_label.as_deref().unwrap_or("<unknown>"),
-                        type_name,
-                        from_root_body,
-                        child.type_param_bindings.len(),
-                        child.companion_types.len(),
-                        members.len(),
-                        _extends.len()
-                    ),
-                );
-            }
-            return Some(cached);
-        }
         if component_meta_core_trace_enabled() {
             component_meta_core_trace_event(
                 "core_named_resolution",
                 format!(
-                    "file={} kind=interface cache=miss name={} from_root_body={} bindings={} companions={} members={} extends={}",
+                    "file={} kind=interface name={} from_root_body={} bindings={} companions={} members={} extends={}",
                     child.trace_label.as_deref().unwrap_or("<unknown>"),
                     type_name,
                     from_root_body,
@@ -281,43 +214,17 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
         );
         resolved.root_runtime_types = vec![RuntimeType::Object];
         let resolved = Arc::new(resolved);
-        if store_result {
-            child.store_named_resolution(
-                type_name_bytes,
-                base_offset,
-                from_root_body,
-                Arc::clone(&resolved),
-            );
-        }
         return Some(resolved);
     }
 
     if let Some(class_decl) = ctx.find_class(type_name_bytes) {
         let type_params = class_decl.type_parameters.as_deref();
         let child = instantiate_type_params_ctx(ctx, type_params, type_args);
-        if let Some(cached) =
-            child.cached_named_resolution(type_name_bytes, base_offset, from_root_body)
-        {
-            if component_meta_core_trace_enabled() {
-                component_meta_core_trace_event(
-                    "core_named_resolution",
-                    format!(
-                        "file={} kind=class cache=hit name={} from_root_body={} bindings={} companions={}",
-                        child.trace_label.as_deref().unwrap_or("<unknown>"),
-                        type_name,
-                        from_root_body,
-                        child.type_param_bindings.len(),
-                        child.companion_types.len()
-                    ),
-                );
-            }
-            return Some(cached);
-        }
         if component_meta_core_trace_enabled() {
             component_meta_core_trace_event(
                 "core_named_resolution",
                 format!(
-                    "file={} kind=class cache=miss name={} from_root_body={} bindings={} companions={}",
+                    "file={} kind=class name={} from_root_body={} bindings={} companions={}",
                     child.trace_label.as_deref().unwrap_or("<unknown>"),
                     type_name,
                     from_root_body,
@@ -343,14 +250,6 @@ pub(super) fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
         resolved.root_runtime_types = vec![RuntimeType::Object];
         resolved.dedup_props();
         let resolved = Arc::new(resolved);
-        if store_result {
-            child.store_named_resolution(
-                type_name_bytes,
-                base_offset,
-                from_root_body,
-                Arc::clone(&resolved),
-            );
-        }
         return Some(resolved);
     }
 
@@ -592,14 +491,13 @@ pub(super) fn apply_named_type_heritage_edge_with_ctx_ref<'ctx, 'a: 'ctx>(
                 return;
             }
             recursion_guard.push(name.clone());
-            if let Some(resolved) = resolve_named_local_type_with_ctx_ref_inner(
+            if let Some(resolved) = resolve_named_local_type_with_ctx_ref(
                 name.as_str(),
                 *type_args,
                 base_offset,
                 ctx,
                 false,
                 recursion_guard,
-                false,
             ) {
                 result.props.extend(resolved.props.iter().cloned());
                 result
@@ -1180,10 +1078,6 @@ pub(super) fn resolve_class_property_definition(
         .type_annotation
         .as_ref()
         .and_then(|ann| span_text(source, ann.type_annotation.span().into()));
-    let type_expr = prop
-        .type_annotation
-        .as_ref()
-        .map(|ann| lower_ts_type_from_bytes(&ann.type_annotation, source));
 
     Some(ResolvedProp {
         span: Span {
@@ -1199,8 +1093,6 @@ pub(super) fn resolve_class_property_definition(
         type_text,
         map_local: true,
         span_is_absolute: base_offset != 0,
-        type_expr,
-        type_expr_scope: None,
         declared_in_macro_type_arg: from_root_body,
     })
 }
@@ -1225,7 +1117,6 @@ pub(super) fn resolve_class_method_definition(
             .as_ref()
             .map(|return_type| &return_type.type_annotation),
     );
-    let type_expr = lower_method_signature_for_class(method, source);
     Some(ResolvedProp {
         span: Span {
             start: method.span.start + base_offset,
@@ -1240,8 +1131,6 @@ pub(super) fn resolve_class_method_definition(
         type_text,
         map_local: true,
         span_is_absolute: base_offset != 0,
-        type_expr: Some(type_expr),
-        type_expr_scope: None,
         declared_in_macro_type_arg: from_root_body,
     })
 }
@@ -1271,10 +1160,6 @@ pub(super) fn resolve_class_accessor_property(
         .type_annotation
         .as_ref()
         .and_then(|ann| span_text(source, ann.type_annotation.span().into()));
-    let type_expr = prop
-        .type_annotation
-        .as_ref()
-        .map(|ann| lower_ts_type_from_bytes(&ann.type_annotation, source));
 
     Some(ResolvedProp {
         span: Span {
@@ -1290,8 +1175,6 @@ pub(super) fn resolve_class_accessor_property(
         type_text,
         map_local: true,
         span_is_absolute: base_offset != 0,
-        type_expr,
-        type_expr_scope: None,
         declared_in_macro_type_arg: from_root_body,
     })
 }

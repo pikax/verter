@@ -100,7 +100,7 @@ fn define_props_normalizer_produces_fields_with_surface_readonly_and_jsdoc() {
     let props =
         props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
-    let mut names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
+    let mut names: Vec<&str> = props.iter().map(|p| p.analysis.name.as_str()).collect();
     names.sort_unstable();
     assert_eq!(
         names,
@@ -108,48 +108,40 @@ fn define_props_normalizer_produces_fields_with_surface_readonly_and_jsdoc() {
         "all three Props members must surface"
     );
 
-    let count = props.iter().find(|p| p.name == "count").unwrap();
-    assert!(!count.is_optional, "count is required");
+    let count = props.iter().find(|p| p.analysis.name == "count").unwrap();
+    assert!(!count.analysis.is_optional, "count is required");
     assert_eq!(
-        count.description.as_deref(),
+        count.analysis.description.as_deref(),
         Some("the count"),
         "count's JSDoc description must be sliced from the surface spans"
     );
     assert!(
-        count.declared_in_macro_type_arg,
+        count.analysis.declared_in_macro_type_arg,
         "count is declared in the macro type arg's own body"
     );
     // Concrete typed form + scope (not just `is_some()`): `count: number` raises
-    // to the `number` primitive, scoped to the SFC where it was lowered.
-    assert!(
-        matches!(
-            count.type_expr,
-            Some(verter_type_expr::TypeExpr::Primitive(
-                verter_type_expr::PrimitiveName::Number
-            ))
-        ),
-        "count.type_expr is the `number` primitive, got {:?}",
-        count.type_expr
+    // to the `number` primitive, rendered at the terminal sink.
+    assert_eq!(
+        count.analysis.type_annotation.as_deref(),
+        Some("number"),
+        "count's display renders the `number` primitive, got {:?}",
+        count.analysis.type_annotation
     );
     assert_eq!(
-        count.type_expr_scope.as_ref().map(|s| s.as_str()),
+        count.analysis.type_expr_scope.as_ref().map(|s| s.as_str()),
         Some(FILE),
         "count.type_expr_scope is the SFC the prop was declared in"
     );
 
-    let label = props.iter().find(|p| p.name == "label").unwrap();
-    assert!(label.is_optional, "label? is optional");
+    let label = props.iter().find(|p| p.analysis.name == "label").unwrap();
+    assert!(label.analysis.is_optional, "label? is optional");
     // `label?: string` → the `string` primitive (the `?` is the optional flag,
     // not part of the value type).
-    assert!(
-        matches!(
-            label.type_expr,
-            Some(verter_type_expr::TypeExpr::Primitive(
-                verter_type_expr::PrimitiveName::String
-            ))
-        ),
-        "label.type_expr is the `string` primitive, got {:?}",
-        label.type_expr
+    assert_eq!(
+        label.analysis.type_annotation.as_deref(),
+        Some("string"),
+        "label's display renders the `string` primitive, got {:?}",
+        label.analysis.type_annotation
     );
 
     // `AnalyzedPropField` carries no readonly axis (it is recovered downstream),
@@ -205,7 +197,7 @@ fn define_emits_normalizer_extracts_call_signature_events_and_strips_event_param
     let emits =
         emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
-    let mut names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
+    let mut names: Vec<&str> = emits.iter().map(|e| e.analysis.name.as_str()).collect();
     names.sort_unstable();
     assert_eq!(
         names,
@@ -217,40 +209,146 @@ fn define_emits_normalizer_extracts_call_signature_events_and_strips_event_param
     // Vue emit payload shape): `change` keeps `[value: number]` (1 element),
     // `select` keeps `[id: string, extra: boolean]` (2 elements). The leading
     // event-name parameter is stripped.
-    let change = emits.iter().find(|e| e.name == "change").unwrap();
-    let payload = change
-        .payload_expr
-        .as_ref()
-        .expect("change payload_expr must be the stripped tuple");
-    let verter_type_expr::TypeExpr::Tuple { elements, .. } = payload else {
-        panic!("change payload must be a Tuple, got {payload:?}");
-    };
+    let change = emits.iter().find(|e| e.analysis.name == "change").unwrap();
     assert_eq!(
-        elements.len(),
-        1,
+        change.analysis.payload_type.as_deref(),
+        Some("[value: number]"),
         "leading event-name param must be stripped from the change payload tuple"
     );
     // Negative: the surviving tuple element is NOT the event-name literal.
     assert!(
-        !matches!(
-            elements[0].ty,
-            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(_))
-        ),
+        !change
+            .analysis
+            .payload_type
+            .as_deref()
+            .unwrap_or_default()
+            .contains("'change'"),
         "the stripped payload tuple's element must not be the event-name literal"
     );
 
-    let select = emits.iter().find(|e| e.name == "select").unwrap();
-    let verter_type_expr::TypeExpr::Tuple {
-        elements: select_elements,
-        ..
-    } = select.payload_expr.as_ref().expect("select payload_expr")
+    let select = emits.iter().find(|e| e.analysis.name == "select").unwrap();
+    assert_eq!(
+        select.analysis.payload_type.as_deref(),
+        Some("[id: string, extra: boolean]"),
+        "select keeps its two non-event params as tuple elements"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (2a) Call-signature payload SOURCE minting — the three-way split:
+//
+//      - a leaf/leaf-union-param signature keeps the complete CLOSED tuple
+//        source (complete by itself, no replay needed);
+//      - a signature with a param RICHER than the closed element vocabulary
+//        (a named reference) mints the projected CALLABLE-PARAMS replay
+//        route — `base` = the macro's stamped type-argument locator,
+//        `signature_ordinal` = the SURFACE call-signature sequence index
+//        (declaration order, BEFORE event-name expansion — NOT an
+//        emitted-row counter), `first_param` = 1 (the event-name strip);
+//      - a zero-payload signature keeps the PRESENT empty closed tuple.
+//
+//      Discriminating: the pre-change producer published the typed FAILURE
+//      (`Failed(UnrepresentableRequiredPayload)`) for the richer row, so the
+//      CallableParams assertion fails against it; stamping the emitted-row
+//      index instead of the surface sequence index publishes ordinal 1 for
+//      `save` (it is the second EMITTED row but the THIRD signature) and
+//      fails the ordinal assertion.
+// ---------------------------------------------------------------------------
+
+const VUE_EMITS_CALLSIG_RICH: &str = r#"<script setup lang="ts">
+interface Row { id: number }
+defineEmits<{
+  (e: 'change', value: number): void;
+  (e: unknown, phantom: number): void;
+  (e: 'save', value: Row): void;
+  (e: 'close'): void;
+}>();
+</script>
+"#;
+
+#[test]
+fn define_emits_callsig_rich_params_mint_the_callable_params_replay_source() {
+    use verter_type_expr::facts::{
+        ClosedTypeFact, ProjectedTypeFact, SemanticTypeSource, SourcePosition,
+    };
+    use verter_type_expr::locators::{AuthoredBodyLocator, MacroPayloadPosition};
+
+    const FILE: &str = "/w/EmitsRich.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_EMITS_CALLSIG_RICH);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
+    let macro_index = request.macro_index;
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineEmits must resolve a macro surface");
+    let emits =
+        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+
+    // A leaf-param signature keeps the complete CLOSED tuple source.
+    let change = emits.iter().find(|e| e.analysis.name == "change").unwrap();
+    assert!(
+        matches!(
+            &change.payload_source,
+            SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(tuple)))
+                if tuple.elements.len() == 1
+        ),
+        "a leaf-param call signature keeps its complete closed tuple source, got {:?}",
+        change.payload_source
+    );
+
+    // The RICHER-param signature mints the CallableParams replay route. Its
+    // ordinal is the SURFACE call-signature sequence index (3rd signature —
+    // the nameless `(e: unknown, …)` signature contributes NO emit row but
+    // still occupies ordinal 1), never the emitted-row counter.
+    let save = emits.iter().find(|e| e.analysis.name == "save").unwrap();
+    let SourcePosition::Present(SemanticTypeSource::Projected(ProjectedTypeFact::CallableParams {
+        base,
+        signature_ordinal,
+        first_param,
+    })) = &save.payload_source
     else {
-        panic!("select payload must be a Tuple");
+        panic!(
+            "a call signature with a named-reference param must mint the \
+             projected CallableParams replay source, got {:?}",
+            save.payload_source
+        );
     };
     assert_eq!(
-        select_elements.len(),
-        2,
-        "select keeps its two non-event params as tuple elements"
+        *signature_ordinal, 2,
+        "the ordinal indexes the surface's declaration-order call-signature \
+         sequence BEFORE event-name expansion (an emitted-row counter says 1)"
+    );
+    assert_eq!(*first_param, 1, "the event-name strip stamps first_param 1");
+    let AuthoredBodyLocator::MacroPayload(payload) = base else {
+        panic!("the replay base is the macro's stamped type-argument locator, got {base:?}");
+    };
+    assert_eq!(payload.payload, MacroPayloadPosition::TypeArgument);
+    assert_eq!(payload.macro_index as usize, macro_index);
+
+    // A zero-payload signature keeps the PRESENT empty closed tuple — never
+    // a CallableParams route and never a failure.
+    let close = emits.iter().find(|e| e.analysis.name == "close").unwrap();
+    assert!(
+        matches!(
+            &close.payload_source,
+            SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(tuple)))
+                if tuple.elements.is_empty()
+        ),
+        "a zero-payload call signature keeps the present empty closed tuple, got {:?}",
+        close.payload_source
+    );
+
+    // Negative: NO call-signature row publishes the typed failure — every
+    // realized call-signature payload now has a faithful present source.
+    assert!(
+        emits.iter().all(|e| !e.payload_source.is_failed()),
+        "no realized call-signature emit row may publish Failed once the \
+         CallableParams replay route exists, got {:?}",
+        emits
+            .iter()
+            .map(|e| (&e.analysis.name, &e.payload_source))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -284,7 +382,7 @@ fn define_emits_normalizer_property_style_fallback() {
     let emits =
         emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
-    let mut names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
+    let mut names: Vec<&str> = emits.iter().map(|e| e.analysis.name.as_str()).collect();
     names.sort_unstable();
     assert_eq!(
         names,
@@ -294,26 +392,31 @@ fn define_emits_normalizer_property_style_fallback() {
 }
 
 // ---------------------------------------------------------------------------
-// (3a) Mixed emit interface — a call signature AND a property member. The
-//      call-signature precedence means the property member's event is EXCLUDED
-//      (matching the eager projector: property-style fires ONLY when NO
-//      call-sig emit was found).
+// (3a) Mixed emit interface — a call signature AND property members, including
+//      a property member that DUPLICATES the call-signature event name. The
+//      published emits are the UNION of both forms: a property member inside a
+//      `defineEmits<T>` object surface IS an emit; duplicate names take
+//      CALL-SIGNATURE precedence (call-sig emits are pushed first, first-writer
+//      wins in the de-dup).
 //
-//      Discriminating: a naive "union of call-sig + property events" would
-//      surface `notAnEvent` alongside `change`; the precedence rule excludes
-//      it. Also asserts the call-sig payload's stripped tuple shape + SFC scope.
+//      Discriminating: the either/or gate (property-style fires ONLY when no
+//      call-sig emit was found) drops `notAnEvent` entirely and fails the union
+//      assertion; property-precedence on the duplicate `change` would publish
+//      the `[dup: string]` tuple and fail the payload assertion. Also asserts
+//      deterministic order (signature order, then member order) + SFC scope.
 // ---------------------------------------------------------------------------
 
 const VUE_EMITS_MIXED: &str = r#"<script setup lang="ts">
 defineEmits<{
   (e: 'change', value: number): void;
   notAnEvent: [flag: boolean];
+  change: [dup: string];
 }>();
 </script>
 "#;
 
 #[test]
-fn define_emits_normalizer_mixed_callsig_excludes_property_members() {
+fn define_emits_normalizer_mixed_callsig_unions_property_members() {
     const FILE: &str = "/w/EmitsMixed.vue";
     let host = make_host();
     upsert(&host, FILE, VUE_EMITS_MIXED);
@@ -325,48 +428,68 @@ fn define_emits_normalizer_mixed_callsig_excludes_property_members() {
     let emits =
         emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
-    let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
+    let names: Vec<&str> = emits.iter().map(|e| e.analysis.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["change"],
-        "the call-signature event fires; the property member is EXCLUDED (call-sig precedence)"
+        vec!["change", "notAnEvent"],
+        "the published emits are the UNION of call-signature and property emits, \
+         deterministic (signature order, then member order), de-duped by name"
     );
-    // Explicit negative: the property member did NOT become an event.
-    assert!(
-        !emits.iter().any(|e| e.name == "notAnEvent"),
-        "a property member must NOT add an event alongside a call signature (negative)"
+    // The property member IS an emit alongside the call signature (the
+    // either/or gate is gone).
+    let not_an_event = emits
+        .iter()
+        .find(|e| e.analysis.name == "notAnEvent")
+        .expect("a property member publishes as an emit alongside a call signature");
+    assert_eq!(
+        not_an_event.analysis.payload_type.as_deref(),
+        Some("[flag: boolean]"),
+        "the property emit publishes its named-tuple payload display, got {:?}",
+        not_an_event.analysis.payload_type
+    );
+    // Exactly ONE `change` survives the de-dup (negative: no duplicate rows).
+    assert_eq!(
+        emits.iter().filter(|e| e.analysis.name == "change").count(),
+        1,
+        "duplicate event names de-dup to one published emit"
     );
 
-    // The call-sig payload is the stripped tuple `[value: number]` — the
-    // leading event-name parameter is dropped, leaving one tuple element typed
-    // `number` (the Vue emit payload shape).
+    // CALL-SIGNATURE precedence on the duplicate name: the surviving `change`
+    // payload is the stripped call-sig tuple `[value: number]`, NOT the
+    // property member's `[dup: string]` tuple.
     let change = &emits[0];
-    let verter_type_expr::TypeExpr::Tuple { elements, .. } = change
-        .payload_expr
-        .as_ref()
-        .expect("change payload_expr is the stripped tuple")
-    else {
-        panic!("change payload must be a Tuple");
-    };
     assert_eq!(
-        elements.len(),
-        1,
-        "the leading event-name param is stripped, leaving the payload tuple element"
+        change.analysis.payload_type.as_deref(),
+        Some("[value: number]"),
+        "the duplicate-name emit keeps the CALL-SIGNATURE payload (precedence), got {:?}",
+        change.analysis.payload_type
     );
-    assert!(
-        matches!(
-            elements[0].ty,
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
-        ),
-        "the surviving payload tuple element is typed `number`, got {:?}",
-        elements[0].ty
+    assert_ne!(
+        change.analysis.payload_type.as_deref(),
+        Some("[dup: string]"),
+        "the property member must not shadow the call-signature payload (negative)"
     );
     // The payload scope is the SFC (the signature was written in the SFC's own
     // defineEmits type argument).
     assert_eq!(
-        change.payload_expr_scope.as_ref().map(|s| s.as_str()),
+        change
+            .analysis
+            .payload_expr_scope
+            .as_ref()
+            .map(|s| s.as_str()),
         Some(FILE),
         "the local call-sig payload scope is the SFC"
+    );
+    // The property emit's display value is scoped to the SFC too (its
+    // value-node scope — the tuple was authored in the SFC).
+    assert_eq!(
+        not_an_event
+            .analysis
+            .payload_expr_scope
+            .as_ref()
+            .map(|s| s.as_str()),
+        Some(FILE),
+        "the property emit's payload display is paired with its value-node scope"
     );
 }
 
@@ -407,7 +530,10 @@ fn cross_file_emit_call_signature_payload_scope_is_base_file() {
         emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
     assert_eq!(
-        emits.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+        emits
+            .iter()
+            .map(|e| e.analysis.name.as_str())
+            .collect::<Vec<_>>(),
         vec!["change"],
         "the cross-file call-signature event name surfaces"
     );
@@ -415,13 +541,21 @@ fn cross_file_emit_call_signature_payload_scope_is_base_file() {
     // The stripped payload's scope follows the SIGNATURE's declaration-origin
     // file (the imported base), not the SFC owner.
     assert_eq!(
-        change.payload_expr_scope.as_ref().map(|s| s.as_str()),
+        change
+            .analysis
+            .payload_expr_scope
+            .as_ref()
+            .map(|s| s.as_str()),
         Some(BASE),
         "the call-signature payload scope is the base file the signature was declared in"
     );
     // Negative: it is NOT the SFC owner.
     assert_ne!(
-        change.payload_expr_scope.as_ref().map(|s| s.as_str()),
+        change
+            .analysis
+            .payload_expr_scope
+            .as_ref()
+            .map(|s| s.as_str()),
         Some(FILE),
         "the payload scope must not collapse to the SFC owner for an imported signature"
     );
@@ -451,23 +585,29 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
         let surface = host.resolve_vue_macro_surface(&request).expect("surface");
         emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()))
     };
-    let change = local_emits.iter().find(|e| e.name == "change").unwrap();
+    let change = local_emits
+        .iter()
+        .find(|e| e.analysis.name == "change")
+        .unwrap();
     // The display is the bracketed payload tuple (event-name param stripped),
     // NOT the whole call-signature source text.
     assert_eq!(
-        change.payload_type.as_deref(),
+        change.analysis.payload_type.as_deref(),
         Some("[value: number]"),
         "the call-sig payload_type is the bracketed stripped-payload tuple"
     );
     // Negative: it is NOT the whole call-signature source slice.
     assert_ne!(
-        change.payload_type.as_deref(),
+        change.analysis.payload_type.as_deref(),
         Some("(e: 'change', value: number): void"),
         "the payload_type must not be the whole call-signature source text"
     );
-    let select = local_emits.iter().find(|e| e.name == "select").unwrap();
+    let select = local_emits
+        .iter()
+        .find(|e| e.analysis.name == "select")
+        .unwrap();
     assert_eq!(
-        select.payload_type.as_deref(),
+        select.analysis.payload_type.as_deref(),
         Some("[id: string, extra: boolean]"),
         "each call-sig event's payload_type is its own stripped-payload tuple"
     );
@@ -482,9 +622,12 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
         let surface = host.resolve_vue_macro_surface(&request).expect("surface");
         emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()))
     };
-    let cross_change = cross_emits.iter().find(|e| e.name == "change").unwrap();
+    let cross_change = cross_emits
+        .iter()
+        .find(|e| e.analysis.name == "change")
+        .unwrap();
     assert_eq!(
-        cross_change.payload_type.as_deref(),
+        cross_change.analysis.payload_type.as_deref(),
         Some("[value: number]"),
         "the cross-file call-sig payload_type is the same bracketed stripped-payload tuple"
     );
@@ -492,7 +635,7 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
     // payload tuple renders identically regardless of declaration site) —
     // proving consistency, not a per-shape divergence.
     assert_eq!(
-        cross_change.payload_type, change.payload_type,
+        cross_change.analysis.payload_type, change.analysis.payload_type,
         "local and cross-file call-sig payload_type render through the SAME tuple-display path"
     );
 }
@@ -536,7 +679,7 @@ fn define_emits_callsig_carrier_event_name_union_resolves_both_names() {
     let emits =
         emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
-    let mut names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
+    let mut names: Vec<&str> = emits.iter().map(|e| e.analysis.name.as_str()).collect();
     names.sort_unstable();
     assert_eq!(
         names,
@@ -551,27 +694,14 @@ fn define_emits_callsig_carrier_event_name_union_resolves_both_names() {
     for name in ["save", "cancel"] {
         let event = emits
             .iter()
-            .find(|e| e.name == name)
+            .find(|e| e.analysis.name == name)
             .unwrap_or_else(|| panic!("event `{name}` surfaces"));
-        let verter_type_expr::TypeExpr::Tuple { elements, .. } = event
-            .payload_expr
-            .as_ref()
-            .unwrap_or_else(|| panic!("event `{name}` carries a payload tuple"))
-        else {
-            panic!("event `{name}` payload must be a Tuple");
-        };
         assert_eq!(
-            elements.len(),
-            1,
-            "the leading event-name param is stripped, leaving the `[value: number]` payload"
-        );
-        assert!(
-            matches!(
-                elements[0].ty,
-                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
-            ),
-            "the surviving payload element is `number`, got {:?}",
-            elements[0].ty
+            event.analysis.payload_type.as_deref(),
+            Some("[value: number]"),
+            "the leading event-name param is stripped, leaving the `[value: number]` \
+             payload, got {:?}",
+            event.analysis.payload_type
         );
     }
 }
@@ -611,28 +741,29 @@ fn define_model_normalizer_produces_synthesized_model_prop_from_analyzer_facts()
     assert_eq!(props.len(), 1, "defineModel synthesizes exactly one prop");
     let model = &props[0];
     assert_eq!(
-        model.name, "title",
+        model.analysis.name, "title",
         "the model prop is named after the model"
     );
     assert!(
-        model.declared_in_macro_type_arg,
+        model.analysis.declared_in_macro_type_arg,
         "the model prop is declared at the macro site"
     );
     // Concrete typed form (not just `is_some()`): `defineModel<string>('title')`
-    // synthesizes a model prop typed `string`.
+    // synthesizes a model prop typed `string`, carried as the authored payload
+    // locator plus its display.
     assert!(
-        matches!(
-            model.type_expr,
-            Some(verter_type_expr::TypeExpr::Primitive(
-                verter_type_expr::PrimitiveName::String
-            ))
-        ),
-        "the model prop's type_expr is the `string` model value type, got {:?}",
-        model.type_expr
+        model.analysis.payload.is_some(),
+        "the model prop carries its authored payload locator"
+    );
+    assert_eq!(
+        model.analysis.type_annotation.as_deref(),
+        Some("string"),
+        "the model prop's display is the `string` model value type, got {:?}",
+        model.analysis.type_annotation
     );
     // The re-anchored scope is the SFC owner, not the empty analyzer scope.
     assert_eq!(
-        model.type_expr_scope.as_ref().map(|s| s.as_str()),
+        model.analysis.type_expr_scope.as_ref().map(|s| s.as_str()),
         Some(FILE),
         "the model prop's type_expr_scope is re-anchored to the SFC owner"
     );
@@ -675,20 +806,20 @@ fn with_defaults_normalizer_uses_inner_props_surface_with_raw_optionality() {
     let props =
         props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
-    let mut names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
+    let mut names: Vec<&str> = props.iter().map(|p| p.analysis.name.as_str()).collect();
     names.sort_unstable();
     assert_eq!(names, vec!["label", "size"], "both props surface");
 
-    let size = props.iter().find(|p| p.name == "size").unwrap();
+    let size = props.iter().find(|p| p.analysis.name == "size").unwrap();
     // `size?` is declared optional; defaults do NOT change AnalyzedPropField
     // optionality (that is a PropAnalysis-layer concern). The field keeps its
     // raw declared optionality — matching the eager rail.
     assert!(
-        size.is_optional,
+        size.analysis.is_optional,
         "size keeps its declared `?` optionality at the AnalyzedPropField layer"
     );
-    let label = props.iter().find(|p| p.name == "label").unwrap();
-    assert!(!label.is_optional, "label is required (no `?`)");
+    let label = props.iter().find(|p| p.analysis.name == "label").unwrap();
+    assert!(!label.analysis.is_optional, "label is required (no `?`)");
 }
 
 // ---------------------------------------------------------------------------
@@ -744,7 +875,7 @@ fn with_defaults_outer_macro_resolves_inner_define_props_surface() {
     let mut names: Vec<&str> = inner_dtos
         .prop_fields()
         .iter()
-        .map(|p| p.name.as_str())
+        .map(|p| p.analysis.name.as_str())
         .collect();
     names.sort_unstable();
     assert_eq!(
@@ -793,7 +924,7 @@ fn cross_file_heritage_props_surface_with_own_body_vs_heritage_provenance() {
     let props =
         props_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
 
-    let mut names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
+    let mut names: Vec<&str> = props.iter().map(|p| p.analysis.name.as_str()).collect();
     names.sort_unstable();
     assert_eq!(
         names,
@@ -801,14 +932,17 @@ fn cross_file_heritage_props_surface_with_own_body_vs_heritage_provenance() {
         "the inherited Base member surfaces alongside the own-body member"
     );
 
-    let count = props.iter().find(|p| p.name == "count").unwrap();
+    let count = props.iter().find(|p| p.analysis.name == "count").unwrap();
     assert!(
-        count.declared_in_macro_type_arg,
+        count.analysis.declared_in_macro_type_arg,
         "count is in the macro type arg's own body"
     );
-    let base_flag = props.iter().find(|p| p.name == "baseFlag").unwrap();
+    let base_flag = props
+        .iter()
+        .find(|p| p.analysis.name == "baseFlag")
+        .unwrap();
     assert!(
-        !base_flag.declared_in_macro_type_arg,
+        !base_flag.analysis.declared_in_macro_type_arg,
         "baseFlag arrived via heritage — NOT declared in the macro type arg (negative)"
     );
 
@@ -879,29 +1013,28 @@ fn generic_inherited_member_type_expr_scope_is_deriving_file() {
 
     let val = props
         .iter()
-        .find(|p| p.name == "val")
+        .find(|p| p.analysis.name == "val")
         .expect("the inherited generic member `val` surfaces");
 
-    // The substituted value type is `Local` — a `Ref` the deriving file owns.
-    let type_expr = val.type_expr.as_ref().expect("val carries a typed form");
-    assert!(
-        matches!(
-            type_expr,
-            verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "Local"
-        ),
-        "val's substituted value type is Ref(\"Local\"), got {type_expr:?}"
+    // The substituted value type is `Local` — a `Ref` the deriving file owns,
+    // rendered at the terminal sink.
+    assert_eq!(
+        val.analysis.type_annotation.as_deref(),
+        Some("Local"),
+        "val's substituted value type displays as the `Local` ref, got {:?}",
+        val.analysis.type_annotation
     );
 
     // The scope MUST be the DERIVING file (where `Local` is declared), NOT the
     // base file. Pre-fix (declaration_origin-first) this is the base file →
     // `Local` would not resolve there.
     assert_eq!(
-        val.type_expr_scope.as_ref().map(|s| s.as_str()),
+        val.analysis.type_expr_scope.as_ref().map(|s| s.as_str()),
         Some(FILE),
         "val's type_expr_scope follows the value-node scope (the deriving SFC), not the base file"
     );
     assert_ne!(
-        val.type_expr_scope.as_ref().map(|s| s.as_str()),
+        val.analysis.type_expr_scope.as_ref().map(|s| s.as_str()),
         Some(BASE),
         "the type_expr_scope must NOT be the heritage base file (negative — Local does not live there)"
     );
@@ -959,7 +1092,7 @@ fn define_emits_over_local_class_does_not_publish_non_public_members() {
         .expect("defineEmits<Class> resolves a surface");
     let emits =
         emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
-    let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
+    let names: Vec<&str> = emits.iter().map(|e| e.analysis.name.as_str()).collect();
 
     assert!(
         names.contains(&"publicEvt"),
@@ -1002,7 +1135,7 @@ fn define_emits_over_imported_class_does_not_publish_non_public_members() {
         .expect("defineEmits<ImportedClass> resolves a surface");
     let emits =
         emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
-    let names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
+    let names: Vec<&str> = emits.iter().map(|e| e.analysis.name.as_str()).collect();
 
     assert!(
         names.contains(&"publicEvt"),

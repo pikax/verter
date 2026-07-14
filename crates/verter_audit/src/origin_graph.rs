@@ -521,8 +521,6 @@ pub enum DispatchKeyKind {
     ProjectPath,
     /// Normalization pass.
     Normalize,
-    /// Resolved named-type key (see Vue macro resolution).
-    ResolvedNamedType,
 }
 
 /// Which VFS layer served the read — mirrored from the workspace's

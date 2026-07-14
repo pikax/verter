@@ -67,6 +67,7 @@ use crate::locator_identity::{
     semantic_space_for_locator_space, LocatorLoweringKey, ParseEnvHash, ResolveEnvHash,
 };
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_type_expr::locators::{TypeParamBoundPosition, TypeParamVisibility};
 
 use crate::resolver_core::bare_name_resolve::{
     resolve_bare_name_in_scope, DeclarationScopePayload,
@@ -100,23 +101,84 @@ impl AnchorPreparedDecl {
     }
 }
 
+/// One name slot of a binder frame: whether the name is a referenceable
+/// binder or a shadow-only entry.
+///
+/// A shadow-only entry exists because TS lexical visibility of a type
+/// parameter's DEFAULT bound is asymmetric: the parameter itself and later
+/// siblings still SHADOW any outer same-named declaration (the name is
+/// declared in the frame), but a reference to them is illegal — it must
+/// resolve unbound-within-frame, never fall through to the outer symbol.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BinderSlot {
+    /// The name is a referenceable binder: a reference binds this node.
+    Usable(SemanticNodeId),
+    /// The name is declared in this frame (it shadows outer same-named
+    /// declarations) but is FORBIDDEN as a reference from the current
+    /// position: a reference lowers to the fail-closed `Opaque(Miss)`.
+    ShadowOnly,
+}
+
 /// One lexical binder frame of the locator-shape lowering: declared
 /// type-parameter / `infer` / mapped-binder names in scope at one nesting
-/// level, each mapped to its interned binder node.
+/// level, each mapped to its [`BinderSlot`].
 #[derive(Debug, Default, Clone)]
 pub(crate) struct LocatorBinderFrame {
-    names: FxHashMap<Arc<str>, SemanticNodeId>,
+    names: FxHashMap<Arc<str>, BinderSlot>,
 }
 
 impl LocatorBinderFrame {
     /// Bind a syntactic binder name to its interned binder node.
     pub(crate) fn bind(&mut self, name: Arc<str>, node: SemanticNodeId) {
-        self.names.insert(name, node);
+        self.names.insert(name, BinderSlot::Usable(node));
     }
 
-    fn lookup(&self, name: &str) -> Option<SemanticNodeId> {
+    /// Declare a syntactic binder name as present-but-forbidden: it shadows
+    /// outer same-named declarations without being referenceable.
+    fn bind_shadow_only(&mut self, name: Arc<str>) {
+        self.names.insert(name, BinderSlot::ShadowOnly);
+    }
+
+    fn lookup(&self, name: &str) -> Option<BinderSlot> {
         self.names.get(name).copied()
     }
+}
+
+/// Identity minting mode for one declared type-parameter binder in the
+/// shared binder-frame constructor
+/// ([`ProjectSemanticDispatch::build_type_param_binder_frame`]).
+pub(super) enum BinderIdentityMode<'a> {
+    /// A type-declaration HEADER parameter: binder identity = the OWNING
+    /// symbol name + the parameter's declared ordinal.
+    DeclHeader {
+        /// The declaring symbol's stable merged name.
+        owner_symbol: &'a Arc<str>,
+    },
+    /// A signature-scoped parameter (a function / constructor type's own
+    /// generics, or a free authored `TypeParameter` occurrence): binder
+    /// identity = the display name at ordinal 0.
+    Signature,
+}
+
+/// Presence spec of one declared type parameter for the shared binder-frame
+/// constructor: name + bound presence. The bound BODIES enter through the
+/// caller's bound-lowering strategy (typed-IR inline on the shape path, the
+/// memoized `LowerLocator` query on the fact path), so both paths intern
+/// IDENTICAL binder ids from identical specs.
+pub(super) struct TypeParamBinderSpec {
+    pub(super) name: Arc<str>,
+    pub(super) has_constraint: bool,
+    pub(super) has_default: bool,
+}
+
+/// One minted type-parameter binder of a declaration-header / signature
+/// frame: the final (bound-carrying) binder node plus its lowered bound
+/// nodes.
+pub(super) struct BuiltTypeParamBinder {
+    pub(super) name: Arc<str>,
+    pub(super) binder: SemanticNodeId,
+    pub(super) constraint: Option<SemanticNodeId>,
+    pub(super) default: Option<SemanticNodeId>,
 }
 
 /// The SEALED locator-shape lowering context: the authored position's
@@ -200,8 +262,10 @@ impl<'a> ShapeLowerCtx<'a> {
         }
     }
 
-    /// The binder node `name` stands for, scanning innermost-last outward.
-    fn lookup_binder(&self, name: &str) -> Option<SemanticNodeId> {
+    /// The binder slot `name` stands for, scanning innermost-last outward.
+    /// The FIRST frame declaring the name decides (an inner binder shadows
+    /// an outer one; a shadow-only entry shadows without being usable).
+    fn lookup_binder(&self, name: &str) -> Option<BinderSlot> {
         self.binders
             .iter()
             .rev()
@@ -492,29 +556,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
             // -- Declared type parameters stay SHELLS --
             TypeExpr::TypeParameter(param) => {
-                if let Some(binder) = ctx.lookup_binder(&param.name) {
-                    return binder;
+                match ctx.lookup_binder(&param.name) {
+                    Some(BinderSlot::Usable(binder)) => return binder,
+                    // A shadow-forbidden name (a default's self / forward
+                    // sibling) is unbound-within-frame — never the outer
+                    // same-named declaration.
+                    Some(BinderSlot::ShadowOnly) => return self.opaque(QueryError::Miss),
+                    None => {}
                 }
-                let constraint = param
-                    .constraint
-                    .as_deref()
-                    .map(|c| self.lower_locator_shape_node(c, ctx));
-                let default = param
-                    .default
-                    .as_deref()
-                    .map(|d| self.lower_locator_shape_node(d, ctx));
-                let display_name: Arc<str> = Arc::from(param.name.as_str());
-                let decl = DeclIdentity::from_scope(scope, Arc::clone(&display_name));
-                graph.intern_node_with_scope(
-                    SemanticNodeData::TypeParam {
-                        decl,
-                        param_index: 0,
-                        constraint,
-                        default,
-                        display_name,
+                // A free authored parameter declaration mints its binder
+                // through the ONE shared frame constructor so its own bounds
+                // lower under the TS-exact self frame (an F-bounded
+                // constraint's self reference binds the predeclared shell; a
+                // default's self reference is shadow-forbidden).
+                let spec = [TypeParamBinderSpec {
+                    name: Arc::from(param.name.as_str()),
+                    has_constraint: param.constraint.is_some(),
+                    has_default: param.default.is_some(),
+                }];
+                let base = LocatorShapeCtx::new(
+                    scope,
+                    ctx.binders,
+                    ctx.name_resolution,
+                    ctx.scope_payload,
+                );
+                let (_frame, built) = self.build_type_param_binder_frame(
+                    &base,
+                    BinderIdentityMode::Signature,
+                    &spec,
+                    TypeParamVisibility::Body,
+                    |_, position, bound_ctx| {
+                        let bound = match position {
+                            TypeParamBoundPosition::Constraint => param.constraint.as_deref(),
+                            TypeParamBoundPosition::Default => param.default.as_deref(),
+                        }?;
+                        Some(self.lower_type_expr_for_locator_shape(bound, bound_ctx))
                     },
-                    scope.clone(),
-                )
+                );
+                built[0].binder
             }
 
             // -- Named reference: identity resolution ONLY --
@@ -686,9 +765,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Lower a function / constructor signature. A function's own `<T>`
-    /// binders shadow outer generics, each parameter's constraint / default
-    /// seeing the PRIOR own binders (TS scoping). An absent return
-    /// annotation mirrors the shared `Opaque(Miss)` placeholder.
+    /// binders shadow outer generics; each parameter's constraint / default
+    /// lowers under the ONE shared binder-frame constructor's TS-exact
+    /// per-position frame (a constraint sees every own sibling, a default
+    /// sees prior own siblings with self / later shadow-forbidden). An
+    /// absent return annotation mirrors the shared `Opaque(Miss)`
+    /// placeholder.
     fn lower_locator_shape_function(
         &self,
         func: &FunctionExpr,
@@ -696,46 +778,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> SemanticNodeId {
         let graph = self.graph();
         let scope = ctx.scope;
-        let mut own_frame = LocatorBinderFrame::default();
-        let mut type_parameters: Vec<TypeParamDecl> =
-            Vec::with_capacity(func.type_parameters.len());
-        for tp in &func.type_parameters {
-            let display_name: Arc<str> = Arc::from(tp.name.as_str());
-            let head_storage;
-            let head_ctx = if type_parameters.is_empty() {
-                *ctx
-            } else {
-                let mut frames: Vec<LocatorBinderFrame> = ctx.binders.to_vec();
-                frames.push(own_frame.clone());
-                head_storage = frames;
-                ctx.with_binders(&head_storage)
-            };
-            let constraint = tp
-                .constraint
-                .as_deref()
-                .map(|c| self.lower_locator_shape_node(c, &head_ctx));
-            let default = tp
-                .default
-                .as_deref()
-                .map(|d| self.lower_locator_shape_node(d, &head_ctx));
-            let decl = DeclIdentity::from_scope(scope, Arc::clone(&display_name));
-            let binder = graph.intern_node_with_scope(
-                SemanticNodeData::TypeParam {
-                    decl,
-                    param_index: 0,
-                    constraint,
-                    default,
-                    display_name: Arc::clone(&display_name),
-                },
-                scope.clone(),
-            );
-            own_frame.bind(Arc::clone(&display_name), binder);
-            type_parameters.push(TypeParamDecl {
-                name: display_name,
-                constraint,
-                default,
-            });
-        }
+        let specs: Vec<TypeParamBinderSpec> = func
+            .type_parameters
+            .iter()
+            .map(|tp| TypeParamBinderSpec {
+                name: Arc::from(tp.name.as_str()),
+                has_constraint: tp.constraint.is_some(),
+                has_default: tp.default.is_some(),
+            })
+            .collect();
+        let base = LocatorShapeCtx::new(scope, ctx.binders, ctx.name_resolution, ctx.scope_payload);
+        let (own_frame, built) = self.build_type_param_binder_frame(
+            &base,
+            BinderIdentityMode::Signature,
+            &specs,
+            TypeParamVisibility::Body,
+            |ordinal, position, bound_ctx| {
+                let tp = func.type_parameters.get(ordinal as usize)?;
+                let bound = match position {
+                    TypeParamBoundPosition::Constraint => tp.constraint.as_deref(),
+                    TypeParamBoundPosition::Default => tp.default.as_deref(),
+                }?;
+                Some(self.lower_type_expr_for_locator_shape(bound, bound_ctx))
+            },
+        );
+        let type_parameters: Vec<TypeParamDecl> = built
+            .iter()
+            .map(|binder| TypeParamDecl {
+                name: Arc::clone(&binder.name),
+                constraint: binder.constraint,
+                default: binder.default,
+            })
+            .collect();
 
         let inner_storage;
         let inner_ctx = if func.type_parameters.is_empty() {
@@ -792,17 +866,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         type_arguments: &[TypeExpr],
         ctx: &ShapeLowerCtx<'_>,
     ) -> SemanticNodeId {
-        let graph = self.graph();
         let scope = ctx.scope;
 
-        if let Some(binder) = ctx.lookup_binder(name) {
-            if type_arguments.is_empty() {
-                return binder;
+        match ctx.lookup_binder(name) {
+            Some(BinderSlot::Usable(binder)) => {
+                if type_arguments.is_empty() {
+                    return binder;
+                }
+                // An applied binder (`T<X>` where `T` is a bound type
+                // parameter) has no faithful authored shape — fail closed
+                // rather than leak the shadowed name as an unbound reference.
+                return self.opaque(QueryError::Miss);
             }
-            // An applied binder (`T<X>` where `T` is a bound type
-            // parameter) has no faithful authored shape — fail closed
-            // rather than leak the shadowed name as an unbound reference.
-            return self.opaque(QueryError::Miss);
+            // A shadow-forbidden name (a default bound's self / forward
+            // sibling): the name is declared in the frame, so it shadows
+            // any outer same-named declaration, but the reference itself is
+            // illegal — unbound-within-frame, never the outer symbol.
+            Some(BinderSlot::ShadowOnly) => return self.opaque(QueryError::Miss),
+            None => {}
         }
 
         // A script-setup generic parameter is NOT a declaration: its bare
@@ -815,13 +896,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .scope_payload
             .is_some_and(|payload| payload.scope_type_bindings.contains_key(name.as_ref()))
         {
-            return graph.intern_node_with_scope(
-                SemanticNodeData::new_bare_ref(
-                    Arc::clone(name),
-                    scope.clone(),
-                    self.lower_locator_shape_args(type_arguments, ctx),
-                ),
-                scope.clone(),
+            return self.intern_ref_head_carrier(
+                crate::project_semantic_dispatch::carrier::RefHeadResolution::Unresolved,
+                name,
+                scope,
+                self.lower_locator_shape_args(type_arguments, ctx),
             );
         }
 
@@ -838,7 +917,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // shadowing wins over the global lib heads below by resolution
         // order. This resolves WHO the name is (a slot), never WHAT it
         // means (no `ResolveDecl` / `Instantiate` execution).
-        let resolved = ctx
+        let resolved: Option<(ResolvedRootIdentity, HashValue)> = ctx
             .name_resolution
             .and_then(|map| map.get(name.as_ref()))
             .and_then(|direct| {
@@ -863,40 +942,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         &direct.symbol_name,
                     );
                 self.ctx.observe_borrowed_signature(&route_facts);
-                self.ctx.shallow_file_state(&final_canonical)?;
-                Some(ResolvedRootIdentity::new(final_canonical, final_symbol))
+                // ONE leaf shallow-state retrieval: this read is BOTH the
+                // liveness gate (the permitted first canonical shallow
+                // materialization — at most once per content generation)
+                // AND the versioned-identity hash source. It builds the
+                // versioned `DeclIdentity` + correct invalidation facts;
+                // it never lowers the target's declaration bodies.
+                let state = self.ctx.shallow_file_state(&final_canonical)?;
+                Some((
+                    ResolvedRootIdentity::new(final_canonical, final_symbol),
+                    state.whole_hash,
+                ))
             })
             .or_else(|| match scope {
-                NodeScopeId::File { canonical_id, .. } => resolve_bare_name_in_scope(
-                    self.ctx,
-                    canonical_id.as_ref(),
-                    ctx.scope_payload,
-                    name.as_ref(),
-                ),
+                NodeScopeId::File { canonical_id, .. } => {
+                    let ri = resolve_bare_name_in_scope(
+                        self.ctx,
+                        canonical_id.as_ref(),
+                        ctx.scope_payload,
+                        name.as_ref(),
+                    )?;
+                    // Same single retrieval on the bare-name path: one
+                    // state read supplies the versioned-identity hash (an
+                    // unknown file keeps the default hash — the identity
+                    // is still deterministic within the generation).
+                    let whole_hash = self
+                        .ctx
+                        .shallow_file_state(ri.canonical_id.as_str())
+                        .map_or(HashValue::default(), |s| s.whole_hash);
+                    Some((ri, whole_hash))
+                }
                 NodeScopeId::Global => None,
             });
-        if let Some(ri) = resolved {
-            let canonical: Arc<str> = Arc::from(ri.canonical_id.as_str());
-            let decl_name: Arc<str> = Arc::from(ri.symbol_name.as_str());
-            let whole_hash = self
-                .ctx
-                .shallow_file_state(canonical.as_ref())
-                .map_or(HashValue::default(), |s| s.whole_hash);
+        use crate::project_semantic_dispatch::carrier::RefHeadResolution;
+        if let Some((ri, whole_hash)) = resolved {
             let identity = DeclIdentity {
-                canonical_id: canonical,
+                canonical_id: Arc::from(ri.canonical_id.as_str()),
                 whole_hash,
-                decl_name,
+                decl_name: Arc::from(ri.symbol_name.as_str()),
             };
-            if type_arguments.is_empty() {
-                return graph
-                    .intern_node_with_scope(SemanticNodeData::DeclRef { identity }, scope.clone());
-            }
-            return graph.intern_node_with_scope(
-                SemanticNodeData::InstantiationRef {
-                    base: identity,
-                    args: self.lower_locator_shape_args(type_arguments, ctx),
-                },
-                scope.clone(),
+            return self.intern_ref_head_carrier(
+                RefHeadResolution::Resolved(identity),
+                name,
+                scope,
+                self.lower_locator_shape_args(type_arguments, ctx),
             );
         }
 
@@ -909,91 +998,200 @@ impl<'a> ProjectSemanticDispatch<'a> {
             )
             .is_some()
         {
-            return graph.intern_node_with_scope(
-                SemanticNodeData::InstantiationRef {
-                    base: DeclIdentity {
-                        canonical_id: Arc::from("__builtin__"),
-                        whole_hash: HashValue::default(),
-                        decl_name: Arc::clone(name),
-                    },
-                    args: self.lower_locator_shape_args(type_arguments, ctx),
-                },
-                scope.clone(),
+            return self.intern_ref_head_carrier(
+                RefHeadResolution::Builtin(DeclIdentity {
+                    canonical_id: Arc::from("__builtin__"),
+                    whole_hash: HashValue::default(),
+                    decl_name: Arc::clone(name),
+                }),
+                name,
+                scope,
+                self.lower_locator_shape_args(type_arguments, ctx),
             );
         }
 
         // Unresolved: keep the deferred BareRef carrier — demand-time
         // carrier-subject normalization owns its resolution.
-        graph.intern_node_with_scope(
-            SemanticNodeData::new_bare_ref(
-                Arc::clone(name),
-                scope.clone(),
-                self.lower_locator_shape_args(type_arguments, ctx),
-            ),
-            scope.clone(),
+        self.intern_ref_head_carrier(
+            RefHeadResolution::Unresolved,
+            name,
+            scope,
+            self.lower_locator_shape_args(type_arguments, ctx),
         )
     }
 
-    /// Build the locator-shape binder frame for a declaration's type
-    /// parameters: declared parameters stay SHELLS — one `TypeParam` binder
-    /// per declared parameter, each constraint / default lowered under the
-    /// frame built so far (TS scoping — earlier parameters are visible to
-    /// later heads).
+    /// The ONE shared binder-frame constructor for declared type-parameter
+    /// lists — decl headers (typed-IR bounds lowered inline), function /
+    /// constructor signature generics, free authored `TypeParameter`
+    /// occurrences, and the fact-side re-derivation from `NarrowTypeParam`
+    /// facts (bounds lowered through the memoized `LowerLocator` query) ALL
+    /// route through it, so every derivation interns IDENTICAL binder ids.
     ///
-    /// Returns the frame plus the ordered `(name, binder)` bindings.
+    /// TS-exact lexical visibility, two-phase:
+    ///
+    /// 1. **Predeclare every sibling** as a bound-free `TypeParam` SHELL —
+    ///    the sibling NAME set is complete before any bound lowers, so a
+    ///    bound's sibling reference (backward, forward, or self) always
+    ///    finds the frame entry and can never fall through to an outer
+    ///    same-named declaration.
+    /// 2. **Lower bounds per position**: the bound of the parameter at
+    ///    ordinal `N` lowers under a frame where parameters declared BEFORE
+    ///    `N` are usable through their final (bound-carrying) binders and
+    ///    the parameter itself plus later siblings are — for a CONSTRAINT —
+    ///    usable shells (TS constraints may reference later siblings and
+    ///    self, F-bounded forms included), or — for a DEFAULT —
+    ///    shadow-forbidden entries (TS rejects default forward / self
+    ///    references; such a reference lowers to the fail-closed
+    ///    `Opaque(Miss)`, never an outer capture). Constraints stay graph
+    ///    EDGES on the binder nodes — nothing here evaluates them, so a
+    ///    mutual `<T extends U, U extends T>` just creates the edges (the
+    ///    shell break makes the node data acyclic by construction) and
+    ///    resolution-time cycle handling stays where it lives.
+    ///
+    /// `visibility` selects the RETURNED frame: `Body` demands every final
+    /// binder (the whole-declaration frame); a bound demand returns exactly
+    /// that bound's per-position frame. Bound BODIES enter through the
+    /// caller's `lower_bound` strategy (`(ordinal, position, frame-ctx) →
+    /// node`; `None` = absent bound, or a fact-side lowering miss whose
+    /// binder-identity divergence degrades substitution to a no-op while
+    /// the read-boundary fold taints warm admission), so the shape-inline
+    /// and fact-query derivations share one minting engine.
+    ///
     /// Binder identity is deterministic (content-addressed interning over
-    /// the same scope + owner + parameter list), so the substitution step
-    /// that applies `Instantiate` args to a fetched shape re-derives the
-    /// SAME binder ids from the prepared declaration's parameter list.
-    ///
-    /// The binder's declaration identity carries the OWNING symbol name
-    /// plus the parameter's declared ordinal — a DISTINCT identity from
-    /// the display-name-keyed shells a nested function type's own `<T>`
-    /// binders intern, so applying an argument to the declaration's `T`
-    /// can never rewrite a shadowing inner `T`.
-    pub(super) fn locator_shape_binder_frame(
+    /// the same scope + identity mode + ordinal + bound NODES), so the
+    /// substitution step that applies `Instantiate` args to a fetched shape
+    /// re-derives the SAME binder ids from the prepared declaration's
+    /// parameter facts.
+    pub(super) fn build_type_param_binder_frame(
         &self,
-        scope: &NodeScopeId,
-        owner_symbol: &Arc<str>,
-        type_parameters: &[verter_type_expr::TypeParam],
-        name_resolution: Option<&FxHashMap<String, ResolvedRootIdentity>>,
-        scope_payload: Option<&DeclarationScopePayload>,
-    ) -> (LocatorBinderFrame, Vec<(Arc<str>, SemanticNodeId)>) {
-        let mut frame = LocatorBinderFrame::default();
-        let mut bindings: Vec<(Arc<str>, SemanticNodeId)> =
-            Vec::with_capacity(type_parameters.len());
-        for (index, param) in type_parameters.iter().enumerate() {
-            let display_name: Arc<str> = Arc::from(param.name.as_str());
-            let (constraint, default) = {
-                let head_frames = std::slice::from_ref(&frame);
-                let head_ctx =
-                    LocatorShapeCtx::new(scope, head_frames, name_resolution, scope_payload);
-                (
-                    param
-                        .constraint
-                        .as_deref()
-                        .map(|c| self.lower_type_expr_for_locator_shape(c, &head_ctx)),
-                    param
-                        .default
-                        .as_deref()
-                        .map(|d| self.lower_type_expr_for_locator_shape(d, &head_ctx)),
-                )
+        base: &LocatorShapeCtx<'_>,
+        identity: BinderIdentityMode<'_>,
+        specs: &[TypeParamBinderSpec],
+        visibility: TypeParamVisibility,
+        mut lower_bound: impl FnMut(
+            u32,
+            TypeParamBoundPosition,
+            &LocatorShapeCtx<'_>,
+        ) -> Option<SemanticNodeId>,
+    ) -> (LocatorBinderFrame, Vec<BuiltTypeParamBinder>) {
+        let graph = self.graph();
+        let scope = base.scope;
+        let mint_identity = |name: &Arc<str>, index: usize| match &identity {
+            // A decl-header binder's identity carries the OWNING symbol
+            // name plus the parameter's declared ordinal — a DISTINCT
+            // identity from the display-name-keyed shells a nested function
+            // type's own `<T>` binders intern, so applying an argument to
+            // the declaration's `T` can never rewrite a shadowing inner `T`.
+            BinderIdentityMode::DeclHeader { owner_symbol } => (
+                DeclIdentity::from_scope(scope, Arc::clone(owner_symbol)),
+                index as u16,
+            ),
+            BinderIdentityMode::Signature => (DeclIdentity::from_scope(scope, Arc::clone(name)), 0),
+        };
+
+        // Phase 1: predeclare every sibling as a bound-free shell.
+        let shells: Vec<(Arc<str>, SemanticNodeId)> = specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| {
+                let (decl, param_index) = mint_identity(&spec.name, index);
+                let shell = graph.intern_node_with_scope(
+                    SemanticNodeData::TypeParam {
+                        decl,
+                        param_index,
+                        constraint: None,
+                        default: None,
+                        display_name: Arc::clone(&spec.name),
+                    },
+                    scope.clone(),
+                );
+                (Arc::clone(&spec.name), shell)
+            })
+            .collect();
+
+        // The frame the bound at `ordinal` lowers under (also the frame a
+        // bound-position demand returns): prior finals usable; self + later
+        // siblings constraint-usable shells / default-forbidden shadows.
+        let bound_frame =
+            |finals: &[BuiltTypeParamBinder], ordinal: usize, position: TypeParamBoundPosition| {
+                let mut frame = LocatorBinderFrame::default();
+                for built in finals {
+                    frame.bind(Arc::clone(&built.name), built.binder);
+                }
+                for (name, shell) in shells.iter().skip(ordinal) {
+                    match position {
+                        TypeParamBoundPosition::Constraint => frame.bind(Arc::clone(name), *shell),
+                        TypeParamBoundPosition::Default => frame.bind_shadow_only(Arc::clone(name)),
+                    }
+                }
+                frame
             };
-            let decl = DeclIdentity::from_scope(scope, Arc::clone(owner_symbol));
-            let binder = self.graph().intern_node_with_scope(
+
+        // Phase 2: left-to-right final-binder minting. A `Body` demand
+        // needs every final binder; a bound demand needs exactly the finals
+        // declared before its ordinal.
+        let limit = match visibility {
+            TypeParamVisibility::Body => specs.len(),
+            TypeParamVisibility::Constraint { ordinal }
+            | TypeParamVisibility::Default { ordinal } => (ordinal as usize).min(specs.len()),
+        };
+        let mut finals: Vec<BuiltTypeParamBinder> = Vec::with_capacity(limit);
+        for (index, spec) in specs.iter().take(limit).enumerate() {
+            let mut lower_in = |position: TypeParamBoundPosition| {
+                let frame = bound_frame(&finals, index, position);
+                let mut frames: Vec<LocatorBinderFrame> = base.binders.to_vec();
+                frames.push(frame);
+                let ctx =
+                    LocatorShapeCtx::new(scope, &frames, base.name_resolution, base.scope_payload);
+                lower_bound(index as u32, position, &ctx)
+            };
+            let constraint = if spec.has_constraint {
+                lower_in(TypeParamBoundPosition::Constraint)
+            } else {
+                None
+            };
+            let default = if spec.has_default {
+                lower_in(TypeParamBoundPosition::Default)
+            } else {
+                None
+            };
+            let (decl, param_index) = mint_identity(&spec.name, index);
+            let binder = graph.intern_node_with_scope(
                 SemanticNodeData::TypeParam {
                     decl,
-                    param_index: index as u16,
+                    param_index,
                     constraint,
                     default,
-                    display_name: Arc::clone(&display_name),
+                    display_name: Arc::clone(&spec.name),
                 },
                 scope.clone(),
             );
-            frame.bind(Arc::clone(&display_name), binder);
-            bindings.push((display_name, binder));
+            finals.push(BuiltTypeParamBinder {
+                name: Arc::clone(&spec.name),
+                binder,
+                constraint,
+                default,
+            });
         }
-        (frame, bindings)
+
+        let frame = match visibility {
+            TypeParamVisibility::Body => {
+                let mut frame = LocatorBinderFrame::default();
+                for built in &finals {
+                    frame.bind(Arc::clone(&built.name), built.binder);
+                }
+                frame
+            }
+            TypeParamVisibility::Constraint { ordinal } => bound_frame(
+                &finals,
+                ordinal as usize,
+                TypeParamBoundPosition::Constraint,
+            ),
+            TypeParamVisibility::Default { ordinal } => {
+                bound_frame(&finals, ordinal as usize, TypeParamBoundPosition::Default)
+            }
+        };
+        (frame, finals)
     }
 
     /// Cold build for [`SemanticQueryKey::LowerLocator`] — the SESSION
@@ -1071,6 +1269,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let anchor_symbol = match key.locator() {
             AuthoredBodyLocator::DeclBody(slot) => Arc::clone(&slot.anchor.symbol),
             AuthoredBodyLocator::AugmentationBody(aug) => Arc::clone(&aug.anchor.symbol),
+            AuthoredBodyLocator::JsdocTypedefBody(typedef) => Arc::clone(&typedef.anchor.symbol),
             AuthoredBodyLocator::MacroPayload(payload) => Arc::clone(&payload.anchor.symbol),
         };
 
@@ -1118,18 +1317,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
                 .map(|prepared| AnchorPreparedDecl::Augmentation(Box::new(prepared)))
             }
+            // A JSDoc typedef declares NO header type parameters (its deref
+            // returns `type_parameters: Vec::new()`) and its comment-derived
+            // payload is re-parsed by the dedicated lease-only re-derivation,
+            // independent of any prepared declaration — so no binder-frame
+            // prepared decl exists for the anchor. Mirrors the MacroPayload
+            // arm below.
+            AuthoredBodyLocator::JsdocTypedefBody(_) => None,
             AuthoredBodyLocator::MacroPayload(_) => None,
         };
         let name_resolution = prepared_anchor
             .as_ref()
             .map(AnchorPreparedDecl::name_resolution);
 
-        let (frame, _bindings) = self.locator_shape_binder_frame(
-            &scope,
-            &anchor_symbol,
-            &derefed.type_parameters,
-            name_resolution,
-            scope_payload.as_ref(),
+        // The deref returns the FULL sibling parameter list plus the
+        // position-exact TS visibility; the shared constructor rebuilds the
+        // frame the derefed shape lowers under (a whole body sees every
+        // final binder; a bound position sees its per-position frame).
+        let header_params = &derefed.type_parameters;
+        let specs: Vec<TypeParamBinderSpec> = header_params
+            .iter()
+            .map(|param| TypeParamBinderSpec {
+                name: Arc::from(param.name.as_str()),
+                has_constraint: param.constraint.is_some(),
+                has_default: param.default.is_some(),
+            })
+            .collect();
+        let base = LocatorShapeCtx::new(&scope, &[], name_resolution, scope_payload.as_ref());
+        let (frame, _binders) = self.build_type_param_binder_frame(
+            &base,
+            BinderIdentityMode::DeclHeader {
+                owner_symbol: &anchor_symbol,
+            },
+            &specs,
+            derefed.visibility,
+            |ordinal, position, bound_ctx| {
+                let param = header_params.get(ordinal as usize)?;
+                let bound = match position {
+                    TypeParamBoundPosition::Constraint => param.constraint.as_deref(),
+                    TypeParamBoundPosition::Default => param.default.as_deref(),
+                }?;
+                Some(self.lower_type_expr_for_locator_shape(bound, bound_ctx))
+            },
         );
         let frames = [frame];
         let shape_ctx =
@@ -1188,6 +1417,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let anchor = match &locator {
             AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
             AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
+            AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
             AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
         };
         let slot = self

@@ -617,33 +617,64 @@ fn gate4_walker_detects_production_sentinel_in_import_type_arguments() {
     );
 }
 
+/// Materialize ONE published source position to its SHALLOW published shape
+/// and walk it for the sentinel.
+///
+/// The published surface is source-positioned and TypeExpr-free: a field
+/// carries a `SourcePosition` (`Absent` / `Present(SemanticTypeSource)` /
+/// `Failed`), never a `TypeExpr`. The sentinel therefore is not a field of the
+/// meta — it is what the published source RENDERS to. The probe raises the
+/// source through the ONE shared dispatch in its SHALLOW form (the published
+/// shape a consumer reads without demanding an expansion — carriers survive),
+/// which is exactly what the hermetic `Table.vue` / `ChatMessages.vue`
+/// trackers assert on.
+///
+/// `Absent` and `Failed` positions expose no source and are skipped here:
+/// neither can carry a sentinel (they carry no shape at all). A `Failed`
+/// position is the state a genuine partial materialization lands in — that
+/// class is covered by the `synthesis_should_suppress` half of assertion #4,
+/// not by this walker.
+fn source_position_carries_budget_exceeded(
+    host: &VerterHost,
+    owner_canonical: &str,
+    position: &verter_type_expr::facts::SourcePosition,
+) -> bool {
+    position.present().is_some_and(|source| {
+        verter_session::test_only::semantic_source_probe::shallow_type_expr(
+            host,
+            owner_canonical,
+            source,
+        )
+        .as_ref()
+        .is_some_and(type_expr_mentions_budget_exceeded)
+    })
+}
+
 /// Walk every PUBLISHED type-bearing surface of a resolved
 /// `ComponentMetaAnalysis` (props + models + events + slots) for a leaked
 /// budget-exceeded partial sentinel. `true` means at least one
 /// `demand: Published` field carries the marker — a silent correctness
 /// regression even when `synthesis_should_suppress` is `false`.
 fn published_surface_carries_budget_exceeded(
+    host: &VerterHost,
+    owner_canonical: &str,
     meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
 ) -> bool {
-    let props = meta
-        .props
-        .iter()
-        .any(|p| type_expr_mentions_budget_exceeded(&p.type_expr));
-    let models = meta
-        .models
-        .iter()
-        .any(|m| type_expr_mentions_budget_exceeded(&m.type_expr));
-    let events = meta
-        .events
-        .iter()
-        .any(|e| type_expr_mentions_budget_exceeded(&e.payload));
+    let carries =
+        |position| source_position_carries_budget_exceeded(host, owner_canonical, position);
+    let props = meta.props.iter().any(|p| carries(&p.type_source));
+    let models = meta.models.iter().any(|m| carries(&m.type_source));
+    let events = meta.events.iter().any(|e| carries(&e.payload));
     let slots = meta.slots.iter().any(|s| {
-        s.return_expr
+        s.return_source.as_ref().is_some_and(|source| {
+            verter_session::test_only::semantic_source_probe::shallow_type_expr(
+                host,
+                owner_canonical,
+                source,
+            )
             .as_ref()
             .is_some_and(type_expr_mentions_budget_exceeded)
-            || s.bindings
-                .iter()
-                .any(|b| type_expr_mentions_budget_exceeded(&b.type_expr))
+        }) || s.bindings.iter().any(|b| carries(&b.type_source))
     });
     props || models || events || slots
 }
@@ -672,7 +703,7 @@ fn resolve_with_hard_budget(corpus_root: &Path, basename: &str) -> ComponentOutc
             Some((meta, resolution)) => (
                 true,
                 resolution.synthesis_should_suppress,
-                published_surface_carries_budget_exceeded(&meta),
+                published_surface_carries_budget_exceeded(&host, &canonical, &meta),
             ),
             None => (false, false, false),
         };
@@ -923,7 +954,7 @@ fn resolve_audited_stats(host: &Arc<VerterHost>, canonical: &str) -> AuditedReso
     };
     AuditedResolveStats {
         suppress: resolution.synthesis_should_suppress,
-        surface_sentinel: published_surface_carries_budget_exceeded(&meta),
+        surface_sentinel: published_surface_carries_budget_exceeded(host, canonical, &meta),
         budget_diagnostics,
         charges,
         cold_builds: footprint.cache_outcomes.cold_builds as u64,
@@ -1178,4 +1209,72 @@ fn parse_first_pass_aggregate_ms(raw: &str) -> Option<f64> {
         .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e'))
         .unwrap_or(rest.len());
     rest[..end].parse::<f64>().ok()
+}
+
+/// The fact-signature OVERFLOW rail must not be a warm-cache CLIFF on the real
+/// corpus.
+///
+/// A compute whose deduplicated observation set exceeds `FACT_SIGNATURE_CAP`
+/// (1024) is refused shared-cache admission permanently — it recomputes cold on
+/// every request, forever. That refusal is mandatory for correctness (past the
+/// cap we can no longer prove the entry's curated `dep_signature` covers
+/// everything the compute read), but it costs a warm entry, and nothing else in
+/// the design establishes headroom under the cap.
+///
+/// `Table.vue` and `ChatMessages.vue` are the two heaviest open-generic
+/// components in the corpus — the TanStack-heritage / open-conditional-mapped
+/// class this project has been burned by before, and by far the most likely to
+/// legitimately dedup >1024 facts in one member reduce. If the counter fires on
+/// them, the rail is a real performance cliff on real components and the
+/// refusal-vs-performance trade needs an explicit decision, not a silent
+/// regression.
+///
+/// The counter (`signature_overflow_at_install`) is bumped by the ONE
+/// signature-CONSUMING tracer boundary per compute, so it counts overflowing
+/// computes — not tracer installs.
+#[test]
+fn fact_signature_overflow_never_fires_on_the_real_corpus() {
+    let corpus_root = locate_corpus_root();
+    let host = build_corpus_host(&corpus_root);
+
+    let mut per_component: Vec<(&str, u64)> = Vec::new();
+    for component in COMPLETE_MANDATORY_COMPONENTS {
+        let canonical = locate_component(&corpus_root, component)
+            .to_string_lossy()
+            .to_string();
+        let before = verter_session::for_tests::read_signature_overflow_at_install(&host);
+        // Cold + warm pass, exactly as a repeat request would drive it. BOTH
+        // must RESOLVE: a component that returns `None` observes no facts, so
+        // it trivially overflows nothing — discarding these results would let a
+        // corpus-wide resolution failure PASS this gate as "zero overflow".
+        let cold = host.get_component_meta(&canonical);
+        assert!(
+            cold.is_some(),
+            "`{component}` must RESOLVE on the cold pass — a `None` here makes the \
+             zero-overflow assertion below vacuous (nothing resolved, so nothing could \
+             overflow)",
+        );
+        let warm = host.get_component_meta(&canonical);
+        assert!(
+            warm.is_some(),
+            "`{component}` must RESOLVE on the warm pass — a `None` here makes the \
+             zero-overflow assertion below vacuous",
+        );
+        let after = verter_session::for_tests::read_signature_overflow_at_install(&host);
+        per_component.push((component, after - before));
+    }
+
+    let total: u64 = per_component.iter().map(|(_, n)| *n).sum();
+    let offenders: Vec<&(&str, u64)> = per_component.iter().filter(|(_, n)| *n > 0).collect();
+    assert!(
+        offenders.is_empty(),
+        "FACT-SIGNATURE OVERFLOW FIRED ON A REAL COMPONENT ({total} overflowing computes; \
+         per-component: {per_component:?}). The overflow rail permanently refuses shared-cache \
+         admission for these computes, so they recompute cold on EVERY request — a warm-cache \
+         cliff on the heaviest real components. Do NOT resolve this by raising \
+         FACT_SIGNATURE_CAP, weakening the refusal, or exempting a path: the refusal is what \
+         keeps an entry whose curated signature cannot be proven complete out of the shared \
+         cache. This is a mandated-refusal-vs-performance design conflict and needs an explicit \
+         decision.",
+    );
 }

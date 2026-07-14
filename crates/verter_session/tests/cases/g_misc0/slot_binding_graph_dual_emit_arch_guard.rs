@@ -13,22 +13,26 @@
 //! accumulator; any unpaired direct call would lose coverage on
 //! that deletion).
 //!
-//! The slot-binding-graph traversal has SIX legitimate dispatch
+//! The slot-binding-graph traversal has SEVEN legitimate dispatch
 //! sites that must emit dispatch-facts:
 //!
-//! 1. `accumulate_lowered_node_carrier_deps` — site 1 of 6.
+//! 1. `accumulate_lowered_node_carrier_deps` — site 1 of 7.
 //! 2. `slot_param_root_is_symbolic_only` (open-generic gate, CONCRETE
-//!    Conditional-check reduction `ProjectPath` read) — site 2 of 6.
+//!    Conditional-check reduction `ProjectPath` read) — site 2 of 7.
 //! 3. `slot_param_root_is_symbolic_only` (open-generic gate,
-//!    `InstantiationRef` carrier Skeleton-`Instantiate` read) — site 3 of 6.
+//!    `InstantiationRef` carrier Skeleton-`Instantiate` read) — site 3 of 7.
 //!    Sites 2 and 3 are the generic slot-alias binding gate: it reduces a
 //!    concrete Conditional check and Skeleton-instantiates an
 //!    `InstantiationRef` carrier through real `execute_read`s, each
 //!    paired-emitted here so a `generic="M"` slot resolves to NO bindings on
 //!    both the DTO and graph-native paths.
-//! 4. `resolve_slot_bindings_graph_native` — site 4 of 6.
-//! 5. `compute_bindings_via_graph` (slot-surface read) — site 5 of 6.
-//! 6. `compute_bindings_via_graph` (param-surface read) — site 6 of 6.
+//! 4. `resolve_slot_bindings_graph_native` — site 4 of 7.
+//! 5. `compute_bindings_via_graph` (slot-surface read) — site 5 of 7.
+//! 6. `compute_bindings_via_graph` (param-surface read) — site 6 of 7.
+//! 7. `compute_bindings_via_graph` (binding-value carrier
+//!    head-resolution read — the dep-observation `Navigate` read that
+//!    loads and records an unresolved binding value's cross-file
+//!    declaration dependency) — site 7 of 7.
 //!
 //! Each site MUST appear exactly once as a call to
 //! `emit_slot_binding_graph_dispatch_facts`. The legacy
@@ -68,7 +72,7 @@ fn slot_binding_graph_helper_is_declared() {
         src.contains("fn emit_slot_binding_graph_dispatch_facts("),
         "Arch guard: `slot_binding_graph.rs` MUST declare \
          the dual-emit helper `emit_slot_binding_graph_dispatch_facts`. \
-         Without the helper, the five dispatch-emission sites cannot \
+         Without the helper, the seven dispatch-emission sites cannot \
          route their `accumulate_dispatch_dep_signature` AND \
          `observe_fact_signature` calls through one shared paired \
          emission point."
@@ -151,7 +155,7 @@ fn slot_binding_graph_uses_paired_emit_at_every_site() {
     let src = read_workspace_file("crates/verter_session/src/meta_resolve/slot_binding_graph.rs");
 
     // Count `emit_slot_binding_graph_dispatch_facts(` call sites —
-    // there must be exactly 6 (the six dispatch reads in this
+    // there must be exactly 7 (the seven dispatch reads in this
     // file). The function declaration itself accounts for the
     // `fn emit_...(` form, not the `emit_...(` call form, so it
     // does not inflate the count.
@@ -162,15 +166,17 @@ fn slot_binding_graph_uses_paired_emit_at_every_site() {
     // Calls = total occurrences − declarations (1).
     let pure_calls = calls.saturating_sub(decl_count);
     assert_eq!(
-        pure_calls, 6,
+        pure_calls, 7,
         "Arch guard: `slot_binding_graph.rs` MUST contain \
-         exactly 6 calls to `emit_slot_binding_graph_dispatch_facts` \
+         exactly 7 calls to `emit_slot_binding_graph_dispatch_facts` \
          (one per dispatch-read site: accumulate_lowered_node_carrier_deps, \
          TWO sites in slot_param_root_is_symbolic_only (the open-generic \
          gate's concrete-Conditional `ProjectPath` reduction AND the \
          `InstantiationRef` carrier Skeleton-`Instantiate`), \
-         resolve_slot_bindings_graph_native, and two sites inside \
-         compute_bindings_via_graph). observed_calls={pure_calls} \
+         resolve_slot_bindings_graph_native, and three sites inside \
+         compute_bindings_via_graph (slot-surface, param-surface, and \
+         the binding-value carrier head-resolution dep-observation \
+         read)). observed_calls={pure_calls} \
          (total occurrences={calls}, declarations={decl_count})"
     );
 }

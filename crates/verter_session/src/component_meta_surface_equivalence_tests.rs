@@ -85,6 +85,52 @@ fn prop<'m>(
         .unwrap_or_else(|| panic!("prop `{name}` must exist; got {:?}", prop_names(meta)))
 }
 
+/// Demand-materialize a published prop's `type_source` through the one shared
+/// dispatch — the explicit consumer resolution step for a RESOLVED-shape
+/// assertion.
+fn demand_prop_type(
+    project: &Arc<MetaProject>,
+    owner: &str,
+    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+) -> TypeExpr {
+    crate::test_only::semantic_source_probe::demand_type_expr(
+        project.host(),
+        owner,
+        prop.type_source
+            .present()
+            .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name)),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "prop `{}`'s published source must demand-materialize",
+            prop.name
+        )
+    })
+}
+
+/// Shell-materialize a published prop's `type_source` WITHOUT a resolution
+/// demand — the shallow published shape (`Ref` carriers survive) for a
+/// SHALLOWNESS assertion.
+fn shallow_prop_type(
+    project: &Arc<MetaProject>,
+    owner: &str,
+    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+) -> TypeExpr {
+    crate::test_only::semantic_source_probe::shallow_type_expr(
+        project.host(),
+        owner,
+        prop.type_source
+            .present()
+            .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name)),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "prop `{}`'s published source must shell-materialize",
+            prop.name
+        )
+    })
+}
+
 // ════════════════════════════════════════════════════════════════════
 // D2 — alias chain published shallow at the component-meta surface.
 // ════════════════════════════════════════════════════════════════════
@@ -125,7 +171,8 @@ defineProps<{ node: Outer }>()
     assert_eq!(prop_names(&meta), vec!["node"], "exactly one prop `node`");
     let node = prop(&meta, "node");
 
-    match &node.type_expr {
+    let node_type = shallow_prop_type(&project, "/App.vue", node);
+    match &node_type {
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -206,23 +253,21 @@ defineProps<MergedProps>()
             "merged member `{name}` is author-written through the macro type arg"
         );
     }
-    let a = prop(&meta, "a");
+    let a_type = demand_prop_type(&project, "/App.vue", prop(&meta, "a"));
     assert!(
         matches!(
-            &a.type_expr,
+            &a_type,
             TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         ),
-        "merged member `a` must keep its `number` type, got {:?}",
-        a.type_expr
+        "merged member `a` must keep its `number` type, got {a_type:?}"
     );
-    let b = prop(&meta, "b");
+    let b_type = demand_prop_type(&project, "/App.vue", prop(&meta, "b"));
     assert!(
         matches!(
-            &b.type_expr,
+            &b_type,
             TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
         ),
-        "merged member `b` must keep its `string` type, got {:?}",
-        b.type_expr
+        "merged member `b` must keep its `string` type, got {b_type:?}"
     );
 }
 
@@ -352,7 +397,8 @@ defineProps<{
     }
     // `label`'s type is the imported alias `Label` — it STAYS a shallow `Ref`
     // (imported alias names are not eagerly inlined to their primitive body).
-    match &prop(&meta, "label").type_expr {
+    let label_type = shallow_prop_type(&project, "/component.vue", prop(&meta, "label"));
+    match &label_type {
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -376,7 +422,8 @@ defineProps<{
     // `onSubmit`'s type is the imported function-type alias `Submit` — a
     // shallow `Ref { name: "Submit" }` (not eagerly inlined to the `Function`
     // body).
-    match &prop(&meta, "onSubmit").type_expr {
+    let on_submit_type = shallow_prop_type(&project, "/component.vue", prop(&meta, "onSubmit"));
+    match &on_submit_type {
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -396,7 +443,8 @@ defineProps<{
     }
     // The member whose type is an imported INTERFACE alias STAYS a shallow
     // `Ref { name: "Foo" }` — never eagerly inlined to Foo's `{ bar }` body.
-    match &prop(&meta, "item").type_expr {
+    let item_type = shallow_prop_type(&project, "/component.vue", prop(&meta, "item"));
+    match &item_type {
         TypeExpr::Ref {
             name,
             type_arguments,
@@ -420,7 +468,7 @@ defineProps<{
     // Explicit anti-expansion arm: `item` must NOT be eagerly inlined to the
     // imported `Foo` Object body.
     assert!(
-        !matches!(&prop(&meta, "item").type_expr, TypeExpr::Object(_)),
+        !matches!(&item_type, TypeExpr::Object(_)),
         "the imported-alias member `item` must NOT expand `Foo` inline to an Object body"
     );
 
@@ -565,7 +613,8 @@ defineProps<{
     // `x: Foo['bar']` MUST publish the RESOLVED terminal `number` — impossible
     // without resolving `Foo`'s body in `/foo.ts`. A bare-`Ref`/`IndexedAccess`
     // carrier (broken cross-file member-type resolution) fails this arm.
-    match &prop(&meta, "x").type_expr {
+    let x_type = demand_prop_type(&project, "/component.vue", prop(&meta, "x"));
+    match &x_type {
         TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number) => {}
         other => panic!(
             "the path-projected imported member `x: Foo['bar']` must publish the RESOLVED \
@@ -575,7 +624,8 @@ defineProps<{
     }
     // `y: Foo['baz']` MUST publish the RESOLVED terminal `string` — the
     // distinct primitive proves the projection routed to `baz`, not `bar`.
-    match &prop(&meta, "y").type_expr {
+    let y_type = demand_prop_type(&project, "/component.vue", prop(&meta, "y"));
+    match &y_type {
         TypeExpr::Primitive(verter_type_expr::PrimitiveName::String) => {}
         other => panic!(
             "the path-projected imported member `y: Foo['baz']` must publish the RESOLVED \
@@ -647,11 +697,9 @@ defineProps<Props>()
         "the `items` member is author-written through the `defineProps<Props>` macro type arg"
     );
 
-    let TypeExpr::Array { element, .. } = &items.type_expr else {
-        panic!(
-            "`items` must resolve to an array, got {:?}",
-            items.type_expr
-        );
+    let items_type = demand_prop_type(&project, "/Generic.vue", items);
+    let TypeExpr::Array { element, .. } = &items_type else {
+        panic!("`items` must resolve to an array, got {items_type:?}");
     };
     let TypeExpr::Object(shape) = element.as_ref() else {
         panic!(
@@ -877,25 +925,25 @@ defineProps<{ z: string }>()
     // The recompute must carry the CHANGED member types, not just the changed
     // names — a wrong-type recompute (e.g. echoing the old `a: string`/`b: number`
     // surface under the new names) is caught here.
+    let renamed_type = demand_prop_type(&project, "/Owner.vue", prop(&after, "renamed"));
     assert!(
         matches!(
-            &prop(&after, "renamed").type_expr,
+            &renamed_type,
             TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
         ),
-        "the recomputed `renamed` member must carry its `string` type, got {:?}",
-        prop(&after, "renamed").type_expr
+        "the recomputed `renamed` member must carry its `string` type, got {renamed_type:?}"
     );
     assert!(
         prop(&after, "renamed").required,
         "the recomputed non-optional `renamed` must publish as required"
     );
+    let c_type = demand_prop_type(&project, "/Owner.vue", prop(&after, "c"));
     assert!(
         matches!(
-            &prop(&after, "c").type_expr,
+            &c_type,
             TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
         ),
-        "the recomputed `c` member must carry its `boolean` type, got {:?}",
-        prop(&after, "c").type_expr
+        "the recomputed `c` member must carry its `boolean` type, got {c_type:?}"
     );
     assert!(
         prop(&after, "c").required,

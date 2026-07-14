@@ -328,7 +328,6 @@ export type Outer = Inner;
     let (id_node, record) = parts(host.resolve_named_symbol_with_audit(
         "/aliases.ts",
         "Outer",
-        &[],
         Some(ProjectionMode::Identity),
     ));
     let id_node = id_node.expect("Identity must resolve");
@@ -360,7 +359,6 @@ export type Outer = Inner;
     let (navigate_node, _) = parts(host.resolve_named_symbol_with_audit(
         "/aliases.ts",
         "Outer",
-        &[],
         Some(ProjectionMode::Navigate),
     ));
     let navigate_node = navigate_node.expect("Navigate must resolve");
@@ -385,7 +383,6 @@ export type Outer = Inner;
     let (nav_node, record) = parts(host.resolve_named_symbol_with_audit(
         "/aliases.ts",
         "Outer",
-        &[],
         Some(ProjectionMode::Navigate),
     ));
     let nav_node = nav_node.expect("Navigate must resolve");
@@ -416,7 +413,6 @@ export type Outer = Inner;
     let (exp_node, record) = parts(host.resolve_named_symbol_with_audit(
         "/aliases.ts",
         "Outer",
-        &[],
         Some(ProjectionMode::Expanded),
     ));
     let exp_node = exp_node.expect("Expanded must resolve");
@@ -452,7 +448,7 @@ export type Outer = Inner;
 
     // No mode override → host defaults to Expanded for non-generic.
     let (def_node, record) =
-        parts(host.resolve_named_symbol_with_audit("/types.ts", "Outer", &[], None));
+        parts(host.resolve_named_symbol_with_audit("/types.ts", "Outer", None));
     let def_node = def_node.expect("default must resolve");
     let r = assert_one_typeresolution_record(&record);
     let payload = match &r.kind_payload {
@@ -489,8 +485,7 @@ export type Wrap<T> = { wrapped: T };
 "#,
     );
 
-    let (def_node, record) =
-        parts(host.resolve_named_symbol_with_audit("/types.ts", "Wrap", &[], None));
+    let (def_node, record) = parts(host.resolve_named_symbol_with_audit("/types.ts", "Wrap", None));
     let def_node = def_node.expect("generic default must resolve");
     let r = assert_one_typeresolution_record(&record);
     let payload = match &r.kind_payload {
@@ -518,7 +513,6 @@ fn resolve_named_symbol_with_audit_emits_one_record() {
     let (_node, record) = parts(host.resolve_named_symbol_with_audit(
         "/single.ts",
         "T",
-        &[],
         Some(ProjectionMode::Expanded),
     ));
     // record is always present now (carrier `audit` field is mandatory).
@@ -544,7 +538,6 @@ fn resolve_named_symbol_with_audit_carries_trace_id() {
     let (_node, record) = parts(host.resolve_named_symbol_with_audit(
         "/single.ts",
         "T",
-        &[],
         Some(ProjectionMode::Expanded),
     ));
     let r = &record;
@@ -856,7 +849,11 @@ export type Wrap<T> = { wrapped: T };
 "#,
     );
 
-    let (node, record) = parts(host.resolve_named_symbol_with_audit(
+    // Type-argument instantiation routes through the WIRE entry — the sole
+    // public path that accepts (symbolic) type args; it lowers them to node
+    // ids INSIDE its one audited request under the request's single store
+    // view. The bare `resolve_named_symbol_with_audit` takes no type args.
+    let (node, record) = parts(host.resolve_named_symbol_wire_with_audit(
         "/types.ts",
         "Wrap",
         &[type_arg_primitive(PrimitiveName::String)],
@@ -876,6 +873,57 @@ export type Wrap<T> = { wrapped: T };
     }
     // Suppress unused warning on the helper.
     let _ = type_arg_ref;
+}
+
+#[test]
+fn wire_lowering_miss_reports_computed_default_effective_mode() {
+    // FIX D regression: an early miss with `mode = None` must record the
+    // resolver's COMPUTED default effective mode in the audit record — for a
+    // NON-GENERIC scope that is `Expanded`, NOT a hardcoded `Navigate`.
+    //
+    // A canonical with no shallow file state fails the very first
+    // `shallow_file_state?` inside `lower_type_expr_in_scope_with_mode`, so
+    // ANY non-empty wire arg deterministically hits an early-miss return in
+    // `resolve_named_symbol_request` (the wire-lowering miss; and if the store
+    // view were momentarily non-current, the non-current-view miss — BOTH were
+    // fixed to return the computed `effective_mode`). The scope is non-generic
+    // (no shallow decl ⇒ not a generic carrier), so the computed default is
+    // `Expanded`.
+    let host = make_host_with_audit();
+    // Settle the host with a real file so the store view proves current and
+    // the request reaches the wire-lowering step.
+    upsert_ts(&host, "/real.ts", "export type T = number;\n");
+
+    let (node, record) = host
+        .resolve_named_symbol_wire_with_audit(
+            "/absent.ts",
+            "Whatever",
+            &[type_arg_primitive(PrimitiveName::String)],
+            None,
+        )
+        .into_parts();
+    // A wire-lowering miss is a NON-FAULT `Ok(None)` — never a fault, never a
+    // partial instantiation.
+    assert!(
+        matches!(node, Ok(None)),
+        "a wire-lowering miss is a non-fault Ok(None); got {node:?}"
+    );
+    let r = assert_one_typeresolution_record(&record);
+    let payload = match &r.kind_payload {
+        RequestKindPayload::TypeResolution(p) => p,
+        _ => panic!("the miss still emits a type-resolution audit payload"),
+    };
+    // DISCRIMINATING: the pre-fix miss hardcoded `Navigate`
+    // (`requested_mode.unwrap_or(Navigate)`); the fix returns the computed
+    // default `Expanded` for this non-generic scope. A regression to the
+    // hardcoded fallback flips this to `Navigate` and fails here.
+    assert_eq!(
+        payload.query_mode,
+        verter_audit::ProjectionModeTag::Expanded,
+        "a wire-lowering miss (mode=None, non-generic scope) must record the \
+         COMPUTED default Expanded, not a hardcoded Navigate; got {:?}",
+        payload.query_mode
+    );
 }
 
 /// Recursively collect member names across `Object` / `Intersection` /
@@ -1000,7 +1048,6 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     let (resolved, record) = parts(host.resolve_named_symbol_with_audit(
         "/types.ts",
         "ColorModeSelectProps",
-        &[],
         Some(ProjectionMode::Expanded),
     ));
     let resolved = resolved.expect("ColorModeSelectProps must resolve");
@@ -1146,7 +1193,6 @@ fn resolve_named_symbol_unknown_symbol_rides_ok_not_err() {
         .resolve_named_symbol_with_audit(
             "/miss.ts",
             "DefinitelyNotDeclared",
-            &[],
             Some(ProjectionMode::Expanded),
         )
         .into_parts();

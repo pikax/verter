@@ -67,17 +67,21 @@ fn build_host(files: &[(&str, &str)]) -> std::sync::Arc<VerterHost> {
     ))
 }
 
-/// Resolve a fixture's target SFC and return its
-/// [`ComponentMetaAnalysis`]. The audit machinery is left disabled so
-/// the gate does not depend on audit-capture wiring (separate
-/// concern from resolved-type correctness).
-fn compute_for_fixture(fixture: &fixtures::CorrectnessFixture) -> ComponentMetaAnalysis {
+/// Resolve a fixture's target SFC and return the host plus its
+/// [`ComponentMetaAnalysis`] (the host stays alive so the snapshot
+/// projection can demand published type sources through the shared
+/// probe). The audit machinery is left disabled so the gate does not
+/// depend on audit-capture wiring (separate concern from
+/// resolved-type correctness).
+fn compute_for_fixture(
+    fixture: &fixtures::CorrectnessFixture,
+) -> (std::sync::Arc<VerterHost>, ComponentMetaAnalysis) {
     let host = build_host(fixture.files);
     let req = verter_session::audited_request::AuditedRequest::builder()
-        .attach_to(host)
+        .attach_to(std::sync::Arc::clone(&host))
         .resolve_component_meta(fixture.target);
     match req {
-        Ok((analysis, _resolution, _record)) => analysis,
+        Ok((analysis, _resolution, _record)) => (host, analysis),
         Err(e) => panic!(
             "correctness fixture `{}` (`{}`) must resolve, got {e}",
             fixture.id, fixture.target,
@@ -198,8 +202,8 @@ fn correctness_snapshot_for_every_fixture() {
     ensure_class_a_expected_matches_snapshot();
 
     for fixture in fixtures::FIXTURES {
-        let analysis = compute_for_fixture(fixture);
-        let view = snapshot_view::SnapshotView::from_analysis(&analysis);
+        let (host, analysis) = compute_for_fixture(fixture);
+        let view = snapshot_view::SnapshotView::from_analysis(&host, &analysis);
         let actual = serde_json::to_string_pretty(&view).expect("serialize");
         let snapshot_path = snapshot_path_for(fixture);
 
@@ -499,8 +503,8 @@ fn correctness_gate_is_discriminating_for_every_property() {
         let Some(fixture) = fixtures::FIXTURES.iter().find(|f| f.id == case.fixture_id) else {
             continue;
         };
-        let analysis = compute_for_fixture(fixture);
-        let view = snapshot_view::SnapshotView::from_analysis(&analysis);
+        let (host, analysis) = compute_for_fixture(fixture);
+        let view = snapshot_view::SnapshotView::from_analysis(&host, &analysis);
         let mutated = apply_mutation(view.clone(), case.mutation).unwrap_or_else(|why| {
             panic!(
                 "mutation {:?} could not be applied to fixture `{}`: {why}. \

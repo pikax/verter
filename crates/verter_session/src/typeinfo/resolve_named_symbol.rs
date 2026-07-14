@@ -12,11 +12,23 @@
 //! Public API surface (the resolve-named-symbol contract):
 //!
 //! ```ignore
+//! // Bare-named-symbol resolvers — NO type-argument parameter. A public
+//! // entry that accepted caller-pre-lowered `SemanticNodeId`s would be a
+//! // cross-view foot-gun (generation-local ids are not view-portable), so
+//! // ALL generic instantiation routes through the wire entry below, which
+//! // lowers its args under the request's one store view.
 //! pub fn resolve_named_symbol_with_audit(
 //!     host: &VerterHost,
 //!     canonical_id: &str,
 //!     name: &str,
-//!     type_args: &[TypeExpr],
+//!     mode: ProjectionMode,
+//! ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError>;
+//!
+//! pub fn resolve_named_symbol_wire_with_audit(
+//!     host: &VerterHost,
+//!     canonical_id: &str,
+//!     name: &str,
+//!     wire_type_args: &[Arc<TypeExpr>], // symbolic; lowered inside the request
 //!     mode: ProjectionMode,
 //! ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError>;
 //!
@@ -28,12 +40,20 @@
 //! - Non-generic decl → `Expanded`.
 //! - Identity returns the alias node verbatim (no unwrap).
 //!
-//! Type args at the boundary are
-//! [`verter_type_expr::TypeExpr`]s; the host
-//! method lowers them through
+//! Generic instantiation is WIRE-ONLY: a caller holding symbolic
+//! [`verter_type_expr::TypeExpr`] payloads (the NAPI / WASM adapters'
+//! FFI-JSON decode) enters through
+//! [`VerterHost::resolve_named_symbol_wire_with_audit`], which lowers the
+//! payloads INSIDE the audited request — under the SAME proven-current
+//! store view / dispatch the resolution runs against, via the sanctioned
 //! [`crate::project_semantic_dispatch::ProjectSemanticDispatch::lower_type_expr_in_scope_with_mode`]
-//! per the resolve-named-symbol contract — type_args are lowered to
-//! `SemanticNodeId`s inside the host method before dispatch.
+//! bridge in `Navigate` mode — and then resolves. No PUBLIC entry accepts
+//! raw symbolic IR OR caller-pre-lowered node ids, so generation-local node
+//! ids never cross store views (lowering under one view and resolving under
+//! another would key an `InstantiateKey` with foreign-generation ids). The
+//! internal [`crate::typeinfo::types::TypeArgList`] (`&[SemanticNodeId]`)
+//! survives only as the same-view carrier the request body threads AFTER
+//! lowering — never a public parameter.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -98,7 +118,69 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         name: &str,
-        type_args: &[Arc<TypeExpr>],
+        mode: ResolveMode,
+    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+        // Bare-named-symbol resolution: no type arguments. Generic
+        // instantiation is wire-only (see the module doc / the
+        // `resolve_named_symbol_wire_with_audit` foot-gun note), so this
+        // public entry never accepts caller-pre-lowered node ids.
+        self.resolve_named_symbol_audited(
+            canonical_id,
+            name,
+            NamedSymbolTypeArgs::Lowered(&[]),
+            mode,
+        )
+    }
+
+    /// Wire-boundary sibling of [`Self::resolve_named_symbol_with_audit`]:
+    /// resolve `name` in `canonical_id`'s top-level scope, instantiating
+    /// with WIRE-DECODED symbolic type arguments (the NAPI / WASM
+    /// `resolveSymbolWithAudit` FFI-JSON decode).
+    ///
+    /// The wire args lower to semantic-graph node ids INSIDE the audited
+    /// request, through the SAME `ProjectSemanticDispatch` (and therefore
+    /// the SAME proven-current store view) the resolution itself runs
+    /// against — node ids are generation-local, so lowering under one view
+    /// and resolving under another would key an `InstantiateKey` with
+    /// foreign-generation ids. Lowering runs the sanctioned
+    /// [`ProjectSemanticDispatch::lower_type_expr_in_scope_with_mode`]
+    /// bridge in `Navigate` mode regardless of the terminal projection mode
+    /// — the args are a context inherited by the instantiation, not the
+    /// body being projected.
+    ///
+    /// A lowering MISS (any single arg failing to lower) is a NON-FAULT
+    /// miss INSIDE the registered request: the carrier returns `Ok(None)`
+    /// WITH its audit record — never a partial instantiation, and never an
+    /// audit-less early return (an absent audit record is reserved for
+    /// failures before a semantic request exists, e.g. a malformed wire
+    /// decode).
+    #[must_use]
+    pub fn resolve_named_symbol_wire_with_audit(
+        &self,
+        canonical_id: &str,
+        name: &str,
+        wire_type_args: &[Arc<TypeExpr>],
+        mode: ResolveMode,
+    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+        self.resolve_named_symbol_audited(
+            canonical_id,
+            name,
+            NamedSymbolTypeArgs::Wire(wire_type_args),
+            mode,
+        )
+    }
+
+    /// The ONE audited request wrapper both the node-id and the wire entry
+    /// points share: registration → TLS observer install → request body →
+    /// payload snapshot → finalise. The request body
+    /// ([`resolve_named_symbol_request`]) acquires exactly ONE store view
+    /// and runs wire-arg lowering (when present) plus the resolution under
+    /// it.
+    fn resolve_named_symbol_audited(
+        &self,
+        canonical_id: &str,
+        name: &str,
+        type_args: NamedSymbolTypeArgs<'_>,
         mode: ResolveMode,
     ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
         // Registration / context setup mirrors
@@ -133,11 +215,11 @@ impl VerterHost {
         let (outcome, effective_mode) = match registration.as_ref() {
             AuditRequestRegistration::Active(_) => {
                 let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-                resolve_named_symbol_inner(self, canonical_id, name, type_args, mode)
+                resolve_named_symbol_request(self, canonical_id, name, type_args, mode)
             }
             AuditRequestRegistration::Noop => {
                 let _noop_guard = verter_audit::install_noop_observer();
-                resolve_named_symbol_inner(self, canonical_id, name, type_args, mode)
+                resolve_named_symbol_request(self, canonical_id, name, type_args, mode)
             }
         };
         let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
@@ -249,13 +331,71 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         name: &str,
-        type_args: &[Arc<TypeExpr>],
         mode: ResolveMode,
     ) -> Option<SemanticNodeId> {
-        self.resolve_named_symbol_with_audit(canonical_id, name, type_args, mode)
+        // Bare-named-symbol resolution (no type arguments) — the non-audit
+        // sibling MUST drop its type-arg parameter too: it forwards to the
+        // now-bare audited entry, so it cannot carry caller-pre-lowered ids
+        // either. Generic instantiation is wire-only.
+        self.resolve_named_symbol_with_audit(canonical_id, name, mode)
             .into_result()
             .ok()
             .flatten()
+    }
+}
+
+/// How a caller supplied the generic type arguments of a named-symbol
+/// resolution: ALREADY-LOWERED semantic node ids (the internal semantic API
+/// surface) or wire-decoded symbolic `TypeExpr` payloads (the FFI boundary),
+/// lowered INSIDE the audited request under the SAME store view the
+/// resolution runs against.
+#[derive(Clone, Copy)]
+enum NamedSymbolTypeArgs<'a> {
+    /// Already-lowered, SAME-VIEW node ids
+    /// ([`crate::typeinfo::types::TypeArgList`]). The bare public entries
+    /// supply only the EMPTY slice here (bare-named-symbol resolution — no
+    /// caller-pre-lowered ids); the variant stays a slice so the request
+    /// body can thread the wire-lowered ids under its own view after
+    /// lowering without a second shape.
+    Lowered(crate::typeinfo::types::TypeArgList<'a>),
+    /// Wire-decoded symbolic payloads, lowered under the request's one view.
+    Wire(&'a [Arc<TypeExpr>]),
+}
+
+/// Compute the resolver's EFFECTIVE projection mode up front — before the
+/// request even acquires a store view — so every early-miss return (a
+/// non-current view under churn, a wire-arg lowering miss) reports the mode
+/// the resolver would actually have used, not a hardcoded fallback. The
+/// generic-carrier probe reads only the host's shallow inventory (not the
+/// request view), so it is safe to compute before view acquisition; a
+/// `Some(mode)` request pins the mode verbatim.
+fn compute_effective_mode(
+    host: &VerterHost,
+    canonical_id: &str,
+    name: &str,
+    requested_mode: ResolveMode,
+) -> ProjectionMode {
+    match requested_mode {
+        Some(mode) => mode,
+        None => {
+            // A generic carrier defaults to Navigate (declaration stays
+            // unexpanded); a non-generic decl defaults to Expanded (callers
+            // receive the full projection). The shallow inventory is the
+            // authority.
+            let is_generic_carrier = host
+                .shallow_file_state(canonical_id)
+                .and_then(|state| {
+                    state
+                        .symbol(name)
+                        .map(|sym| !sym.type_param_names.is_empty())
+                })
+                .unwrap_or(false);
+            if is_generic_carrier {
+                ProjectionMode::Navigate
+            } else {
+                ProjectionMode::Expanded
+            }
+        }
     }
 }
 
@@ -301,16 +441,18 @@ fn noop_type_resolution_record(
     }
 }
 
-/// Inner resolution function shared by the audit / non-audit entry
-/// points. Returns the resolved node and the *effective* mode (after
+/// The shared request BODY of the audited entry points: acquire EXACTLY ONE
+/// proven-current store view, build ONE dispatch over it, lower any
+/// wire-decoded type arguments under that dispatch, and resolve under the
+/// SAME view. Returns the resolved node and the *effective* mode (after
 /// default-mode resolution) so the audit payload can record what the
 /// resolver actually ran with.
 #[allow(clippy::type_complexity)]
-fn resolve_named_symbol_inner(
+fn resolve_named_symbol_request(
     host: &VerterHost,
     canonical_id: &str,
     name: &str,
-    type_args: &[Arc<TypeExpr>],
+    type_args: NamedSymbolTypeArgs<'_>,
     requested_mode: ResolveMode,
 ) -> (
     Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
@@ -326,67 +468,81 @@ fn resolve_named_symbol_inner(
     // computing against the stale view. A non-current settle is a non-fault
     // miss (`Ok(None)`) — the FFI surface maps it to a `null` payload, so the
     // consumer re-queries once the host settles.
+    // Compute the effective mode ONCE, up front — every early-miss return
+    // below (the non-current view, a wire-arg lowering miss) reports THIS
+    // computed default, not a hardcoded `Navigate`, so the audit record
+    // records the mode the resolver would actually have used (`mode = None`
+    // on a non-generic decl defaults to `Expanded`, not `Navigate`).
+    let effective_mode = compute_effective_mode(host, canonical_id, name, requested_mode);
+
     let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) else {
-        return (Ok(None), requested_mode.unwrap_or(ProjectionMode::Navigate));
+        return (Ok(None), effective_mode);
     };
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx =
         crate::resolver_core::HostResolverContext::from_current(host, &current_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    let scope_arc: Arc<str> = Arc::from(canonical_id);
 
-    // Determine whether the decl carries declaration-site type
-    // parameters. The shallow inventory is the authority — if the
-    // file's `ShallowFileState::symbol(name)` returns an entry with a
-    // non-empty `type_parameters` list, we treat the resolved decl as
-    // a generic carrier. Value symbols (functions, etc.) are not
-    // generic carriers in this sense; the `resolve_named_symbol`
-    // contract is rooted on the type-side declaration.
-    let is_generic_carrier = host
-        .shallow_file_state(canonical_id)
-        .and_then(|state| {
-            state
-                .symbol(name)
-                .map(|sym| !sym.type_param_names.is_empty())
-        })
-        .unwrap_or(false);
-
-    // Default-mode selection: generic carriers default to Navigate
-    // so the declaration stays unexpanded; non-generic declarations
-    // default to Expanded so callers receive the full projection.
-    let effective_mode = match requested_mode {
-        Some(mode) => mode,
-        None => {
-            if is_generic_carrier {
-                ProjectionMode::Navigate
-            } else {
-                ProjectionMode::Expanded
+    // Wire-boundary lowering, INSIDE the audited request and under THIS
+    // dispatch (and therefore this view), in `Navigate` mode — the args are
+    // a context inherited by the instantiation, not the body being
+    // projected. A miss on any single arg is a NON-FAULT `Ok(None)` miss
+    // (the established boundary bail-out semantics, now audit-carrying):
+    // the resolution never runs partially instantiated.
+    let lowered_wire_args: Vec<SemanticNodeId>;
+    let type_args: crate::typeinfo::types::TypeArgList<'_> = match type_args {
+        NamedSymbolTypeArgs::Lowered(args) => args,
+        NamedSymbolTypeArgs::Wire(wire) => {
+            let mut lowered: Vec<SemanticNodeId> = Vec::with_capacity(wire.len());
+            for arg in wire {
+                match dispatch.lower_type_expr_in_scope_with_mode(
+                    canonical_id,
+                    arg.as_ref(),
+                    ProjectionMode::Navigate,
+                ) {
+                    Some(node) => lowered.push(node),
+                    None => return (Ok(None), effective_mode),
+                }
             }
+            lowered_wire_args = lowered;
+            &lowered_wire_args
         }
     };
 
-    // Lower type_args in the call-scope. Args are lowered in
-    // `Navigate` mode regardless of the terminal mode — the args
-    // themselves are a context inherited by the instantiation, not
-    // the body that is being projected.
-    let mut lowered_args: Vec<SemanticNodeId> = Vec::with_capacity(type_args.len());
-    for arg in type_args {
-        match dispatch.lower_type_expr_in_scope_with_mode(
-            canonical_id,
-            arg.as_ref(),
-            ProjectionMode::Navigate,
-        ) {
-            Some(id) => lowered_args.push(id),
-            None => {
-                // Lowering miss → bail out and surface a None
-                // resolution rather than partially instantiating. A
-                // lowering miss is a non-fault (`Ok(None)`); a genuine
-                // dispatch fault while lowering would have been raised
-                // inside the dispatch itself.
-                return (Ok(None), effective_mode);
-            }
-        }
-    }
+    resolve_named_symbol_in_current_view(
+        host,
+        &dispatch,
+        canonical_id,
+        name,
+        type_args,
+        effective_mode,
+    )
+}
+
+/// Resolve `name` under an ALREADY-ACQUIRED view/dispatch — the shared
+/// resolution body both the node-id and the wire entries reach through
+/// [`resolve_named_symbol_request`]. It performs NO view acquisition of its
+/// own: every dispatch (and every node id it produces or consumes) belongs
+/// to the caller's one request view.
+///
+/// `type_args` are ALREADY-LOWERED node ids produced under the SAME view as
+/// `dispatch`; no `TypeExpr` enters the semantic API. `effective_mode` is the
+/// resolver's already-resolved projection mode (computed by
+/// [`compute_effective_mode`] before view acquisition, so the request body's
+/// early-miss returns and this path report the SAME mode).
+#[allow(clippy::type_complexity)]
+fn resolve_named_symbol_in_current_view(
+    host: &VerterHost,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical_id: &str,
+    name: &str,
+    type_args: crate::typeinfo::types::TypeArgList<'_>,
+    effective_mode: ProjectionMode,
+) -> (
+    Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    ProjectionMode,
+) {
+    let scope_arc: Arc<str> = Arc::from(canonical_id);
 
     // Resolve the bare declaration. The dispatch entry-point
     // memoises this through its `execute_cooperative` path. Note
@@ -452,7 +608,7 @@ fn resolve_named_symbol_inner(
     let instantiate_key =
         SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             base,
-            Arc::from(lowered_args.into_boxed_slice()),
+            Arc::from(type_args.to_vec().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 &scope_arc,
                 crate::semantic_query::ProjectionReductionContext::published(effective_mode),
@@ -472,7 +628,7 @@ fn resolve_named_symbol_inner(
     let final_node = if matches!(effective_mode, ProjectionMode::Identity) {
         node
     } else {
-        match materialize_through_aliases(host, &dispatch, node, effective_mode) {
+        match materialize_through_aliases(host, dispatch, node, effective_mode) {
             Ok(materialized) => materialized,
             // A hard dispatch fault during nested materialization
             // propagates as `Err` rather than silently degrading to

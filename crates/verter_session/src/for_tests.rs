@@ -110,9 +110,28 @@ pub fn install_fact_tracer_for_tests<F, R>(
 where
     F: FnOnce() -> R,
 {
-    let (value, finalise, _fenced_serve_observed) =
+    let (value, finalise, _non_cacheable_read_observed) =
         crate::fact_signature_helpers::install_fact_tracer(host, f);
     (value, finalise)
+}
+
+/// Open a REAL cacheability tracer scope and hand `f` the scope's
+/// `CacheabilityProbe` — the same primitive every production producer uses.
+///
+/// The shared-cache funnels REQUIRE a probe, and a probe can be minted only by
+/// [`crate::fact_signature_helpers::with_cacheability_scope`]. An integration
+/// test that drives a funnel directly (`RouteDb`, `ImportedRootDb`) therefore
+/// needs a scope of its own. This is NOT an escape hatch around the admission
+/// contract — it IS the contract: a test whose closure consumes a non-cacheable
+/// read is refused admission exactly as production is.
+///
+/// Returns `(value, non_cacheable)` — the scope's verdict, sampled after it
+/// pops.
+pub fn with_cacheability_scope_for_tests<F, R>(host: &crate::VerterHost, f: F) -> (R, bool)
+where
+    F: for<'t> FnOnce(&crate::fact_signature_helpers::CacheabilityProbe<'t>) -> R,
+{
+    crate::fact_signature_helpers::with_cacheability_scope(host, f)
 }
 
 /// Convert a dispatch-fence `DepSignature` into a
@@ -200,7 +219,7 @@ impl Drop for MaterializeForceOverflowGuard<'_> {
 /// When armed, the materialiser's cold-compute closure folds a partial
 /// into its active [`crate::request_context::ColdComputeCompletenessScope`]
 /// via the EXACT production rail a budget-tripped child read uses
-/// ([`crate::request_context::mark_request_materialization_cache_suppress`]).
+/// ([`crate::request_context::mark_request_result_partial`]).
 /// The per-cold-compute completeness therefore goes `Partial` and the
 /// `MaterializeStructureDb` admission gate
 /// (`refuse_result_cache_admission_if_partial`) must refuse the entry —
@@ -541,12 +560,29 @@ pub fn dispatch_substitute_for_tests(
 /// `evaluate_deferred_semantic_node_with_context` helper so its
 /// hash-cons + depth-budget discriminator tests can exercise
 /// the evaluator with controlled (node, context) inputs
-/// without reaching through the full query pipeline.
+/// without reaching through the full query pipeline. Returns the typed
+/// outcome as a `(node, completeness)` pair — the completeness rides
+/// along so depth/budget discriminators can assert the typed partial
+/// reasons; never a restored bare-node API.
+///
+/// Gated `#[cfg(any(test, feature = "test-support"))]` — STRICTER than the
+/// enclosing `debug_assertions`-gated module, mirroring
+/// [`instantiate_key_for_tests`]. The `(node, completeness)` pair is a `.0`
+/// bare-node escape from the node-hiding rail, so it must NOT exist in an
+/// ordinary debug build (e.g. the debug LSP): `test-support` is off in
+/// `default` yet turned on for `verter_session`'s own test / integration
+/// targets by the `[dev-dependencies]` self-edge, so this shim is reachable
+/// from genuine test code in BOTH the unit and integration builds and is
+/// COMPILE-ABSENT in every production profile.
+#[cfg(any(test, feature = "test-support"))]
 pub fn dispatch_evaluate_deferred_for_tests(
     host: &crate::VerterHost,
     node: crate::semantic_query::SemanticNodeId,
     context: crate::semantic_query::ProjectionReductionContext,
-) -> crate::semantic_query::SemanticNodeId {
+) -> (
+    crate::semantic_query::SemanticNodeId,
+    crate::semantic_query::ResultCompleteness,
+) {
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     dispatch.evaluate_deferred_semantic_node_with_context_for_tests(node, context)
 }

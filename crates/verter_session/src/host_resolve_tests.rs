@@ -1769,23 +1769,14 @@ defineProps<DynamicProps>()
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
-    let first = host
-        .resolve_external_type_from_loaded_files(
-            "/src/Consumer.vue",
-            "./types",
-            "DynamicProps",
-            &mut tracked_deps,
-            &mut resolution_deps,
-            &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
-        )
-        .expect("first resolution should complete");
+    let first = host.resolve_component_meta_macro_elements(
+        "/src/Consumer.vue",
+        "./types",
+        "DynamicProps",
+        &mut tracked_deps,
+        &mut resolution_deps,
+        &mut cache,
+    );
     assert!(
         first.is_none(),
         "DynamicProps should be missing before the dependency update"
@@ -1800,33 +1791,27 @@ defineProps<DynamicProps>()
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
     let second = host
-        .resolve_external_type_from_loaded_files(
+        .resolve_component_meta_macro_elements(
             "/src/Consumer.vue",
             "./types",
             "DynamicProps",
             &mut tracked_deps,
             &mut resolution_deps,
             &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
         )
-        .expect("second resolution should complete")
         .expect("DynamicProps should resolve after the dependency update");
 
     assert!(
         second
+            .elements
             .props
             .iter()
             .filter_map(|prop| prop.key_name.as_deref())
             .any(|name| name == "added"),
         "resolved props should come from the updated dependency: {:?}",
         second
+            .elements
             .props
             .iter()
             .filter_map(|prop| prop.key_name.clone())
@@ -1835,7 +1820,7 @@ defineProps<DynamicProps>()
 }
 
 #[test]
-fn route_cache_hits_increment_route_fact_reuse_counter() {
+fn repeat_type_import_request_warm_hits_imported_root_route_slot() {
     let host = strict_host();
 
     upsert_vue(
@@ -1865,57 +1850,59 @@ defineProps<Props>()
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
     let first = host
-        .resolve_external_type_from_loaded_files(
+        .resolve_component_meta_macro_elements(
             "/src/Consumer.vue",
             "./types",
             "Props",
             &mut tracked_deps,
             &mut resolution_deps,
             &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
         )
-        .expect("first resolution should complete");
-    assert!(first.is_some(), "Props should resolve on the first request");
+        .expect("Props should resolve on the first request");
+    assert!(
+        first
+            .elements
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        "first resolution should surface the `label` member, got: {:?}",
+        first.elements.props
+    );
 
-    host.provenance().reset();
+    // The retired `ResolvedTypeCacheDb` hit counter has no successor on the
+    // provenance surface; the live route-reuse observable is the
+    // fact-validated `ImportedRootDb` slot the repeat request warm-hits.
+    let warm_before = host.project_type_store().imported_roots().warm_hit_count();
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
     let second = host
-        .resolve_external_type_from_loaded_files(
+        .resolve_component_meta_macro_elements(
             "/src/Consumer.vue",
             "./types",
             "Props",
             &mut tracked_deps,
             &mut resolution_deps,
             &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
         )
-        .expect("second resolution should complete");
+        .expect("Props should resolve on the second request");
     assert!(
-        second.is_some(),
-        "Props should resolve on the second request"
+        second
+            .elements
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        "second resolution should surface the `label` member, got: {:?}",
+        second.elements.props
     );
 
-    let p = host.provenance().snapshot();
+    let warm_after = host.project_type_store().imported_roots().warm_hit_count();
     assert!(
-        p.resolved_external_type_cache_hits >= 1,
-        "expected a resolved-external-type cache hit on the second request, got {:?}",
-        p
+        warm_after > warm_before,
+        "the repeat request should warm-hit the imported-root route slot \
+         (warm hits before={warm_before}, after={warm_after})"
     );
 }
 
@@ -1980,7 +1967,7 @@ export interface Props {
     let mut requested_routes = super::FrontierRequestedRoutes::default();
     requested_routes.insert(
         ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
-        crate::resolver_core::RouteDemand::MemberPath(vec!["primary".into()]),
+        crate::resolver_core::RouteDemand::member_path(vec!["primary".to_string()]),
     );
     let mut companion_plans = super::FrontierCompanionPlans::default();
 
@@ -1999,8 +1986,8 @@ export interface Props {
     );
     assert_eq!(
         requested_routes.get(&("/src/types.ts".to_string(), "Props".to_string())),
-        Some(&crate::resolver_core::RouteDemand::MemberPath(vec![
-            "primary".into()
+        Some(&crate::resolver_core::RouteDemand::member_path(vec![
+            "primary".to_string()
         ])),
         "the active member route should be transferred onto the defining target",
     );
@@ -2143,7 +2130,10 @@ export interface Props {
     let mut requested_routes = super::FrontierRequestedRoutes::default();
     requested_routes.insert(
         ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
-        crate::resolver_core::RouteDemand::MemberPath(vec!["primary".into(), "label".into()]),
+        crate::resolver_core::RouteDemand::member_path(vec![
+            "primary".to_string(),
+            "label".to_string(),
+        ]),
     );
     let mut companion_plans = super::FrontierCompanionPlans::default();
 
@@ -2163,8 +2153,8 @@ export interface Props {
     );
     assert_eq!(
         requested_routes.get(&("/src/alpha.ts".to_string(), "AlphaProps".to_string())),
-        Some(&crate::resolver_core::RouteDemand::MemberPath(vec![
-            "label".into()
+        Some(&crate::resolver_core::RouteDemand::member_path(vec![
+            "label".to_string()
         ])),
         "the imported companion should keep only the remaining member tail",
     );
@@ -2237,7 +2227,7 @@ fn frontier_companion_plan_cache_keeps_distinct_routes_separate() {
     let member = cache.get_or_compute(
         "/src/button.ts",
         "ButtonProps",
-        &crate::resolver_core::RouteDemand::MemberPath(vec!["icon".to_string()]),
+        &crate::resolver_core::RouteDemand::member_path(vec!["icon".to_string()]),
         Vec::new,
     );
 
@@ -2254,7 +2244,7 @@ fn frontier_companion_plan_cache_keeps_distinct_routes_separate() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn barrel_cache_hits_increment_barrel_fact_reuse_counter() {
+fn repeat_barrel_request_warm_hits_imported_root_route_slot() {
     let host = strict_host();
 
     upsert_vue(
@@ -2293,62 +2283,59 @@ defineProps<Props>()
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
     let first = host
-        .resolve_external_type_from_loaded_files(
+        .resolve_component_meta_macro_elements(
             "/src/Consumer.vue",
             "./barrel",
             "Props",
             &mut tracked_deps,
             &mut resolution_deps,
             &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
         )
-        .expect("first resolution should complete");
-    assert!(first.is_some(), "Props should resolve on the first request");
+        .expect("Props should resolve on the first request");
+    assert!(
+        first
+            .elements
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        "the barrel-routed resolution should surface the `label` member, got: {:?}",
+        first.elements.props
+    );
 
-    host.resolved_type_cache().clear();
-    host.provenance().reset();
+    // The barrel hop's imported-root proof is host-owned and fact-validated:
+    // the repeat request warm-hits the `ImportedRootDb` slot instead of
+    // re-walking the `export *` chain.
+    let warm_before = host.project_type_store().imported_roots().warm_hit_count();
 
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
     let second = host
-        .resolve_external_type_from_loaded_files(
+        .resolve_component_meta_macro_elements(
             "/src/Consumer.vue",
             "./barrel",
             "Props",
             &mut tracked_deps,
             &mut resolution_deps,
             &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
         )
-        .expect("second resolution should complete");
+        .expect("Props should resolve on the second request");
     assert!(
-        second.is_some(),
-        "Props should resolve on the second request"
+        second
+            .elements
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        "the repeat barrel-routed resolution should surface the `label` member, got: {:?}",
+        second.elements.props
     );
 
-    // The route-only frontier path reuses host-owned shallow state caches
-    // rather than going through the module_facts barrel-reuse counter.
-    // Verify that the second request resolved without extra cache misses
-    // beyond the one caused by the explicit resolved_type_cache.clear().
-    let p = host.provenance().snapshot();
-    assert_eq!(
-        p.resolved_external_type_cache_misses, 1,
-        "second request should produce exactly one cache miss (cleared cache), got {:?}",
-        p
+    let warm_after = host.project_type_store().imported_roots().warm_hit_count();
+    assert!(
+        warm_after > warm_before,
+        "the repeat barrel request should warm-hit the imported-root route slot \
+         (warm hits before={warm_before}, after={warm_after})"
     );
 }
 
@@ -2474,26 +2461,19 @@ defineProps<FirstProps>()
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
     let first = host
-        .resolve_external_type_from_loaded_files(
+        .resolve_component_meta_macro_elements(
             "/src/Consumer.vue",
             "./barrel_a",
             "FirstProps",
             &mut tracked_deps,
             &mut resolution_deps,
             &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
         )
-        .expect("first nested barrel resolution should complete")
         .expect("FirstProps should resolve");
     assert!(
         first
+            .elements
             .props
             .iter()
             .filter_map(|prop| prop.key_name.as_deref())
@@ -2504,27 +2484,20 @@ defineProps<FirstProps>()
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
     let second = host
-        .resolve_external_type_from_loaded_files(
+        .resolve_component_meta_macro_elements(
             "/src/Consumer.vue",
             "./barrel_a",
             "SecondProps",
             &mut tracked_deps,
             &mut resolution_deps,
             &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
         )
-        .expect("second nested barrel resolution should complete")
         .expect("SecondProps should still resolve on a warm lookup");
 
     assert!(
         second
+            .elements
             .props
             .iter()
             .filter_map(|prop| prop.key_name.as_deref())
@@ -2770,26 +2743,24 @@ export interface ButtonProps {
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
     let resolved = host
-        .resolve_external_type_from_loaded_files(
+        .resolve_component_meta_macro_elements(
             "/src/Consumer.vue",
             "./types",
             "ButtonProps",
             &mut tracked_deps,
             &mut resolution_deps,
             &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
         )
-        .expect("barrel resolution should complete");
+        .expect("ButtonProps should resolve through the barrel");
     assert!(
-        resolved.is_some(),
-        "ButtonProps should resolve through the barrel"
+        resolved
+            .elements
+            .props
+            .iter()
+            .any(|prop| prop.key_name.as_deref() == Some("label")),
+        "the barrel-scanned Vue child should surface the `label` member, got: {:?}",
+        resolved.elements.props
     );
 
     let whole_hash = host
@@ -2945,74 +2916,63 @@ defineProps<ButtonProps>()
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
 
     let link_props = host
-        .resolve_external_type_from_loaded_files(
+        .resolve_component_meta_macro_elements(
             "/workspace/components/Button.vue",
             "../types",
             "LinkProps",
             &mut tracked_deps,
             &mut resolution_deps,
             &mut cache,
-            &mut visiting,
-            false,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
         )
-        .expect("LinkProps resolution should complete")
         .expect("LinkProps should resolve through the cyclic barrel");
     assert!(
         link_props
+            .elements
             .props
             .iter()
             .any(|prop| prop.key_name.as_deref() == Some("as")),
         "LinkProps should keep inherited props through the cyclic barrel, got: {:?}",
-        link_props.props
+        link_props.elements.props
     );
     assert!(
         link_props
+            .elements
             .props
             .iter()
             .any(|prop| prop.key_name.as_deref() == Some("type")),
         "LinkProps should keep button attribute props through the cyclic barrel, got: {:?}",
-        link_props.props
+        link_props.elements.props
     );
 
     let use_icons = host
-        .resolve_external_type_from_loaded_files(
+        .resolve_component_meta_macro_elements(
             "/workspace/components/Button.vue",
             "../composables/useComponentIcons",
             "UseComponentIconsProps",
             &mut tracked_deps,
             &mut resolution_deps,
             &mut cache,
-            &mut visiting,
-            false,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
         )
-        .expect("UseComponentIconsProps resolution should complete")
         .expect("UseComponentIconsProps should resolve through the cyclic barrel");
     assert!(
         use_icons
+            .elements
             .props
             .iter()
             .any(|prop| prop.key_name.as_deref() == Some("icon")),
         "UseComponentIconsProps should keep imported IconProps members, got: {:?}",
-        use_icons.props
+        use_icons.elements.props
     );
     assert!(
         use_icons
+            .elements
             .props
             .iter()
             .any(|prop| prop.key_name.as_deref() == Some("avatar")),
         "UseComponentIconsProps should keep imported AvatarProps members, got: {:?}",
-        use_icons.props
+        use_icons.elements.props
     );
 }
 
@@ -4200,27 +4160,20 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
         "type imports from declaration files should prefer the declaration companion",
     );
 
-    let mut tracked_deps = std::collections::BTreeSet::new();
-    let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
-    let resolved = host
-        .resolve_external_type_from_loaded_files(
+    // The imported `defineEmits<AccordionRootEmits>()` type argument resolves
+    // through the collector's kind-aware dispatch-backed normalizer (the
+    // element payload authority for compile positions): the emits surface
+    // must come from the `.d.ts` declaration companion, not the runtime
+    // `.js` sibling.
+    let resolved = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        crate::typeinfo::framework_surface::vue_exec::imported_emits_resolved_elements(
+            ctx,
             "/workspace/src/Consumer.vue",
-            "fancy",
-            "AccordionRootEmits",
-            &mut tracked_deps,
-            &mut resolution_deps,
-            &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
             0,
+            "AccordionRootEmits",
         )
-        .expect("external type resolution should succeed")
-        .expect("external type resolution should produce a result");
+    })
+    .expect("external type resolution should produce a result");
 
     assert!(
         resolved

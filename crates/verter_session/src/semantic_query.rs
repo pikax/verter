@@ -243,11 +243,7 @@ impl ScopeId {
 ///   nodes (declaration anchors, instantiated shells, surface members when
 ///   their value carries a declaration identity, etc.).
 ///
-/// **Exempt variants.** [`SemanticNodeData::VueMacroElements`] nodes do NOT
-/// populate the sidecar — they live on the parser's refcount-only hot path
-/// and are never consumed by dispatch builders that walk
-/// [`SemanticGraphStore::node_scope`](crate::semantic_query_memo::SemanticGraphStore::node_scope).
-/// For an exempt node id, `node_scope` returns `None` (no sidecar entry).
+/// For a node with no sidecar entry, `node_scope` returns `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NodeScopeId {
     /// Structural / scope-less origin. Primitives, shared literal-unions,
@@ -2096,7 +2092,7 @@ pub struct SurfaceMember {
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See
-    /// [`verter_compiler::utils::oxc::script::type_surface::ResolvedProp::declared_in_macro_type_arg`]
+    /// [`verter_parser::utils::oxc::script::type_surface::ResolvedProp::declared_in_macro_type_arg`]
     /// for the structural definition. Propagated through the prepared-surface
     /// walker and `surface_member_to_expanded_field`. Witness-gated: a
     /// non-neutral value exists only via
@@ -2145,12 +2141,10 @@ pub struct IndexSignature {
 /// One-level surface view of a semantic node. Members are ordered to keep
 /// hashing stable.
 ///
-/// Carries the full
-/// member + signature metadata previously held by the soon-to-be-retired
-/// `ProjectedMember` / `ProjectedSurface` / `ProjectedKeyspace` types in
-/// `verter_semantic::analysis::type_solver::query_engine`. Consumers should
-/// read these fields directly instead of going through the legacy projected
-/// types, which retire in D3 alongside `TypeSurfaceDb`.
+/// The single node-native surface carrier: consumers read the full member +
+/// signature metadata directly off these fields; the one registry publication
+/// materialisation happens at the query-engine terminal sink
+/// (`surface_view_to_registry_type_expr`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceView {
     pub members: Arc<[SurfaceMember]>,
@@ -2205,7 +2199,7 @@ pub type DepSignature = Arc<[(Arc<str>, DepVersion)]>;
 /// Only a real budget *exhaustion early-exit* (`BUDGET_EXCEEDED`) — which
 /// arises only on a genuine armed-fuse runaway trip — counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
-pub struct PartialReasonSet(u8);
+pub struct PartialReasonSet(u16);
 
 impl PartialReasonSet {
     /// An armed runaway fuse tripped mid-compute (`QueryError::BudgetExceeded`).
@@ -2226,6 +2220,29 @@ impl PartialReasonSet {
     /// boolean-bridge fold). The producer that originated the partial
     /// records the precise reason; this marks a downstream propagation.
     pub const PROPAGATED: Self = Self(1 << 6);
+    /// The deferred-shell evaluator's per-thread recursion ceiling
+    /// (`EVALUATE_DEFERRED_DEPTH_CEILING`) fired: a recursive operator
+    /// re-dispatch chain (fresh-node regrowth the entry-node memo cannot
+    /// collapse) was truncated and the evaluation carrier-stopped at its
+    /// entry node. The stop is a stack-safety fuse, never a semantic
+    /// classification — the truncated result is refused warm admission.
+    pub const DEFERRED_EVALUATION_LIMIT: Self = Self(1 << 7);
+    /// The structural-fact demand loop's residual-carrier step fuse
+    /// (`STRUCTURAL_FACT_DEMAND_FUSE`) fired: a `DeclRef` /
+    /// `InstantiationRef` resolution chain exceeded the per-demand step
+    /// bound before reaching a terminal structural body. The reached node
+    /// is an intermediate carrier, not a stable stop.
+    pub const STRUCTURAL_FACT_DEMAND_LIMIT: Self = Self(1 << 8);
+    /// A residual-carrier resolution read returned a non-`Miss` query
+    /// fault not already classified by the budget / unstable-state /
+    /// cancellation / recursion reasons (e.g. an alias-cycle carrier, a
+    /// value-domain mismatch). An honest `QueryError::Miss` is NOT a
+    /// fault — an unresolved authored name is a valid semantic `Unknown`.
+    pub const SEMANTIC_QUERY_FAULT: Self = Self(1 << 9);
+    /// A demanded node id had no live `SemanticNodeData` in the shared
+    /// graph arena (`node_data(id) == None` — missing arena data, not a
+    /// staleness signal). The demand cannot classify what it cannot read.
+    pub const MISSING_SEMANTIC_NODE_DATA: Self = Self(1 << 10);
 
     /// The empty reason set (no partial reasons recorded).
     #[must_use]
@@ -2667,10 +2684,6 @@ pub enum QueryError {
     /// A surface member the projection boundary cannot represent. Maps to
     /// the `SEMANTIC_SURFACE_MEMBER` sentinel.
     UnrepresentableSurfaceMember,
-    /// A [`SemanticNodeData::VueMacroElements`] node reached the reverse
-    /// boundary, which has no `TypeExpr` projection for it. Maps to the
-    /// `"VueMacroElements"` sentinel.
-    VueMacroElementsPlaceholder,
 }
 
 impl QueryError {
@@ -2724,8 +2737,7 @@ impl QueryError {
             | QueryError::TypeParamCycle
             | QueryError::RaiseMiss
             | QueryError::UnrepresentableSurface
-            | QueryError::UnrepresentableSurfaceMember
-            | QueryError::VueMacroElementsPlaceholder => false,
+            | QueryError::UnrepresentableSurfaceMember => false,
         }
     }
 }
@@ -2776,7 +2788,6 @@ impl PartialEq for QueryError {
             (Self::RaiseMiss, Self::RaiseMiss) => true,
             (Self::UnrepresentableSurface, Self::UnrepresentableSurface) => true,
             (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
-            (Self::VueMacroElementsPlaceholder, Self::VueMacroElementsPlaceholder) => true,
             _ => false,
         }
     }
@@ -2845,11 +2856,34 @@ impl std::hash::Hash for QueryError {
             Self::UnrepresentableSurfaceMember => {
                 13u8.hash(state);
             }
-            Self::VueMacroElementsPlaceholder => {
-                14u8.hash(state);
-            }
         }
     }
+}
+
+/// Value-or-degradation carrier for the raise/reduce control paths.
+///
+/// [`Degraded`](Self::Degraded) is a DEGRADATION state — the typed home for
+/// the control conditions ([`QueryError::Miss`], [`QueryError::RaiseMiss`],
+/// [`QueryError::UnrepresentableSurface`], [`QueryError::BudgetExceeded`],
+/// …) that would otherwise travel as a fabricated
+/// `TypeExpr::Unknown { raw: <sentinel> }` string channel — NOT a fatal
+/// error channel. It is deliberately its own enum rather than a
+/// `Result<T, QueryError>` alias: `?`-propagation would conflate
+/// degradation with fatal failure, and a degraded result still flows to the
+/// immediate caller or to a sealed output seam (which alone spells it as a
+/// raw sentinel string, via `semantic_query_error_raw`).
+///
+/// No-poison: `Degraded` composes with the EXISTING `ReturnOnly` /
+/// `ResultCompleteness::Partial` / cache-suppress rails — it never grows a
+/// second degradation/admission channel, and only a complete
+/// [`Value`](Self::Value) result may admit warm.
+#[derive(Debug, Clone)]
+pub(crate) enum SemanticOutcome<T> {
+    /// The path produced a complete value.
+    Value(T),
+    /// The path degraded; the payload names the typed reason
+    /// (miss / raise-miss / unrepresentable surface / budget exhaustion, …).
+    Degraded(QueryError),
 }
 
 /// Query-level execution result. `Recursive` is a query-local placeholder for
@@ -4293,24 +4327,6 @@ pub enum SemanticQueryKey {
         path: Arc<[PathSegment]>,
         context: ProjectionReductionContext,
     },
-    /// Identity for a Vue macro resolution artifact cached in the shared
-    /// semantic graph under a [`HostResolvedNamedTypeKey`].
-    ///
-    /// This key is read-dominant: hot-path lookups go through
-    /// [`SemanticGraphStore::get_resolved_named_type`](crate::semantic_query_memo::SemanticGraphStore::get_resolved_named_type)
-    /// directly so the parser's named-type cache stays refcount-only. The
-    /// formal [`SemanticQueryApi::execute`] entry point returns
-    /// [`QueryError::Miss`] when the key has not been written (writes come
-    /// from the [`NamedTypeCache`](verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache)
-    /// adapter side, not from `execute`).
-    ///
-    /// Wrapping the key in `Arc` keeps equality / hashing cheap because the
-    /// inner key already carries `Arc<str>` and `Arc<[…]>` allocations — we
-    /// move the key behind one more refcount so clones during key
-    /// construction do not deep-copy the contained slices.
-    ResolvedNamedType {
-        key: Arc<HostResolvedNamedTypeKey>,
-    },
     /// Full-identity relation query between `source` and `target` semantic
     /// nodes.
     ///
@@ -4689,7 +4705,6 @@ pub enum SemanticQueryKeyTag {
     NormalizeUnion,
     NormalizeIntersection,
     ProjectPath,
-    ResolvedNamedType,
     Relate,
     ResolveMacroPayload,
     ResolveClassSurface,
@@ -4719,7 +4734,6 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::NormalizeUnion,
         SemanticQueryKeyTag::NormalizeIntersection,
         SemanticQueryKeyTag::ProjectPath,
-        SemanticQueryKeyTag::ResolvedNamedType,
         SemanticQueryKeyTag::Relate,
         SemanticQueryKeyTag::ResolveMacroPayload,
         SemanticQueryKeyTag::ResolveClassSurface,
@@ -4751,7 +4765,6 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::NormalizeUnion => "NormalizeUnion",
             SemanticQueryKeyTag::NormalizeIntersection => "NormalizeIntersection",
             SemanticQueryKeyTag::ProjectPath => "ProjectPath",
-            SemanticQueryKeyTag::ResolvedNamedType => "ResolvedNamedType",
             SemanticQueryKeyTag::Relate => "Relate",
             SemanticQueryKeyTag::ResolveMacroPayload => "ResolveMacroPayload",
             SemanticQueryKeyTag::ResolveClassSurface => "ResolveClassSurface",
@@ -4774,7 +4787,7 @@ impl SemanticQueryKeyTag {
     /// nested `execute_read` sub-dispatches are recorded too) ORs
     /// `1 << bit_index()` into a `u32` mask surfaced on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
-    /// `ALL.len()` is 23 (≤ 32) so the mask never overflows `u32`.
+    /// `ALL.len()` is 22 (≤ 32) so the mask never overflows `u32`.
     #[must_use]
     pub fn bit_index(self) -> u32 {
         Self::ALL
@@ -4824,7 +4837,6 @@ impl SemanticQueryKey {
                 SemanticQueryKeyTag::NormalizeIntersection
             }
             SemanticQueryKey::ProjectPath { .. } => SemanticQueryKeyTag::ProjectPath,
-            SemanticQueryKey::ResolvedNamedType { .. } => SemanticQueryKeyTag::ResolvedNamedType,
             SemanticQueryKey::Relate { .. } => SemanticQueryKeyTag::Relate,
             SemanticQueryKey::ResolveMacroPayload { .. } => {
                 SemanticQueryKeyTag::ResolveMacroPayload
@@ -5158,21 +5170,6 @@ pub enum SemanticNodeData {
         false_branch_ref: SemanticNodeId,
         distributive: bool,
     },
-    /// Pragmatic carrier for Vue macro resolution artifacts (spans, text,
-    /// prop/emit metadata) produced by the parser's cross-file type resolver
-    /// via the [`NamedTypeCache`](verter_compiler::utils::oxc::vue::named_type_keys::NamedTypeCache)
-    /// trait.
-    ///
-    /// This variant is an **interim** shape: Vue codegen consumers (props /
-    /// emits / defineModel) still drive from the concrete `ResolvedElements`
-    /// struct rather than from a pure `SemanticNodeData` surface. Folding
-    /// `ResolvedElements` behind a `SemanticNodeId` keeps the shared semantic
-    /// graph as the single storage / identity backbone while we migrate
-    /// those consumers off the direct struct. The cache entries are
-    /// whole-hash-scoped (see
-    /// [`HostResolvedNamedTypeKey`]), so reads are self-validating within
-    /// one project generation.
-    VueMacroElements(Arc<verter_compiler::utils::oxc::script::type_surface::ResolvedElements>),
     // §5.6 Function shape.
     ///
     /// Classes / interfaces lower to `SemanticNodeData::Object` with heritage
@@ -5359,7 +5356,8 @@ impl SemanticNodeData {
             Self::Infer { .. } => 15,
             Self::MergedDecl { .. } => 16,
             Self::Conditional { .. } => 17,
-            Self::VueMacroElements(_) => 18,
+            // Index 18 is intentionally unused so the surviving variants
+            // keep stable bucket indices independent of declaration order.
             Self::Function { .. } => 19,
             Self::DeclRef { .. } => 20,
             Self::InstantiationRef { .. } => 21,
@@ -5384,15 +5382,6 @@ impl SemanticNodeData {
 //   used for Debug output and error messages. Two `TypeParam` nodes
 //   with matching identity but differing `display_name` must alias
 //   under dedup.
-// - **VueMacroElements** is an identity-carrier with
-//   latest-insert-wins semantics (see `SemanticGraphStore::insert_resolved_named_type`
-//   at [`semantic_query_memo.rs:287-301`]). Equality and hashing are
-//   `Arc::as_ptr`-based so two calls that wrap the *same* `Arc` alias,
-//   but any structurally-identical-but-Arc-distinct pair stays
-//   distinct — preserving the invariant that separate inserts under
-//   the same `HostResolvedNamedTypeKey` still allocate fresh arena
-//   slots and never collide with prior payloads even when the inner
-//   `ResolvedElements` value happens to be structurally equal.
 //
 // Other variants compare / hash by their field values. The
 // discriminant tag is mixed into the hash so two variants with
@@ -5500,7 +5489,6 @@ impl PartialEq for SemanticNodeData {
                     distributive: bd,
                 },
             ) => ack == bck && aex == bex && atr == btr && afr == bfr && ad == bd,
-            (Self::VueMacroElements(a), Self::VueMacroElements(b)) => Arc::ptr_eq(a, b),
             (
                 Self::Function {
                     params: ap,
@@ -5636,12 +5624,6 @@ impl std::hash::Hash for SemanticNodeData {
                 false_branch_ref.hash(state);
                 distributive.hash(state);
             }
-            Self::VueMacroElements(elements) => {
-                // Identity-carrier: hash on `Arc::as_ptr` so two calls with
-                // distinct `Arc` allocations (fresh inserts under the same
-                // `HostResolvedNamedTypeKey`) produce distinct hashes.
-                (Arc::as_ptr(elements) as usize).hash(state);
-            }
             Self::Function {
                 params,
                 return_type,
@@ -5723,55 +5705,6 @@ pub struct TypeParamDecl {
     pub name: Arc<str>,
     pub constraint: Option<SemanticNodeId>,
     pub default: Option<SemanticNodeId>,
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// Vue macro resolution — host-owned cache identity
-// ──────────────────────────────────────────────────────────────────────────
-
-/// Host-owned cache key for fully-resolved named local symbols.
-///
-/// Promotes the per-context `ResolvedNamedTypeCacheKey` used by the parser's
-/// `TypeResolutionContext` into a cross-request identity: the original shape
-/// `(name, surface, base_offset, companion_cache_key, type_param_bindings)`
-/// plus `(canonical_id, whole_hash)` scoping so stored entries stay
-/// consistent with the owning file's content generation.
-///
-/// `canonical_id` is `Arc<str>` so every adapter clone / `get`-time key
-/// construction is a refcount bump instead of a `String` heap allocation.
-///
-/// **Env-scoped identity (R T L J).** Beyond `(canonical_id, whole_hash)`
-/// content scoping, the key carries the env dims the resolved macro
-/// surface depends on: `resolve_env_hash` (`R` — heritage / import
-/// resolution), `type_env_hash` (`T`), `lib_env_hash` (`L` — apparent /
-/// lib-declared surfaces), and `project_identity` (`J`). Two resolutions
-/// of the same file content (equal `whole_hash`) under different envs
-/// (e.g. a different `lib` selection that changes heritage resolution)
-/// occupy DISTINCT entries instead of colliding — the host adapter
-/// supplies these from `host_view_env_hashes()` /
-/// `host_view_project_identity()`. These are ENV hashes, NOT
-/// content/version hashes; `whole_hash` already carries the content
-/// version (this key is a content-addressed artifact identity, so it
-/// legitimately carries `whole_hash`, unlike the query-identity family
-/// keys).
-///
-/// Entries keyed by this struct live inside
-/// [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore) via
-/// [`SemanticNodeData::VueMacroElements`]; the graph owns the identity map
-/// and backs reads with refcount-only lookups.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct HostResolvedNamedTypeKey {
-    pub canonical_id: Arc<str>,
-    pub whole_hash: Hash16,
-    /// `resolve_env_hash` (`R`) — heritage / import resolution dim.
-    pub resolve_env_hash: HashValue,
-    /// `type_env_hash` (`T`).
-    pub type_env_hash: HashValue,
-    /// `lib_env_hash` (`L`) — lib-declared apparent surfaces.
-    pub lib_env_hash: HashValue,
-    /// `project_identity` (`J`).
-    pub project_identity: u32,
-    pub inner: verter_compiler::utils::oxc::vue::named_type_keys::ResolvedNamedTypeCacheKey,
 }
 
 // ──────────────────────────────────────────────────────────────────────────

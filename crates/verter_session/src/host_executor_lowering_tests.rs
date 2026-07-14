@@ -5,7 +5,6 @@
 //! - `lowering_step_drops_oxc_arena_at_boundary`
 
 use crate::owned_artifacts::eval_program::OwnedEvalProgram;
-use crate::owned_artifacts::type_resolution_context::OwnedTypeResolutionContext;
 use static_assertions::assert_impl_all;
 
 #[test]
@@ -24,7 +23,6 @@ fn lowering_step_drops_oxc_arena_at_boundary() {
     // produces `OwnedEvalProgram` and the arena drops at the boundary.
     fn assert_send_sync_static<T: Send + Sync + 'static>() {}
     assert_send_sync_static::<OwnedEvalProgram>();
-    assert_send_sync_static::<OwnedTypeResolutionContext>();
 
     // Cross-thread move: build a non-empty owned artifact, send it
     // across a thread boundary. If a non-Send field were re-introduced

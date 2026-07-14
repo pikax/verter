@@ -1458,216 +1458,18 @@ fn structural_carrier_producer_guards_remain_registered() {
 }
 
 // ===========================================================================
-// Hot prepared-decl CARRIER guards — the session-owned `HotPrepared*` carriers
-// must own NO transitive `TypeExpr`. The TYPE-MEANING proof is now the
-// COMPILER: every carrier `#[derive(verter_no_typeexpr::NoTypeExpr)]`s, and an
-// `assert_impl_all!(_: NoTypeExpr)` in `hot_prepared.rs` fails the BUILD if any
-// carrier field owns (transitively, through any alias / re-export / nested
-// owner) a `TypeExpr`. The two source guards below are NARROW defenses that do
-// NOT re-prove type meaning:
-//
-//   * the COVERAGE guard asserts every `Hot*` carrier is opted into BOTH the
-//     derive and the `assert_impl_all!` set — so a NEW carrier with neither is
-//     forced to classify itself (it cannot silently sidestep the compiler
-//     proof);
-//   * the HAND-IMPL guard asserts no hand-written `NoTypeExpr` /
-//     `NoTypeExprWitness` impl exists anywhere in `verter_session/src/**`
-//     EXCEPT the single audited `HotTypeRef` witness — closing the one route
-//     (a hand-written witness) that could otherwise satisfy the bound without
-//     the field-recursive derive.
-//
-// Each guard has a paired self-test proving it discriminates (fires on a
+// Hand-written NoTypeExpr-witness ban — the compiler (the field-recursive
+// `#[derive(verter_no_typeexpr::NoTypeExpr)]` + `assert_impl_all!`) owns the
+// transitive TYPE-MEANING proof for every witnessed carrier. The guard below
+// is a NARROW defense that does NOT re-prove type meaning: it bans the one
+// escape hatch (a hand-written `NoTypeExpr` / `NoTypeExprWitness` impl) that
+// could otherwise satisfy the bound without the field-recursive derive —
+// everywhere in `verter_session/src/**` except the single audited
+// `HotTypeRef` witness in `semantic_query.rs` (the non-keyable dispatch
+// handle the hot read path mints on demand via `decl_body_hot_ref`).
+// The guard has a paired self-test proving it discriminates (fires on a
 // synthetic violation, passes on the known-good shape).
 // ===========================================================================
-
-/// The hot-carrier source file the coverage guard parses.
-const HOT_PREPARED_REL: &str = "src/resolver_core/hot_prepared.rs";
-
-/// Every `Hot*`-prefixed `struct`/`enum` name declared in `hot_prepared.rs`.
-/// This is the carrier inventory the coverage guard cross-checks against the
-/// derive sites and the `assert_impl_all!` set: a new carrier that this scan
-/// finds but that is missing from either opt-in REDS.
-fn declared_hot_carriers(src: &str) -> Vec<String> {
-    let file = syn::parse_file(src).expect("parse hot_prepared.rs");
-    let mut names = Vec::new();
-    for item in &file.items {
-        let ident = match item {
-            syn::Item::Struct(s) => &s.ident,
-            syn::Item::Enum(e) => &e.ident,
-            _ => continue,
-        };
-        let name = ident.to_string();
-        if name.starts_with("Hot") {
-            names.push(name);
-        }
-    }
-    names
-}
-
-/// Whether `name`'s `struct`/`enum` definition in `src` carries a
-/// `#[derive(... NoTypeExpr ...)]`. Parses the item's outer attributes and
-/// looks for a `derive` attribute whose token stream names `NoTypeExpr` — so a
-/// carrier that drops the derive is detected regardless of derive-list order or
-/// the leading path segments (`verter_no_typeexpr::NoTypeExpr`).
-fn carrier_has_no_type_expr_derive(src: &str, name: &str) -> bool {
-    let file = syn::parse_file(src).expect("parse hot_prepared.rs");
-    for item in &file.items {
-        let (ident, attrs) = match item {
-            syn::Item::Struct(s) => (&s.ident, &s.attrs),
-            syn::Item::Enum(e) => (&e.ident, &e.attrs),
-            _ => continue,
-        };
-        if *ident != name {
-            continue;
-        }
-        for attr in attrs {
-            if !attr.path().is_ident("derive") {
-                continue;
-            }
-            let mut found = false;
-            // `parse_nested_meta` walks each derive entry (a path like
-            // `verter_no_typeexpr::NoTypeExpr` or a bare `NoTypeExpr`); the last
-            // path segment is the trait name.
-            let _ = attr.parse_nested_meta(|meta| {
-                if meta
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|seg| seg.ident == "NoTypeExpr")
-                {
-                    found = true;
-                }
-                Ok(())
-            });
-            if found {
-                return true;
-            }
-        }
-        return false;
-    }
-    false
-}
-
-/// Every type named in an `assert_impl_all!(<Type>: NoTypeExpr)` invocation in
-/// `src`. The coverage guard requires every declared carrier to appear here, so
-/// a carrier that derives the trait but is never asserted (the `assert_impl_all!`
-/// is what turns the bound into a build failure) is still caught.
-fn assert_impl_all_no_type_expr_subjects(src: &str) -> Vec<String> {
-    let mut subjects = Vec::new();
-    for raw in src.lines() {
-        let line = raw.trim();
-        let Some(rest) = line.strip_prefix("assert_impl_all!(") else {
-            continue;
-        };
-        // Only the `: NoTypeExpr)` form — not an unrelated `assert_impl_all!`.
-        let Some(colon) = rest.find(':') else {
-            continue;
-        };
-        let (subject, bound) = rest.split_at(colon);
-        if !bound.contains("NoTypeExpr") {
-            continue;
-        }
-        let subject = subject.trim();
-        if !subject.is_empty() {
-            subjects.push(subject.to_string());
-        }
-    }
-    subjects
-}
-
-#[test]
-fn every_hot_carrier_opts_into_no_type_expr() {
-    // COVERAGE — not type meaning. Each `Hot*` carrier in `hot_prepared.rs` must
-    // (a) carry `#[derive(NoTypeExpr)]` AND (b) appear in an
-    // `assert_impl_all!(_: NoTypeExpr)` entry. The compiler owns the transitive
-    // type proof; this only forces a NEW carrier to opt in (a carrier with
-    // neither would skip the proof silently).
-    let src = read_rel(HOT_PREPARED_REL);
-    let carriers = declared_hot_carriers(&src);
-    assert!(
-        carriers.len() >= 15,
-        "expected the full hot-carrier inventory (≥15) in {HOT_PREPARED_REL}; found {}: {carriers:?} \
-         — if a carrier was intentionally removed, update this floor with the new count",
-        carriers.len()
-    );
-
-    let asserted = assert_impl_all_no_type_expr_subjects(&src);
-    let mut missing_derive = Vec::new();
-    let mut missing_assert = Vec::new();
-    for carrier in &carriers {
-        if !carrier_has_no_type_expr_derive(&src, carrier) {
-            missing_derive.push(carrier.clone());
-        }
-        if !asserted.iter().any(|s| s == carrier) {
-            missing_assert.push(carrier.clone());
-        }
-    }
-    assert!(
-        missing_derive.is_empty(),
-        "every `Hot*` carrier in {HOT_PREPARED_REL} must `#[derive(verter_no_typeexpr::NoTypeExpr)]` \
-         — these do NOT: {missing_derive:?}. Add the derive (or, if the field genuinely cannot be \
-         TypeExpr-free, the carrier is mis-designed)."
-    );
-    assert!(
-        missing_assert.is_empty(),
-        "every `Hot*` carrier must appear in an `assert_impl_all!(_: NoTypeExpr)` entry in \
-         {HOT_PREPARED_REL} (the assert is what turns the unsatisfiable bound into a BUILD failure) \
-         — these are missing: {missing_assert:?}"
-    );
-}
-
-#[test]
-fn every_hot_carrier_opts_into_no_type_expr_self_test_discriminates() {
-    // The detector must FIRE on a carrier missing the derive, and on a carrier
-    // missing the `assert_impl_all!` entry — so a future weakening that lets
-    // either slip through is caught here.
-    let planted_missing_derive = "\
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
-struct HotGood { a: u32 }
-
-#[derive(Debug, Clone)]
-struct HotMissingDerive { b: u32 }
-
-assert_impl_all!(HotGood: NoTypeExpr);
-assert_impl_all!(HotMissingDerive: NoTypeExpr);
-";
-    let carriers = declared_hot_carriers(planted_missing_derive);
-    assert!(
-        carriers.contains(&"HotGood".to_string())
-            && carriers.contains(&"HotMissingDerive".to_string()),
-        "self-test: both synthetic carriers must be discovered; got {carriers:?}"
-    );
-    assert!(
-        carrier_has_no_type_expr_derive(planted_missing_derive, "HotGood"),
-        "self-test: `HotGood` carries the derive and MUST be detected as such"
-    );
-    assert!(
-        !carrier_has_no_type_expr_derive(planted_missing_derive, "HotMissingDerive"),
-        "self-test: `HotMissingDerive` lacks the derive and MUST be detected as MISSING it — if \
-         this passed, the coverage guard would green-light a carrier that skips the compiler proof"
-    );
-
-    // The `assert_impl_all!` subject scan must capture exactly the named subjects.
-    let subjects = assert_impl_all_no_type_expr_subjects(planted_missing_derive);
-    assert!(
-        subjects.contains(&"HotGood".to_string())
-            && subjects.contains(&"HotMissingDerive".to_string()),
-        "self-test: the assert-subject scan must capture both named subjects; got {subjects:?}"
-    );
-
-    // A carrier present but NOT asserted must be flagged by the missing-assert
-    // arm: discriminate that path too.
-    let planted_missing_assert = "\
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
-struct HotNotAsserted { a: u32 }
-";
-    let not_asserted_subjects = assert_impl_all_no_type_expr_subjects(planted_missing_assert);
-    assert!(
-        !not_asserted_subjects.contains(&"HotNotAsserted".to_string()),
-        "self-test: `HotNotAsserted` has no `assert_impl_all!` entry, so the subject scan must NOT \
-         list it (the missing-assert arm then reds it); got {not_asserted_subjects:?}"
-    );
-}
 
 /// The audited single exception to the hand-impl ban: the one
 /// `impl … NoTypeExprWitness … for HotTypeRef` in `semantic_query.rs`. The
@@ -2070,7 +1872,7 @@ fn hand_impl_audited_exception_is_file_precise_not_ident_only() {
          match would have wrongly exempted this impostor"
     );
     assert!(
-        !is_audited_witness_file("src/resolver_core/hot_prepared.rs"),
+        !is_audited_witness_file("src/resolver_core/prepared_decl.rs"),
         "self-test: a non-`semantic_query.rs` file is NOT the audited witness file"
     );
     assert!(
@@ -2112,7 +1914,7 @@ impl verter_no_typeexpr::__private::NoTypeExprWitness for other::HotTypeRef {}
     // Classify under ANY OTHER file → the file gate fails, so BOTH `HotTypeRef`
     // hits become violations. An ident-only exemption would have (wrongly)
     // exempted them.
-    let violations_elsewhere = classify("src/resolver_core/hot_prepared.rs");
+    let violations_elsewhere = classify("src/resolver_core/prepared_decl.rs");
     assert_eq!(
         violations_elsewhere,
         vec!["HotTypeRef".to_string(), "HotTypeRef".to_string()],
@@ -2165,22 +1967,21 @@ impl verter_no_typeexpr::__private::NoTypeExprWitness for other::HotTypeRef {}
 
 #[test]
 fn verter_semantic_has_no_session_dep_is_confirmed_present() {
-    // The hot carriers live in `verter_session` and reference `verter_semantic`
-    // SCALAR types (ResolvedRootIdentity / TypeDeclKind / DeclProvenance / …) —
-    // the ALLOWED direction (session → semantic). The REVERSE edge (which
-    // would let the lower compat-DTO crate carry session `HotTypeRef` handles)
-    // is banned by the EXISTING crate-level guard
-    // `no_verter_semantic_to_verter_session_dep` in architecture_guards.rs.
-    // That guard is crate-level, so the new `hot_prepared` module is
-    // automatically covered. This test CONFIRMS the existing guard is present
-    // (a real `fn` definition, not a hollow rename) rather than duplicating
-    // it.
+    // The session's handle surface (`HotTypeRef` in `semantic_query.rs`)
+    // references `verter_semantic` SCALAR types — the ALLOWED direction
+    // (session → semantic). The REVERSE edge (which would let the lower
+    // compat-DTO crate carry session `HotTypeRef` handles) is banned by the
+    // EXISTING crate-level guard `no_verter_semantic_to_verter_session_dep`
+    // in architecture_guards.rs. That guard is crate-level, so the handle
+    // surface is automatically covered. This test CONFIRMS the existing
+    // guard is present (a real `fn` definition, not a hollow rename) rather
+    // than duplicating it.
     let guards = read_rel("tests/cases/architecture_guards.rs");
     assert!(
         guards.contains("fn no_verter_semantic_to_verter_session_dep("),
         "the existing crate-level reverse-dep guard \
          `no_verter_semantic_to_verter_session_dep` must remain a real `fn` test in \
-         architecture_guards.rs — it covers the new hot_prepared module (session → semantic is \
+         architecture_guards.rs — it covers the session handle surface (session → semantic is \
          the allowed direction; the reverse edge is banned)."
     );
     // Anti-vacuity: the guard's own subject (the reverse crate name) must be
