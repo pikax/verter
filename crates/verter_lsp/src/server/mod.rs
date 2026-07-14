@@ -6,19 +6,18 @@ use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer};
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::position_map::PositionMapper;
 use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::documents::{uri_to_canonical_id, DocumentRegistry};
 use crate::features::cursor_context::ExpressionContext;
 use crate::features::diagnostics::map_diagnostics;
 use crate::provider_sync::{
-    commit_sync_transition, genuinely_stale_after_sync, open_unresolved_carrier_commit,
-    open_unresolved_carrier_state, prepare_sync_transition, revert_unsynced_kinds,
-    ProviderPathKind, ProviderSyncState,
+    commit_sync_transition, genuinely_stale_after_sync, non_decl_close_targets,
+    open_unresolved_carrier_commit, open_unresolved_carrier_state, prepare_sync_transition,
+    revert_unsynced_kinds, NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
 };
 use crate::statistics::Statistics;
-use crate::tsgo::project_sync::ProjectSync;
-use crate::tsgo::traits::TypeProvider;
+use crate::type_provider::project_sync::ProjectSync;
+use crate::type_provider::traits::TypeProvider;
 use crate::LspConfig;
 
 // `server_tests.rs` (a child of `server`, included via `#[path]`) uses
@@ -32,7 +31,7 @@ use crate::features::cursor_context::{
 };
 #[cfg(test)]
 #[allow(unused_imports)]
-use crate::tsgo::merge;
+use crate::type_provider::merge;
 
 // ── Handler tracking for freeze diagnosis ──────────────────────────────
 // Moved to `handler_guard.rs`. Imported here so the
@@ -42,6 +41,11 @@ use crate::tsgo::merge;
 mod handler_guard;
 #[allow(unused_imports)]
 use self::handler_guard::{block_in_place_if_available, ACTIVE_HANDLERS};
+// Re-export the runtime-flavor-guarded blocking helper so sibling top-level
+// modules (e.g. the background `sync_coordinator` / `background_init` diagnostic
+// publish paths) can route VFS source reads through the same guard the server
+// handlers use, instead of an unguarded `tokio::task::block_in_place`.
+pub(crate) use self::handler_guard::block_in_place_if_available as block_in_place_guarded;
 
 // Provider-sync state CRUD + context helpers. Inherent-impl
 // extension methods on `VerterLanguageServer` covering MRU bookkeeping,
@@ -55,6 +59,15 @@ mod provider_state;
 // and template-contract definition resolution (props, events, v-model,
 // slots).
 mod component_resolve;
+
+// Cross-file `<Child prop=…>` rename resolution. Inherent-impl extension
+// methods on `VerterLanguageServer` plus the shared classification types
+// (`ChildPropUsage`/`ChildPropRenameClass`/`ChildPropDeclarationProof`), covering
+// the SHARED prop-usage resolution (also used by the goto-definition props branch),
+// inline macro-field declaration resolution, the imported-type declaration
+// `get_definition` upgrade hop, and the rename classification the merged-edit
+// completeness gate consumes.
+mod child_prop_rename;
 
 // Provider-sync orchestration. Inherent-impl extension
 // methods on `VerterLanguageServer` covering diagnostics publishing,
@@ -93,12 +106,16 @@ mod aux_features;
 
 // LSP navigation feature handlers. Trait methods on
 // `LanguageServer for VerterLanguageServer` covering hover, completion,
-// completion_resolve, goto_definition, goto_type_definition, references,
-// prepare_rename, rename.
+// completion_resolve.
 mod nav_features;
 
+// Navigation method bodies that map source positions onto the generated
+// artifact and back: goto_definition, goto_type_definition, references,
+// prepare_rename, rename.
+mod nav_features_navigation;
+
 // Completion-resolve auto-import edit translation:
-// `resolve_tsgo_auto_import_edits` and `completion_resolve_error`, called
+// `resolve_provider_auto_import_edits` and `completion_resolve_error`, called
 // by `nav_features::handle_completion_resolve`.
 mod nav_features_completion_resolve;
 
@@ -126,19 +143,29 @@ use self::server_utils::*;
 pub(crate) use self::server_utils::{
     adapter_module_language_for, carrier_language_for, compute_verter_diagnostics_for_with_views,
     is_default_export_component_carrier, prepare_non_carrier_provider_sync,
-    self_file_provider_content, sync_self_file_shadow_state,
+    sync_self_file_shadow_state,
 };
 
 #[path = "../background_drain.rs"]
 mod background_drain;
+#[path = "../background_drain_decl_closure.rs"]
+mod background_drain_decl_closure;
 #[path = "../background_init.rs"]
 mod background_init;
 // Glob re-export so `server_tests.rs` (a child of `server`) sees
 // `drain_pending_snapshot_provider_sync`, `sync_pending_carrier_provider_file`,
 // `is_generated_verter_types_event`, etc. via its `use super::*;`.
 pub(crate) use self::background_drain::configure_provider_paths_for_source;
+// The declaration-overlay lifecycle owner is reached by the drain
+// (`background_drain`), the server struct, and the `did_close` lifecycle —
+// glob-export it at module scope so all three resolve the bare name.
 #[cfg(test)]
 use self::background_drain::*;
+pub(crate) use self::background_drain_decl_closure::DeclOverlayOwner;
+// `carrier_dependency_ids` is asserted by the dual-resolution-rail unit test;
+// `DeclCloseTarget` is named only by the lifecycle regression tests.
+#[cfg(test)]
+pub(crate) use self::background_drain_decl_closure::{carrier_dependency_ids, DeclCloseTarget};
 #[cfg(test)]
 use self::background_init::*;
 
@@ -162,6 +189,12 @@ pub(crate) struct TypeProviderContext {
     pub(crate) mapper: ProviderPositionMapper,
     pub(crate) tsx_line_index: LineIndex,
     pub(crate) carrier_line_index: LineIndex,
+    /// The captured immutable provider surface every field above was built
+    /// from. Handlers re-validate it AFTER the provider await (via
+    /// `provider_context_still_valid`) and DROP the provider contribution on a
+    /// mismatch — a response produced against a superseded surface must never
+    /// be mapped/published (fail closed).
+    pub(crate) snapshot: Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
 }
 
 /// The generalized per-document provider-projection query context, serving BOTH
@@ -181,6 +214,9 @@ pub(crate) struct ProviderProjectionContext {
     pub(crate) provider_line_index: LineIndex,
     /// Line index over the user source.
     pub(crate) source_line_index: LineIndex,
+    /// The captured immutable provider surface every field above was built
+    /// from — the post-await re-validation identity (fail closed on mismatch).
+    pub(crate) snapshot: Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -227,10 +263,34 @@ pub struct VerterLanguageServer {
     cached_verter_diags: Arc<DashMap<String, CachedVerterDiagEntry>>,
     /// Source-keyed provider materialization state shared across background/live sync.
     provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
+    /// The proactive declaration-overlay lifecycle owner: the SOLE authority for
+    /// the `.d.<ext>.ts` overlay graph (reachability folded with the per-overlay
+    /// close generation) and the only code that issues a provider `close_dts` for a
+    /// declaration overlay. The drain's closure pass opens/reconciles overlays
+    /// through it; the `did_close` lifecycle releases a closed root through it. The
+    /// per-declaration-path serialization lock inside the owner makes a stale close
+    /// unable to clobber a concurrent open of the same overlay (TS2307 stranding) or
+    /// resurrect one no live root reaches. See [`DeclOverlayOwner`].
+    decl_overlay_owner: Arc<DeclOverlayOwner>,
+    /// The cross-file-rename provider FENCE. A real (non-advisory) async mutex
+    /// the rename transaction holds across its sync-before-query →
+    /// snapshot-capture → provider-query → response-parse, so a sync it issues
+    /// writes its serialized provider command before the rename request is sent,
+    /// and no other rename transaction interleaves its own surface mutations
+    /// mid-capture. Concurrent background syncs remain harmless because the
+    /// captured snapshots are immutable historical.
+    rename_provider_fence: Arc<tokio::sync::Mutex<()>>,
     /// Which type provider backend is active (TSGO, tsserver, or none).
     type_provider_kind: crate::TypeProviderKind,
     /// When `true`, show a recommendation to switch to TSGO in VS Code settings.
     suggest_tsgo: bool,
+    /// TEST SEAM: when `true`, suppress the `did_open` imported-carrier-API
+    /// prewarm so a cross-file-rename lane can exercise the path where only
+    /// `handle_rename`'s own sync-before-query would sync a closed child's API
+    /// surface. That lane is `#[ignore]`'d (the Block H-membership tsserver
+    /// program-membership gap): suppression does NOT prove `handle_rename`'s own
+    /// sync closes the closed child today.
+    suppress_imported_carrier_prewarm: bool,
     /// Generation counter for completion coalescing. During rapid typing, each keystroke
     /// triggers a completion request. By incrementing this counter, stale requests can
     /// detect they've been superseded and skip the expensive type provider call.
@@ -299,14 +359,38 @@ pub struct VerterLanguageServer {
     /// canonical (transitive deps NOT invalidated — codified
     /// limitation).
     hover_provenance_cache: Arc<crate::features::hover_provenance::HoverProvenanceCache>,
+    /// The live carrier-publish coordinator for the tsserver engine — the seam
+    /// that makes a framework carrier a member of its REAL configured project by
+    /// publishing its companions into the on-disk store the
+    /// `@verter/typescript-plugin` reads. `Some` only when the active provider is
+    /// tsserver: for tsserver the carrier companions reach the engine through the
+    /// store + plugin membership (NOT a direct `provider.open_file`); for tsgo the
+    /// carrier companions reach the engine through the project-bound `--api` direct
+    /// open (`open_project` + `root_files`). The backend it holds resolves the SAME
+    /// store dir the tsserver spawn delivers to the plugin.
+    carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
+    /// The per-source carrier transaction coordinator — the SINGLE authority for carrier
+    /// provider-state admission (the receipt-gated commit + IDE-surface stamp), the
+    /// owner-loss barrier (the tombstone that survives a state removal), and the non-owned
+    /// retry disposition (requeue / owner-loss barrier advance). Shared (`Arc`) across the
+    /// server, the SyncCoordinator, the background drain, and the workspace scanner so all
+    /// carrier admissions serialize on one barrier map. Engine-agnostic (both tsserver and
+    /// tsgo route their commits through it).
+    carrier_transaction_coordinator: Arc<crate::external_ts::CarrierTransactionCoordinator>,
 }
 
 impl VerterLanguageServer {
     pub fn new(client: Client, config: LspConfig) -> Self {
-        let project_sync = config
-            .type_provider
-            .as_ref()
-            .map(|tp| ProjectSync::new(Arc::clone(tp), config.project_sync_mode));
+        let project_sync = config.type_provider.as_ref().map(|tp| {
+            // Bind the sync to the active engine kind so the carrier-companion
+            // content opens are suppressed for tsserver (the plugin serves the
+            // carrier from the publish store) and flow through for tsgo.
+            ProjectSync::new_with_kind(
+                Arc::clone(tp),
+                config.project_sync_mode,
+                config.type_provider_kind,
+            )
+        });
 
         let needs_ide_sync = Arc::new(DashSet::new());
         let needs_deferred_sync = Arc::new(DashSet::new());
@@ -314,10 +398,39 @@ impl VerterLanguageServer {
         let position_encoding = Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16));
         let cached_verter_diags = Arc::new(DashMap::new());
         let provider_sync_states = Arc::new(DashMap::new());
+        let decl_overlay_owner = Arc::new(DeclOverlayOwner::default());
         let pending_snapshot_provider_sync = Arc::new(DashSet::new());
         let vfs_workspace: Arc<
             parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
         > = Arc::new(parking_lot::RwLock::new(None));
+
+        // The live carrier-publish coordinator: built ONLY for the tsserver engine
+        // (tsgo uses the project-bound `--api` direct carrier-companion open instead).
+        // It holds a `TsserverEngineBackend` whose store dir is derived from the SAME
+        // shared resolver the tsserver spawn uses to point the plugin at the store,
+        // so the LSP publishes exactly the store the plugin reads.
+        let carrier_publish_coordinator = match (&config.type_provider, config.type_provider_kind) {
+            (Some(provider), crate::TypeProviderKind::Tsserver) => {
+                let backend = Arc::new(
+                    crate::external_ts::TsserverEngineBackend::with_default_host_version(),
+                );
+                // The negotiated TypeScript version is informational on the minted
+                // binding (membership keys on env dims + content hash, not this
+                // string); the project's real version refines it when known.
+                Some(crate::external_ts::CarrierPublishCoordinator::new(
+                    backend,
+                    Arc::clone(provider),
+                    crate::external_ts::default_carrier_store_host_version(),
+                ))
+            }
+            _ => None,
+        };
+
+        // The per-source carrier transaction coordinator (admission gate + owner-loss
+        // barrier + non-owned retry disposition), shared across the server, SyncCoordinator,
+        // drain, and scanner so every carrier admission serializes on ONE barrier map.
+        let carrier_transaction_coordinator =
+            Arc::new(crate::external_ts::CarrierTransactionCoordinator::new());
 
         // Create SyncCoordinator if a type provider is connected.
         // The coordinator's debounced loop replaces the old spawn-per-keystroke pattern.
@@ -334,6 +447,9 @@ impl VerterLanguageServer {
                     position_encoding: Arc::clone(&position_encoding),
                     provider_sync_states: Arc::clone(&provider_sync_states),
                     vfs_workspace: Arc::clone(&vfs_workspace),
+                    type_provider_kind: config.type_provider_kind,
+                    carrier_publish_coordinator: carrier_publish_coordinator.clone(),
+                    carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
                 },
             )
         });
@@ -354,8 +470,11 @@ impl VerterLanguageServer {
             inlay_hints_enabled: std::sync::atomic::AtomicBool::new(true),
             cached_verter_diags,
             provider_sync_states,
+            decl_overlay_owner,
+            rename_provider_fence: Arc::new(tokio::sync::Mutex::new(())),
             type_provider_kind: config.type_provider_kind,
             suggest_tsgo: config.suggest_tsgo,
+            suppress_imported_carrier_prewarm: config.suppress_imported_carrier_prewarm,
             completion_generation: std::sync::atomic::AtomicU64::new(0),
             needs_ide_sync,
             needs_deferred_sync,
@@ -373,6 +492,8 @@ impl VerterLanguageServer {
             hover_provenance_cache: Arc::new(
                 crate::features::hover_provenance::HoverProvenanceCache::new(),
             ),
+            carrier_publish_coordinator,
+            carrier_transaction_coordinator,
         }
     }
 
@@ -409,6 +530,87 @@ impl VerterLanguageServer {
         workspace: Arc<verter_workspace::FilesystemWorkspace>,
     ) {
         *self.vfs_workspace.write() = Some(workspace);
+    }
+
+    /// RAW (unmerged) provider code actions for a carrier URI + range + editor diagnostics — the
+    /// provider's `getCodeFixes` output BEFORE `merge_code_actions` (test harness access). Lets a
+    /// canary tell "provider emitted nothing" from "provider emitted but merge dropped it".
+    pub(crate) async fn test_raw_provider_code_actions(
+        &self,
+        uri: &tower_lsp_server::ls_types::Uri,
+        range: tower_lsp_server::ls_types::Range,
+        diagnostics: &[tower_lsp_server::ls_types::Diagnostic],
+    ) -> Vec<crate::type_provider::protocol::TypeCodeAction> {
+        aux_features::raw_provider_code_actions(self, uri, range, diagnostics).await
+    }
+
+    /// MERGED (Verter lint/template + type-provider) diagnostics for a carrier URI,
+    /// mapped back onto the carrier source ranges (test harness access).
+    ///
+    /// Returns the exact set [`Self::publish_full_diagnostics`] would push to the
+    /// client, so a real-provider test can assert a specific TS diagnostic
+    /// (e.g. TS1192 default-import-of-no-default) surfaces on the `.vue` carrier.
+    pub(crate) async fn test_merged_diagnostics(
+        &self,
+        uri: &tower_lsp_server::ls_types::Uri,
+    ) -> Vec<tower_lsp_server::ls_types::Diagnostic> {
+        self.compute_full_diagnostics(uri).await
+    }
+
+    /// The committed carrier [`crate::provider_sync::ProviderSyncState`] for a
+    /// carrier-source URI (test harness access), or `None` when no provider-sync
+    /// state has been committed for it.
+    ///
+    /// Read-only: it clones the entry the carrier-sync gateway commits into the
+    /// server's shared `provider_sync_states` map (the provider-neutral ownership
+    /// backbone), so a real-provider test can assert that a `.vue`/`.svelte`
+    /// carrier whose diagnostics flow actually became an OWNED, background-loaded
+    /// project member through that backbone — not merely that a diagnostic happened
+    /// to appear.
+    pub(crate) fn test_provider_sync_state(
+        &self,
+        uri: &tower_lsp_server::ls_types::Uri,
+    ) -> Option<crate::provider_sync::ProviderSyncState> {
+        let canonical_id = self.documents.get_canonical_id(uri)?;
+        self.provider_sync_state_for_source(&canonical_id)
+    }
+
+    /// The server's shared declaration-overlay lifecycle owner (test harness
+    /// access). The SAME `Arc` the `did_close` lifecycle releases through and the
+    /// background closure pass opens through, so a concurrency test can race the
+    /// real `handle_did_close` against the real closure pass on one shared owner and
+    /// assert no overlay edge leaks (via the owner's `test_slot_*` accessors).
+    pub(crate) fn test_decl_overlay_owner(&self) -> &Arc<DeclOverlayOwner> {
+        &self.decl_overlay_owner
+    }
+
+    /// Run ONE real proactive-declaration-overlay closure pass
+    /// ([`DeclOverlayOwner::open_declaration_closure_for_open_files`]) against the
+    /// server's OWN shared state — its `project_sync`, `documents`,
+    /// `provider_sync_states`, published resolver snapshot, and the shared
+    /// declaration-overlay owner (test harness access).
+    ///
+    /// This is the EXACT pass `background_init` runs (same owner, same shared
+    /// `Arc`s), so a test can interleave it with the real `handle_did_close` and
+    /// exercise the production `[RELEASE]`-vs-`[DIDCLOSE]` ordering on one shared
+    /// owner. Returns `false` (no-op) when no project sync or published snapshot is
+    /// available.
+    pub(crate) async fn test_run_declaration_closure_pass(&self, pass_generation: u64) -> bool {
+        let Some(sync) = self.project_sync.as_ref() else {
+            return false;
+        };
+        let Some(snapshot) = self.published_resolver() else {
+            return false;
+        };
+        self.decl_overlay_owner
+            .open_declaration_closure_for_open_files(
+                sync,
+                &self.documents,
+                &self.provider_sync_states,
+                &snapshot,
+                pass_generation,
+            )
+            .await
     }
 }
 
@@ -480,7 +682,7 @@ impl LanguageServer for VerterLanguageServer {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        nav_features::handle_goto_type_definition(self, params).await
+        nav_features_navigation::handle_goto_type_definition(self, params).await
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -491,7 +693,7 @@ impl LanguageServer for VerterLanguageServer {
         &self,
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
-        nav_features::handle_prepare_rename(self, params).await
+        nav_features_navigation::handle_prepare_rename(self, params).await
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -617,3 +819,6 @@ impl LanguageServer for VerterLanguageServer {
 )]
 #[path = "../server_tests.rs"]
 mod server_tests;
+
+#[cfg(test)]
+mod request_surface_guard_tests;

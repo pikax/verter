@@ -16,6 +16,13 @@
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct TestForceKnobs {
+    /// Observations of the session-wrapper operations that runtime-render
+    /// compilation must bypass. Host-backed compilation is the firing control.
+    pub(crate) wrapper_source_clone_count: std::sync::atomic::AtomicUsize,
+    pub(crate) wrapper_cache_mode_classification_count: std::sync::atomic::AtomicUsize,
+    pub(crate) wrapper_sync_transitive_count: std::sync::atomic::AtomicUsize,
+    pub(crate) wrapper_store_view_read_count: std::sync::atomic::AtomicUsize,
+    pub(crate) wrapper_resolver_ctx_construction_count: std::sync::atomic::AtomicUsize,
     /// Per-host test-injection knob for the carrier-subject normalization
     /// prelude. When `true`, the traced carrier-normalization prelude
     /// (`trace_carrier_subject_normalization_if_needed`) fans a synthetic

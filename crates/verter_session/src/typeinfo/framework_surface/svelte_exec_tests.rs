@@ -169,7 +169,9 @@ fn workspace_host_with_svelte(
             workspace_aliases: vec![],
             compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: verter_workspace::ProjectMembership::MatchAll,
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/workspace"),
+            ),
         }]);
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
     workspace.set_project_graph(project_graph);

@@ -31,9 +31,6 @@ pub struct ScriptParseResult<'a> {
     /// Each entry is a (span, type) pair where the span references the identifier
     /// in the parsed script content (offset by `base_offset`).
     pub bindings: Vec<(Span, BindingType)>,
-    /// Source literal spans (including quotes) of dynamic `import('./Foo.vue')` calls
-    /// whose specifier ends in `.vue`. Used by IDE codegen for `.vue` → `.vue.ts` rewriting.
-    pub vue_dynamic_import_spans: Vec<Span>,
 }
 
 /// A parsed script item
@@ -72,6 +69,24 @@ pub enum ImportSpecifierKind {
 pub struct ScriptBinding<'a> {
     /// The local name of the binding
     pub name: &'a str,
+    /// The module-exported (imported) name, for a NAMED import specifier
+    /// (`import { Imported as Local }` → `Some("Imported")`; `import { Foo }`
+    /// → `Some("Foo")`). `None` for default/namespace imports (whose imported
+    /// identity is the module's default / the whole namespace, not a named
+    /// export) and for non-import bindings. Reconstructing a declaration-legal
+    /// `import type { Imported as Local }` requires this — the local `name`
+    /// alone loses the alias.
+    pub imported: Option<&'a str>,
+    /// Whether the NAMED import's module-export name is a string literal
+    /// (`import { "vue-props" as Local }`) rather than a plain identifier
+    /// (`import { Imported as Local }`). Derived from the typed OXC
+    /// `ModuleExportName` variant at capture time (NOT a downstream string
+    /// sniff). When `true`, `imported` holds the UNQUOTED string-literal value
+    /// (`"vue-props"` → `vue-props`) and a declaration-legal reconstruction must
+    /// re-quote it; a string-literal import is ALWAYS aliased to an identifier
+    /// local (a bare `import { "x-y" }` is a TS error). Always `false` for
+    /// identifier-named, default, namespace, and non-import bindings.
+    pub imported_is_string_literal: bool,
     /// Span of the binding identifier
     pub span: Span,
     /// Whether this is a per-specifier type import (`import { type Foo }`)

@@ -148,3 +148,7 @@ path = "examples/profile_host_synthetic.rs"
 [[example]]
 name = "profile_component_meta"
 path = "examples/profile_component_meta.rs"
+
+[[example]]
+name = "profile_public_api_batch"
+path = "examples/profile_public_api_batch.rs"

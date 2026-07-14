@@ -1,6 +1,7 @@
-use crate::resolver::{
-    IdeProjectCompilerOptions, IdeProjectConfig, ProjectMembership, WorkspaceAlias,
-};
+use crate::canonical_path::CanonicalPath;
+use crate::membership::ConfiguredMembership;
+use crate::resolver::{IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias};
+use crate::snapshot_builder::configured_membership_from_raw;
 use crate::types::ProjectOwnership;
 
 /// Source precedence rank for a project configuration.
@@ -39,8 +40,10 @@ pub struct VfsProjectConfig {
     pub compiler_options: IdeProjectCompilerOptions,
     /// Resolved project-reference edges (canonical tsconfig paths).
     pub references: Vec<String>,
-    /// Membership filter from tsconfig (files/include/exclude).
-    pub membership: ProjectMembership,
+    /// Exact configured membership (the same representation the snapshot's
+    /// ownership authority carries). Built from the raw parsed membership via
+    /// [`configured_membership_from_raw`] on the legacy path.
+    pub membership: ConfiguredMembership,
 }
 
 impl VfsProjectConfig {
@@ -213,9 +216,14 @@ impl ProjectGraph {
 
             for entry in &tsconfig_entries {
                 let project_root = entry.root.clone();
-                let membership = load_project_membership(ws, &entry.path);
+                let raw_membership = load_project_membership(ws, &entry.path);
                 let compiler_options = load_compiler_options(ws, &entry.path);
                 let references = load_project_references(ws, &entry.path);
+                let membership = configured_membership_from_raw(
+                    &project_root,
+                    &raw_membership,
+                    &compiler_options,
+                );
 
                 projects.push(VfsProjectConfig {
                     root: project_root,
@@ -303,6 +311,8 @@ impl ProjectGraph {
                 }
             }
 
+            let fallback_membership =
+                ConfiguredMembership::match_all_under_root(&CanonicalPath::new(&canonical));
             projects.push(VfsProjectConfig {
                 root: canonical.clone(),
                 rank: ProjectRank::Inferred,
@@ -313,7 +323,7 @@ impl ProjectGraph {
                 workspace_aliases: fallback_workspace_aliases,
                 compiler_options: IdeProjectCompilerOptions::default(),
                 references: vec![],
-                membership: ProjectMembership::MatchAll,
+                membership: fallback_membership,
             });
         }
 
@@ -340,7 +350,7 @@ mod tests {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new(root)),
         }
     }
 

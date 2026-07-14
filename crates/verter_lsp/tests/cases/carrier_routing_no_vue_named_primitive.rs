@@ -38,8 +38,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Production routing / provider-sync / position-mapping source roots scanned
-/// by the guard (relative to the crate `src/`).
-const SCAN_DIRS: &[&str] = &["features", "server", "documents", "tsgo"];
+/// by the guard (relative to the crate `src/`). `type_provider/` holds the
+/// provider-neutral merge / auto-import / project-sync primitives; `tsgo/`
+/// holds the backend-specific transport/respawn wrappers.
+const SCAN_DIRS: &[&str] = &["features", "server", "documents", "type_provider", "tsgo"];
 const SCAN_FILES: &[&str] = &[
     "server_utils.rs",
     "background_drain.rs",
@@ -92,6 +94,11 @@ const VUE_INTRINSIC_ALLOWLIST: &[&str] = &[
     // check that lives in `verter_session`; referenced by name in carrier
     // docs/tests).
     "is_vue",
+    // The `CarrierKind::Vue` carrier-DISCRIMINANT variant (a per-framework enum
+    // value on the neutral `CarrierKind` type — names WHICH carrier a markup
+    // region belongs to, exactly as the `Svelte` sibling variant does; it is a
+    // discriminant value, not a carrier-generic routing primitive).
+    "Vue",
 ];
 
 fn crate_src() -> PathBuf {

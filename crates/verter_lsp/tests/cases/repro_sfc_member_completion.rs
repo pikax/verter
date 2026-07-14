@@ -40,7 +40,7 @@ use verter_session::{HostConfig, VerterHost};
 use verter_lsp::documents::line_index::LineIndex;
 use verter_lsp::documents::provider_projection::ProviderPositionMapper;
 use verter_lsp::documents::DocumentRegistry;
-use verter_lsp::tsgo::merge;
+use verter_lsp::type_provider::merge;
 
 /// The exact BUG-REPORT case: incomplete member access inside a multi-line arrow.
 const BROKEN: &str =

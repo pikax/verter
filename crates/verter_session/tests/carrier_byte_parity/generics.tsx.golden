@@ -1,0 +1,42 @@
+import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement } from "@verter/types";
+import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots } from "@verter/types";
+;export function ___VERTER___TemplateBindingFN<T>() {
+
+;type ___VERTER___defineProps_Type=___VERTER___Prettify<{ items: T[]; selected: T }>;const ___VERTER___props=defineProps<___VERTER___defineProps_Type>()
+
+const __props = ___VERTER___props;
+// @ts-ignore
+let ___VERTER___instance!: Omit<InstanceType<import('./Generics.vue.verter.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
+void ___VERTER___instance;
+const ___VERTER___directiveAccessor = ___VERTER___retrieveSetupDirectives(___VERTER___instance);
+void ___VERTER___directiveAccessor;
+
+{
+<div />
+} // close block scope
+
+function ___VERTER___Comp100<T>() {
+  return {} as HTMLElementTagNameMap["div"];
+}
+function ___VERTER___getRootComponent<T>() { return ___VERTER___Comp100<T>(); }
+function ___VERTER___getRootComponentPassedProps<T>() { return {}; }
+type ___VERTER___RootElement<T> = ReturnType<typeof ___VERTER___getRootComponent<T>>;
+type ___VERTER___RootElementProps<T> = ___VERTER___Prettify<Omit<
+  ___VERTER___ExtractComponentProps<___VERTER___RootElement<T>>,
+  keyof ReturnType<typeof ___VERTER___getRootComponentPassedProps<T>>
+>>;
+
+type ___VERTER___Attrs<T> = ___VERTER___attributes<T> & ___VERTER___RootElementProps<T>;
+
+void ___VERTER___getRootComponent; void ___VERTER___getRootComponentPassedProps;
+void __props;
+void ___VERTER___props;
+void ___VERTER___Comp100;
+void (___VERTER___instance).valueOf;
+
+return {};
+} // close templateBindingFN
+
+export { default } from './Generics.vue.verter.ts';
+
+type ___VERTER___attributes = {};

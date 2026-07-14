@@ -98,8 +98,19 @@ pub enum CompilerErrorCode {
     // -- Expression errors --
     /// Error parsing JavaScript expression.
     XInvalidExpression,
-    /// Invalid TypeScript type argument passed to a Vue compiler macro.
+    /// Invalid TypeScript type argument passed to a Vue compiler macro
+    /// (a RESOLVED type of the wrong shape — e.g. a non-object-like
+    /// `defineProps` type or a `defineEmits` type with no call
+    /// signatures). This is a genuine local misuse and is always fatal.
     XInvalidMacroType,
+    /// An IMPORTED macro type argument (`defineProps<T>()` where `T` is
+    /// imported) that could not be RESOLVED. Distinct from
+    /// [`Self::XInvalidMacroType`] (a resolved-but-wrong-shape type): the
+    /// type reference itself is unresolved, so the compiler degrades it to
+    /// a runtime `Unknown`. The render-only bundler lane treats ONLY this
+    /// code as a soft (warning) diagnostic; every other macro-type
+    /// diagnostic stays fatal.
+    XUnresolvedImportedMacroType,
 
     // -- Style errors --
     /// Error parsing or processing CSS in a `<style>` block.
@@ -164,6 +175,9 @@ impl CompilerErrorCode {
             Self::XDuplicateDirective => "Duplicate built-in directive on the same element.",
             Self::XInvalidExpression => "Error parsing JavaScript expression.",
             Self::XInvalidMacroType => "Invalid macro type argument.",
+            Self::XUnresolvedImportedMacroType => {
+                "Imported macro type argument could not be resolved."
+            }
             Self::XCssParseError => "Error parsing or processing CSS.",
         }
     }

@@ -37,6 +37,25 @@ pub mod script;
 pub mod script_recover;
 pub mod template;
 
+/// The reserved public-API carrier virtual-file suffix (`.verter.ts`).
+///
+/// A component's PUBLIC type lives in the REDIRECT-reached public-API carrier
+/// (`Foo.vue.verter.ts` / `Foo.svelte.verter.ts`) — the cross-package /
+/// project-reference redirect target. It is NEVER the in-project bare-import
+/// target (a bare `import X from "./Comp.vue"` resolves natively to the
+/// `.d.vue.ts` declaration carrier through the engine's basename-append probe).
+///
+/// The IDE carrier self-imports this API surface to type the component
+/// instance and re-exports its public default, so the declaration carrier
+/// surfaces the component's public type.
+///
+/// This MIRRORS `verter_workspace::CARRIER_API_VIRTUAL_SUFFIX` (the single
+/// naming authority). `verter_compiler` is a lower crate than `verter_workspace`
+/// and cannot import it, so the two derivations are kept byte-for-byte in sync
+/// by [`tests::carrier_api_suffix_matches_workspace_naming`] + the
+/// `virtual_file_naming_*` guards rather than a shared import.
+pub const CARRIER_API_VIRTUAL_SUFFIX: &str = ".verter.ts";
+
 /// Options for IDE script generation.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -68,13 +87,37 @@ pub struct IdeScriptOptions<'a> {
     /// When a root v-if references a prop, the component's type signature
     /// narrows based on the prop value passed by the parent.
     pub conditional_root_narrowing: bool,
-    /// Binding names referenced in style `v-bind()` expressions.
-    /// Used to emit `void(name)` and prevent false unused diagnostics.
+    /// Binding names referenced in style `v-bind()` expressions, derived SOUNDLY
+    /// from the typed AST (each `v-bind()` expression parsed and its identifier
+    /// roots collected — never a `.split('.')` string heuristic). Used to emit
+    /// `void(name)` and to keep a style-used binding's value-read unwrap entry.
     pub style_v_bind_vars: Vec<String>,
+    /// Whether [`Self::style_v_bind_vars`] is a COMPLETE, sound usage set. `false`
+    /// when any discovered `v-bind()` expression failed to parse (or no style
+    /// scan ran), in which case unused-binding liveness fails open (every binding
+    /// is treated as used — no TS6133 demotion).
+    pub style_usage_complete: bool,
     /// CSS module info: `(module_name, class_names)` pairs.
     /// `module_name` is `"$style"` for `<style module>` or the custom name
     /// from `<style module="classes">`.
     pub css_modules: Vec<CssModuleInfo>,
+    /// AST-driven set of identifier names referenced by the `<template>`.
+    ///
+    /// Built from the typed template IR (expression bindings ∪ v-for sources ∪
+    /// component tag names), never a raw-source scan. A setup binding present
+    /// here is "used in template" and keeps its value-read unwrap entry so it is
+    /// not falsely flagged unused; a binding absent here AND absent from the
+    /// script body / style `v-bind` is genuinely unused and emits a type-only
+    /// unwrap entry so TypeScript surfaces TS6133 at its source declaration.
+    ///
+    /// `None` when no template parse was available (parse errors, template-less
+    /// SFC) — in that case the lowering conservatively keeps every value read.
+    ///
+    /// Built from the `ide_completion = false` template-expression overlay (the
+    /// COMPLETE liveness overlay), NOT the `ide_completion = true` IDE/completion
+    /// overlay, which intentionally suppresses real references for completion and
+    /// would mis-report a genuinely-used binding as unused.
+    pub template_used_vars: Option<rustc_hash::FxHashSet<String>>,
 }
 
 /// CSS module information for IDE codegen.
@@ -492,6 +535,23 @@ pub fn sanitize_js_identifier(filename: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The API-carrier suffix must hold its documented shape: it carries the
+    /// reserved `.verter.` infix (the REDIRECT-reached cross-package target).
+    /// `verter_compiler` cannot depend on `verter_workspace`, so the literal
+    /// byte-equality with `verter_workspace::CARRIER_API_VIRTUAL_SUFFIX` is
+    /// guarded cross-crate by `virtual_file_naming_characterization` in
+    /// `verter_session`; this local test pins the shape so a drift here is
+    /// caught at the source crate too.
+    #[test]
+    fn carrier_api_suffix_matches_workspace_naming() {
+        assert_eq!(CARRIER_API_VIRTUAL_SUFFIX, ".verter.ts");
+        // The reserved `.verter.` infix marks the API surface — the
+        // redirect-reached cross-package target, never a bare-import probe
+        // target (a bare `./Comp.vue` resolves natively to the `.d.vue.ts`
+        // declaration carrier, which is bare-probed, not `.verter.`-infixed).
+        assert!(CARRIER_API_VIRTUAL_SUFFIX.contains(".verter."));
+    }
 
     #[test]
     fn sanitize_basic() {

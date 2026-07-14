@@ -170,6 +170,7 @@ pub(crate) mod fact_signature_helpers;
 pub use crate::fact_signature_helpers::ReadSetSignature;
 #[cfg(test)]
 mod error_propagation_lattice_tests;
+pub mod external_ts;
 pub mod file_artifact_store;
 mod hash;
 pub(crate) mod instant;
@@ -287,6 +288,8 @@ pub mod invalidation_domain;
 pub mod loop5_instrumentation;
 pub(crate) mod mapper_binder_registry;
 pub mod meta;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod runtime_render_lane_tests;
 
 pub mod meta_resolve;
 #[cfg(test)]
@@ -303,6 +306,8 @@ pub(crate) mod project_semantic_dispatch;
 pub mod project_type_store;
 #[cfg(test)]
 mod project_type_store_tests;
+#[cfg(test)]
+mod public_api_batch_fixed_view_tests;
 pub mod query_host_port;
 mod request_budget;
 pub mod request_context;
@@ -563,18 +568,11 @@ pub struct VerterHost {
     /// (scheduler pool). **Compiled out in production builds.**
     #[cfg(test)]
     pub(crate) compile_one_caller_kind_tag: std::sync::atomic::AtomicU8,
-    /// Test-only observable: records the host-CPU-pool identity token
-    /// observed on the worker that ran `compile_one_in_batch`. Encoding:
-    /// `usize::MAX` is the "unobserved / not on a host pool" sentinel
-    /// (so the field stays lock-free and avoids `AtomicOption`);
-    /// any other value is the worker's
-    /// `verter_scheduler::host_cpu_pool_token()` reading, expected to
-    /// equal `self.host_cpu_pool().pool_id()` on a properly host-owned
-    /// `compile_many`. A regressed per-call Rayon pool (no
-    /// `start_handler` installs the token) would report the sentinel
-    /// even though `CallerKind::current() == External`. Read by
-    /// `compile_many_workers_carry_host_cpu_pool_id`. **Compiled out
-    /// in production builds.**
+    /// Test-only host-CPU-pool identity token observed by
+    /// `compile_one_in_batch`. `usize::MAX` means unobserved/not on a
+    /// host pool; otherwise it must equal `host_cpu_pool().pool_id()`.
+    /// This distinguishes the owned pool from a per-call Rayon pool even
+    /// when both report `CallerKind::External`. Compiled out in production.
     #[cfg(test)]
     pub(crate) compile_one_host_cpu_pool_token: std::sync::atomic::AtomicUsize,
     /// Test-only seam fired inside an `IndexedReady` materialise flight
@@ -713,9 +711,9 @@ pub struct VerterHost {
     /// from the scheduler's own CPU pool — workers register as
     /// [`verter_scheduler::caller_kind::CallerKind::External`] so
     /// `wait_or_drive` parks instead of inline-executing scheduler CPU
-    /// tasks. Built once at host construction and reused across every
-    /// batch call (a regressed per-call rebuild would bump
-    /// [`verter_scheduler::HostCpuPool::build_count`] on every batch).
+    /// tasks. The pool is built once per host; its workers spawn eagerly
+    /// for the default/LSP policy and on first batch demand for
+    /// `batch_typecheck` ([`crate::types::HostResourcePolicy`]).
     ///
     /// Not present on `wasm32` — `compile_many` is gated behind
     /// `#[cfg(not(target_arch = "wasm32"))]` and the host-pool field
@@ -725,8 +723,10 @@ pub struct VerterHost {
     /// Scheduler-side lazy declaration-lowering service: dedicated
     /// worker threads own the retained (!Send) eval-program parses per
     /// content generation and run pure per-declaration lowering jobs
-    /// for the declaration-body memos. Built once at host construction;
-    /// shared by every `IndexedReady` artifact's memo. Retention is
+    /// for the declaration-body memos. One service is shared by every
+    /// `IndexedReady` memo; workers spawn eagerly for the default/LSP
+    /// policy and on first lowering demand for `batch_typecheck`
+    /// ([`crate::types::HostResourcePolicy`]). Retention is
     /// LEASE-PINNED — a memo holds the snapshot for its content
     /// generation, so a live artifact reuses one parse instead of
     /// re-parsing per body demand. On `wasm32` there are no worker

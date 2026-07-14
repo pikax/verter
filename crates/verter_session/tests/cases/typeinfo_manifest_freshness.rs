@@ -124,7 +124,7 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
     let output = Command::new(&node)
         .arg(&script)
         .arg("--check")
-        .current_dir(&root)
+        .current_dir(workspace_root())
         .output()
         .unwrap_or_else(|err| {
             panic!(

@@ -1254,7 +1254,9 @@ fn candidate_list_resolves_to_first_loaded() {
             compiler_options:
                 verter_semantic::analysis::project_resolver::IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: verter_semantic::analysis::project_resolver::ProjectMembership::MatchAll,
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/src"),
+            ),
         },
     ]);
     let source = "<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
@@ -3642,7 +3644,9 @@ fn upsert_syncs_relative_import_edges_to_workspace() {
         workspace_aliases: vec![],
         compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: verter_workspace::ProjectMembership::default(),
+        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            &verter_workspace::CanonicalPath::new("/src"),
+        ),
     });
 
     // Inject the dependency file so the resolver can find it
@@ -3740,7 +3744,9 @@ fn workspace_resolution_used_for_aliased_imports() {
             ..Default::default()
         },
         references: vec![],
-        membership: verter_workspace::ProjectMembership::default(),
+        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            &verter_workspace::CanonicalPath::new("/project"),
+        ),
     });
 
     // Inject the dependency file into the workspace so it can be resolved
@@ -4558,6 +4564,73 @@ fn public_api_testing_mode_is_byte_identical_through_projector_dispatch() {
 }
 
 #[test]
+fn public_api_declaration_mode_is_declaration_safe_through_projector_dispatch() {
+    // `PublicApiMode::Declaration` threads through `get_public_api_with_mode`
+    // -> the Vue api-projector leg -> `TscMode::Declaration`. The result is a
+    // strictly valid `.d.ts`: NO runtime/value code, an explicit
+    // `declare const … export default …`, and the SAME public props surface
+    // (`CapProps`) the Public mode computes.
+    let host = public_api_byte_pin_host();
+    let decl = host
+        .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Declaration, None)
+        .expect("declaration-mode api output")
+        .code
+        .to_string();
+
+    // NEGATIVE: no runtime / value tokens.
+    assert!(
+        !decl.contains("defineComponent("),
+        "declaration must not call defineComponent, got:\n{decl}"
+    );
+    assert!(
+        !decl.contains("const __comp"),
+        "declaration must not create the runtime __comp const, got:\n{decl}"
+    );
+    assert!(
+        !decl.contains("typeof __comp"),
+        "declaration must not reference typeof a runtime value, got:\n{decl}"
+    );
+    assert!(
+        !decl.contains("import { defineComponent }"),
+        "declaration must not value-import defineComponent, got:\n{decl}"
+    );
+    // POSITIVE: it is a declaration carrying the public props surface.
+    assert!(
+        decl.contains("declare const Cap"),
+        "declaration declares the component value, got:\n{decl}"
+    );
+    assert!(
+        decl.contains("export default Cap"),
+        "declaration default-exports the component, got:\n{decl}"
+    );
+    assert!(
+        decl.contains("CapProps"),
+        "declaration preserves the imported props type reference, got:\n{decl}"
+    );
+    // The type-only import survives; it is declaration-legal.
+    assert!(
+        decl.contains("import type { CapProps } from './cap-types'"),
+        "declaration keeps the type-only import, got:\n{decl}"
+    );
+
+    // DISCRIMINATING: the Public mode (control) DOES carry the runtime const,
+    // and the two outputs differ.
+    let public = host
+        .get_public_api_with_mode("/src/Cap.vue", PublicApiMode::Public, None)
+        .expect("public-mode api output")
+        .code
+        .to_string();
+    assert!(
+        public.contains("const __comp = defineComponent"),
+        "Public mode emits the runtime __comp (control), got:\n{public}"
+    );
+    assert_ne!(
+        public, decl,
+        "Declaration output must differ from Public output"
+    );
+}
+
+#[test]
 fn public_api_non_vue_canonical_returns_none_through_projector_dispatch() {
     // A non-Vue canonical has no api-projector leg (its language has no
     // framework adapter id), so dispatch returns None — exactly the
@@ -4698,6 +4771,10 @@ fn vue_api_projector_rejects_a_non_carrier_vue_language() {
         file_language: &carrier,
         mode: PublicApiMode::Public,
         profile: None,
+        // This SFC's `defineProps<{ a: string }>()` is an inline literal (no
+        // macro-type deps), so the legacy body never reaches the seed-bearing
+        // macro-deps branch — `None` is sufficient for this carrier-gate test.
+        render_seed: None,
     });
     assert!(
         via_carrier.is_some(),
@@ -4717,6 +4794,9 @@ fn vue_api_projector_rejects_a_non_carrier_vue_language() {
         file_language: &vue_non_carrier,
         mode: PublicApiMode::Public,
         profile: None,
+        // Rejected by the carrier-narrowness gate BEFORE the legacy body, so
+        // the seed is never consulted.
+        render_seed: None,
     });
     assert!(
         rejected.is_none(),
@@ -4746,14 +4826,22 @@ fn render_legacy_body_operates_on_the_resolved_canonical_without_re_resolving() 
         })
         .unwrap();
 
+    // This SFC's `defineProps<{ a: string }>()` is an inline literal (no
+    // macro-type deps), so the legacy body never reaches the seed-bearing
+    // macro-deps branch — `None` for the render seed is sufficient here.
     assert!(
-        host.render_vue_public_api_legacy("/src/Coherent.vue", PublicApiMode::Public, None)
+        host.render_vue_public_api_legacy("/src/Coherent.vue", PublicApiMode::Public, None, None)
             .is_some(),
         "the legacy body must render the resolved canonical it is given"
     );
     assert!(
-        host.render_vue_public_api_legacy("/virtual/coherent-handle", PublicApiMode::Public, None)
-            .is_none(),
+        host.render_vue_public_api_legacy(
+            "/virtual/coherent-handle",
+            PublicApiMode::Public,
+            None,
+            None
+        )
+        .is_none(),
         "the legacy body must NOT resolve an alias itself — the host resolves once up-front"
     );
 

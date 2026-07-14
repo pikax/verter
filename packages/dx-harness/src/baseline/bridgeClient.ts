@@ -28,6 +28,18 @@ export type ProviderName = "tsgo" | "tsserver";
 export type FileRole = "entry" | "api" | "support";
 export type QueryMethod = "completion" | "hover" | "definition" | "typeDefinition" | "references";
 
+/**
+ * Provider-pure completion resolve handle — mirrors
+ * `verter_type_runtime::protocol::CompletionResolveData` (`#[serde(tag = "kind",
+ * rename_all = "snake_case")]`). Carried on a completion item as `resolveData`
+ * and sent back via `resolveCompletion` to recover the auto-import edits. The
+ * exact wire shape is pinned Rust-side and asserted against this mirror by the
+ * dx-harness serde fixture test.
+ */
+export type CompletionResolveData =
+  | { kind: "lsp"; label: string; data: unknown }
+  | { kind: "tsserver_entry"; name: string; source?: string; data?: unknown; offset: number };
+
 /** The pinned TypeScript tool root passed in `hello` (`ToolRoot`). */
 export interface ToolRootWire {
   tsserverTsdk?: string;
@@ -81,6 +93,13 @@ export interface QueryRequest {
   triggerCharacter?: string;
   requiresSourceMap?: boolean;
 }
+export interface ResolveCompletionRequest {
+  type: "resolveCompletion";
+  uri: string;
+  path: string;
+  version: number;
+  data: CompletionResolveData;
+}
 export interface DiagnosticsRequest {
   type: "diagnostics";
   uri: string;
@@ -97,6 +116,7 @@ export type BridgeRequest =
   | OpenRequest
   | SyncArtifactsRequest
   | QueryRequest
+  | ResolveCompletionRequest
   | DiagnosticsRequest
   | ShutdownRequest;
 
@@ -149,6 +169,13 @@ export interface NormalizedCompletionItem {
   detail?: string;
   insertText?: string;
   sortText?: string;
+  /** The provider-pure resolve handle, present on items that carry one. */
+  resolveData?: CompletionResolveData;
+}
+export interface NormalizedResolvedTextEdit {
+  start: number;
+  end: number;
+  newText: string;
 }
 export type QueryResult =
   | { kind: "hover"; hover: NormalizedHover | null }
@@ -162,12 +189,33 @@ export interface QueryResponse {
   result: QueryResult;
   capabilities: ProviderCapabilities;
 }
+export interface ResolveCompletionResponse {
+  type: "resolveCompletion";
+  uri: string;
+  version: number;
+  additionalTextEdits: NormalizedResolvedTextEdit[];
+  detail?: string;
+  documentation?: string;
+  capabilities: ProviderCapabilities;
+}
+/**
+ * Provider-neutral editor diagnostic tag on the baseline wire — the Rust
+ * `NormalizedDiagnosticTag` mirror. `"unnecessary"` fades unused code,
+ * `"deprecated"` renders a strikethrough.
+ */
+export type NormalizedDiagnosticTag = "unnecessary" | "deprecated";
 export interface NormalizedDiagnostic {
   message: string;
   severity: string;
   start: number;
   end: number;
   code?: string;
+  /**
+   * Editor-facing tags (gray-out / strikethrough). The Rust bridge always emits
+   * this array (empty when untagged); optional here so in-test fixtures need not
+   * spell an empty array, but a real bridge frame always carries it.
+   */
+  tags?: NormalizedDiagnosticTag[];
 }
 export interface DiagnosticsResponse {
   type: "diagnostics";
@@ -202,6 +250,7 @@ export type BridgeResponse =
   | OpenResponse
   | SyncArtifactsResponse
   | QueryResponse
+  | ResolveCompletionResponse
   | DiagnosticsResponse
   | ShutdownResponse
   | ErrorResponse;
@@ -266,6 +315,19 @@ export function queryFrame(input: QueryInput): QueryRequest {
   if (input.triggerCharacter !== undefined) frame.triggerCharacter = input.triggerCharacter;
   if (input.requiresSourceMap) frame.requiresSourceMap = true;
   return frame;
+}
+
+/** Inputs to {@link resolveCompletionFrame}. */
+export interface ResolveCompletionInput {
+  uri: string;
+  path: string;
+  version: number;
+  data: CompletionResolveData;
+}
+
+/** Build a `resolveCompletion` request. */
+export function resolveCompletionFrame(input: ResolveCompletionInput): ResolveCompletionRequest {
+  return { type: "resolveCompletion", ...input };
 }
 
 /** Inputs to {@link diagnosticsFrame}. */
@@ -466,6 +528,13 @@ export class BridgeClient {
   }
   query(input: QueryInput): Promise<QueryResponse | ErrorResponse> {
     return this.send(queryFrame(input)) as Promise<QueryResponse | ErrorResponse>;
+  }
+  resolveCompletion(
+    input: ResolveCompletionInput,
+  ): Promise<ResolveCompletionResponse | ErrorResponse> {
+    return this.send(resolveCompletionFrame(input)) as Promise<
+      ResolveCompletionResponse | ErrorResponse
+    >;
   }
   diagnostics(input: DiagnosticsInput): Promise<DiagnosticsResponse | ErrorResponse> {
     return this.send(diagnosticsFrame(input)) as Promise<DiagnosticsResponse | ErrorResponse>;

@@ -1840,7 +1840,9 @@ fn workspace_classification_helpers_use_typed_accessor_not_substring() {
             workspace_aliases: vec![],
             compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: verter_workspace::ProjectMembership::MatchAll,
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/workspace/node_modules/@me/inner-pkg"),
+            ),
         }]);
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),

@@ -96,8 +96,8 @@ use type_constructs::{
 use wrapper::{
     collect_global_component_fallbacks, directive_accessor_declaration,
     emit_global_component_fallbacks, emit_minimal_wrapper, instance_declaration,
-    instance_declaration_ambient, instance_probe_line, should_infer_function_types, to_pascal_case,
-    PREFIX,
+    instance_declaration_ambient, instance_probe_line, public_facade_reexport,
+    should_infer_function_types, to_pascal_case, PREFIX,
 };
 
 pub use type_constructs::{VERTER_TYPES_AMBIENT_MODULE, VERTER_TYPES_STANDALONE_DTS};
@@ -209,6 +209,31 @@ pub fn generate_ide_script<'alloc>(
 
     // Apply accumulated operations
     out.apply_to(ct);
+
+    // Emit the component's PUBLIC-FACADE re-export as a top-level statement on
+    // the IDE carrier. A consumer importing the component must see its PUBLIC
+    // `export default`, so the IDE carrier re-exports the public default from the
+    // API carrier (`.verter.ts`, where the public default is synthesised). A bare
+    // in-project `import Comp from "./Comp.vue"` resolves natively to the
+    // `.d.vue.ts` declaration carrier (the IDE carrier itself is the
+    // self-diagnostics surface).
+    //
+    // EXCEPTION — the Options-API script-only arm `(Some(script), None)` already
+    // emits its OWN public `export default __sfc__` (the `defineComponent`-shape
+    // component value), so it is already public-clean; appending a second
+    // `export default` re-export there would be a DUPLICATE default export
+    // (invalid TS/JS). Only the `<script setup>` arm and the no-script arm lack
+    // an own default (the setup path REMOVES any companion `export default`), so
+    // the facade re-export is needed exactly there.
+    //
+    // The facade is ADDITIVE — every template internal stays local
+    // (non-exported). Emitted through `CodeTransform::append` (output-only,
+    // unmapped) so the facade does not perturb any mapped source span, keeping
+    // CodeTransform the single source of truth for the carrier text.
+    let emits_own_public_default = matches!((script, script_setup), (Some(_), None));
+    if !emits_own_public_default {
+        ct.append(&public_facade_reexport(options.filename));
+    }
 
     // Compute the correct insertion position for return_close.
     // Must be after BOTH the template and all script blocks in the source.

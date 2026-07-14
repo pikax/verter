@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verterjs.dev/schemas/replacement-deviations.v1.json",
+  "title": "Verter replacement-validation deviation ledger",
+  "description": "The machine-readable source of truth for deviations found running real projects through Verter against reference tooling. Entries are HERMETIC: no project name, path, source byte, or verbatim diagnostic — only opaque ids, generic repro fixtures, and message shapes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "entries"],
+  "properties": {
+    "schema": {
+      "const": "verter.replacement-deviations.v1"
+    },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "workstream",
+        "class",
+        "genericReproFixture",
+        "status",
+        "disposition"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "A stable ledger id (opaque; never a project name).",
+          "minLength": 1
+        },
+        "workstream": {
+          "enum": ["ide", "tsc", "build"]
+        },
+        "class": {
+          "enum": [
+            "VERTER_BUG",
+            "REFERENCE_WRONG",
+            "HARNESS_OR_ORACLE_GAP",
+            "INTENTIONAL_DEVIATION",
+            "UNDECIDED"
+          ]
+        },
+        "genericReproFixture": {
+          "type": "string",
+          "description": "Path/identifier of the generic, vendored, hermetic repro fixture. REQUIRED before any landing.",
+          "minLength": 1
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The reference tool + version the deviation was found against (e.g. 'vue-tsc 3.2.x')."
+        },
+        "oracleRuling": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The oracle's ruling summary."
+        },
+        "ownerCrate": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The lowest reusable owner crate a VERTER_BUG / HARNESS_OR_ORACLE_GAP fix lands in."
+        },
+        "regressionTest": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The discriminating regression/locking test that pins the intended behavior."
+        },
+        "disposition": {
+          "type": "string",
+          "description": "open | fixed | documented | deferred | blocked.",
+          "enum": ["open", "fixed", "documented", "deferred", "blocked"]
+        },
+        "status": {
+          "type": "string",
+          "description": "draft | final. A final/approved ruling has passed review.",
+          "enum": ["draft", "final"]
+        },
+        "subtype": {
+          "enum": ["HARNESS_BUG", "ORACLE_GAP"],
+          "description": "REQUIRED when class == HARNESS_OR_ORACLE_GAP."
+        },
+        "independentRepro": {
+          "type": "string",
+          "minLength": 1,
+          "description": "An independent reproduction (not Verter's own projection). REQUIRED for every non-VERTER_BUG affirmative ruling."
+        },
+        "sourceOfTruth": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A named spec / Vue runtime behavior / TS behavior / codex ruling — never 'because Verter says so'. REQUIRED for non-VERTER_BUG."
+        },
+        "reviewerApproval": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Explicit reviewer approval. REQUIRED for non-VERTER_BUG."
+        },
+        "lockingAssertion": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A regression assertion that LOCKS the intended behavior so it cannot silently drift. REQUIRED for non-VERTER_BUG."
+        },
+        "undecidedReason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why the deviation is not yet ruled. REQUIRED when class == UNDECIDED."
+        },
+        "nextAction": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The concrete next step to resolve an UNDECIDED. REQUIRED when class == UNDECIDED."
+        }
+      },
+      "allOf": [
+        {
+          "$comment": "HARNESS_OR_ORACLE_GAP requires a subtype.",
+          "if": {
+            "properties": { "class": { "const": "HARNESS_OR_ORACLE_GAP" } },
+            "required": ["class"]
+          },
+          "then": { "required": ["subtype"] }
+        },
+        {
+          "$comment": "Every affirmative non-VERTER_BUG ruling requires the four anti-misclassification fields.",
+          "if": {
+            "properties": {
+              "class": {
+                "enum": [
+                  "REFERENCE_WRONG",
+                  "INTENTIONAL_DEVIATION",
+                  "HARNESS_OR_ORACLE_GAP"
+                ]
+              }
+            },
+            "required": ["class"]
+          },
+          "then": {
+            "required": [
+              "independentRepro",
+              "sourceOfTruth",
+              "reviewerApproval",
+              "lockingAssertion"
+            ]
+          }
+        },
+        {
+          "$comment": "UNDECIDED requires a reason + next action, and must NOT be final/approved.",
+          "if": {
+            "properties": { "class": { "const": "UNDECIDED" } },
+            "required": ["class"]
+          },
+          "then": {
+            "required": ["undecidedReason", "nextAction"],
+            "properties": {
+              "status": { "const": "draft" },
+              "disposition": { "enum": ["open", "deferred", "blocked"] }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

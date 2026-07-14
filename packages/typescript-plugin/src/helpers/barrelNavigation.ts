@@ -1,5 +1,5 @@
 import type tsModule from "typescript/lib/tsserverlibrary";
-import { isVue } from "./utils";
+import { isVue } from "@verter/language-shared";
 
 export interface AliasedDefinitionInfo {
   fileName: string;

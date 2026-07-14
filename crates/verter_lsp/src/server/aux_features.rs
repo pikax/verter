@@ -30,9 +30,10 @@ use crate::features::formatting::format_document;
 use crate::features::linked_editing::linked_editing_ranges;
 use crate::features::organize_imports::organize_imports_actions;
 use crate::features::workspace_symbol::workspace_symbols;
-use crate::tsgo::merge;
+use crate::type_provider::merge;
+use crate::type_provider::protocol::ProviderDiagnosticContext;
 
-use super::handler_guard::HandlerGuard;
+use super::handler_guard::{block_in_place_if_available, HandlerGuard};
 use super::server_utils::*;
 use super::VerterLanguageServer;
 
@@ -192,9 +193,16 @@ pub(super) async fn handle_document_highlight(
 
     // Virtual file: route directly through TSGO
     if let Some(tp) = &server.type_provider {
-        if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
+        if let Some(vf_ctx) = server.virtual_file_context(uri) {
+            let tsx_path = vf_ctx.tsx_path.clone();
+            let vf_li = vf_ctx.line_index.clone();
             if let Some(offset) = vf_li.position_to_offset(position) {
                 if let Ok(type_highlights) = tp.get_document_highlights(&tsx_path, offset).await {
+                    // Post-await validation (fail closed): highlights produced
+                    // against a superseded surface must be dropped.
+                    if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
+                        return Ok(None);
+                    }
                     let highlights: Vec<DocumentHighlight> = type_highlights
                         .into_iter()
                         .filter_map(|h| {
@@ -204,10 +212,10 @@ pub(super) async fn handle_document_highlight(
                                     end: vf_li.offset_to_position(h.end)?,
                                 },
                                 kind: Some(match h.kind {
-                                    crate::tsgo::protocol::TypeDocumentHighlightKind::Read => {
+                                    crate::type_provider::protocol::TypeDocumentHighlightKind::Read => {
                                         DocumentHighlightKind::READ
                                     }
-                                    crate::tsgo::protocol::TypeDocumentHighlightKind::Write => {
+                                    crate::type_provider::protocol::TypeDocumentHighlightKind::Write => {
                                         DocumentHighlightKind::WRITE
                                     }
                                     _ => DocumentHighlightKind::TEXT,
@@ -239,28 +247,36 @@ pub(super) async fn handle_document_highlight(
         )
     })();
 
-    // Enhance with TypeProvider if available
+    // Enhance with TypeProvider if available. The context is built from ONE
+    // captured immutable provider surface (path, content, mapper, indexes).
     if let Some(tp) = &server.type_provider {
-        if let Some((tsx_path, tsx_content, mapper)) = server.ide_context(uri) {
-            let tsx_li = LineIndex::new(&tsx_content, server.documents.encoding());
-            if let Some(doc) = server.documents.get(uri) {
-                if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
-                    position,
-                    &doc.line_index,
-                    &mapper,
-                    &tsx_li,
-                ) {
-                    if let Ok(type_highlights) =
-                        tp.get_document_highlights(&tsx_path, tsx_offset).await
-                    {
-                        return Ok(merge::merge_document_highlights(
-                            verter_result,
-                            type_highlights,
-                            &tsx_li,
-                            &mapper,
-                            &doc.line_index,
-                        ));
+        if let Some(ctx) = server.type_provider_context(uri) {
+            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
+                position,
+                &ctx.carrier_line_index,
+                &ctx.mapper,
+                &ctx.tsx_line_index,
+            ) {
+                if let Ok(type_highlights) =
+                    tp.get_document_highlights(&ctx.tsx_path, tsx_offset).await
+                {
+                    // Post-await validation: highlights produced against a
+                    // surface that no longer matches must be DROPPED (fail
+                    // closed), never mapped through a superseded context.
+                    if !server.provider_context_still_valid(uri, &ctx) {
+                        tracing::debug!(
+                            "document_highlight: dropping provider highlights — captured \
+                             surface no longer valid"
+                        );
+                        return Ok(verter_result);
                     }
+                    return Ok(merge::merge_document_highlights(
+                        verter_result,
+                        type_highlights,
+                        &ctx.tsx_line_index,
+                        &ctx.mapper,
+                        &ctx.carrier_line_index,
+                    ));
                 }
             }
         }
@@ -279,9 +295,14 @@ pub(super) async fn handle_signature_help(
 
     // Virtual file: route directly through TSGO
     if let Some(tp) = &server.type_provider {
-        if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
-            if let Some(offset) = vf_li.position_to_offset(position) {
-                if let Ok(type_sig) = tp.get_signature_help(&tsx_path, offset).await {
+        if let Some(vf_ctx) = server.virtual_file_context(uri) {
+            if let Some(offset) = vf_ctx.line_index.position_to_offset(position) {
+                if let Ok(type_sig) = tp.get_signature_help(&vf_ctx.tsx_path, offset).await {
+                    // Post-await validation (fail closed): signature help
+                    // produced against a superseded surface must be dropped.
+                    if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
+                        return Ok(None);
+                    }
                     return Ok(merge::merge_signature_help(type_sig));
                 }
             }
@@ -299,6 +320,15 @@ pub(super) async fn handle_signature_help(
                 &ctx.tsx_line_index,
             ) {
                 if let Ok(type_sig) = tp.get_signature_help(&ctx.tsx_path, tsx_offset).await {
+                    // Post-await validation: signature help produced against a
+                    // surface that no longer matches must be DROPPED (fail closed).
+                    if !server.provider_context_still_valid(uri, &ctx) {
+                        tracing::debug!(
+                            "signature_help: dropping provider signature — captured surface \
+                             no longer valid"
+                        );
+                        return Ok(None);
+                    }
                     return Ok(merge::merge_signature_help(type_sig));
                 }
             }
@@ -439,9 +469,19 @@ pub(super) async fn handle_code_action(
     // prelude) and CORRUPT the module. Code actions stay DEFERRED for the
     // self-file projection — a clean no-op, never a wrong/unmapped edit.
     // (Carrier code actions unchanged.)
+    // The provider's `get_code_actions` issues `getCodeFixes` only — it returns
+    // QUICKFIX-kind actions (e.g. the TS6133 remove-unused-declaration fix and its
+    // delete-all-unused companion), never refactors and never source actions. So
+    // gating it on a non-`quickfix` kind would return quickfixes the client
+    // explicitly did NOT ask for (an LSP `context.only` violation). Gate on
+    // `quickfix` / `None` only; the implicit `None` (all-kinds) case still fires
+    // because `wants_code_action_kind(None, _)` is true. The `source.removeUnused`
+    // SOURCE action (fixAll-on-save / "Source Action…" removing all unused without a
+    // cursor-on-diagnostic) is a separate surface DEFERRED to the `source.*` backlog
+    // — it is intentionally NOT wired into this gate.
     if !server.is_self_file_projection(uri)
         && !server.is_typing_cooldown()
-        && (wants_code_action_kind(only, "quickfix") || wants_code_action_kind(only, "refactor"))
+        && wants_code_action_kind(only, "quickfix")
     {
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
@@ -457,16 +497,92 @@ pub(super) async fn handle_code_action(
                     &ctx.mapper,
                     &ctx.tsx_line_index,
                 );
+                // Resolve the editor's diagnostics (codes + ranges) into the
+                // provider-facing context: parse each `code` to an integer and map
+                // each range to TSX byte offsets, fail-closed (an unparseable code
+                // or an unmappable range drops that diagnostic). The provider feeds
+                // these into `getCodeFixes` / `context.diagnostics`.
+                let diag_ctx = build_provider_diagnostic_contexts(
+                    &params.context.diagnostics,
+                    &ctx.carrier_line_index,
+                    &ctx.mapper,
+                    &ctx.tsx_line_index,
+                );
                 if let (Some(so), Some(eo)) = (start_offset, end_offset) {
-                    if let Ok(type_actions) = tp.get_code_actions(&ctx.tsx_path, so, eo).await {
+                    // Pin the FOREIGN carrier IDE surfaces BEFORE the query, so
+                    // a returned foreign-file edit maps through the generation
+                    // this request began against.
+                    let foreign_ide_set = server.capture_foreign_carrier_ide_set();
+                    if let Ok(type_actions) =
+                        tp.get_code_actions(&ctx.tsx_path, so, eo, &diag_ctx).await
+                    {
+                        // Post-await validation (STRICT for code actions: a corrupt
+                        // edit is worse than no edit): on a superseded surface drop
+                        // the WHOLE provider action set — only Verter-native actions
+                        // already in `all_actions` are served.
+                        if !server.provider_context_still_valid(uri, &ctx) {
+                            tracing::warn!(
+                                "code_action: dropping provider actions — captured surface \
+                                 no longer valid"
+                            );
+                            return Ok(if all_actions.is_empty() {
+                                None
+                            } else {
+                                Some(all_actions)
+                            });
+                        }
                         let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
+                        let negotiated_encoding = server.position_encoding.read().clone();
+                        // For the add-import prelude re-anchor: a provider `addMissingImport`
+                        // quickfix inserts a brand-new import at the synthetic TSX helper-preamble,
+                        // which the strict mapper drops; the carrier-NEUTRAL `merge_code_actions`
+                        // re-anchors that CURRENT-file insertion at a PRECOMPUTED import anchor. The
+                        // anchor itself is resolved HERE through the carrier-keyed, USE-SITE-AWARE
+                        // `resolve_carrier_preamble_import_anchor` (Vue SFC carrier WITH an existing
+                        // `<script setup>`, unambiguous mixed-script) from the carrier source and the
+                        // SFC-absolute top-level import spans (exactly the completion-resolve inputs).
+                        // `None` when the carrier document is not open, or the carrier is not a Vue
+                        // SFC, or it lacks `<script setup>`, or it is ambiguous mixed-script — then a
+                        // preamble insertion has no anchor and stays dropped (fail-closed).
+                        let carrier_source: String = server
+                            .documents
+                            .get(uri)
+                            .map(|doc| doc.source.to_string())
+                            .unwrap_or_default();
+                        let user_import_spans: Vec<(u32, u32)> = server
+                            .documents
+                            .get_analysis(uri)
+                            .map(|a| {
+                                a.imports
+                                    .iter()
+                                    .map(|imp| (imp.span.start, imp.span.end))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let preamble_reanchor =
+                            crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+                                &ctx.tsx_path,
+                                &carrier_source,
+                                &user_import_spans,
+                            );
                         let actions = merge::merge_code_actions(
                             type_actions,
+                            &ctx.tsx_path,
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.carrier_line_index,
+                            Some(&|ide_path: &str| {
+                                server.foreign_ide_context(&foreign_ide_set, ide_path)
+                            }),
                             &carrier_source_exists,
+                            negotiated_encoding,
+                            &|p: &str| {
+                                block_in_place_if_available(|| {
+                                    server.documents.host().workspace_read().read_file(p)
+                                })
+                            },
+                            preamble_reanchor.as_ref(),
                         );
                         all_actions.extend(actions);
                     }
@@ -480,6 +596,101 @@ pub(super) async fn handle_code_action(
     } else {
         Some(all_actions)
     })
+}
+
+/// Parse an LSP diagnostic `code` into the integer TypeScript error code the
+/// provider code-fix path keys on.
+///
+/// - `Number(n)` → included when it fits `u32`.
+/// - `String(s)` → parsed as a decimal `u32` (Verter publishes TS codes as
+///   strings, e.g. `"6133"`).
+/// - a non-numeric string or a missing code → `None` (skipped, fail-closed).
+fn parse_diagnostic_code(code: Option<&NumberOrString>) -> Option<u32> {
+    match code? {
+        NumberOrString::Number(n) => u32::try_from(*n).ok(),
+        NumberOrString::String(s) => s.parse::<u32>().ok(),
+    }
+}
+
+/// Resolve the editor's `params.context.diagnostics` into the provider-facing
+/// [`ProviderDiagnosticContext`] list: parse each `code` to an integer and map
+/// each range to TSX byte offsets in the queried generated file.
+///
+/// Fail-closed: a diagnostic whose code is non-numeric, or whose range does not
+/// map cleanly into the TSX, is dropped rather than forwarded with a guessed code
+/// or an off-by-prelude range.
+fn build_provider_diagnostic_contexts(
+    diagnostics: &[Diagnostic],
+    carrier_line_index: &LineIndex,
+    mapper: &crate::documents::provider_projection::ProviderPositionMapper,
+    tsx_line_index: &LineIndex,
+) -> Vec<ProviderDiagnosticContext> {
+    diagnostics
+        .iter()
+        .filter_map(|diag| {
+            let code = parse_diagnostic_code(diag.code.as_ref())?;
+            let start = merge::carrier_position_to_tsx_offset_validated(
+                &diag.range.start,
+                carrier_line_index,
+                mapper,
+                tsx_line_index,
+            )?;
+            let end = merge::carrier_position_to_tsx_offset_validated(
+                &diag.range.end,
+                carrier_line_index,
+                mapper,
+                tsx_line_index,
+            )?;
+            Some(ProviderDiagnosticContext { code, start, end })
+        })
+        .collect()
+}
+
+/// Test-only RAW provider code-action probe: resolves the carrier→TSX provider context exactly as
+/// [`handle_code_action`] does, then calls the provider's `get_code_actions` (`getCodeFixes`) and
+/// returns its UNMERGED output — the generated-TSX-keyed [`TypeCodeAction`]s, before
+/// [`merge::merge_code_actions`]. The add-import-landing canary uses this to distinguish "the
+/// provider returned NO add-import" (a harness limitation — canary stays green) from "the provider
+/// DID return one but the merge dropped/mis-placed it" (a real regression — the canary must fail).
+/// Returns an empty vec when the provider is absent, the context cannot be resolved, or the range
+/// offsets cannot be mapped (fail-closed, same as the production handler's drops).
+#[cfg(test)]
+pub(super) async fn raw_provider_code_actions(
+    server: &VerterLanguageServer,
+    uri: &Uri,
+    range: Range,
+    diagnostics: &[Diagnostic],
+) -> Vec<crate::type_provider::protocol::TypeCodeAction> {
+    let Some(tp) = &server.type_provider else {
+        return Vec::new();
+    };
+    let Some(ctx) = server.type_provider_context(uri) else {
+        return Vec::new();
+    };
+    let start_offset = merge::carrier_position_to_tsx_offset_validated(
+        &range.start,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    );
+    let end_offset = merge::carrier_position_to_tsx_offset_validated(
+        &range.end,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    );
+    let (Some(so), Some(eo)) = (start_offset, end_offset) else {
+        return Vec::new();
+    };
+    let diag_ctx = build_provider_diagnostic_contexts(
+        diagnostics,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    );
+    tp.get_code_actions(&ctx.tsx_path, so, eo, &diag_ctx)
+        .await
+        .unwrap_or_default()
 }
 
 /// Audit-aware wrapper for [`handle_code_action`].
@@ -521,6 +732,16 @@ pub(super) async fn handle_semantic_tokens_full(
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
                 if let Ok(type_tokens) = tp.get_semantic_tokens(&ctx.tsx_path).await {
+                    // Post-await validation: tokens produced against a surface
+                    // that no longer matches must be DROPPED (fail closed) — VS
+                    // Code re-requests after the next sync lands.
+                    if !server.provider_context_still_valid(uri, &ctx) {
+                        tracing::debug!(
+                            "semantic_tokens: dropping provider tokens — captured surface \
+                             no longer valid"
+                        );
+                        return Ok(None);
+                    }
                     let tokens = merge::merge_semantic_tokens(
                         type_tokens,
                         &ctx.tsx_line_index,
@@ -609,20 +830,27 @@ pub(super) async fn handle_inlay_hint(
     // Virtual file: route directly through type provider (positions already in TSX coordinates)
     if !typing && inlay_enabled {
         if let Some(tp) = &server.type_provider {
-            if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
+            if let Some(vf_ctx) = server.virtual_file_context(uri) {
+                let tsx_path = vf_ctx.tsx_path.clone();
+                let vf_li = vf_ctx.line_index.clone();
                 let start = vf_li.position_to_offset(&range.start);
                 let end = vf_li.position_to_offset(&range.end);
                 if let (Some(so), Some(eo)) = (start, end) {
                     if let Ok(type_hints) = tp.get_inlay_hints(&tsx_path, so, eo).await {
+                        // Post-await validation (fail closed): hints produced
+                        // against a superseded surface must be dropped.
+                        if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
+                            return Ok(None);
+                        }
                         let hints: Vec<InlayHint> = type_hints
                             .into_iter()
                             .filter_map(|h| {
                                 let pos = vf_li.offset_to_position(h.position)?;
                                 let kind = h.kind.map(|k| match k {
-                                    crate::tsgo::protocol::InlayHintKind::Type => {
+                                    crate::type_provider::protocol::InlayHintKind::Type => {
                                         InlayHintKind::TYPE
                                     }
-                                    crate::tsgo::protocol::InlayHintKind::Parameter => {
+                                    crate::type_provider::protocol::InlayHintKind::Parameter => {
                                         InlayHintKind::PARAMETER
                                     }
                                 });
@@ -692,7 +920,10 @@ pub(super) async fn handle_inlay_hint(
                 .or_else(|| Some(ctx.tsx_line_index.source_len()));
                 if let (Some(so), Some(eo)) = (start_offset, end_offset) {
                     match tp.get_inlay_hints(&ctx.tsx_path, so, eo).await {
-                        Ok(type_hints) => {
+                        // Post-await validation as a match guard: hints produced
+                        // against a superseded surface are DROPPED (fail closed) —
+                        // the `Ok(_)` arm below logs the drop.
+                        Ok(type_hints) if server.provider_context_still_valid(uri, &ctx) => {
                             tracing::debug!(
                                 "inlay_hint: type provider returned {} hints for {}",
                                 type_hints.len(),
@@ -709,6 +940,12 @@ pub(super) async fn handle_inlay_hint(
                                 tsgo_hints.len()
                             );
                             hints.append(&mut tsgo_hints);
+                        }
+                        Ok(_) => {
+                            tracing::debug!(
+                                "inlay_hint: dropping provider hints — captured surface \
+                                 no longer valid"
+                            );
                         }
                         Err(e) => {
                             tracing::debug!(
@@ -859,6 +1096,35 @@ pub(super) async fn handle_formatting(
     Ok(edits)
 }
 
+/// Resolve the markup [`CarrierKind`](crate::features::auto_close_tag::CarrierKind)
+/// for an on-type-formatting document, or `None` when the document is NOT a Vue
+/// or Svelte carrier (a plain script, a virtual file, an unsupported carrier, …).
+///
+/// The editor `language_id` is authoritative for a framework carrier (an
+/// in-memory carrier document may not carry a `.vue` / `.svelte` path), so it is
+/// consulted first via the registry; any other document classifies by canonical
+/// path through the host's static classifier — the same resolution
+/// `DocumentRegistry::document_file_language` performs. The resolved
+/// `FileLanguage` is mapped to a `CarrierKind` by the shared, fail-closed
+/// [`carrier_kind_for_language`] descriptor-identity classifier; only the
+/// built-in Vue / Svelte CARRIER rows map to a `CarrierKind`, and everything
+/// else (non-carrier, or a future carrier without its own arm) returns `None`
+/// and the on-type handler emits no edit.
+fn carrier_kind_for_on_type(
+    language_id: &str,
+    canonical_id: &str,
+) -> Option<crate::features::auto_close_tag::CarrierKind> {
+    use crate::features::auto_close_tag::carrier_kind_for_language;
+    let language = verter_session::LanguageRegistry::global()
+        .carrier_for_editor_language_id(language_id)
+        .unwrap_or_else(|| {
+            verter_session::LanguageRegistry::global()
+                .classify_static(canonical_id)
+                .static_resolution()
+        });
+    carrier_kind_for_language(&language)
+}
+
 pub(super) async fn handle_on_type_formatting(
     server: &VerterLanguageServer,
     params: DocumentOnTypeFormattingParams,
@@ -869,8 +1135,23 @@ pub(super) async fn handle_on_type_formatting(
 
     let edits = (|| {
         let doc = server.documents.get(uri)?;
+
+        // Proactive tag auto-close is a MARKUP feature. It must fire only for a
+        // framework CARRIER document (Vue / Svelte) and only inside that
+        // carrier's template/markup region — never in a plain `.ts` / `.js`
+        // document (where `formatOnType` may be globally enabled and a `>` is a
+        // TS-generic close, not a tag), and never inside the carrier's
+        // `<script>` / `<style>` blocks. The carrier kind is resolved from the
+        // document's authoritative editor `language_id`; the region gate lives
+        // in `auto_close_tag_in_carrier`.
+        let carrier = carrier_kind_for_on_type(&doc.language_id, &doc.canonical_id)?;
+
         let offset = doc.line_index.position_to_offset(position)? as usize;
-        let snippet = crate::features::auto_close_tag::auto_close_tag(&doc.source, offset)?;
+        let snippet = crate::features::auto_close_tag::auto_close_tag_in_carrier(
+            &doc.source,
+            offset,
+            carrier,
+        )?;
 
         // Insert the closing tag text right at the cursor position (after the `>`)
         // The `$0` cursor marker is for snippet-capable clients; for the TextEdit
@@ -969,5 +1250,248 @@ pub(super) async fn handle_outgoing_calls(
     match calls {
         Some(v) if !v.is_empty() => Ok(Some(v)),
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod on_type_gate_tests {
+    use super::carrier_kind_for_on_type;
+    use crate::features::auto_close_tag::CarrierKind;
+
+    /// BLOCKER 1: the on-type auto-close gate must resolve a carrier ONLY for a
+    /// framework carrier document. A plain `.ts` / `.js` / `.tsx` document (where
+    /// `editor.formatOnType` may be globally enabled) resolves to `None`, so the
+    /// handler emits no edit and a TS-generic `>` is never turned into `</...>`.
+    #[test]
+    fn non_carrier_languages_resolve_to_no_carrier() {
+        for (lang, path) in [
+            ("typescript", "file:///proj/src/util.ts"),
+            ("javascript", "file:///proj/src/util.js"),
+            ("typescriptreact", "file:///proj/src/App.tsx"),
+            ("javascriptreact", "file:///proj/src/App.jsx"),
+            ("plaintext", "file:///proj/notes.txt"),
+        ] {
+            assert_eq!(
+                carrier_kind_for_on_type(lang, path),
+                None,
+                "`{lang}` is not a markup carrier — auto-close must not engage",
+            );
+        }
+    }
+
+    /// The Vue carrier `language_id` resolves to `CarrierKind::Vue`, authoritative
+    /// even for an in-memory carrier whose canonical id is not a `.vue` path.
+    #[test]
+    fn vue_language_id_resolves_to_vue_carrier() {
+        assert_eq!(
+            carrier_kind_for_on_type("vue", "file:///proj/src/App.vue"),
+            Some(CarrierKind::Vue),
+        );
+        // language_id is authoritative even without a `.vue` extension.
+        assert_eq!(
+            carrier_kind_for_on_type("vue", "untitled:Untitled-1"),
+            Some(CarrierKind::Vue),
+        );
+    }
+
+    /// The Svelte carrier `language_id` resolves to `CarrierKind::Svelte`.
+    #[test]
+    fn svelte_language_id_resolves_to_svelte_carrier() {
+        assert_eq!(
+            carrier_kind_for_on_type("svelte", "file:///proj/src/App.svelte"),
+            Some(CarrierKind::Svelte),
+        );
+    }
+
+    /// A `.vue` / `.svelte` path still classifies as its carrier when the editor
+    /// `language_id` is unhelpful (the canonical-path fallback), so an upgrade
+    /// path that loses the carrier `language_id` does not silently disable the
+    /// markup gate.
+    #[test]
+    fn carrier_path_fallback_classifies_when_language_id_is_generic() {
+        assert_eq!(
+            carrier_kind_for_on_type("plaintext", "file:///proj/src/App.vue"),
+            Some(CarrierKind::Vue),
+        );
+        assert_eq!(
+            carrier_kind_for_on_type("plaintext", "file:///proj/src/App.svelte"),
+            Some(CarrierKind::Svelte),
+        );
+    }
+}
+
+#[cfg(test)]
+mod code_action_diag_ctx_tests {
+    use super::{build_provider_diagnostic_contexts, parse_diagnostic_code};
+    use crate::documents::line_index::LineIndex;
+    use crate::documents::position_map::PositionMapper;
+    use crate::documents::provider_projection::ProviderPositionMapper;
+    use tower_lsp_server::ls_types::{Diagnostic, NumberOrString, Position, Range};
+
+    // ── parse_diagnostic_code: Number / String / non-numeric / missing ──────
+
+    /// Verter publishes TS codes as strings (`code: String("6133")`); the handler
+    /// must parse that decimal string to the integer 6133 the code-fix path needs.
+    #[test]
+    fn parses_string_code_to_integer() {
+        assert_eq!(
+            parse_diagnostic_code(Some(&NumberOrString::String("6133".to_string()))),
+            Some(6133),
+        );
+    }
+
+    /// A numeric `code` is taken directly when it fits u32.
+    #[test]
+    fn parses_number_code_directly() {
+        assert_eq!(
+            parse_diagnostic_code(Some(&NumberOrString::Number(6133))),
+            Some(6133),
+        );
+    }
+
+    /// A non-numeric string code is dropped (fail-closed) — never forwarded as a
+    /// guessed/0 code.
+    #[test]
+    fn drops_non_numeric_string_code() {
+        assert_eq!(
+            parse_diagnostic_code(Some(&NumberOrString::String("notanumber".to_string()))),
+            None,
+        );
+        // An empty string is likewise non-numeric.
+        assert_eq!(
+            parse_diagnostic_code(Some(&NumberOrString::String(String::new()))),
+            None,
+        );
+    }
+
+    /// A missing code is dropped.
+    #[test]
+    fn drops_missing_code() {
+        assert_eq!(parse_diagnostic_code(None), None);
+    }
+
+    /// A negative numeric code does not fit u32 and is dropped (no wraparound).
+    #[test]
+    fn drops_negative_number_code() {
+        assert_eq!(
+            parse_diagnostic_code(Some(&NumberOrString::Number(-1))),
+            None,
+        );
+    }
+
+    // ── build_provider_diagnostic_contexts: parse + map + fail-closed ────────
+
+    /// An identity-mapped carrier/TSX (same text, 1:1 source map) lets us assert
+    /// the full pipeline: a `String("6133")`-coded diagnostic over a mapped range
+    /// yields a `ProviderDiagnosticContext { code: 6133, .. }` with a real TSX
+    /// span; a non-numeric-coded diagnostic in the same batch is dropped.
+    fn identity_mapping() -> (ProviderPositionMapper, LineIndex, LineIndex) {
+        let src = "const foo = 1;\nconst bar = 2;\n";
+        let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+        let source_id = builder.set_source_and_content("App.vue", src);
+        // 1:1 tokens for both lines so carrier positions map straight through.
+        builder.add_token(0, 0, 0, 0, Some(source_id), None);
+        builder.add_token(1, 0, 1, 0, Some(source_id), None);
+        let json = builder.into_sourcemap().to_json_string();
+        let mapper = ProviderPositionMapper::source_map(PositionMapper::from_json(&json).unwrap());
+        let li = LineIndex::new_utf16(src);
+        let tsx_li = LineIndex::new_utf16(src);
+        (mapper, li, tsx_li)
+    }
+
+    fn diag_at(line: u32, start_char: u32, end_char: u32, code: NumberOrString) -> Diagnostic {
+        Diagnostic {
+            range: Range {
+                start: Position {
+                    line,
+                    character: start_char,
+                },
+                end: Position {
+                    line,
+                    character: end_char,
+                },
+            },
+            code: Some(code),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn threads_6133_and_drops_non_numeric() {
+        let (mapper, carrier_li, tsx_li) = identity_mapping();
+        let diags = vec![
+            // `const foo` on line 0, cols 0..9 — a TS6133 published as a string.
+            diag_at(0, 0, 9, NumberOrString::String("6133".to_string())),
+            // A non-numeric code in the same batch must be dropped.
+            diag_at(1, 0, 9, NumberOrString::String("oops".to_string())),
+        ];
+        let ctxs = build_provider_diagnostic_contexts(&diags, &carrier_li, &mapper, &tsx_li);
+        assert_eq!(
+            ctxs.len(),
+            1,
+            "only the numeric-coded diagnostic should be threaded; got {ctxs:?}"
+        );
+        assert_eq!(
+            ctxs[0].code, 6133,
+            "the parsed code must be the integer 6133"
+        );
+        // The mapped TSX span covers `const foo` (byte 0..9 on the identity map).
+        assert_eq!(ctxs[0].start, 0);
+        assert_eq!(ctxs[0].end, 9);
+    }
+
+    /// An empty diagnostics list yields an empty context list (the provider call
+    /// then short-circuits).
+    #[test]
+    fn empty_diagnostics_yield_empty_contexts() {
+        let (mapper, carrier_li, tsx_li) = identity_mapping();
+        let ctxs = build_provider_diagnostic_contexts(&[], &carrier_li, &mapper, &tsx_li);
+        assert!(ctxs.is_empty());
+    }
+
+    /// Architect ruling (UPHELD): the forwarding is GENERIC over numeric codes,
+    /// NOT hardcoded to 6133. A non-6133 numeric code (e.g. TS2304
+    /// "cannot find name") over a mappable range IS forwarded to the provider,
+    /// carrying that exact integer code — while a native Verter string code
+    /// (`"verter/..."`) is filtered out by the numeric parse.
+    ///
+    /// Discriminating two ways: a regression that hardcoded `code == 6133` would
+    /// DROP the 2304 context (so `ctxs` would be empty / the code assertion
+    /// fails); a regression that forwarded non-numeric Verter codes would let the
+    /// `"verter/..."` diagnostic through (so the length would be 2). Both the
+    /// `Number(2304)` and the `String("2304")` spellings are exercised.
+    #[test]
+    fn forwards_arbitrary_numeric_code_and_drops_verter_string_code() {
+        let (mapper, carrier_li, tsx_li) = identity_mapping();
+        let diags = vec![
+            // A non-6133 numeric code published as a decimal STRING (the editor form).
+            diag_at(0, 0, 9, NumberOrString::String("2304".to_string())),
+            // The same generic path published as a raw NUMBER on line 1.
+            diag_at(1, 0, 9, NumberOrString::Number(2304)),
+            // A native Verter rule code (string, non-numeric) must NOT be forwarded.
+            diag_at(
+                0,
+                0,
+                9,
+                NumberOrString::String("verter/some-rule".to_string()),
+            ),
+        ];
+        let ctxs = build_provider_diagnostic_contexts(&diags, &carrier_li, &mapper, &tsx_li);
+        assert_eq!(
+            ctxs.len(),
+            2,
+            "both numeric-coded diagnostics (string + number spelling) are forwarded; \
+             the verter/ string code is dropped — got {ctxs:?}"
+        );
+        assert!(
+            ctxs.iter().all(|c| c.code == 2304),
+            "the path forwards the ACTUAL integer code (2304), proving it is generic, \
+             not 6133-locked — got {ctxs:?}"
+        );
+        // No forwarded context may carry a sentinel/zero code from a non-numeric source.
+        assert!(
+            !ctxs.iter().any(|c| c.code == 0),
+            "a non-numeric verter/ code must never be forwarded as a 0 sentinel — got {ctxs:?}"
+        );
     }
 }

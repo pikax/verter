@@ -1,0 +1,20 @@
+[package]
+name = "verter_analysis_inputs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Neutral foundation for local-analysis-input config: opaque project ids, path-privacy types, and the producer-side redactor shared by analysis runners"
+keywords = ["analysis", "redaction", "hermetic", "privacy"]
+categories = ["development-tools"]
+
+# This crate is intentionally filesystem-free (no `std::fs::`): it parses config
+# CONTENT a caller hands it and never reads disk. The file read lives in the
+# consumer that owns an allow-listed disk boundary, so there is no I/O feature gate.
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

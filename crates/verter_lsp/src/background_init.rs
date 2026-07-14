@@ -55,6 +55,15 @@ pub(super) struct BackgroundInitArgs {
     /// VFS workspace handle — populated during background_init with a FilesystemWorkspace.
     pub(super) vfs_workspace:
         Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
+    /// The tsserver carrier-publish coordinator (the store-publish membership
+    /// path). `Some` only for the tsserver engine; `None` for tsgo and when no
+    /// type provider is connected.
+    pub(super) carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
+    pub(super) carrier_transaction_coordinator:
+        Arc<crate::external_ts::CarrierTransactionCoordinator>,
+    /// The proactive declaration-overlay lifecycle owner (shared with the server's
+    /// `did_close` lifecycle).
+    pub(super) decl_overlay_owner: Arc<super::DeclOverlayOwner>,
 }
 
 struct PublishedWorkspaceBuild {
@@ -140,6 +149,9 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         position_encoding,
         mru_canonical_ids,
         vfs_workspace,
+        carrier_publish_coordinator,
+        carrier_transaction_coordinator,
+        decl_overlay_owner,
     } = args;
 
     let host = documents.host_arc();
@@ -282,6 +294,8 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         &pending_snapshot_provider_sync,
         is_tsgo,
         Some(&mru_canonical_ids),
+        carrier_publish_coordinator.as_ref(),
+        &carrier_transaction_coordinator,
     )
     .await;
 
@@ -292,6 +306,13 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         &vfs_workspace,
         &provider_sync_states,
         is_tsgo,
+        carrier_publish_coordinator.as_ref(),
+        &decl_overlay_owner,
+        // The closure pass runs UNDER this init's generation. A stale (superseded)
+        // init pass that reaches the overlay reconcile must not close an overlay a
+        // newer live init pass re-established reachability for.
+        my_gen,
+        &carrier_transaction_coordinator,
     )
     .await;
 
@@ -346,7 +367,11 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             project_sync: project_sync.clone(),
             vfs_workspace: Arc::clone(&vfs_workspace),
             provider_sync_states: Arc::clone(&provider_sync_states),
+            provider_surfaces: documents.provider_surfaces().clone(),
             is_tsgo,
+            carrier_publish_coordinator: carrier_publish_coordinator.clone(),
+            carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
+            pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
             tsx_profile: tsx_profile.read().clone(),
             tsconfig_patterns: Vec::new(),
             workspace_snapshot: scanner_snapshot,
@@ -369,7 +394,6 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         let documents = documents.clone();
         let cached_verter_diags = Arc::clone(&cached_verter_diags);
         let type_provider = type_provider.clone();
-        let tsx_profile = tsx_profile.clone();
         let position_encoding = position_encoding.clone();
         let init_generation = Arc::clone(&init_generation);
         let vfs_workspace = Arc::clone(&vfs_workspace);
@@ -411,50 +435,16 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
                 let diagnostics = if let Some(tp) = &type_provider {
                     let canonical_id = crate::documents::uri_to_canonical_id(&uri);
-                    let profile = tsx_profile.read().clone();
-                    let ide = documents.host.get_ide(&canonical_id, &profile);
-
-                    if let Some(ide) = ide {
-                        let tsx_path = provider_sync_states
-                            .get(&canonical_id)
-                            .and_then(|state| state.ide_path.clone());
-                        let encoding = position_encoding.read().clone();
-                        let tsx_li = crate::documents::line_index::LineIndex::new(
-                            &ide.code,
-                            encoding.clone(),
-                        );
-                        let mapper = ide
-                            .source_map
-                            .as_ref()
-                            .and_then(|sm| PositionMapper::from_json(sm).ok());
-                        let vue_source = documents.host.get_source(&canonical_id);
-
-                        let type_diags = if let Some(tsx_path) = tsx_path.as_ref() {
-                            tp.get_diagnostics(tsx_path).await.ok()
-                        } else {
-                            None
-                        };
-
-                        match (type_diags, mapper, vue_source) {
-                            (Some(type_diags), Some(mapper), Some(vue_src)) => {
-                                let vue_li = crate::documents::line_index::LineIndex::new(
-                                    &vue_src, encoding,
-                                );
-                                let mapper =
-                                    crate::documents::provider_projection::ProviderPositionMapper::source_map(mapper);
-                                crate::tsgo::merge::merge_diagnostics(
-                                    verter_diags,
-                                    type_diags,
-                                    &tsx_li,
-                                    &mapper,
-                                    &vue_li,
-                                )
-                            }
-                            _ => verter_diags,
-                        }
-                    } else {
-                        verter_diags
-                    }
+                    let encoding = position_encoding.read().clone();
+                    crate::sync_coordinator::carrier_provider_diagnostics(
+                        &documents,
+                        &provider_sync_states,
+                        tp.as_ref(),
+                        encoding,
+                        &canonical_id,
+                        verter_diags,
+                    )
+                    .await
                 } else {
                     verter_diags
                 };
@@ -500,47 +490,16 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
             let diagnostics = if let Some(tp) = &type_provider {
                 let canonical_id = crate::documents::uri_to_canonical_id(&uri);
-                let profile = tsx_profile.read().clone();
-                let ide = documents.host.get_ide(&canonical_id, &profile);
-
-                if let Some(ide) = ide {
-                    let tsx_path = provider_sync_states
-                        .get(&canonical_id)
-                        .and_then(|state| state.ide_path.clone());
-                    let encoding = position_encoding.read().clone();
-                    let tsx_li =
-                        crate::documents::line_index::LineIndex::new(&ide.code, encoding.clone());
-                    let mapper = ide
-                        .source_map
-                        .as_ref()
-                        .and_then(|sm| PositionMapper::from_json(sm).ok());
-                    let vue_source = documents.host.get_source(&canonical_id);
-
-                    let type_diags = if let Some(tsx_path) = tsx_path.as_ref() {
-                        tp.get_diagnostics(tsx_path).await.ok()
-                    } else {
-                        None
-                    };
-
-                    match (type_diags, mapper, vue_source) {
-                        (Some(type_diags), Some(mapper), Some(vue_src)) => {
-                            let vue_li =
-                                crate::documents::line_index::LineIndex::new(&vue_src, encoding);
-                            let mapper =
-                                crate::documents::provider_projection::ProviderPositionMapper::source_map(mapper);
-                            crate::tsgo::merge::merge_diagnostics(
-                                verter_diags,
-                                type_diags,
-                                &tsx_li,
-                                &mapper,
-                                &vue_li,
-                            )
-                        }
-                        _ => verter_diags,
-                    }
-                } else {
-                    verter_diags
-                }
+                let encoding = position_encoding.read().clone();
+                crate::sync_coordinator::carrier_provider_diagnostics(
+                    &documents,
+                    &provider_sync_states,
+                    tp.as_ref(),
+                    encoding,
+                    &canonical_id,
+                    verter_diags,
+                )
+                .await
             } else {
                 verter_diags
             };
@@ -739,7 +698,7 @@ mod tests {
                 .root
                 .snapshot
                 .resolver
-                .owner_for_file(&app_path)
+                .nearest_config_for_path(&app_path)
                 .is_some(),
             "resolver published with the snapshot should own the configured file"
         );

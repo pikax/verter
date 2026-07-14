@@ -33,8 +33,10 @@ smallvec = "1.15"
 lazy_static = "1.5.0"
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
+oxc_ast_visit = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
+oxc_syntax = { workspace = true }
 oxc_diagnostics = "0.126.0"
 bumpalo = { version = "3.20.3", features = ["collections"] }
 serde = { workspace = true }

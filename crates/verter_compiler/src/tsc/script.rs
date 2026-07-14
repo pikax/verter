@@ -49,8 +49,9 @@ use crate::utils::oxc::script::type_surface::{
     extract_companion_types, ResolvedCallPayloadForm, ResolvedElements, ResolvedProp, RuntimeType,
 };
 use crate::utils::oxc::vue::{
-    parse_script, parse_script_with_companion, DefaultExportType, ImportSpecifierKind,
-    MacroArrayArg, MacroObjectArg, MacroTypeParams, ScriptItem, ScriptMacro, ScriptMode,
+    extract_options_component_macro_args, parse_script, parse_script_with_companion,
+    DefaultExportType, ImportSpecifierKind, MacroArrayArg, MacroObjectArg, MacroTypeParams,
+    OptionsComponentMacroArgs, ScriptItem, ScriptMacro, ScriptMode, ScriptParseContext,
 };
 
 /// Macro stub declarations shared between `generate_code` (when expose entries
@@ -84,6 +85,13 @@ pub enum TscMode {
     Public,
     /// Testing/debug API that exposes script-setup bindings on the instance.
     Testing,
+    /// The declaration-only public surface (`.d.<ext>.ts`): a strictly valid
+    /// `.d.ts` — pure declarations, NO runtime / value code — that a bare
+    /// framework-carrier import (`import B from "./B.vue"`) resolves to. It
+    /// renders the SAME public surface [`Self::Public`] computes, but as an
+    /// explicit `declare const … export default …` instead of `typeof` over a
+    /// runtime `defineComponent` value.
+    Declaration,
 }
 
 /// Options for tsc codegen.
@@ -301,6 +309,16 @@ struct TscMacroState {
 
     // Type import statements to emit (e.g. `import type { Props } from './types'`)
     type_import_stmts: Vec<String>,
+
+    // Declaration-only type import statements: VALUE imports (no `type`
+    // modifier) that are USED IN A TYPE POSITION (e.g. `import { Props }` used by
+    // `defineProps<Props>()`). The `Public`/`Testing` paths bring these into
+    // scope via the emitted `<script setup>` body; the `Declaration` path omits
+    // that body, so it emits these as declaration-legal `import type { … }`
+    // statements instead. Kept SEPARATE from `type_import_stmts` so emitting
+    // them does NOT duplicate the value import the setup body already carries in
+    // the non-declaration paths.
+    declaration_promoted_type_imports: Vec<String>,
 }
 
 // ── Extract + Cache API ──────────────────────────────────────────────────────
@@ -552,8 +570,8 @@ pub fn generate_tsc_from_state(
     let root_element_tag = state.root_element_tag.as_deref();
     let filename = state.filename.as_deref();
 
-    if matches!(mode, TscMode::Testing) {
-        generate_testing_code(
+    match mode {
+        TscMode::Testing => generate_testing_code(
             component_name,
             &macro_state,
             sfc_source,
@@ -563,9 +581,17 @@ pub fn generate_tsc_from_state(
             root_element_tag,
             &state.content_str,
             &state.test_bindings,
-        )
-    } else {
-        generate_code(
+        ),
+        TscMode::Declaration => generate_declaration_code(
+            component_name,
+            &macro_state,
+            sfc_source,
+            filename,
+            generic_params,
+            attrs_type,
+            root_element_tag,
+        ),
+        TscMode::Public => generate_code(
             component_name,
             &macro_state,
             sfc_source,
@@ -575,7 +601,7 @@ pub fn generate_tsc_from_state(
             None, // narrowing not used in cache path
             root_element_tag,
             &state.content_str,
-        )
+        ),
     }
 }
 
@@ -713,6 +739,30 @@ pub fn generate_tsc_output_with_options(
     tokenize_sfc(bytes, |e| syntax.handle(&e, &ctx));
 
     let Some(setup) = syntax.script_setup() else {
+        // No <script setup>. In Declaration mode every no-setup case must stay
+        // declaration-safe: the Options-API runtime stub wraps the default
+        // export in a runtime `defineComponent(...)` and the empty stub creates
+        // a runtime `__comp` — neither is `.d.ts`-legal. A no-setup Declaration
+        // request projects the FULL options-object public surface (props/emits
+        // from the `defineComponent({ props, emits })` options object) into a
+        // declaration-safe component declaration, falling back to the minimal
+        // empty stub only for a genuinely-empty surface.
+        if matches!(tsc_options.mode, TscMode::Declaration) {
+            if let Some(script) = syntax.script() {
+                if let Some(content) = script.content {
+                    let content_str = &sfc_source[content.start as usize..content.end as usize];
+                    if let Some(output) = generate_options_api_declaration(
+                        component_name,
+                        sfc_source,
+                        content_str,
+                        tsc_options.filename.as_deref(),
+                    ) {
+                        return output;
+                    }
+                }
+            }
+            return generate_declaration_empty_stub(component_name);
+        }
         // No <script setup> — check for Options API <script> block.
         // If present, pass through its content so defineComponent() props
         // are preserved for cross-component type checking.
@@ -725,6 +775,9 @@ pub fn generate_tsc_output_with_options(
         return generate_empty_stub(component_name);
     };
     let Some(content_span) = setup.content else {
+        if matches!(tsc_options.mode, TscMode::Declaration) {
+            return generate_declaration_empty_stub(component_name);
+        }
         return generate_empty_stub(component_name);
     };
 
@@ -830,8 +883,8 @@ pub fn generate_tsc_output_with_options(
         };
 
     // ── 9. Generate code + source map ────────────────────────────────
-    if matches!(tsc_options.mode, TscMode::Testing) {
-        generate_testing_code(
+    match tsc_options.mode {
+        TscMode::Testing => generate_testing_code(
             component_name,
             &state,
             sfc_source,
@@ -841,9 +894,17 @@ pub fn generate_tsc_output_with_options(
             root_element_tag.as_deref(),
             content_str,
             &test_bindings,
-        )
-    } else {
-        generate_code(
+        ),
+        TscMode::Declaration => generate_declaration_code(
+            component_name,
+            &state,
+            sfc_source,
+            tsc_options.filename.as_deref(),
+            generic_params,
+            attrs_type,
+            root_element_tag.as_deref(),
+        ),
+        TscMode::Public => generate_code(
             component_name,
             &state,
             sfc_source,
@@ -853,7 +914,7 @@ pub fn generate_tsc_output_with_options(
             narrowing.as_ref(),
             root_element_tag.as_deref(),
             content_str,
-        )
+        ),
     }
 }
 
@@ -893,12 +954,134 @@ fn collect_type_imports<'a>(items: &[ScriptItem<'a>]) -> FxHashMap<&'a str, Type
     map
 }
 
+/// A type-position-referenced import whose declaration-legal `import type …`
+/// statement must be reconstructed. Carries the structured import shape so the
+/// reconstruction is driven entirely by typed data — never re-parsing or
+/// string-slicing the source.
+#[derive(Clone, Copy)]
+struct ReconstructedTypeImport<'a> {
+    /// The local binding name as referenced in the type position.
+    local: &'a str,
+    /// The module-exported name for a NAMED import (`Some` for named, possibly
+    /// equal to `local`); `None` for default/namespace imports. For a
+    /// string-literal export name this is the UNQUOTED value (`x-y`) — see
+    /// [`Self::imported_is_string_literal`].
+    imported: Option<&'a str>,
+    /// Whether the NAMED imported name is a string literal
+    /// (`import { "x-y" as Local }`) rather than a plain identifier. Carried
+    /// from the typed import binding so the declaration reconstruction re-quotes
+    /// a string-literal export name into a declaration-legal form; never a
+    /// downstream string sniff for quotes.
+    imported_is_string_literal: bool,
+    /// The module specifier (e.g. `./types`).
+    source: &'a str,
+    /// Named / default / namespace — selects the type-only statement form.
+    kind: ImportSpecifierKind,
+}
+
+impl<'a> ReconstructedTypeImport<'a> {
+    /// Render the declaration-legal `import type …` statement for this import
+    /// form, preserving the imported name for aliased named imports and the
+    /// quoting for a string-literal export name.
+    ///
+    /// - Named, `local == imported`:  `import type { Local } from '…'`
+    /// - Named, aliased:              `import type { Imported as Local } from '…'`
+    /// - Named, string-literal name:  `import type { "x-y" as Local } from '…'`
+    /// - Namespace:                   `import type * as Local from '…'`
+    /// - Default:                     `import type Local from '…'`
+    fn render_stmt(&self) -> String {
+        match self.kind {
+            ImportSpecifierKind::Named => match self.imported {
+                // A string-literal export name (`import { "x-y" as Local }`) is
+                // not a valid identifier, so it can NEVER equal the identifier
+                // local and is ALWAYS aliased — re-quote it into the
+                // declaration-legal `import type { "x-y" as Local }` form.
+                Some(imported) if self.imported_is_string_literal => {
+                    format!(
+                        "import type {{ {} as {} }} from '{}'",
+                        quote_module_export_name(imported),
+                        self.local,
+                        self.source
+                    )
+                }
+                Some(imported) if imported != self.local => {
+                    format!(
+                        "import type {{ {} as {} }} from '{}'",
+                        imported, self.local, self.source
+                    )
+                }
+                // Named non-aliased (or the imported name is unexpectedly
+                // absent): the bare-local form resolves because local ==
+                // imported.
+                _ => format!("import type {{ {} }} from '{}'", self.local, self.source),
+            },
+            ImportSpecifierKind::Namespace => {
+                format!("import type * as {} from '{}'", self.local, self.source)
+            }
+            ImportSpecifierKind::Default => {
+                format!("import type {} from '{}'", self.local, self.source)
+            }
+        }
+    }
+}
+
+/// Re-quote a string-literal module export name (`import { "x-y" as Local }`)
+/// into a declaration-legal double-quoted TS string literal. The captured
+/// `imported` value is the UNQUOTED cooked name (`x-y`), so every character a
+/// double-quoted TS/JS string literal cannot carry raw is re-escaped when
+/// re-wrapping. The result is a VALID single-line double-quoted literal for ANY
+/// input — printable characters (including the hyphen in `"vue-props"`) pass
+/// through unchanged, so the encoder never over-escapes.
+pub(super) fn quote_module_export_name(unquoted: &str) -> String {
+    let mut out = String::with_capacity(unquoted.len() + 2);
+    out.push('"');
+    for ch in unquoted.chars() {
+        match ch {
+            // Backslash and the closing delimiter must always be escaped.
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            // Line terminators are illegal raw inside a string literal.
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            // Remaining ASCII control characters (U+0000..U+001F) are illegal
+            // raw: use the conventional short escapes where they exist, and a
+            // zero-padded 4-hex `\uXXXX` fallback for the rest.
+            '\u{0008}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\u{000B}' => out.push_str("\\v"),
+            '\u{000C}' => out.push_str("\\f"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 struct TypeUsageTracker<'a> {
-    imports: Vec<(&'a str, &'a str)>,
+    /// Type-only imports (`import type …` / `import { type Foo }`), in source
+    /// order, with their full reconstructed shape (named/aliased/default/
+    /// namespace). Reconstruction preserves the imported name so an aliased
+    /// type-only import round-trips as `import type { Imported as Local }`.
+    imports: Vec<ReconstructedTypeImport<'a>>,
     import_lookup: FxHashMap<&'a str, &'a str>,
+    /// VALUE imports (no `type` modifier), in source order, with their full
+    /// reconstructed shape. A value import used in a type position is PROMOTED
+    /// to a declaration-legal `import type` for the `Declaration` path — every
+    /// import form (named, aliased-named, default, namespace) promotes to its
+    /// own correct type-only statement so the referenced symbol resolves.
+    value_imports: Vec<ReconstructedTypeImport<'a>>,
+    value_import_lookup: FxHashMap<&'a str, &'a str>,
     locals: Vec<LocalTypeDecl<'a>>,
     local_lookup: FxHashMap<&'a str, usize>,
     needed_imports: FxHashSet<&'a str>,
+    /// Value imports observed in a TYPE position (the promotion set), keyed by
+    /// local name.
+    needed_value_imports: FxHashSet<&'a str>,
     needed_locals: FxHashSet<&'a str>,
 }
 
@@ -909,11 +1092,33 @@ impl<'a> TypeUsageTracker<'a> {
         type_imports: &FxHashMap<&'a str, TypeImportInfo<'a>>,
     ) -> Self {
         let mut imports = Vec::new();
+        let mut value_imports = Vec::new();
         for item in items {
             if let ScriptItem::Import(imp) = item {
                 for binding in &imp.bindings {
+                    // Reconstruct the import's full shape from the typed binding
+                    // — never re-parsed. A binding with no `import_kind` is not
+                    // an import specifier (it is an export/decl binding) and is
+                    // skipped.
+                    let Some(kind) = binding.import_kind else {
+                        continue;
+                    };
+                    let reconstructed = ReconstructedTypeImport {
+                        local: binding.name,
+                        imported: binding.imported,
+                        imported_is_string_literal: binding.imported_is_string_literal,
+                        source: imp.source,
+                        kind,
+                    };
                     if imp.is_type_only || binding.is_type_only {
-                        imports.push((binding.name, imp.source));
+                        imports.push(reconstructed);
+                    } else {
+                        // A VALUE import (no `type` modifier) of ANY form. Every
+                        // form has a declaration-legal type-only promotion, so
+                        // it is eligible for promotion when used in a type
+                        // position (named → `import type { … }`, namespace →
+                        // `import type * as …`, default → `import type …`).
+                        value_imports.push(reconstructed);
                     }
                 }
             }
@@ -934,17 +1139,30 @@ impl<'a> TypeUsageTracker<'a> {
             }
         }
 
-        let import_lookup = type_imports
+        let import_lookup: FxHashMap<&'a str, &'a str> = type_imports
             .iter()
             .map(|(name, info)| (*name, info.source))
+            .collect();
+
+        // A name that is BOTH a type-only import and (separately) a value
+        // import resolves as type-only — the type-only entry already brings it
+        // into scope, so it must not also be tracked for value promotion. The
+        // lookup is keyed by the LOCAL name (what a type position references).
+        let value_import_lookup: FxHashMap<&'a str, &'a str> = value_imports
+            .iter()
+            .filter(|imp| !import_lookup.contains_key(imp.local))
+            .map(|imp| (imp.local, imp.source))
             .collect();
 
         Self {
             imports,
             import_lookup,
+            value_imports,
+            value_import_lookup,
             locals,
             local_lookup,
             needed_imports: FxHashSet::default(),
+            needed_value_imports: FxHashSet::default(),
             needed_locals: FxHashSet::default(),
         }
     }
@@ -969,6 +1187,12 @@ impl<'a> TypeUsageTracker<'a> {
             }
         } else if self.import_lookup.contains_key(name) {
             self.needed_imports.insert(name);
+        } else if self.value_import_lookup.contains_key(name) {
+            // A value import (of any form) used in a type position — record its
+            // local name for promotion to a declaration-legal `import type`
+            // (Declaration path). For `import * as NS`, `NS` is recorded here
+            // when `NS.Props` is referenced.
+            self.needed_value_imports.insert(name);
         }
     }
 
@@ -1000,6 +1224,13 @@ impl<'a> TypeUsageTracker<'a> {
                     if seen.insert(name) {
                         refs.push(name);
                     }
+                } else if let Some((name, _)) = self.value_import_lookup.get_key_value(token) {
+                    // A value import referenced from within a type position
+                    // (e.g. a local type alias body referencing it).
+                    let name = *name;
+                    if seen.insert(name) {
+                        refs.push(name);
+                    }
                 }
             } else {
                 idx += 1;
@@ -1010,12 +1241,29 @@ impl<'a> TypeUsageTracker<'a> {
     }
 
     fn finalize(self, state: &mut TscMacroState) {
+        // Type-only imports referenced in a type position. The statement is
+        // reconstructed from the typed import shape so an aliased type-only
+        // import keeps its imported name (`import type { Imported as Local }`).
         let mut emitted_imports = FxHashSet::default();
-        for (name, source) in self.imports {
-            if self.needed_imports.contains(name) {
-                let stmt = format!("import type {{ {} }} from '{}'", name, source);
+        for imp in self.imports {
+            if self.needed_imports.contains(imp.local) {
+                let stmt = imp.render_stmt();
                 if emitted_imports.insert(stmt.clone()) {
                     state.type_import_stmts.push(stmt);
+                }
+            }
+        }
+
+        // Value imports used in a type position → declaration-only `import type`
+        // promotions. Kept separate so the non-declaration paths (which emit the
+        // setup body verbatim) do NOT also emit a duplicate `import type`. Each
+        // form promotes to its own correct type-only statement.
+        let mut emitted_promotions = FxHashSet::default();
+        for imp in self.value_imports {
+            if self.needed_value_imports.contains(imp.local) {
+                let stmt = imp.render_stmt();
+                if emitted_promotions.insert(stmt.clone()) {
+                    state.declaration_promoted_type_imports.push(stmt);
                 }
             }
         }
@@ -1841,8 +2089,9 @@ fn extract_generic_param_names(generic_params: &str) -> Vec<String> {
 /// When the default export is a plain object (no `defineComponent` wrapper),
 /// we insert `defineComponent()` around it so that Vue's type overloads
 /// infer data/methods/computed on the instance type. This makes
-/// `InstanceType<typeof import('./Foo.vue.ts')['default']>` resolve to the
-/// full component instance rather than `never`.
+/// `InstanceType<typeof import('./Foo.vue.verter.ts')['default']>` resolve to
+/// the full component instance rather than `never` (the public-API carrier is
+/// the `.verter.ts` surface).
 fn generate_options_api_stub(_component_name: &str, script_content: &str) -> TscOutput {
     let source_map = minimal_source_map();
     let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
@@ -1905,6 +2154,144 @@ fn generate_empty_stub(component_name: &str) -> TscOutput {
     let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
     let code = format!(
         "import {{ defineComponent }} from \"vue\"\nconst __comp = defineComponent({{}})\ndeclare const {name}: typeof __comp\nexport default {name}\n//# sourceMappingURL=data:application/json;base64,{map}\n",
+        name = name,
+        map = encoded,
+    );
+    TscOutput { code, source_map }
+}
+
+/// Project an Options-API component's full public surface into the
+/// declaration-only (`.d.<ext>.ts`) form, or `None` for a genuinely-empty
+/// surface (no `props`/`emits` on the options object) so the caller falls back
+/// to [`generate_declaration_empty_stub`].
+///
+/// The Options-API runtime `props: { … }` / `props: [ … ]` and `emits: { … }` /
+/// `emits: [ … ]` are extracted (typed-IR only) through the SHARED parser
+/// macro-argument extractor and fed into the SAME `process_props` /
+/// `process_emits` normalization the `<script setup>` macros use — there is no
+/// second prop/emit engine. The populated [`TscMacroState`] then renders through
+/// [`generate_declaration_code`], the mode-agnostic declaration-SAFE renderer
+/// (no runtime `defineComponent(...)` call, no `__comp`, no `typeof __comp`).
+fn generate_options_api_declaration(
+    component_name: &str,
+    sfc_source: &str,
+    options_script_content: &str,
+    filename: Option<&str>,
+) -> Option<TscOutput> {
+    let alloc = Allocator::default();
+    let parsed = Parser::new(&alloc, options_script_content, SourceType::ts()).parse();
+    let ctx = ScriptParseContext::new(0, options_script_content.as_bytes());
+    let macro_args: OptionsComponentMacroArgs =
+        extract_options_component_macro_args(&parsed.program, &ctx);
+
+    let has_props = macro_args.props_object.is_some() || macro_args.props_array.is_some();
+    let has_emits = macro_args.emits_object.is_some() || macro_args.emits_array.is_some();
+    if !has_props && !has_emits {
+        // Genuinely-empty surface: let the caller emit the minimal empty stub.
+        return None;
+    }
+
+    // Thread the component's REAL type-import context through the SAME machinery
+    // the `<script setup>` declaration path uses, so an Options-API prop typed via
+    // an imported type (`type: Object as PropType<Foo>` with `Foo` imported) keeps
+    // `Foo`'s import in the emitted declaration. The import first pass of
+    // `parse_script` is mode-independent, so it yields the script's `ScriptItem`s
+    // (including its imports) for `collect_type_imports` + `TypeUsageTracker`; the
+    // `process_props` / `process_emits` calls below already register used types via
+    // `mark_type_text`, and `type_usage_tracker.finalize` emits exactly the imports
+    // those types reference (type-only directly, value imports promoted to `import
+    // type`) — no separate import engine.
+    let script = parse_script(
+        &parsed.program,
+        ScriptMode::Options,
+        0,
+        options_script_content,
+    );
+    let type_imports = collect_type_imports(&script.items);
+    let comments: &[Comment] = &parsed.program.comments;
+    let mut type_usage_tracker =
+        TypeUsageTracker::new(&script.items, options_script_content, &type_imports);
+    let mut state = TscMacroState::default();
+
+    // Props: object form populates the full `props_ts` inline surface via the
+    // shared `process_props`. The array (string-name) form names props without a
+    // type; surface each as an `unknown`-typed inline entry so a `props: ['msg']`
+    // component still exposes `msg` in `$props` (parity with object form, which
+    // `process_props` renders directly).
+    if let Some(props_obj) = macro_args.props_object.as_ref() {
+        process_props(
+            None,
+            Some(props_obj),
+            None,
+            sfc_source,
+            options_script_content,
+            0,
+            &type_imports,
+            comments,
+            &mut type_usage_tracker,
+            &mut state,
+        );
+    } else if let Some(props_arr) = macro_args.props_array.as_ref() {
+        let entries: Vec<InlinePropEntry> = props_arr
+            .elements
+            .iter()
+            .filter_map(|elem| {
+                elem.name.map(|name| InlinePropEntry {
+                    name: name.to_string(),
+                    optional: true,
+                    ts_type: "unknown".to_string(),
+                    comment: None,
+                    map_span: Some(local_to_sfc_span(elem.span, 0)),
+                })
+            })
+            .collect();
+        if !entries.is_empty() {
+            state.props_ts = Some(PropsTs::Inline(entries));
+        }
+    }
+
+    // Emits: both object and array forms populate `emits_ts` via `process_emits`.
+    if macro_args.emits_object.is_some() || macro_args.emits_array.is_some() {
+        process_emits(
+            None,
+            macro_args.emits_object.as_ref(),
+            macro_args.emits_array.as_ref(),
+            options_script_content,
+            0,
+            &mut type_usage_tracker,
+            &mut state,
+        );
+    }
+
+    type_usage_tracker.finalize(&mut state);
+
+    Some(generate_declaration_code(
+        component_name,
+        &state,
+        sfc_source,
+        filename,
+        None,
+        None,
+        None,
+    ))
+}
+
+/// The declaration-safe minimal component declaration for a no-`<script setup>`
+/// Declaration request with a genuinely-empty public surface (an empty SFC, a
+/// scriptless SFC, or an Options-API component declaring no props/emits).
+///
+/// Pure declarations only: a `DefineComponent`-typed `declare const` value with
+/// an empty props/emits surface and a default export. NO `import { defineComponent }`
+/// value import, NO `const __comp = …` runtime value, NO `typeof __comp` — the
+/// runtime [`generate_empty_stub`] emits all three; this is the `.d.ts`-legal
+/// counterpart. An Options-API component that DOES declare props/emits projects
+/// its full surface via [`generate_options_api_declaration`] instead.
+fn generate_declaration_empty_stub(component_name: &str) -> TscOutput {
+    let name = sanitize_tsc_component_name(component_name);
+    let source_map = minimal_source_map();
+    let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
+    let code = format!(
+        "declare const {name}: import(\"vue\").DefineComponent<{{}}, {{}}, any>\nexport default {name}\n//# sourceMappingURL=data:application/json;base64,{map}\n",
         name = name,
         map = encoded,
     );
@@ -2382,39 +2769,78 @@ fn generate_code(
     } else {
         generic_params.map(|s| s.to_string())
     };
-    let full_props = render_full_props_type(
-        &state.props_ts,
-        &state.emits_ts,
-        &state.models,
-        &state.defaulted_prop_names,
+    // Render the explicit instance shape (`new(...)` + `$props`/`$emit`/… +
+    // the expose tail + closing `}`). This is the SAME public surface the
+    // declaration path renders — the only `Public`-vs-`Declaration` difference
+    // is the value-bearing `__OmitNew<typeof __comp> &` prefix above, which the
+    // declaration path omits.
+    render_instance_shape_body(
+        &mut out,
+        state,
+        attrs_type,
+        root_element_tag,
         narrowing,
+        full_gp.as_deref(),
+        // `Public` emits the setup body, so `typeof <exposed-binding>` resolves.
+        true,
     );
+    out.push_str(&format!("export default {}\n", component_name));
 
+    // ── Inline source map ─────────────────────────────────────────────
+    let (mut code, mappings) = out.into_parts();
+    let source_map = build_tsc_source_map(&code, sfc_source, filename, &mappings);
+    let encoded = BASE64_STANDARD.encode(source_map.as_bytes());
+    code.push_str(&format!(
+        "//# sourceMappingURL=data:application/json;base64,{}\n",
+        encoded
+    ));
+
+    TscOutput { code, source_map }
+}
+
+/// Render the explicit instance-shape body of the `declare const Component`
+/// declaration: the `new(...)` construct signature, the `$props`/`$emit`/
+/// `$slots`/`$data`/`$attrs`/`$refs`/`$root` instance members, and the expose
+/// tail, followed by the object's closing `}`.
+///
+/// This is the SINGLE renderer for the public instance surface — BOTH the
+/// runtime `Public` path ([`generate_code`]) and the declaration-only path
+/// ([`generate_declaration_code`]) call it, so the two cannot drift. The
+/// caller is responsible for opening the `declare const Name: …{` line (the
+/// `Public` path prefixes the value-bearing `__OmitNew<typeof __comp> &`; the
+/// declaration path opens a bare `{`).
+fn render_instance_shape_body(
+    out: &mut TscWriter,
+    state: &TscMacroState,
+    attrs_type: Option<&str>,
+    root_element_tag: Option<&str>,
+    narrowing: Option<&TscNarrowingInfo>,
+    full_gp: Option<&str>,
+    expose_typeof_resolvable: bool,
+) {
     // Generate simplified constructor: `new(props?: PublicProps & Props): { $props, $emit, ... }`
     // Does NOT include ComponentPublicInstance in the return type — CPI has many
     // generic params that TypeScript expands, causing "Type instantiation is
     // excessively deep" with self-referential prop types (e.g. Action → callback(Action)).
     // The explicit $props/$emit/$slots/$data/$attrs/$refs fields cover instance access.
-    match &full_gp {
+    match full_gp {
         Some(gp) => {
             out.push_str(&format!(
                 "  new<{gp}>(props?: import(\"vue\").PublicProps & "
             ));
-            out.append_rendered(render_full_props_type(
-                &state.props_ts,
-                &state.emits_ts,
-                &state.models,
-                &state.defaulted_prop_names,
-                narrowing,
-            ));
-            out.push_str("): {\n");
         }
         None => {
             out.push_str("  new(props?: import(\"vue\").PublicProps & ");
-            out.append_rendered(full_props);
-            out.push_str("): {\n");
         }
     }
+    out.append_rendered(render_full_props_type(
+        &state.props_ts,
+        &state.emits_ts,
+        &state.models,
+        &state.defaulted_prop_names,
+        narrowing,
+    ));
+    out.push_str("): {\n");
 
     out.push_str("    $props: import(\"vue\").PublicProps & ");
     out.append_rendered(render_full_props_type(
@@ -2489,19 +2915,44 @@ fn generate_code(
         out.push_str(&format!("  }} & {}\n", expose_type));
     } else if !state.expose_entries.is_empty() {
         // Runtime object form: `defineExpose({ foo, bar: val })`
-        // Build ShallowUnwrapRef intersection with typeof for each entry
+        // Build ShallowUnwrapRef intersection over each entry.
         out.push_str("  }\n    & import(\"vue\").ShallowUnwrapRef<{ ");
         for (i, entry) in state.expose_entries.iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
             }
-            match &entry.typeof_target {
-                Some(target) => {
-                    out.push_str(&format!("{}: typeof {}", entry.name, target));
+            if expose_typeof_resolvable {
+                // `Public` path: the setup body is emitted, so `typeof <ident>`
+                // resolves the binding's inferred type. A method/complex entry
+                // (`typeof_target == None`) falls back to `any`.
+                match &entry.typeof_target {
+                    Some(target) => {
+                        out.push_str(&format!("{}: typeof {}", entry.name, target));
+                    }
+                    None => {
+                        out.push_str(&format!("{}: any", entry.name));
+                    }
                 }
-                None => {
-                    out.push_str(&format!("{}: any", entry.name));
-                }
+            } else {
+                // Declaration path: the setup body is OMITTED, so the exposed
+                // binding is NOT in scope — `typeof <ident>` would be an unbound
+                // value reference (an erroring declaration). Render a
+                // declaration-legal placeholder instead. `unknown` (not `any`)
+                // preserves the public member shape without inventing a type or
+                // silently widening to an unsound `any`.
+                //
+                // TODO(follow-up): this is a PRECISION placeholder, not the final
+                // declaration strategy. A runtime-object `defineExpose({ x })`
+                // entry's exact type is the inferred type of the setup binding
+                // `x`, which is not yet captured in the typed macro/codegen state
+                // (only the identifier name is). Capturing resolved setup-binding
+                // types — at the point setup bindings are already classified — is
+                // required so the declaration can render each exposed member's
+                // exact type; this MUST land before the declaration carrier is
+                // wired to a consuming engine. The type-PARAMETER form
+                // (`defineExpose<{ x: T }>()`) already renders its exact type via
+                // `expose_type_text` above and is unaffected.
+                out.push_str(&format!("{}: unknown", entry.name));
             }
         }
         out.push_str(" }>\n");
@@ -2509,7 +2960,98 @@ fn generate_code(
         out.push_str("  }\n");
     }
     out.push_str("}\n");
-    out.push_str(&format!("export default {}\n", component_name));
+}
+
+/// Generate the declaration-only public surface (`.d.<ext>.ts`).
+///
+/// A declaration-safe surface: type-only imports, local type declarations, the
+/// props/emits/slots-derived interfaces, and an explicit
+/// `declare const Component: { new(...): { … } } …; export default Component;`.
+/// It renders the SAME public instance surface [`generate_code`] computes (via
+/// the shared [`render_instance_shape_body`]), but as an EXPLICIT declaration
+/// instead of `typeof` over a runtime `defineComponent` value.
+///
+/// It emits NO runtime / value code: NO `import { defineComponent }`, NO macro
+/// stubs, NO `<script setup>` executable body, NO `const __comp = …`, NO
+/// `typeof __comp`.
+///
+/// # Declaration contract: the instance/public-props surface
+///
+/// The declaration carries the component's INSTANCE surface — the
+/// props/emits/slots/expose a consumer needs to type-check `<Component />`,
+/// `createApp(Component)`, and instance/prop access — projected through the
+/// explicit `new(...)` construct signature. It deliberately does NOT reproduce
+/// the `Public` path's `__OmitNew<typeof __comp> &` prefix: that prefix is a
+/// value-bearing `typeof` over the runtime `defineComponent` const and is not
+/// declaration-legal, so non-constructor component/static members it carried are
+/// NOT projected here. The instance/public-props surface is the load-bearing
+/// contract for importing a component and using it as a component value.
+///
+/// # Expose surface
+///
+/// The `defineExpose` surface the `Public` path resolves via the setup body +
+/// `typeof` is rendered here from the typed expose state: the type-parameter
+/// form (`defineExpose<{ … }>()` → `expose_type_text`) projects its exact type;
+/// the runtime-object form (`defineExpose({ x })` → `expose_entries`) renders
+/// each member with a declaration-legal placeholder (`unknown`) rather than the
+/// `typeof <setup-binding>` the omitted setup body would require (see
+/// [`render_instance_shape_body`]'s `expose_typeof_resolvable`). Driven from the
+/// typed state, never a re-parse of source text.
+fn generate_declaration_code(
+    component_name: &str,
+    state: &TscMacroState,
+    sfc_source: &str,
+    filename: Option<&str>,
+    generic_params: Option<&str>,
+    attrs_type: Option<&str>,
+    root_element_tag: Option<&str>,
+) -> TscOutput {
+    let mut out = TscWriter::new(512);
+
+    // ── Type import statements (declaration-legal `import type …`) ────
+    for stmt in &state.type_import_stmts {
+        out.push_str(stmt);
+        out.push('\n');
+    }
+    // Value imports used in a type position, promoted to declaration-legal
+    // `import type` (the setup body that brought them into scope in the runtime
+    // path is omitted here).
+    for stmt in &state.declaration_promoted_type_imports {
+        out.push_str(stmt);
+        out.push('\n');
+    }
+
+    // ── Local type declarations ───────────────────────────────────────
+    for lt in &state.local_types {
+        out.push_str(lt);
+        out.push('\n');
+    }
+    out.push('\n');
+
+    // ── declare const ComponentName ───────────────────────────────────
+    // The declaration form is the explicit instance shape WITHOUT the
+    // value-bearing `__OmitNew<typeof __comp> &` prefix the runtime path uses:
+    // a `.d.ts` has no runtime `__comp` value to take `typeof` of, so the
+    // declaration opens a bare object type whose `new(...)` carries the full
+    // public `$props`/`$emit`/`$slots`/… surface.
+    out.push_str(&format!("declare const {component_name}: {{\n"));
+
+    // Declaration mode does not narrow on root conditions (narrowing is a
+    // `Public`-only template-driven projection); the instance shape is rendered
+    // without narrowing generics.
+    let full_gp = generic_params.map(str::to_string);
+    render_instance_shape_body(
+        &mut out,
+        state,
+        attrs_type,
+        root_element_tag,
+        None,
+        full_gp.as_deref(),
+        // Declaration OMITS the setup body, so `typeof <exposed-binding>` is
+        // unbound — render exposed members with a declaration-legal placeholder.
+        false,
+    );
+    out.push_str(&format!("export default {component_name}\n"));
 
     // ── Inline source map ─────────────────────────────────────────────
     let (mut code, mappings) = out.into_parts();

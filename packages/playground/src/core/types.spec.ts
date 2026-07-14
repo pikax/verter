@@ -28,6 +28,8 @@ describe("File", () => {
         templateCode: "",
         verterSourceMap: "",
         tscCode: "",
+        declCode: "",
+        declSourceMap: "",
         ssrCode: "",
         errors: [],
         compilerDiagnostics: [],

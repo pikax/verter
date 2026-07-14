@@ -726,6 +726,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // paths only, so a generated name is caught once
             // committed, not at generation time).
             "tracked_paths_are_portable",
+            // Canonical-id case-canonicalization at the upsert
+            // chokepoint: a caller-supplied variant spelling of the
+            // same file (upper-case Windows drive letter `C:/...` vs
+            // canonical `c:/...`) must not mint a second host identity
+            // that splits alias routes and derived caches — the
+            // HOST_MISSING_MACRO_TYPE_DEP degradation class.
+            "upsert_always_canonicalizes_supplied_canonical_id",
             // Content-residue half: `git ls-files -z` walk pinning that no
             // tracked file embeds any of 64 KNOWN leaked-root markers
             // (one dev's $HOME, one machine's checkout drive + worktree/
@@ -856,6 +863,38 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "svelte_rune_module_not_in_carrier_extensions",
             "lifecycle_watch_globs_are_descriptor_derived",
             "rune_module_self_file_state_closed_on_did_close",
+        ],
+    ),
+    (
+        "Project-Bound External-TS Contract",
+        &[
+            // A production external-TS op is uninstantiable without a
+            // `BoundProject` witness; no path-only result-construction entry
+            // (`query_by_path` / `open_tsx` / `update_file(uri)`) in production.
+            "provider_op_requires_resolved_project",
+            // TS-correct ownership: a carrier source is owned only via the
+            // default include, a no-extension directory/bare-star glob, or an
+            // explicit per-extension `files`/glob entry — never an `*.ts` glob;
+            // TypeScript `include` has no brace expansion.
+            "carrier_ownership_extension_rules",
+            // A real user file at the exact `{name}.vue.tsx`/`.svelte.tsx`
+            // companion path downgrades the source to `Ambiguous` — the overlay
+            // is never placed, no external-TS result, the real file is never
+            // shadowed (`.vue` AND `.svelte`).
+            "carrier_never_shadows_real_user_file",
+            // A `Foo.svelte` component beside a real same-stem `Foo.svelte.ts`
+            // rune is a DETECTED ambiguity (fail closed, no silently-wrong edge).
+            "same_stem_svelte_component_rune_fails_closed",
+            // The external-TS engine is project-bound on EVERY backend: the
+            // GLOBAL guard bans inferred-project construction/open knobs
+            // (`openExternalProject`, `useSingleInferredProject`,
+            // `createInferredProject`, `inferredProjectCompilerOptions`, the
+            // tsserver `configure_paths` impl, the config-less owned tsgo restart
+            // backend) across the LSP / TSC / type-runtime source, and asserts the
+            // tsgo carrier path reaches configured membership via `open_project` +
+            // `project.root_files`. The ONE `compilerOptionsForInferredProjects`
+            // CONFIG call (extension provider) is allow-listed.
+            "no_fallback_to_inferred_anywhere",
         ],
     ),
     // ──────────────────── SKILL.md additions ──────────────────────

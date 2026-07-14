@@ -54,7 +54,7 @@ export const CLIENT_FRAMEWORKS: readonly ClientFramework[] = [
     triggerLanguageIds: ["vue"],
     virtualFileSuffixes: {
       ide: [".jsx", ".tsx"],
-      importSurface: [".ts"],
+      importSurface: [".verter.ts"],
       testingApi: ".__verter_test.ts",
       sidecars: [],
     },
@@ -67,7 +67,7 @@ export const CLIENT_FRAMEWORKS: readonly ClientFramework[] = [
     triggerLanguageIds: ["svelte"],
     virtualFileSuffixes: {
       ide: [".tsx"],
-      importSurface: [".ts"],
+      importSurface: [".verter.ts"],
       testingApi: null,
       sidecars: [],
     },

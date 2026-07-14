@@ -17,8 +17,9 @@ use super::span::adjust_diagnostics_spans;
 use super::span_shift::shift_formal_parameters_spans;
 use crate::common::Span;
 use crate::utils::oxc::bindings::{
-    collect_expression_reference_spans, collect_pattern_local_spans,
-    collect_pattern_reference_spans, collect_type_reference_spans,
+    collect_expression_free_refs, collect_expression_reference_spans,
+    collect_pattern_default_free_ref_names, collect_pattern_local_spans,
+    collect_pattern_reference_spans, collect_type_free_ref_names, collect_type_reference_spans,
 };
 
 /// Result of parsing a v-slot expression.
@@ -63,7 +64,34 @@ pub struct VSlotWithBindings<'a> {
     /// Spans of external references used in the slot expression (type annotations, defaults).
     /// For `{ data }: { data: MyType }`, this would contain a span for "MyType".
     /// Use `span.slice(source)` to get the string value.
+    ///
+    /// Default-value references drop global-named identifiers (`Date`, `Map`) — the
+    /// runtime `_ctx`-prefixing set. Use [`liveness_reference_names`](Self::liveness_reference_names)
+    /// for unused-binding liveness, where a setup binding may shadow a global.
     pub references: Vec<Span>,
+
+    /// Free-reference NAMES for UNUSED-BINDING LIVENESS, collected by the COMPLETE
+    /// `Visit` walker over the slot's default-value expressions plus its
+    /// type-annotation references.
+    ///
+    /// Unlike [`references`](Self::references) (the runtime `_ctx`-prefixing span
+    /// set, collected by the partial walker that drops globals and does not recurse
+    /// into callback bodies), this set:
+    /// - is collected by the complete `Visit` walker for BOTH domains — value
+    ///   defaults route through `collect_expression_free_refs` and type annotations
+    ///   through `collect_type_free_ref_names`, the same `SetupRefCollector` Visit
+    ///   driven over a `TSType` — so a binding referenced ONLY inside a nested
+    ///   callback in a default (`#default="{ row = list.map(r => fmt(r)) }"`) OR
+    ///   ONLY via a `typeof` query buried in a function-type parameter
+    ///   (`#default="{ cb }: { cb: (x: typeof Helper) => void }"`) is recorded;
+    /// - RETAINS global-named identifiers (a `const Map` binding shadowing the JS
+    ///   global, used as `#default="{ row = Map }"`, is a real use);
+    /// - carries NAMES (not spans), so liveness never depends on the partial
+    ///   wrapped→file-relative span shift (which does not recurse into arrow
+    ///   bodies, so a callback-body span would slice the wrong source bytes).
+    ///
+    /// Feeds ONLY the liveness usage union, never runtime codegen.
+    pub liveness_reference_names: Vec<String>,
 }
 
 impl<'a> VSlotWithBindings<'a> {
@@ -88,21 +116,32 @@ impl<'a> VSlotWithBindings<'a> {
     }
 }
 
-/// Extract binding spans from the file-relative FormalParameters.
+/// Extract bindings from the file-relative FormalParameters.
 ///
-/// The params tree has already been shifted to file-relative, so locals and
-/// default-value references slice `input` directly. Type-annotation reference
-/// spans are read from nodes that keep the synthetic arrow-wrapper prefix
-/// (display-only positions that are never source-mapped), so they take only the
-/// `file_offset` shift to reach their published position.
+/// Returns the local spans, the runtime reference spans, and the liveness
+/// reference NAMES. The params tree has already been shifted to file-relative for
+/// VALUE positions, so runtime locals/default-value reference spans slice `input`
+/// directly; type-annotation reference spans keep the synthetic arrow-wrapper
+/// prefix (display-only positions that are never source-mapped), so they take
+/// only the `file_offset` shift. LIVENESS carries owned names so it never depends
+/// on that partial span shift (which does not recurse into callback bodies).
 fn extract_slot_bindings_internal(
     params: &FormalParameters<'_>,
     input: &str,
     file_offset: u32,
     ignored_extra: &[&str],
-) -> (Vec<Span>, Vec<Span>) {
+) -> (Vec<Span>, Vec<Span>, Vec<String>) {
     let mut locals = Vec::new();
     let mut references_set = FxHashSet::default();
+    // LIVENESS reference NAMES, collected by the complete `Visit` walker over BOTH
+    // domains — value defaults via `collect_expression_free_refs` and type
+    // annotations via `collect_type_free_ref_names` (the same Visit driven over a
+    // `TSType`). Globals are RETAINED, a binding referenced only inside a nested
+    // callback in a default is recorded, and a `typeof` query nested in any type
+    // position (function/method/constructor params, signatures, mapped constraints)
+    // is recorded — none of which is possible through the partial runtime span
+    // collectors.
+    let mut liveness_names: FxHashSet<&str> = FxHashSet::default();
 
     // Extract local spans from parameters
     for param in &params.items {
@@ -128,22 +167,38 @@ fn extract_slot_bindings_internal(
     // and apply only the file shift so they land at their published position.
     let mut type_refs: FxHashSet<Span> = FxHashSet::default();
 
-    // Extract reference spans from type annotations and default values
+    // Extract references from type annotations and default values.
+    //
+    // RUNTIME `references_set` (partial `is_global`-filtering walker → spans) and
+    // LIVENESS `liveness_names` (complete `Visit` walker → names) are collected
+    // independently. The liveness VALUE walker descends into nested callback bodies
+    // in a default (`#default="{ row = list.map(r => fmt(r)) }"`), records `fmt`,
+    // and retains global-named references. Type-space references feed liveness via
+    // the complete `Visit`-over-`TSType` collector (`collect_type_free_ref_names`),
+    // whose default `walk::*` traversal reaches EVERY nested type position —
+    // function/constructor/method-signature/call/index/construct-signature params,
+    // mapped-type constraints, infer, import, template-literal, predicate, and
+    // qualified-name roots — so a `typeof Helper` buried in `(x: typeof Helper) =>
+    // void` is recorded and never falsely demoted.
     for param in &params.items {
         // Default value (initializer) — already file-relative.
         if let Some(init) = &param.initializer {
             collect_expression_reference_spans(init, &ignored, &mut references_set);
+            liveness_names.extend(collect_expression_free_refs(init));
         }
         // Type annotation on the parameter (on FormalParameter, not BindingPattern)
         if let Some(annotation) = &param.type_annotation {
             collect_type_reference_spans(&annotation.type_annotation, &mut type_refs);
+            liveness_names.extend(collect_type_free_ref_names(&annotation.type_annotation));
         }
         // References in default values within the pattern — already file-relative.
         collect_pattern_reference_spans(&param.pattern, &ignored, &mut references_set);
+        collect_pattern_default_free_ref_names(&param.pattern, &mut liveness_names);
     }
     if let Some(rest) = &params.rest {
         if let Some(annotation) = &rest.type_annotation {
             collect_type_reference_spans(&annotation.type_annotation, &mut type_refs);
+            liveness_names.extend(collect_type_free_ref_names(&annotation.type_annotation));
         }
     }
 
@@ -154,7 +209,15 @@ fn extract_slot_bindings_internal(
     }
 
     let references: Vec<Span> = references_set.into_iter().collect();
-    (locals, references)
+    // The complete `Visit`/type-reference walkers have no `ignored` parameter
+    // (they suppress only lexically-shadowed names); the slot's own param locals
+    // are declared outside the default expressions, so exclude them here by name.
+    let liveness_reference_names: Vec<String> = liveness_names
+        .into_iter()
+        .filter(|name| !ignored.contains(name.as_bytes()))
+        .map(|name| name.to_string())
+        .collect();
+    (locals, references, liveness_reference_names)
 }
 
 /// Parse a Vue v-slot expression from a span within a larger source string.
@@ -328,18 +391,19 @@ pub fn parse_vslot_with_bindings_sliced<'a>(
         adjust_diagnostics_spans(errors, offset);
     }
 
-    let (locals, references) = if result.errors.is_some() {
-        (Vec::new(), Vec::new())
+    let (locals, references, liveness_reference_names) = if result.errors.is_some() {
+        (Vec::new(), Vec::new(), Vec::new())
     } else if let Some(params) = &result.params {
         extract_slot_bindings_internal(params, input, offset, ignored)
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
 
     VSlotWithBindings {
         result,
         locals,
         references,
+        liveness_reference_names,
     }
 }
 
@@ -975,5 +1039,256 @@ mod tests {
             .expect("sliced malformed parse must produce a labelled diagnostic");
 
         assert_eq!(sliced_off, raw_off + slice_start as usize);
+    }
+
+    /// A global-named identifier in a v-slot default-value (`{ row = Map }`) is
+    /// DROPPED from the runtime `references` set (so it is not `_ctx`-prefixed) but
+    /// RETAINED in `liveness_reference_names` (so a `const Map` setup binding
+    /// shadowing the global is not falsely reported unused). Discriminating: would
+    /// FAIL if liveness reused the runtime `is_global` filter.
+    #[test]
+    fn global_named_default_value_dropped_from_runtime_kept_for_liveness() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings(allocator, "{ row = Map }", SourceType::tsx(), &[]);
+
+        assert!(wb.is_ok());
+        assert!(
+            wb.references.is_empty(),
+            "runtime references must DROP the global-named default `Map`, got: {:?}",
+            wb.references
+                .iter()
+                .map(|s| (s.start, s.end))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            wb.liveness_reference_names,
+            vec!["Map".to_string()],
+            "liveness names must RETAIN the global-named default `Map`"
+        );
+    }
+
+    /// A `typeof X` reference nested inside a `TSFunctionType` parameter of a
+    /// v-slot type annotation (`{ cb }: { cb: (x: typeof Helper) => void }`) is
+    /// recorded in `liveness_reference_names`. The retired partial type walker
+    /// visited only a function type's `return_type`, dropping its params, so the
+    /// `typeof Helper` query was never reached — `Helper` would demote to a
+    /// type-only read and false-positive TS6133. Discriminating: FAILS on the
+    /// partial type walker.
+    #[test]
+    fn typeof_in_function_type_param_recorded_for_liveness() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings(
+            allocator,
+            "{ cb }: { cb: (x: typeof Helper) => void }",
+            SourceType::tsx(),
+            &[],
+        );
+        assert!(wb.is_ok());
+        assert!(
+            wb.liveness_reference_names.contains(&"Helper".to_string()),
+            "`typeof Helper` inside a function-type PARAM must be recorded; got {:?}",
+            wb.liveness_reference_names
+        );
+    }
+
+    /// `typeof X` nested in a `TSMethodSignature` parameter of a type-literal
+    /// annotation. The retired walker visited only a method signature's
+    /// `return_type`, dropping its params. Discriminating: FAILS on the partial
+    /// walker.
+    #[test]
+    fn typeof_in_method_signature_param_recorded_for_liveness() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings(
+            allocator,
+            "{ api }: { api: { run(x: typeof Helper): void } }",
+            SourceType::tsx(),
+            &[],
+        );
+        assert!(wb.is_ok());
+        assert!(
+            wb.liveness_reference_names.contains(&"Helper".to_string()),
+            "`typeof Helper` inside a method-signature PARAM must be recorded; got {:?}",
+            wb.liveness_reference_names
+        );
+    }
+
+    /// `typeof X` nested in a call signature of a type-literal annotation. A call
+    /// signature (`{ (x: typeof Helper): void }`) was entirely behind the retired
+    /// walker's `_ => {}` arm. Discriminating: FAILS on the partial walker.
+    #[test]
+    fn typeof_in_call_signature_param_recorded_for_liveness() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings(
+            allocator,
+            "{ cb }: { cb: { (x: typeof Helper): void } }",
+            SourceType::tsx(),
+            &[],
+        );
+        assert!(wb.is_ok());
+        assert!(
+            wb.liveness_reference_names.contains(&"Helper".to_string()),
+            "`typeof Helper` inside a CALL signature must be recorded; got {:?}",
+            wb.liveness_reference_names
+        );
+    }
+
+    /// `typeof X` nested in an index signature of a type-literal annotation. An
+    /// index signature (`{ [k: string]: typeof Helper }`) was behind the retired
+    /// walker's `_ => {}` arm. Discriminating: FAILS on the partial walker.
+    #[test]
+    fn typeof_in_index_signature_recorded_for_liveness() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings(
+            allocator,
+            "{ map }: { map: { [k: string]: typeof Helper } }",
+            SourceType::tsx(),
+            &[],
+        );
+        assert!(wb.is_ok());
+        assert!(
+            wb.liveness_reference_names.contains(&"Helper".to_string()),
+            "`typeof Helper` inside an INDEX signature must be recorded; got {:?}",
+            wb.liveness_reference_names
+        );
+    }
+
+    /// `typeof X` nested in a construct signature of a type-literal annotation. A
+    /// construct signature (`{ new (x: typeof Helper): Foo }`) was behind the
+    /// retired walker's `_ => {}` arm. Discriminating: FAILS on the partial walker.
+    #[test]
+    fn typeof_in_construct_signature_param_recorded_for_liveness() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings(
+            allocator,
+            "{ ctor }: { ctor: { new (x: typeof Helper): Foo } }",
+            SourceType::tsx(),
+            &[],
+        );
+        assert!(wb.is_ok());
+        assert!(
+            wb.liveness_reference_names.contains(&"Helper".to_string()),
+            "`typeof Helper` inside a CONSTRUCT signature must be recorded; got {:?}",
+            wb.liveness_reference_names
+        );
+    }
+
+    /// `typeof X` nested in a `TSConstructorType` parameter. A constructor type
+    /// (`new (x: typeof Helper) => Foo`) was entirely behind the retired walker's
+    /// `_ => {}` arm. Discriminating: FAILS on the partial walker.
+    #[test]
+    fn typeof_in_constructor_type_param_recorded_for_liveness() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings(
+            allocator,
+            "{ ctor }: { ctor: new (x: typeof Helper) => Foo }",
+            SourceType::tsx(),
+            &[],
+        );
+        assert!(wb.is_ok());
+        assert!(
+            wb.liveness_reference_names.contains(&"Helper".to_string()),
+            "`typeof Helper` inside a CONSTRUCTOR type param must be recorded; got {:?}",
+            wb.liveness_reference_names
+        );
+    }
+
+    /// `typeof X` nested in a mapped-type constraint. A mapped type's constraint
+    /// (`{ [K in keyof typeof Helper]: V }`) was dropped — the retired walker
+    /// followed only the mapped value `type_annotation`. Discriminating: FAILS on
+    /// the partial walker.
+    #[test]
+    fn typeof_in_mapped_type_constraint_recorded_for_liveness() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings(
+            allocator,
+            "{ rec }: { rec: { [K in keyof typeof Helper]: string } }",
+            SourceType::tsx(),
+            &[],
+        );
+        assert!(wb.is_ok());
+        assert!(
+            wb.liveness_reference_names.contains(&"Helper".to_string()),
+            "`typeof Helper` in a MAPPED-TYPE constraint must be recorded; got {:?}",
+            wb.liveness_reference_names
+        );
+    }
+
+    /// A nested function-type RETURN position whose return is itself a function
+    /// type carrying `typeof X` in ITS param (`() => (x: typeof Helper) => void`).
+    /// The retired walker recursed return types but never params, so the inner
+    /// param's `typeof Helper` was missed. Discriminating: FAILS on the partial
+    /// walker.
+    #[test]
+    fn typeof_in_nested_function_type_return_param_recorded_for_liveness() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings(
+            allocator,
+            "{ make }: { make: () => (x: typeof Helper) => void }",
+            SourceType::tsx(),
+            &[],
+        );
+        assert!(wb.is_ok());
+        assert!(
+            wb.liveness_reference_names.contains(&"Helper".to_string()),
+            "`typeof Helper` in a nested function-type's PARAM must be recorded; got {:?}",
+            wb.liveness_reference_names
+        );
+    }
+
+    /// A bare named type in a `TSFunctionType` param (no `typeof`) is also
+    /// recorded — a v-slot default-slot binding can reference a setup VALUE binding
+    /// from a type position via `typeof`, but a setup-declared TYPE name used as a
+    /// param annotation must keep its declaration live too. Routing through the
+    /// complete `Visit` over the type collects every type-name leaf in param
+    /// position. Discriminating: FAILS on the partial walker (function-type params
+    /// were skipped entirely).
+    #[test]
+    fn named_type_in_function_type_param_recorded_for_liveness() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings(
+            allocator,
+            "{ cb }: { cb: (x: HelperType) => void }",
+            SourceType::tsx(),
+            &[],
+        );
+        assert!(wb.is_ok());
+        assert!(
+            wb.liveness_reference_names
+                .contains(&"HelperType".to_string()),
+            "a named type in a function-type PARAM must be recorded; got {:?}",
+            wb.liveness_reference_names
+        );
+    }
+
+    /// A binding referenced ONLY inside a nested callback in a v-slot default
+    /// (`{ row = list.map(r => fmt(r)) }`) is recorded in `liveness_reference_names`.
+    /// The retired partial liveness span walker dropped the arrow-function argument
+    /// body, missing `fmt`. Discriminating: would FAIL on the partial walker.
+    #[test]
+    fn nested_callback_default_value_recorded_for_liveness() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings(
+            allocator,
+            "{ row = list.map(r => fmt(r)) }",
+            SourceType::tsx(),
+            &[],
+        );
+        assert!(wb.is_ok());
+        assert!(
+            wb.liveness_reference_names.contains(&"list".to_string()),
+            "default-value receiver `list` recorded; got {:?}",
+            wb.liveness_reference_names
+        );
+        assert!(
+            wb.liveness_reference_names.contains(&"fmt".to_string()),
+            "a reference inside the `.map(..)` callback BODY must be recorded; got {:?}",
+            wb.liveness_reference_names
+        );
+        // `r` is the callback param (inner-scope local) and must NOT leak.
+        assert!(
+            !wb.liveness_reference_names.contains(&"r".to_string()),
+            "callback param `r` stays excluded; got {:?}",
+            wb.liveness_reference_names
+        );
     }
 }

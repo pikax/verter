@@ -229,7 +229,13 @@ pub fn resolve(
         workspace_root,
         strict,
         &|| verter_type_runtime::find_node(),
-        &|| verter_type_runtime::tsgo::find_tsgo_binary().ok(),
+        &|| {
+            // rc-only canonical discovery: env override → workspace `node_modules`
+            // rc `tsc` → npm/npx cache. Passing the workspace root lets a project
+            // that pins `typescript@>=7` resolve its own engine.
+            verter_type_runtime::tsgo::find_tsgo_binary_canonical(Some(Path::new(workspace_root)))
+                .ok()
+        },
         &|tsdk, ws| {
             verter_type_runtime::find_tsserver(Some(tsdk), Some(ws))
                 .map(|p| p.to_string_lossy().to_string())
@@ -250,8 +256,18 @@ pub async fn spawn(
             Ok(Arc::new(provider))
         }
         (ProviderName::Tsserver, SpawnPlan::Tsserver { node, tsserver_js }) => {
-            let provider =
-                TsserverTypeProvider::spawn(node, tsserver_js, workspace_root, None, None).await?;
+            // No plugin loaded (baseline), so the response-remap gate is moot;
+            // pass the verter_lsp-internal default (`false`).
+            let provider = TsserverTypeProvider::spawn(
+                node,
+                tsserver_js,
+                workspace_root,
+                None,
+                None,
+                false,
+                None,
+            )
+            .await?;
             Ok(Arc::new(provider))
         }
         // The plan is always built for the requested provider in `resolve_with`.

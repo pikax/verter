@@ -21,12 +21,15 @@
 //! comparison that pairs the two halves is owned by the DX harness integration
 //! gate (a later harness component), not reproduced here.
 //!
-//! Auto-import and completion-resolve differential is likewise outside this
-//! bridge: producing and validating the resolve/edit shape is owned by the
-//! raw-LSP auto-import collector and the extension-host accept gate. The bridge
-//! exposes normalized provider output only and runs no completion-resolve route.
-//! (`verter_type_runtime::TypeProvider` already exposes `resolve_completion`, so
-//! that collector needs no product-trait change when it is built.)
+//! The bridge also exposes the lazy auto-import-on-accept route
+//! (`resolveCompletion`): after a `completion` query, the runner picks the item
+//! carrying an actionable `resolveData` handle and sends it back so the SAME real
+//! provider (tsgo or tsserver) resolves its `additionalTextEdits` through
+//! `verter_type_runtime::TypeProvider::resolve_completion`. This is the
+//! bridge-side surface the differential uses to prove tsserver and tsgo return
+//! the SAME resolved import edits — provider parity for auto-import. The bridge
+//! still normalizes provider output only; the carrier `.vue` re-anchor of those
+//! edits is the LSP layer's job and is exercised by the VS Code E2E gate.
 //!
 //! All logging goes to stderr — stdout is reserved for the protocol channel.
 
@@ -49,9 +52,10 @@ use crate::artifact_overlay::{ArtifactOverlay, ProbeStatus};
 use crate::protocol::{
     AppliedSync, BaselineFile, DiagnosticsRequest, DiagnosticsResponse, ErrorKind, HelloRequest,
     HelloResponse, NormalizedCompletionItem, NormalizedDiagnostic, NormalizedHover,
-    NormalizedLocation, OpenRequest, OpenResponse, ProviderCapabilities, ProviderName, QueryMethod,
-    QueryRequest, QueryResponse, QueryResult, Request, Response, ShutdownResponse, SyncAction,
-    SyncArtifactsRequest, SyncArtifactsResponse,
+    NormalizedLocation, NormalizedResolvedTextEdit, OpenRequest, OpenResponse,
+    ProviderCapabilities, ProviderName, QueryMethod, QueryRequest, QueryResponse, QueryResult,
+    Request, ResolveCompletionRequest, ResolveCompletionResponse, Response, ShutdownResponse,
+    SyncAction, SyncArtifactsRequest, SyncArtifactsResponse,
 };
 use crate::provider::Resolution;
 
@@ -186,6 +190,7 @@ impl Bridge {
             Request::Open(o) => (self.on_open(o).await, false),
             Request::SyncArtifacts(s) => (self.on_sync(s).await, false),
             Request::Query(q) => (self.on_query(q).await, false),
+            Request::ResolveCompletion(r) => (self.on_resolve_completion(r).await, false),
             Request::Diagnostics(d) => (self.on_diagnostics(d).await, false),
             Request::Shutdown => (self.on_shutdown().await, true),
         }
@@ -333,7 +338,7 @@ impl Bridge {
     async fn on_query(&mut self, q: QueryRequest) -> Response {
         let (provider, caps) = match self.ready_provider() {
             Ok(rp) => rp,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
         // Path-precise staleness: gate on the SPECIFIC generated artifact being
         // probed, not the authored-URI rollup. A sync that refreshed only a
@@ -399,10 +404,41 @@ impl Bridge {
         })
     }
 
+    async fn on_resolve_completion(&mut self, r: ResolveCompletionRequest) -> Response {
+        let (provider, caps) = match self.ready_provider() {
+            Ok(rp) => rp,
+            Err(resp) => return *resp,
+        };
+        // Path-precise staleness: gate on the SPECIFIC generated artifact being
+        // resolved, the same gate `on_query` applies.
+        if let ProbeStatus::Stale { have } = self.overlay.probe_path_status(&r.path, r.version) {
+            return Response::stale(&r.uri, r.version, have);
+        }
+        match provider.resolve_completion(&r.path, r.data).await {
+            Ok(resolved) => {
+                self.baseline_ran += 1;
+                let resolved = resolved.unwrap_or_default();
+                Response::ResolveCompletion(ResolveCompletionResponse {
+                    uri: r.uri,
+                    version: r.version,
+                    additional_text_edits: resolved
+                        .additional_text_edits
+                        .iter()
+                        .map(NormalizedResolvedTextEdit::from)
+                        .collect(),
+                    detail: resolved.detail,
+                    documentation: resolved.documentation,
+                    capabilities: caps,
+                })
+            }
+            Err(e) => Response::error(ErrorKind::ProviderError, e.to_string()),
+        }
+    }
+
     async fn on_diagnostics(&mut self, d: DiagnosticsRequest) -> Response {
         let (provider, caps) = match self.ready_provider() {
             Ok(rp) => rp,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
         // Path-precise staleness: gate on the SPECIFIC generated artifact being
         // probed, not the authored-URI rollup (the same gate `on_query` applies).
@@ -442,19 +478,23 @@ impl Bridge {
     /// Clone the provider Arc and its capabilities if the bridge is ready to
     /// probe, else the refusal response. Capabilities ride along structurally
     /// (no separate `Option` to unwrap).
-    fn ready_provider(&self) -> Result<(Arc<dyn TypeProvider>, ProviderCapabilities), Response> {
+    // `Box<Response>` keeps the `Err` variant small: `Response` is a large wire
+    // enum, so returning it unboxed in a `Result` trips `clippy::result_large_err`.
+    fn ready_provider(
+        &self,
+    ) -> Result<(Arc<dyn TypeProvider>, ProviderCapabilities), Box<Response>> {
         if self.skipped {
-            return Err(Response::error(
+            return Err(Box::new(Response::error(
                 ErrorKind::NotInitialized,
                 "baseline provider not available (skipped)",
-            ));
+            )));
         }
         match &self.ready {
             Some(r) => Ok((Arc::clone(&r.provider), r.capabilities.clone())),
-            None => Err(Response::error(
+            None => Err(Box::new(Response::error(
                 ErrorKind::NotInitialized,
                 "probe before hello",
-            )),
+            ))),
         }
     }
 }

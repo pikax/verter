@@ -43,6 +43,13 @@ packages/benchmark/benchmark-results/
 # Integration test cloned repos
 .integration-tests/
 
+# Local analysis-campaign inputs (corpus paths live here, never committed).
+# Ignore the directory CONTENTS (not the dir itself) so the lone committable
+# example can be re-included — a `!` negation cannot re-include a file whose
+# PARENT directory is excluded, so this must be `.analysis/*`, never `.analysis/`.
+.analysis/*
+!.analysis/projects.local.json.example
+
 # Playwright transient artifacts
 packages/playground/test-results/
 

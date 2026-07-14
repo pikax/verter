@@ -15,7 +15,9 @@ use rustc_hash::FxHashSet;
 
 use super::span::{adjust_diagnostics_spans, adjust_expression_spans};
 use crate::common::Span;
-use crate::utils::oxc::bindings::collect_expression_reference_spans;
+use crate::utils::oxc::bindings::{
+    collect_expression_free_refs, collect_expression_reference_spans,
+};
 
 /// Result of parsing a v-for expression.
 #[derive(Debug)]
@@ -87,7 +89,28 @@ pub struct VForWithBindings<'a> {
     /// Spans of external references used in the v-for expression.
     /// For `item of data.items`, this would contain a span for "data".
     /// Use `span.slice(source)` to get the string value.
+    ///
+    /// Drops global-named identifiers (`Date`, `Map`) — the runtime
+    /// `_ctx`-prefixing set. Use [`liveness_reference_names`](Self::liveness_reference_names)
+    /// for unused-binding liveness, where a setup binding may shadow a global.
     pub references: Vec<Span>,
+
+    /// Free-reference NAMES for UNUSED-BINDING LIVENESS, collected by the COMPLETE
+    /// `Visit` walker over the v-for source expression.
+    ///
+    /// Unlike [`references`](Self::references) (the runtime `_ctx`-prefixing span
+    /// set, collected by the partial walker that drops globals and does not
+    /// recurse into callback bodies), this set:
+    /// - is collected by the complete `Visit` walker, so a binding referenced ONLY
+    ///   inside a nested callback in the source (`v-for="x in rows.map(r => fmt(r))"`)
+    ///   is recorded;
+    /// - RETAINS global-named identifiers (a `<script setup>` binding may shadow a
+    ///   JS global, so `v-for="x in Date"` is a real use of a `const Date` binding);
+    /// - carries NAMES (not spans), so liveness never depends on the partial
+    ///   wrapped→file-relative span shift.
+    ///
+    /// Feeds ONLY the liveness usage union, never runtime codegen.
+    pub liveness_reference_names: Vec<String>,
 }
 
 impl<'a> VForWithBindings<'a> {
@@ -197,15 +220,17 @@ fn collect_vfor_left_local_spans(expr: &Expression<'_>, locals: &mut Vec<Span>) 
     }
 }
 
-/// Extract binding spans from a VForParseResult.
+/// Extract bindings from a VForParseResult.
 ///
-/// This is an internal function used by `parse_vfor_with_bindings`.
-/// Returns spans instead of string references to avoid self-referential struct issues.
+/// This is an internal function used by `parse_vfor_with_bindings`. Returns the
+/// local spans, the runtime reference spans, and the liveness reference NAMES.
+/// The runtime references are spans (a self-referential-struct workaround);
+/// liveness carries owned names so it never depends on the partial span shift.
 fn extract_vfor_bindings_internal(
     result: &VForParseResult<'_>,
     input: &str,
     ignored_extra: &[&str],
-) -> (Vec<Span>, Vec<Span>) {
+) -> (Vec<Span>, Vec<Span>, Vec<String>) {
     let mut locals = Vec::new();
     let mut references_set = FxHashSet::default();
 
@@ -231,15 +256,31 @@ fn extract_vfor_bindings_internal(
     // Note: we only collect runtime references, NOT TypeScript type references.
     // TS type assertions (e.g. `as Foo`) are preserved in SSR output (stripped later
     // by the bundler), so type identifiers must not be added to the reference set.
+    //
+    // `references` is the RUNTIME `_ctx`-prefixing set (drops globals via the
+    // partial `is_global`-filtering walker). `liveness_reference_names` is the
+    // unused-binding LIVENESS set: it routes through the COMPLETE `Visit` name
+    // collector, so a setup binding referenced ONLY inside a nested callback in the
+    // source (`v-for="x in rows.map(r => fmt(r))"`) is recorded, and global-named
+    // references (`v-for="x in Date"` over a `const Date` binding) are retained.
+    let mut liveness_reference_names: Vec<String> = Vec::new();
     if let Some(right) = &result.right {
         collect_expression_reference_spans(right, &ignored, &mut references_set);
+        // The complete `Visit` walker has no `ignored` parameter (it suppresses
+        // only lexically-shadowed names); the v-for LEFT locals are declared
+        // outside the source expression, so exclude them here by name.
+        for name in collect_expression_free_refs(right) {
+            if !ignored.contains(name.as_bytes()) {
+                liveness_reference_names.push(name.to_string());
+            }
+        }
     }
 
     let mut references: Vec<Span> = references_set.into_iter().collect();
     // Sort by start position — downstream consumers (prefix_vfor_references_into)
     // use a forward-scanning cursor that assumes ascending order.
     references.sort_unstable_by_key(|s| s.start);
-    (locals, references)
+    (locals, references, liveness_reference_names)
 }
 
 /// Parse a Vue v-for expression from a span within a larger source string.
@@ -438,16 +479,18 @@ pub fn parse_vfor_with_bindings_sliced<'a>(
     // pass — no re-slice, no re-parse, no per-span shift.
     let result = parse_vfor_sliced(allocator, span, input, source_type);
 
-    let (locals, references) = if result.has_left_errors() || result.has_right_errors() {
-        (Vec::new(), Vec::new())
-    } else {
-        extract_vfor_bindings_internal(&result, input, ignored)
-    };
+    let (locals, references, liveness_reference_names) =
+        if result.has_left_errors() || result.has_right_errors() {
+            (Vec::new(), Vec::new(), Vec::new())
+        } else {
+            extract_vfor_bindings_internal(&result, input, ignored)
+        };
 
     VForWithBindings {
         result,
         locals,
         references,
+        liveness_reference_names,
     }
 }
 

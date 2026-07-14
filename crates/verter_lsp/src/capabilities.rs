@@ -41,14 +41,25 @@ fn glob_for_extensions(extensions: &[&str]) -> String {
     }
 }
 
-pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilities {
+/// Build the advertised server capabilities.
+///
+/// `resolve_provider` is the HONEST completion-resolve capability: it must
+/// reflect whether the active type provider actually implements
+/// `completionItem/resolve` (auto-import / lazy detail), not be hard-coded. A
+/// session with no provider, or a provider without resolve support, advertises
+/// `resolve_provider: false` so the client never sends resolve requests the
+/// server would silently no-op.
+pub fn server_capabilities(
+    encoding: &PositionEncodingKind,
+    resolve_provider: bool,
+) -> ServerCapabilities {
     ServerCapabilities {
         position_encoding: Some(encoding.clone()),
         text_document_sync: Some(TextDocumentSyncCapability::Kind(
             TextDocumentSyncKind::INCREMENTAL,
         )),
         completion_provider: Some(CompletionOptions {
-            resolve_provider: Some(true),
+            resolve_provider: Some(resolve_provider),
             trigger_characters: Some(vec![
                 ".".into(),
                 "@".into(),
@@ -91,9 +102,12 @@ pub fn server_capabilities(encoding: &PositionEncodingKind) -> ServerCapabilitie
         }),
         color_provider: Some(ColorProviderCapability::Simple(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
+        // Proactive tag auto-close fires on the `>` that closes an open tag.
+        // The handler (`auto_close_tag`) requires a `>` immediately before the
+        // cursor, so `>` is the only trigger it can act on — no `/` more-trigger.
         document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
             first_trigger_character: ">".to_string(),
-            more_trigger_character: Some(vec!["/".to_string()]),
+            more_trigger_character: None,
         }),
         call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),

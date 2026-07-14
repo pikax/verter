@@ -66,6 +66,8 @@ mod ambient_lib_tests;
 pub mod ambient_parse;
 pub mod audit_sink;
 pub mod canonical_path;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod carrier_discovery;
 pub mod changes;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config;
@@ -93,7 +95,11 @@ pub mod relative_path;
 pub mod resolver;
 pub mod snapshot_builder;
 pub mod traits;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tsgo_virtual_config;
 pub mod types;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod virtual_config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod vite_config;
 pub mod workspace_snapshot;
@@ -120,6 +126,8 @@ pub use ambient_lib::{
     AmbientLibSpec, AmbientLibsByProject, AmbientSymbolHit, ProjectAmbientLibs,
 };
 pub use canonical_path::{canonicalize_path, CanonicalPath};
+#[cfg(not(target_arch = "wasm32"))]
+pub use carrier_discovery::{decide_carrier_discovery, CarrierDiscoveryMode};
 pub use changes::{ChangeResult, OwnedFileInfo, OwnershipDiff, WorkspaceChange};
 #[cfg(not(target_arch = "wasm32"))]
 pub use config::{
@@ -144,9 +152,10 @@ pub use package_index::PackageIndex;
 pub use project_key::ProjectStableKey;
 pub use published_state::{ProjectEnvHashArray, PublishedRoot};
 pub use resolver::{
-    carrier_api_provider_path, carrier_ide_provider_path, path_is_carrier, strip_carrier_extension,
-    IdeProjectCompilerOptions, IdeProjectConfig, NativeProjectResolver, ProjectMembership,
-    ProjectResolver, WorkspaceAlias,
+    carrier_api_provider_path, carrier_ide_provider_path, carrier_source_extensions,
+    path_is_carrier, strip_carrier_extension, IdeProjectCompilerOptions, IdeProjectConfig,
+    NativeProjectResolver, ProjectMembership, ProjectResolver, WorkspaceAlias,
+    CARRIER_API_VIRTUAL_SUFFIX,
 };
 pub use snapshot_builder::build_workspace_snapshot_simple;
 #[cfg(not(target_arch = "wasm32"))]
@@ -160,6 +169,8 @@ pub use types::{
     ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase, ResolveRequest,
     ResolveRequestKind, ResolveResult, VfsProvenanceSnapshot,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use virtual_config::{compute_virtual_config_identity, VirtualConfigIdentity};
 #[cfg(not(target_arch = "wasm32"))]
 pub use vite_config::{
     analyze_vite_config, discover_vite_aliases, execute_trusted_vite_config, find_vite_config,

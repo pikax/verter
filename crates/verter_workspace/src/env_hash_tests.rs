@@ -16,6 +16,8 @@
 use std::sync::OnceLock;
 
 use super::EnvHashInputs;
+use crate::canonical_path::CanonicalPath;
+use crate::membership::ConfiguredMembership;
 use crate::module_resolution::{ConditionSet, ModuleResolutionMode};
 use crate::resolver::{
     IdeProjectCompilerOptions, IdeProjectConfig, ProjectMembership, WorkspaceAlias,
@@ -42,13 +44,18 @@ fn baseline() -> (IdeProjectConfig, EnvHashInputs<'static>) {
     cfg.compiler_options = IdeProjectCompilerOptions {
         base_url: Some("/ws/proj".to_string()),
         paths: vec![("@/*".to_string(), vec!["src/*".to_string()])],
+        ..Default::default()
     };
     cfg.references = vec!["/ws/proj/tsconfig.refs.json".to_string()];
-    cfg.membership = ProjectMembership::IncludeExclude {
-        files: vec!["index.ts".to_string()],
-        include: vec!["src/**".to_string()],
-        exclude: vec!["dist/**".to_string()],
-    };
+    cfg.membership = crate::snapshot_builder::configured_membership_from_raw(
+        "/ws/proj",
+        &ProjectMembership::IncludeExclude {
+            files: vec!["index.ts".to_string()],
+            include: vec!["src/**".to_string()],
+            exclude: vec!["dist/**".to_string()],
+        },
+        &cfg.compiler_options,
+    );
     let inputs = EnvHashInputs {
         parser_flags: &["preserve_jsx", "vue_macros_v3"],
         resolve_extensions: &[".ts", ".tsx", ".vue"],
@@ -409,7 +416,7 @@ fn project_identity_changes_when_membership_changes() {
     let (cfg, _) = baseline();
     let h0 = cfg.project_identity();
     let mut cfg2 = cfg.clone();
-    cfg2.membership = ProjectMembership::MatchAll;
+    cfg2.membership = ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/ws/proj"));
     let h1 = cfg2.project_identity();
     assert_ne!(h0, h1, "membership change MUST change project_identity");
 }

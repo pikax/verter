@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "preserve",
+    "jsxImportSource": "vue",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowArbitraryExtensions": true,
+    "allowImportingTsExtensions": true,
+    "baseUrl": ".",
+    "paths": {
+      "vue": ["./stubs/vue.d.ts"],
+      "@verter/types": ["./stubs/verter-types.d.ts"]
+    }
+  },
+  "include": ["src/**/*"]
+}

@@ -126,7 +126,7 @@ pub struct PositionMapper {
     by_src_line: Vec<Vec<u32>>,
     /// The generated-TSX position immediately AFTER Verter's helper-import preamble — the typed
     /// boundary emitted by IDE codegen as the `x_verter_helper_preamble_end` source-map metadata
-    /// member (see [`crate::tsgo::auto_import`]). Everything in `[start-of-file, helper_preamble_end]`
+    /// member (see [`crate::type_provider::auto_import`]). Everything in `[start-of-file, helper_preamble_end]`
     /// is the synthetic helper-import preamble, the only generated region a TypeProvider auto-import
     /// insertion may legitimately land in unmapped. `None` when the map carries no such boundary
     /// (a non-Verter map, or an older artifact) — the classifier then rejects unmapped edits rather
@@ -570,7 +570,7 @@ impl PositionMapper {
     /// synthetic component/export code (rejected). Unlike a mapped-run heuristic, it is exact even
     /// when the generated file has NO mapped runs (an empty `<script setup>`) and is robust to user
     /// imports that precede the helper preamble (a companion `<script>`). See
-    /// [`crate::tsgo::auto_import`] for the structural classifier that consumes this.
+    /// [`crate::type_provider::auto_import`] for the structural classifier that consumes this.
     pub fn helper_preamble_end(&self) -> Option<TsPosition> {
         self.helper_preamble_end
     }

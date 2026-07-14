@@ -1,0 +1,66 @@
+name: lapce
+
+# Builds the Lapce volt and runs its host-target unit suite. The volt is a
+# wasm32-wasip1 cdylib: a thin LSP launcher that delegates all decision logic
+# (argv, initializationOptions, server discovery, the platform matrix) to the
+# shared `verter-editor-client` crate, with the `lapce-plugin` glue isolated
+# behind `cfg(target_os = "wasi")`. The wasm build is the integration smoke that
+# catches a dependency float (e.g. an lsp-types bump past the Url->Uri rename),
+# and the host-target tests exercise the pure launch surface plus the manifest
+# and lockfile guards.
+#
+# A real-Lapce UI smoke is out of scope: Lapce has no headless-editor harness
+# comparable to @vscode/test-electron, so the real-server end-to-end check is
+# deferred, mirroring how the neovim job defers its real-server smoke.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "extensions/lapce/**"
+      - "crates/verter-editor-client/**"
+      - ".github/workflows/lapce.yml"
+  pull_request:
+    paths:
+      - "extensions/lapce/**"
+      - "crates/verter-editor-client/**"
+      - ".github/workflows/lapce.yml"
+
+jobs:
+  build:
+    name: lapce volt (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Cross-platform portability is a CRITICAL rule: the volt must build and
+        # the host-target launch surface must pass on all three host OSes. The
+        # run steps use `shell: bash` so the same scripts work under Git-bash on
+        # the Windows runner.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (with wasm32-wasip1)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+          components: clippy, rustfmt
+
+      - name: Build the volt (wasm32-wasip1)
+        shell: bash
+        run: cargo build --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release
+
+      - name: Run host-target unit tests
+        shell: bash
+        run: cargo test --manifest-path extensions/lapce/Cargo.toml
+
+      - name: Clippy (wasm32-wasip1)
+        shell: bash
+        run: cargo clippy --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 -- -D warnings
+
+      - name: Rustfmt check
+        shell: bash
+        working-directory: extensions/lapce
+        run: cargo fmt --check

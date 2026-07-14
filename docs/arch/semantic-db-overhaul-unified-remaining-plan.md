@@ -3047,14 +3047,17 @@ that C2a introduces)** → background/diagnostics cluster (C7 → C6 → C10+C13
 - **C15 — ranged provider updates only over provider-materialized text. GATED
   (HARD-ORDER prerequisite).** Boundary is `verter_type_runtime` TSGO `ipc.rs` +
   a compiler/codegen handoff (NOT `verter_session`). Ranged provider `didChange` /
-  diff updates instead of full-document re-sends. **HARD-ORDER:** TSGO mutates
-  provider-visible text via `rewrite_vue_imports_for_tsgo`
-  (`crates/verter_type_runtime/src/tsgo/ipc.rs`, around `:1301`) before the
-  update / open / load variants — a source range after a rewritten `.vue` import
-  lands at the wrong provider offset. Direct source-range forwarding is FORBIDDEN
-  until that rewrite is emitted through `CodeTransform` before `build_string()` /
-  source-map emission (a compiler/codegen workstream) OR eliminated by
-  byte-preserving resolver behaviour. Until then, every provider range/diff is
+  diff updates instead of full-document re-sends. The former provider-side
+  import rewrite (`rewrite_vue_imports_for_tsgo`) and its offset-translation
+  compensation have been ELIMINATED: TSGO now receives byte-identical generated
+  text (carrier→carrier imports are suffixed at compile time through
+  `CodeTransform`; plain-file `./Comp.vue` specifiers are resolved to the
+  `.verter.ts` carrier by the workspace resolver before the bytes reach the
+  provider), so provider-visible offsets already match the source. With the
+  byte-shifting rewrite gone, the prior HARD-ORDER prerequisite (forbidding
+  direct source-range forwarding until the rewrite was emitted through
+  `CodeTransform`) is satisfied by byte-preserving resolver behaviour. Until
+  ranged updates are wired, every provider range/diff is
   computed ONLY over previous/current provider-materialized `ide.code`, never
   source ranges. **GOVERNANCE-FLAG:** CodeTransform single-source CRITICAL +
   proposed guard `codetransform_no_post_build_provider_text_rewrite_static_guard`
@@ -4437,6 +4440,14 @@ bridge.
     host/API edit to the cross-component `.vue.ts` synthesized-instance-type
     materialization this block owns; once the host materializes imported-component
     instance types under tsgo, the skipped real-provider rows assert live.
+- **Framework-aware import placement (DEFERRED design, tracked).** Auto-import edit
+  placement is Vue-`<script setup>`-hardcoded + string-based in `verter_lsp`, so `.svelte`
+  and plain-`<script>` Vue get no/invalid auto-import. The codex-architect-recommended fix is
+  a framework-neutral `FrameworkImportPlacement` capability in `verter_session::framework`
+  (registry-dispatched, typed `ImportPlacementOutcome`, neutral parse-artifact root/block
+  layout, Vue + Svelte impls, LSP delegation) — captured in
+  `docs/arch/framework-import-placement-design.md`. It is a shared placement primitive that
+  `B.7` (candidate sources + auto-imports) and `B.8` (organize-imports) CONSUME, not reinvent.
 
 ---
 

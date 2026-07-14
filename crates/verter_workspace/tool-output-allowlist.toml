@@ -21,6 +21,10 @@ path = "crates/verter_lsp/src/svelte_assets.rs"
 rationale = "materializes the Verter-owned `@verter/svelte-jsx` shim into the host data directory (tool setup for TSGO/inferred-project resolution, not semantic input); reads it back via byte-compare; never the user workspace"
 
 [[entries]]
+path = "crates/verter_lsp/src/external_ts/carrier_publish_store.rs"
+rationale = "materializes the Verter-owned carrier-snapshot store (content-addressed blobs + atomic manifest) into a per-host temp directory for the tsserver plugin to read synchronously (tool output mirroring the in-memory ProviderSurfaceStore, not semantic input); never the user workspace"
+
+[[entries]]
 path = "crates/verter_lsp/src/config.rs"
 rationale = "test fixtures (`#[cfg(test)]` blocks set up tmp directories for `discover_lint_config` tests)"
 
@@ -31,6 +35,10 @@ rationale = "test harness — sets up scratch worktrees for LSP integration test
 [[entries]]
 path = "crates/verter_lsp/src/test_utils.rs"
 rationale = "test utilities — temp workspace creation for LSP unit tests"
+
+[[entries]]
+path = "crates/verter_lsp/src/real_provider_tests/rename.rs"
+rationale = "real-provider rename integration tests (`#[cfg(test)] mod real_provider_tests`) — the `read_file` helper reads on-disk fixture content for a CLOSED file to assert the on-disk-vs-LSP-edit contract; same test-fixture-read category as `test_harness.rs`/`test_utils.rs`, never workspace/semantic state"
 
 [[entries]]
 path = "crates/verter_mcp/src/baseline.rs"

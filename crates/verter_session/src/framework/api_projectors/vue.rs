@@ -22,6 +22,7 @@ impl ComponentApiProjector for VueComponentApiProjector {
             file_language,
             mode,
             profile,
+            render_seed,
         } = cx;
         // Carrier-narrowness: the public-API surface is produced only for the
         // Vue SFC CARRIER row, never a same-adapter non-carrier row (e.g. a
@@ -35,7 +36,9 @@ impl ComponentApiProjector for VueComponentApiProjector {
         }
         // Render against the ALREADY-resolved canonical the host classified —
         // not the raw alias id — so the language gate and the render share one
-        // alias resolution (no classify-one / render-another split).
-        host.render_vue_public_api_legacy(resolved_canonical, mode, profile)
+        // alias resolution (no classify-one / render-another split). The
+        // batch-shared cold seed + session view ride on `render_seed` so the
+        // macro-deps path takes ZERO per-call store-view reads.
+        host.render_vue_public_api_legacy(resolved_canonical, mode, profile, render_seed)
     }
 }

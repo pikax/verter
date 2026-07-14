@@ -82,6 +82,321 @@ fn non_vue_function_call() {
     ));
 }
 
+/// Helper: pull the captured `async_component_source` for a named binding.
+fn async_component_source_of<'a>(
+    result: &'a ScriptAnalysisSnapshot,
+    name: &str,
+) -> Option<&'a str> {
+    result
+        .bindings
+        .iter()
+        .find(|b| b.name == name)
+        .and_then(|b| match &b.initializer {
+            Some(BindingInitializer::FunctionCall {
+                async_component_source,
+                ..
+            }) => async_component_source.as_deref(),
+            _ => None,
+        })
+}
+
+#[test]
+fn define_async_component_arrow_captures_carrier_specifier() {
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const Lazy = defineAsyncComponent(() => import('./X.vue'));",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        Some("./X.vue"),
+        "an arrow `() => import('./X.vue')` loader must capture the carrier specifier"
+    );
+}
+
+#[test]
+fn define_async_component_async_await_arrow_captures_carrier_specifier() {
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const Lazy = defineAsyncComponent(async () => await import('./Y.vue'));",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        Some("./Y.vue"),
+        "an `async () => await import(...)` loader must capture the carrier specifier"
+    );
+}
+
+#[test]
+fn define_async_component_options_loader_captures_carrier_specifier() {
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const Lazy = defineAsyncComponent({ loader: () => import('./Z.vue') });",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        Some("./Z.vue"),
+        "an options-object loader must capture the carrier specifier"
+    );
+}
+
+#[test]
+fn bare_dynamic_import_arrow_does_not_capture_carrier_specifier() {
+    // A bare `() => import(...)` NOT wrapped in defineAsyncComponent is a plain
+    // value, never a component declaration — no carrier link.
+    let result = analyze("const Lazy = () => import('./X.vue');");
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        None,
+        "a bare dynamic-import arrow must NOT capture a carrier specifier"
+    );
+}
+
+#[test]
+fn define_async_component_dynamic_specifier_is_not_captured() {
+    // A non-static import target yields no static carrier specifier.
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const name = 'X';\n\
+         const Lazy = defineAsyncComponent(() => import(`./${name}.vue`));",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        None,
+        "a dynamic/templated import target must NOT yield a static carrier specifier"
+    );
+}
+
+#[test]
+fn define_async_component_block_body_returns_captures_returned_import_only() {
+    // A block body returning the import captures it.
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const Lazy = defineAsyncComponent(() => { return import('./R.vue'); });",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        Some("./R.vue"),
+        "a block-body `return import(...)` must capture the returned carrier"
+    );
+}
+
+#[test]
+fn define_async_component_block_body_side_effect_import_is_not_captured() {
+    // CRITICAL false-positive guard: a block-body loader that side-effect
+    // `import('./Side.vue')`s but RETURNS something else must NOT carrier-link
+    // the side-effect import — only the returned value is the loader's result.
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         import Other from './Other.vue';\n\
+         const Lazy = defineAsyncComponent(() => { import('./Side.vue'); return Other; });",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        None,
+        "a bare side-effect `import(...)` in a block body must NOT be captured as the carrier"
+    );
+}
+
+#[test]
+fn define_async_component_parenthesized_loader_captures_carrier_specifier() {
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const Lazy = defineAsyncComponent((() => import('./P.vue')));",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        Some("./P.vue"),
+        "a parenthesized loader argument must still capture the carrier specifier"
+    );
+}
+
+#[test]
+fn define_async_component_quoted_loader_key_captures_carrier_specifier() {
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const Lazy = defineAsyncComponent({ \"loader\": () => import('./Q.vue') });",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        Some("./Q.vue"),
+        "a quoted `loader` options key must still capture the carrier specifier"
+    );
+}
+
+#[test]
+fn define_async_component_duplicate_loader_key_captures_last() {
+    // JS last-wins for duplicate object keys: the LAST static `loader` is the
+    // effective one.
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const Lazy = defineAsyncComponent({ loader: () => import('./A.vue'), loader: () => import('./B.vue') });",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        Some("./B.vue"),
+        "a duplicate `loader` key must capture the LAST value (JS last-wins), not the first"
+    );
+}
+
+#[test]
+fn define_async_component_spread_after_loader_is_not_captured() {
+    // A spread after the `loader` key may override it dynamically — undecidable,
+    // so no carrier link.
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const rest = {};\n\
+         const Lazy = defineAsyncComponent({ loader: () => import('./A.vue'), ...rest });",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        None,
+        "a spread after a `loader` key may override it — must NOT capture a stale carrier"
+    );
+}
+
+#[test]
+fn define_async_component_block_body_only_first_reachable_return_counts() {
+    // The block's first statement is `return Other` (not the import), so the
+    // later `return import('./Wrong.vue')` (dead code) must NOT be captured.
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         import Other from './Other.vue';\n\
+         const Lazy = defineAsyncComponent(() => { return Other; return import('./Wrong.vue'); });",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        None,
+        "an unreachable later `return import(...)` must NOT be captured (first statement wins)"
+    );
+}
+
+#[test]
+fn define_async_component_conditional_return_loader_is_not_captured() {
+    // A runtime-dependent loader (`if (flag) return import('./A.vue'); return
+    // import('./B.vue')`) is NOT a deterministic single carrier — the first
+    // statement is the `if`, not a `return import(...)`, so bail to None.
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         declare const flag: boolean;\n\
+         const Lazy = defineAsyncComponent(() => { if (flag) return import('./A.vue'); return import('./B.vue'); });",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        None,
+        "a conditional/runtime-dependent block loader must NOT mint a deterministic carrier link"
+    );
+}
+
+#[test]
+fn define_async_component_block_body_leading_statement_before_return_is_not_captured() {
+    // Conservative determinism: any leading statement before the `return
+    // import(...)` makes the block shape non-trivial — bail.
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const Lazy = defineAsyncComponent(() => { const x = 1; return import('./A.vue'); });",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        None,
+        "a leading statement before the return makes the block non-trivial — must NOT capture"
+    );
+}
+
+#[test]
+fn define_async_component_spread_before_last_loader_captures_last_loader() {
+    // A spread BEFORE the last explicit `loader` is overridden by that loader —
+    // deterministic, so capture the last explicit loader (B.vue).
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const rest = {};\n\
+         const Lazy = defineAsyncComponent({ loader: () => import('./A.vue'), ...rest, loader: () => import('./B.vue') });",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        Some("./B.vue"),
+        "a spread before the LAST explicit loader is overridden by it — capture the last loader"
+    );
+}
+
+#[test]
+fn define_async_component_computed_key_after_loader_is_not_captured() {
+    // A computed key (`[key]`) after the explicit `loader` may evaluate to
+    // "loader" and override it — undecidable, so bail.
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const key = 'loader';\n\
+         const Lazy = defineAsyncComponent({ loader: () => import('./A.vue'), [key]: () => import('./B.vue') });",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        None,
+        "a computed key after the explicit loader may override it — must NOT capture"
+    );
+}
+
+#[test]
+fn define_async_component_computed_key_before_loader_captures_explicit_loader() {
+    // A computed key BEFORE the last explicit `loader` is overridden by it —
+    // deterministic, capture the explicit loader.
+    let result = analyze(
+        "import { defineAsyncComponent } from 'vue';\n\
+         const key = 'x';\n\
+         const Lazy = defineAsyncComponent({ [key]: 1, loader: () => import('./A.vue') });",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        Some("./A.vue"),
+        "a computed key before the last explicit loader is overridden by it — capture the loader"
+    );
+}
+
+#[test]
+fn type_only_define_async_component_import_does_not_capture_carrier() {
+    // A `import type { defineAsyncComponent }` is a type-only binding (no runtime
+    // value) — even though the classifier tags it DefineAsyncComponent, it must
+    // NOT mint a carrier link.
+    let result = analyze(
+        "import type { defineAsyncComponent } from 'vue';\n\
+         const Lazy = defineAsyncComponent(() => import('./X.vue'));",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        None,
+        "a `import type` defineAsyncComponent binding must NOT carrier-link (not a runtime value)"
+    );
+}
+
+#[test]
+fn per_specifier_type_only_define_async_component_does_not_capture_carrier() {
+    // The per-specifier `import { type defineAsyncComponent }` form is also
+    // type-only.
+    let result = analyze(
+        "import { type defineAsyncComponent } from 'vue';\n\
+         const Lazy = defineAsyncComponent(() => import('./X.vue'));",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        None,
+        "a per-specifier type-only defineAsyncComponent import must NOT carrier-link"
+    );
+}
+
+#[test]
+fn locally_defined_define_async_component_does_not_capture_carrier() {
+    // False-positive guard: a LOCAL function named `defineAsyncComponent` (not
+    // the Vue import) must NOT mint a carrier link — capture is gated on the
+    // imported Vue binding, not the name.
+    let result = analyze(
+        "function defineAsyncComponent(loader: () => Promise<unknown>) { return loader; }\n\
+         const Lazy = defineAsyncComponent(() => import('./X.vue'));",
+    );
+    assert_eq!(
+        async_component_source_of(&result, "Lazy"),
+        None,
+        "a locally-defined `defineAsyncComponent` (not the Vue import) must NOT carrier-link"
+    );
+}
+
 #[test]
 fn lifecycle_hooks_flag() {
     let result = analyze("import { onMounted } from 'vue';");

@@ -10,6 +10,8 @@
 //! from this manifest.
 
 mod architecture_guards;
+mod carrier_byte_parity;
+mod carrier_coordinator_route_guard;
 mod carrier_encapsulation_guards;
 mod carrier_routing_no_vue_gate;
 mod client_framework_manifest_ts_freshness;
@@ -26,6 +28,7 @@ mod g_block;
 mod g_cache;
 mod g_compile;
 mod g_component;
+mod g_extts;
 mod g_fact;
 mod g_family;
 mod g_file;
@@ -38,6 +41,7 @@ mod g_route;
 mod g_session;
 mod g_type;
 mod handle_capable_consumer_guards;
+mod host_preset_policy;
 mod integration_test_layout_guard;
 mod oracle_driver;
 mod oracle_query_specs_shared;

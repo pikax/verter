@@ -274,6 +274,63 @@ describe.skipIf(!BIN)("raw-LSP signal collectors (real binary)", () => {
     expect(events[0].ok).toBe(true);
   });
 
+  it("auto-import: a DOTTED component file (`Model.Named.vue`) offers a SANITIZED tag and binds the valid identifier", async () => {
+    // USER-FACING REGRESSION SURFACE (drives the REAL verter-lsp binary, both
+    // providers via DX_LSP_PROVIDER): a sibling component file whose stem has a
+    // `.` (`Model.Named.vue`) must surface a workspace-component tag completion
+    // under the SANITIZED label `ModelNamed`, and resolving it must apply a
+    // VALID `import ModelNamed from './Model.Named.vue'` — the binding is the
+    // sanitized identifier, the module specifier is the real on-disk path.
+    //
+    // DISCRIMINATING: pre-fix the derived name was the invalid `Model.Named`, so
+    // the offered label + import binding were `Model.Named`, producing the syntax
+    // error `import Model.Named from './Model.Named.vue'`. With that behavior:
+    //   - the `targetLabel: "ModelNamed"` candidate is never offered
+    //     (`auto_import_no_candidate`), OR
+    //   - the resolved import binds `Model.Named`, not `ModelNamed`
+    //     (`verifyAutoImport` fails the exact-symbol gate).
+    // Either way `ok` is false. Only the sanitizer makes this green.
+    const parentSrc = [
+      '<script setup lang="ts">',
+      "const x = 1",
+      "</script>",
+      "<template>",
+      "  <",
+      "</template>",
+      "",
+    ].join("\n");
+    const root = workspaceWith({
+      // The dotted-stem component the parent has NOT imported yet.
+      "Model.Named.vue": '<script setup lang="ts"></script>\n<template><div /></template>\n',
+      "App.vue": parentSrc,
+    });
+    const client = await startedClient(root);
+    const sink = new CollectingSink();
+    // Anchor immediately after the `<` in the template tag-name position; the
+    // script then types the sanitized component name to drive the tag completion.
+    const tagAnchor = parentSrc.indexOf("  <") + "  <".length;
+    await collectAutoImport({
+      client,
+      sink,
+      uri: fileUri(root, "App.vue"),
+      buffer: new EditBuffer(parentSrc, { tag: tagAnchor }),
+      script: [{ kind: "insert", anchor: "tag", text: "ModelNamed", burst: true }],
+      scenario: "live-auto-import",
+      probe: "auto-import-dotted-component",
+      anchor: "tag",
+      provider: PROVIDER,
+      targetLabel: "ModelNamed",
+      expectedImport: { symbol: "ModelNamed", module: "./Model.Named.vue" },
+      requestTimeoutMs: 20_000,
+    });
+    const events = sink.events.filter((e) => e.collector === "autoImport");
+    expect(events).toHaveLength(1);
+    // The resolved import must structurally bind the sanitized identifier from
+    // the real module path — never the invalid `Model.Named` form.
+    expect(events[0].signal).toBe("auto_import_applied");
+    expect(events[0].ok).toBe(true);
+  });
+
   it("recovery: drives real probes, captures non-empty snapshots, and confirms return-to-baseline", async () => {
     const root = workspace(["recovery.vue"]);
     const client = await startedClient(root);

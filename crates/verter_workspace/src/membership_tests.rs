@@ -314,3 +314,243 @@ fn configured_membership_prefers_materialized_when_populated() {
         "should use materialized set, not spec fallback"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Supported-extension membership model (TS-equivalent extension expansion).
+//
+// TypeScript's default `include` is `**/*` filtered to KNOWN extensions
+// (`.ts`/`.tsx`/`.d.ts`, `.js`/`.jsx` iff `allowJs`, plus declared
+// `extraFileExtensions`). A no-extension directory glob (`"src"`, resolved to
+// `"src/**/*"`) or a bare-star glob expands into one glob per supported
+// extension; an extension-specific glob (`"src/**/*.ts"`) is never expanded.
+//
+// The carrier extensions act as `extraFileExtensions` and are sourced from
+// `verter_language::LanguageRegistry::global().carrier_extensions()` — NEVER
+// hardcoded — so the rule is adapter-parameterized (`.vue` AND `.svelte`).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The supported-extension set the live `LanguageRegistry` exposes: at least
+/// `.vue` AND `.svelte` are registered carrier extensions. The membership model
+/// uses these (no literal `"vue"`/`"svelte"`).
+fn registered_carrier_exts() -> Vec<String> {
+    verter_language::LanguageRegistry::global()
+        .carrier_extensions()
+        .iter()
+        .map(|e| (*e).to_string())
+        .collect()
+}
+
+/// Build a configured spec from raw `include` globs the way the snapshot builder
+/// does: resolve each through `resolve_membership_path` (so a bare directory
+/// `"src"` becomes `"src/**/*"`), then apply the supported-extension expansion.
+fn spec_from_includes(
+    includes: &[&str],
+    allow_js: bool,
+    carrier_exts: &[String],
+) -> StaticMembershipSpec {
+    let r = root();
+    let supported = SupportedExtensions::new(allow_js, carrier_exts);
+    let resolved: Vec<String> = includes
+        .iter()
+        .map(|inc| crate::config::resolve_membership_path(r.as_str(), inc, true))
+        .collect();
+    let resolved_refs: Vec<&str> = resolved.iter().map(String::as_str).collect();
+    StaticMembershipSpec::from_includes(&r, &[], &resolved_refs, &[], &supported)
+}
+
+/// Case 1 — `include: ["src"]` (directory glob) OWNS `src/Foo.vue` AND
+/// `src/Foo.svelte` (adapter-parameterized over every registered carrier).
+#[test]
+fn directory_glob_owns_every_carrier_source() {
+    let carriers = registered_carrier_exts();
+    let spec = spec_from_includes(&["src"], false, &carriers);
+    for ext in &carriers {
+        let path = CanonicalPath::new(&format!("d:/project/src/Foo.{ext}"));
+        assert!(
+            spec.matches(&path),
+            "a no-extension directory glob (`src`) must own a carrier source `Foo.{ext}`"
+        );
+    }
+    // It also owns ordinary TS.
+    assert!(spec.matches(&CanonicalPath::new("d:/project/src/util.ts")));
+}
+
+/// Case 2 — `include: ["src/**/*"]` (bare star) OWNS the carrier sources.
+#[test]
+fn bare_star_glob_owns_every_carrier_source() {
+    let carriers = registered_carrier_exts();
+    let spec = spec_from_includes(&["src/**/*"], false, &carriers);
+    for ext in &carriers {
+        let path = CanonicalPath::new(&format!("d:/project/src/Foo.{ext}"));
+        assert!(
+            spec.matches(&path),
+            "a bare-star glob (`src/**/*`) must own a carrier source `Foo.{ext}`"
+        );
+    }
+}
+
+/// Case 3 — `include: ["src/**/*.ts"]` (extension-specific) does NOT own the
+/// carrier sources (it is never expanded). This is the `NoProject` case.
+#[test]
+fn extension_specific_glob_does_not_own_carrier_source() {
+    let carriers = registered_carrier_exts();
+    let spec = spec_from_includes(&["src/**/*.ts"], false, &carriers);
+    for ext in &carriers {
+        let path = CanonicalPath::new(&format!("d:/project/src/Foo.{ext}"));
+        assert!(
+            !spec.matches(&path),
+            "an extension-specific glob (`src/**/*.ts`) must NOT own a carrier source `Foo.{ext}`"
+        );
+    }
+    // It DOES still own the `.ts` it names.
+    assert!(spec.matches(&CanonicalPath::new("d:/project/src/util.ts")));
+}
+
+/// Case 4 — SEPARATE per-extension entries
+/// (`["src/**/*.ts", "src/**/*.vue", "src/**/*.svelte"]`) OWN the carrier
+/// sources. NO brace expansion — never `*.{vue,svelte}`.
+#[test]
+fn separate_per_extension_entries_own_carrier_sources() {
+    let carriers = registered_carrier_exts();
+    let mut includes: Vec<String> = vec!["src/**/*.ts".to_string()];
+    for ext in &carriers {
+        includes.push(format!("src/**/*.{ext}"));
+    }
+    let include_refs: Vec<&str> = includes.iter().map(String::as_str).collect();
+    let spec = spec_from_includes(&include_refs, false, &carriers);
+    for ext in &carriers {
+        let path = CanonicalPath::new(&format!("d:/project/src/Foo.{ext}"));
+        assert!(
+            spec.matches(&path),
+            "a separate per-extension entry `src/**/*.{ext}` must own `Foo.{ext}`"
+        );
+    }
+    assert!(spec.matches(&CanonicalPath::new("d:/project/src/util.ts")));
+}
+
+/// Case 5 — default-include (no `files`/`include`) OWNS the carrier sources.
+#[test]
+fn default_include_owns_every_carrier_source() {
+    let carriers = registered_carrier_exts();
+    let supported = SupportedExtensions::new(false, &carriers);
+    let spec = StaticMembershipSpec::with_supported_extension_defaults(&root(), &supported);
+    for ext in &carriers {
+        let path = CanonicalPath::new(&format!("d:/project/src/Foo.{ext}"));
+        assert!(
+            spec.matches(&path),
+            "the default include must own a carrier source `Foo.{ext}`"
+        );
+    }
+    assert!(spec.matches(&CanonicalPath::new("d:/project/src/deep/util.ts")));
+    // Default exclude still filters node_modules.
+    assert!(!spec.matches(&CanonicalPath::new("d:/project/node_modules/vue/index.ts")));
+}
+
+/// Case 6 — an `exclude`d carrier source ⇒ NOT owned (`NoProject`). `exclude`
+/// is literal / extension-agnostic; it filters the expanded include set.
+#[test]
+fn excluded_carrier_source_is_not_owned() {
+    let carriers = registered_carrier_exts();
+    let r = root();
+    let supported = SupportedExtensions::new(false, &carriers);
+    let spec = StaticMembershipSpec::from_includes(
+        &r,
+        &[],
+        &["d:/project/src/**/*"],
+        &["d:/project/src/generated/**"],
+        &supported,
+    );
+    for ext in &carriers {
+        // A carrier under the excluded dir is NOT owned.
+        assert!(
+            !spec.matches(&CanonicalPath::new(&format!(
+                "d:/project/src/generated/Foo.{ext}"
+            ))),
+            "an excluded carrier source `generated/Foo.{ext}` must NOT be owned"
+        );
+        // But a carrier outside the excluded dir IS owned.
+        assert!(
+            spec.matches(&CanonicalPath::new(&format!("d:/project/src/Foo.{ext}"))),
+            "a non-excluded carrier source `Foo.{ext}` is still owned"
+        );
+    }
+}
+
+/// NEGATIVE CONTROL (discriminates the explicit-extension model from today's
+/// literal-glob accident): under a bare-star glob, an UNKNOWN, non-carrier,
+/// non-supported extension (`src/Foo.foo`) is NOT owned. Today's literal-glob
+/// `**/*` would wrongly own it — so this test is RED without the model.
+#[test]
+fn bare_star_does_not_own_unknown_extension() {
+    let carriers = registered_carrier_exts();
+    let spec = spec_from_includes(&["src/**/*"], false, &carriers);
+    assert!(
+        !spec.matches(&CanonicalPath::new("d:/project/src/Foo.foo")),
+        "a bare-star glob must NOT own an unknown non-carrier extension `Foo.foo` \
+         (this discriminates the explicit supported-extension model from the \
+         literal-glob accident)"
+    );
+    // Sanity: a `.foo`-specific glob WOULD own it (extension-specific, never expanded,
+    // matched literally) — proving the model only filters the EXPANDED set.
+    let r = root();
+    let supported = SupportedExtensions::new(false, &carriers);
+    let explicit =
+        StaticMembershipSpec::from_includes(&r, &[], &["d:/project/src/**/*.foo"], &[], &supported);
+    assert!(
+        explicit.matches(&CanonicalPath::new("d:/project/src/Foo.foo")),
+        "an extension-specific `.foo` glob is matched literally (never expanded)"
+    );
+}
+
+/// `allowJs`/`checkJs` gating: under a bare-star glob, a `.js` file is owned
+/// ONLY when allowJs/checkJs is set (RED without the model — today's literal
+/// `**/*` owns `.js` unconditionally).
+#[test]
+fn bare_star_owns_js_only_when_allow_js() {
+    let carriers = registered_carrier_exts();
+    let js = CanonicalPath::new("d:/project/src/util.js");
+
+    // allowJs OFF → `.js` is NOT a supported extension → not owned.
+    let no_js = spec_from_includes(&["src/**/*"], false, &carriers);
+    assert!(
+        !no_js.matches(&js),
+        "without allowJs/checkJs, a bare-star glob must NOT own a `.js` file"
+    );
+
+    // allowJs ON → `.js` IS supported → owned.
+    let with_js = spec_from_includes(&["src/**/*"], true, &carriers);
+    assert!(
+        with_js.matches(&js),
+        "with allowJs/checkJs, a bare-star glob owns a `.js` file"
+    );
+}
+
+/// The standard TS extension set is always present regardless of allowJs and
+/// regardless of which carriers are registered. Discriminates a model that
+/// forgot `.d.ts` / `.mts` / `.cts` family members.
+#[test]
+fn supported_set_always_includes_full_ts_family() {
+    let supported = SupportedExtensions::new(false, &[]);
+    let exts = supported.extensions();
+    for required in [".ts", ".tsx", ".d.ts", ".cts", ".mts", ".d.cts", ".d.mts"] {
+        assert!(
+            exts.iter().any(|e| e == required),
+            "the supported-extension set must always include `{required}`, got {exts:?}"
+        );
+    }
+    // JS family absent when allowJs is off.
+    for js in [".js", ".jsx", ".cjs", ".mjs"] {
+        assert!(
+            !exts.iter().any(|e| e == js),
+            "the JS family must be absent without allowJs/checkJs, but `{js}` was present"
+        );
+    }
+    // With allowJs the JS family appears.
+    let with_js = SupportedExtensions::new(true, &[]);
+    for js in [".js", ".jsx", ".cjs", ".mjs"] {
+        assert!(
+            with_js.extensions().iter().any(|e| e == js),
+            "with allowJs the supported set must include `{js}`"
+        );
+    }
+}

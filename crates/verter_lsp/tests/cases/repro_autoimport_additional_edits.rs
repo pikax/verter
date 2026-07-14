@@ -23,7 +23,7 @@
 //!     **SFC-absolute** `AnalyzedImport.span` ends directly (no double-offset) and filtering to
 //!     the selected `<script setup>` block (Volar parity).
 //!
-//! These gates exercise the pure translation surface (`verter_lsp::tsgo::auto_import`) directly on
+//! These gates exercise the pure translation surface (`verter_lsp::type_provider::auto_import`) directly on
 //! a faithful generated-TSX source map. They are GREEN with the fix and would be RED (or
 //! structurally different) without it. The full provider round-trip is covered by the VS Code e2e
 //! suite.
@@ -35,11 +35,11 @@ use verter_lsp::documents::line_index::LineIndex;
 use verter_lsp::documents::position_map::PositionMapper;
 use verter_lsp::documents::provider_projection::ProviderPositionMapper;
 use verter_lsp::documents::sfc_scanner::scan_sfc_blocks;
-use verter_lsp::tsgo::auto_import::{
+use verter_lsp::type_provider::auto_import::{
     resolve_script_import_anchor, translate_completion_import_edits, AutoImportEditMappingError,
     ProviderImportEdit, ScriptImportInsertionAnchor,
 };
-use verter_lsp::tsgo::merge::tsx_range_to_carrier_range;
+use verter_lsp::type_provider::merge::tsx_range_to_carrier_range;
 
 /// Inject the `x_verter_helper_preamble_end` source-map metadata member exactly as Verter's IDE
 /// codegen does — a leading object member carrying the generated-TSX position immediately after
@@ -201,6 +201,8 @@ fn auto_import_at_synthetic_offset_is_reanchored_into_script_setup() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     )
     .expect("the auto-import edit must translate, not be dropped");
 
@@ -437,6 +439,8 @@ fn non_zerowidth_unmapped_edit_is_rejected() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     );
     assert_eq!(
         result,
@@ -466,6 +470,8 @@ fn zerowidth_edit_in_trailing_synthetic_region_is_rejected() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     );
     assert_eq!(
         result,
@@ -497,6 +503,8 @@ fn out_of_range_unmapped_edit_is_rejected() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     );
     assert_eq!(
         result,
@@ -538,6 +546,8 @@ fn no_mapped_run_trailing_synthetic_edit_is_rejected() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     );
     assert_eq!(
         result,
@@ -572,6 +582,8 @@ fn no_mapped_run_preamble_edit_is_reanchored() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     )
     .expect("a preamble auto-import must re-anchor even with no mapped runs, not be dropped");
 
@@ -614,8 +626,15 @@ fn multiple_edits_fail_structurally_when_unmapped_edit_cannot_anchor() {
     // No anchor available → the unmapped preamble import cannot be placed → reject the whole
     // resolve (NOT `UnmappableEdit`: the edit IS a valid preamble insertion; it simply has nowhere
     // to land).
-    let result =
-        translate_completion_import_edits(&provider_edits, None, &tsx_li, &mapper, &vue_li);
+    let result = translate_completion_import_edits(
+        &provider_edits,
+        None,
+        &tsx_li,
+        &mapper,
+        &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
+    );
     assert_eq!(
         result,
         Err(AutoImportEditMappingError::NoInsertionAnchor),
@@ -655,6 +674,8 @@ fn multiple_edits_map_completely_when_anchor_available() {
         &tsx_li,
         &mapper,
         &vue_li,
+        "/ws/src/App.vue",
+        &(|_: &str| false),
     )
     .expect("both edits map");
 

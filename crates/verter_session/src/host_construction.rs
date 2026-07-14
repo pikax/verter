@@ -279,36 +279,29 @@ impl VerterHost {
             ..verter_audit::AuditConfig::default()
         };
         let scratch_cache_capacity = config.typeinfo_scratch_cache_capacity;
-        // Resolve the host CPU pool worker count BEFORE moving
-        // `config` into the struct. The mapping (matching the
-        // documented `HostConfig::host_cpu_threads` contract):
-        //
-        // - `None`                 -> `available_parallelism()` (default)
-        // - `Some(0)`              -> `available_parallelism()` (same as
-        //                             None; treated as default so a
-        //                             misconfigured FFI / NAPI / TS
-        //                             caller passing `0` still gets a
-        //                             working pool rather than a panic)
-        // - `Some(n)` where n > 0  -> `n` workers
-        //
-        // The `.filter(|&n| n > 0).unwrap_or_else(...)` pattern below
-        // implements exactly this mapping in one pass.
-        //
-        // `available_parallelism()` may itself fail (return `Err`) on
-        // some platforms; we final-fallback to `1` worker so
-        // `HostCpuPool::new`'s positive-thread assertion never fires
-        // from any host-construction path.
+        // Source the live session query profile from the config (NOT a
+        // hardcoded value) and capture the resource-policy-driven pool
+        // descriptors BEFORE `config` is moved into the struct.
+        let query_profile = config.query_profile;
+        let decl_lowering_policy = config.resource_policy.decl_lowering;
+        // Build (or, under a lazy spawn policy, defer building) the
+        // host-owned CPU pool from the SINGLE resolved policy. The legacy
+        // `host_cpu_threads` scalar already fed `resolved_host_cpu_pool_policy`:
+        // `None` / `Some(0)` keep the structured size (default
+        // `AvailableParallelism`); `Some(n>0)` pins `Fixed(n)`. A positive
+        // worker count is guaranteed by `PoolSize::resolve`, so
+        // `HostCpuPool::new`'s positive-thread assertion never fires.
         #[cfg(not(target_arch = "wasm32"))]
-        let host_cpu_threads = config
-            .host_cpu_threads
-            .filter(|&n| n > 0)
-            .unwrap_or_else(|| {
-                std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(1)
-            });
-        #[cfg(not(target_arch = "wasm32"))]
-        let host_cpu_pool = verter_scheduler::HostCpuPool::new(host_cpu_threads);
+        let host_cpu_pool = {
+            let policy = config.resolved_host_cpu_pool_policy();
+            let threads = policy.size.resolve();
+            match policy.spawn {
+                crate::types::PoolSpawn::Eager => verter_scheduler::HostCpuPool::new(threads),
+                crate::types::PoolSpawn::LazyOnFirstUse => {
+                    verter_scheduler::HostCpuPool::new_lazy(threads)
+                }
+            }
+        };
         Self {
             instance_id: next_host_instance_id(),
             config,
@@ -325,7 +318,7 @@ impl VerterHost {
             scheduler,
             provenance,
             resolver: HostResolverState::new(routes_handle, imported_roots_handle),
-            query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
+            query_profile: parking_lot::Mutex::new(query_profile),
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
             audit_records: Arc::clone(&audit_records_init),
@@ -374,7 +367,13 @@ impl VerterHost {
             framework_script_caches,
             #[cfg(not(target_arch = "wasm32"))]
             host_cpu_pool,
-            decl_lowering: Arc::new(crate::decl_lowering::DeclLoweringService::new()),
+            decl_lowering: Arc::new(crate::decl_lowering::DeclLoweringService::new_with(
+                matches!(
+                    decl_lowering_policy.spawn,
+                    crate::types::PoolSpawn::LazyOnFirstUse
+                ),
+                decl_lowering_policy.size.resolve(),
+            )),
             compile_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
             materialize_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
             materialize_force_in_scope_partial: std::sync::atomic::AtomicBool::new(false),
@@ -546,10 +545,13 @@ impl VerterHost {
     /// API's outer coordinator (`compile_many` and the component-meta
     /// batch both fan out on it through the host batch coordinator).
     ///
-    /// The pool is built once at host construction (worker count from
-    /// [`crate::types::HostConfig::host_cpu_threads`], defaulting to
-    /// `std::thread::available_parallelism`) and reused across every
-    /// batch call. Distinct from the scheduler's own CPU pool — see
+    /// The pool's spawn timing + worker count come from the resolved
+    /// [`crate::types::HostConfig::resolved_host_cpu_pool_policy`] (the
+    /// legacy `host_cpu_threads` scalar feeds it). Under the default /
+    /// `lsp_interactive` policy the workers spawn eagerly at construction;
+    /// under `batch_typecheck` they spawn lazily on the first batch
+    /// `install`. Either way the pool is reused across every batch call.
+    /// Distinct from the scheduler's own CPU pool — see
     /// [`verter_scheduler::HostCpuPool`] for the dual-pool isolation
     /// invariant.
     ///
@@ -1016,5 +1018,109 @@ impl std::fmt::Debug for VerterHost {
         f.debug_struct("VerterHost")
             .field("config", &self.config)
             .finish_non_exhaustive()
+    }
+}
+
+/// Host-level discrimination tests for the lazy resource policy: a
+/// `batch_typecheck` host spawns NEITHER the host CPU pool worker threads
+/// NOR the decl-lowering workers at construction, and spawns each only on
+/// its first real demand; a default / `lsp_interactive` host spawns BOTH
+/// eagerly. These read the `pub(crate)` pool accessor + the decl-lowering
+/// `workers_spawned` probe, so they live in-crate (the host pool is
+/// deliberately not exposed to downstream crates — see `host_cpu_pool`).
+/// Native-only: the host CPU pool and `compile_many` are
+/// `#[cfg(not(target_arch = "wasm32"))]`.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod resource_policy_lazy_tests {
+    use std::sync::Arc;
+
+    use crate::host_compile::{CompileBatchInput, CompileBatchOptions};
+    use crate::semantic_query::ProjectionMode;
+    use crate::types::{HostConfig, UpsertRequest};
+    use crate::{FileLanguage, VerterHost};
+
+    /// `batch_typecheck()` must NOT spawn the host CPU pool's worker
+    /// threads at construction; the first `compile_many` batch (which fans
+    /// out through `host_cpu_pool().install`) must spawn them. Reverting
+    /// the lazy policy (building the pool eagerly) flips the
+    /// construction-time count from 0 to N and fails the first assertion.
+    #[test]
+    fn batch_host_defers_host_cpu_pool_spawn_until_first_batch() {
+        let host = VerterHost::new_standalone(HostConfig::batch_typecheck());
+        assert_eq!(
+            host.host_cpu_pool().pool_thread_count(),
+            0,
+            "batch_typecheck() host must NOT spawn HostCpuPool worker threads at \
+             construction (lazy resource policy)"
+        );
+
+        let entries = host.compile_many(
+            vec![CompileBatchInput {
+                canonical_id: "/proj/Lazy.vue".to_string(),
+                source: Arc::from("<template><div>x</div></template>"),
+                requested_mode: None,
+                component_id: None,
+            }],
+            CompileBatchOptions::default(),
+            crate::host_compile::CompileManyTarget::HostBacked,
+        );
+        assert_eq!(entries.len(), 1, "the batch must produce exactly one entry");
+        assert!(
+            host.host_cpu_pool().pool_thread_count() > 0,
+            "the first compile_many batch must spawn the lazy HostCpuPool worker threads"
+        );
+    }
+
+    /// `batch_typecheck()` must NOT spawn the decl-lowering workers at
+    /// construction; the first lowering demand (`resolve_named_symbol`
+    /// over a type decl) must spawn them.
+    #[test]
+    fn batch_host_defers_decl_lowering_spawn_until_first_lowering() {
+        let host = VerterHost::new_standalone(HostConfig::batch_typecheck());
+        assert!(
+            !host.decl_lowering.workers_spawned(),
+            "batch_typecheck() host must NOT spawn decl-lowering workers at construction \
+             (lazy resource policy)"
+        );
+
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some("/proj/types.ts".to_string()),
+            input_id: "/proj/types.ts".to_string(),
+            source: Arc::from("export type Foo = { a: 1 };\n"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        });
+        let node =
+            host.resolve_named_symbol("/proj/types.ts", "Foo", Some(ProjectionMode::Expanded));
+        assert!(
+            node.is_some(),
+            "Foo must resolve — forcing a declaration-body lowering demand"
+        );
+        assert!(
+            host.decl_lowering.workers_spawned(),
+            "the first lowering demand must spawn the lazy decl-lowering workers"
+        );
+    }
+
+    /// Pins the EAGER default policy: `default()` AND `lsp_interactive()`
+    /// spawn BOTH pools at construction. Laziness leaking into the default
+    /// flips these to 0 / false, proving Full's spawn timing is unchanged.
+    #[test]
+    fn default_and_lsp_interactive_hosts_spawn_both_pools_eagerly() {
+        for host in [
+            VerterHost::new_standalone(HostConfig::default()),
+            VerterHost::new_standalone(HostConfig::lsp_interactive()),
+        ] {
+            assert!(
+                host.host_cpu_pool().pool_thread_count() > 0,
+                "default()/lsp_interactive() host must spawn HostCpuPool worker threads \
+                 eagerly at construction"
+            );
+            assert!(
+                host.decl_lowering.workers_spawned(),
+                "default()/lsp_interactive() host must spawn decl-lowering workers eagerly \
+                 at construction"
+            );
+        }
     }
 }

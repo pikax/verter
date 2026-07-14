@@ -10,7 +10,14 @@
  */
 import { describe, it, expect } from "vitest";
 import ts from "typescript";
-import { parseFile, FALLBACK_STUB } from "./helpers/getDtsSnapshot";
+
+/**
+ * The degraded component declaration tsserver would see if no real carrier
+ * existed. Kept as a literal fixture so the "degraded type" structural tests can
+ * prove a stub-shaped `.d.ts` loses `$props` through a barrel — the carrier
+ * authority (the Rust LSP publish store) is exercised end-to-end elsewhere.
+ */
+const FALLBACK_STUB = "export default {} as any";
 
 // ── Minimal Vue type stub ────────────────────────────────────────────────────
 // Just enough for `import { defineComponent } from "vue"` and
@@ -268,22 +275,6 @@ export default ${name}
 `;
 }
 
-// ── Mock logger for parseFile() ─────────────────────────────────────────────
-
-const mockLogger = { info: () => {}, msg: () => {} } as any;
-
-// ── Native binary availability check ────────────────────────────────────────
-// parseFile() requires the native NAPI binary. If unavailable, skip tests
-// that depend on real generated output.
-
-let hasNativeBinary = false;
-try {
-  const probe = parseFile("/probe.vue", "<template><div /></template>", mockLogger, "/");
-  hasNativeBinary = probe !== FALLBACK_STUB;
-} catch {
-  hasNativeBinary = false;
-}
-
 // ══════════════════════════════════════════════════════════════════════════════
 // Tests
 // ══════════════════════════════════════════════════════════════════════════════
@@ -413,105 +404,12 @@ describe("barrel export type preservation", () => {
     });
   });
 
-  // ── Using parseFile() output (requires native binary) ─────────────────
-
-  describe("barrel re-export with parseFile() output", () => {
-    const sfc = `
-<script setup lang="ts">
-defineProps<{
-  zIndex?: number
-  duration?: number | string
-  show?: boolean
-  lockScroll?: boolean
-}>()
-</script>
-<template><div /></template>
-`;
-
-    let generatedDecl: string;
-
-    // Try to generate with native binary; skip if unavailable
-    try {
-      generatedDecl = parseFile("/src/Overlay.vue", sfc, mockLogger, "/src");
-    } catch {
-      generatedDecl = FALLBACK_STUB;
-    }
-
-    const hasNative = generatedDecl !== FALLBACK_STUB;
-
-    it.skipIf(!hasNative)("parseFile() generates valid component declaration", () => {
-      // Positive: output has expected markers
-      expect(generatedDecl).toContain("defineComponent");
-      expect(generatedDecl).toContain("__OmitNew");
-      expect(generatedDecl).toContain('import("vue").PublicProps');
-      expect(generatedDecl).toContain("export default");
-      expect(generatedDecl).toContain("$props");
-      expect(generatedDecl).toContain("zIndex");
-      expect(generatedDecl).toContain("lockScroll");
-      // Negative: not the fallback stub
-      expect(generatedDecl).not.toBe(FALLBACK_STUB);
-      expect(generatedDecl).not.toContain("as any");
-    });
-
-    it.skipIf(!hasNative)("preserves $props through barrel with real parseFile() output", () => {
-      const { checker, getSourceFile } = createVirtualProgram({
-        "/src/Overlay.vue.d.ts": generatedDecl,
-        "/src/index.ts": `export { default as Overlay } from './Overlay.vue'`,
-        "/src/consumer.ts": `
-          import { Overlay } from './index'
-          const inst = new Overlay()
-          const props = inst.$props
-        `,
-      });
-
-      const sf = getSourceFile("/src/consumer.ts");
-      expect(sf).toBeDefined();
-
-      const propsType = getVariableType(checker, sf!, "props");
-      expect(propsType).toBeDefined();
-      // Positive: real props are preserved
-      expect(propsType).toContain("zIndex");
-      expect(propsType).toContain("duration");
-      expect(propsType).toContain("show");
-      expect(propsType).toContain("lockScroll");
-      // Negative: not degraded
-      expect(propsType).not.toBe("any");
-      expect(propsType).not.toBe("{}");
-    });
-
-    it.skipIf(!hasNative)(
-      "preserves $props through multi-level barrel with real parseFile() output",
-      () => {
-        const { checker, getSourceFile } = createVirtualProgram({
-          "/src/components/Overlay/Overlay.vue.d.ts": generatedDecl,
-          "/src/components/Overlay/index.ts": `export { default as Overlay } from './Overlay.vue'`,
-          "/src/components/index.ts": `export * from './Overlay'`,
-          "/src/consumer.ts": `
-          import { Overlay } from './components'
-          const inst = new Overlay()
-          const props = inst.$props
-        `,
-        });
-
-        const sf = getSourceFile("/src/consumer.ts");
-        expect(sf).toBeDefined();
-
-        const propsType = getVariableType(checker, sf!, "props");
-        expect(propsType).toBeDefined();
-        expect(propsType).toContain("zIndex");
-        expect(propsType).toContain("lockScroll");
-        expect(propsType).not.toBe("any");
-        expect(propsType).not.toBe("{}");
-      },
-    );
-  });
-
   // ── Fallback stub degrades type (demonstrates the bug scenario) ─────
 
   describe("fallback stub produces degraded type", () => {
     it("FALLBACK_STUB causes barrel re-export to lose $props", () => {
-      // When the native binary fails to load, parseFile() returns FALLBACK_STUB.
-      // This demonstrates the type degradation the user experiences.
+      // A stub-shaped `.d.ts` (what a consumer would see with no real carrier)
+      // demonstrates the type degradation the carrier authority exists to avoid.
       const { checker, getSourceFile } = createVirtualProgram({
         "/src/Overlay.vue.d.ts": FALLBACK_STUB, // "export default {} as any"
         "/src/index.ts": `export { default as Overlay } from './Overlay.vue'`,
@@ -613,46 +511,6 @@ export default Overlay
       expect(propsType).not.toBe("{}");
       expect(propsType).not.toBe("any");
     });
-
-    // The FIX with parseFile() output (requires native binary).
-    it.skipIf(!hasNativeBinary)(
-      "FIX: real parseFile() output with __OmitNew preserves $props through barrel",
-      () => {
-        const sfc = `
-<script setup lang="ts">
-defineProps<{
-  zIndex?: number
-  show?: boolean
-  lockScroll?: boolean
-}>()
-</script>
-<template><div /></template>
-`;
-        const generated = parseFile("/src/Overlay.vue", sfc, mockLogger, "/src");
-        // The generated output should now use __OmitNew
-        expect(generated).toContain("__OmitNew");
-        expect(generated).not.toContain(": typeof __comp &");
-
-        const { checker, getSourceFile } = createVirtualProgram({
-          "/src/Overlay.vue.d.ts": generated,
-          "/src/index.ts": `export { default as Overlay } from './Overlay.vue'`,
-          "/src/consumer.ts": `
-          import { Overlay } from './index'
-          const inst = new Overlay()
-          const props = inst.$props
-        `,
-        });
-
-        const sf = getSourceFile("/src/consumer.ts");
-        expect(sf).toBeDefined();
-        const propsType = getVariableType(checker, sf!, "props");
-        expect(propsType).toBeDefined();
-        expect(propsType).toContain("zIndex");
-        expect(propsType).toContain("show");
-        expect(propsType).toContain("lockScroll");
-        expect(propsType).not.toBe("{}");
-      },
-    );
   });
 
   // ── HTML global attributes (class, style) on $props ────────────────────
@@ -739,50 +597,6 @@ defineProps<{
         propErrors,
         "accessing class/style through barrel should not produce type errors",
       ).toHaveLength(0);
-
-      // Negative
-      expect(propsType).not.toBe("any");
-      expect(propsType).not.toBe("{}");
-    });
-
-    it.skipIf(!hasNativeBinary)("class and style available with real parseFile() output", () => {
-      const sfc = `
-<script setup lang="ts">
-defineProps<{ title: string; count?: number }>()
-</script>
-<template><div>{{ title }}</div></template>
-`;
-      const generated = parseFile("/src/MyComp.vue", sfc, mockLogger, "/src");
-
-      const { checker, program, getSourceFile } = createVirtualProgram({
-        "/src/MyComp.vue.d.ts": generated,
-        "/src/consumer.ts": `
-            import MyComp from './MyComp.vue'
-            const inst = new MyComp()
-            const props = inst.$props
-            const cls = props.class
-            const sty = props.style
-          `,
-      });
-
-      const sf = getSourceFile("/src/consumer.ts");
-      expect(sf).toBeDefined();
-
-      const propsType = getVariableType(checker, sf!, "props");
-      expect(propsType).toBeDefined();
-      // Positive: user props
-      expect(propsType).toContain("title");
-      expect(propsType).toContain("count");
-      // Positive: PublicProps (expanded) provides class/style/key
-      expect(propsType).toContain("AllowedComponentProps");
-
-      // Positive: accessing class/style compiles without error
-      const diagnostics = ts.getPreEmitDiagnostics(program, sf!);
-      const propErrors = diagnostics.filter((d) => {
-        const msg = ts.flattenDiagnosticMessageText(d.messageText, "\n");
-        return msg.includes("class") || msg.includes("style");
-      });
-      expect(propErrors, "accessing class/style should not produce type errors").toHaveLength(0);
 
       // Negative
       expect(propsType).not.toBe("any");

@@ -263,3 +263,473 @@ fn case_fold_is_unicode_aware() {
     assert_ne!(case_fold("a.rs"), case_fold("b.rs"));
     assert_ne!(case_fold("\u{3B1}.rs"), case_fold("\u{3B2}.rs"));
 }
+
+// ───────────────────────── Generated carrier/companion path portability ─────
+//
+// The guard above covers TRACKED paths. Generated carrier/companion virtual
+// files (`Foo.vue.tsx`, `Foo.svelte.tsx`, `Foo.vue.verter.ts`, the
+// `Foo.d.vue.ts` declaration overlay, …) are NEVER tracked, so the
+// `git ls-files` scan never sees them — yet they DO materialize on disk
+// (`@verter` `--api` FS-overlays, the TSC mirror tree) and a non-portable
+// generated name (an NTFS-illegal char, a reserved device basename, a
+// case-collision) would break checkout/materialization on Windows/macOS just
+// like a tracked one. This block applies the SAME portability rules to the
+// names the descriptor naming column ACTUALLY produces, derived through the
+// real production producers (never a hand-built literal), so a producer that
+// minted a non-portable name (e.g. a `blake3:<hash>` digest leaking into a
+// companion basename, a reserved stem) is caught here.
+
+use verter_session::framework::descriptor::{
+    built_in_descriptors, svelte_descriptor, vue_descriptor, FrameworkAdapterDescriptor,
+};
+
+/// Apply rules 1–4 of the tracked-path portability contract (UTF-8 validity is
+/// implicit — these are `&str`) to ONE generated component-relative name, pushing
+/// a labelled violation for each failure. The name is a single relative path
+/// segment chain (no drive/UNC prefix); `label` identifies the producer + carrier
+/// source for the failure message.
+fn check_generated_name_portable(name: &str, label: &str, violations: &mut Vec<String>) {
+    for component in name.split(['/', '\\']) {
+        if component.is_empty() {
+            continue;
+        }
+        let bytes = component.as_bytes();
+        if let Some(&bad) = bytes.iter().find(|&&b| is_ntfs_illegal_byte(b)) {
+            violations.push(format!(
+                "{label}: generated name `{name}` component `{component}` contains \
+                 NTFS-illegal byte {bad:#04x}"
+            ));
+        }
+        if component.ends_with('.') || component.ends_with(' ') {
+            violations.push(format!(
+                "{label}: generated name `{name}` component `{component}` ends with a dot \
+                 or space (Windows strips it)"
+            ));
+        }
+        if is_reserved_device_name(bytes) {
+            violations.push(format!(
+                "{label}: generated name `{name}` component `{component}` is a reserved \
+                 Windows device name"
+            ));
+        }
+    }
+    if name.len() > 200 {
+        violations.push(format!(
+            "{label}: generated name `{name}` is {} bytes (> 200-byte portability budget)",
+            name.len()
+        ));
+    }
+}
+
+/// Every generated carrier/companion identity a descriptor's naming column can
+/// produce for `carrier_source`, derived through the REAL production producers
+/// (`ide_carrier_identities`, the `.verter.` API surface suffix, the testing-API
+/// suffix, the sidecar suffixes, and `declaration_carrier_identity`) — never a
+/// hand-built literal. Each is paired with a producer label.
+fn generated_identities_for(
+    descriptor: &FrameworkAdapterDescriptor,
+    carrier_source: &str,
+) -> Vec<(String, &'static str)> {
+    let mut out: Vec<(String, &'static str)> = Vec::new();
+    let Some(naming) = descriptor.virtual_file_naming.as_ref() else {
+        return out;
+    };
+    // IDE carrier identities (Vue: `.tsx` AND `.jsx`; Svelte: `.tsx`).
+    for ide in naming.ide_carrier_identities(carrier_source) {
+        out.push((ide, "ide_carrier_identity"));
+    }
+    // The redirect-reached `.verter.` public-API surface.
+    if let Some(api_suffix) = naming.api_surface_suffix() {
+        out.push((format!("{carrier_source}{api_suffix}"), "api_surface"));
+    }
+    // The testing-API surface.
+    if let Some(test_suffix) = naming.testing_api_suffix {
+        out.push((format!("{carrier_source}{test_suffix}"), "testing_api"));
+    }
+    // Any sidecar surfaces.
+    for sidecar in naming.sidecar_suffixes {
+        out.push((format!("{carrier_source}{sidecar}"), "sidecar"));
+    }
+    // The extension-middle `.d.<ext>.ts` declaration overlay.
+    if let Some(decl) = descriptor.declaration_carrier_identity(carrier_source) {
+        out.push((decl, "declaration_carrier"));
+    }
+    out
+}
+
+/// The built-in framework descriptors paired with their carrier extension (`.vue`,
+/// `.svelte`) — the SAME registry the production framework-adapter substrate builds,
+/// enumerated through [`built_in_descriptors`] (never a hand-listed pair). A
+/// descriptor with no carrier extension (a carrier-less adapter) is dropped.
+fn carrier_descriptors_with_extension() -> Vec<(FrameworkAdapterDescriptor, String)> {
+    built_in_descriptors()
+        .into_iter()
+        .filter_map(|d| d.carrier_extension().map(|ext| (d, ext)))
+        .collect()
+}
+
+/// Every TRACKED carrier source, decoded to UTF-8 and paired with the INDEX (into
+/// `descriptors`) of the descriptor whose carrier extension it matches. A tracked
+/// path is a carrier when its basename ends with a descriptor's carrier extension
+/// preceded by ≥1 stem char (the same append-to-full rule
+/// `verter_workspace::path_is_carrier` applies). This derives the source set from the
+/// REAL `git ls-files` enumeration the tracked-path guard already uses — not a
+/// representative literal list — so a path-specific generated collision/nonportable
+/// name on any real tracked carrier is exercised.
+fn tracked_carrier_sources(
+    descriptors: &[(FrameworkAdapterDescriptor, String)],
+) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    for raw in tracked_paths() {
+        let Some(path) = decode_utf8(&raw) else {
+            continue; // a non-UTF-8 path is a Rule-1 violation flagged by the base guard
+        };
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        for (idx, (_descriptor, ext)) in descriptors.iter().enumerate() {
+            // Append-to-full: the basename must be strictly longer than the extension
+            // (a bare `.vue` file with an empty stem is not a carrier source).
+            if basename.len() > ext.len() && basename.ends_with(ext.as_str()) {
+                out.push((path.to_string(), idx));
+                break;
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn generated_carrier_companion_names_are_portable() {
+    // Derive the carrier sources from the REAL tracked tree (the same `git ls-files`
+    // enumeration the tracked-path guard uses), routed to each REAL framework
+    // descriptor by its OWN carrier extension — never a representative literal list.
+    // Every real tracked `.vue`/`.svelte` source's generated companion identities
+    // (IDE carriers, the `.verter.` API surface, the testing-API surface, sidecars,
+    // and the `.d.<ext>.ts` declaration overlay) are checked against the SAME
+    // portability rules the base guard applies to tracked paths.
+    let descriptors = carrier_descriptors_with_extension();
+    assert!(
+        !descriptors.is_empty(),
+        "no carrier-bearing framework descriptors — the registry enumeration is broken \
+         (a portability check over zero descriptors is vacuous)"
+    );
+
+    let sources = tracked_carrier_sources(&descriptors);
+    assert!(
+        !sources.is_empty(),
+        "no tracked carrier sources matched the descriptor carrier extensions — the \
+         derivation from `git ls-files` is broken (the generated-name check would be vacuous)"
+    );
+
+    let mut violations: Vec<String> = Vec::new();
+    // The full generated set, each name remembered with its originating carrier source
+    // so a collision message names BOTH colliding sources.
+    let mut folded: HashMap<String, (String, String)> = HashMap::new();
+
+    for (carrier_source, descriptor_idx) in &sources {
+        let (descriptor, _ext) = &descriptors[*descriptor_idx];
+        let identities = generated_identities_for(descriptor, carrier_source);
+        assert!(
+            !identities.is_empty(),
+            "tracked carrier source `{carrier_source}` produced NO generated identities — \
+             the producer wiring is broken (a portability check over an empty set is vacuous)"
+        );
+        for (name, producer) in identities {
+            let label = format!("{producer}({carrier_source})");
+            check_generated_name_portable(&name, &label, &mut violations);
+            // Case-insensitive collision across the FULL generated set: two distinct
+            // tracked carrier sources must never mint companion names that fold
+            // together (a clobber on case-insensitive NTFS/APFS). The base guard
+            // already proves the tracked SOURCES don't case-collide, so a collision
+            // here means a PRODUCER folded two distinct sources into one name.
+            if let Some((prev_name, prev_source)) =
+                folded.insert(case_fold(&name), (name.clone(), carrier_source.clone()))
+            {
+                if prev_name != name || &prev_source != carrier_source {
+                    violations.push(format!(
+                        "generated names `{name}` (from {carrier_source}) and `{prev_name}` \
+                         (from {prev_source}) collide case-insensitively"
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "generated carrier/companion names must be portable across macOS/Windows/Linux \
+         (they materialize on disk but are never tracked); {} violation(s):\n  {}",
+        violations.len(),
+        violations.join("\n  ")
+    );
+}
+
+#[test]
+fn generated_name_portability_checker_discriminates() {
+    // The checker FIRES on a synthetic non-portable generated name (an NTFS-illegal
+    // `:` from a leaked digest tag, a reserved device basename, a trailing dot) and
+    // is CLEAN on the real producer output — proving it would CATCH a producer that
+    // minted a non-portable name and is non-vacuous.
+    let mut v = Vec::new();
+    check_generated_name_portable("blake3:abc.vue.tsx", "synthetic", &mut v);
+    assert!(
+        v.iter().any(|m| m.contains("NTFS-illegal")),
+        "a `:` in a generated name must trip the portability checker"
+    );
+
+    let mut v = Vec::new();
+    check_generated_name_portable("src/nul.vue.tsx", "synthetic", &mut v);
+    assert!(
+        v.iter().any(|m| m.contains("reserved")),
+        "a reserved device basename (`nul`) in a generated name must trip the checker"
+    );
+
+    let mut v = Vec::new();
+    check_generated_name_portable("Trailing .vue.tsx", "synthetic", &mut v);
+    // `Trailing ` (component before `/`? no — this is one component). The space is
+    // mid-name, not trailing on a component; assert the dedicated trailing case via
+    // a component that genuinely ends with a space.
+    check_generated_name_portable("dir /App.vue.tsx", "synthetic", &mut v);
+    assert!(
+        v.iter().any(|m| m.contains("ends with a dot or space")),
+        "a component ending with a space must trip the checker"
+    );
+
+    // The REAL Vue producer output for a normal source is CLEAN.
+    let mut v = Vec::new();
+    let descriptor = vue_descriptor();
+    for (name, producer) in generated_identities_for(&descriptor, "App.vue") {
+        check_generated_name_portable(&name, producer, &mut v);
+    }
+    assert!(
+        v.is_empty(),
+        "the real Vue companion names for `App.vue` must be portable; got: {v:?}"
+    );
+
+    // The REAL Svelte producer output for a normal source is CLEAN too (both
+    // carrier-bearing descriptors are exercised, not just Vue).
+    let mut v = Vec::new();
+    let svelte = svelte_descriptor();
+    for (name, producer) in generated_identities_for(&svelte, "src/lib/Card.svelte") {
+        check_generated_name_portable(&name, producer, &mut v);
+    }
+    assert!(
+        v.is_empty(),
+        "the real Svelte companion names for `src/lib/Card.svelte` must be portable; got: {v:?}"
+    );
+
+    // The real declaration carrier IS produced (extension-middle), proving the
+    // declaration-overlay name is covered, not silently skipped.
+    assert_eq!(
+        vue_descriptor().declaration_carrier_identity("App.vue"),
+        Some("App.d.vue.ts".to_string()),
+        "the `.d.vue.ts` declaration overlay name must be produced and covered"
+    );
+    assert_eq!(
+        svelte_descriptor().declaration_carrier_identity("src/lib/Card.svelte"),
+        Some("src/lib/Card.d.svelte.ts".to_string()),
+        "the `.d.svelte.ts` declaration overlay name (full path preserved) must be covered"
+    );
+}
+
+/// DISCRIMINATING: the tracked-source DERIVATION routes a carrier path to the right
+/// descriptor by its carrier extension and skips a non-carrier path — so the rewritten
+/// `generated_carrier_companion_names_are_portable` actually exercises the REAL tracked
+/// carrier set (enumeration-derived), not a hidden hardcoded list.
+#[test]
+fn tracked_carrier_source_derivation_discriminates() {
+    let descriptors = carrier_descriptors_with_extension();
+    // Both built-in carrier descriptors are present with their extensions.
+    let exts: Vec<&str> = descriptors.iter().map(|(_, e)| e.as_str()).collect();
+    assert!(
+        exts.contains(&".vue") && exts.contains(&".svelte"),
+        "the carrier-descriptor enumeration must include `.vue` and `.svelte`; got {exts:?}"
+    );
+
+    // The REAL derivation over the tracked tree yields a substantial, non-empty set
+    // (the repo tracks hundreds of `.vue`/`.svelte` carrier fixtures) — proving the
+    // generated-name guard is non-vacuous from the enumeration, not a literal list.
+    let sources = tracked_carrier_sources(&descriptors);
+    assert!(
+        sources.len() > 50,
+        "expected many tracked carrier sources from the `git ls-files` enumeration, got {} — \
+         the derivation (or the carrier-extension routing) is broken",
+        sources.len()
+    );
+    // Every derived source ends with the carrier extension of the descriptor it routed
+    // to (the routing is by real extension, never a blind index).
+    for (source, idx) in &sources {
+        let (_descriptor, ext) = &descriptors[*idx];
+        assert!(
+            source.ends_with(ext.as_str()),
+            "tracked source `{source}` routed to descriptor with extension `{ext}` but does \
+             not end with it"
+        );
+    }
+    // A non-carrier path (`.ts`) and a bare-extension path (empty stem) are NOT routed.
+    let non_carrier: Vec<&str> = sources
+        .iter()
+        .map(|(s, _)| s.as_str())
+        .filter(|s| s.ends_with(".ts") && !s.ends_with(".vue") && !s.ends_with(".svelte"))
+        .collect();
+    assert!(
+        non_carrier.is_empty(),
+        "a plain `.ts` path must NOT be derived as a carrier source; got {non_carrier:?}"
+    );
+}
+
+// ───────────────────────── C14: cross-platform path-identity invariants ─────
+//
+// The external-TS engine relies on ONE canonical path-identity layer
+// (`verter_span::path`, re-exported as `verter_workspace::canonicalize_path` /
+// `CanonicalPath`) shared by the VFS, the position mapper, and both provider
+// adapters. A carrier the provider opens, the diagnostic file the engine reports,
+// and the document the editor sends must all canonicalize to ONE id, or a feature
+// lands on the wrong file. These tests pin the cross-platform identity invariants
+// the real-provider path depends on: Windows drive-casing, UNC forms, and the
+// case-insensitive collision class. Symlink / pnpm realpath is a SEPARATE layer
+// (the fs realpath, not this lexical identity) and is asserted as such.
+
+use verter_workspace::{canonicalize_path, CanonicalPath};
+
+#[test]
+fn windows_drive_casing_canonicalizes_to_one_identity() {
+    // `C:\` and `c:\` are the SAME file on Windows; the canonical identity lowers
+    // the drive letter so both map to ONE id (the engine may report `C:` while the
+    // configured path uses `c:`). The rest of the path keeps its case (correct on
+    // case-sensitive Linux).
+    let upper = canonicalize_path(r"C:\Users\Dev\App.vue.tsx");
+    let lower = canonicalize_path(r"c:\Users\Dev\App.vue.tsx");
+    assert_eq!(upper, lower, "drive-letter case must not split identity");
+    assert_eq!(
+        upper, "c:/Users/Dev/App.vue.tsx",
+        "the drive is lowered, separators normalized, the rest case-preserved"
+    );
+    // The newtype's Eq/Hash agree (so a map keyed by CanonicalPath collapses them).
+    assert_eq!(
+        CanonicalPath::new(r"C:\Users\Dev\App.vue.tsx"),
+        CanonicalPath::new(r"c:\Users\Dev\App.vue.tsx"),
+        "CanonicalPath equality must fold the drive case"
+    );
+    let mut set = std::collections::HashSet::new();
+    set.insert(CanonicalPath::new(r"C:\Users\Dev\App.vue.tsx"));
+    assert!(
+        set.contains(&CanonicalPath::new(r"c:/Users/Dev/App.vue.tsx")),
+        "a CanonicalPath-keyed set must treat the drive-case variants as one key"
+    );
+}
+
+#[test]
+fn unc_forms_canonicalize_to_one_identity() {
+    // The Windows extended-length / UNC prefixes all denote the same network path;
+    // the canonical identity strips `\\?\` and `\\?\UNC\` so a carrier reached via
+    // any form is ONE id.
+    let raw_unc = canonicalize_path(r"\\server\share\App.vue.tsx");
+    let ext_unc = canonicalize_path(r"\\?\UNC\server\share\App.vue.tsx");
+    assert_eq!(
+        raw_unc, ext_unc,
+        "the `\\\\?\\UNC\\` extended form must canonicalize to the bare UNC path"
+    );
+    assert_eq!(raw_unc, "//server/share/App.vue.tsx");
+    // The extended-length DRIVE prefix `\\?\C:\` reduces to the lowered drive form.
+    assert_eq!(
+        canonicalize_path(r"\\?\C:\repo\Widget.svelte.tsx"),
+        "c:/repo/Widget.svelte.tsx",
+        "the `\\\\?\\C:\\` extended-drive form must reduce to the lowered drive id"
+    );
+}
+
+#[test]
+fn case_insensitive_collision_folds_for_collision_detection() {
+    // Two carrier companion paths differing ONLY by case collide on
+    // case-insensitive NTFS/APFS; the portability `case_fold` folds them together so
+    // the collision detector (used by the tracked-path guard and the generated-name
+    // guard above) catches it. This is the SAME fold the guard relies on, applied to
+    // generated companion names.
+    assert_eq!(
+        case_fold("c:/project/Component.vue.tsx"),
+        case_fold("c:/project/component.vue.tsx"),
+        "case-only-distinct companion names must fold to one bucket"
+    );
+    // A genuinely distinct stem does NOT fold together (no false collision).
+    assert_ne!(
+        case_fold("c:/project/Alpha.vue.tsx"),
+        case_fold("c:/project/Beta.vue.tsx"),
+        "distinct stems must not collide"
+    );
+}
+
+/// Symlink / pnpm realpath is a DIFFERENT layer than the lexical canonical
+/// identity: `canonicalize_path` is purely lexical (drive-lower + UNC-strip +
+/// separator-normalize), it does NOT resolve symlinks. The fs realpath
+/// (`std::fs::canonicalize`, what pnpm's virtual store relies on) resolves the link
+/// to its target. This test pins BOTH: the OS realpath collapses a symlink to its
+/// target, while Verter's lexical identity preserves the path as written (the two
+/// layers are distinct and must not be conflated).
+///
+/// On Windows, creating a directory symlink requires privilege (Developer Mode or
+/// admin); when unavailable the symlink-creation is skipped with a clear reason
+/// (the lexical-identity assertions still run unconditionally).
+#[test]
+fn symlink_realpath_is_a_separate_layer_from_lexical_identity() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let target = tmp.path().join("real_pkg");
+    std::fs::create_dir_all(target.join("src")).expect("create target dir");
+    std::fs::write(target.join("src/Comp.vue"), "<template></template>").expect("write carrier");
+
+    // Lexical identity (unconditional, all platforms): the symlinked path and the
+    // target path canonicalize LEXICALLY to distinct ids — Verter does not collapse
+    // symlinks at the identity layer (realpath is the VFS/fs layer's job).
+    let link_path_str = tmp
+        .path()
+        .join("linked_pkg")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let target_path_str = target.to_string_lossy().replace('\\', "/");
+    assert_ne!(
+        canonicalize_path(&format!("{link_path_str}/src/Comp.vue")),
+        canonicalize_path(&format!("{target_path_str}/src/Comp.vue")),
+        "the lexical canonical identity must NOT collapse a symlink to its target \
+         (realpath is a separate layer)"
+    );
+
+    // fs realpath (gated): create the symlink and assert std::fs::canonicalize (the
+    // pnpm virtual-store realpath behavior) resolves the LINK to the TARGET.
+    let link = tmp.path().join("linked_pkg");
+    let symlink_made = make_dir_symlink(&target, &link);
+    match symlink_made {
+        Ok(()) => {
+            let via_link = std::fs::canonicalize(link.join("src/Comp.vue"))
+                .expect("realpath the file through the symlink");
+            let via_target = std::fs::canonicalize(target.join("src/Comp.vue"))
+                .expect("realpath the file through the target");
+            assert_eq!(
+                via_link, via_target,
+                "fs realpath (the pnpm-store layer) must resolve the symlink to its target"
+            );
+        }
+        Err(reason) => {
+            // Skip-with-reason: the lexical-identity assertion above already ran; the
+            // realpath sub-case needs symlink privilege this environment lacks.
+            eprintln!("skipping the fs-realpath sub-case (symlink creation unavailable): {reason}");
+        }
+    }
+}
+
+/// Create a directory symlink `link -> target`, returning `Err(reason)` when the
+/// platform/privilege does not allow it (Windows without Developer Mode / admin).
+fn make_dir_symlink(target: &std::path::Path, link: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(target, link)
+            .map_err(|e| format!("symlink_dir requires privilege on Windows: {e}"))
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).map_err(|e| format!("symlink: {e}"))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (target, link);
+        Err("symlinks unsupported on this platform".to_string())
+    }
+}

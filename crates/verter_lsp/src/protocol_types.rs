@@ -129,6 +129,33 @@ pub struct TypeProviderStatusParams {
     pub reason: Option<String>,
 }
 
+/// Server → client notification: the resolved per-workspace carrier-store
+/// directory the LSP publishes compiled `.vue`/`.svelte` carriers into.
+///
+/// The extension forwards this dir to VS Code's OWN TypeScript server via
+/// `configurePlugin`, so a plain `.ts` opened in VS Code (served by VS Code's TS
+/// service, not the LSP-spawned tsserver) reads the same store and gets real types
+/// for imported carriers. The LSP is the single source of the
+/// `<temp>/verter-carrier-store/<host-version>/<workspace-hash>/` path derivation,
+/// which the extension cannot reproduce without mirroring that exact recipe. Mirrors
+/// `$/verter/carrierStoreReady` in `packages/language-shared/src/notifications.ts`.
+pub enum CarrierStoreReady {}
+
+impl tower_lsp_server::ls_types::notification::Notification for CarrierStoreReady {
+    type Params = CarrierStoreReadyParams;
+    const METHOD: &'static str = "$/verter/carrierStoreReady";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CarrierStoreReadyParams {
+    /// The absolute, forward-slash-normalized per-workspace carrier-store dir the
+    /// LSP publishes carriers into (and the dir the `@verter/typescript-plugin`
+    /// reads). Identical to the dir the LSP delivers to its own spawned tsserver
+    /// through `VERTER_CARRIER_STORE_DIR`.
+    pub carrier_store_dir: String,
+}
+
 /// Server → client request: forward a TypeScript query to the extension's
 /// in-process `ts.createLanguageService()`. Uses tsserver command format so
 /// existing response parsers work unchanged.

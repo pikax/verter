@@ -1,8 +1,28 @@
 /**
- * Main-thread bridge to the TypeScript LanguageService web worker.
- * Provides async methods for type checking, hover, and completions.
+ * Main-thread bridge to the in-context TypeScript LanguageService worker
+ * (`tsWorker.ts`). Speaks the carrier protocol:
+ *
+ * - **Sync model** — ONE atomic `syncSource` per source: a framework carrier
+ *   (`.vue`/`.svelte`) pushes its three WASM-produced surfaces (IDE
+ *   `X.vue.tsx`, declaration `X.d.vue.ts`, API `X.vue.verter.ts`); a plain
+ *   `.ts`/`.js` file pushes its raw content as a user program member. A
+ *   removed source sends `removeSource`.
+ * - **Result mapping** — every worker result span carries a `fileName` and
+ *   maps through the CORE strict `CarrierMapper` registered for THAT file in
+ *   a `CarrierMapperSet`. A span with no mapper, in synthetic (unmapped)
+ *   generated space, or landing in a different source DROPS (fail closed) —
+ *   never a closest-segment snap, never a single-active-file assumption.
+ * - **Query direction** — a source offset translates through the strict
+ *   source→generated direction of the active carrier's mapper onto the IDE
+ *   carrier path; an unmapped source position fails closed without touching
+ *   the worker.
+ * - **`checkStandalone`** — the editable-output panel's scratch file, checked
+ *   raw and unmapped BY DESIGN (it edits generated TSX, not a carrier
+ *   source). This is the ONLY raw path.
  */
-import { SourceMapMapper } from "./sourceMapMapper";
+import { CarrierMapperSet, normalizePath, toIdeCarrierFileName } from "@verter/language-shared";
+import { createCarrierMapper } from "./carrierMappers";
+import type { CarrierSurfaces } from "./carrierStore";
 import type { TypeScriptServiceBridge } from "./lspProviders";
 
 interface PendingRequest {
@@ -10,12 +30,15 @@ interface PendingRequest {
   reject: (reason: unknown) => void;
 }
 
-interface TsDiagnostic {
+/** One diagnostic as the worker reports it (generated/user-file space). */
+interface WorkerDiagnostic {
   message: string;
   start: number;
   length: number;
   category: number; // 0=Warning, 1=Error, 2=Suggestion, 3=Message
   code: number;
+  /** The file the diagnostic belongs to — results map BY this. */
+  fileName: string;
 }
 
 interface TsHoverInfo {
@@ -42,10 +65,6 @@ interface TsReferenceLike extends TsSpanLike {
   isDefinition?: boolean;
 }
 
-interface TsHighlightLike extends TsSpanLike {
-  kind?: string;
-}
-
 interface TsRenameResponse {
   canRename: boolean;
   localizedErrorMessage: string | null;
@@ -55,9 +74,9 @@ interface TsRenameResponse {
 
 export interface RawTsDiagnostic {
   message: string;
-  /** TSX byte offset (start) — NOT mapped through source map */
+  /** TSX offset (start) — raw, NOT mapped (editable output panel only). */
   start: number;
-  /** TSX byte offset (end) */
+  /** TSX offset (end). */
   end: number;
   severity: "error" | "warning" | "info";
   code: number;
@@ -65,9 +84,9 @@ export interface RawTsDiagnostic {
 
 export interface MappedDiagnostic {
   message: string;
-  /** Vue source byte offset (start) */
+  /** Source (`.vue`/`.svelte`/user-file) UTF-16 offset (start). */
   start: number;
-  /** Vue source byte offset (end) */
+  /** Source UTF-16 offset (end). */
   end: number;
   severity: "error" | "warning" | "info";
   code: number;
@@ -88,6 +107,35 @@ export interface RenameLocations {
   triggerSpan: MappedSpan | null;
   locations: MappedSpan[];
 }
+
+/** The compiled surfaces the sync model reads off a playground file. */
+export interface SyncableCompiledSurfaces {
+  types: string;
+  typesSourceMap: string;
+  declCode: string;
+  declSourceMap: string;
+  tscCode: string;
+}
+
+/** A playground workspace file, structurally (`core/types.File` satisfies it). */
+export interface SyncableFile {
+  filename: string;
+  code: string;
+  compiled: SyncableCompiledSurfaces;
+}
+
+/** The last payload pushed for a source (skip re-sends of unchanged content). */
+type PushedPayload =
+  | {
+      kind: "carrier";
+      types: string;
+      typesSourceMap: string;
+      declCode: string;
+      declSourceMap: string;
+      tscCode: string;
+      sourceCode: string;
+    }
+  | { kind: "user"; content: string };
 
 // TS ScriptElementKind → Monaco CompletionItemKind (approximate)
 const TS_KIND_TO_MONACO: Record<string, number> = {
@@ -124,106 +172,13 @@ const TS_KIND_TO_MONACO: Record<string, number> = {
   link: 0,
 };
 
-/** Structured metadata for the destructured block, provided by the Rust compiler. */
-export interface DestructuredBinding {
-  name: string;
-  /** SFC-absolute start offset (UTF-16 code units). */
-  sourceStart: number;
-  /** SFC-absolute end offset (UTF-16 code units). */
-  sourceEnd: number;
-}
+const USER_FILE_EXTENSIONS = /\.(ts|tsx|js|jsx)$/;
 
-/** Metadata for the destructured block region in the generated TSX. */
-export interface DestructuredBlockMeta {
-  bindings: DestructuredBinding[];
-  /** Start offset of the destructured block in the generated TSX output (UTF-16). */
-  blockStart: number;
-  /** End offset of the destructured block in the generated TSX output (UTF-16). */
-  blockEnd: number;
-}
+/** The editable-output panel's scratch path (raw diagnostics by design). */
+const STANDALONE_SCRATCH_PATH = "/__standalone__/direct-edit.tsx";
 
-const DESTRUCTURED_START = "/* verter-destructured-start */";
-const DESTRUCTURED_END = "/* verter-destructured-end */";
-
-/** Check if a TSX offset falls inside the destructured block. */
-function isInsideDestructuredBlock(
-  meta: DestructuredBlockMeta | null,
-  tsxCode: string,
-  tsxOffset: number,
-): boolean {
-  if (meta) {
-    return tsxOffset >= meta.blockStart && tsxOffset < meta.blockEnd;
-  }
-  // Fallback: string search for boundary markers
-  const start = tsxCode.indexOf(DESTRUCTURED_START);
-  if (start === -1) return false;
-  const end = tsxCode.indexOf(DESTRUCTURED_END, start);
-  if (end === -1) return false;
-  return tsxOffset >= start && tsxOffset < end + DESTRUCTURED_END.length;
-}
-
-/**
- * Resolve a TSX offset inside the destructured block to its SFC source span.
- * Uses structured metadata (pre-converted to UTF-16) — no comment parsing needed.
- */
-function resolveDestructuredBinding(
-  meta: DestructuredBlockMeta | null,
-  tsxCode: string,
-  tsxOffset: number,
-): MappedSpan | null {
-  if (!meta) return null;
-  // Find the closest binding whose name appears before tsxOffset
-  // by searching for each binding name near the offset
-  for (let i = meta.bindings.length - 1; i >= 0; i--) {
-    const b = meta.bindings[i];
-    const namePos = tsxCode.lastIndexOf(b.name, tsxOffset);
-    if (namePos !== -1 && namePos + b.name.length >= tsxOffset && namePos >= meta.blockStart) {
-      return { start: b.sourceStart, end: b.sourceEnd };
-    }
-  }
-  return null;
-}
-
-/**
- * Expand a TS6198 ("All destructured elements are unused") diagnostic into
- * individual TS6133-like diagnostics for each binding, using structured metadata.
- */
-function expandTs6198ToIndividualDiagnostics(
-  meta: DestructuredBlockMeta | null,
-  tsxCode: string,
-  tsxStart: number,
-  severity: MappedDiagnostic["severity"],
-  vueCode: string,
-): MappedDiagnostic[] {
-  if (!meta || meta.bindings.length === 0) return [];
-
-  // Find which destructuring statement this diagnostic belongs to.
-  // Look for the "const {" or "let {" before tsxStart and the "___VERTER___unwrapped" after.
-  const unwrappedMarker = "___VERTER___unwrapped";
-  const stmtEnd = tsxCode.indexOf(unwrappedMarker, tsxStart);
-  if (stmtEnd === -1) return [];
-
-  const constIdx = tsxCode.lastIndexOf("const {", tsxStart);
-  const letIdx = tsxCode.lastIndexOf("let {", tsxStart);
-  const stmtStart = Math.max(constIdx, letIdx);
-  if (stmtStart === -1) return [];
-
-  // Collect all bindings whose names appear in this statement range
-  const stmtText = tsxCode.slice(stmtStart, stmtEnd);
-  const diagnostics: MappedDiagnostic[] = [];
-  for (const b of meta.bindings) {
-    if (stmtText.includes(b.name)) {
-      const name = vueCode.slice(b.sourceStart, b.sourceEnd);
-      diagnostics.push({
-        message: `'${name}' is declared but its value is never read.`,
-        start: b.sourceStart,
-        end: b.sourceEnd,
-        severity,
-        code: 6133,
-      });
-    }
-  }
-  return diagnostics;
+function categoryToSeverity(category: number): MappedDiagnostic["severity"] {
+  return category === 1 ? "error" : category === 0 ? "warning" : "info";
 }
 
 export class TypeScriptService implements TypeScriptServiceBridge {
@@ -233,12 +188,10 @@ export class TypeScriptService implements TypeScriptServiceBridge {
   private initialized = false;
   private initPromise: Promise<void> | null = null;
 
-  // Current file state
-  private currentMapper: SourceMapMapper | null = null;
-  private currentTsxPath: string | null = null;
-  private currentTsxCode: string | null = null;
-  private currentVueCode: string | null = null;
-  private currentDestructuredBlock: DestructuredBlockMeta | null = null;
+  /** Per-carrier strict mappers, keyed by the IDE carrier provider path. */
+  private readonly mappers = new CarrierMapperSet();
+  /** sourcePath → last pushed payload. */
+  private readonly synced = new Map<string, PushedPayload>();
 
   async init(options?: { verterTypesContent?: string; vueVersion?: string }): Promise<void> {
     if (this.initialized) return;
@@ -258,9 +211,6 @@ export class TypeScriptService implements TypeScriptServiceBridge {
 
     this.worker.onmessage = (e: MessageEvent<{ id: number; result?: unknown; error?: string }>) => {
       const { id, result, error } = e.data;
-      if (typeof console !== "undefined") {
-        console.debug("[tsc] <-", { id, error: error ?? undefined, hasResult: result != null });
-      }
       const pending = this.pending.get(id);
       if (pending) {
         this.pending.delete(id);
@@ -272,13 +222,8 @@ export class TypeScriptService implements TypeScriptServiceBridge {
       }
     };
 
-    await this.send("init", options);
+    await this.send("init", { verterTypesContent: options?.verterTypesContent });
     this.initialized = true;
-  }
-
-  async updateVueTypes(vueVersion: string): Promise<void> {
-    if (!this.initialized) return;
-    await this.send("updateVueTypes", { vueVersion });
   }
 
   private send(type: string, payload?: unknown): Promise<unknown> {
@@ -289,106 +234,234 @@ export class TypeScriptService implements TypeScriptServiceBridge {
       }
       const id = ++this.requestId;
       this.pending.set(id, { resolve, reject });
-      if (typeof console !== "undefined") {
-        console.debug("[tsc] ->", type, { id });
-      }
       this.worker.postMessage({ id, type, payload });
     });
   }
 
+  // ── Sync model ──
+
+  /** Worker-absolute path for a playground filename. */
+  private sourcePathFor(filename: string): string {
+    const normalized = normalizePath(filename);
+    return normalized.startsWith("/") ? normalized : `/${normalized}`;
+  }
+
+  /** How a workspace file enters the worker program (`null` = not syncable). */
+  private routeFor(sourcePath: string): "carrier" | "user" | null {
+    if (toIdeCarrierFileName(sourcePath) !== null) return "carrier";
+    if (USER_FILE_EXTENSIONS.test(sourcePath)) return "user";
+    return null;
+  }
+
   /**
-   * Sync TSX output to the worker and get diagnostics mapped to Vue positions.
+   * Push the whole workspace: one atomic `syncSource` per changed source,
+   * `removeSource` for sources that vanished. Unchanged sources are skipped.
    */
-  async syncTsx(
-    vueFilename: string,
-    tsxCode: string,
-    vueCode: string,
-    sourceMapJson: string | null,
-    destructuredBlock?: DestructuredBlockMeta | null,
-  ): Promise<MappedDiagnostic[]> {
-    if (!this.initialized) return [];
-
-    const tsxPath = `/${vueFilename}.tsx`;
-    this.currentTsxPath = tsxPath;
-    this.currentTsxCode = tsxCode;
-    this.currentVueCode = vueCode;
-    this.currentDestructuredBlock = destructuredBlock ?? null;
-
-    // Create mapper if source map is available
-    if (sourceMapJson && sourceMapJson.length > 2) {
-      this.currentMapper = new SourceMapMapper(sourceMapJson, tsxCode, vueCode);
-    } else {
-      this.currentMapper = null;
-      if (typeof console !== "undefined") {
-        console.debug(
-          "[verter] TSX source map unavailable — hover/completions disabled. " +
-            `sourceMap length: ${sourceMapJson?.length ?? 0}, tsx length: ${tsxCode.length}`,
-        );
+  async syncWorkspace(files: Iterable<SyncableFile>): Promise<void> {
+    if (!this.initialized) return;
+    const seen = new Set<string>();
+    for (const file of files) {
+      const sourcePath = this.sourcePathFor(file.filename);
+      if (this.routeFor(sourcePath) === null) continue;
+      seen.add(sourcePath);
+      await this.syncSource(file);
+    }
+    for (const sourcePath of [...this.synced.keys()]) {
+      if (!seen.has(sourcePath)) {
+        await this.removeSourceByPath(sourcePath);
       }
     }
+  }
 
-    await this.send("updateFile", { path: tsxPath, content: tsxCode });
+  /** Push ONE source's current content/surfaces (no-op when unchanged). */
+  async syncSource(file: SyncableFile): Promise<void> {
+    if (!this.initialized) return;
+    const sourcePath = this.sourcePathFor(file.filename);
+    const route = this.routeFor(sourcePath);
+    if (route === null) return;
 
-    const diagnostics = (await this.send("getDiagnostics", { path: tsxPath })) as TsDiagnostic[];
+    if (route === "user") {
+      const payload: PushedPayload = { kind: "user", content: file.code };
+      const previous = this.synced.get(sourcePath);
+      if (previous?.kind === "user" && previous.content === payload.content) return;
+      await this.send("syncSource", { sourcePath, userContent: file.code });
+      this.synced.set(sourcePath, payload);
+      return;
+    }
 
+    const { types, typesSourceMap, declCode, declSourceMap, tscCode } = file.compiled;
+    const payload: PushedPayload = {
+      kind: "carrier",
+      types,
+      typesSourceMap,
+      declCode,
+      declSourceMap,
+      tscCode,
+      sourceCode: file.code,
+    };
+    const previous = this.synced.get(sourcePath);
+    if (
+      previous?.kind === "carrier" &&
+      previous.types === types &&
+      previous.typesSourceMap === typesSourceMap &&
+      previous.declCode === declCode &&
+      previous.declSourceMap === declSourceMap &&
+      previous.tscCode === tscCode &&
+      previous.sourceCode === file.code
+    ) {
+      return;
+    }
+
+    // A surface the compile no longer produces is OMITTED — the worker store
+    // retires it atomically (fail closed; no stale carrier lingers).
+    const surfaces: CarrierSurfaces = {
+      ide: types ? { code: types, sourceMap: typesSourceMap || null } : undefined,
+      decl: declCode ? { code: declCode, sourceMap: declSourceMap || null } : undefined,
+      api: tscCode ? { code: tscCode, sourceMap: null } : undefined,
+    };
+    await this.send("syncSource", { sourcePath, surfaces });
+    this.synced.set(sourcePath, payload);
+    this.refreshCarrierMapper(sourcePath, file);
+  }
+
+  /** Retire a source (delete / rename cleanup): all carriers + the user file. */
+  async removeSource(filename: string): Promise<void> {
+    if (!this.initialized) return;
+    await this.removeSourceByPath(this.sourcePathFor(filename));
+  }
+
+  private async removeSourceByPath(sourcePath: string): Promise<void> {
+    await this.send("removeSource", { sourcePath });
+    this.synced.delete(sourcePath);
+    const carrierPath = toIdeCarrierFileName(sourcePath);
+    if (carrierPath !== null) {
+      this.mappers.delete(carrierPath);
+    }
+  }
+
+  /**
+   * Ensure ONE source's surfaces are current before an LSP query (called by
+   * `lspProviders` after a recompile; no-op when nothing changed).
+   */
+  async ensureSourceCurrent(file: SyncableFile): Promise<void> {
+    await this.syncSource(file);
+  }
+
+  /** (Re)register the CORE strict mapper for a carrier's IDE surface. */
+  private refreshCarrierMapper(sourcePath: string, file: SyncableFile): void {
+    const carrierPath = toIdeCarrierFileName(sourcePath);
+    if (carrierPath === null) return;
+    const sourceName = normalizePath(file.filename);
+    const sourceCode = file.code;
+    const mapper = file.compiled.types
+      ? createCarrierMapper({
+          providerPath: carrierPath,
+          code: file.compiled.types,
+          sourceMap: file.compiled.typesSourceMap || null,
+          // The live source text the surfaces were compiled from — consulted
+          // before the map's own sourcesContent. Exact-name only (fail closed).
+          readSourceText: (source) => {
+            const normalized = normalizePath(source);
+            return normalized === sourceName || normalized === sourcePath ? sourceCode : undefined;
+          },
+        })
+      : null;
+    if (mapper !== null) {
+      this.mappers.set(carrierPath, mapper);
+    } else {
+      // Mapless/torn ⇒ NO mapper: every span for this carrier drops.
+      this.mappers.delete(carrierPath);
+    }
+  }
+
+  // ── Result mapping (generated → source, strict, fail closed) ──
+
+  /** Whether a map source name spells the requested playground file. */
+  private isSameSource(mapSource: string, filename: string): boolean {
+    const normalized = normalizePath(mapSource);
+    return normalized === normalizePath(filename) || normalized === this.sourcePathFor(filename);
+  }
+
+  /**
+   * Map one worker result span into the REQUESTED source's space, or `null`
+   * (drop): a plain user file's own spans pass through raw; every other span
+   * maps through the mapper registered for ITS OWN `fileName` and must land
+   * in the requested source.
+   */
+  private mapResultSpanToSource(filename: string, span: TsSpanLike): MappedSpan | null {
+    const sourcePath = this.sourcePathFor(filename);
+    const spanFile = normalizePath(span.fileName);
+    if (this.synced.get(sourcePath)?.kind === "user" && spanFile === sourcePath) {
+      return { start: span.start, end: span.start + span.length };
+    }
+    const mapper = this.mappers.forCarrier(spanFile);
+    if (mapper === undefined) return null;
+    const mapped = mapper.mapGeneratedSpanToSource(span.start, span.start + span.length);
+    if (mapped === null) return null;
+    if (!this.isSameSource(mapped.source, filename)) return null;
+    return { start: mapped.start, end: mapped.end };
+  }
+
+  // ── Query direction (source → generated, strict, fail closed) ──
+
+  /**
+   * The worker file + offset a source-space query targets: a user file
+   * queries itself raw; a carrier queries its IDE carrier at the strictly
+   * forward-mapped generated offset — or not at all (`null`).
+   */
+  private queryTarget(
+    filename: string,
+    sourceOffset: number,
+  ): { path: string; offset: number } | null {
+    const sourcePath = this.sourcePathFor(filename);
+    const state = this.synced.get(sourcePath);
+    if (state === undefined) return null;
+    if (state.kind === "user") {
+      return { path: sourcePath, offset: sourceOffset };
+    }
+    const carrierPath = toIdeCarrierFileName(sourcePath);
+    if (carrierPath === null) return null;
+    const mapper = this.mappers.forCarrier(carrierPath);
+    if (mapper === undefined) return null;
+    const generated = mapper.mapSourceOffsetToGenerated(sourceOffset);
+    if (generated === null) return null;
+    return { path: carrierPath, offset: generated.offset };
+  }
+
+  // ── Diagnostics ──
+
+  /**
+   * The requested source's diagnostics, strictly mapped into its own space.
+   * Unmapped/synthetic/foreign spans DROP.
+   */
+  async getDiagnostics(filename: string): Promise<MappedDiagnostic[]> {
+    if (!this.initialized) return [];
+    const sourcePath = this.sourcePathFor(filename);
+    const state = this.synced.get(sourcePath);
+    if (state === undefined) return [];
+    const queryPath = state.kind === "user" ? sourcePath : toIdeCarrierFileName(sourcePath);
+    if (queryPath === null) return [];
+    // A carrier with no registered mapper (no IDE surface / mapless / torn
+    // map) can never surface a mapped diagnostic — fail closed without
+    // querying the worker.
+    if (state.kind === "carrier" && this.mappers.forCarrier(queryPath) === undefined) {
+      return [];
+    }
+
+    const raw = (await this.send("getDiagnostics", { path: queryPath })) as WorkerDiagnostic[];
     const mapped: MappedDiagnostic[] = [];
-    for (const d of diagnostics) {
-      const tsxStart = d.start;
-      const tsxEnd = d.start + d.length;
-
-      // Expand TS6198 ("All destructured elements are unused") inside the
-      // verter-destructured block into individual TS6133-like diagnostics for
-      // each binding, using structured metadata.
-      if (
-        d.code === 6198 &&
-        tsxCode &&
-        isInsideDestructuredBlock(this.currentDestructuredBlock, tsxCode, tsxStart)
-      ) {
-        const expanded = expandTs6198ToIndividualDiagnostics(
-          this.currentDestructuredBlock,
-          tsxCode,
-          tsxStart,
-          d.category === 1 ? "error" : d.category === 0 ? "warning" : "info",
-          vueCode,
-        );
-        mapped.push(...expanded);
-        continue;
-      }
-
-      let vueStart: number | null = null;
-      let vueEnd: number | null = null;
-
-      // For positions inside the destructured block, skip the source map —
-      // it can't properly map synthetic code. Use structured metadata instead.
-      const inDestructuredBlock =
-        tsxCode && isInsideDestructuredBlock(this.currentDestructuredBlock, tsxCode, tsxStart);
-
-      if (!inDestructuredBlock && this.currentMapper) {
-        vueStart = this.currentMapper.tsxOffsetToVueOffset(tsxStart);
-        vueEnd = this.currentMapper.tsxOffsetToVueOffset(tsxEnd);
-      }
-
-      // Fall back to structured metadata when source map fails or was skipped
-      if (vueStart == null && this.currentTsxCode) {
-        const resolved = resolveDestructuredBinding(
-          this.currentDestructuredBlock,
-          this.currentTsxCode,
-          tsxStart,
-        );
-        if (resolved) {
-          vueStart = resolved.start;
-          vueEnd = resolved.end;
-        }
-      }
-
-      // Drop diagnostics that can't be mapped — they're in synthetic code
-      if (vueStart == null) continue;
-
+    for (const d of raw) {
+      const span = this.mapResultSpanToSource(filename, {
+        fileName: d.fileName,
+        start: d.start,
+        length: d.length,
+      });
+      if (span === null) continue;
       mapped.push({
         message: d.message,
-        start: vueStart,
-        end: vueEnd ?? tsxEnd,
-        severity: d.category === 1 ? "error" : d.category === 0 ? "warning" : "info",
+        start: span.start,
+        end: span.end,
+        severity: categoryToSeverity(d.category),
         code: d.code,
       });
     }
@@ -396,92 +469,33 @@ export class TypeScriptService implements TypeScriptServiceBridge {
   }
 
   /**
-   * Ensure the worker file and source map mapper are up to date before LSP operations.
-   * This is called by LSP providers (completions, hover, etc.) to avoid using
-   * a stale mapper when the TSX has changed but syncTsx hasn't fired yet (debounced).
+   * Check a standalone scratch file and return RAW (unmapped) diagnostics —
+   * the editable output panel edits generated TSX directly, by design the
+   * only raw path.
    */
-  async ensureTsxCurrent(
-    vueFilename: string,
-    tsxCode: string,
-    vueCode: string,
-    sourceMapJson: string | null,
-    destructuredBlock?: DestructuredBlockMeta | null,
-  ): Promise<void> {
-    if (!this.initialized) return;
-    // Skip if nothing changed
-    if (this.currentTsxCode === tsxCode && this.currentVueCode === vueCode) return;
-
-    const tsxPath = `/${vueFilename}.tsx`;
-    this.currentTsxPath = tsxPath;
-    this.currentTsxCode = tsxCode;
-    this.currentVueCode = vueCode;
-    this.currentDestructuredBlock = destructuredBlock ?? null;
-
-    if (sourceMapJson && sourceMapJson.length > 2) {
-      this.currentMapper = new SourceMapMapper(sourceMapJson, tsxCode, vueCode);
-    } else {
-      this.currentMapper = null;
-    }
-
-    await this.send("updateFile", { path: tsxPath, content: tsxCode });
-  }
-
-  /**
-   * Sync all files' .d.ts declarations to the worker for cross-file import resolution.
-   * Uses tscCode (which has `export default`) as virtual .d.ts files.
-   */
-  async syncDtsFiles(files: Array<{ filename: string; dtsCode: string }>): Promise<void> {
-    if (!this.initialized) return;
-
-    for (const { filename, dtsCode } of files) {
-      const dtsPath = `/${filename}.d.ts`;
-      await this.send("updateFile", { path: dtsPath, content: dtsCode });
-    }
-  }
-
-  /**
-   * Remove a file from the worker's virtual FS.
-   */
-  async closeFile(filename: string): Promise<void> {
-    if (!this.initialized) return;
-    const tsxPath = `/${filename}.tsx`;
-    await this.send("closeFile", { path: tsxPath });
-  }
-
-  /**
-   * Send TSX code directly to the worker and return raw (unmapped) diagnostics.
-   * Used by the editable output panel — does NOT touch currentMapper or currentTsxPath.
-   */
-  async syncTsxDirect(tsxCode: string): Promise<RawTsDiagnostic[]> {
+  async checkStandalone(tsxCode: string): Promise<RawTsDiagnostic[]> {
     if (!this.initialized) return [];
-
-    const directPath = "/direct-edit.tsx";
-    await this.send("updateFile", { path: directPath, content: tsxCode });
-    const diagnostics = (await this.send("getDiagnostics", { path: directPath })) as TsDiagnostic[];
-
-    return diagnostics.map((d) => ({
+    const raw = (await this.send("checkStandalone", {
+      path: STANDALONE_SCRATCH_PATH,
+      content: tsxCode,
+    })) as WorkerDiagnostic[];
+    return raw.map((d) => ({
       message: d.message,
       start: d.start,
       end: d.start + d.length,
-      severity: d.category === 1 ? "error" : d.category === 0 ? "warning" : "info",
+      severity: categoryToSeverity(d.category),
       code: d.code,
     }));
   }
 
-  /**
-   * Get hover info for a Vue position, mapping through source map.
-   */
-  async getHover(filename: string, vueOffset: number): Promise<string | null> {
-    if (!this.initialized || !this.currentTsxPath) return null;
+  // ── LSP queries ──
 
-    const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
-    if (tsxOffset === null) return null;
+  async getHover(filename: string, sourceOffset: number): Promise<string | null> {
+    if (!this.initialized) return null;
+    const target = this.queryTarget(filename, sourceOffset);
+    if (target === null) return null;
 
-    const info = (await this.send("getHover", {
-      path: this.currentTsxPath,
-      offset: tsxOffset,
-    })) as TsHoverInfo | null;
-
+    const info = (await this.send("getHover", target)) as TsHoverInfo | null;
     if (!info || !info.text) return null;
 
     const lines = [`\`\`\`typescript\n${info.text}\n\`\`\``];
@@ -491,23 +505,15 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     return lines.join("\n\n");
   }
 
-  /**
-   * Get completions for a Vue position, mapping through source map.
-   */
   async getCompletions(
     filename: string,
-    vueOffset: number,
+    sourceOffset: number,
   ): Promise<Array<{ label: string; kind: number; detail?: string; insertText?: string }>> {
-    if (!this.initialized || !this.currentTsxPath) return [];
+    if (!this.initialized) return [];
+    const target = this.queryTarget(filename, sourceOffset);
+    if (target === null) return [];
 
-    const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
-    if (tsxOffset === null) return [];
-
-    const entries = (await this.send("getCompletions", {
-      path: this.currentTsxPath,
-      offset: tsxOffset,
-    })) as TsCompletionEntry[];
-
+    const entries = (await this.send("getCompletions", target)) as TsCompletionEntry[];
     return entries.map((e) => ({
       label: e.label,
       kind: TS_KIND_TO_MONACO[e.kind] ?? 9, // default to Property
@@ -515,42 +521,31 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     }));
   }
 
-  /**
-   * Get definition locations for a Vue position.
-   */
-  async getDefinition(filename: string, vueOffset: number): Promise<MappedSpan[]> {
-    if (!this.initialized || !this.currentTsxPath) return [];
-    const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
-    if (tsxOffset === null) return [];
-    const defs = (await this.send("getDefinition", {
-      path: this.currentTsxPath,
-      offset: tsxOffset,
-    })) as TsSpanLike[] | null;
+  async getDefinition(filename: string, sourceOffset: number): Promise<MappedSpan[]> {
+    if (!this.initialized) return [];
+    const target = this.queryTarget(filename, sourceOffset);
+    if (target === null) return [];
+
+    const defs = (await this.send("getDefinition", target)) as TsSpanLike[] | null;
     if (!defs || defs.length === 0) return [];
 
     const mapped: MappedSpan[] = [];
     for (const def of defs) {
-      const location = this.mapTsxSpanToVueSpan(def);
+      const location = this.mapResultSpanToSource(filename, def);
       if (location) mapped.push(location);
     }
     return mapped;
   }
 
-  /**
-   * Get references for a Vue position.
-   */
-  async getReferences(filename: string, vueOffset: number): Promise<MappedReference[]> {
-    if (!this.initialized || !this.currentTsxPath) return [];
-    const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
-    if (tsxOffset === null) return [];
-    const refs = (await this.send("getReferences", {
-      path: this.currentTsxPath,
-      offset: tsxOffset,
-    })) as TsReferenceLike[];
+  async getReferences(filename: string, sourceOffset: number): Promise<MappedReference[]> {
+    if (!this.initialized) return [];
+    const target = this.queryTarget(filename, sourceOffset);
+    if (target === null) return [];
 
+    const refs = (await this.send("getReferences", target)) as TsReferenceLike[];
     const mapped: MappedReference[] = [];
     for (const ref of refs) {
-      const location = this.mapTsxSpanToVueSpan(ref);
+      const location = this.mapResultSpanToSource(filename, ref);
       if (!location) continue;
       mapped.push({
         ...location,
@@ -560,31 +555,22 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     return mapped;
   }
 
-  /**
-   * Get highlight spans for a Vue position.
-   */
-  async getDocumentHighlights(filename: string, vueOffset: number): Promise<MappedSpan[]> {
-    if (!this.initialized || !this.currentTsxPath) return [];
-    const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
-    if (tsxOffset === null) return [];
-    const highlights = (await this.send("getDocumentHighlights", {
-      path: this.currentTsxPath,
-      offset: tsxOffset,
-    })) as TsHighlightLike[];
+  async getDocumentHighlights(filename: string, sourceOffset: number): Promise<MappedSpan[]> {
+    if (!this.initialized) return [];
+    const target = this.queryTarget(filename, sourceOffset);
+    if (target === null) return [];
 
+    const highlights = (await this.send("getDocumentHighlights", target)) as TsSpanLike[];
     const mapped: MappedSpan[] = [];
     for (const highlight of highlights) {
-      const location = this.mapTsxSpanToVueSpan(highlight);
+      const location = this.mapResultSpanToSource(filename, highlight);
       if (location) mapped.push(location);
     }
     return mapped;
   }
 
-  /**
-   * Get all rename locations for a Vue position.
-   */
-  async getRenameLocations(filename: string, vueOffset: number): Promise<RenameLocations> {
-    if (!this.initialized || !this.currentTsxPath) {
+  async getRenameLocations(filename: string, sourceOffset: number): Promise<RenameLocations> {
+    if (!this.initialized) {
       return {
         canRename: false,
         rejectReason: "TypeScript service is not initialized",
@@ -592,21 +578,17 @@ export class TypeScriptService implements TypeScriptServiceBridge {
         locations: [],
       };
     }
-
-    const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
-    if (tsxOffset === null) {
+    const target = this.queryTarget(filename, sourceOffset);
+    if (target === null) {
       return {
         canRename: false,
-        rejectReason: "Source map mapping unavailable",
+        rejectReason: "Position has no mapped generated correlate",
         triggerSpan: null,
         locations: [],
       };
     }
-    const response = (await this.send("getRenameLocations", {
-      path: this.currentTsxPath,
-      offset: tsxOffset,
-    })) as TsRenameResponse;
 
+    const response = (await this.send("getRenameLocations", target)) as TsRenameResponse;
     if (!response.canRename) {
       return {
         canRename: false,
@@ -618,8 +600,8 @@ export class TypeScriptService implements TypeScriptServiceBridge {
 
     const triggerSpan =
       response.triggerSpan != null
-        ? this.mapTsxSpanToVueSpan({
-            fileName: this.currentTsxPath,
+        ? this.mapResultSpanToSource(filename, {
+            fileName: target.path,
             start: response.triggerSpan.start,
             length: response.triggerSpan.length,
           })
@@ -627,7 +609,7 @@ export class TypeScriptService implements TypeScriptServiceBridge {
 
     const locations: MappedSpan[] = [];
     for (const loc of response.locations) {
-      const mapped = this.mapTsxSpanToVueSpan(loc);
+      const mapped = this.mapResultSpanToSource(filename, loc);
       if (mapped) locations.push(mapped);
     }
 
@@ -638,50 +620,13 @@ export class TypeScriptService implements TypeScriptServiceBridge {
     };
   }
 
-  private mapVueOffsetToTsxOffset(vueOffset: number): number | null {
-    if (!this.currentMapper) return null;
-    return this.currentMapper.vueOffsetToTsxOffset(vueOffset);
-  }
-
-  private mapTsxSpanToVueSpan(span: TsSpanLike): MappedSpan | null {
-    if (!this.currentTsxPath || span.fileName !== this.currentTsxPath) return null;
-
-    const start = span.start;
-    const end = span.start + span.length;
-
-    if (this.currentMapper) {
-      const mappedStart = this.currentMapper.tsxOffsetToVueOffset(start);
-      const mappedEnd = this.currentMapper.tsxOffsetToVueOffset(end);
-      if (mappedStart != null && mappedEnd != null) {
-        return { start: mappedStart, end: mappedEnd };
-      }
-      if (mappedStart != null) return { start: mappedStart, end: mappedEnd ?? end };
-      if (mappedEnd != null) return { start: mappedStart ?? start, end: mappedEnd };
-    }
-
-    // Source map failed — try structured metadata fallback
-    if (this.currentTsxCode && this.currentDestructuredBlock) {
-      const resolved = resolveDestructuredBinding(
-        this.currentDestructuredBlock,
-        this.currentTsxCode,
-        start,
-      );
-      if (resolved) return resolved;
-    }
-
-    return null;
-  }
-
   dispose(): void {
     this.worker?.terminate();
     this.worker = null;
     this.pending.clear();
     this.initialized = false;
     this.initPromise = null;
-    this.currentMapper = null;
-    this.currentTsxPath = null;
-    this.currentTsxCode = null;
-    this.currentVueCode = null;
-    this.currentDestructuredBlock = null;
+    this.mappers.clear();
+    this.synced.clear();
   }
 }

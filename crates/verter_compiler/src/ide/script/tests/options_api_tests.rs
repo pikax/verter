@@ -37,7 +37,9 @@ fn types_module_custom_override() {
             is_jsx: false,
             conditional_root_narrowing: false,
             style_v_bind_vars: vec![],
+            style_usage_complete: true,
             css_modules: vec![],
+            template_used_vars: None,
         },
     );
     assert!(
@@ -194,10 +196,17 @@ const count = ref(0)
 <template><MyComponent/></template>"#,
     );
 
-    // Companion imports should be hoisted above the wrapper function
+    // Companion imports should be hoisted above the wrapper function, emitted
+    // with the BARE `.vue` specifier (no `.vue.tsx` rewrite — bare resolves
+    // natively to the `.d.vue.ts` declaration carrier).
     assert!(
-        code.contains("import MyComponent from './MyComponent.vue.ts'"),
-        "companion import should be hoisted with .vue.ts rewrite: {code}"
+        code.contains("import MyComponent from './MyComponent.vue'"),
+        "companion in-project import must be emitted BARE (`./MyComponent.vue`): {code}"
+    );
+    assert!(
+        !code.contains("./MyComponent.vue.tsx"),
+        "the compile-time `.vue.tsx` rewrite must be DROPPED on the companion options-api path: \
+         {code}"
     );
 
     // Import should appear before the wrapper function
@@ -389,10 +398,16 @@ const count = ref(0)
 <template><MyComponent/></template>"#,
     );
 
-    // Companion imports should be hoisted
+    // Companion imports should be hoisted, emitted with the BARE `.vue`
+    // specifier (no `.vue.tsx` rewrite — even on the JSX carrier path, bare
+    // resolves natively to the `.d.vue.ts` declaration carrier).
     assert!(
-        code.contains("import MyComponent from './MyComponent.vue.ts'"),
-        "companion import should be hoisted with .vue.ts rewrite:\n{code}"
+        code.contains("import MyComponent from './MyComponent.vue'"),
+        "companion in-project import must be emitted BARE (`./MyComponent.vue`):\n{code}"
+    );
+    assert!(
+        !code.contains("./MyComponent.vue.tsx"),
+        "the compile-time `.vue.tsx` rewrite must be DROPPED on the JSX companion path:\n{code}"
     );
 
     // Import should appear before the wrapper function

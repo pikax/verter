@@ -17,9 +17,28 @@ tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "r
 tracing = "0.1.44"
 verter_span = { path = "../verter_span" }
 verter_language = { path = "../verter_language" }
+# The tsgo `--api` ATTACH transport: the dual-surface OWNED provider attaches an
+# `--api` checker (diagnostics + reflection) to its own `tsgo --lsp` process over
+# the server-minted pipe (the `custom/initializeAPISession` attach), reusing the
+# vscode-jsonrpc transport + typed checker client this crate would otherwise
+# duplicate.
+verter_tsgo_api = { path = "../verter_tsgo_api" }
+
+[dev-dependencies]
+# Per-test isolated temp dirs (auto-cleaned) for the discovery version-parse
+# tests, so parallel runs never collide on a fixed temp path.
+tempfile = "3.27"
+# `test-util` provides the paused virtual clock (`#[tokio::test(start_paused = true)]`)
+# the resilient restart-interleaving tests use to drive respawn backoff
+# deterministically without any wall-clock sleep.
+tokio = { version = "1.52", features = [
+    "test-util",
+    "macros",
+    "rt",
+    "sync",
+    "time",
+    "io-util",
+] }
 
 [features]
 default = []
-# Enables LSP-integration tests that depend on verter_session and LSP internals.
-# Not enabled by default — only used when running tests from verter_lsp context.
-__lsp_tests = []

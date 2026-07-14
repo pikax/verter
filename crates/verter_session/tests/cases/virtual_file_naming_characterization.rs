@@ -12,7 +12,7 @@
 use verter_session::framework::descriptor::{
     svelte_descriptor, vue_descriptor, VirtualFileNaming, VirtualPathPolicy,
 };
-use verter_workspace::{IdeProjectConfig, NativeProjectResolver, ProjectMembership};
+use verter_workspace::{IdeProjectConfig, NativeProjectResolver};
 
 /// Apply a `VirtualPathPolicy` to a carrier canonical (append-to-full
 /// semantics, `is_jsx = false` — a TypeScript carrier — for the conditional
@@ -41,7 +41,9 @@ fn single_project_resolver() -> NativeProjectResolver {
         "/workspace".to_string(),
         Some("/workspace/tsconfig.json".to_string()),
     );
-    project.membership = ProjectMembership::MatchAll;
+    project.membership = verter_workspace::ConfiguredMembership::match_all_under_root(
+        &verter_workspace::CanonicalPath::new("/workspace"),
+    );
     NativeProjectResolver::new(vec![project])
 }
 
@@ -65,7 +67,9 @@ fn vue_column_reproduces_production_provider_derivations() {
         col_ide, prod_ide,
         "the Vue column ide path (non-jsx) must reproduce provider_ide_id_for_source"
     );
-    assert_eq!(col_api.as_deref(), Some("/workspace/src/App.vue.ts"));
+    // The API carrier carries the reserved `.verter.` infix (redirect-reached);
+    // the IDE carrier stays the bare-probe-reachable `.tsx`.
+    assert_eq!(col_api.as_deref(), Some("/workspace/src/App.vue.verter.ts"));
     assert_eq!(col_ide.as_deref(), Some("/workspace/src/App.vue.tsx"));
 }
 
@@ -84,7 +88,12 @@ fn svelte_column_reproduces_production_provider_derivations() {
 
     assert_eq!(col_api, prod_api);
     assert_eq!(col_ide, prod_ide);
-    assert_eq!(col_api.as_deref(), Some("/workspace/src/Comp.svelte.ts"));
+    // The API carrier carries the reserved `.verter.` infix (redirect-reached);
+    // the IDE carrier stays the bare-probe-reachable `.tsx`.
+    assert_eq!(
+        col_api.as_deref(),
+        Some("/workspace/src/Comp.svelte.verter.ts")
+    );
     assert_eq!(col_ide.as_deref(), Some("/workspace/src/Comp.svelte.tsx"));
 }
 

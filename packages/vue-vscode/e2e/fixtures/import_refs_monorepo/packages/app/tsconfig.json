@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "preserve",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "declaration": true,
+    "paths": {
+      "@ui/*": ["../ui/src/*"]
+    }
+  },
+  "references": [{ "path": "../ui" }],
+  "include": ["src"]
+}

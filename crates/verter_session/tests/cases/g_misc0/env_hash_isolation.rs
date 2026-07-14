@@ -27,9 +27,7 @@ use verter_session::file_artifact_store::{
 
 use verter_workspace::env_hash::EnvHashInputs;
 use verter_workspace::module_resolution::{ConditionSet, ModuleResolutionMode};
-use verter_workspace::resolver::{
-    IdeProjectCompilerOptions, IdeProjectConfig, ProjectMembership, WorkspaceAlias,
-};
+use verter_workspace::resolver::{IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias};
 
 fn baseline_conditions() -> &'static ConditionSet {
     static C: OnceLock<ConditionSet> = OnceLock::new();
@@ -49,9 +47,12 @@ fn baseline_cfg() -> IdeProjectConfig {
     cfg.compiler_options = IdeProjectCompilerOptions {
         base_url: Some("/ws/proj".to_string()),
         paths: vec![("@/*".to_string(), vec!["src/*".to_string()])],
+        ..Default::default()
     };
     cfg.references = Vec::new();
-    cfg.membership = ProjectMembership::MatchAll;
+    cfg.membership = verter_workspace::ConfiguredMembership::match_all_under_root(
+        &verter_workspace::CanonicalPath::new("/ws/proj"),
+    );
     cfg
 }
 

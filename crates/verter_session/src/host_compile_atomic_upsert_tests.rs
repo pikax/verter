@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use verter_scheduler::stage::Priority;
 
-use crate::host_compile::{CompileBatchInput, CompileBatchOptions};
+use crate::host_compile::{CompileBatchInput, CompileBatchOptions, CompileManyTarget};
 use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::types::{FileLanguage, HostConfig, HostError, UpsertRequest};
 use crate::VerterHost;
@@ -36,6 +36,7 @@ fn ok_input(canonical_id: &str, source: &str) -> CompileBatchInput {
         canonical_id: canonical_id.to_string(),
         source: Arc::from(source),
         requested_mode: None,
+        component_id: None,
     }
 }
 
@@ -86,7 +87,11 @@ fn compile_many_stage_b_uses_one_atomic_upsert_batch() {
     // populated exclusively by `handle_new_request_batch`.
     host.scheduler.test_install_batch_admit_epoch_trace();
 
-    let entries = host.compile_many(inputs, CompileBatchOptions::default());
+    let entries = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert_eq!(entries.len(), N, "every input position must be returned");
     assert!(
         entries.iter().all(|e| e.errors.is_empty()),
@@ -139,7 +144,11 @@ fn compile_many_duplicate_canonical_dedups_to_one_batch_request_and_reports_all_
     ];
 
     host.scheduler.test_install_batch_admit_epoch_trace();
-    let entries = host.compile_many(inputs, CompileBatchOptions::default());
+    let entries = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
 
     // All three input positions are reported.
     assert_eq!(entries.len(), 3, "Stage D must fan out to all 3 positions");
@@ -216,6 +225,7 @@ fn compile_many_upsert_batch_captures_calling_thread_request_context() {
                 priority: Some(Priority::Interactive),
                 default_mode: None,
             },
+            CompileManyTarget::HostBacked,
         );
         assert_eq!(entries.len(), 1);
         assert!(
@@ -557,7 +567,11 @@ fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let entries = host.compile_many(inputs, CompileBatchOptions::default());
+            let entries = host.compile_many(
+                inputs,
+                CompileBatchOptions::default(),
+                CompileManyTarget::HostBacked,
+            );
             let _ = tx.send(entries.len());
         });
 

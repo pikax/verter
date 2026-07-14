@@ -91,7 +91,7 @@ impl DocumentProviderProjection {
 /// Dispatches the three mapping operations to the source-map-backed
 /// [`PositionMapper`] (carrier IDE) or the line-only rewrite-aware
 /// [`SelfFileProviderMapper`] (self-file rune module). The return shapes match
-/// [`PositionMapper`] exactly, so the `tsgo::merge` helpers are projection-
+/// [`PositionMapper`] exactly, so the `type_provider::merge` helpers are projection-
 /// agnostic.
 #[derive(Clone)]
 pub enum ProviderPositionMapper {
@@ -166,7 +166,7 @@ impl ProviderPositionMapper {
 
     /// The generated provider-buffer position immediately after the last emitted synthetic
     /// helper import, the authoritative gate for classifying a TypeProvider auto-import
-    /// insertion (see [`crate::tsgo::auto_import`]).
+    /// insertion (see [`crate::type_provider::auto_import`]).
     ///
     /// Only the carrier-IDE `SourceMap` projection emits a synthetic helper-import preamble; a
     /// `SelfFile` rune-module projection has none, so it returns `None` (the auto-import
@@ -306,6 +306,30 @@ impl SelfFileProviderMapper {
     #[must_use]
     pub fn prelude_line_count(&self) -> u32 {
         self.prelude_line_count
+    }
+
+    /// A 16-byte structural identity over this mapper's SEMANTIC content — the
+    /// prelude line count plus every rewrite segment's coordinates, hashed in
+    /// canonical order. Two mappers that map identically hash identically; any
+    /// mapping change (a rewrite added/removed/shifted, a prelude growth)
+    /// changes the identity. This is the self-file analogue of the carrier
+    /// surface's map-JSON hash: the provider-surface store stamps it as the
+    /// recorded `map_hash` so a mapper-only re-sync is a DISTINCT capture.
+    #[must_use]
+    pub fn identity_hash16(&self) -> [u8; 16] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&self.prelude_line_count.to_le_bytes());
+        for r in &self.rewrites {
+            hasher.update(&r.line.to_le_bytes());
+            hasher.update(&r.src_start.to_le_bytes());
+            hasher.update(&r.src_end.to_le_bytes());
+            hasher.update(&r.provider_start.to_le_bytes());
+            hasher.update(&r.provider_end.to_le_bytes());
+        }
+        let digest = hasher.finalize();
+        let mut out = [0u8; 16];
+        out.copy_from_slice(&digest.as_bytes()[..16]);
+        out
     }
 
     /// Map a user-source column on `line` to the provider column, applying the

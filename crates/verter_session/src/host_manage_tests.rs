@@ -172,10 +172,6 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         self.inner.resolve_import(importer_id, specifier, ctx)
     }
 
-    fn owner_for_file(&self, canonical_id: &str) -> Option<verter_workspace::ProjectOwnership> {
-        self.inner.owner_for_file(canonical_id)
-    }
-
     fn content_generation(&self) -> u64 {
         self.inner.content_generation()
     }
@@ -3244,8 +3240,9 @@ fn get_analysis_resolves_alias_import() {
                     verter_semantic::analysis::project_resolver::IdeProjectCompilerOptions::default(
                     ),
                 references: vec![],
-                membership:
-                    verter_semantic::analysis::project_resolver::ProjectMembership::MatchAll,
+                membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                    &verter_workspace::CanonicalPath::new("/project"),
+                ),
             },
         ]);
     }
@@ -12722,7 +12719,9 @@ mod manifest_types_entry_routing_tests {
                 workspace_aliases: vec![],
                 compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
                 references: vec![],
-                membership: verter_workspace::ProjectMembership::default(),
+                membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                    &verter_workspace::CanonicalPath::new("/ws/node_modules/@scope/local-pkg"),
+                ),
             },
         ]));
         // Inject a runtime-script target inside the workspace-owned

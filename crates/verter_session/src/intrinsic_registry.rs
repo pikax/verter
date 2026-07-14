@@ -437,6 +437,25 @@ type   NoInfer   <   T  >   = intrinsic   ;
             );
             return;
         }
+        // Version-DISCRIMINATING gate: when the workspace pins the TS>=7 rc
+        // engine (an `@typescript/typescript-*` platform package is discoverable),
+        // discovery MUST select THAT package's libs — not a coexisting legacy
+        // `typescript@5/6` lib dir. The pre-fix lexicographic-last selection
+        // chose `typescript@6.0.3` (its pnpm store dir sorts AFTER the `@`-named
+        // rc store dir), scanning TS6 libs against the rc engine; this assertion
+        // FAILS on that selection and PASSES on active-version selection. Both
+        // facts are computed in `verter_workspace` (the allowlisted disk-reading
+        // layer) so this audit performs no `std::fs` of its own.
+        if library.rc_platform_package_available() {
+            assert!(
+                library.selected_lib_is_rc_platform(),
+                "the workspace pins the rc TS>=7 engine, so the intrinsic scan must come from the \
+                 rc per-platform package (`@typescript/typescript-<platform>`), not a legacy \
+                 `typescript@<ver>` lib dir — got {:?}",
+                library.lib_dir()
+            );
+        }
+
         let scanned = scan_intrinsics_via_library(&library);
         assert!(
             !scanned.is_empty(),

@@ -1550,7 +1550,7 @@ const count = 0
     };
 
     // The unvalidated mapping should work
-    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset(
         &position,
         &doc.line_index,
         &mapper,
@@ -1564,7 +1564,7 @@ const count = 0
     );
 
     // The VALIDATED mapping must also work — this is the bug (#20)
-    let validated = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
+    let validated = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1624,7 +1624,7 @@ const msg = 'hello'
         character: (template_msg - line_start) as u32,
     };
 
-    let validated = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
+    let validated = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1670,7 +1670,7 @@ function handleClick() {}
         character: (template_hc - line_start) as u32,
     };
 
-    let validated = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
+    let validated = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1714,7 +1714,7 @@ const nested = reactive({ deep: { value: 'hello', count: 1 } })
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1774,7 +1774,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1855,7 +1855,7 @@ const users: User[] = [{ name: 'Alice', email: 'a@b.com', age: 30 }]
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1910,7 +1910,7 @@ fn validated_tsx_offset_keeps_fixture_vfor_member_access_on_template_occurrence(
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1970,7 +1970,7 @@ const outerLabel = 'outer'
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2022,7 +2022,7 @@ const outerLabel = 'outer'
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2083,7 +2083,7 @@ const outerLabel = 'outer'
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2147,7 +2147,7 @@ const show = true
         character: (template_show - line_start) as u32,
     };
 
-    let validated = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
+    let validated = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2196,7 +2196,7 @@ const items = [1, 2, 3]
         character: (items_in_vfor - line_start) as u32,
     };
 
-    let validated = crate::tsgo::merge::carrier_position_to_tsx_offset_validated(
+    let validated = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -3343,10 +3343,10 @@ fn verter_types_stub_covers_tsx_imports() {
 #[tokio::test]
 async fn integration_hover_merge_with_mock_type_provider() {
     use crate::documents::line_index::LineIndex;
-    use crate::tsgo::merge;
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::protocol::HoverInfo;
-    use crate::tsgo::traits::TypeProvider;
+    use crate::type_provider::merge;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::protocol::HoverInfo;
+    use crate::type_provider::traits::TypeProvider;
 
     let source = r#"<script setup lang="ts">
 const count = 42
@@ -3456,7 +3456,7 @@ const count = 42
     assert!(
         calls
             .iter()
-            .any(|c| matches!(c, crate::tsgo::mock::MockCall::GetHover { .. })),
+            .any(|c| matches!(c, crate::type_provider::mock::MockCall::GetHover { .. })),
         "mock get_hover must have been called"
     );
 }
@@ -3645,8 +3645,8 @@ const msg = 'hello'
 /// Simulates debounced provider sync: 5 rapid changes → only the latest syncs.
 #[tokio::test]
 async fn debounced_sync_only_syncs_latest() {
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::project_sync::ProjectSync;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::project_sync::ProjectSync;
     use crate::ProjectSyncMode;
     use dashmap::{DashMap, DashSet};
 
@@ -3705,7 +3705,7 @@ async fn debounced_sync_only_syncs_latest() {
         calls.len()
     );
     match &calls[0] {
-        crate::tsgo::mock::MockCall::UpdateFile { content, .. } => {
+        crate::type_provider::mock::MockCall::UpdateFile { content, .. } => {
             assert_eq!(content, "version 4", "should sync the last version");
         }
         other => panic!("expected UpdateFile, got {:?}", other),
@@ -3719,8 +3719,8 @@ async fn debounced_sync_only_syncs_latest() {
 /// When a debounced task is superseded by a newer generation, it should not sync.
 #[tokio::test]
 async fn debounced_sync_skipped_when_superseded() {
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::project_sync::ProjectSync;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::project_sync::ProjectSync;
     use crate::ProjectSyncMode;
     use dashmap::{DashMap, DashSet};
 
@@ -3781,8 +3781,8 @@ async fn debounced_sync_skipped_when_superseded() {
 /// ensure_provider_synced: when the file is dirty, it should trigger an immediate sync.
 #[tokio::test]
 async fn ensure_provider_synced_triggers_sync_when_dirty() {
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::project_sync::ProjectSync;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::project_sync::ProjectSync;
     use crate::ProjectSyncMode;
     use dashmap::DashSet;
 
@@ -3811,8 +3811,8 @@ async fn ensure_provider_synced_triggers_sync_when_dirty() {
 /// ensure_provider_synced: when the file is clean, no sync should happen.
 #[tokio::test]
 async fn ensure_provider_synced_noop_when_clean() {
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::project_sync::ProjectSync;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::project_sync::ProjectSync;
     use crate::ProjectSyncMode;
     use dashmap::DashSet;
 
@@ -3834,8 +3834,8 @@ async fn ensure_provider_synced_noop_when_clean() {
 /// and the debounced tasks should be skipped (already flushed).
 #[tokio::test]
 async fn rapid_changes_then_completion_triggers_one_sync() {
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::project_sync::ProjectSync;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::project_sync::ProjectSync;
     use crate::ProjectSyncMode;
     use dashmap::{DashMap, DashSet};
 
@@ -3896,7 +3896,7 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
     // (it checks gen, not needs_sync). But we want to verify the flush happened.
     let update_calls: Vec<_> = calls
         .iter()
-        .filter(|c| matches!(c, crate::tsgo::mock::MockCall::UpdateFile { .. }))
+        .filter(|c| matches!(c, crate::type_provider::mock::MockCall::UpdateFile { .. }))
         .collect();
 
     // The flush should be the first call
@@ -3907,7 +3907,7 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
 
     // First call should be the flush content
     match &update_calls[0] {
-        crate::tsgo::mock::MockCall::UpdateFile { content, .. } => {
+        crate::type_provider::mock::MockCall::UpdateFile { content, .. } => {
             assert_eq!(
                 content, "latest for completion",
                 "first sync should be from the completion flush"
@@ -3920,8 +3920,8 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
 /// Pull diagnostics should NOT force a provider sync (avoids per-keystroke sync).
 #[tokio::test]
 async fn diagnostic_pull_does_not_force_sync() {
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::traits::TypeProvider;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::traits::TypeProvider;
     use dashmap::DashSet;
 
     let mock = MockTypeProvider::new();
@@ -4595,9 +4595,9 @@ const msg = ref('hello')
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn integration_concurrent_completion_and_did_change_no_deadlock() {
     use crate::documents::line_index::LineIndex;
-    use crate::tsgo::merge;
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::traits::TypeProvider;
+    use crate::type_provider::merge;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::traits::TypeProvider;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let source = r#"<script setup lang="ts">
@@ -4638,15 +4638,21 @@ const msg = "hello"
     mock.set_completions(
         "test",
         tsx_offset.unwrap(),
-        vec![crate::tsgo::protocol::Completion {
+        vec![crate::type_provider::protocol::Completion {
             label: "msg".to_string(),
             kind: None,
             detail: Some("const msg: string".to_string()),
             documentation: None,
             edit_range_start: None,
             edit_range_end: None,
+            text_edit_new_text: None,
             insert_text: None,
             sort_text: None,
+            insert_text_format: None,
+            commit_characters: None,
+            filter_text: None,
+            preselect: None,
+            label_details: None,
             data: None,
         }],
     );
@@ -5179,10 +5185,10 @@ import MyComp from './MyComp.vue'
 #[tokio::test]
 async fn integration_hover_slot_merge_preserves_verter_info() {
     use crate::documents::line_index::LineIndex;
-    use crate::tsgo::merge;
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::protocol::HoverInfo;
-    use crate::tsgo::traits::TypeProvider;
+    use crate::type_provider::merge;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::protocol::HoverInfo;
+    use crate::type_provider::traits::TypeProvider;
 
     let source = r#"<script setup lang="ts">
 </script>

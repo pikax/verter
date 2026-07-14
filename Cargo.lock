@@ -3778,6 +3778,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "verter-editor-client"
+version = "0.0.1-beta.1"
+dependencies = [
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "verter_actions"
 version = "0.0.1-beta.1"
 dependencies = [
@@ -3789,6 +3797,14 @@ dependencies = [
  "verter_diagnostics",
  "verter_semantic",
  "verter_span",
+]
+
+[[package]]
+name = "verter_analysis_inputs"
+version = "0.0.1-beta.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3932,6 +3948,7 @@ dependencies = [
 name = "verter_lsp"
 version = "0.0.1-beta.1"
 dependencies = [
+ "blake3",
  "dashmap 6.2.1",
  "futures-util",
  "glob",
@@ -3953,6 +3970,7 @@ dependencies = [
  "tower-lsp-server",
  "tracing",
  "tracing-subscriber",
+ "verter-editor-client",
  "verter_actions",
  "verter_audit",
  "verter_diagnostics",
@@ -3962,6 +3980,7 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_tsgo_api",
  "verter_type_runtime",
  "verter_workspace",
 ]
@@ -4097,9 +4116,11 @@ dependencies = [
  "memchr",
  "oxc_allocator",
  "oxc_ast",
+ "oxc_ast_visit",
  "oxc_diagnostics",
  "oxc_parser",
  "oxc_span",
+ "oxc_syntax",
  "phf 0.13.1",
  "rustc-hash 2.1.2",
  "serde",
@@ -4130,6 +4151,18 @@ dependencies = [
  "verter_semantic",
  "verter_span",
  "verter_type_expr",
+]
+
+[[package]]
+name = "verter_relay_shim"
+version = "0.0.1-beta.1"
+dependencies = [
+ "getrandom 0.2.17",
+ "libc",
+ "serde_json",
+ "tokio",
+ "verter_tsgo_api",
+ "windows-sys",
 ]
 
 [[package]]
@@ -4278,10 +4311,28 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "verter_compiler",
  "verter_session",
+ "verter_span",
+ "verter_tsgo_api",
  "verter_workspace",
  "walkdir",
+]
+
+[[package]]
+name = "verter_tsgo_api"
+version = "0.0.1-beta.1"
+dependencies = [
+ "arc-swap",
+ "base64",
+ "libc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "verter_span",
+ "windows-sys",
 ]
 
 [[package]]
@@ -4316,10 +4367,12 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "verter_language",
  "verter_span",
+ "verter_tsgo_api",
 ]
 
 [[package]]
@@ -4370,6 +4423,7 @@ dependencies = [
  "verter_language",
  "verter_scheduler",
  "verter_span",
+ "verter_tsgo_api",
  "walkdir",
  "xxhash-rust",
 ]
@@ -4780,6 +4834,7 @@ dependencies = [
 name = "xtask"
 version = "0.0.1-beta.1"
 dependencies = [
+ "regex",
  "serde",
  "serde_json",
  "toml",

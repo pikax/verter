@@ -19,7 +19,8 @@ pub(super) use crate::ide::CssModuleInfo;
 mod common;
 pub(super) use common::{
     gen_jsx_script, gen_tsx_script, gen_tsx_script_full, gen_tsx_script_full_with_options,
-    gen_tsx_script_full_with_opts, gen_tsx_script_narrowing, gen_tsx_script_with_sourcemap,
+    gen_tsx_script_full_with_opts, gen_tsx_script_narrowing, gen_tsx_script_unwrap,
+    gen_tsx_script_with_sourcemap,
 };
 
 mod comp_emit_tests;

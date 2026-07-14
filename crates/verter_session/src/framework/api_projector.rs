@@ -55,4 +55,30 @@ pub struct ComponentApiProjectorCtx<'a> {
     pub mode: PublicApiMode,
     /// The compile profile, when script/content overrides apply.
     pub profile: Option<&'a CompileProfile>,
+    /// The batch-shared cold seed + active session view (crate-private; least
+    /// authority). `Some` on every host render path (scalar `N=1` and batch).
+    /// Vue consumes it for cross-file macro-type resolution; Svelte ignores it
+    /// (its shim renders purely from cached shallow state).
+    pub(crate) render_seed: Option<PublicApiRenderSeed<'a>>,
+}
+
+/// The batch-shared cold-seed store view + active session view threaded into a
+/// public-API render so a render takes ZERO per-call store-view reads.
+///
+/// Captured ONCE — per scalar call (`N=1`) or per batch — as a
+/// [`crate::resolver_store::BatchFixedView`] and shared across every item: the
+/// O(N²) store-view-cliff collapse. Least authority: the raw `BatchFixedView`
+/// is intentionally NOT exposed (the projector only needs the cold seed to
+/// build its cold-compute resolver context, plus the view to thread the
+/// session-aware collector). The session view is ALWAYS present on this carrier
+/// — never `None` on the render path.
+pub(crate) struct PublicApiRenderSeed<'a> {
+    /// The batch-shared OVERLAID cold-seed for the external-type collection /
+    /// extraction resolver context. Reused across every item; the cold compute
+    /// seeds from it WITHOUT a fresh per-item `resolver_store_view_read()`.
+    pub(crate) cold_seed: &'a crate::resolver_store::ColdSeedHostStoreView,
+    /// The active session view threaded into the macro-type collector's
+    /// view-aware path (NEVER `None`). For the host-level public-API entry this
+    /// is the base [`crate::session_view::HostViewRef`].
+    pub(crate) session_view: &'a dyn crate::session_view::SessionView,
 }

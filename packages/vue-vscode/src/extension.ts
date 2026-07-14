@@ -34,6 +34,8 @@ import {
 
 import { join, normalize } from "path";
 import { appendFileSync, existsSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { spawn, type ChildProcess } from "child_process";
 
 import type { PatchClient, NotificationParams } from "@verter/language-shared";
 import { patchClient, NotificationType, RequestType } from "@verter/language-shared";
@@ -70,6 +72,7 @@ import {
 import { StartupProbe, readStartupProbeConfig, writeTimingMarker } from "./startupProbe";
 import { shouldRestartLanguageServerForConfigurationChange } from "./languageServerConfig";
 import { addShowRecentAuditRecordsCommand } from "./audit";
+import { planSharedTsgo, typeProviderRoutesTsgo } from "./sharedTsgoLaunch";
 
 type GetClient = () => PatchClient<LanguageClient>;
 type ActivationRuntime = Awaited<ReturnType<typeof activateExtension>>;
@@ -162,6 +165,21 @@ async function activateExtension(context: ExtensionContext) {
   let configRestartTimer: ReturnType<typeof setTimeout> | undefined;
   let tsPluginConfigured = false;
   let tsPluginPromise: Promise<void> | undefined;
+  // The resolved per-workspace carrier-store dir the LSP publishes carriers into,
+  // delivered by the LSP's `$/verter/carrierStoreReady` notification (emitted from
+  // the server's init lifecycle, which resolves the dir authoritatively via
+  // `default_carrier_store_dir_string(workspace_root)` and also hands it to its own
+  // spawned tsserver through `VERTER_CARRIER_STORE_DIR`). The notification handler
+  // (`onCarrierStoreReady` → `applyCarrierStoreDir`) records it here and forwards it
+  // to VS Code's OWN TypeScript server via `configurePlugin`, so a plain `.ts`
+  // (served by VS Code's TS service, not the LSP-spawned tsserver) reads the SAME
+  // store the LSP writes — the headline "plain .ts importing a .vue gets real types"
+  // DX. The extension never re-derives the dir itself (the recipe — blake3 over the
+  // canonicalized + case-folded workspace root plus the LSP version — lives solely
+  // in the LSP, so mirroring it here would risk silently targeting the WRONG dir).
+  // `undefined` until the notification arrives; until then VS Code's own TS server
+  // has no store and fails closed (the LSP-spawned tsserver still has the env dir).
+  let carrierStoreDir: string | undefined;
 
   const getStartedClient = () => {
     if (!server) {
@@ -182,10 +200,12 @@ async function activateExtension(context: ExtensionContext) {
   const getTypeScriptPluginConfig = (): {
     enable: true;
     exposeBindingsTesting?: boolean;
+    carrierStoreDir?: string;
   } => {
     const pluginConfig: {
       enable: true;
       exposeBindingsTesting?: boolean;
+      carrierStoreDir?: string;
     } = { enable: true };
     const experimentalConfig = workspace.getConfiguration("verter.experimental");
     const inspect = experimentalConfig.inspect<boolean>("exposeBindingsTesting");
@@ -204,7 +224,32 @@ async function activateExtension(context: ExtensionContext) {
       );
     }
 
+    // Forward the LSP-reported carrier-store dir to VS Code's TS server plugin
+    // so it reads the same store the LSP publishes carriers into. Omitted until
+    // the LSP reports it (the plugin then falls back to the env var).
+    if (carrierStoreDir !== undefined) {
+      pluginConfig.carrierStoreDir = carrierStoreDir;
+    }
+
     return pluginConfig;
+  };
+
+  /**
+   * Record the LSP-reported carrier-store dir and (re-)configure VS Code's TS
+   * server plugin so it picks up the new `carrierStoreDir`. A no-op when the dir
+   * is unchanged (avoids a redundant `configurePlugin` round-trip). When the dir
+   * changes (first report, or a workspace switch), the configured flag is reset
+   * so `ensureTypeScriptPluginConfigured(force)` re-issues `configurePlugin` with
+   * the updated config.
+   */
+  const applyCarrierStoreDir = (dir: string | undefined) => {
+    if (dir === carrierStoreDir) {
+      return;
+    }
+    carrierStoreDir = dir;
+    tsPluginConfigured = false;
+    tsPluginPromise = undefined;
+    void ensureTypeScriptPluginConfigured(undefined, true);
   };
 
   const ensureTypeScriptPluginConfigured = (document?: TextDocument, force = false) => {
@@ -268,6 +313,7 @@ async function activateExtension(context: ExtensionContext) {
 
     serverPromise = activateVueLanguageServer(context, log, startupProbe, {
       onReady: ensureDeferredFeaturesRegistered,
+      onCarrierStoreReady: applyCarrierStoreDir,
     })
       .then((runtime) => {
         server = runtime;
@@ -438,12 +484,32 @@ export async function activateVueLanguageServer(
   startupProbe?: StartupProbe,
   options?: {
     onReady?: () => void;
+    /**
+     * Called with the LSP-reported per-workspace carrier-store dir (the
+     * `CarrierStoreReady` notification). The extension forwards it to VS Code's
+     * own TS server via `configurePlugin`.
+     */
+    onCarrierStoreReady?: (carrierStoreDir: string) => void;
   },
 ) {
   const { workspaceFolders } = workspace;
   const rootPath = Array.isArray(workspaceFolders) ? workspaceFolders[0].uri.fsPath : undefined;
 
   const binaryPath = findLspBinary(context.extensionPath, log);
+
+  // Establish the OPTIONAL SHARED editor-attach rendezvous (fail-closed to OWNED).
+  // The `--shared-*` args (empty when OWNED) arm the LSP; the shim is spawned once
+  // and torn down on deactivate — reused across restarts (never respawned per restart).
+  const effectiveTypeProvider =
+    readE2eEnv("TYPE_PROVIDER") ||
+    workspace.getConfiguration("verter").get<string>("typeProvider", "auto");
+  const sharedTsgo = establishSharedTsgo(
+    context.extensionPath,
+    rootPath,
+    effectiveTypeProvider,
+    log,
+  );
+  context.subscriptions.push({ dispose: () => sharedTsgo.dispose() });
 
   // CSS intellisense service — created after client, referenced by middleware closures
   let cssService: CssService | undefined;
@@ -685,7 +751,7 @@ export async function activateVueLanguageServer(
   };
 
   let client = createLanguageServer(
-    buildServerOptions(binaryPath, rootPath, context.extensionPath, log),
+    buildServerOptions(binaryPath, rootPath, context.extensionPath, log, sharedTsgo.lspArgs),
     clientOptions,
   );
   const getClient = () => client as unknown as PatchClient<LanguageClient>;
@@ -882,6 +948,12 @@ export async function activateVueLanguageServer(
     lc.onNotification(NotificationType.TypeProviderSyncComplete, (params: { gen: number }) => {
       log.info(`TypeProviderSyncComplete (init generation ${params.gen})`);
     });
+    lc.onNotification(NotificationType.CarrierStoreReady, (params: { carrierStoreDir: string }) => {
+      log.info(`Carrier store dir reported by LSP: ${params.carrierStoreDir}`);
+      // Forward to VS Code's own TS server plugin so a plain `.ts` served by
+      // VS Code's TS service reads the same store the LSP publishes into.
+      options?.onCarrierStoreReady?.(params.carrierStoreDir);
+    });
   }
 
   function stopHeartbeatTimer() {
@@ -1007,7 +1079,13 @@ export async function activateVueLanguageServer(
         stop: () => client.stop(),
         createAndStart: async () => {
           client = createLanguageServer(
-            buildServerOptions(binaryPath, rootPath, context.extensionPath, log),
+            buildServerOptions(
+              binaryPath,
+              rootPath,
+              context.extensionPath,
+              log,
+              sharedTsgo.lspArgs,
+            ),
             clientOptions,
           );
           registerTypeProviderPidListener(client);
@@ -1048,11 +1126,107 @@ export async function activateVueLanguageServer(
   };
 }
 
+/** A live SHARED-tsgo rendezvous: the `--shared-*` LSP args + the shim disposer. */
+interface SharedTsgoLaunch {
+  /** The `--shared-control-dir` / `--shared-session-key` args to arm the LSP (empty when OWNED). */
+  lspArgs: string[];
+  /** Tear down the spawned relay shim (no-op when OWNED). */
+  dispose: () => void;
+}
+
+const NO_SHARED_TSGO: SharedTsgoLaunch = { lspArgs: [], dispose: () => {} };
+
+/**
+ * Establish the OPTIONAL SHARED editor-attach rendezvous, FAIL-CLOSED.
+ *
+ * SHARED is an additive tsgo overlay: the extension discovers the built/packaged
+ * `verter-relay-shim` + the native-preview tsgo, spawns the shim (which advertises a
+ * live real-tsgo attach into an isolated control dir), and returns the `--shared-*`
+ * args that arm the LSP's `shared_rendezvous()`. Absent the shim OR the tsgo — or on
+ * ANY error — it returns {@link NO_SHARED_TSGO} so the extension launches the OWNED
+ * baseline, never crashing. Only engaged for a tsgo-routing provider (SHARED is a
+ * tsgo overlay); `auto` stays OWNED here (the LSP's own auto-mode still serves OWNED).
+ */
+function establishSharedTsgo(
+  extensionPath: string,
+  workspaceRoot: string | undefined,
+  typeProvider: string,
+  log?: LogOutputChannel,
+): SharedTsgoLaunch {
+  if (!typeProviderRoutesTsgo(typeProvider)) {
+    // TODO(follow-up): also engage for `auto` when the workspace resolves to tsgo —
+    // that requires replicating the LSP's auto tsgo-decision (workspace TS engine
+    // discovery) in the extension; today `auto` stays OWNED here (the LSP's own auto
+    // mode still serves the OWNED tsgo baseline, just without the SHARED overlay).
+    return NO_SHARED_TSGO;
+  }
+  try {
+    const nativePreviewTsdk = workspace
+      .getConfiguration("typescript.native-preview")
+      .get<string>("tsdk");
+    const plan = planSharedTsgo({
+      extensionPath,
+      controlDirRoot: tmpdir(),
+      env: process.env,
+      nativePreviewTsdk: nativePreviewTsdk || undefined,
+      workspaceRoot,
+    });
+    if (!plan.engaged) {
+      log?.info(`[shared-tsgo] not engaged — ${plan.reason}`);
+      return NO_SHARED_TSGO;
+    }
+
+    // Spawn the shim: it spawns the real tsgo (`--lsp --stdio`), relays its stdio,
+    // and advertises into the control dir under the session key. stdin is held OPEN
+    // (never ended) so the relayed real tsgo stays alive + attachable; the LSP's
+    // SHARED overlay discovers the advertisement lazily per carrier query. stderr is
+    // inherited for diagnosability; stdout is piped (the relay's editor side).
+    const child: ChildProcess = spawn(plan.shimPath, plan.shimArgs, {
+      stdio: ["pipe", "pipe", "inherit"],
+      windowsHide: true,
+    });
+    child.on("error", (err) => {
+      log?.warn(`[shared-tsgo] relay shim spawn error (staying OWNED): ${err}`);
+    });
+    log?.info(
+      `[shared-tsgo] armed: shim=${plan.shimPath} realTsgo=${plan.realTsgo} ` +
+        `controlDir=${plan.controlDir} (SHARED editor-attach overlay will bind lazily per query)`,
+    );
+
+    let disposed = false;
+    return {
+      lspArgs: plan.lspArgs,
+      dispose: () => {
+        if (disposed) return;
+        disposed = true;
+        try {
+          // `child.kill()` terminates the SHIM (SIGTERM on Unix / TerminateProcess on
+          // Windows). The GRANDCHILD real-tsgo the shim spawned is reaped by the shim's
+          // OWN OS-level containment, NOT by this call: on Windows tsgo is born into the
+          // shim's `KILL_ON_JOB_CLOSE` Job Object (reaped when the shim's job handle
+          // closes at exit), on Linux it carries `PR_SET_PDEATHSIG=SIGKILL`, and on
+          // macOS/BSD the shim's SIGTERM handler tears its child down (graceful). The one
+          // residual is a HARD-kill (SIGKILL) of the shim on macOS/BSD — no parent-death
+          // primitive there — which the shim documents as best-effort; a normal dispose
+          // (SIGTERM) does not hit it. See `crates/verter_relay_shim/src/main.rs`.
+          child.kill();
+        } catch {
+          /* already gone */
+        }
+      },
+    };
+  } catch (err) {
+    log?.warn(`[shared-tsgo] establish failed (staying OWNED): ${err}`);
+    return NO_SHARED_TSGO;
+  }
+}
+
 function buildServerOptions(
   binaryPath: string,
   rootPath: string | undefined,
   extensionPath: string,
   log?: LogOutputChannel,
+  sharedLspArgs: string[] = [],
 ): ServerOptions {
   const logLevel = workspace.getConfiguration("verter.server").get<string>("logLevel", "info");
   const verterConfig = workspace.getConfiguration("verter");
@@ -1075,6 +1249,10 @@ function buildServerOptions(
     args.push(`--mcp-port=0`);
     args.push(`--mcp-lint-preset=${mcpLintPreset}`);
   }
+  // Arm the OPTIONAL SHARED editor-attach rendezvous (both --shared-* or neither;
+  // empty when OWNED). These are ---prefixed flags, so they precede the positional
+  // workspace-root arg the LSP parses last.
+  args.push(...sharedLspArgs);
   if (rootPath) args.push(rootPath);
 
   log?.info(
@@ -1305,9 +1483,7 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
 
   // Track whether the active editor is a framework-carrier file (.vue/.svelte).
   const updateHasActiveCarrierFile = () => {
-    const isCarrier = isFrameworkCarrierLanguageId(
-      window.activeTextEditor?.document?.languageId,
-    );
+    const isCarrier = isFrameworkCarrierLanguageId(window.activeTextEditor?.document?.languageId);
     commands.executeCommand("setContext", "verter.hasActiveCarrierFile", isCarrier);
   };
   updateHasActiveCarrierFile();

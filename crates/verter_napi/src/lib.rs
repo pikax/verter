@@ -803,6 +803,41 @@ fn host_diagnostics_to_napi(
     }
 }
 
+/// Map a JS HMR-strategy string to the host [`host::HmrStrategy`]. Mirrors
+/// the `verter_ffi` profile conversion (`"vite"` / `"webpack"` / `"none"`,
+/// case-insensitive). Faithful mapping — an unknown value is an error, not
+/// a silent drop to `None`.
+fn ffi_hmr_strategy_to_host(s: &str) -> std::result::Result<host::HmrStrategy, String> {
+    if s.eq_ignore_ascii_case("vite") {
+        Ok(host::HmrStrategy::Vite)
+    } else if s.eq_ignore_ascii_case("webpack") {
+        Ok(host::HmrStrategy::Webpack)
+    } else if s.eq_ignore_ascii_case("none") {
+        Ok(host::HmrStrategy::None)
+    } else {
+        Err(format!(
+            "invalid hmrStrategy '{s}', expected 'vite', 'webpack', or 'none'"
+        ))
+    }
+}
+
+/// Convert a single host [`host::HostDiagnostic`] into its NAPI wire
+/// shape. Used to surface the RuntimeRender soft-macro warnings on
+/// [`NapiCompileBatchEntry::diagnostics`].
+fn napi_diagnostic_from_host(d: &host::HostDiagnostic) -> NapiDiagnostic {
+    NapiDiagnostic {
+        severity: match d.severity {
+            host::HostSeverity::Error => "error".to_string(),
+            host::HostSeverity::Warning => "warning".to_string(),
+            host::HostSeverity::Info => "info".to_string(),
+        },
+        code: d.code.clone(),
+        message: d.message.clone(),
+        spanStart: d.span.map(|s| s.start),
+        spanEnd: d.span.map(|s| s.end),
+    }
+}
+
 fn host_block_kind_to_str(kind: &host::ExternalBlockKind) -> &'static str {
     match kind {
         host::ExternalBlockKind::Script => "script",
@@ -1720,6 +1755,13 @@ impl NapiVerterHost {
     /// defineOptions) and generates a `ComponentPublicInstance`-based declaration
     /// with inline source map. This is the fast path for IDE type checking.
     ///
+    /// `mode` selects the served surface: `"public"` (default when absent) —
+    /// the application-facing instance shape; `"testing"` — the Vue Test
+    /// Utils-like debug surface exposing `<script setup>` bindings;
+    /// `"declaration"` — the declaration-only (`.d.<ext>.ts`) public surface
+    /// (a valid `.d.ts` with no runtime/value code). An unknown mode string
+    /// is rejected with `InvalidArg`.
+    ///
     /// Returns `{ code, sourceMap? }` or `null` if no TSC output is available.
     #[napi(js_name = "getPublicApi")]
     pub fn get_public_api(
@@ -1727,15 +1769,7 @@ impl NapiVerterHost {
         canonical_id: String,
         mode: Option<String>,
     ) -> Result<Option<NapiTscResponse>> {
-        let mode = match mode.as_deref() {
-            None | Some("public") => host::PublicApiMode::Public,
-            Some("testing") => host::PublicApiMode::Testing,
-            Some(other) => {
-                return Err(ffi_err(format!(
-                    "invalid public api mode '{other}', expected 'public' or 'testing'"
-                )));
-            }
-        };
+        let mode = ffi_public_api_mode_to_host(mode.as_deref()).map_err(ffi_err)?;
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner
                 .get_public_api_with_mode(&canonical_id, mode, None)
@@ -2156,6 +2190,7 @@ impl NapiVerterHost {
                     canonical_id: f.canonicalId,
                     source: std::sync::Arc::from(buffer_to_string(f.source)?),
                     requested_mode,
+                    component_id: f.componentId,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -2164,6 +2199,59 @@ impl NapiVerterHost {
             .map(|m| ffi_compile_cache_mode_to_host(&m))
             .transpose()
             .map_err(ffi_err)?;
+        // The compile lane. Default `host-backed`. FAIL-CLOSED: the
+        // RuntimeRender lane REQUIRES an explicit render profile carried on
+        // the variant — the host must never substitute production/client
+        // defaults for a bundler render. Every output-affecting field of the
+        // JS `compileProfile` is threaded so the render output reproduces the
+        // `getVirtualFile` path byte-for-byte; an unknown `hmrStrategy` is an
+        // error, never a silent drop. HostBacked ignores the profile (its
+        // profile is the frozen bundler preset).
+        let target = match opts.target.as_deref() {
+            None | Some("host-backed") => host_compile::CompileManyTarget::HostBacked,
+            Some("runtime-render") => {
+                let p = opts.compileProfile.ok_or_else(|| {
+                    ffi_err(
+                        "compileProfile is required for target 'runtime-render' \
+                         (the output-affecting build profile must be explicit; \
+                         the host does not substitute defaults)"
+                            .to_string(),
+                    )
+                })?;
+                let delimiters =
+                    match (p.delimiterOpen, p.delimiterClose) {
+                        (Some(open), Some(close)) => Some((open, close)),
+                        (None, None) => None,
+                        _ => return Err(ffi_err(
+                            "compileProfile.delimiterOpen and delimiterClose must be set together"
+                                .to_string(),
+                        )),
+                    };
+                host_compile::CompileManyTarget::RuntimeRender {
+                    profile: host_compile::CompileBatchRenderProfile {
+                        filename: p.filename,
+                        is_production: p.isProduction,
+                        ssr: p.ssr,
+                        force_js: p.forceJs,
+                        force_vapor: p.forceVapor,
+                        source_map: p.sourceMap,
+                        // Tri-state pass-through: an omitted `comments`
+                        // stays `None` (compiler default `!isProduction`).
+                        comments: p.comments,
+                        hmr_strategy: ffi_hmr_strategy_to_host(&p.hmrStrategy).map_err(ffi_err)?,
+                        runtime_module_name: p.runtimeModuleName,
+                        types_module_name: p.typesModuleName,
+                        delimiters,
+                        custom_elements: p.customElements,
+                    },
+                }
+            }
+            Some(other) => {
+                return Err(ffi_err(format!(
+                    "invalid target '{other}', expected 'host-backed' or 'runtime-render'"
+                )));
+            }
+        };
         let entries = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.compile_many(
                 inputs,
@@ -2171,6 +2259,7 @@ impl NapiVerterHost {
                     priority,
                     default_mode,
                 },
+                target,
             )
         }))?;
         Ok(entries
@@ -2179,7 +2268,13 @@ impl NapiVerterHost {
                 canonicalId: e.canonical_id,
                 code: e.code.to_string(),
                 sourceMap: e.source_map.map(|s| s.to_string()),
+                lang: e.lang,
                 errors: e.errors,
+                diagnostics: e
+                    .diagnostics
+                    .iter()
+                    .map(napi_diagnostic_from_host)
+                    .collect(),
                 durationMs: e.duration_ms,
                 cacheHit: e.cache_hit,
                 requestedMode: e.requested_mode.to_string(),
@@ -2881,6 +2976,47 @@ pub struct NapiCompileBatchInput {
     /// Requested compile cache mode ("stateless" / "content" /
     /// "session"). `None` inherits the batch `defaultMode`.
     pub requestedMode: Option<String>,
+    /// Explicit per-component scoped-style / HMR id. Threaded into this
+    /// input's compile profile ONLY on the RuntimeRender lane (scoped-style
+    /// / HMR identity is per-component, not per-build). `None` lets codegen
+    /// auto-generate the id.
+    pub componentId: Option<String>,
+}
+
+/// The batch-level render profile for the RuntimeRender lane (JS mirror of
+/// [`host_compile::CompileBatchRenderProfile`]). Every field is
+/// output-affecting and uniform across a single bundler build. This carries
+/// the full output-affecting projection of the JS `HostCompileProfile` so
+/// the render lane reproduces the `getVirtualFile` path byte-for-byte.
+#[napi(object)]
+pub struct NapiCompileBatchRenderProfile {
+    /// Codegen filename override (component-name extraction, scope-id
+    /// derivation, source-map `source`/`file`). Absent falls back to the
+    /// canonical id — same semantics as `HostCompileProfile.filename`.
+    pub filename: Option<String>,
+    pub isProduction: bool,
+    pub ssr: bool,
+    pub forceJs: bool,
+    pub forceVapor: bool,
+    pub sourceMap: bool,
+    /// Preserve template comments. TRI-STATE: absent keeps the compiler
+    /// default (`!isProduction` — dev preserves, prod strips), same
+    /// semantics as an absent `HostCompileProfile.comments`. Do NOT
+    /// collapse an omitted value to `false`.
+    pub comments: Option<bool>,
+    /// HMR strategy: "none" | "vite" | "webpack".
+    pub hmrStrategy: String,
+    /// Runtime module import specifier (e.g. "vue").
+    pub runtimeModuleName: Option<String>,
+    /// Types module import specifier.
+    pub typesModuleName: Option<String>,
+    /// Custom interpolation delimiters — open. Must be set together with
+    /// `delimiterClose`.
+    pub delimiterOpen: Option<String>,
+    /// Custom interpolation delimiters — close.
+    pub delimiterClose: Option<String>,
+    /// Custom-element tag names (affect template codegen).
+    pub customElements: Option<Vec<String>>,
 }
 
 /// Caller-configurable options for [`NapiVerterHost::compile_many`].
@@ -2894,6 +3030,16 @@ pub struct NapiCompileBatchOptions {
     /// Default compile cache mode for inputs whose `requestedMode` is
     /// unset. `None` resolves to "session" (the host default).
     pub defaultMode: Option<String>,
+    /// The compile lane: `"host-backed"` (default) runs the full session
+    /// wrapper; `"runtime-render"` runs the render-only bundler lane. The
+    /// render lane REQUIRES `compileProfile` (fail-closed).
+    pub target: Option<String>,
+    /// The batch-level render profile for the `"runtime-render"` lane. It
+    /// is REQUIRED for that lane (the NAPI conversion fails closed when it
+    /// is absent) — every output-affecting field must be explicit; the
+    /// host must not substitute production/client defaults. Ignored by the
+    /// `"host-backed"` lane.
+    pub compileProfile: Option<NapiCompileBatchRenderProfile>,
 }
 
 /// Result for a single original input position.
@@ -2902,8 +3048,18 @@ pub struct NapiCompileBatchEntry {
     pub canonicalId: String,
     pub code: String,
     pub sourceMap: Option<String>,
+    /// The compiled `Main` module language ("ts" / "js" / "jsx"), or
+    /// `None` on an error/panic outcome. Bundler consumers (vite
+    /// sub-request routing) read it.
+    pub lang: Option<String>,
     /// All compilation errors for this file. Empty on success.
     pub errors: Vec<String>,
+    /// Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
+    /// compile, separate from the fatal `errors`. Populated by the
+    /// RuntimeRender lane's soft-macro contract (an unresolved imported
+    /// macro type renders successfully and reports a warning here). Always
+    /// empty on the HostBacked lane and on any fatal outcome.
+    pub diagnostics: Vec<NapiDiagnostic>,
     pub durationMs: f64,
     /// `true` iff this input was served from a warm cache entry under its
     /// classified mode — the fact-validated session slot (`Session`) or
@@ -3059,4 +3215,140 @@ mod tests {
     // host-backed batch path is fully exercised by the host_compile
     // tests in verter_session and the JS-side E2E tests in
     // packages/native/index.spec.ts.
+
+    /// A NAPI host preloaded with a Vue SFC whose props type lives in a
+    /// sibling `.ts` file — the same fixture shape the verter_session
+    /// public-API mode pins use, exercised here THROUGH the NAPI binding.
+    fn public_api_mode_fixture_host() -> NapiVerterHost {
+        let napi_host = NapiVerterHost {
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
+                host::HostConfig::default(),
+            )),
+        };
+        let _ = napi_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/Cap.vue".to_string(),
+                source: std::sync::Arc::from(
+                    "<script setup lang=\"ts\">\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n</script>\n<template><div>{{ count }}</div></template>",
+                ),
+                file_language: host::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert Cap.vue");
+        let _ = napi_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/cap-types.ts".to_string(),
+                source: std::sync::Arc::from(
+                    "export interface CapProps { label: string; n: number }\n",
+                ),
+                file_language: host::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert cap-types.ts");
+        napi_host
+    }
+
+    /// The `getPublicApi` NAPI binding accepts `"declaration"` and routes
+    /// it to `PublicApiMode::Declaration` — the declaration-only
+    /// `.d.<ext>.ts` surface — while `"public"` keeps the runtime-instance
+    /// surface. DISCRIMINATING: the pre-change allow-list rejected
+    /// `"declaration"` at the binding boundary (InvalidArg), so this test
+    /// fails RED on the old binding even though the host already serves
+    /// `PublicApiMode::Declaration`.
+    #[test]
+    fn get_public_api_declaration_mode_is_accepted_and_distinct_from_public() {
+        let napi_host = public_api_mode_fixture_host();
+
+        let decl = napi_host
+            .get_public_api("/src/Cap.vue".to_string(), Some("declaration".to_string()))
+            .expect("the NAPI binding must accept mode 'declaration'")
+            .expect("declaration-mode output for a Vue SFC");
+        let public = napi_host
+            .get_public_api("/src/Cap.vue".to_string(), Some("public".to_string()))
+            .expect("mode 'public' stays accepted")
+            .expect("public-mode output for a Vue SFC");
+
+        // Declaration-specific shape: a valid `.d.ts` — declares the
+        // component value, carries NO runtime/value code.
+        assert!(
+            decl.code.contains("declare const Cap"),
+            "declaration output declares the component value, got:\n{}",
+            decl.code
+        );
+        assert!(
+            decl.code.contains("export default Cap"),
+            "declaration output default-exports the component, got:\n{}",
+            decl.code
+        );
+        assert!(
+            !decl.code.contains("const __comp"),
+            "declaration output must not carry the runtime __comp const, got:\n{}",
+            decl.code
+        );
+        assert!(
+            !decl.code.contains("defineComponent("),
+            "declaration output must not call defineComponent, got:\n{}",
+            decl.code
+        );
+        // Control: the public surface DOES carry the runtime const, so the
+        // negative assertions above discriminate mode routing (a binding
+        // that silently served Public for "declaration" fails here).
+        assert!(
+            public.code.contains("const __comp = defineComponent"),
+            "public output keeps the runtime __comp const (control), got:\n{}",
+            public.code
+        );
+        assert_ne!(
+            decl.code, public.code,
+            "declaration-mode output must differ from public-mode output"
+        );
+    }
+
+    /// Absent mode stays the Public surface (backward-compatible with the
+    /// existing modeless callers) and an unknown mode string is still a
+    /// typed `InvalidArg` rejection — never a silent default.
+    #[test]
+    fn get_public_api_mode_defaults_to_public_and_rejects_unknown() {
+        let napi_host = public_api_mode_fixture_host();
+
+        let absent = napi_host
+            .get_public_api("/src/Cap.vue".to_string(), None)
+            .expect("absent mode stays accepted")
+            .expect("default-mode output for a Vue SFC");
+        let public = napi_host
+            .get_public_api("/src/Cap.vue".to_string(), Some("public".to_string()))
+            .expect("mode 'public' stays accepted")
+            .expect("public-mode output for a Vue SFC");
+        assert_eq!(
+            absent.code, public.code,
+            "absent mode must serve the Public surface (backward-compatible)"
+        );
+
+        let err =
+            match napi_host.get_public_api("/src/Cap.vue".to_string(), Some("bogus".to_string())) {
+                Err(e) => e,
+                Ok(_) => panic!("an unknown mode must be rejected, not silently defaulted"),
+            };
+        assert_eq!(
+            err.status,
+            Status::InvalidArg,
+            "unknown mode maps to InvalidArg, got {:?}: {}",
+            err.status,
+            err.reason
+        );
+        assert!(
+            err.reason.contains("bogus"),
+            "the rejection names the offending mode string: {}",
+            err.reason
+        );
+        assert!(
+            err.reason.contains("declaration"),
+            "the rejection lists 'declaration' among the accepted modes: {}",
+            err.reason
+        );
+    }
 }

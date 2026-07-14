@@ -36,6 +36,62 @@ fn prelude_opens_the_projection_and_no_script_tag_survives() {
 }
 
 #[test]
+fn ide_carrier_exports_public_facade_default_with_typed_props() {
+    // The IDE carrier (`Comp.svelte.tsx`) is the self-diagnostics surface; it
+    // composes the component's PUBLIC type as a clean `export default` — a
+    // constructable component whose instance carries `$props`/`$events`/
+    // `$slots`. (The bare-import target is the `Comp.d.svelte.ts` declaration
+    // carrier, not this IDE carrier.) `$props` is derived SYNTACTICALLY from the
+    // instance script's `$props()` annotation.
+    let code = project(
+        "<script lang=\"ts\">let { msg }: { msg: string } = $props();</script>\n<div>{msg}</div>",
+    );
+    assert!(
+        code.contains("export default __VerterPublicComponent;"),
+        "IDE carrier must export the public component facade as default:\n{code}"
+    );
+    assert!(
+        code.contains("type __VerterPublicProps = { msg: string };"),
+        "public facade $props must carry the syntactic annotation:\n{code}"
+    );
+    assert!(
+        code.contains("$props: __VerterPublicProps;")
+            && code.contains("$events: Record<string, unknown>;")
+            && code.contains("$slots: Record<string, unknown>;"),
+        "public instance must surface $props/$events/$slots:\n{code}"
+    );
+    // The bare `export {};` module marker is REPLACED by the facade default —
+    // the `export default` already makes the file a module.
+    assert!(
+        !code.contains("export {};"),
+        "the bare `export {{}}` marker must be replaced by the facade default:\n{code}"
+    );
+    // Template internals stay LOCAL (non-exported): the render scope fn is a
+    // plain local function, never the public default.
+    assert!(
+        code.contains("function __verter_render()")
+            && !code.contains("export default __verter_render")
+            && !code.contains("export { __verter_render as default }"),
+        "template internals (__verter_render) must NOT be the public default:\n{code}"
+    );
+}
+
+#[test]
+fn ide_carrier_facade_degrades_untyped_props_to_permissive_record() {
+    // An untyped `$props()` (or no instance script) degrades the public facade
+    // `$props` to a permissive `Record<string, unknown>` (LOCAL — no resolver).
+    let code = project("<div>{x}</div>");
+    assert!(
+        code.contains("type __VerterPublicProps = Record<string, unknown>;"),
+        "untyped/absent $props must degrade to a permissive Record:\n{code}"
+    );
+    assert!(
+        code.contains("export default __VerterPublicComponent;"),
+        "a template-only Svelte component must still export a public facade:\n{code}"
+    );
+}
+
+#[test]
 fn interpolation_is_kept_verbatim() {
     let code = project("<div>{count}</div>");
     assert!(code.contains("{count}"));
@@ -2810,5 +2866,140 @@ fn fragment_dynamic_slot_store_sub_is_rewritten() {
     assert!(
         body.contains("__verter_void(__verter_store_get(name))"),
         "the dynamic-slot store-sub is rewritten through the text path: {body}"
+    );
+}
+
+// ── ISSUE-7 parity: an unused Svelte top-level `let` is NOT kept artificially
+// live ────────────────────────────────────────────────────────────────────
+//
+// Unlike Vue's `<script setup>` lowering (which built a `___VERTER___unwrapped`
+// object that value-read every binding and suppressed TS6133), the Svelte IDE
+// projector keeps script bodies as ORIGINAL chunks at their source spans and
+// never synthesises a per-binding value-read. So an unused top-level `let foo`
+// stays a plain module-level decl that TypeScript naturally flags as unused —
+// no Vue-style keep-alive. This pins that parity; no Svelte codegen change is
+// expected for ISSUE-7.
+#[test]
+fn unused_top_level_let_is_not_value_read_kept_alive() {
+    let code = project("<script lang=\"ts\">let foo = 1;</script>\n<div>hello</div>");
+
+    // The decl stays at its source span (mapped chunk), not rewritten.
+    assert!(
+        code.contains("let foo = 1;"),
+        "the unused top-level `let foo` must stay a plain source decl: {code}"
+    );
+
+    // No Vue-style synthetic value-read keep-alive of `foo`.
+    assert!(
+        !code.contains("foo: foo as unknown as typeof foo"),
+        "Svelte must NOT emit a Vue-style value-read keep-alive for `foo`: {code}"
+    );
+    assert!(
+        !code.contains("shallowUnwrapRef"),
+        "Svelte projection has no shallowUnwrapRef unwrap object: {code}"
+    );
+    // `foo` is used nowhere — the template references nothing, so the render
+    // body must not reference `foo` either (no synthetic use).
+    let body = render_body(&code);
+    assert!(
+        !body.contains("foo"),
+        "an unused `foo` must not be referenced by the render body: {body}"
+    );
+}
+
+// The Svelte IDE projector publishes the typed `x_verter_helper_preamble_end`
+// source-map boundary — the SAME contract Vue's IDE projection already meets.
+// The Svelte prelude is the module INTRO (the `@jsxImportSource` pragma must be
+// the leading output bytes), so the boundary is captured on the intro block of
+// the shared `generate_map_with_preamble` walk. This is the producer half of the
+// LSP fail-closed auto-import preamble classifier: without the boundary a legit
+// `.svelte` zero-width auto-import strict-mapping near the carrier top is
+// over-dropped by the absent-boundary fuse.
+//
+// DISCRIMINATING: against the pre-change projector (which generated the map via
+// `generate_map_json` and never registered the prelude as the helper preamble),
+// assertions (b)/(c) FAIL — the member is absent. With the producer fix the
+// projector routes through `generate_map_json_with_preamble` over a
+// preamble-registered intro, so the member is present at the exact post-prelude
+// generated position.
+#[test]
+fn svelte_ide_projection_publishes_helper_preamble_end_boundary() {
+    let source = "<script lang=\"ts\">let a = 1;</script>\n<div>{a}</div>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("C.svelte"), false);
+
+    // The component prelude in Html namespace + legacy mode (this source uses NO
+    // rune, so it is legacy). This is the exact INTRO the projector prepends.
+    let prelude = super::prelude::render_prelude(super::prelude::SvelteJsxNamespace::Html, true);
+
+    // (a) Byte-unchanged TSX: the projected code leads with the prelude verbatim
+    // and equals the prelude concatenated with the rest the projector produced.
+    // Compare the `.code` against itself reconstructed (prelude + suffix) — the
+    // producer change adds ONLY source-map metadata, never a TSX byte.
+    assert!(
+        projection.code.starts_with(&prelude),
+        "the projected TSX must lead with the unmapped prelude verbatim: {:?}",
+        &projection.code[..projection.code.len().min(prelude.len() + 40)]
+    );
+    let suffix = &projection.code[prelude.len()..];
+    let reconstructed = format!("{prelude}{suffix}");
+    assert_eq!(
+        projection.code, reconstructed,
+        "the projected TSX bytes must be exactly prelude ++ projection suffix (byte-unchanged)"
+    );
+    // The boundary recording must NOT double-prepend the prelude: the pragma line appears EXACTLY
+    // once (a stray second intro insertion would duplicate it). This pins that
+    // `prepend_helper_preamble_content` adds only metadata, never a second TSX copy of the prelude.
+    assert_eq!(
+        projection
+            .code
+            .matches("/** @jsxImportSource @verter/svelte-jsx */")
+            .count(),
+        1,
+        "the prelude pragma must appear exactly once (no double-prepend): {}",
+        projection.code
+    );
+    // The render scope still wraps the template (the projection is intact).
+    assert!(
+        projection.code.contains("function __verter_render()"),
+        "the render scope function must still be emitted: {}",
+        projection.code
+    );
+
+    // (b) The map now carries the typed preamble-end boundary member (ABSENT
+    // pre-fix because the projector used `generate_map_json`).
+    assert!(
+        projection
+            .source_map
+            .contains("x_verter_helper_preamble_end"),
+        "the Svelte IDE source map must publish the x_verter_helper_preamble_end boundary: {}",
+        projection.source_map
+    );
+
+    // (c) The boundary VALUE is exact: the generated position immediately after
+    // the rendered prelude. The prelude is pure insertion (the intro), so its end
+    // is line == the count of `\n` in the prelude, column 0 (every prelude
+    // fragment ends with `\n`, so the last line is empty).
+    let prelude_newlines = prelude.matches('\n').count() as u64;
+    assert!(
+        prelude.ends_with('\n'),
+        "the prelude is expected to end with a newline (boundary column 0)"
+    );
+    let map: serde_json::Value =
+        serde_json::from_str(&projection.source_map).expect("the source map is valid JSON");
+    let boundary = map
+        .get("x_verter_helper_preamble_end")
+        .expect("the boundary member is present");
+    assert_eq!(
+        boundary.get("line").and_then(serde_json::Value::as_u64),
+        Some(prelude_newlines),
+        "the boundary line must be the count of prelude newlines, got {boundary:?}"
+    );
+    assert_eq!(
+        boundary
+            .get("character")
+            .and_then(serde_json::Value::as_u64),
+        Some(0),
+        "the boundary column must be 0 (the prelude ends with a newline), got {boundary:?}"
     );
 }

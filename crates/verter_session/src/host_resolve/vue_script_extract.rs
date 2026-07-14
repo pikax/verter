@@ -34,14 +34,37 @@ pub(crate) fn template_converter_inputs(
     Vec<(String, Vec<String>)>,
     Option<String>,
 ) {
-    let all_imports: Vec<(String, String)> = imports
+    // Carrier-linkage map for template components. A `import type { X }` (or a
+    // per-specifier `import { type X }`) is a TYPE-ONLY binding — it has no
+    // runtime value, so a tag `<X/>` must NEVER be carrier-linked to it as a
+    // value component. Mirror `compile_fact_emission::binding_is_value`
+    // (`!import.is_type_only && !binding.is_type_only`) so only runtime value
+    // bindings enter the linkage map.
+    let mut all_imports: Vec<(String, String)> = imports
         .iter()
+        .filter(|imp| !imp.is_type_only)
         .flat_map(|imp| {
             imp.bindings
                 .iter()
+                .filter(|binding| !binding.is_type_only)
                 .map(|binding| (binding.name.clone(), imp.source.clone()))
         })
         .collect();
+
+    // A `const X = defineAsyncComponent(() => import('./X.vue'))` declares a
+    // component whose carrier is the dynamically-imported `.vue`. The analyzer
+    // captures the static loader specifier on the binding's initializer; surface
+    // it in the linkage map so a `<X>` tag links to its `.vue` carrier exactly
+    // like a static default import.
+    for binding in bindings {
+        if let Some(verter_semantic::analysis::BindingInitializer::FunctionCall {
+            async_component_source: Some(source),
+            ..
+        }) = &binding.initializer
+        {
+            all_imports.push((binding.name.clone(), source.clone()));
+        }
+    }
 
     let mut unions = Vec::new();
     let define_props = macros

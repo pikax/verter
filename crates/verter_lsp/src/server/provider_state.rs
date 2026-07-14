@@ -15,32 +15,129 @@ use tower_lsp_server::ls_types::Uri;
 
 use crate::documents::line_index::LineIndex;
 use crate::provider_sync::{
-    commit_sync_transition, prepare_sync_transition, remove_sync_state, ProviderPathKind,
-    ProviderSyncState,
+    commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
 };
-use crate::tsgo::merge;
+use crate::type_provider::merge;
 
 use super::server_utils::source_id_from_provider_carrier_path;
 use super::{TypeProviderContext, VerterLanguageServer};
 
 impl VerterLanguageServer {
-    pub(super) fn external_ide_context(&self, ide_path: &str) -> Option<merge::ExternalIdeContext> {
-        let (_tsx_path, tsx_content, mapper) = self.ide_context_by_path(ide_path)?;
-        let tsx_line_index = LineIndex::new(&tsx_content, self.documents.encoding());
-        // Get the Vue file's line index
-        let snapshot = self.published_resolver()?;
-        let canonical_id = source_id_from_provider_carrier_path(
-            &snapshot.resolver,
-            self.documents.host(),
+    /// Capture the immutable FOREIGN-carrier IDE surface set a provider-backed
+    /// request pins BEFORE its provider query, so a returned foreign carrier
+    /// location maps through the generation the request began against — never
+    /// whatever surface is current at merge time.
+    pub(super) fn capture_foreign_carrier_ide_set(
+        &self,
+    ) -> crate::provider_surface_store::ProviderQuerySnapshot {
+        self.documents
+            .provider_surfaces()
+            .capture_current_carrier_ide_set()
+    }
+
+    /// Resolve the merge-time mapping context for a FOREIGN carrier IDE
+    /// location from the pinned set `captured`
+    /// ([`Self::capture_foreign_carrier_ide_set`]), fail-closed: an uncaptured
+    /// path, a no-longer-honored surface, or a drifted/closed foreign open
+    /// document drops the location.
+    pub(super) fn foreign_ide_context(
+        &self,
+        captured: &crate::provider_surface_store::ProviderQuerySnapshot,
+        ide_path: &str,
+    ) -> Option<merge::ExternalIdeContext> {
+        let encoding = self.position_encoding.read().clone();
+        crate::provider_surface_store::foreign_ide_context_from_captured(
+            self.documents.provider_surfaces(),
+            &self.documents,
+            captured,
             ide_path,
-        )?;
-        let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
-        let doc = self.documents.get(&uri)?;
-        Some(merge::ExternalIdeContext {
-            tsx_line_index,
-            mapper,
-            carrier_line_index: doc.line_index.clone(),
-        })
+            encoding,
+        )
+    }
+
+    /// THE server-side record choke point for an API-surface sync.
+    ///
+    /// Records a fresh generation pinning the EXACT `api_code` synced under
+    /// `dts_path`, together with the source map parsed from the SAME content.
+    /// When the caller already holds the synced content's source map it passes it
+    /// in `source_map_json`; otherwise (`None`) the live `get_public_api()` map is
+    /// used ONLY when its code byte-matches `api_code`, so a snapshot never pairs
+    /// the synced offsets with a source map produced against drifted content.
+    pub(super) fn record_carrier_api_snapshot(
+        &self,
+        canonical_id: &str,
+        dts_path: &str,
+        api_code: &str,
+        source_map_json: Option<&str>,
+    ) {
+        let store = self.documents.provider_surfaces();
+        let host = self.documents.host();
+        match source_map_json {
+            Some(_) => crate::provider_surface_store::record_carrier_api_surface(
+                store,
+                Some(&self.documents),
+                host,
+                canonical_id,
+                dts_path,
+                api_code,
+                source_map_json,
+            ),
+            // No map in scope → use the live map only if it still matches content.
+            None => crate::provider_surface_store::record_carrier_api_surface_code_only(
+                store,
+                Some(&self.documents),
+                host,
+                canonical_id,
+                dts_path,
+                api_code,
+            ),
+        }
+    }
+
+    /// THE server-side record choke point for a DIRECT IDE-surface sync (the
+    /// tsgo direct-open / bootstrap-unresolved paths; the tsserver publish path
+    /// records through `record_and_version_carrier_companions` inside the
+    /// carrier-sync gateway).
+    ///
+    /// Records a fresh generation pinning the EXACT `ide_code` synced under
+    /// `ide_path`, together with the source map parsed from the SAME content.
+    /// When the caller already holds the synced content's source map it passes
+    /// it in `source_map_json`; otherwise (`None`) the live IDE artifact's map
+    /// is used ONLY when its code byte-matches `ide_code`, so a snapshot never
+    /// pairs the synced offsets with a source map produced against drifted
+    /// content. Called ONLY after a SUCCESSFUL provider sync (fail-closed:
+    /// a failed sync records nothing).
+    pub(super) fn record_carrier_ide_snapshot(
+        &self,
+        canonical_id: &str,
+        ide_path: &str,
+        ide_code: &str,
+        source_map_json: Option<&str>,
+    ) {
+        let store = self.documents.provider_surfaces();
+        let host = self.documents.host();
+        let owned_map: Option<std::sync::Arc<str>> = match source_map_json {
+            Some(_) => None,
+            // No map in scope → use the live IDE artifact's map only if its
+            // code still byte-matches the content that was actually synced.
+            None => {
+                let profile = self.documents.tsx_profile.read().clone();
+                host.get_ide(canonical_id, &profile)
+                    .filter(|ide| &*ide.code == ide_code)
+                    .and_then(|ide| ide.source_map.clone())
+            }
+        };
+        let map_json = source_map_json.or(owned_map.as_deref());
+        let _ = crate::provider_surface_store::record_carrier_companion_surface(
+            store,
+            Some(&self.documents),
+            host,
+            canonical_id,
+            ide_path,
+            crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+            ide_code,
+            map_json,
+        );
     }
 
     /// Pre-extracted data for type provider calls.
@@ -49,7 +146,9 @@ impl VerterLanguageServer {
     pub(super) fn type_provider_context(&self, uri: &Uri) -> Option<TypeProviderContext> {
         // Route through the generalized projection context (serves BOTH the
         // carrier-IDE and self-file rune-module projections). The feature layer
-        // sees the same `tsx_*` field names regardless of projection.
+        // sees the same `tsx_*` field names regardless of projection. Every
+        // field — path, content, mapper, both line indexes — comes from the ONE
+        // captured immutable provider surface carried in `snapshot`.
         let ctx = self.provider_projection_context(uri)?;
         Some(TypeProviderContext {
             tsx_path: ctx.provider_path,
@@ -57,6 +156,7 @@ impl VerterLanguageServer {
             mapper: ctx.mapper,
             tsx_line_index: ctx.provider_line_index,
             carrier_line_index: ctx.source_line_index,
+            snapshot: ctx.snapshot,
         })
     }
 
@@ -108,22 +208,71 @@ impl VerterLanguageServer {
             .map(|entry| entry.clone())
     }
 
-    pub(super) fn prepare_carrier_provider_sync_transition(
+    /// Route a carrier's sync through the SINGLE carrier-sync gateway: the membership
+    /// decision (publish on owned / retract on owner-loss for tsserver) is FUSED with
+    /// the provider-state transition + the sealed receipt that gates the commit. This
+    /// is the server-side wrapper every interactive/background carrier-sync entry uses
+    /// (it builds the engine membership context from `self`).
+    pub(super) async fn reconcile_carrier_via_gateway(
         &self,
         canonical_id: &str,
         is_jsx: bool,
-    ) -> Option<crate::provider_sync::ProviderSyncTransition> {
+        ide: Option<&verter_session::IdeResponse>,
+    ) -> crate::external_ts::CarrierSyncDecision {
+        let Some(snapshot) = self.published_resolver() else {
+            // No published snapshot yet (bootstrap): nothing to advertise/commit — a
+            // settleable non-owned outcome the caller routes through the coordinator.
+            return crate::external_ts::CarrierSyncDecision::NotOwned(
+                crate::external_ts::CarrierNotOwned::pending(),
+            );
+        };
+        // Clone the VFS handle out of the guard so no lock is held across the await.
+        let vfs = self.vfs_workspace.read().clone();
+        // tsserver: the carrier reaches the provider as a store-backed configured-
+        // project member, so the gateway runs the membership reconcile. tsgo (no
+        // coordinator) ⇒ `None` ⇒ the gateway returns a direct-open transition.
+        let membership = match (
+            matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver),
+            self.carrier_publish_coordinator.as_ref(),
+        ) {
+            (true, Some(coordinator)) => {
+                Some(crate::external_ts::CarrierMembershipCtx { coordinator })
+            }
+            _ => None,
+        };
+        crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
+            host: self.documents.host(),
+            vfs: vfs.as_deref(),
+            ownership_ready: snapshot.ownership_ready,
+            resolver: &snapshot.resolver,
+            provider_sync_states: &self.provider_sync_states,
+            provider_surfaces: self.documents.provider_surfaces(),
+            documents: Some(&self.documents),
+            canonical_id,
+            is_jsx,
+            ide,
+            membership,
+            admission: &self.carrier_transaction_coordinator,
+            reason: crate::external_ts::ReconcileReason::SourceSynced,
+        })
+        .await
+    }
+
+    /// The carrier provider paths for `canonical_id` for the CLOSE-only path (delete /
+    /// file-removed buffer cleanup). NOT a commit — needs no receipt.
+    pub(super) fn carrier_close_state(
+        &self,
+        canonical_id: &str,
+        is_jsx: bool,
+    ) -> Option<ProviderSyncState> {
         let snapshot = self.published_resolver()?;
-        let next_state = crate::provider_sync::carrier_sync_state_for_source(
+        let decl_path = self.documents.host().declaration_carrier_path(canonical_id);
+        crate::external_ts::carrier_close_target(
             &snapshot.resolver,
             canonical_id,
             is_jsx,
-        )?;
-        Some(prepare_sync_transition(
-            &self.provider_sync_states,
-            canonical_id,
-            next_state,
-        ))
+            decl_path,
+        )
     }
 
     pub(super) fn prepare_non_carrier_provider_sync_transition(
@@ -146,11 +295,43 @@ impl VerterLanguageServer {
         commit_sync_transition(&self.provider_sync_states, canonical_id, state);
     }
 
+    /// Commit a CARRIER provider state through the coordinator's admission gate
+    /// ([`crate::external_ts::CarrierTransactionCoordinator::admit_owned`]) — GATED on the
+    /// sealed receipt minted by the carrier-sync gateway (so a carrier state can never be
+    /// committed without the membership decision). On a `Superseded` refusal (stale /
+    /// cross-owner / equal-key-different-artifact / owner-loss-since-capture) the source is
+    /// requeued for a fresh transaction — the interactive callers' retry disposition, never
+    /// silently dropped. Non-carrier (shadow) commits keep
+    /// [`Self::commit_provider_sync_state`].
+    pub(super) fn commit_carrier_provider_state(
+        &self,
+        canonical_id: &str,
+        state: ProviderSyncState,
+        receipt: &crate::external_ts::ProviderReadyReceipt,
+    ) {
+        if self.carrier_transaction_coordinator.admit_owned(
+            &self.provider_sync_states,
+            canonical_id,
+            state,
+            receipt,
+        ) == crate::external_ts::AdmitOutcome::Superseded
+        {
+            self.queue_snapshot_provider_sync(canonical_id.to_string());
+        }
+    }
+
     pub(super) fn remove_provider_sync_state(
         &self,
         canonical_id: &str,
     ) -> Option<ProviderSyncState> {
-        remove_sync_state(&self.provider_sync_states, canonical_id)
+        // Advance-before-mutate: removing a previously-committed carrier state is an
+        // owner-loss for the admission barrier, so the coordinator advances the barrier
+        // BEFORE it vacates the slot (a late owned token captured before the removal can
+        // never resurrect the obsolete owner into the vacated slot — the barrier lives
+        // outside the removed state). A non-carrier / uncommitted state removes without a
+        // spurious advance.
+        self.carrier_transaction_coordinator
+            .advance_barrier_and_remove(&self.provider_sync_states, canonical_id)
     }
 
     pub(super) async fn clear_provider_sync_state(&self, canonical_id: &str) {
@@ -175,6 +356,17 @@ impl VerterLanguageServer {
         ide_code: Option<&str>,
     ) {
         let previous = self.provider_sync_state_for_source(canonical_id);
+        // Converting a previously-committed OWNED carrier (it carried a commit stamp) to
+        // Unresolved is an owner-loss for the admission barrier: advance it so a late owned
+        // token — captured before this conversion — can never resurrect the obsolete owner
+        // into the now-unstamped slot (the vacant-resurrection fence).
+        if previous
+            .as_ref()
+            .is_some_and(|state| state.commit_stamp.is_some())
+        {
+            self.carrier_transaction_coordinator
+                .advance_barrier(canonical_id);
+        }
         // The DESIRED Unresolved target: owner-independent desired-extension IDE
         // path + the open-vs-update syncability hint. Binding forced
         // `Unresolved`, owner-derived API dropped.
@@ -196,7 +388,14 @@ impl VerterLanguageServer {
                 sync.open_tsx(&ide_path, ide_code).await
             };
             match result {
-                Ok(()) => ide_synced = true,
+                Ok(()) => {
+                    ide_synced = true;
+                    // Record a fresh generation pinning the EXACT IDE bytes just
+                    // synced (interactive queries capture this surface). No source
+                    // map in scope → the choke attaches the live IDE artifact's
+                    // map only if it still byte-matches `ide_code`.
+                    self.record_carrier_ide_snapshot(canonical_id, &ide_path, ide_code, None);
+                }
                 Err(error) => {
                     tracing::warn!(
                         "preserve_open_unresolved_carrier: failed to sync open unresolved IDE path \
@@ -212,6 +411,9 @@ impl VerterLanguageServer {
         // is still open in the provider — rows 7 & 9), the owner-derived API is
         // dropped+closed unconditionally, and the orphaned prior IDE path is
         // closed ONLY after a successful flip (close-after-success).
+        // An UNRESOLVED (owner-less) open-document liveness state is membership-free
+        // (no publish to forget), so it commits through the plain non-carrier path —
+        // the receipt gates only OWNED-publish commits.
         let commit = crate::provider_sync::open_unresolved_carrier_commit(
             previous.as_ref(),
             target,
@@ -248,6 +450,10 @@ impl VerterLanguageServer {
     /// the genuinely-stale paths are closed (kind synced AND not active). On a
     /// total failure (`synced_kinds` empty) nothing is committed or closed —
     /// the previous state + provider paths are retained intact.
+    ///
+    /// The tsgo receipt is minted from `pending` HERE — after the empty-`synced_kinds`
+    /// early return — so it is minted only once at least one companion buffer opened;
+    /// on total failure the pending drops unconfirmed and no receipt exists.
     pub(super) async fn commit_and_close_after_sync(
         &self,
         canonical_id: &str,
@@ -255,6 +461,7 @@ impl VerterLanguageServer {
         mut committed_state: ProviderSyncState,
         stale_paths: &[(ProviderPathKind, String)],
         synced_kinds: &[ProviderPathKind],
+        pending: crate::external_ts::PendingProviderReady,
     ) {
         if synced_kinds.is_empty() {
             return;
@@ -269,7 +476,23 @@ impl VerterLanguageServer {
             &committed_state,
             synced_kinds,
         );
-        self.commit_provider_sync_state(canonical_id, committed_state);
+        // At least one kind opened: NOW mint the receipt (post-open), attesting EXACTLY
+        // the kinds that actually opened this pass, and commit through the admission gate.
+        let receipt = pending.confirm_opened(synced_kinds);
+        // Gate the stale-path close on ADMISSION: a `Superseded` commit (a newer
+        // transaction reclaimed the source, or an owner-loss advanced the barrier) requeues
+        // and closes NOTHING — the computed stale paths may be the newer transaction's LIVE
+        // buffers. Only an admitted commit closes them.
+        if self.carrier_transaction_coordinator.admit_owned(
+            &self.provider_sync_states,
+            canonical_id,
+            committed_state,
+            &receipt,
+        ) == crate::external_ts::AdmitOutcome::Superseded
+        {
+            self.queue_snapshot_provider_sync(canonical_id.to_string());
+            return;
+        }
         self.close_provider_paths(&genuinely_stale).await;
     }
 
@@ -278,13 +501,62 @@ impl VerterLanguageServer {
             return;
         };
         for (kind, path) in paths {
+            // A `Decl` close is ROUTED through THE declaration-overlay lifecycle
+            // owner — the SOLE authority that issues a provider `close_dts` for a
+            // declaration overlay — so there is no second, UNGUARDED Decl-close path.
+            // The owner serializes the close behind the overlay's path lock and
+            // re-checks the overlay's reachability + close generation before the
+            // destructive close: a still-referenced overlay (or one whose generation
+            // advanced via a racing open) is skipped (closing it would strand an open
+            // root on TS2307); a `Decl` path that is NOT a proactive overlay (no slot,
+            // generation 0) closes through the same path. The owner needs no resolver
+            // snapshot here — its per-path serialization (not a compensate-after-close
+            // re-open) is what keeps a concurrent open consistent.
+            if *kind == ProviderPathKind::Decl {
+                let target = self.decl_overlay_owner.close_target_for(path);
+                self.decl_overlay_owner
+                    .guarded_close(
+                        sync,
+                        &self.provider_sync_states,
+                        std::slice::from_ref(&target),
+                    )
+                    .await;
+                continue;
+            }
+            // EVERY closing store-backed surface (IDE / API / Shadow) is no longer
+            // the active synced virtual surface — retire its active generation
+            // under a fresh close EPOCH (historical snapshots stay valid for any
+            // in-flight rename that already captured them; the `Closing` state
+            // keeps the path failing closed until the provider close is
+            // CONFIRMED). Retiring only the API role would leave a closed IDE /
+            // Shadow surface `Current`: after a `did_close`, a reopen of the same
+            // text (before a successful re-sync) could then capture the stale
+            // snapshot and serve a query against a CLOSED provider buffer.
+            // Capture the epoch-stamped close token so the finalize is scoped to
+            // THIS close.
+            let close_token = self.documents.provider_surfaces().forget(path);
             let result = match kind {
                 ProviderPathKind::Ide => sync.close_tsx(path).await,
                 ProviderPathKind::Api => sync.close_dts(path).await,
                 ProviderPathKind::Shadow => sync.close_file(path).await,
+                // Delegated above (the guarded close is the SOLE Decl-close path).
+                ProviderPathKind::Decl => unreachable!("Decl is delegated to the guarded close"),
             };
-            if let Err(error) = result {
-                tracing::warn!("failed to close provider path {path}: {error}");
+            match result {
+                // Only a CONFIRMED close finalizes, and only via THIS close's
+                // token — if the path was reopened (or retired again by a newer
+                // close) during the await, the epoch no longer matches and the
+                // finalize is a no-op (the fresh snapshot is preserved). On an
+                // error the token is dropped, so the `Closing` state persists
+                // (fail closed).
+                Ok(()) => {
+                    self.documents
+                        .provider_surfaces()
+                        .finalize_close(close_token);
+                }
+                Err(error) => {
+                    tracing::warn!("failed to close provider path {path}: {error}");
+                }
             }
         }
     }
@@ -294,25 +566,108 @@ impl VerterLanguageServer {
         self.close_provider_paths(&paths).await;
     }
 
+    /// Release a now-closed carrier ROOT from the proactive declaration-overlay
+    /// graph: drop it from every overlay's reachability set and CLOSE every
+    /// `.d.<ext>.ts` overlay no longer reachable from any open root.
+    ///
+    /// An overlay still reached by a DIFFERENT open root is retained (closing it
+    /// would strand that root's bare carrier imports on TS2307). The closed
+    /// overlays are also stripped from their owner carrier's committed provider
+    /// state so the Decl kind does not linger as a falsely-live path.
+    pub(super) async fn release_declaration_overlays_for_closed_root(&self, root_canonical: &str) {
+        let now_unreferenced = self.decl_overlay_owner.release_root(root_canonical);
+        if now_unreferenced.is_empty() {
+            return;
+        }
+        // Route the Decl close through THE declaration-overlay lifecycle owner — the
+        // SOLE path that issues a provider `close_dts` for a declaration overlay (the
+        // closure pass's reconcile uses the same owner). It serializes the close
+        // behind the overlay's path lock and re-checks reachability + the close
+        // generation before the destructive close, so this did_close-side close can
+        // never clobber a concurrent reopen by another still-open root (TS2307
+        // stranding). It also strips the `Decl` kind from each owner carrier's
+        // committed state for the overlays it actually closes.
+        let Some(sync) = &self.project_sync else {
+            return;
+        };
+        self.decl_overlay_owner
+            .guarded_close(sync, &self.provider_sync_states, &now_unreferenced)
+            .await;
+    }
+
     /// Check if a URI is a virtual file and return its TSGO routing context.
     ///
     /// For virtual files (verter-virtual://), the content IS the TSX already.
     /// The cursor position is in TSX coordinates, so we can query TSGO directly
     /// without position mapping.
     ///
-    /// Returns `Some((tsx_path, virtual_doc_line_index))` if this is a virtual file
-    /// that should be routed through the source .vue file's TSX.
-    pub(super) fn virtual_file_context(&self, uri: &Uri) -> Option<(String, LineIndex)> {
+    /// Fail-closed gates (any miss ⇒ `None`):
+    /// - the SOURCE document has no capturable request surface
+    ///   ([`Self::capture_provider_request_surface`]);
+    /// - the VIRTUAL document's bytes do not match the captured surface's
+    ///   provider content — a stale virtual tab holding generation N while the
+    ///   provider serves generation N+1 would compute offsets against content
+    ///   the provider no longer holds (torn, not merely stale).
+    ///
+    /// The returned context carries the captured snapshot for the post-await
+    /// gate ([`Self::virtual_request_surface_still_valid`]) every virtual-file
+    /// branch runs before mapping/returning provider output.
+    pub(super) fn virtual_file_context(&self, uri: &Uri) -> Option<VirtualFileContext> {
         let source_uri_str = self.documents.get_virtual_source_uri(uri)?;
         let source_uri: Uri = source_uri_str.parse().ok()?;
 
-        // Get the TSX path from the source .vue file
-        let tsx_path = self.active_ide_path_for_uri(&source_uri)?;
+        // Resolve the provider path through the captured request surface of the
+        // source document (fail closed when no consistent surface exists) —
+        // never an independent committed-path read.
+        let snapshot = self.capture_provider_request_surface(&source_uri)?;
+        let tsx_path = snapshot.stamp.provider_path.to_string();
 
-        // Build LineIndex from the virtual file's content (for offset conversion)
+        // Build LineIndex from the virtual file's content (for offset
+        // conversion) and require those bytes to MATCH the captured surface —
+        // the offsets computed from a drifted virtual buffer would index
+        // content the provider does not hold.
         let doc = self.documents.get(uri)?;
+        if *doc.source != *snapshot.provider_content {
+            return None;
+        }
         let line_index = doc.line_index.clone();
 
-        Some((tsx_path, line_index))
+        Some(VirtualFileContext {
+            tsx_path,
+            line_index,
+            snapshot,
+        })
     }
+
+    /// Post-await validation for a virtual-file provider query: the captured
+    /// surface is still honored AND the virtual document still byte-matches
+    /// the captured provider content. `false` ⇒ the provider response was
+    /// produced against a surface that no longer matches the virtual tab —
+    /// the branch must DROP the provider contribution (fail closed).
+    pub(super) fn virtual_request_surface_still_valid(
+        &self,
+        uri: &Uri,
+        ctx: &VirtualFileContext,
+    ) -> bool {
+        self.documents
+            .provider_surfaces()
+            .captured_snapshot_still_honored(&ctx.snapshot)
+            && self
+                .documents
+                .get(uri)
+                .is_some_and(|doc| *doc.source == *ctx.snapshot.provider_content)
+    }
+}
+
+/// The routing context for a `verter-virtual://` document's provider query:
+/// the provider path and line index the offsets are computed against, plus the
+/// captured request surface the post-await gate revalidates.
+pub(super) struct VirtualFileContext {
+    /// The provider path the query routes to (the captured surface's path).
+    pub(super) tsx_path: String,
+    /// Line index over the VIRTUAL document's bytes (byte-matched to the
+    /// captured surface at capture).
+    pub(super) line_index: LineIndex,
+    /// The captured request surface for post-await revalidation.
+    pub(super) snapshot: std::sync::Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
 }

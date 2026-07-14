@@ -31,6 +31,10 @@ session_metrics = []
 # every build profile, not release-only. Production-unreachability is asserted
 # by `tests/cases/g_misc1/test_support_feature_off_in_default_build.rs`.
 test-support = []
+# Exposes test-only constructors (e.g. `ProjectBinding::new_for_test`) for
+# downstream crates' tests. Enabled ONLY via a downstream `[dev-dependencies]`
+# entry — never in a production build, so it cannot weaken a witness discipline.
+test-util = []
 # Opt-in: the TS7 oracle harness GENERATION side (the §4 generation spike + the
 # snapshot generator), which drives the pinned tsgo via `verter_type_runtime`.
 # `docs/arch/u0-oracle-harness-design.md` §3 invariant 1: tsgo is GENERATION-ONLY

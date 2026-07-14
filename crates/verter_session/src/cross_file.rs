@@ -636,7 +636,9 @@ import Child from '@/components/Child.vue'
                 }],
                 compiler_options: IdeProjectCompilerOptions::default(),
                 references: vec![],
-                membership: ProjectMembership::MatchAll,
+                membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                    &verter_workspace::CanonicalPath::new("/project"),
+                ),
             }]);
         }
 

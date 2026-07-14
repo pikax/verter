@@ -306,11 +306,12 @@ fn incomparable_configured_roots_overlap_is_ambiguous() {
         other => panic!("expected Ambiguous for incomparable-root overlap, got {other:?}"),
     }
 
-    // single_owner_for_file must refuse to invent a winner.
+    // The fallback lookup must refuse to invent a winner from a genuine configured
+    // overlap: an incomparable configured overlap is NOT a single fallback owner.
     assert_eq!(
-        snap.single_owner_for_file("d:/project/shared/util.ts"),
+        snap.single_fallback_owner_for_file("d:/project/shared/util.ts"),
         None,
-        "single_owner_for_file must be None for genuine incomparable overlap"
+        "single_fallback_owner_for_file must be None for genuine incomparable configured overlap"
     );
 }
 
@@ -323,6 +324,170 @@ fn no_configured_resolution_outside_all_projects() {
 
     let res = snap.configured_owner_resolution_for_file("d:/other/foo.ts");
     assert_eq!(res, ConfiguredOwnerResolution::None);
+}
+
+// ── F2 deterministic graph pruning (aggregators / referenced non-leaves) ──
+
+/// Set the `references` of a Configured project (by resolved tsconfig path).
+fn with_references(mut project: OwnershipProject, refs: &[&str]) -> OwnershipProject {
+    if let ProjectPayload::Configured { references, .. } = &mut project.payload {
+        *references = refs.iter().map(|r| CanonicalPath::new(r)).collect();
+    } else {
+        panic!("with_references only applies to Configured projects");
+    }
+    project
+}
+
+#[test]
+fn f2_solution_aggregator_referencing_leaf_resolves_to_unique_leaf() {
+    // A solution/aggregator tsconfig at the SAME root that BOTH claims the file
+    // (broad/default include materializes it) AND `references` the real leaf
+    // config which also claims it. Pre-F2, both candidates survive at the same
+    // root (neither is a strict ancestor) -> Ambiguous. F2: the aggregator
+    // transitively references a co-claiming candidate, so it is dropped as a
+    // non-leaf; the unique leaf wins. This is TS solution-style behaviour: the
+    // referenced leaf owns the file, the aggregator only pulls it in.
+    let leaf = configured_project(
+        0,
+        "d:/project",
+        "d:/project/tsconfig.app.json",
+        &["d:/project/src/App.vue"],
+    );
+    let aggregator = with_references(
+        configured_project(
+            1,
+            "d:/project",
+            "d:/project/tsconfig.json",
+            &["d:/project/src/App.vue"],
+        ),
+        &["d:/project/tsconfig.app.json"],
+    );
+    let snap = snapshot_with(vec![leaf, aggregator, fallback_project(2, "d:/project")]);
+
+    // Discriminator: pre-F2 this is Ambiguous over both configs.
+    match snap.configured_owner_resolution_for_file("d:/project/src/App.vue") {
+        ConfiguredOwnerResolution::Unique(id) => {
+            assert_eq!(
+                snap.tsconfig_path(id).map(|p| p.as_str()),
+                Some("d:/project/tsconfig.app.json"),
+                "the referenced leaf must be the unique owner, not the aggregator"
+            );
+        }
+        other => panic!("expected Unique(leaf), got {other:?}"),
+    }
+}
+
+#[test]
+fn f2_reference_chain_root_mid_leaf_resolves_to_unique_leaf() {
+    // Transitive: root -> mid -> leaf, all three claim the same file at the same
+    // root. Pre-F2 -> Ambiguous (3 candidates, none a strict ancestor). F2: root
+    // transitively references leaf (via mid) and mid references leaf, so both are
+    // dropped as non-leaves; only the terminal leaf survives.
+    let root = with_references(
+        configured_project(
+            0,
+            "d:/project",
+            "d:/project/tsconfig.json",
+            &["d:/project/src/App.vue"],
+        ),
+        &["d:/project/tsconfig.mid.json"],
+    );
+    let leaf = configured_project(
+        1,
+        "d:/project",
+        "d:/project/tsconfig.leaf.json",
+        &["d:/project/src/App.vue"],
+    );
+    let mid = with_references(
+        configured_project(
+            2,
+            "d:/project",
+            "d:/project/tsconfig.mid.json",
+            &["d:/project/src/App.vue"],
+        ),
+        &["d:/project/tsconfig.leaf.json"],
+    );
+    let snap = snapshot_with(vec![root, leaf, mid, fallback_project(3, "d:/project")]);
+
+    match snap.configured_owner_resolution_for_file("d:/project/src/App.vue") {
+        ConfiguredOwnerResolution::Unique(id) => {
+            assert_eq!(
+                snap.tsconfig_path(id).map(|p| p.as_str()),
+                Some("d:/project/tsconfig.leaf.json"),
+                "the terminal leaf must be the unique owner across the reference chain"
+            );
+        }
+        other => panic!("expected Unique(leaf) across the chain, got {other:?}"),
+    }
+}
+
+#[test]
+fn f2_same_root_overlap_without_reference_edge_stays_ambiguous() {
+    // Control: two real configs at the same root that BOTH claim the file with NO
+    // reference edge between them is a GENUINE tie -> Ambiguous. F2 pruning must
+    // NOT invent a winner here (no aggregator/leaf relationship exists).
+    let app = configured_project(
+        0,
+        "d:/project",
+        "d:/project/tsconfig.app.json",
+        &["d:/project/src/shared.ts"],
+    );
+    let test = configured_project(
+        1,
+        "d:/project",
+        "d:/project/tsconfig.test.json",
+        &["d:/project/src/shared.ts"],
+    );
+    let snap = snapshot_with(vec![app, test, fallback_project(2, "d:/project")]);
+
+    match snap.configured_owner_resolution_for_file("d:/project/src/shared.ts") {
+        ConfiguredOwnerResolution::Ambiguous(ids) => {
+            assert_eq!(ids.len(), 2, "genuine same-root tie keeps both candidates");
+        }
+        other => panic!("expected Ambiguous for a genuine tie, got {other:?}"),
+    }
+}
+
+#[test]
+fn f2_cyclic_reference_pair_stays_ambiguous_not_none() {
+    // A MALFORMED reference cycle: two configs at the same root that BOTH claim the
+    // file AND mutually `reference` each other (A -> B and B -> A). They form ONE
+    // reference SCC in which each transitively reaches the other, so neither is a
+    // strict solution aggregator over the other. Without SCC-condensing, the (b)
+    // domination pass dropped A (it references B) AND dropped B (it references A) ->
+    // effective set empty -> None -> a FALSE NoProject. Condensing the SCC (a strict
+    // reference edge requires the reverse edge to be absent) keeps BOTH candidates:
+    // a genuine cyclic tie is Ambiguous, never silently None.
+    let a = with_references(
+        configured_project(
+            0,
+            "d:/project",
+            "d:/project/tsconfig.a.json",
+            &["d:/project/src/App.vue"],
+        ),
+        &["d:/project/tsconfig.b.json"],
+    );
+    let b = with_references(
+        configured_project(
+            1,
+            "d:/project",
+            "d:/project/tsconfig.b.json",
+            &["d:/project/src/App.vue"],
+        ),
+        &["d:/project/tsconfig.a.json"],
+    );
+    let snap = snapshot_with(vec![a, b, fallback_project(2, "d:/project")]);
+
+    match snap.configured_owner_resolution_for_file("d:/project/src/App.vue") {
+        ConfiguredOwnerResolution::Ambiguous(ids) => {
+            assert_eq!(
+                ids.len(),
+                2,
+                "a cyclic A<->B reference tie must keep BOTH candidates, never collapse to None"
+            );
+        }
+        other => panic!("expected Ambiguous over the cyclic reference pair, got {other:?}"),
+    }
 }
 
 // ── Precedence ordering ──

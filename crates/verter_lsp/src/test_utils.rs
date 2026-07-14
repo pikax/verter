@@ -26,19 +26,49 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
         verter_workspace::FilesystemOptions::default(),
     ));
 
-    let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
-        id: verter_workspace::workspace_snapshot::ProjectId(0),
-        root: verter_workspace::CanonicalPath::new(root),
-        workspace_root: verter_workspace::CanonicalPath::new(root),
-        payload: verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
+    let root_cp = verter_workspace::CanonicalPath::new(root);
+    // A `tsconfig` ⇒ a CONFIGURED owner (the only ownership state that binds a carrier
+    // through the shared `WorkspaceProjectResolver`; spec-bridge `include: {root}/**/*`
+    // matches every file under `root`). `None` ⇒ an inferred Fallback project (never a
+    // carrier owner for external-TS).
+    let payload = match tsconfig {
+        Some(tsconfig) => {
+            let spec = verter_workspace::StaticMembershipSpec {
+                files: Vec::new(),
+                include: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
+                    &root_cp, "**/*",
+                )],
+                exclude: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
+                    &root_cp,
+                    "node_modules/**",
+                )],
+            };
+            verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+                tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
+                membership: verter_workspace::ConfiguredMembership {
+                    spec,
+                    materialized_files: Default::default(),
+                },
+                compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                references: Vec::new(),
+                workspace_aliases: Vec::new(),
+            }
+        }
+        None => verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
             membership: verter_workspace::FallbackMembership {
-                root: verter_workspace::CanonicalPath::new(root),
+                root: root_cp.clone(),
                 exclude: vec![verter_workspace::NormalizedGlob::new(&format!(
                     "{}/node_modules/**",
                     root
                 ))],
             },
         },
+    };
+    let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
+        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        root: root_cp.clone(),
+        workspace_root: root_cp.clone(),
+        payload,
     }];
 
     let resolver = verter_workspace::ProjectResolver::new(vec![
@@ -79,22 +109,51 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
         .projects()
         .iter()
         .enumerate()
-        .map(
-            |(i, p)| verter_workspace::workspace_snapshot::OwnershipProject {
-                id: verter_workspace::workspace_snapshot::ProjectId(i as u32),
-                root: verter_workspace::CanonicalPath::new(&p.root),
-                workspace_root: verter_workspace::CanonicalPath::new(&p.workspace_root),
-                payload: verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
+        .map(|(i, p)| {
+            let root_cp = verter_workspace::CanonicalPath::new(&p.root);
+            // A registry project with a `tsconfig_path` ⇒ a CONFIGURED owner (the only
+            // ownership state that binds a carrier through the shared resolver;
+            // spec-bridge `include: {root}/**/*`). Otherwise an inferred Fallback.
+            let payload = match &p.tsconfig_path {
+                Some(tsconfig) => {
+                    let spec = verter_workspace::StaticMembershipSpec {
+                        files: Vec::new(),
+                        include: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
+                            &root_cp, "**/*",
+                        )],
+                        exclude: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
+                            &root_cp,
+                            "node_modules/**",
+                        )],
+                    };
+                    verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+                        tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
+                        membership: verter_workspace::ConfiguredMembership {
+                            spec,
+                            materialized_files: Default::default(),
+                        },
+                        compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                        references: Vec::new(),
+                        workspace_aliases: Vec::new(),
+                    }
+                }
+                None => verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
                     membership: verter_workspace::FallbackMembership {
-                        root: verter_workspace::CanonicalPath::new(&p.root),
+                        root: root_cp.clone(),
                         exclude: vec![verter_workspace::NormalizedGlob::new(&format!(
                             "{}/node_modules/**",
                             p.root
                         ))],
                     },
                 },
-            },
-        )
+            };
+            verter_workspace::workspace_snapshot::OwnershipProject {
+                id: verter_workspace::workspace_snapshot::ProjectId(i as u32),
+                root: root_cp.clone(),
+                workspace_root: verter_workspace::CanonicalPath::new(&p.workspace_root),
+                payload,
+            }
+        })
         .collect();
 
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
@@ -125,20 +184,50 @@ pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
     let projects: Vec<verter_workspace::workspace_snapshot::OwnershipProject> = project_roots
         .iter()
         .enumerate()
-        .map(|(i, (root, ws_root, _tsconfig))| {
-            verter_workspace::workspace_snapshot::OwnershipProject {
-                id: verter_workspace::workspace_snapshot::ProjectId(i as u32),
-                root: verter_workspace::CanonicalPath::new(root),
-                workspace_root: verter_workspace::CanonicalPath::new(ws_root),
-                payload: verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
+        .map(|(i, (root, ws_root, tsconfig))| {
+            let root_cp = verter_workspace::CanonicalPath::new(root);
+            // A `tsconfig` ⇒ a CONFIGURED owner (the only ownership state that binds a
+            // carrier through the shared `WorkspaceProjectResolver`; the spec-bridge
+            // `include: {root}/**/*` matches every file under `root`). `None` ⇒ an
+            // inferred Fallback project (never a carrier owner for external-TS).
+            let payload = match tsconfig {
+                Some(tsconfig) => {
+                    let spec = verter_workspace::StaticMembershipSpec {
+                        files: Vec::new(),
+                        include: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
+                            &root_cp, "**/*",
+                        )],
+                        exclude: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
+                            &root_cp,
+                            "node_modules/**",
+                        )],
+                    };
+                    verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+                        tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
+                        membership: verter_workspace::ConfiguredMembership {
+                            spec,
+                            materialized_files: Default::default(),
+                        },
+                        compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                        references: Vec::new(),
+                        workspace_aliases: Vec::new(),
+                    }
+                }
+                None => verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
                     membership: verter_workspace::FallbackMembership {
-                        root: verter_workspace::CanonicalPath::new(root),
+                        root: root_cp.clone(),
                         exclude: vec![verter_workspace::NormalizedGlob::new(&format!(
                             "{}/node_modules/**",
                             root
                         ))],
                     },
                 },
+            };
+            verter_workspace::workspace_snapshot::OwnershipProject {
+                id: verter_workspace::workspace_snapshot::ProjectId(i as u32),
+                root: root_cp,
+                workspace_root: verter_workspace::CanonicalPath::new(ws_root),
+                payload,
             }
         })
         .collect();

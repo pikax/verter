@@ -33,6 +33,7 @@
 mod expression;
 mod helpers;
 pub mod keywords;
+mod setup_refs;
 mod slot;
 mod types;
 mod vfor;
@@ -56,11 +57,25 @@ pub use helpers::{
     collect_assignment_target_locals, collect_assignment_target_locals_array,
     collect_assignment_target_locals_object, collect_assignment_target_maybe_default_locals,
     collect_chain_element_references, collect_expression_references, collect_pattern_locals,
-    collect_pattern_references, collect_setup_binding_refs,
-    collect_ts_type_references_from_expression, collect_type_references,
+    collect_pattern_references, collect_ts_type_references_from_expression,
+    collect_type_references,
 };
 
-// Re-export span-based helpers (avoiding self-referential struct issues)
+// Re-export the complete `Visit`-based free-reference collectors. These are the
+// SOLE liveness-feeding reference collectors: every unused-binding liveness path
+// routes through this one complete `Visit` walker (names for the script body /
+// style scan, spans for the v-for source / v-slot default-value feeders), so no
+// liveness path can regress onto a partial hand-rolled walker.
+pub use setup_refs::{
+    collect_expression_free_ref_spans, collect_expression_free_refs,
+    collect_pattern_default_free_ref_names, collect_setup_binding_refs,
+    collect_type_free_ref_names,
+};
+
+// Re-export span-based helpers (avoiding self-referential struct issues). NOTE:
+// these are the RUNTIME `_ctx`-prefixing reference collectors (they apply the
+// `is_global` filter). They MUST NOT feed unused-binding liveness — liveness uses
+// the complete `Visit` collectors above.
 pub use helpers::{
     collect_chain_element_reference_spans, collect_expression_reference_spans,
     collect_pattern_local_spans, collect_pattern_reference_spans,

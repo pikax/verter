@@ -5,4 +5,7 @@
 //! `fixtures/` data directory beside this manifest is reached by absolute
 //! `CARGO_MANIFEST_DIR`-relative paths from the entries, not declared here.
 
+mod config_diagnostics;
+mod diagnostic_set_parity;
 mod diagnostics;
+mod typecheck_fail_closed;

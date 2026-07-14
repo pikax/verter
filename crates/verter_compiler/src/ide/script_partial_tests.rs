@@ -45,7 +45,9 @@ fn gen(source: &str) -> (String, FxHashMap<String, BindingType>, String) {
         is_jsx: false,
         conditional_root_narrowing: false,
         style_v_bind_vars: vec![],
+        style_usage_complete: true,
         css_modules: vec![],
+        template_used_vars: None,
     };
 
     let template_end = syntax.template_ast().map(|tpl| {

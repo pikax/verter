@@ -87,7 +87,12 @@ pub use verter_semantic::facts::registry::{
 /// Used as a key dimension on [`AugmentationTargetKey`] to keep
 /// augmentation entries from one project from poisoning a sibling
 /// project under the same syntactic specifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Byte-ordered (`PartialOrd`/`Ord` over the 16 hash bytes) so ordered
+/// sets of project identities — e.g. the members of a
+/// [`ReferenceComponent`](crate::external_ts::ReferenceComponent) — have
+/// one canonical deterministic order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectIdentity(pub Hash16);
 
 impl ProjectIdentity {

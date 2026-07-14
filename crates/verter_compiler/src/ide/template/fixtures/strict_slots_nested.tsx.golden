@@ -1,6 +1,6 @@
-import Card from './Card.vue.ts'
-import Panel from './Panel.vue.ts'
-import Row from './Row.vue.ts'
+import Card from './Card.vue'
+import Panel from './Panel.vue'
+import Row from './Row.vue'
 import type { Prettify as ___VERTER___Prettify, ExtractComponentProps as ___VERTER___ExtractComponentProps, ExtractLeafElement as ___VERTER___ExtractLeafElement } from "@verter/types";
 import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithProps as ___VERTER___enhanceElementWithProps, extractRenderComponent as ___VERTER___extractRenderComponent, instantiateComponent as ___VERTER___instantiateComponent, extractArgumentsFromRenderSlot as ___VERTER___extractArgumentsFromRenderSlot, runCustomDirective as ___VERTER___runCustomDirective, retrieveSetupDirectives as ___VERTER___retrieveSetupDirectives, strictRenderSlot as ___VERTER___strictRenderSlot, checkRequiredSlots as ___VERTER___checkRequiredSlots } from "@verter/types";
 ;export function ___VERTER___TemplateBindingFN() {
@@ -10,7 +10,7 @@ import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithPro
 
 
 // @ts-ignore
-let ___VERTER___instance!: Omit<InstanceType<import('./App.vue.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
+let ___VERTER___instance!: Omit<InstanceType<import('./App.vue.verter.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
 void ___VERTER___instance;
 const ___VERTER___directiveAccessor = ___VERTER___retrieveSetupDirectives(___VERTER___instance);
 void ___VERTER___directiveAccessor;
@@ -54,5 +54,7 @@ void (___VERTER___instance).valueOf;
 
 return {};
 } // close templateBindingFN
+
+export { default } from './App.vue.verter.ts';
 
 type ___VERTER___attributes = {};

@@ -15,11 +15,40 @@ use crate::resolver_core::{IntrinsicMemberTypeSource, IntrinsicSurfaceMember};
 use crate::VerterHost;
 
 impl VerterHost {
+    /// The single owning project's ownership descriptor for a NON-carrier-ownership
+    /// consumer (intrinsic-type projection + its cache anchor). Resolves through the
+    /// published snapshot's EXACT configured-owner resolution (`Unique` → that
+    /// project) and, only on an authoritative configured-`None`, the SEPARATE
+    /// single-fallback resolution. A genuine configured overlap (`Ambiguous`) fails
+    /// closed to `None` — never a fabricated winner. This is an explicit,
+    /// purpose-scoped project lookup, NOT the carrier-ownership authority (that is
+    /// `external_ts::CarrierOwnershipResolution`) and NOT a generic path→singleton
+    /// selector on the workspace trait.
+    fn owning_project_ownership(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_workspace::ProjectOwnership> {
+        use verter_workspace::workspace_snapshot::ConfiguredOwnerResolution;
+        let root = self.ws().published_root()?;
+        let snapshot = &root.snapshot;
+        let id = match snapshot.configured_owner_resolution_for_file(canonical_id) {
+            ConfiguredOwnerResolution::Unique(id) => id,
+            ConfiguredOwnerResolution::Ambiguous(_) => return None,
+            ConfiguredOwnerResolution::None => {
+                snapshot.single_fallback_owner_for_file(canonical_id)?
+            }
+        };
+        let project = snapshot.project(id);
+        Some(verter_workspace::ProjectOwnership {
+            project_root: project.root.as_str().to_string(),
+            tsconfig_path: snapshot.tsconfig_path(id).map(|p| p.as_str().to_string()),
+        })
+    }
+
     pub(super) fn project_intrinsic_cache_anchor(&self, canonical_id: &str) -> (String, u64) {
-        let ws = self.ws();
-        let generation = ws.content_generation();
-        let anchor = ws
-            .owner_for_file(canonical_id)
+        let generation = self.ws().content_generation();
+        let anchor = self
+            .owning_project_ownership(canonical_id)
             .map(|owner| {
                 format!(
                     "{}|{}",
@@ -70,9 +99,8 @@ impl VerterHost {
         owner_canonical_id: &str,
         specifier: &str,
     ) -> Option<String> {
-        let ws = self.ws();
-        let owner = ws.owner_for_file(owner_canonical_id)?;
-        let resolved = ws.resolve_import_for_project(
+        let owner = self.owning_project_ownership(owner_canonical_id)?;
+        let resolved = self.ws().resolve_import_for_project(
             &owner,
             specifier,
             verter_workspace::ResolutionContext {

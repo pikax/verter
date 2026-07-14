@@ -1,0 +1,17 @@
+import { defineComponent } from "vue"
+type __OmitNew<T> = { [K in keyof T]: T[K] }
+
+const __comp = defineComponent({
+})
+
+declare const Generics: __OmitNew<typeof __comp> & {
+  new<T>(props?: import("vue").PublicProps & { items: T[]; selected: T }): {
+    $props: import("vue").PublicProps & { items: T[]; selected: T },
+    $emit: (event: string, ...args: unknown[]) => void,
+    $data: {},
+    $attrs: import("vue").HTMLAttributes,
+    $refs: {},
+  }
+}
+export default Generics
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3Byb2ovR2VuZXJpY3MudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCIgZ2VuZXJpYz1cIlRcIj5cbmRlZmluZVByb3BzPHsgaXRlbXM6IFRbXTsgc2VsZWN0ZWQ6IFQgfT4oKVxuPC9zY3JpcHQ+XG48dGVtcGxhdGU+PGRpdiAvPjwvdGVtcGxhdGU+XG4iXSwibWFwcGluZ3MiOiI7Ozs7Ozs7K0NBQ2MsWUFBWTswQ0FBWixZQUFZIn0=

@@ -1,6 +1,6 @@
 use super::*;
 use crate::canonical_path::CanonicalPath;
-use crate::membership::{FallbackMembership, StaticMembershipSpec};
+use crate::membership::{ConfiguredMembership, FallbackMembership, StaticMembershipSpec};
 use crate::normalized_glob::NormalizedGlob;
 use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
 use crate::workspace_snapshot::{
@@ -76,18 +76,42 @@ fn default_spec(root: &str) -> StaticMembershipSpec {
     StaticMembershipSpec::with_typescript_defaults(&CanonicalPath::new(root))
 }
 
+/// The supported-extension set the production builder uses (carrier extensions
+/// from the live registry, JS off). Used to drive `membership_to_spec` through
+/// the real expansion path.
+fn test_supported() -> crate::membership::SupportedExtensions {
+    supported_extensions_for(&IdeProjectCompilerOptions::default())
+}
+
 // ── membership_to_spec conversion ──
 
 #[test]
 fn match_all_becomes_typescript_defaults() {
     let root = CanonicalPath::new("d:/project");
-    let spec = membership_to_spec(&root, &ProjectMembership::MatchAll);
+    let spec = membership_to_spec(&root, &ProjectMembership::MatchAll, &test_supported());
 
-    // Should have default include pattern
-    assert_eq!(spec.include.len(), 1, "should have 1 include pattern");
+    // The default `**/*` include expands into one glob per supported extension
+    // (the explicit-extension model) — never zero, all carrying the `**/*` body.
     assert!(
-        spec.include[0].as_str().contains("**/*"),
-        "include should be **/*"
+        !spec.include.is_empty(),
+        "default include must expand to at least one supported-extension glob"
+    );
+    assert!(
+        spec.include.iter().all(|g| g.as_str().contains("**/*")),
+        "every expanded default include keeps the `**/*` body"
+    );
+    // A `.ts` and every carrier extension are covered; an unknown extension is not.
+    assert!(spec.matches(&CanonicalPath::new("d:/project/src/foo.ts")));
+    for ext in supported_extensions_for(&IdeProjectCompilerOptions::default()).extensions() {
+        let path = CanonicalPath::new(&format!("d:/project/src/foo{ext}"));
+        assert!(
+            spec.matches(&path),
+            "default include must own a supported-extension file `foo{ext}`"
+        );
+    }
+    assert!(
+        !spec.matches(&CanonicalPath::new("d:/project/src/foo.unknownext")),
+        "default include must NOT own an unknown extension"
     );
 
     // Should have default exclude patterns
@@ -113,11 +137,21 @@ fn include_exclude_converts_directly() {
             include: vec!["d:/project/src/**/*".to_string()],
             exclude: vec!["d:/project/dist/**".to_string()],
         },
+        &test_supported(),
     );
 
     assert_eq!(spec.files.len(), 1);
-    assert_eq!(spec.include.len(), 1);
+    // The bare-star include expands per supported extension (never empty).
+    assert!(
+        !spec.include.is_empty(),
+        "bare-star include must expand to at least one supported-extension glob"
+    );
     assert_eq!(spec.exclude.len(), 1);
+    // The exact membership semantics: the named file + supported siblings own,
+    // the excluded dir does not.
+    assert!(spec.matches(&CanonicalPath::new("d:/project/src/main.ts")));
+    assert!(spec.matches(&CanonicalPath::new("d:/project/src/widget.tsx")));
+    assert!(!spec.matches(&CanonicalPath::new("d:/project/dist/out.ts")));
 }
 
 #[test]
@@ -130,11 +164,217 @@ fn empty_exclude_fills_defaults() {
             include: vec!["d:/project/src/**/*".to_string()],
             exclude: vec![], // empty → should fill TS defaults
         },
+        &test_supported(),
     );
 
     assert!(
         spec.exclude.len() >= 2,
         "empty exclude should be filled with TS defaults"
+    );
+}
+
+// ── FIX 1: default-include + path reconciliation, end-to-end through the
+// production config parse chain, asserting BOTH membership paths AGREE ──
+
+/// Drive the FULL production chain for one tsconfig body: parse membership from
+/// an in-memory workspace, expand to a `StaticMembershipSpec`, and ALSO
+/// round-trip the spec back to the live `IdeProjectConfig` shape. Returns
+/// `(spec, ide_config)` so a caller can assert BOTH the `StaticMembershipSpec::matches`
+/// path AND the live `IdeProjectConfig::matches_file` path on the same parsed config.
+fn parse_both_paths(root: &str, tsconfig_body: &str) -> (StaticMembershipSpec, IdeProjectConfig) {
+    use crate::memory::{MemoryOptions, MemoryWorkspace};
+
+    let tsconfig = format!("{root}/tsconfig.json");
+    let ws = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    ws.inject_file(tsconfig.clone(), std::sync::Arc::<str>::from(tsconfig_body));
+
+    let root_cp = CanonicalPath::new(root);
+    let raw = crate::config::load_project_membership(&ws, &tsconfig);
+    let spec = membership_to_spec(&root_cp, &raw, &test_supported());
+
+    let mut ide = IdeProjectConfig::new(root.to_string(), root.to_string(), Some(tsconfig));
+    ide.membership = ConfiguredMembership {
+        spec: spec.clone(),
+        materialized_files: rustc_hash::FxHashSet::default(),
+    };
+
+    (spec, ide)
+}
+
+/// Like `parse_both_paths`, but also injects `{root}/base.json` so the child
+/// tsconfig can `extends` it — exercising the inheritance path end-to-end.
+fn parse_both_paths_with_base(
+    root: &str,
+    base_body: &str,
+    child_body: &str,
+) -> (StaticMembershipSpec, IdeProjectConfig) {
+    use crate::memory::{MemoryOptions, MemoryWorkspace};
+
+    let tsconfig = format!("{root}/tsconfig.json");
+    let base = format!("{root}/base.json");
+    let ws = MemoryWorkspace::new(MemoryOptions {
+        roots: vec![root.to_string()],
+        default_resolve_extensions: None,
+    });
+    ws.inject_file(base, std::sync::Arc::<str>::from(base_body));
+    ws.inject_file(tsconfig.clone(), std::sync::Arc::<str>::from(child_body));
+
+    let root_cp = CanonicalPath::new(root);
+    let raw = crate::config::load_project_membership(&ws, &tsconfig);
+    let spec = membership_to_spec(&root_cp, &raw, &test_supported());
+
+    let mut ide = IdeProjectConfig::new(root.to_string(), root.to_string(), Some(tsconfig));
+    ide.membership = ConfiguredMembership {
+        spec: spec.clone(),
+        materialized_files: rustc_hash::FxHashSet::default(),
+    };
+
+    (spec, ide)
+}
+
+#[test]
+fn inherited_explicit_empty_files_owns_nothing_on_both_paths() {
+    // An `extends` base declaring `"files": []` (solution-style) must keep the
+    // child owning NOTHING but references — the default include must NOT be
+    // synthesized just because the inherited vectors are empty. Asserted on BOTH
+    // the `StaticMembershipSpec::matches` path AND the live
+    // `IdeProjectConfig::matches_file` path, which MUST AGREE.
+    //
+    // DISCRIMINATING: before the fix the producer inherited only the empty
+    // files/include vectors (not the declared-ness), so it synthesized `**/*`
+    // and OWNED `src/Foo.vue` — the red.
+    let (spec, ide) = parse_both_paths_with_base(
+        "d:/ws",
+        r#"{ "files": [] }"#,
+        r#"{ "extends": "./base.json", "exclude": ["dist"] }"#,
+    );
+
+    for ext in ["vue", "svelte"] {
+        let candidate = CanonicalPath::new(&format!("d:/ws/src/Foo.{ext}"));
+        assert!(
+            !spec.matches(&candidate),
+            "path 1: inherited explicit `files: []` must own NOTHING (`src/Foo.{ext}`)"
+        );
+        assert!(
+            !ide.matches_file(&format!("d:/ws/src/Foo.{ext}")),
+            "path 2: inherited explicit `files: []` must own NOTHING (`src/Foo.{ext}`)"
+        );
+    }
+}
+
+#[test]
+fn inherited_explicit_empty_include_owns_nothing_on_both_paths() {
+    // Sibling of the above for an inherited `"include": []`.
+    let (spec, ide) = parse_both_paths_with_base(
+        "d:/ws",
+        r#"{ "include": [] }"#,
+        r#"{ "extends": "./base.json", "exclude": ["dist"] }"#,
+    );
+
+    let candidate = CanonicalPath::new("d:/ws/src/Foo.vue");
+    assert!(
+        !spec.matches(&candidate),
+        "path 1: inherited explicit `include: []` must own NOTHING"
+    );
+    assert!(
+        !ide.matches_file("d:/ws/src/Foo.vue"),
+        "path 2: inherited explicit `include: []` must own NOTHING"
+    );
+}
+
+#[test]
+fn exclude_only_owns_default_include_minus_exclude_on_both_paths() {
+    // FIX 1: `{"exclude":["dist"]}` keeps the implicit default include MINUS the
+    // excludes — it OWNS `src/Foo.vue`/`src/Foo.svelte` and REJECTS
+    // `dist/Foo.vue`. Asserted on BOTH the `StaticMembershipSpec::matches` path
+    // AND the live `IdeProjectConfig::matches_file` path, which MUST AGREE.
+    //
+    // DISCRIMINATING: before FIX 1 the producer emitted an empty include for an
+    // exclude-only config ⇒ `StaticMembershipSpec::matches` owned NOTHING (the
+    // red on path 1); the two paths also DIVERGED (the live path's
+    // `!exclude.is_empty()` fallback owned everything-not-excluded).
+    let (spec, ide) = parse_both_paths("d:/ws", r#"{ "exclude": ["dist"] }"#);
+
+    for ext in ["vue", "svelte"] {
+        let owned = CanonicalPath::new(&format!("d:/ws/src/Foo.{ext}"));
+        assert!(
+            spec.matches(&owned),
+            "path 1 (StaticMembershipSpec::matches): exclude-only must OWN `src/Foo.{ext}`"
+        );
+        assert!(
+            ide.matches_file(&format!("d:/ws/src/Foo.{ext}")),
+            "path 2 (IdeProjectConfig::matches_file): exclude-only must OWN `src/Foo.{ext}`"
+        );
+    }
+
+    let excluded = CanonicalPath::new("d:/ws/dist/Foo.vue");
+    assert!(
+        !spec.matches(&excluded),
+        "path 1: exclude-only must REJECT `dist/Foo.vue`"
+    );
+    assert!(
+        !ide.matches_file("d:/ws/dist/Foo.vue"),
+        "path 2: exclude-only must REJECT `dist/Foo.vue`"
+    );
+}
+
+#[test]
+fn explicit_empty_files_owns_nothing_on_both_paths() {
+    // FIX 1 distinction: an explicit `"files": []` solution-style config owns
+    // NOTHING but its references — distinct from "no files key" (which gets the
+    // default include). BOTH paths must agree it owns nothing.
+    //
+    // DISCRIMINATING on path 2: before FIX 4 the `!exclude.is_empty()` fallback
+    // made the live path own everything-not-excluded (the TS-default exclude is
+    // non-empty) — the red.
+    let (spec, ide) = parse_both_paths("d:/ws", r#"{ "files": [], "references": [] }"#);
+
+    let candidate = CanonicalPath::new("d:/ws/src/App.vue");
+    assert!(
+        !spec.matches(&candidate),
+        "path 1: explicit `files: []` must own NOTHING"
+    );
+    assert!(
+        !ide.matches_file("d:/ws/src/App.vue"),
+        "path 2: explicit `files: []` must own NOTHING (no everything-not-excluded fallback)"
+    );
+}
+
+#[test]
+fn default_and_include_exclude_agree_on_both_paths() {
+    // FIX 1 cases (c) default (no keys) and (d) include+exclude: both paths agree.
+    let (spec_default, ide_default) = parse_both_paths("d:/ws", r#"{ "compilerOptions": {} }"#);
+    assert!(
+        spec_default.matches(&CanonicalPath::new("d:/ws/src/Foo.vue")),
+        "path 1: default include owns `src/Foo.vue`"
+    );
+    assert!(
+        ide_default.matches_file("d:/ws/src/Foo.vue"),
+        "path 2: default include owns `src/Foo.vue`"
+    );
+
+    let (spec_ie, ide_ie) = parse_both_paths(
+        "d:/ws",
+        r#"{ "include": ["src/**/*"], "exclude": ["src/gen"] }"#,
+    );
+    assert!(
+        spec_ie.matches(&CanonicalPath::new("d:/ws/src/Foo.vue")),
+        "path 1: include+exclude owns `src/Foo.vue`"
+    );
+    assert!(
+        ide_ie.matches_file("d:/ws/src/Foo.vue"),
+        "path 2: include+exclude owns `src/Foo.vue`"
+    );
+    assert!(
+        !spec_ie.matches(&CanonicalPath::new("d:/ws/src/gen/Bar.vue")),
+        "path 1: include+exclude REJECTS `src/gen/Bar.vue`"
+    );
+    assert!(
+        !ide_ie.matches_file("d:/ws/src/gen/Bar.vue"),
+        "path 2: include+exclude REJECTS `src/gen/Bar.vue`"
     );
 }
 
@@ -194,7 +434,9 @@ fn simple_build_creates_resolver() {
     );
 
     // Resolver should find owner for files under project root
-    let owner = snap.resolver.owner_for_file("d:/project/src/main.ts");
+    let owner = snap
+        .resolver
+        .nearest_config_for_path("d:/project/src/main.ts");
     assert!(owner.is_some());
 }
 
@@ -365,25 +607,31 @@ fn fallback_no_tsconfig_no_aliases_no_configured_settings() {
     assert!(snap.tsconfig_path(owners[0]).is_none());
 }
 
-// ── spec_to_membership round-trip ──
+// ── membership_to_spec expansion + matching semantics ──
 
 #[test]
-fn spec_round_trips_through_membership() {
-    let original = StaticMembershipSpec {
-        files: vec![CanonicalPath::new("d:/project/src/main.ts")],
-        include: vec![NormalizedGlob::new("d:/project/src/**/*")],
-        exclude: vec![NormalizedGlob::new("d:/project/dist/**")],
+fn include_exclude_membership_expands_and_matches_supported_extensions() {
+    // A raw `files`/`include`/`exclude` membership expands to a spec whose
+    // `matches` honours `files` immunity, bare-star include expansion across the
+    // supported extension set, and `exclude` filtering.
+    let raw = ProjectMembership::IncludeExclude {
+        files: vec!["d:/project/src/main.ts".to_string()],
+        include: vec!["d:/project/src/**/*".to_string()],
+        exclude: vec!["d:/project/dist/**".to_string()],
     };
-
-    let membership = spec_to_membership(&original);
     let root = CanonicalPath::new("d:/project");
-    let back = membership_to_spec(&root, &membership);
+    let back = membership_to_spec(&root, &raw, &test_supported());
 
-    assert_eq!(back.files.len(), original.files.len());
-    assert_eq!(back.include.len(), original.include.len());
-    // Note: exclude may differ because empty exclude fills defaults
-    // In this case exclude is non-empty so it should round-trip
-    assert_eq!(back.exclude.len(), original.exclude.len());
+    assert_eq!(back.files.len(), 1);
+    // The bare-star include expands per supported extension, so the glob COUNT
+    // is one-per-extension; the membership SEMANTICS are what matter: the same
+    // supported paths match, the excluded dir does not.
+    assert!(!back.include.is_empty());
+    assert!(back.matches(&CanonicalPath::new("d:/project/src/main.ts")));
+    assert!(back.matches(&CanonicalPath::new("d:/project/src/widget.tsx")));
+    assert!(!back.matches(&CanonicalPath::new("d:/project/dist/out.ts")));
+    // An explicit non-empty exclude is kept verbatim (no default fill).
+    assert_eq!(back.exclude.len(), 1);
 }
 
 // ── materialize_from_spec ──
@@ -661,7 +909,7 @@ fn build_from_workspace_roots_discovers_tsconfigs() {
     let owner = result
         .snapshot
         .resolver
-        .owner_for_file(&format!("{}/src/foo.ts", workspace_str));
+        .nearest_config_for_path(&format!("{}/src/foo.ts", workspace_str));
     assert!(owner.is_some(), "resolver should find owner");
 
     // No trust required
@@ -822,7 +1070,7 @@ fn bridge_configured_project_from_vfs_config() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec!["d:/project/tsconfig.app.json".to_string()],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     };
 
     let project = ownership_project_from_vfs_config(&config, ProjectId(0));
@@ -856,7 +1104,7 @@ fn bridge_fallback_project_from_vfs_config() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     };
 
     let project = ownership_project_from_vfs_config(&config, ProjectId(0));

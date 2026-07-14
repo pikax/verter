@@ -193,8 +193,15 @@ pub(super) async fn handle_initialize(
         );
     }
 
+    // Honest completion-resolve capability: advertise resolve only when the
+    // active provider actually implements it.
+    let resolve_provider = server
+        .type_provider
+        .as_ref()
+        .is_some_and(|tp| tp.supports_completion_resolve());
+
     Ok(InitializeResult {
-        capabilities: server_capabilities(&encoding),
+        capabilities: server_capabilities(&encoding, resolve_provider),
         server_info: Some(ServerInfo {
             name: "verter-lsp".into(),
             version: Some(env!("CARGO_PKG_VERSION").into()),
@@ -311,6 +318,30 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
             .send_notification::<McpReady>(McpReadyParams { port })
             .await;
         tracing::info!("Sent $/verter/mcpReady with port {port}");
+    }
+
+    // Emit the resolved per-workspace carrier-store dir so the extension can hand
+    // it to VS Code's OWN TypeScript server (via `configurePlugin`); a plain `.ts`
+    // opened there then reads the SAME store and resolves imported `.vue`/`.svelte`
+    // carriers. The LSP is the single source of the
+    // `<temp>/verter-carrier-store/<host-version>/<workspace-hash>/` derivation —
+    // it cannot be reproduced extension-side without mirroring the exact recipe. The
+    // dir is keyed on the primary workspace root (the one the carrier-publish path
+    // and the spawned tsserver share).
+    {
+        let first_root = server.workspace_roots.lock().await.first().cloned();
+        if let Some(root_uri) = first_root {
+            let workspace_root = crate::documents::uri_to_canonical_id_from_str(&root_uri);
+            let carrier_store_dir =
+                crate::external_ts::default_carrier_store_dir_string(&workspace_root);
+            server
+                .client
+                .send_notification::<CarrierStoreReady>(CarrierStoreReadyParams {
+                    carrier_store_dir: carrier_store_dir.clone(),
+                })
+                .await;
+            tracing::info!("Sent $/verter/carrierStoreReady with dir {carrier_store_dir}");
+        }
     }
 
     // Eagerly populate type provider workspace roots so that
@@ -446,7 +477,10 @@ pub(super) async fn handle_did_open(
     }
     let startup_policy = did_open_startup_policy(server.type_provider_kind);
     let prewarm_imported_carrier_apis = startup_policy.sync_imported_carrier_apis
-        && matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver);
+        && matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver)
+        // TEST SEAM: suppressed so the cross-file-rename child-closed lane proves
+        // `handle_rename`'s own sync-before-query is the sole sync of the child API.
+        && !server.suppress_imported_carrier_prewarm;
     let imported_carrier_priority_ids = server
         .documents
         .get_analysis(uri)
@@ -522,8 +556,15 @@ pub(super) async fn handle_did_open(
         server.sync_self_file_shadow_unresolved(uri).await;
     }
 
-    // Imported carrier API warmup SECOND (Normal priority, never blocks active file)
-    if startup_policy.sync_imported_carrier_apis && !prewarm_imported_carrier_apis {
+    // Imported carrier API warmup SECOND (Normal priority, never blocks active file).
+    // TEST SEAM: also gated off by `suppress_imported_carrier_prewarm` — the cross-
+    // file-rename discrimination lane must leave `handle_rename`'s own
+    // sync-before-query as the SOLE sync of an imported child's API surface, so
+    // BOTH the eager (above) and this deferred did_open warmup are suppressed.
+    if startup_policy.sync_imported_carrier_apis
+        && !prewarm_imported_carrier_apis
+        && !server.suppress_imported_carrier_prewarm
+    {
         for import_id in &imported_carrier_priority_ids {
             let should_sync =
                 !server.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
@@ -653,15 +694,35 @@ pub(super) async fn handle_did_change(
                 coordinator.signal(canonical_id.clone(), uri.as_str().to_string());
             }
 
-            // Eager TSX sync — send fresh TSX to type provider immediately.
-            // sync_tsx is fire-and-forget (~1ms), so this adds negligible latency.
-            // This ensures ALL subsequent requests (completion, hover, definition)
-            // see fresh content without needing per-handler inline sync.
-            if let Some(sync) = &server.project_sync {
+            // Eager carrier refresh — make the freshly-edited carrier content
+            // visible to the type provider immediately, so the next interactive
+            // request (completion, hover, definition) sees it without per-handler
+            // inline sync.
+            //
+            // tsserver: the carrier is a configured-project MEMBER served from the
+            // publish store, so a fresh edit must RE-PUBLISH the companions (and
+            // fire the change notification) — NOT open the synthetic TSX as a
+            // second content authority (the eager `sync_tsx` is a no-op for
+            // tsserver). The publish is fail-closed (a no-owner carrier publishes
+            // nothing). tsgo keeps the eager `sync_tsx` content open.
+            if matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver) {
+                if carrier_language_for(&canonical_id).is_some() {
+                    server.publish_carrier_to_external_ts(&canonical_id).await;
+                }
+            } else if let Some(sync) = &server.project_sync {
                 if let Some(ide) = server.documents.get_ide(&uri) {
                     if let Some(ide_path) = server.eager_syncable_ide_path_for_uri(&uri) {
                         if let Err(e) = sync.sync_tsx(&ide_path, &ide.code).await {
                             tracing::warn!("did_change: eager tsx sync failed: {e}");
+                        } else {
+                            // Record a fresh generation pinning the EXACT IDE bytes
+                            // just synced (interactive queries capture this surface).
+                            server.record_carrier_ide_snapshot(
+                                &canonical_id,
+                                &ide_path,
+                                &ide.code,
+                                ide.source_map.as_deref(),
+                            );
                         }
                     }
                 }
@@ -719,11 +780,10 @@ pub(super) async fn handle_did_close(
         let state = server
             .provider_sync_state_for_source(&canonical_id)
             .or_else(|| {
-                server.documents.get_ide(uri).and_then(|ide| {
-                    server
-                        .prepare_carrier_provider_sync_transition(&canonical_id, ide.is_jsx)
-                        .map(|transition| transition.next)
-                })
+                server
+                    .documents
+                    .get_ide(uri)
+                    .and_then(|ide| server.carrier_close_state(&canonical_id, ide.is_jsx))
             });
         let is_tsgo = matches!(server.type_provider_kind, crate::TypeProviderKind::Tsgo);
 
@@ -749,13 +809,41 @@ pub(super) async fn handle_did_close(
             }
         }
     }
-    // Capture canonical_id before did_close clears document state.
+    // Capture canonical_id before did_close clears document state — every step
+    // below that needs the closed file's identity (the overlay release, the host
+    // evict, the scheduler close) reads it from here, not from `documents`.
     let canonical_id = server.documents.get_canonical_id(uri);
 
-    // Clear the VFS overlay FIRST so the workspace falls back to disk.
-    // This must happen before scheduler.close_file() because close_file
-    // enqueues a background Source reload that reads via WorkspaceSourceLoader.
+    // Clear document state FIRST, before releasing the proactive
+    // declaration-overlay graph below: `documents.did_close` removes this root
+    // from `documents.open_uris()`, the live open-root set the background
+    // closure pass reads. Doing it first means a closure pass racing this close
+    // observes the root as CLOSED — so when it reconciles the overlay refcount it
+    // DROPS this root's re-recorded edges instead of keeping them. If the release
+    // ran first, a pass landing in the gap would re-record the just-released
+    // edges while the root was still in the open set, and the final reconcile
+    // would KEEP them with no future close event — a permanent overlay leak.
+    //
+    // (Also keeps the required ordering vs `scheduler.close_file()` below: the
+    // VFS overlay must clear before `close_file` enqueues a background Source
+    // reload that reads via WorkspaceSourceLoader.)
     server.documents.did_close(uri);
+
+    // Release this root from the proactive declaration-overlay graph: any
+    // `.d.<ext>.ts` overlay its closure opened that NO other open root still
+    // reaches is closed now. An overlay still reachable from another open root
+    // is retained (closing it would strand that root's bare carrier imports).
+    // A no-op for tsserver (the refcount is only populated on the tsgo closure
+    // pass) and when the closed file was never a carrier root. Runs AFTER
+    // `did_close` so the closure pass already sees the root as closed (above).
+    if server.project_sync.is_some() {
+        if let Some(ref canonical_id) = canonical_id {
+            server
+                .release_declaration_overlays_for_closed_root(canonical_id)
+                .await;
+        }
+    }
+
     server.cached_verter_diags.remove(uri.as_str());
 
     // Evict the host's FileEntry so ensure_loaded / get_source don't
@@ -911,13 +999,18 @@ pub(super) async fn handle_did_change_watched_files(
                 .documents
                 .host()
                 .get_ide(canonical_id, &profile)
-                .and_then(|ide| {
-                    server
-                        .prepare_carrier_provider_sync_transition(canonical_id, ide.is_jsx)
-                        .map(|transition| transition.next)
-                })
+                .and_then(|ide| server.carrier_close_state(canonical_id, ide.is_jsx))
         }) {
             server.close_provider_state(&state).await;
+        }
+        // Drop the carrier's STORE membership too — the provider-buffer close above
+        // closes the open companion; this retracts it from `getExternalFiles` so the
+        // deleted carrier is no longer advertised to the plugin. Best-effort on the
+        // delete path, but a failure is surfaced.
+        if let Err(error) = server.retract_carrier_from_external_ts(canonical_id).await {
+            tracing::warn!(
+                "did_change_watched_files: carrier retract failed for {canonical_id}: {error}"
+            );
         }
         server.documents.host().remove(canonical_id);
         server.cached_verter_diags.remove(uri_str.as_str());
@@ -959,6 +1052,7 @@ pub(super) async fn handle_did_change_watched_files(
             let sync = sync.clone();
             let vfs_workspace = Arc::clone(&server.vfs_workspace);
             let provider_sync_states = Arc::clone(&server.provider_sync_states);
+            let provider_surfaces = server.documents.provider_surfaces().clone();
             let is_tsgo = matches!(server.type_provider_kind, crate::TypeProviderKind::Tsgo);
 
             tokio::spawn(async move {
@@ -967,6 +1061,7 @@ pub(super) async fn handle_did_change_watched_files(
                         &canonical_id,
                         &host,
                         &sync,
+                        &provider_surfaces,
                         &vfs_workspace,
                         is_tsgo,
                         &provider_sync_states,
@@ -1057,14 +1152,17 @@ pub(super) async fn handle_did_delete_files(
                     .documents
                     .host()
                     .get_ide(&canonical_id, &profile)
-                    .and_then(|ide| {
-                        server
-                            .prepare_carrier_provider_sync_transition(&canonical_id, ide.is_jsx)
-                            .map(|transition| transition.next)
-                    })
+                    .and_then(|ide| server.carrier_close_state(&canonical_id, ide.is_jsx))
             })
         {
             server.close_provider_state(&state).await;
+        }
+        // Retract the carrier's STORE membership (the provider buffer was closed
+        // above) so the deleted carrier is no longer advertised via
+        // `getExternalFiles`. Best-effort on the delete path (the file is gone; the
+        // next authoritative publish re-prunes), but a failure is surfaced.
+        if let Err(error) = server.retract_carrier_from_external_ts(&canonical_id).await {
+            tracing::warn!("did_delete_files: carrier retract failed for {canonical_id}: {error}");
         }
         server.documents.host().remove(&canonical_id);
         server.cached_verter_diags.remove(uri.as_str());

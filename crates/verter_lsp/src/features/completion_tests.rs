@@ -1331,10 +1331,245 @@ fn test_tag_name_includes_components() {
 
     assert!(result.is_some(), "should return completions for tag names");
     let items = result.unwrap().items;
-    assert!(
-        items.iter().any(|i| i.label == "MyComp"),
-        "should include component 'MyComp': {:?}",
-        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    let my_comp = items
+        .iter()
+        .find(|i| i.label == "MyComp")
+        .unwrap_or_else(|| {
+            panic!(
+                "should include component 'MyComp': {:?}",
+                items.iter().map(|i| &i.label).collect::<Vec<_>>()
+            )
+        });
+    // A component tag must use the CLASS kind (class icon), matching the
+    // `ClientOnly` precedent — NOT MODULE (the namespace `{}` icon).
+    // Discriminating: pre-fix all component tags used `CompletionItemKind::MODULE`.
+    assert_eq!(
+        my_comp.kind,
+        Some(CompletionItemKind::CLASS),
+        "component tag item must use the CLASS completion kind"
+    );
+    assert_ne!(
+        my_comp.kind,
+        Some(CompletionItemKind::MODULE),
+        "component tag item must NOT use the MODULE completion kind (the `{{}}` icon)"
+    );
+}
+
+/// Find a completion item by label, panicking with the full label list on miss.
+fn find_item<'a>(items: &'a [CompletionItem], label: &str) -> &'a CompletionItem {
+    items.iter().find(|i| i.label == label).unwrap_or_else(|| {
+        panic!(
+            "expected item {label:?}, got: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        )
+    })
+}
+
+#[test]
+fn tag_name_uppercase_script_binding_stays_module_kind() {
+    // KIND POLICY (site `tag_name_completions` ~515): an uppercase script binding
+    // is a HEURISTIC component candidate (first-char-uppercase guess), NOT a
+    // confirmed component. It must stay MODULE — CLASS is reserved for confirmed
+    // component tags, so an arbitrary `const Foo = ...` does not get a misleading
+    // component icon.
+    let analysis = make_analysis(
+        vec![AnalyzedBinding {
+            name: "MyWidget".to_string(),
+            kind: AnalyzedBindingKind::Const,
+            is_reactive: false,
+            reactivity_kind: ReactivityKind::None,
+            type_annotation: None,
+            initializer: None,
+            span: verter_span::Span::new(0, 0),
+            used_in_script: false,
+            used_in_style: false,
+        }],
+        vec![],
+        vec![],
+    );
+    let items = tag_name_completions(&analysis, None, None);
+    let item = find_item(&items, "MyWidget");
+    assert_eq!(
+        item.kind,
+        Some(CompletionItemKind::MODULE),
+        "uppercase script binding is a heuristic candidate and must stay MODULE, not CLASS"
+    );
+    assert_ne!(item.kind, Some(CompletionItemKind::CLASS));
+}
+
+#[test]
+fn tag_name_uppercase_nontype_import_stays_module_kind() {
+    // KIND POLICY (site `tag_name_completions` ~542): an uppercase non-type import
+    // is a HEURISTIC component candidate, NOT a confirmed component. It must stay
+    // MODULE — the uppercase-first-char guess must not claim the component icon.
+    let analysis = make_analysis(
+        vec![],
+        vec![AnalyzedImport {
+            source: "./Foo.vue".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "Foo".to_string(),
+                kind: ImportBindingKind::Default,
+                imported_name: None,
+                is_type_only: false,
+                vue_api: None,
+                span: verter_span::Span::new(0, 0),
+            }],
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: None,
+        }],
+        vec![],
+    );
+    let items = tag_name_completions(&analysis, None, None);
+    let item = find_item(&items, "Foo");
+    assert_eq!(
+        item.kind,
+        Some(CompletionItemKind::MODULE),
+        "uppercase non-type import is a heuristic candidate and must stay MODULE, not CLASS"
+    );
+    assert_ne!(item.kind, Some(CompletionItemKind::CLASS));
+}
+
+#[test]
+fn tag_name_workspace_auto_import_uses_class_kind() {
+    // GAP (kind coverage, site `tag_name_completions` ~569): a workspace
+    // auto-import component tag must use CLASS, not MODULE — and carry the
+    // sanitized `data.component_name`.
+    let analysis = make_analysis(vec![], vec![], vec![]);
+    let ws = [WorkspaceComponent {
+        name: "ModelNamed".to_string(),
+        import_path: "./Model.Named.vue".to_string(),
+    }];
+    let items = tag_name_completions(&analysis, Some(&ws), Some("file:///App.vue"));
+    let item = find_item(&items, "ModelNamed");
+    assert_eq!(
+        item.kind,
+        Some(CompletionItemKind::CLASS),
+        "workspace auto-import tag item must use CLASS"
+    );
+    assert_ne!(item.kind, Some(CompletionItemKind::MODULE));
+    // The resolve envelope carries the sanitized binding name + real path.
+    let data = item.data.as_ref().expect("auto-import data envelope");
+    assert_eq!(data["component_name"], "ModelNamed");
+    assert_eq!(data["import_path"], "./Model.Named.vue");
+}
+
+#[test]
+fn tag_name_workspace_label_collision_emits_single_first_wins_item() {
+    // COLLISION DEDUP (site `tag_name_completions` workspace-component emission):
+    // two distinct workspace carriers can sanitize to the SAME identifier — e.g.
+    // `Model.Named.vue` and `ModelNamed.vue` BOTH → `ModelNamed`. `build_workspace_components`
+    // sorts by canonical path and surfaces BOTH candidates (lex-first FIRST), so the
+    // SYNTHESIZER must dedup by label and keep the FIRST (lexicographically-first
+    // canonical path). Without dedup the user sees TWO indistinguishable `ModelNamed`
+    // tag items with different `import_path`s.
+    //
+    // DISCRIMINATING: pre-fix the synthesizer emitted both, so the count was 2.
+    let analysis = make_analysis(vec![], vec![], vec![]);
+    // Mirror `build_workspace_components` output ordering: lex-first canonical path
+    // (`/ws/src/Model.Named.vue`) FIRST, the later path (`/ws/src/ModelNamed.vue`) second.
+    let ws = [
+        WorkspaceComponent {
+            name: "ModelNamed".to_string(),
+            import_path: "./Model.Named.vue".to_string(),
+        },
+        WorkspaceComponent {
+            name: "ModelNamed".to_string(),
+            import_path: "./ModelNamed.vue".to_string(),
+        },
+    ];
+    let items = tag_name_completions(&analysis, Some(&ws), Some("file:///App.vue"));
+
+    // EXACTLY ONE `ModelNamed` tag item — not two indistinguishable collisions.
+    let model_named: Vec<&CompletionItem> =
+        items.iter().filter(|i| i.label == "ModelNamed").collect();
+    assert_eq!(
+        model_named.len(),
+        1,
+        "two colliding workspace carriers must dedup to a SINGLE tag item, got: {:?}",
+        model_named
+            .iter()
+            .map(|i| i.data.as_ref().map(|d| d["import_path"].clone()))
+            .collect::<Vec<_>>()
+    );
+
+    // The SURVIVING item is the FIRST (lexicographically-first canonical path).
+    let item = model_named[0];
+    assert_eq!(
+        item.kind,
+        Some(CompletionItemKind::CLASS),
+        "the surviving collision item must keep the CLASS kind"
+    );
+    let data = item.data.as_ref().expect("auto-import data envelope");
+    assert_eq!(
+        data["import_path"], "./Model.Named.vue",
+        "first-wins: the surviving item must carry the lexicographically-first carrier path"
+    );
+    assert_eq!(data["component_name"], "ModelNamed");
+}
+
+#[test]
+fn workspace_auto_import_kind_is_class_in_tag_position_but_module_in_expression_scope() {
+    // KIND POLICY discriminator across the TWO call sites for the SAME workspace
+    // component:
+    // - `tag_name_completions` (tag position, site ~569): the item is inserted as
+    //   a `<Tag>` and earns the component icon → CLASS.
+    // - `template_completions` (EXPRESSION / INTERPOLATION scope, site ~990): the
+    //   SAME component is referenced as a value binding, not a tag, so it stays
+    //   MODULE. The kind is context-dependent, NOT a property of the component.
+    //
+    // Also pins the NEGATIVE: a plain value import (NOT a component) stays MODULE
+    // in expression scope — the policy must not bleed onto ordinary imports.
+    let analysis = make_analysis(
+        vec![],
+        vec![AnalyzedImport {
+            // A plain value import (NOT a component) — stays MODULE everywhere.
+            source: "./utils".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "formatDate".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: None,
+                is_type_only: false,
+                vue_api: None,
+                span: verter_span::Span::new(0, 0),
+            }],
+            span: verter_span::Span::new(0, 0),
+            resolved_canonical_id: None,
+        }],
+        vec![],
+    );
+    let ws = [WorkspaceComponent {
+        name: "ModelNamed".to_string(),
+        import_path: "./Model.Named.vue".to_string(),
+    }];
+
+    // TAG position: CLASS.
+    let tag_items = tag_name_completions(&analysis, Some(&ws), Some("file:///App.vue"));
+    let tag_comp = find_item(&tag_items, "ModelNamed");
+    assert_eq!(
+        tag_comp.kind,
+        Some(CompletionItemKind::CLASS),
+        "in tag position a confirmed workspace component must use CLASS"
+    );
+
+    // EXPRESSION / INTERPOLATION scope: the SAME component is MODULE.
+    let expr_items = template_completions(&analysis, Some(&ws), Some("file:///App.vue"), None);
+    let expr_comp = find_item(&expr_items, "ModelNamed");
+    assert_eq!(
+        expr_comp.kind,
+        Some(CompletionItemKind::MODULE),
+        "in expression/interpolation scope the workspace item is a value ref → MODULE, not CLASS"
+    );
+    assert_ne!(expr_comp.kind, Some(CompletionItemKind::CLASS));
+
+    // NEGATIVE: a genuine non-component import binding stays MODULE in expression
+    // scope — the policy must NOT relabel ordinary value imports.
+    let util = find_item(&expr_items, "formatDate");
+    assert_eq!(
+        util.kind,
+        Some(CompletionItemKind::MODULE),
+        "a non-component import binding must remain MODULE, not be relabeled CLASS"
     );
 }
 

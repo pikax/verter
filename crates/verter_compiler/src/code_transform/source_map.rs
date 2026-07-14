@@ -153,6 +153,16 @@ impl<'a> CodeTransform<'a> {
                 &mut generated_line,
                 &mut generated_column,
             );
+            // The helper-import preamble may BE the module intro (the Svelte IDE projection prepends
+            // its `@jsxImportSource`-led prelude as the intro so the pragma stays the leading output
+            // bytes). When it is, capture the generated position immediately after it as the
+            // preamble-end boundary — the same boundary Vue publishes from its `Inserted` preamble
+            // chunk. First capture wins (the debug-assert catches accidental double-publication: a
+            // preamble can be the intro OR an inserted chunk, never both).
+            if is_preamble(self.intro()) {
+                debug_assert!(preamble_end.is_none());
+                preamble_end.get_or_insert((generated_line, generated_column));
+            }
         }
 
         let is_ascii = self.is_ascii();
@@ -253,8 +263,10 @@ impl<'a> CodeTransform<'a> {
                     );
                     // The helper-import preamble is an unmapped insertion: capture the
                     // generated position immediately after it as the preamble-end boundary.
+                    // First capture wins (the debug-assert catches accidental double-publication).
                     if is_preamble(content) {
-                        preamble_end = Some((generated_line, generated_column));
+                        debug_assert!(preamble_end.is_none());
+                        preamble_end.get_or_insert((generated_line, generated_column));
                     }
                 }
                 Chunk::InsertedMapped {
@@ -307,11 +319,12 @@ impl<'a> CodeTransform<'a> {
                             &mut generated_column,
                         );
                     }
-                    // Defensive: the helper-import preamble is emitted unmapped (`Inserted`), but
-                    // match here too so the boundary survives if a preamble is ever routed through
-                    // a mapped insertion.
+                    // Defensive: the helper-import preamble is emitted unmapped (`Inserted`) or as
+                    // the module intro, but match here too so the boundary survives if a preamble is
+                    // ever routed through a mapped insertion. First capture wins.
                     if is_preamble(content) {
-                        preamble_end = Some((generated_line, generated_column));
+                        debug_assert!(preamble_end.is_none());
+                        preamble_end.get_or_insert((generated_line, generated_column));
                     }
                 }
             }

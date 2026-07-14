@@ -150,16 +150,19 @@ fn vue_mod_carries_no_reexport_shim() {
 }
 
 /// The public-API entry dispatches through the framework registry's
-/// component-API projector leg — NOT a hard Vue branch. Two invariants:
+/// component-API projector leg — NOT a hard Vue branch. Invariants:
 ///
-///  * `get_public_api_with_mode` consults `api_projector_for` (registry
-///    dispatch by resolved adapter id). The host method stays the single
-///    entry; classification + projector selection replace the Vue gate.
+///  * The shared per-item render body `render_public_api_items` consults
+///    `api_projector_for` (registry dispatch by resolved adapter id). The
+///    scalar entry (`get_public_api_with_mode`, `N=1`) and the batch entry
+///    (`get_public_api_batch`, `N`) both delegate to it under ONE captured
+///    fixed view; classification + projector selection replace the Vue gate.
 ///
-///  * `render_vue_public_api_legacy` (the projector leg's delegate) carries
-///    NO `is_vue()` framework gate. The Vue-vs-not decision is made ONCE,
-///    up-front, by the registry dispatch; a surviving gate in the body would
-///    be a redundant second classification (a dual path).
+///  * Neither the scalar entry, the shared body, nor
+///    `render_vue_public_api_legacy` (the projector leg's delegate) carries an
+///    `is_vue()` framework gate. The Vue-vs-not decision is made ONCE,
+///    up-front, by the registry dispatch; a surviving gate would be a redundant
+///    second classification (a dual path).
 #[test]
 fn public_api_dispatches_through_registry_projector_no_vue_gate() {
     let pipeline =
@@ -167,16 +170,35 @@ fn public_api_dispatches_through_registry_projector_no_vue_gate() {
     let src = std::fs::read_to_string(&pipeline)
         .unwrap_or_else(|e| panic!("read {}: {e}", pipeline.display()));
 
-    let entry = fn_body(&src, "get_public_api_with_mode");
+    // The shared per-item body owns the registry dispatch (both the scalar
+    // `N=1` entry and the batch entry delegate to it under one fixed view).
+    let shared = fn_body(&src, "render_public_api_items");
     assert!(
-        entry.contains("api_projector_for"),
-        "get_public_api_with_mode must dispatch through \
+        shared.contains("api_projector_for"),
+        "render_public_api_items must dispatch through \
          framework_registry().api_projector_for(..) — registry dispatch, not a Vue branch"
     );
+    assert!(
+        !shared.contains("is_vue"),
+        "render_public_api_items must not consult is_vue() — classification routes \
+         through the resolved adapter id, not a hard Vue gate"
+    );
+
+    let entry = fn_body(&src, "get_public_api_with_mode");
     assert!(
         !entry.contains("is_vue"),
         "get_public_api_with_mode must not consult is_vue() — classification routes \
          through the resolved adapter id, not a hard Vue gate"
+    );
+
+    // The batch entry (`get_public_api_batch`, `N`) likewise delegates to the
+    // shared body under one fixed view; it must carry NO is_vue() gate, so a
+    // future batch-only Vue bypass cannot slip past the scalar-only checks.
+    let batch_entry = fn_body(&src, "get_public_api_batch");
+    assert!(
+        !batch_entry.contains("is_vue"),
+        "get_public_api_batch must not consult is_vue() — classification routes \
+         through the resolved adapter id (the shared render body), not a hard Vue gate"
     );
 
     let legacy = fn_body(&src, "render_vue_public_api_legacy");

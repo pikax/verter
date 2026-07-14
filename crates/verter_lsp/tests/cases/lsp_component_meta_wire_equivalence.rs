@@ -32,6 +32,7 @@ fn build_test_server(host: Arc<VerterHost>) -> LspService<VerterLanguageServer> 
                 suggest_tsgo: false,
                 mcp_port: None,
                 type_provider_none_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });

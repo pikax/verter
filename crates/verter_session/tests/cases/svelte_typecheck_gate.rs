@@ -1,23 +1,24 @@
 //! The Svelte IDE-projection TYPE-CHECK VALIDITY gate.
 //!
 //! OXC parse-only is NOT sufficient: the projected `.svelte.tsx` must type-check
-//! CLEAN through the TSGO path. This harness projects each fixture through the
-//! real Svelte IDE projector, writes it into a hermetic temp project (vendored
-//! `svelte` types + the in-repo `@verter/svelte-jsx` shim `paths`-mapped — no
-//! npm install, Testing-Hermeticity), and runs `tsgo --noEmit`.
+//! CLEAN through the typescript-go engine. This harness projects each fixture
+//! through the real Svelte IDE projector, writes it into a hermetic temp project
+//! (vendored `svelte` types + the in-repo `@verter/svelte-jsx` shim
+//! `paths`-mapped — no npm install, Testing-Hermeticity), and runs the rc
+//! `typescript` launcher (`node typescript/lib/tsc.js --noEmit`).
 //!
 //! GATE PRECONDITION: the pragma-parity fixture proves the
 //! `@jsxImportSource @verter/svelte-jsx` pragma OVERRIDES a project-level
-//! `jsxImportSource: "vue"` under TSGO. If TSGO fails the override, the
-//! fallback is a STOP-and-redesign (escalate) — never a silent degrade.
+//! `jsxImportSource: "vue"` under the engine. If the engine fails the override,
+//! the fallback is a STOP-and-redesign (escalate) — never a silent degrade.
 //!
-//! The harness is GATED behind the locally-resolvable `tsgo` binary: when no
-//! `tsgo`/`tsc` is found (a machine without the native-preview install) the
-//! tests skip with a clear message rather than failing spuriously. On CI with
-//! the binary present they run for real. When the environment REQUIRES a
-//! checker (`CI` or `VERTER_REQUIRE_TYPECHECKER` set), a missing checker is a
-//! HARD failure — the gate must never silently skip where it is meant to run,
-//! which would mask a Svelte projection regression.
+//! The harness is GATED behind the locally-resolvable rc `typescript` launcher
+//! (`typescript/lib/tsc.js`): when it is not found (a machine without an
+//! install) the tests skip with a clear message rather than failing spuriously.
+//! On CI with the launcher present they run for real. When the environment
+//! REQUIRES a checker (`CI` or `VERTER_REQUIRE_TYPECHECKER` set), a missing
+//! checker is a HARD failure — the gate must never silently skip where it is
+//! meant to run, which would mask a Svelte projection regression.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -55,34 +56,112 @@ fn require_type_checker() -> bool {
     truthy("CI") || truthy("VERTER_REQUIRE_TYPECHECKER")
 }
 
-/// Locate a `tsgo` (or `tsc`) binary via the workspace `node_modules/.bin`.
+/// Locate the `typescript@>=7` (rc) `tsc.js` launcher under the workspace
+/// `node_modules`.
 ///
-/// Returns `None` when neither is present, so the gate SKIPS on hermetic
-/// dev machines without the native-preview install. BUT when the environment
-/// REQUIRES a checker ([`require_type_checker`] — CI, or an explicit
-/// `VERTER_REQUIRE_TYPECHECKER`), a missing checker is a HARD failure: the
-/// gate must not silently skip every test (and thereby mask a regression)
-/// exactly where it is meant to run for real.
-fn locate_type_checker() -> Option<(PathBuf, bool)> {
-    let bin = workspace_root().join("node_modules/.bin");
-    let tsgo = bin.join("tsgo");
-    if tsgo.exists() {
-        return Some((tsgo, true));
+/// The rc `typescript` package ships its CLI as a thin Node launcher
+/// (`typescript/lib/tsc.js`) that resolves the per-platform typescript-go
+/// engine binary (`@typescript/typescript-<platform>-<arch>`) internally and
+/// `execFileSync`s it. Invoking it through `node` (see [`typecheck_projected`])
+/// is OS-AGNOSTIC: it needs only `node` on `PATH` and never depends on a
+/// `.bin/tsc` pnpm shim (a `#!/bin/sh` / `.CMD` wrapper that `CreateProcess`
+/// cannot launch directly on Windows → `Os 193`).
+///
+/// Returns `None` when the launcher is not present, so the gate SKIPS on
+/// hermetic dev machines without an install. BUT when the environment REQUIRES
+/// a checker ([`require_type_checker`] — CI, or an explicit
+/// `VERTER_REQUIRE_TYPECHECKER`), a missing checker is a HARD failure: the gate
+/// must not silently skip every test (and thereby mask a regression) exactly
+/// where it is meant to run for real.
+fn locate_type_checker() -> Option<PathBuf> {
+    let node_modules = workspace_root().join("node_modules");
+
+    // Hoisted `typescript/lib/tsc.js` (a pnpm symlink resolves through here).
+    let hoisted = node_modules.join("typescript").join("lib").join("tsc.js");
+    if hoisted.is_file() {
+        return Some(assert_rc_engine_launcher(hoisted));
     }
-    let tsc = bin.join("tsc");
-    if tsc.exists() {
-        return Some((tsc, false));
+
+    // pnpm virtual-store fallback: `.pnpm/typescript@<ver>/node_modules/typescript/lib/tsc.js`.
+    // Enumerate the `typescript@*` store entries and keep the highest-VERSION one
+    // (the rc/TS>=7 engine), not the lexicographically-last (which could be a
+    // legacy `typescript@6.x` JS tsc).
+    let pnpm_dir = node_modules.join(".pnpm");
+    if let Ok(entries) = std::fs::read_dir(&pnpm_dir) {
+        let mut candidates: Vec<PathBuf> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                // The JS `typescript@<ver>` package, not the `+`-named platform
+                // package (which holds the engine binary, not `tsc.js`).
+                if !name.starts_with("typescript@") || name.contains('+') {
+                    return None;
+                }
+                let launcher = entry.path().join("node_modules/typescript/lib/tsc.js");
+                launcher.is_file().then_some(launcher)
+            })
+            .collect();
+        // Highest owning-package version wins (the rc engine), not lexicographic.
+        candidates.sort_by(|a, b| {
+            typescript_package_major(a)
+                .cmp(&typescript_package_major(b))
+                .then_with(|| a.cmp(b))
+        });
+        if let Some(launcher) = candidates.pop() {
+            return Some(assert_rc_engine_launcher(launcher));
+        }
     }
+
     assert!(
         !require_type_checker(),
         "the Svelte typecheck gate REQUIRES a type checker here \
-         (CI / VERTER_REQUIRE_TYPECHECKER is set) but neither `tsgo` nor \
-         `tsc` was found in {}. A silent skip would mask Svelte projection \
-         regressions — install the native-preview type checker or unset the \
-         env var for a local dev skip.",
-        bin.display()
+         (CI / VERTER_REQUIRE_TYPECHECKER is set) but the rc `typescript` \
+         launcher (`typescript/lib/tsc.js`) was not found under {}. A silent \
+         skip would mask Svelte projection regressions — run `pnpm install` \
+         or unset the env var for a local dev skip.",
+        node_modules.display()
     );
     None
+}
+
+/// Read the major version of the `typescript` package owning a located
+/// `tsc.js` launcher. `tsc.js` lives in `typescript/lib/`, so the package's
+/// `package.json` is two directories up. Returns `None` when unreadable.
+///
+/// Dependency-free string scan for `"version": "X.Y.Z"` (no serde) — the same
+/// approach as the runtime's `detect_ts_major_version`.
+fn typescript_package_major(tsc_js: &std::path::Path) -> Option<u32> {
+    let pkg_json = tsc_js.parent()?.parent()?.join("package.json");
+    let content = std::fs::read_to_string(pkg_json).ok()?;
+    let key = content.find("\"version\"")?;
+    let after = &content[key..];
+    let colon = after.find(':')?;
+    let after_colon = after[colon + 1..].trim_start();
+    let quote_start = after_colon.find('"')? + 1;
+    let rest = &after_colon[quote_start..];
+    let quote_end = rest.find('"')?;
+    rest[..quote_end].split('.').next()?.parse::<u32>().ok()
+}
+
+/// Assert a located `tsc.js` belongs to the rc TS>=7 (typescript-go) engine and
+/// return it unchanged. This gate is the "typescript-go" engine gate — running a
+/// legacy `typescript@5/6` JS `tsc` here would type-check against the wrong
+/// engine and mask (or fabricate) a Svelte projection regression. A wrong layout
+/// (e.g. a hoisted legacy `typescript`) FAILS LOUDLY rather than silently
+/// degrading. Cross-platform: reads the package version, no platform/version
+/// hardcoding.
+fn assert_rc_engine_launcher(tsc_js: PathBuf) -> PathBuf {
+    let major = typescript_package_major(&tsc_js);
+    assert!(
+        major.is_some_and(|m| m >= 7),
+        "the Svelte typecheck gate located a `tsc.js` whose owning `typescript` package is not \
+         the rc TS>=7 (typescript-go) engine (major = {major:?}) at {}. Running a legacy JS tsc \
+         here would type-check against the wrong engine — install the pinned rc `typescript` \
+         (`pnpm install`).",
+        tsc_js.display()
+    );
+    tsc_js
 }
 
 /// Render a hermetic temp project for `projected_tsx` and run the type checker.
@@ -107,7 +186,7 @@ fn typecheck_projected_with_options(
     vendor_svelte: bool,
     check_js: bool,
 ) -> Option<(bool, String)> {
-    let (checker, _is_tsgo) = locate_type_checker()?;
+    let tsc_js = locate_type_checker()?;
     let tmp = tempfile::tempdir().expect("temp dir");
     let root = tmp.path();
 
@@ -205,7 +284,11 @@ fn typecheck_projected_with_options(
     );
     std::fs::write(root.join("tsconfig.json"), tsconfig).expect("write tsconfig");
 
-    let output = Command::new(&checker)
+    // Invoke the rc `typescript` launcher through `node` — OS-agnostic, no
+    // dependence on a `.bin/tsc` shebang/`.CMD` shim. The launcher resolves the
+    // per-platform typescript-go engine binary itself.
+    let output = Command::new("node")
+        .arg(&tsc_js)
         .arg("--noEmit")
         .arg("-p")
         .arg(root.join("tsconfig.json"))

@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use verter_audit::{RequestKind, WorkspaceOp};
 use verter_workspace::{
-    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ParsedEdge, ProjectGraph,
-    ProjectMembership, ProjectRank, ResolveRequestKind, VfsProjectConfig, WorkspaceAccess,
+    CanonicalPath, ConfiguredMembership, IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace,
+    ParsedEdge, ProjectGraph, ProjectRank, ResolveRequestKind, VfsProjectConfig, WorkspaceAccess,
     WorkspaceRead,
 };
 
@@ -35,7 +35,7 @@ fn project_config() -> VfsProjectConfig {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     }
 }
 

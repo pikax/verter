@@ -1,0 +1,291 @@
+{
+  "methodologyVersion": "1.1.0",
+  "note": "Self-referential perf-regression gate for the external-TS-engine (§2.7). A CANDIDATE Verter build vs a PINNED-BASELINE Verter build on the SAME runner/job/corpus/tsgo/threads, interleaved, comparing the RATIO of each side's statistic (median for time/throughput/RSS scalars; the named percentile over the pooled per-operation distribution for tail latency) — NOT absolute milliseconds. A one-sided gated metric (higher-is-better / lower-is-better) FAILS only when statisticRatio(candidate,baseline) > threshold AND the bootstrap 95% CI lower bound on the ratio also exceeds the threshold; an `invariant` (two-sided) metric ALSO fails on a DROP — statisticRatio < 1/threshold AND the 95% CI upper bound < 1/threshold — so a correctness-bearing count/byte-size that shrinks (skipped work) is a regression, not a perf win. On a FULL (non-smoke) run, a skipped/unavailable workload, a degenerate (all-zero) gated-metric vector, an engine-version mismatch, or an armed run that fell back to self-check are HARD FAILS — the gate never reads a misconfiguration or missing instrument as green. AXIS A (native compiler) is gated on its empirically-present audit signals — codegen throughput, codegen(+source-map) emit time, output bytes, source-map bytes, and carrier count — each side measured in its OWN child loading THAT side's @verter/native build; axis-A per-PID peak RSS and the full non-checker aggregate are DEFERRED (see `deferred`), never faked. AXIS B (tsgo carrier typecheck/LSP) is gated on the honestly-TS-measurable subset (exit-code + diagnostic-SET correctness, the warm/interactive latency distributions, single-file-edit locality, and IDE-query hover/completion CONTENT equality); the verter-tsc child peak RSS is DEFERRED (verter-tsc spawns tsgo as a SEPARATE child, so the wrapper-PID VmHWM misses the engine's memory, and process-tree RSS is not cleanly portable in TS — see `deferred`) along with the rest of the Rust-requiring axis-B attribution, never faked.",
+  "baselineRef": "PENDING — an UNARMED placeholder; set to the pinned-baseline commit SHA when the gate is first armed by a separate 'perf: refresh baseline' change (not the landing change itself, since a squash-merge SHA cannot self-reference at author time). While PENDING the gate is physically incapable of a green armed verdict: the SCHEDULED nightly blocking run fails RED-until-armed, while a manual workflow_dispatch / local --smoke run executes the same-commit self-check (candidate === baseline, ~1.0 ratios, a loud NOT-ARMED warning). An armed comparison additionally requires --baseline-root (the baseline tsgo engine is resolved from that worktree, never the candidate root).",
+  "corpusHash": "sha256:de3b13510a79bb96070d3ba27ee49dc8a27dbb200377393b579d5cf939e4f0e2",
+  "corpusGeneratorVersion": "1.1.0",
+  "corpusScope": "Vue .vue SFCs ONLY (Block-6). The corpus generator, the axis-A carrier discovery (collectVueFiles), and the LSP workloads (firstVue/countVue) all target .vue; the gate makes NO claim of current Svelte perf coverage. Svelte (.svelte) carriers are a later block (B8) — a Svelte perf corpus + carrier-extension discovery is DEFERRED (see `deferred`), never faked against a non-existent corpus.",
+  "tsgoVersion": "typescript@7.0.2",
+  "tsgoVersionNote": "tsgo = the TypeScript 7 native engine, shipped by the `typescript` npm package at this exact GA version and pinned in the workspace-root devDeps; the gate resolves the installed `typescript` version from the workspace root and FAILS a full run on a mismatch.",
+  "threadPolicy": "Axis-A's in-process native host is thread-pinned to N via hostCpuThreads (N = --threads, default os.availableParallelism() — logical), so axis-A compile throughput is measured at a fixed, ENFORCED thread count. The axis-B subprocesses (verter-tsc, verter_lsp, and the tsgo child they spawn) do NOT accept a thread-pin flag through the harness, so they run at the MACHINE-DEFAULT parallelism — NOT a harness-enforced fixed count. That is still a valid self-referential comparison: candidate and baseline run interleaved on the SAME machine at the SAME default parallelism, identical both sides. N is recorded for the axis-A pin + run provenance, not as an enforced subprocess setting. Subprocess thread-pin enforcement is a tracked follow-up (see `deferred`).",
+  "samplesPerSide": 7,
+  "interleaving": "baseline, candidate, candidate, baseline (repeated) — interleaved to balance monotonic drift across the two sides; the predicate is a ratio of per-side statistics, NOT a paired per-sample comparison.",
+  "predicate": {
+    "rule": "One-sided (higher-is-better / lower-is-better): FAIL iff statisticRatio(candidate, baseline) > threshold AND lowerBound95(ratio) > threshold. Invariant (two-sided): ALSO FAIL on a drop — iff statisticRatio < 1/threshold AND upperBound95(ratio) < 1/threshold — so a correctness-bearing count/byte-size that shrinks (skipped work) is a regression, not a perf win.",
+    "statistic": "median for time/throughput/RSS scalar metrics; the named percentile (p50/p95/p99) over the POOLED per-operation latency distribution for tail-latency metrics",
+    "ci": "percentile bootstrap (10000 resamples, seeded); lowerBound95 = the 2.5th percentile of the resampled ratio distribution (the lower bound of the bootstrap 95% CI)",
+    "direction": "latency/time/RSS: candidate/baseline. throughput (higher is better): baseline/candidate (a drop shows as ratio > 1)"
+  },
+  "workloads": {
+    "axis-a-codegen": {
+      "axis": "A",
+      "title": "native compiler carrier codegen (per-side native child, audited)",
+      "coverage": {
+        "actual": "carrierCount",
+        "expected": "sfcCount",
+        "note": "every SFC must emit a carrier: carrierCount (audited compiles emitting output) must EQUAL sfcCount per sample, on BOTH sides. A subset compile (fewer carriers than SFCs) FAILS a full run even when the candidate/baseline ratio is ~1.0."
+      },
+      "contentEqualityGated": ["carrierContent"],
+      "contentEqualityNote": "carrierContent is a content hash over every generated IDE carrier + its source-map (sorted by canonicalId), compared candidate-vs-baseline for equality. A codegen change that PRESERVES output_bytes + carrierCount but alters the emitted carrier/source-map CONTENT trips this even though the byte/count invariants pass; a benign codegen change requires a reviewed baseline refresh, like the output_bytes invariant. Both sides compile the SAME shared corpus dir at identical canonical paths, so the hash is directly comparable without per-side normalization.",
+      "gated": {
+        "compile_throughput_ratio": {
+          "threshold": 1.1,
+          "direction": "higher-is-better",
+          "statistic": "median",
+          "source": { "kind": "scalar", "key": "filesPerSec" },
+          "note": "per-file audited native-compile throughput (files/sec) under SERIAL orchestration: the axis-A child compiles each SFC one at a time via `compileWithAudit`. The candidate-vs-baseline RATIO is valid because both sides run the identical serial orchestration; named for exactly what it measures (serial per-file compile throughput), not a whole-corpus or concurrent throughput claim."
+        },
+        "codegen_time_ratio": {
+          "threshold": 1.1,
+          "direction": "lower-is-better",
+          "statistic": "median",
+          "source": { "kind": "attribution", "key": "codegenSourcemapMs" },
+          "note": "the PRESENT codegen-side emit time from the audited compile record: carrier codegen + source-map build ms (codegen_ms + sourcemap_ms). This is the MEASURABLE portion of the non-checker budget — it deliberately EXCLUDES the parse/transform/transport phases (whose timing the compile audit record does not emit today), so it is named for what it measures, not as 'non_checker_time'. The full non-checker aggregate is deferred (see `deferred`)."
+        },
+        "source_map_bytes": {
+          "threshold": 1.02,
+          "direction": "invariant",
+          "statistic": "median",
+          "source": { "kind": "attribution", "key": "sourceMapBytes" },
+          "note": "bytes of generated source-map from the audited compile record — a deterministic codegen-output signal, like output_bytes. TWO-SIDED invariant (candidate must equal baseline within ±2%): a DROP is a correctness regression (a truncated/omitted source-map breaks IDE position mapping), not a lower-is-better perf win, and requires a reviewed baseline refresh; a bloat fails too. Source maps are requested on this path (sourceMap: true), so a per-compile ZERO/MISSING source-map measurement is treated as MISSING instrumentation (the attribution presence rail counts a <=0 byte reading as missing, failing a full run) — never a present 0."
+        },
+        "generated_carrier_count": {
+          "threshold": 1.01,
+          "direction": "invariant",
+          "statistic": "median",
+          "source": { "kind": "scalar", "key": "carrierCount" },
+          "note": "count of audited compiles emitting output (output_bytes > 0) — a real codegen-output signal, NOT a static .vue file count. TWO-SIDED invariant (candidate must equal baseline within ±1%): a DROP is a correctness regression (skipped carrier generation), not a perf win; a bloat fails too. Expected to equal the corpus sfcCount (surfaced alongside as the sfcCount metric)."
+        },
+        "output_bytes_ratio": {
+          "threshold": 1.02,
+          "direction": "invariant",
+          "statistic": "median",
+          "source": { "kind": "attribution", "key": "outputBytes" },
+          "note": "bytes of generated carrier output from the audited compile record — a deterministic codegen-output signal. TWO-SIDED invariant (candidate must equal baseline within ±2%): a material change in generated bytes in EITHER direction (a bloat, or an unexpected shrink / skipped codegen) trips it and requires a reviewed baseline refresh."
+        }
+      }
+    },
+    "cold-typecheck": {
+      "axis": "B",
+      "title": "cold full-project carrier typecheck (fresh verter-tsc process)",
+      "correctnessGated": true,
+      "gated": {},
+      "reported": {
+        "total_wall_time_ratio": {
+          "threshold": 1.25,
+          "direction": "lower-is-better",
+          "statistic": "median",
+          "source": { "kind": "total_wall" },
+          "note": "tsgo-checker-dominated; surfaced for information, NEVER gated. A sibling of `gated`, not a `reportedOnly` flag inside it — a reported metric can never fail a run."
+        }
+      },
+      "note": "Gates the exit-code/diagnostic-SET correctness ONLY; total wall-time is REPORTED (the sibling `reported` section), never gated. The child-process peak RSS was REMOVED from the gated set and DEFERRED (see `deferred`): verter-tsc spawns tsgo as a SEPARATE child process, so the sampled verter-tsc wrapper-PID VmHWM misses the tsgo engine's (dominant) resident set — gating a wrapper-PID number that misses the engine's memory would be dishonest, and full subprocess-tree peak RSS is not cleanly portable in TS (/proc is Linux-only, summed per-PID VmHWM is not a faithful tree peak). The non-checker codegen split + real carrier counts for this subprocess are also DEFERRED (need a verter-tsc --audit/json mode); the static .vue file count was REMOVED from the gated set (it never discriminated). rssBytes is still recorded raw in the artifact (wrapper-PID only), but NO metric gates it."
+    },
+    "warm-incremental-retypecheck": {
+      "axis": "B",
+      "title": "incremental re-typecheck (on-disk carrier cache + small dependency edit)",
+      "correctnessGated": true,
+      "gated": {},
+      "reported": {
+        "total_wall_time_ratio": {
+          "threshold": 1.12,
+          "direction": "lower-is-better",
+          "statistic": "median",
+          "source": { "kind": "total_wall" },
+          "note": "surfaced for information, NEVER gated (a sibling of `gated`, not a `reportedOnly` flag inside it)."
+        }
+      },
+      "note": "verter-tsc is always a FRESH process — this measures the on-disk (tsbuildinfo) incremental re-typecheck after a TYPE-CHANGING dependency edit, NOT a retained Program. The measured re-typecheck MUST transition the dependent diagnostic set (an ignored edit is a hard workload failure); the candidate-vs-baseline diagnostic-SET equality is gated on the post-edit set. Wall is REPORTED (the sibling `reported` section), never gated; correctness-gated. The child-process peak RSS was REMOVED from the gated set and DEFERRED (see `deferred`): verter-tsc spawns tsgo as a SEPARATE child process, so the sampled verter-tsc wrapper-PID VmHWM misses the tsgo engine's resident set; full subprocess-tree peak RSS is not cleanly portable in TS. The changed-carrier count is also DEFERRED (needs a Rust per-edit changed-set counter). The genuinely-warm Program-reuse signal is `warm-lsp-incremental`."
+    },
+    "warm-lsp-incremental": {
+      "axis": "B",
+      "title": "warm incremental re-typecheck (persistent LSP, Program retained)",
+      "correctnessGated": true,
+      "gated": {
+        "p50_latency_ratio": {
+          "threshold": 1.08,
+          "direction": "lower-is-better",
+          "statistic": "p50",
+          "source": { "kind": "distribution", "key": "warmLatency" }
+        },
+        "p95_latency_ratio": {
+          "threshold": 1.12,
+          "direction": "lower-is-better",
+          "statistic": "p95",
+          "source": { "kind": "distribution", "key": "warmLatency" }
+        },
+        "p99_latency_ratio": {
+          "threshold": 1.2,
+          "direction": "lower-is-better",
+          "statistic": "p99",
+          "source": { "kind": "distribution", "key": "warmLatency" }
+        }
+      },
+      "note": "ONE persistent verter_lsp client retains the Program across many edits; each measured edit re-points an inline import(\"./types\").WarmDepProbe<i> annotation in the DEPENDENT SFC's OWN buffer at the next pre-declared alias, forcing a warm CROSS-FILE re-resolution against the imported type module plus a dependent re-diagnose (genuinely cross-file — the erroring type lives in the imported module). It does NOT re-edit the imported module itself: repeated overlay edits to an imported module do not re-invalidate an already-open dependent under verter-lsp today (a one-shot cross-file-invalidation limitation — see the deferred 'imported-module-edit invalidation locality' entry). Gates the real warm latency distribution + diagnostic-SET correctness."
+    },
+    "single-file-edit-latency": {
+      "axis": "B",
+      "title": "single-file-edit latency (edit active SFC -> updated diagnostics)",
+      "correctnessGated": true,
+      "behavioral": {
+        "maxAffectedUriFraction": 0.5
+      },
+      "gated": {
+        "p50_latency_ratio": {
+          "threshold": 1.08,
+          "direction": "lower-is-better",
+          "statistic": "p50",
+          "source": { "kind": "distribution", "key": "editLatency" }
+        },
+        "p95_latency_ratio": {
+          "threshold": 1.12,
+          "direction": "lower-is-better",
+          "statistic": "p95",
+          "source": { "kind": "distribution", "key": "editLatency" }
+        },
+        "p99_latency_ratio": {
+          "threshold": 1.2,
+          "direction": "lower-is-better",
+          "statistic": "p99",
+          "source": { "kind": "distribution", "key": "editLatency" }
+        }
+      },
+      "note": "Drives many in-file edits against ONE persistent client; gates the real per-operation p50/p95/p99 over the pooled distribution, the diagnostic-SET correctness, and a diagnostic-publication-locality invariant: a single-file edit must not re-PUBLISH diagnostics for ~the whole project. This counts publishDiagnostics URIs (a publication proxy), NOT real invalidated/rechecked URIs — true LSP invalidation/recheck instrumentation is DEFERRED (see `deferred`). The Verter-vs-tsgo phase split is DEFERRED."
+    },
+    "ide-query-latency": {
+      "axis": "B",
+      "title": "IDE query latency (hover + completion, separate distributions)",
+      "contentEqualityGated": ["hoverContents", "completionLabels"],
+      "gated": {
+        "hover_p50_latency_ratio": {
+          "threshold": 1.08,
+          "direction": "lower-is-better",
+          "statistic": "p50",
+          "source": { "kind": "distribution", "key": "hoverLatency" }
+        },
+        "hover_p95_latency_ratio": {
+          "threshold": 1.12,
+          "direction": "lower-is-better",
+          "statistic": "p95",
+          "source": { "kind": "distribution", "key": "hoverLatency" }
+        },
+        "hover_p99_latency_ratio": {
+          "threshold": 1.2,
+          "direction": "lower-is-better",
+          "statistic": "p99",
+          "source": { "kind": "distribution", "key": "hoverLatency" }
+        },
+        "completion_p50_latency_ratio": {
+          "threshold": 1.08,
+          "direction": "lower-is-better",
+          "statistic": "p50",
+          "source": { "kind": "distribution", "key": "completionLatency" }
+        },
+        "completion_p95_latency_ratio": {
+          "threshold": 1.12,
+          "direction": "lower-is-better",
+          "statistic": "p95",
+          "source": { "kind": "distribution", "key": "completionLatency" }
+        },
+        "completion_p99_latency_ratio": {
+          "threshold": 1.2,
+          "direction": "lower-is-better",
+          "statistic": "p99",
+          "source": { "kind": "distribution", "key": "completionLatency" }
+        },
+        "hover_hit_parity": {
+          "threshold": 1.01,
+          "direction": "invariant",
+          "statistic": "median",
+          "source": { "kind": "scalar", "key": "hoverHits" },
+          "note": "candidate vs baseline hover-hit parity (two-sided): a side returning fewer/no hover results fails — a broken no-op LSP that answers fast cannot pass. Each measured hover is also required to carry contents in the driver."
+        },
+        "completion_item_parity": {
+          "threshold": 1.01,
+          "direction": "invariant",
+          "statistic": "median",
+          "source": { "kind": "scalar", "key": "completionItems" },
+          "note": "candidate vs baseline completion-item-count parity (two-sided); each measured completion is also required to be non-empty in the driver."
+        }
+      },
+      "note": "Hover and completion are SEPARATE pooled distributions (a regression in one path cannot hide behind the other). Each measured query must return a non-empty result (no swallowed errors), and the candidate/baseline hit + item counts must match. The candidate's hover CONTENT (normalized text per probed position) and completion LABEL SET are also compared candidate-vs-baseline for equality (contentEqualityGated: hoverContents + completionLabels) over a fixed deterministic set of probed positions — a content divergence at a probed position is a correctness regression even when the hit/item COUNTS match (counts alone cannot catch a bogus-but-same-count answer). The Verter-vs-tsgo phase split is DEFERRED."
+    }
+  },
+  "deferred": [
+    {
+      "metric": "axis-b cold/warm verter-tsc peak RSS (the tsgo engine's resident set)",
+      "reason": "verter-tsc spawns tsgo as a SEPARATE child process (checker.rs invoke_checker: std::process::Command::new(checker_bin).arg(\"--project\")...spawn()), so the harness's wrapper-PID VmHWM sample (Linux /proc) measures only verter-tsc's own codegen resident set and MISSES the tsgo type-check engine's (dominant) memory. Gating that wrapper-PID number would be a memory metric that misses the engine. Full subprocess-TREE peak RSS is NOT cleanly portable in TypeScript today (/proc is Linux-only; summing per-PID VmHWM over a discovered tree is not a faithful tree peak, and Windows/macOS expose no equivalent), so axis-B peak RSS was REMOVED from the gated set for BOTH cold-typecheck and warm-incremental-retypecheck rather than gate a misleading wrapper-PID figure. rssBytes is still recorded raw in the artifact (wrapper-PID only); no metric gates it. This subsumes the prior warm steady-state-RSS deferral (both peak AND steady-state need the same Rust signal).",
+      "requiresRust": "emit per-PID / per-engine peak (and steady-state) RSS from the verter-tsc + tsgo audit substrate (verter_tsc/verter_audit) — a process-tree or engine-attributed resident-set figure surfaced via a verter-tsc --audit/json mode — so axis-B memory measures the tsgo engine, not the wrapper PID"
+    },
+    {
+      "metric": "axis-a-codegen peak RSS (per-PID compiler resident set)",
+      "reason": "the axis-A child IS the in-process native compile, so there is no spawned child to RSS-sample, and the audit footprint RSS sampler is not armed on the compile path — process_rss_peak_bytes is null on a real axis-A run. No honest TS-only signal exists (the Node-process maxRSS includes the runtime's overhead and is not the compiler's resident set, so it was correctly removed). Removed from the axis-A gated set; axis-B cold/warm peak RSS is ALSO deferred (the spawned verter-tsc wrapper PID's VmHWM misses the tsgo engine's resident set, and process-tree RSS is not cleanly portable in TS), so no workload gates a peak-RSS metric — see the axis-b cold/warm peak RSS entry.",
+      "requiresRust": "arm the audit footprint per-PID peak-RSS sampler on the native compile path (verter_audit/verter_napi), surfaced as process_rss_peak_bytes in the compile RequestAuditRecord"
+    },
+    {
+      "metric": "axis-a-codegen non-checker time aggregate (codegen + source-map + parse/transform/transport)",
+      "reason": "the full non-checker aggregate needs the parse/transform/transport phase timing, which the compile audit record does not emit today (only the codegen + source-map phase timings are present), so nonCheckerMs is null on a real axis-A run. Axis A gates the measurable codegen(+source-map) emit-time sub-signal (codegen_time_ratio) instead; the full aggregate is removed from the gated set.",
+      "requiresRust": "emit the parse/transform/transport phase timing in the compile RequestAuditRecord (verter_compiler/verter_napi) so the full non-checker aggregate is measurable"
+    },
+    {
+      "metric": "axis-b cold/warm non-checker time split",
+      "reason": "verter-tsc runs as a subprocess that emits only `error TSxxxx` lines today, so its per-phase codegen/sourcemap/parse/transform split cannot be read honestly from the harness; the codegen(+source-map) emit-time sub-signal is gated on axis-a-codegen only (the full non-checker aggregate is itself deferred — see the axis-a-codegen non-checker entry).",
+      "requiresRust": "a verter-tsc --audit/--json mode emitting per-request RequestAuditRecord(s)"
+    },
+    {
+      "metric": "axis-b cold/warm carriers-generated count",
+      "reason": "the static .vue file count never discriminates (identical both sides); removed from the gated set. Axis-A's generated_carrier_count is the real audited-compiles-emitting-output signal.",
+      "requiresRust": "a real per-request carriers-generated counter in verter_audit, surfaced via verter-tsc --audit"
+    },
+    {
+      "metric": "warm changed-carrier count",
+      "reason": "a per-edit changed-set is not observable from the subprocess; removed from the gated set.",
+      "requiresRust": "a per-edit carriers-changed counter in verter_audit + verter-tsc --audit"
+    },
+    {
+      "metric": "warm true Program-reuse rate",
+      "reason": "verter-tsc is always cold (no daemon/session); the on-disk incremental re-typecheck wall is reported-only, and the genuinely-warm Program behavior is driven via the persistent LSP instead.",
+      "requiresRust": "a verter-tsc --session/daemon mode that retains the Program + a Program-reuse-rate counter"
+    },
+    {
+      "metric": "interactive Verter-vs-tsgo phase split",
+      "reason": "only the end-to-end LSP request latency is observable in TS today; the Verter-owned vs tsgo-checker split is not.",
+      "requiresRust": "a per-phase LSP latency split (Verter-owned vs tsgo) in the verter_lsp audit"
+    },
+    {
+      "metric": "single-file-edit real invalidation/recheck locality",
+      "reason": "the behavioral invariant counts publishDiagnostics URIs (a publication-locality proxy) — the harness cannot observe which URIs the server actually invalidated/rechecked. The proxy is honest about what it measures (diagnostic-publication locality); the true invariant needs server-side instrumentation.",
+      "requiresRust": "a per-edit invalidated/rechecked-URI counter in verter_lsp surfaced to the LSP test client"
+    },
+    {
+      "metric": "source-map segment count",
+      "reason": "code_transform_ops is a coarse proxy; source_map_bytes is the gated byte-size signal.",
+      "requiresRust": "a real source-map segment count in the compile audit payload"
+    },
+    {
+      "metric": "dedicated hashing/cache/sync time bucket",
+      "reason": "no such bucket exists in the audit substrate; non_checker_time honestly sums producer parse/transform + store/capture/serialize transport ms.",
+      "requiresRust": "a dedicated hashing/cache/sync timing bucket in verter_audit"
+    },
+    {
+      "metric": "subprocess thread-count enforcement",
+      "reason": "only axis-A's in-process host is thread-pinned; verter-tsc/tsgo/verter_lsp do not accept a thread-pin flag through the harness today.",
+      "requiresRust": "a thread-pin flag on verter-tsc / verter_lsp (and tsgo pass-through)"
+    },
+    {
+      "metric": "Svelte (.svelte) perf corpus + carrier-extension discovery",
+      "reason": "Block-6's perf corpus, the axis-A carrier discovery (collectVueFiles), and the LSP workloads (firstVue/countVue) are Vue .vue-ONLY; Svelte LSP/IDE support is a later block (B8). The gate makes NO claim of current Svelte perf coverage rather than fabricate a Svelte number against a non-existent corpus.",
+      "requiresRust": "gated on B8 (Svelte LSP/IDE): add a pinned hermetic .svelte perf corpus, generalize carrier discovery to the registered carrier extensions (.vue + .svelte), and add the Svelte axis-A/axis-B workloads — landing only once Svelte support exists so the numbers measure a real engine, not a stub."
+    },
+    {
+      "metric": "imported-module-edit invalidation locality (an open dependent re-diagnosing when an imported module's overlay is edited repeatedly)",
+      "reason": "verter-lsp's repeated imported-module-overlay edits do not re-invalidate an already-open dependent SFC — only the FIRST dependency edit propagates — so warm-lsp-incremental edits the DEPENDENT SFC's OWN buffer (re-pointing an inline import(\"./types\").WarmDepProbe<i> annotation at successive pre-declared aliases) instead of the imported module to obtain a reliable per-edit warm cross-file re-resolution. The workload stays genuinely cross-file (the erroring type lives in the imported module) but cannot exercise the imported-module-EDIT invalidation path.",
+      "requiresRust": "fix verter-lsp's one-shot cross-file invalidation so repeated overlay edits to an imported module re-invalidate and re-diagnose every open dependent, not only the first edit"
+    },
+    {
+      "metric": "cluster-aware bootstrap (per-run clustering in the CI predicate)",
+      "reason": "the gate's bootstrap resamples POOLED per-operation values, ignoring per-run clustering (operations within one run share that run's noise). On strongly correlated per-run noise the CI is over-confident — but the bias is toward a false RED (a spurious regression flag), the SAFE direction, never a false green, so it is sound to ship RED-until-armed. This is an arming PREREQUISITE, not optional polish: it must land BEFORE or WITH baseline arming. It is the ONE deferral here that needs NO Rust — a pure TS-side stats change in the gate's bootstrap predicate (gate.ts), unlike the Rust-bearing follow-ups above.",
+      "requiresRust": "make the bootstrap cluster-aware — resample whole per-run WorkloadSample clusters (or bootstrap run-level percentile scalars) instead of pooled per-operation values, so the CI reflects true between-run variance"
+    }
+  ]
+}

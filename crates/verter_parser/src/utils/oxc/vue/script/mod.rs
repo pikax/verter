@@ -29,6 +29,7 @@ pub use macros::{
     detect_macro_kind, is_define_component, MacroArrayArg, MacroArrayElement, MacroDeclarator,
     MacroObjectArg, MacroProperty, MacroTypeParams, ScriptMacro, VueMacroKind,
 };
+pub use setup::{extract_options_component_macro_args, OptionsComponentMacroArgs};
 pub use shared::ScriptParseContext;
 pub use types::*;
 pub use usage::{
@@ -170,15 +171,11 @@ pub fn parse_script_with_companion<'a>(
         }
     };
 
-    // Collect dynamic import() calls with .vue specifiers for IDE rewriting
-    let vue_dynamic_import_spans = collect_vue_dynamic_imports(program);
-
     ScriptParseResult {
         is_async,
         items,
         errors,
         bindings,
-        vue_dynamic_import_spans,
     }
 }
 
@@ -212,86 +209,6 @@ fn collect_macro_prop_keys(items: &[ScriptItem]) -> Vec<crate::common::Span> {
         }
     }
     keys
-}
-
-/// Collect source literal spans of `import('./Foo.vue')` expressions.
-///
-/// Walks the full AST to find `ImportExpression` nodes whose source is a string
-/// literal ending in `.vue`. Returns the span of each source literal (including quotes).
-fn collect_vue_dynamic_imports(program: &Program<'_>) -> Vec<crate::common::Span> {
-    use crate::common::Span;
-    use oxc_ast::ast::{Expression, Statement};
-
-    let mut spans = Vec::new();
-
-    fn scan_expr(expr: &Expression<'_>, spans: &mut Vec<Span>) {
-        if let Expression::ImportExpression(import) = expr {
-            if let Expression::StringLiteral(lit) = &import.source {
-                if lit.value.ends_with(".vue") {
-                    spans.push(Span::from(lit.span));
-                }
-            }
-        }
-        // Recurse into common expression forms
-        match expr {
-            Expression::CallExpression(call) => {
-                scan_expr(&call.callee, spans);
-                for arg in &call.arguments {
-                    if let Some(expr) = arg.as_expression() {
-                        scan_expr(expr, spans);
-                    }
-                }
-            }
-            Expression::ArrowFunctionExpression(arrow) => {
-                for stmt in &arrow.body.statements {
-                    scan_stmt(stmt, spans);
-                }
-            }
-            Expression::ParenthesizedExpression(paren) => {
-                scan_expr(&paren.expression, spans);
-            }
-            Expression::ConditionalExpression(cond) => {
-                scan_expr(&cond.test, spans);
-                scan_expr(&cond.consequent, spans);
-                scan_expr(&cond.alternate, spans);
-            }
-            Expression::LogicalExpression(log) => {
-                scan_expr(&log.left, spans);
-                scan_expr(&log.right, spans);
-            }
-            _ => {}
-        }
-    }
-
-    fn scan_stmt(stmt: &Statement<'_>, spans: &mut Vec<Span>) {
-        match stmt {
-            Statement::ExpressionStatement(es) => scan_expr(&es.expression, spans),
-            Statement::VariableDeclaration(vd) => {
-                for decl in &vd.declarations {
-                    if let Some(init) = &decl.init {
-                        scan_expr(init, spans);
-                    }
-                }
-            }
-            Statement::ReturnStatement(ret) => {
-                if let Some(arg) = &ret.argument {
-                    scan_expr(arg, spans);
-                }
-            }
-            Statement::BlockStatement(block) => {
-                for s in &block.body {
-                    scan_stmt(s, spans);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    for stmt in &program.body {
-        scan_stmt(stmt, &mut spans);
-    }
-
-    spans
 }
 
 #[cfg(test)]

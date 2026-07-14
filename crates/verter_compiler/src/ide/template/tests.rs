@@ -1746,6 +1746,305 @@ fn v_model_named() {
     );
 }
 
+/// `v-model:show` on a COMPONENT — the generated `show=` prop NAME token must map
+/// back to the source `show` arg span so a TypeProvider can resolve the child
+/// component's `$props['show']` and hover lands on the directive arg. Pre-change
+/// the static-arg prop name was emitted as unmapped synthetic text
+/// (`Piece::Syn("show={")`) and the whole `v-model:show="x"` span was overwritten,
+/// so the arg token had ZERO source→TSX mapping. Baseline against the working
+/// `:show` bind name mapping (`v_bind_shorthand_title_source_map_accuracy`).
+#[test]
+fn vmodel_named_component_prop_name_maps_to_arg() {
+    let source = r#"<template><Comp v-model:show="x" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("x", BindingType::SetupConst)]);
+
+    assert!(
+        output.contains("show={"),
+        "named v-model should emit `show={{...}}`: {output}"
+    );
+
+    // Source col of the `show` arg token (`v-model:show` → after the colon).
+    let arg_src_col = source.find("v-model:show").unwrap() as u32 + "v-model:".len() as u32;
+    // The generated prop NAME `show=` — locate the prop-name occurrence (the one
+    // immediately followed by `={`).
+    let name_gen_col = output.find("show={").unwrap() as u32;
+    let (name_gl, name_gc) = gen_offset_to_line_col(&output, name_gen_col as usize);
+
+    let has_correct = tokens
+        .iter()
+        .any(|&(dl, dc, sc)| dl == name_gl && dc == name_gc && sc == arg_src_col);
+    assert!(
+        has_correct,
+        "generated `show` prop-name (gen {name_gl}:{name_gc}) must map back to the \
+         source arg col {arg_src_col} (the `s` in `show`). Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+/// `v-model:my-arg` on a COMPONENT — the generated prop name is the camelCased
+/// `myArg` (≠ the source `my-arg`), so preserve-in-place is impossible. The mapped
+/// piece lets the generated token be `myArg` while owning the source `arg_span`.
+/// The mapped token (at the prop-name start) must point back into the `my-arg`
+/// source token. Pre-change there was no mapping at all.
+#[test]
+fn vmodel_named_component_kebab_prop_name_maps_to_arg() {
+    let source = r#"<template><Comp v-model:my-arg="x" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("x", BindingType::SetupConst)]);
+
+    assert!(
+        output.contains("myArg={"),
+        "named v-model:my-arg should camelCase to `myArg={{...}}`: {output}"
+    );
+
+    let arg_src_col = source.find("v-model:my-arg").unwrap() as u32 + "v-model:".len() as u32;
+    let name_gen_col = output.find("myArg={").unwrap() as u32;
+    let (name_gl, name_gc) = gen_offset_to_line_col(&output, name_gen_col as usize);
+
+    // The mapped prop-name token starts at the generated `myArg` and points back
+    // into the `my-arg` source token (InsertMapped is linear-run, so it anchors at
+    // the arg start; char-perfect kebab→camel is not required — the whole source
+    // token is covered by the source-owned hover).
+    let has_correct = tokens
+        .iter()
+        .any(|&(dl, dc, sc)| dl == name_gl && dc == name_gc && sc == arg_src_col);
+    assert!(
+        has_correct,
+        "generated `myArg` prop-name (gen {name_gl}:{name_gc}) must map back to the \
+         source arg col {arg_src_col} (the `m` in `my-arg`). Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+/// REGRESSION: the bound VALUE (`x`) and the `onUpdate:show` handler emissions
+/// must be UNCHANGED by the mapped prop-name piece. The value still maps back to
+/// its source span, and the synthetic `onUpdate:show` event key must NOT carry a
+/// duplicate mapping to the arg span (which would make hover land on the event
+/// key instead of the prop).
+#[test]
+fn vmodel_named_component_value_and_onupdate_unchanged() {
+    let source = r#"<template><Comp v-model:show="x" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("x", BindingType::SetupConst)]);
+
+    // The bound value `x` still maps back to source.
+    let value_src_col = source.find("\"x\"").unwrap() as u32 + 1;
+    assert!(
+        has_token_for_src(&tokens, value_src_col),
+        "bound value `x` must still map back to source col {value_src_col}. Tokens: {tokens:?}"
+    );
+
+    // The onUpdate handler key is still synthetic/unmapped.
+    assert!(
+        output.contains("\"onUpdate:show\""),
+        "named v-model should still produce onUpdate:show handler: {output}"
+    );
+    let onupdate_gen = output.find("onUpdate:show").unwrap();
+    let (ul, uc) = gen_offset_to_line_col(&output, onupdate_gen);
+    assert!(
+        !has_token_at_gen(&tokens, ul, uc),
+        "onUpdate:show event key (gen {ul}:{uc}) must NOT carry a mapping (no duplicate \
+         arg provenance). Tokens: {tokens:?}"
+    );
+
+    // The arg span must be mapped EXACTLY ONCE (only the prop-name piece) — never a
+    // second time onto the onUpdate key. Count distinct generated positions that map
+    // to the arg source col.
+    let arg_src_col = source.find("v-model:show").unwrap() as u32 + "v-model:".len() as u32;
+    let arg_mappings = tokens
+        .iter()
+        .filter(|&&(_, _, sc)| sc == arg_src_col)
+        .count();
+    assert_eq!(
+        arg_mappings, 1,
+        "the source arg col {arg_src_col} must be mapped exactly once (the prop name), \
+         not duplicated onto onUpdate/modifier keys. Tokens: {tokens:?}"
+    );
+}
+
+/// REGRESSION: native `<input v-model:foo="x">` must NOT map the static arg to the
+/// generated DOM prop (`value`/`checked`) — native v-model DOM props are
+/// compiler-synthesized, not a `$props` surface, so mapping would be false
+/// provenance. The DOM-prop name must carry NO mapping to the arg span.
+#[test]
+fn vmodel_native_arg_not_mapped_to_dom_prop() {
+    // Native input with a NAMED arg (`v-model:foo`): the named-arg-on-native branch
+    // is the actual risk the `!is_native` guard defends — a default `v-model` (no
+    // arg) never had a name to map, so it passes trivially. With a named arg, the
+    // arg `foo` is meaningless on a native element (the DOM prop is the synthesized
+    // `value`/`checked`, NOT a `$props` surface), so `static_arg_span` stays `None`
+    // and the codegen must NOT fabricate a mapping onto the synthesized DOM prop.
+    let source = r#"<template><input v-model:foo="x"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("x", BindingType::SetupConst)]);
+
+    // A native element ignores the named arg: the DOM prop is still `value`, NOT a
+    // camelCased `foo` prop. The arg name must not leak into a `$props`-style prop.
+    assert!(
+        output.contains("value={"),
+        "native v-model:foo should still emit the synthesized DOM prop value={{...}}: {output}"
+    );
+    assert!(
+        !output.contains("foo={"),
+        "native v-model:foo must NOT synthesize a `foo` component prop: {output}"
+    );
+
+    // The generated DOM prop name (`value`) must NOT carry a mapped token — it is
+    // compiler-synthesized, not a source token, so the `!is_native` guard must keep
+    // `static_arg_span = None` and emit no `MappedStaticModelPropName` piece.
+    let value_gen = output.find("value={").unwrap();
+    let (vl, vc) = gen_offset_to_line_col(&output, value_gen);
+    assert!(
+        !has_token_at_gen(&tokens, vl, vc),
+        "native DOM prop `value` (gen {vl}:{vc}) must NOT carry a mapped token \
+         (false provenance). Tokens: {tokens:?}, output: {output}"
+    );
+
+    // Strongest: the source `foo` arg span must NOT be mapped anywhere in the
+    // generated TSX (no `MappedStaticModelPropName` emission for a native element).
+    let arg_src_col = source.find("v-model:foo").unwrap() as u32 + "v-model:".len() as u32;
+    assert!(
+        !has_token_for_src(&tokens, arg_src_col),
+        "native v-model:foo arg (source col {arg_src_col}) must carry NO mapped token \
+         — `!is_native` keeps `static_arg_span = None`. Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+/// MULTIPLE `v-model` on one COMPONENT — each generated prop NAME must map
+/// INDEPENDENTLY back to its OWN source arg span. The `v_model_hover` loop walks
+/// every directive and the per-directive mapped prop-name piece must anchor at
+/// the matching arg, so `v-model:a` → source `a` and `v-model:b` → source `b`
+/// (never both onto one arg, never a cross-wired mapping).
+#[test]
+fn vmodel_multiple_named_args_map_independently() {
+    let source = r#"<template><Comp v-model:a="x" v-model:b="y" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(
+        source,
+        &[
+            ("x", BindingType::SetupConst),
+            ("y", BindingType::SetupConst),
+        ],
+    );
+
+    assert!(
+        output.contains("a={") && output.contains("b={"),
+        "both named v-models should emit `a={{...}}` and `b={{...}}`: {output}"
+    );
+
+    // Source cols of each arg (`v-model:a` / `v-model:b` → the char after the colon).
+    let a_src_col = source.find("v-model:a").unwrap() as u32 + "v-model:".len() as u32;
+    let b_src_col = source.find("v-model:b").unwrap() as u32 + "v-model:".len() as u32;
+    assert_ne!(
+        a_src_col, b_src_col,
+        "the two args must be distinct source spans"
+    );
+
+    // Generated prop-name positions: the `a={` / `b={` prop-name tokens.
+    let a_gen = output.find("a={").unwrap();
+    let b_gen = output.find("b={").unwrap();
+    let (a_gl, a_gc) = gen_offset_to_line_col(&output, a_gen);
+    let (b_gl, b_gc) = gen_offset_to_line_col(&output, b_gen);
+
+    // `a` prop name maps to the `a` arg span (and ONLY that one).
+    assert!(
+        tokens
+            .iter()
+            .any(|&(dl, dc, sc)| dl == a_gl && dc == a_gc && sc == a_src_col),
+        "generated `a` prop-name (gen {a_gl}:{a_gc}) must map to source arg col {a_src_col}. \
+         Tokens: {tokens:?}, output: {output}"
+    );
+    // `b` prop name maps to the `b` arg span (and ONLY that one).
+    assert!(
+        tokens
+            .iter()
+            .any(|&(dl, dc, sc)| dl == b_gl && dc == b_gc && sc == b_src_col),
+        "generated `b` prop-name (gen {b_gl}:{b_gc}) must map to source arg col {b_src_col}. \
+         Tokens: {tokens:?}, output: {output}"
+    );
+
+    // Each arg span is mapped EXACTLY ONCE (no cross-wiring onto the other prop name
+    // and no duplicate onto an onUpdate/modifier key).
+    let a_mappings = tokens.iter().filter(|&&(_, _, sc)| sc == a_src_col).count();
+    let b_mappings = tokens.iter().filter(|&&(_, _, sc)| sc == b_src_col).count();
+    assert_eq!(
+        a_mappings, 1,
+        "arg `a` (col {a_src_col}) must be mapped exactly once. Tokens: {tokens:?}"
+    );
+    assert_eq!(
+        b_mappings, 1,
+        "arg `b` (col {b_src_col}) must be mapped exactly once. Tokens: {tokens:?}"
+    );
+}
+
+/// MODIFIER on a named component `v-model` — the prop NAME still maps to the arg
+/// span, and the modifier name (`trim`) falls OUTSIDE the source-owned prop-name
+/// hover range and emits through the UNCHANGED `Piece::Modifier` path (its own
+/// mapped token in the `showModifiers={{ ... }}` prop).
+#[test]
+fn vmodel_named_component_with_modifier_maps_prop_name_and_modifier() {
+    let source = r#"<template><Comp v-model:show.trim="x" /></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("x", BindingType::SetupConst)]);
+
+    assert!(
+        output.contains("show={"),
+        "named v-model with modifier should still emit `show={{...}}`: {output}"
+    );
+    assert!(
+        output.contains("showModifiers={{"),
+        "the `.trim` modifier should emit a `showModifiers` prop: {output}"
+    );
+    assert!(
+        output.contains("trim"),
+        "the modifiers prop should contain `trim`: {output}"
+    );
+
+    // The prop NAME still maps to the source `show` arg span.
+    let arg_src_col = source.find("v-model:show").unwrap() as u32 + "v-model:".len() as u32;
+    let name_gen = output.find("show={").unwrap();
+    let (name_gl, name_gc) = gen_offset_to_line_col(&output, name_gen);
+    assert!(
+        tokens
+            .iter()
+            .any(|&(dl, dc, sc)| dl == name_gl && dc == name_gc && sc == arg_src_col),
+        "generated `show` prop-name (gen {name_gl}:{name_gc}) must map to source arg col \
+         {arg_src_col}. Tokens: {tokens:?}, output: {output}"
+    );
+
+    // The modifier name `trim` maps through the UNCHANGED `Piece::Modifier` path to
+    // its OWN source span (the `trim` after the dot) — outside the prop-name token.
+    let trim_src = source.find(".trim").unwrap() as u32 + 1;
+    assert_ne!(
+        trim_src, arg_src_col,
+        "the modifier span must be distinct from the arg span"
+    );
+    assert!(
+        has_token_for_src(&tokens, trim_src),
+        "modifier `trim` must map to its own source col {trim_src} (unchanged \
+         Piece::Modifier path). Tokens: {tokens:?}, output: {output}"
+    );
+}
+
+/// KEBAB component tag + KEBAB arg — `<my-comp v-model:my-arg="x"/>`. The generated
+/// prop name camelCases to `myArg`, and that token must map back to the SOURCE
+/// `my-arg` arg span (a PascalCase/kebab component tag is still a component, so the
+/// `!is_native` branch emits the mapped prop-name piece).
+#[test]
+fn vmodel_kebab_component_named_arg_maps_to_arg() {
+    let source = r#"<template><my-comp v-model:my-arg="x"/></template>"#;
+    let (output, tokens) = gen_tsx_template_with_map(source, &[("x", BindingType::SetupConst)]);
+
+    assert!(
+        output.contains("myArg={"),
+        "kebab component v-model:my-arg should camelCase to `myArg={{...}}`: {output}"
+    );
+
+    let arg_src_col = source.find("v-model:my-arg").unwrap() as u32 + "v-model:".len() as u32;
+    let name_gen = output.find("myArg={").unwrap();
+    let (name_gl, name_gc) = gen_offset_to_line_col(&output, name_gen);
+    assert!(
+        tokens
+            .iter()
+            .any(|&(dl, dc, sc)| dl == name_gl && dc == name_gc && sc == arg_src_col),
+        "generated `myArg` prop-name (gen {name_gl}:{name_gc}) must map back to source arg \
+         col {arg_src_col} (the `m` in `my-arg`). Tokens: {tokens:?}, output: {output}"
+    );
+}
+
 #[test]
 fn v_model_with_binding_resolution() {
     let result = gen_tsx_template_with_bindings(

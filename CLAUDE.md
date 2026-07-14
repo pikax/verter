@@ -145,6 +145,16 @@ Guards: `compile_audit_sourcemap`.
 
 See `/compiler-codegen` skill for full codegen pipeline, backends, and CompileTarget details.
 
+### Carrier IDE TS Surface Principle
+
+North star for the IDE/LSP experience: for every carrier with an IDE projection (`.vue`, `.svelte`), the script block (`<script>`, `<script setup>`, Svelte module/instance scripts) AND the supported template/markup expressions are **ONE** generated TypeScript/JavaScript/JSX surface — interpolations (`{{ }}`, Svelte `{expr}`), directive/attribute expression values (`v-if`/`v-for`/`v-bind`/`:`/`v-on`/`@`/`v-model`/`v-slot` and dynamic args; Svelte `bind:`/`on:`/`class:`/`style:`/`use:`, `{#if}`/`{#each}`/`{#await}`/snippets, `{@render}`/`{@html}`/`{@const}`, rune calls) all lower into it. That surface is obtained through the IDE path (`CompileTarget::IDE`/`TSX`), synced to the active TypeProvider, with provider positions/ranges/edits mapped back through the document's `ProviderPositionMapper`.
+
+**The bar:** for any supported mapped TS/JS expression position, every provider-backed IDE feature — diagnostics, hover, definition/type-definition, references, rename, completion/resolve, signature help, document highlights, semantic tokens, inlay hints, and generic code actions whose edits map exactly — should behave like the equivalent standalone `.ts`/`.js`/`.jsx` program, with results mapped back to the carrier source. A binding represented in BOTH script and template is discoverable and renamable from either side (rename spans script + template; find-all-references finds both). This holds for **both Vue and Svelte** over the shared LSP path.
+
+Fail-closed boundary: unmapped synthetic helper code, framework tokens with no TS correlate, unsupported/experimental projection regions, and provider edits whose full ranges cannot be mapped must fail closed or return framework-native results — never mis-mapped. Source actions (organize-imports, fix-all, formatting) require explicit per-action support and tests; they are NOT implied by this principle. This is a **principle, not yet a `(CRITICAL)` guarded rule** — it is promoted to CRITICAL once real-provider cross-region Vue/Svelte regression tests guard it.
+
+See `/compiler-codegen` → "Carrier IDE TS Surface Principle" for the full normative text (every covered expression form), and `/host-session` / `/position-encoding` for provider sync and position/range/edit mapping.
+
 ### Fallthrough / Root Inheritance (CRITICAL)
 
 The shared Rust pipeline owns all fallthrough and root inheritance semantics. `verter_semantic::analysis` extracts root reachability facts only. `verter_session` owns the single inheritance resolver, recursion, conditional branch composition, generic propagation, caching, and final metadata projection.
@@ -257,10 +267,26 @@ Closed-contract rules:
 - **Facts/carrier-only adapter ctx.** `FrameworkAdapterCtx` exposes EXACTLY two ops — `carrier_for::<T>` (the adapter's typed parse carrier, `None` for a carrier-less adapter — never a forged token) and `script_facts_for::<T>` (resolved script facts on demand). It never resolves types, indexes a file, runs OXC, calls `ProjectSemanticDispatch`, or reads a `StoreView`. Guard `framework_adapter_ctx_closed_surface`.
 - **Two-pass script-fact seam.** The syntax-capture half (`verter_semantic::analysis::framework_facts`) captures candidates from the live OXC program — SYNTAX-ONLY (may touch OXC + `lower_ts_type`, MUST NOT resolve imports or read capability bits; guard `script_fact_capture_is_syntax_only`). The resolved-validation half (`framework/script_facts`) drives provider `validate` on demand over neutral resolved-import + capability data, content-addresses candidates, and publishes resolved facts under a fact-rail + strict-same-generation gate with `SignatureAdmission::Cacheable`-only publication (overflow ⇒ `ReturnOnly`, no warm). An EMPTY active-provider set is byte-identical zero-cost (Vue does NOT move onto the seam). The `ActiveProviderIndex` is the shared gate authority. Guard `script_fact_providers_zero_cost_on_miss`. The framework-surface result caches (`FrameworkSurfaceStore` / `FrameworkScriptCaches`) are fact-validated today but live on the framework registry rows, NOT the single `ProjectTypeStore` — they are PROVISIONAL off-store caches to be consolidated onto `ProjectTypeStore` (and given true singleflight) at U10.
 - **Parse-domain component-default synth.** `ComponentDefaultSynth` synthesises a component's default-export value symbol from PARSE-DOMAIN inputs only (macros + syntax-capture candidates); it never names the resolved-validation fact types. Registry-dispatched at the shallow-analysis injection points by the file's resolved language. Guard `component_default_synth_parse_domain_only`.
-- **Generated virtual-file naming is descriptor-owned.** The `VirtualFileNaming` column is the single authority for an adapter's IDE / API / testing-API / sidecar suffixes; the committed TS mirror (`packages/typescript-plugin/src/generated/virtual-file-naming.ts`) is rendered from it and byte-pinned. Guard `virtual_file_naming_ts_freshness`.
+- **Generated virtual-file naming is descriptor-owned.** The `VirtualFileNaming` column is the single authority for an adapter's IDE / API / testing-API / sidecar suffixes; the committed TS mirror (`packages/language-shared/src/virtual-file-naming.generated.ts`) is rendered from it and byte-pinned. Guard `virtual_file_naming_ts_freshness`.
 - **No re-export shim for relocated Vue resolution.** The Vue resolution bodies relocated to `framework_surface::vue_exec`; `typeinfo/adapters/vue/{public_type,surface,store}.rs` are DELETED with no re-export shim or alias under `adapters::vue`, and `VueShallowMetadataStore` / `VueMacroDtoKey` are retired. Guards `vue_relocation_no_shim` + `retired_symbols_absent_from_production_source`.
 
 See the `/framework-adapters` skill for the substrate's module map, the descriptor/registry/ctx/executor contracts, the script-fact seam, and Vue as the reference adapter.
+
+### Project-Bound External-TS Contract (CRITICAL)
+
+Production external-TypeScript results for carrier sources are project-bound. The result-producing backend path is `ExternalTsProjectResolver` → `CarrierRegistry` → `EngineBackend`: `EngineBackend::ensure_project` is reached only from a resolved `ProjectBinding`, and `publish_snapshot`, `query`, and `diagnostics` require the resulting `BoundProject` witness. No production external-TS result path may infer a project from a bare path, open a carrier into a config-less/inferred project, or fall back to an inferred backend. Path-shaped transport notifications may exist below this contract, but they cannot construct external-TS results or bypass `BoundProject`.
+
+Ownership is TypeScript-correct. A carrier source (`.vue`, `.svelte`, or any adapter extension) is owned by a configured project only through the default include, a no-extension directory/bare-star glob, or a glob/`files` entry that explicitly covers that extension. An extension-specific `*.ts` glob does not own it. TypeScript include has no brace expansion: multi-extension coverage is separate entries, never `*.{vue,svelte}`.
+
+`NoProject` and `Ambiguous` produce no production external-TS result; Verter-native non-external-TS features may still answer. `SyntheticScratch` is a separate, explicitly labelled scratch lane for non-cross-file features only. It never supplies configured-project semantics, batch typecheck, cross-file results, or project-cache warming.
+
+Generated companion names are descriptor-owned and live in the user namespace. They are collision-free against different adapter source extensions in the normal case, but not resolution-unambiguous or reserved. A real user file at the exact `{name}.vue.tsx` / `{name}.svelte.tsx` companion path, or a same-stem Svelte rune module beside a component, is a detected resolution conflict: Verter marks the source ambiguous and fails closed, never overlay-shadows a real user file and never surfaces a silently wrong edge.
+
+This rule becomes live for a backend only when that backend's real project-bound path lands; the inferred fallback for that backend is deleted in the same change.
+
+Guards: `provider_op_requires_resolved_project`, `carrier_ownership_extension_rules`, `carrier_never_shadows_real_user_file`, `same_stem_svelte_component_rune_fails_closed`, `no_fallback_to_inferred_anywhere`.
+
+See the `/host-session` skill for the contract's three-layer structure (`ProjectResolver`/`CarrierRegistry`/`EngineBackend`), the `BoundProject` witness type-state, and the carrier-publish path.
 
 ## Build
 
@@ -353,11 +379,25 @@ Coverage: new features need tests, bug fixes need regression tests, refactors mu
 
 **Always include negative assertions**: verify both what SHOULD and should NOT be present. Codegen tests must check removed syntax is absent. Type tests must include `@ts-expect-error` guards against `any`/`never`.
 
+**Public-boundary acceptance**: for every changed user-visible IDE, API, or compiler outcome, each affected acceptance ID has an automated public-boundary test asserting the required result AND the relevant forbidden or fail-closed result. Provider-selection, status, unit, and architecture tests supplement but do not substitute for that boundary test. A substrate block may inherit a parent boundary test only by recording the acceptance-ID mapping and executing that test in its gate. Enforcement is judgment — reviewers assess the actual invocation path and assertions, not the filename; §1a proves discrimination; confirm reruns the mapped test.
+
 **Architecture guards for critical rules**: every new `CRITICAL` architecture rule lands with a static architecture guard or a discriminating regression test in the same change (subject to the landed-scanner bar below — a "static guard" is never a new name-keyed file scanner); if a guard cannot be automated yet, the rule text names the planned guard/test and the gap is tracked in the owning skill/doc. The R6 meta-guard at `crates/verter_session/tests/cases/g_misc0/critical_rules_have_guards.rs` (`every_critical_rule_in_docs_has_registered_guard`) walks `CLAUDE.md` plus every `.claude/skills/*/SKILL.md` and asserts every `(CRITICAL)` heading has a `CRITICAL_RULE_GUARDS` registry row with at least one named guard — a prose-only `(CRITICAL)` section fails the gate.
 
 **Landed guards are structural, never name-keyed file scanners (forward-only)**: a heuristic file-scanner guard/test that keys on a specific tool, function, or identifier name (any spelled source name/path/token — type, module, import/path-segment, and string identities included; `syn`/AST-based scanning included) is a transient plan artifact — WIP-only (scratch branches, squashed out before landing), never a full-fledged landed guard. LANDED enforcement of an invariant is structural — compiler/type-system/tool-based (privacy/visibility/`E0603`, type-state, sealed traits, marker-trait derives, a real used tool or function) — never a name/text/grep scanner over the source tree. This strengthens Structural-Confinement-First (`.claude/skills/mom-cto-orchestration/reference/PROTOCOL.md` → Structural-Confinement-First → Landed-scanner bar): even a residual scanner that rule would permit (justified, recorded, supplement to a structural primary) does not land — keep it WIP, replace it structurally, or accept the residue uncovered by any landed scanner. Review/governance-enforced by design, NOT guard-enforced — a guard that detects "name-keyed scanner guards" would itself be a name-scanner. Forward-only: pre-existing landed scanners are grandfathered as a class — by temporal status (already landed at rule adoption), not by list membership — and retained as-is; the explicitly disclosed high-risk example (illustrative, not an exhaustive inventory) is the hot-materialize syntactic tripwire (`hot_materialize_syntactic_tripwire_residual_backstop` + its `HOT_TERMINAL_SINKS`/`HOT_DECIDE_TAINTED_GATE_IDENTS`/`HOT_EXTRACTING_GATE_IDENTS`/`HOT_MAT_DIRECT_IDENTS` name-lists in `crates/verter_session/tests/cases/output_projector_residual_guards.rs`), retained as-is with no removal planned or required — its STRUCTURAL rail (the `NoTypeExpr` marker + the sealed `OutputProjector` capabilities) remains the durable primary.
 
 **Rust test file organization**: When inline `#[cfg(test)]` exceeds ~400 lines, extract to a sibling `*_tests.rs` file.
+
+### Verification Must Prove Execution (MANDATORY)
+
+A required gate passes only on fresh, input-bound evidence that: every applicable required job was eligible and ran; the intended tree-derived surface was owned and independently discovered; selectors matched non-zero work; required source, build, and fixture prerequisites matched the tested tree; executed work was non-zero; unexpected prerequisite skips were zero; child deadlines were strictly below their parent killer; and a terminal summary completed. **Exit status 0 alone, a self-declared test universe, or a missing required-job result is FAIL.** Every tracked test or guard has exactly one declared primary gate; a hand-maintained filename list may not define the primary universe unless generated from independent discovery and parity-checked.
+
+Attestation alone is insufficient — a receipt faithfully attests whatever incomplete universe the runner defines for itself. The durable design needs all three: fresh execution attestation; independently tree-derived inventory/discovery parity; and per-surface negative-control mutation through the exact canonical entry point. A single global canary cannot detect an omitted unrelated spec.
+
+**The negative control must itself be proven to have applied.** A plant that fails to apply reports a pass: `perl`/`sed`/`grep` exit 0 on a non-match, so a mutation's exit code is never proof it landed, and a verification search hitting a PRE-EXISTING occurrence of the planted string is a false positive. Prove the mutation is present, unique, and new in the source before trusting the run; a green planted run means the plant failed until proven otherwise. A discrimination check that cannot distinguish "the plant did not apply" from "the code is correct" is not a discrimination check.
+
+Planned guard: `gate_contract_integrity` — one registered suite exercising the canonical entry point against independent inventory plus per-surface negative controls covering missing summary, disabled or missing job, invalid timeout nesting, zero selection, stale or missing build, missing fixture or unexpected skip, omitted or unowned test, and a mutation that silently fails to apply. Until that guard, its attesting driver, and the required-job aggregator land, this rule is held only by §1a and confirm judgment.
+
+**This rule currently fails its own test, and says so.** It ships `(MANDATORY)` — precisely the tier the R6 meta-guard (`every_critical_rule_in_docs_has_registered_guard`) does not check, because that guard scans `(CRITICAL)` headings only. A rule whose thesis is "a gate that cannot prove it ran is a failure" is therefore, today, a gate that cannot prove it ran. `(CRITICAL)` is not available as a shortcut: an unguarded `(CRITICAL)` heading FAILS the meta-guard. So the gap is named rather than hidden — the deferral, its owner (the gate-integrity block), its resolution gate (that block's landing), and the live in-tree instances are recorded in [`docs/arch/gate-integrity-ledger.md`](docs/arch/gate-integrity-ledger.md). Promotion to `(CRITICAL)` with its own `CRITICAL_RULE_GUARDS` row, in the same change that lands the guard, is an ACCEPTANCE CRITERION of that block (ledger row GI-4). It is never folded into `Stub Prevention` — a related but distinct invariant whose guards do not enforce these semantics.
 
 ### Testing-Hermeticity (MANDATORY)
 
@@ -393,15 +433,20 @@ Prefer architecturally correct, long-term solutions; evaluate by correctness and
 
 Plans must include these sections:
 1. **Context** — why this change is being made
-2. **Changes** — specific files to modify with concrete modifications
-3. **Legacy Deletions** — explicit list of files, functions, code paths, feature flags to remove
-4. **Verification** — full workspace test commands and expected outcomes
+2. **Intent Contract** — the ratified statement of intent, before any mechanism design
+3. **Changes** — specific files to modify with concrete modifications
+4. **Legacy Deletions** — explicit list of files, functions, code paths, feature flags to remove
+5. **Verification** — full workspace test commands and expected outcomes
 
 Without explicit legacy deletion lists, agents skip deletions and leave dual paths alive.
+
+**Intent before mechanism.** Before mechanism design for a block that changes observable behavior, authority, or fallback, record a ratified intent contract: the actor/problem and why the capability should exist; required and forbidden observable outcomes; authority/fallback order; a planned test or gate for each stable acceptance ID; and material cold, warm, allocation, fan-out, and latency bounds. An internal substrate block may reference its parent contract but must state the invariant and performance contribution it owns. Ratification comes from the approved plan or product authority; no implementation brief is dispatched without it. Enforcement is judgment — exercised at decomposition and again immediately before implementation dispatch.
 
 ### Execution
 
 Execute approved plans fully in one pass, end-to-end, without intermediate checkpoints or mid-plan confirmation on already-approved steps. Do not pause, defer scope, leave planned work unfinished, or rewrite the plan into a smaller/safer variant because the correct path is breaking, broad, or labor-intensive. Approved plans land as written unless the user explicitly re-scopes them.
+
+**One-pass execution applies only while the approved design remains valid.** The second-REOPEN circuit breaker lapses approval for the affected design: pause implementation, obtain and record the required architecture/product ruling, and resume only once the design is ratified again. This is not a checkpoint — one-pass governs *executing an approved design*, and the breaker fires when *approval itself has lapsed*, which is a different event and precisely why execution must stop rather than grind on. STOP, failed verification, rule conflict, and verified plan-invalidating discoveries pause at their prescribed evidence gate without creating a discretionary user checkpoint. Breadth, breakage, effort, or migration size never lapses approval; approved scope changes only through the recorded ruling or explicit user re-scope. See `/mom-cto-orchestration` → Decision Admission.
 
 ### Orchestrating Large Plans
 
@@ -424,9 +469,10 @@ When replacing a feature or refactoring a system, delete the superseded code in 
 
 When encountering issues during implementation:
 - If the correct fix aligns with the architecture → implement it properly
-- If the fix would be a workaround, patch, or shim → do NOT apply it. Instead: add a `TODO(follow-up)` comment explaining the proper fix, note it in the feedback file, continue with the plan
 - Never apply a dirty fix that contradicts architectural rules just to make tests pass
-- A clean TODO with a follow-up plan beats a quick patch that accumulates debt
+- If the proper fix is outside approved scope, do not apply a workaround and do not use a `TODO` as its disposition. Route the finding through the applicable scope authority and record `ADOPT-NOW`, `DEFER`, or `REJECT` before related work continues. A `TODO` may reference an approved debt row but never replaces it.
+
+**Explicit finding disposition.** Every scope-deviating correctness finding is dispositioned before related work continues as `ADOPT-NOW`, `DEFER`, or `REJECT`. `ADOPT-NOW` records the scope and acceptance-contract change. `DEFER` requires a codex-DEFER ruling and a debt row naming the durable owner block, the resolution gate no later than plan close, the acceptance ID/test, and the ruling reference. `REJECT` records evidence and rationale. A TODO, a feedback entry, or an ephemeral agent identity is not a disposition; plan close requires zero open deferrals. Enforcement is judgment — codex at the scope consult, and the plan-close zero-open-deferral check.
 
 ### Stub Prevention (CRITICAL)
 
@@ -457,6 +503,24 @@ Categories: `[issue]` (bugs, unexpected behavior, workarounds), `[improvement]` 
 Format: `- [{category}] \`{file_path}\` — Brief description`
 
 ## Dependencies Policy
+
+**Repo-owned toolchain is Rust + JS/Node only — no committed Python.** Repo-owned gate, build, CI, test,
+code-generation, packaging, and release tooling is implemented as Rust bins or JS/Node scripts; Python is
+not a committed implementation language for those paths.
+
+- No tracked repo-owned `.py` file (outside third-party / non-toolchain trees `node_modules`,
+  `.integration-tests`, `vendored`/`vendor`, `.claude`, `target`).
+- No `python`/`python3`/`py -3` command invocation in `package.json`, `.github/workflows/*`, or tracked
+  repo-owned command wrappers (`*.sh`/`*.bash`/`*.ps1`/`*.cmd`/`*.bat`). Thin shell/PowerShell/cmd wrappers
+  are allowed as command-entry shims but must not invoke Python; Node/TS tool scripts must not spawn Python
+  transitively.
+- New or ported repo-owned tooling lands as a Rust bin (e.g. the `gen-typeinfo-manifest` cargo bin, the
+  xtask `check-four-mode-terminology` bin) or a Node script — never a committed Python script.
+- Agents may use Python transiently and locally for ad-hoc analysis, but such use is never committed and
+  never on a gate/build/CI/test path.
+- Committing repo-owned Python is allowed only if it is 100% necessary AND neither Rust nor JS/Node can do
+  it, adopted via an architecture-reviewed change to this policy with a narrow documented justification.
+  Until then, do not add Python.
 
 - Keep dependencies at their latest versions
 - Rust deps: update in `Cargo.toml`, run `cargo update`

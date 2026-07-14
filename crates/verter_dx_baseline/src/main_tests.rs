@@ -5,7 +5,8 @@ use verter_type_runtime::protocol::{
     CompletionResult, HoverInfo, TypeDiagnostic, TypeLocation, TypeProviderError,
 };
 use verter_type_runtime::protocol::{
-    RenameLocation, SemanticToken, SignatureHelp, TypeCodeAction, TypeDocumentHighlight,
+    ProviderDiagnosticContext, RenameLocation, SemanticToken, SignatureHelp, TypeCodeAction,
+    TypeDocumentHighlight,
 };
 use verter_type_runtime::ProviderFuture;
 
@@ -51,6 +52,10 @@ macro_rules! ready {
 }
 
 impl TypeProvider for MockProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
     fn open_file(&self, path: &str, _c: &str) -> ProviderFuture<'_, ()> {
         self.record(format!("open:{path}"));
         let r = self.apply_outcome();
@@ -109,6 +114,7 @@ impl TypeProvider for MockProvider {
         _p: &str,
         _s: u32,
         _e: u32,
+        _diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         ready!(vec![])
     }

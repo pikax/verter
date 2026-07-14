@@ -37,6 +37,14 @@ pub struct DocumentRegistry {
     /// Negotiated position encoding from the client (LSP 3.17).
     /// Set once during `initialize()`, before any documents are opened.
     encoding: RwLock<PositionEncodingKind>,
+    /// The authoritative, generation-stamped store of provider surfaces synced
+    /// to the type provider. Owned here — the single shared document/host facade
+    /// reached by the server, the sync coordinator, AND the background-drain free
+    /// functions (which already receive `&DocumentRegistry`) — so EVERY sync/close
+    /// path records/forgets a generation through one owner. A cross-file rename
+    /// captures the current snapshot set under a fence and maps a returned offset
+    /// only against the exact generation it captured.
+    provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore,
 }
 
 /// Tracked state for an open document.
@@ -78,7 +86,14 @@ impl DocumentRegistry {
                 ..CompileProfile::default()
             })),
             encoding: RwLock::new(PositionEncodingKind::UTF16),
+            provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore::new(),
         }
+    }
+
+    /// The generation-stamped provider-surface store (the authority behind
+    /// fail-closed cross-file rename mapping).
+    pub fn provider_surfaces(&self) -> &crate::provider_surface_store::ProviderSurfaceStore {
+        &self.provider_surfaces
     }
 
     /// Set the negotiated position encoding. Called once during `initialize()`,

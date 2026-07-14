@@ -1,4 +1,6 @@
 use super::*;
+use crate::canonical_path::CanonicalPath;
+use crate::membership::ConfiguredMembership;
 use crate::types::ResolvePhase;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,7 +17,11 @@ fn project(
         workspace_root.to_string(),
         tsconfig_path.map(str::to_string),
     );
-    project.membership = membership;
+    project.membership = crate::snapshot_builder::configured_membership_from_raw(
+        root,
+        &membership,
+        &project.compiler_options,
+    );
     project
 }
 
@@ -308,7 +314,7 @@ fn owner_selection_ignores_solution_style_root_membership() {
     ]);
 
     let owner = resolver
-        .owner_for_file("/workspace/src/App.vue")
+        .nearest_config_for_path("/workspace/src/App.vue")
         .expect("src/App.vue should have an owner project");
 
     assert_eq!(
@@ -324,7 +330,127 @@ fn owner_selection_ignores_solution_style_root_membership() {
 }
 
 #[test]
-fn ambiguous_configured_owner_returns_none() {
+fn live_resolver_files_are_immune_to_exclude() {
+    // FIX 4: in the LIVE `IdeProjectConfig::matches_file` path, an explicitly
+    // listed `files` entry under an excluded directory must still be OWNED —
+    // `files` are immune to `exclude` (matching TS + the new `StaticMembershipSpec`).
+    //
+    // DISCRIMINATING: before FIX 4 the exclude check ran BEFORE the files check,
+    // so `Keep.vue` (under the excluded `src/excluded`) was wrongly rejected ⇒
+    // `nearest_config_for_path` returned `None` (the red). After the fix the file is
+    // owned.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::IncludeExclude {
+            files: vec!["/workspace/src/excluded/Keep.vue".to_string()],
+            include: vec!["src/**/*".to_string()],
+            exclude: vec!["src/excluded".to_string()],
+        },
+    )]);
+
+    let owner = resolver.nearest_config_for_path("/workspace/src/excluded/Keep.vue");
+    assert!(
+        owner.is_some(),
+        "an explicit `files` entry under an excluded dir must be OWNED \
+         (files are immune to exclude in the live resolver path)"
+    );
+    assert_eq!(
+        owner.unwrap().tsconfig_path.as_deref(),
+        Some("/workspace/tsconfig.json")
+    );
+
+    // Negative control: a NON-files file under the excluded dir is still excluded.
+    assert!(
+        resolver
+            .nearest_config_for_path("/workspace/src/excluded/Other.vue")
+            .is_none(),
+        "a non-`files` file under the excluded dir stays excluded"
+    );
+}
+
+#[test]
+fn live_resolver_exclude_only_owns_default_include_minus_exclude() {
+    // FIX 1 (live path / path 2): an exclude-only config keeps the implicit
+    // default include MINUS excludes. The producer synthesizes the default
+    // include into the membership, so the LIVE resolver owns `src/Foo.vue` and
+    // `src/Foo.svelte` and REJECTS `dist/Foo.vue`. (This mirrors what the new
+    // spec / `StaticMembershipSpec::matches` produces — the two paths AGREE.)
+    //
+    // The membership shape here is exactly what `load_project_membership` +
+    // `spec_to_membership` round-trip to for `{"exclude":["dist"]}`: a default
+    // `**/*` include plus the user exclude.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::IncludeExclude {
+            files: Vec::new(),
+            include: vec!["**/*".to_string()],
+            exclude: vec!["dist".to_string()],
+        },
+    )]);
+
+    for ext in ["vue", "svelte"] {
+        let owned = format!("/workspace/src/Foo.{ext}");
+        assert!(
+            resolver.nearest_config_for_path(&owned).is_some(),
+            "exclude-only (default include) must OWN `src/Foo.{ext}`"
+        );
+    }
+    assert!(
+        resolver
+            .nearest_config_for_path("/workspace/dist/Foo.vue")
+            .is_none(),
+        "exclude-only must REJECT `dist/Foo.vue` (under the exclude)"
+    );
+}
+
+#[test]
+fn live_resolver_explicit_empty_files_owns_nothing() {
+    // FIX 1 distinction (live path): an explicit `files: []` solution-style
+    // config (with only the TS-default excludes, no include) owns NOTHING but
+    // its references — it must NOT fall back to owning everything-not-excluded.
+    //
+    // DISCRIMINATING: before FIX 4 the `!exclude.is_empty()` fallback made this
+    // own every non-excluded file (because the TS-default exclude is non-empty)
+    // — the red. After the fix an empty-include + empty-files membership owns
+    // nothing.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::IncludeExclude {
+            files: Vec::new(),
+            include: Vec::new(),
+            // Only the TS-default excludes (what `membership_to_spec` fills for
+            // an explicit `files: []` with no user exclude).
+            exclude: vec!["node_modules/**".to_string()],
+        },
+    )]);
+
+    assert!(
+        resolver
+            .nearest_config_for_path("/workspace/src/App.vue")
+            .is_none(),
+        "an explicit `files: []` solution-style config must own NOTHING but references \
+         (no everything-not-excluded fallback)"
+    );
+}
+
+#[test]
+fn ambiguous_configured_owners_are_preserved_non_collapsing() {
+    // Two configured projects at the SAME root both claim `shared.ts` via `files`.
+    // The resolver is NON-COLLAPSING: `effective_configs_for_path` must PRESERVE both
+    // candidates rather than invent a single winner (or collapse to None). The
+    // fail-closed ownership authority (`WorkspaceSnapshot::configured_owner_resolution_for_file`)
+    // consumes this overlap and reports `Ambiguous`; the resolver's job is only to not
+    // lose it. Import resolution (`nearest_config_for_path`) is NOT the ownership
+    // authority, so it is not asserted here.
+    //
+    // DISCRIMINATING: a collapsing single-owner API returns 1 (invents a winner) or 0
+    // (loses the file); the non-collapsing contract returns BOTH.
     let resolver = ProjectResolver::new(vec![
         project(
             "/workspace",
@@ -348,11 +474,21 @@ fn ambiguous_configured_owner_returns_none() {
         ),
     ]);
 
+    let candidates = resolver.effective_configs_for_path("/workspace/src/shared.ts");
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the non-collapsing resolver must PRESERVE both overlapping configured owners, \
+         not invent a single winner"
+    );
+    let tsconfigs: Vec<&str> = candidates
+        .iter()
+        .filter_map(|c| c.tsconfig_path.as_deref())
+        .collect();
     assert!(
-        resolver
-            .owner_for_file("/workspace/src/shared.ts")
-            .is_none(),
-        "single-owner resolver API must not invent a winner for overlapping configured owners"
+        tsconfigs.contains(&"/workspace/tsconfig.app.json")
+            && tsconfigs.contains(&"/workspace/tsconfig.vitest.json"),
+        "both overlapping configs must survive: {tsconfigs:?}"
     );
 }
 
@@ -379,7 +515,7 @@ fn descendant_configured_owner_wins_over_ancestor_configured_owner() {
     ]);
 
     let owner = resolver
-        .owner_for_file("/workspace/packages/app/src/Note.vue")
+        .nearest_config_for_path("/workspace/packages/app/src/Note.vue")
         .expect("descendant package config must own the package file");
     // Positive: the package config wins.
     assert_eq!(
@@ -396,7 +532,7 @@ fn descendant_configured_owner_wins_over_ancestor_configured_owner() {
 
     // A file owned only by the ancestor root still resolves to the root.
     let root_owner = resolver
-        .owner_for_file("/workspace/scripts/build.ts")
+        .nearest_config_for_path("/workspace/scripts/build.ts")
         .expect("ancestor root config still owns files outside descendant packages");
     assert_eq!(
         root_owner.tsconfig_path.as_deref(),
@@ -410,7 +546,7 @@ fn incomparable_configured_roots_each_own_only_their_own_files() {
     // Sibling-root isolation in the RESOLVER path: `IdeProjectConfig::matches_file`
     // applies `normalized_starts_with(file, root)` FIRST, so two configs with
     // incomparable roots can NEVER both claim the same file — genuine
-    // incomparable ambiguity is unreachable through `owner_for_file` (it IS
+    // incomparable ambiguity is unreachable through `nearest_config_for_path` (it IS
     // reachable in the SNAPSHOT path, exercised by
     // `workspace_snapshot_tests::incomparable_configured_roots_overlap_is_ambiguous`).
     // The real reachable property here: each config owns ONLY files under its own
@@ -433,7 +569,7 @@ fn incomparable_configured_roots_each_own_only_their_own_files() {
     // A file under packages/a is owned by the `a` config alone.
     assert_eq!(
         resolver
-            .owner_for_file("/workspace/packages/a/src/Note.vue")
+            .nearest_config_for_path("/workspace/packages/a/src/Note.vue")
             .and_then(|o| o.tsconfig_path.as_deref()),
         Some("/workspace/packages/a/tsconfig.json"),
         "a file under packages/a is owned by the a config alone"
@@ -441,7 +577,7 @@ fn incomparable_configured_roots_each_own_only_their_own_files() {
     // Negative: the `b` config must NOT cross-claim packages/a's file.
     assert_ne!(
         resolver
-            .owner_for_file("/workspace/packages/a/src/Note.vue")
+            .nearest_config_for_path("/workspace/packages/a/src/Note.vue")
             .and_then(|o| o.tsconfig_path.as_deref()),
         Some("/workspace/packages/b/tsconfig.json"),
         "the b config must not cross-claim a file under packages/a"
@@ -449,7 +585,7 @@ fn incomparable_configured_roots_each_own_only_their_own_files() {
     // Symmetric: a file under packages/b is owned by the `b` config alone.
     assert_eq!(
         resolver
-            .owner_for_file("/workspace/packages/b/src/Panel.vue")
+            .nearest_config_for_path("/workspace/packages/b/src/Panel.vue")
             .and_then(|o| o.tsconfig_path.as_deref()),
         Some("/workspace/packages/b/tsconfig.json"),
         "a file under packages/b is owned by the b config alone"
@@ -457,7 +593,7 @@ fn incomparable_configured_roots_each_own_only_their_own_files() {
     // A file under NEITHER root resolves to None (no config claims it).
     assert!(
         resolver
-            .owner_for_file("/workspace/packages/c/src/Other.vue")
+            .nearest_config_for_path("/workspace/packages/c/src/Other.vue")
             .is_none(),
         "a file under neither sibling root must resolve to None"
     );
@@ -551,8 +687,8 @@ fn provider_paths_keep_vue_as_public_api_targets() {
         .expect("vue files should be rewritten to public API provider paths");
 
     assert!(
-        provider_id.ends_with("/src/App.vue.ts"),
-        "Vue files should resolve to .vue.ts in the provider graph: {provider_id}"
+        provider_id.ends_with("/src/App.vue.verter.ts"),
+        "Vue files should resolve to .vue.verter.ts in the provider graph: {provider_id}"
     );
     assert!(
         !provider_id.ends_with("/src/App.vue"),
@@ -585,15 +721,16 @@ fn provider_ide_id_appends_tsx_to_vue() {
     assert_ne!(
         Some(provider_id.clone()),
         resolver.provider_id_for_source("/workspace/src/App.vue"),
-        "IDE provider paths must remain distinct from the public .vue.ts API path"
+        "IDE provider paths must remain distinct from the public .vue.verter.ts API path"
     );
 }
 
 #[test]
 fn provider_paths_derive_both_virtual_files_for_svelte_carriers() {
     // The carrier-extension generalization: a `.svelte` file receives BOTH the
-    // api virtual file (`.svelte.ts`) and the IDE virtual file (`.svelte.tsx`),
-    // derived from the registry carrier-extension set — not a `.vue`-literal.
+    // api virtual file (`.svelte.verter.ts`, the reserved redirect-reached
+    // infix) and the IDE virtual file (`.svelte.tsx`), derived from the registry
+    // carrier-extension set — not a `.vue`-literal.
     let resolver = ProjectResolver::new(vec![project(
         "/workspace",
         "/workspace",
@@ -604,7 +741,7 @@ fn provider_paths_derive_both_virtual_files_for_svelte_carriers() {
     let api = resolver
         .provider_id_for_source("/workspace/src/Comp.svelte")
         .expect("svelte files receive an api provider path");
-    assert_eq!(api, "/workspace/src/Comp.svelte.ts");
+    assert_eq!(api, "/workspace/src/Comp.svelte.verter.ts");
 
     // A `.svelte` carrier always projects `.tsx` (is_jsx = false → Fixed).
     let ide = resolver
@@ -694,16 +831,16 @@ fn strip_carrier_extension_is_registry_backed_for_every_carrier() {
 }
 
 #[test]
-fn carrier_api_provider_path_appends_ts_to_full_carrier() {
-    // The API virtual path is the FULL carrier canonical + `.ts` for every
-    // carrier — never a hardcoded `.vue.ts`.
+fn carrier_api_provider_path_appends_verter_ts_to_full_carrier() {
+    // The API virtual path is the FULL carrier canonical + the reserved
+    // `.verter.ts` infix for every carrier — never a hardcoded `.vue.ts`.
     assert_eq!(
         carrier_api_provider_path("/workspace/src/App.vue"),
-        "/workspace/src/App.vue.ts"
+        "/workspace/src/App.vue.verter.ts"
     );
     assert_eq!(
         carrier_api_provider_path("/workspace/src/App.svelte"),
-        "/workspace/src/App.svelte.ts"
+        "/workspace/src/App.svelte.verter.ts"
     );
     // Mirrors the IDE derivation's carrier-genericity.
     assert_eq!(
@@ -770,10 +907,10 @@ fn resolve_relative_vue_import_returns_real_source_and_provider_api() {
     assert_eq!(resolved.source_id, "/workspace/src/Foo.vue");
     assert_eq!(resolved.provider_target, ProviderTarget::CarrierPublicApi);
     assert_eq!(resolved.resolution_kind, ResolutionKind::Relative);
-    assert_eq!(resolved.provider_specifier, "./Foo.vue.ts");
+    assert_eq!(resolved.provider_specifier, "./Foo.vue.verter.ts");
     assert!(
-        resolved.provider_id.ends_with("/src/Foo.vue.ts"),
-        "provider graph should target the materialized .vue.ts API file: {}",
+        resolved.provider_id.ends_with("/src/Foo.vue.verter.ts"),
+        "provider graph should target the materialized .vue.verter.ts API file: {}",
         resolved.provider_id
     );
 }
@@ -830,6 +967,7 @@ fn resolve_tsconfig_paths_before_base_url() {
             "shared".to_string(),
             vec!["../generated/shared".to_string()],
         )],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader =
@@ -868,6 +1006,7 @@ fn resolve_base_url_when_no_paths_match() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: Some("/workspace/src".to_string()),
         paths: Vec::new(),
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/shared.ts"]);
@@ -938,6 +1077,7 @@ fn resolve_project_references_after_local_tsconfig_options() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: Some("/workspace/packages/app/src".to_string()),
         paths: Vec::new(),
+        ..Default::default()
     };
     app_project.references = vec!["/workspace/packages/shared/tsconfig.json".to_string()];
 
@@ -950,6 +1090,7 @@ fn resolve_project_references_after_local_tsconfig_options() {
     shared_project.compiler_options = IdeProjectCompilerOptions {
         base_url: Some("/workspace/packages/shared/src".to_string()),
         paths: vec![("shared".to_string(), vec!["index".to_string()])],
+        ..Default::default()
     };
 
     let resolver = ProjectResolver::new(vec![app_project, shared_project]);
@@ -1017,6 +1158,194 @@ fn resolve_package_imports_from_nearest_package_json() {
     assert_eq!(resolved.resolution_kind, ResolutionKind::PackageImports);
     assert_eq!(resolved.provider_target, ProviderTarget::ShadowSourceFile);
     assert_eq!(resolved.provider_specifier, "#utils");
+}
+
+#[test]
+fn resolve_package_imports_subpath_substitutes_js_specifier_to_ts_sibling() {
+    // `nodenext` extension rewrite: a `.js` import specifier resolves to its
+    // `.ts` sibling. The fixture maps `#internal/*` -> `./src/internal/*` and the
+    // consumer imports `#internal/InternalComp.js`; the real file is
+    // `InternalComp.ts`, so the resolver must substitute `.js` -> `.ts`.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let mut reader = TestReader::with_files(&["/workspace/src/internal/InternalComp.ts"]);
+    reader.add_file(
+        "/workspace/package.json",
+        r##"{
+                "imports": {
+                    "#internal/*": "./src/internal/*"
+                }
+            }"##,
+    );
+
+    let resolved = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "#internal/InternalComp.js".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::ProviderGraph,
+            },
+        )
+        .expect("a `#imports` subpath with a `.js` specifier must resolve to its `.ts` sibling");
+
+    assert_eq!(
+        resolved.source_id,
+        "/workspace/src/internal/InternalComp.ts"
+    );
+    assert_eq!(resolved.resolution_kind, ResolutionKind::PackageImports);
+}
+
+#[test]
+fn resolve_relative_js_specifier_substitutes_to_ts_sibling() {
+    // The extension rewrite is general (not `#imports`-specific): a relative
+    // `./x.js` import resolves to `./x.ts` when only the `.ts` sibling exists.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/workspace/src/mod.ts"]);
+
+    let resolved = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "./mod.js".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::ProviderGraph,
+            },
+        )
+        .expect("a relative `.js` specifier must resolve to its `.ts` sibling");
+
+    assert_eq!(resolved.source_id, "/workspace/src/mod.ts");
+}
+
+#[test]
+fn resolve_js_specifier_prefers_source_ts_over_colocated_dts() {
+    // TS extension substitution: when BOTH `./x.ts` and `./x.d.ts` exist, a
+    // `./x.js` specifier resolves to the SOURCE `./x.ts`, not the declaration.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/workspace/src/mod.ts", "/workspace/src/mod.d.ts"]);
+
+    let resolved = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "./mod.js".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::ProviderGraph,
+            },
+        )
+        .expect("a relative `.js` specifier must resolve");
+
+    assert_eq!(
+        resolved.source_id, "/workspace/src/mod.ts",
+        "the source `.ts` sibling must win over a co-located `.d.ts` for a `.js` specifier"
+    );
+}
+
+#[test]
+fn sfc_src_attr_js_does_not_substitute_to_ts_sibling() {
+    // An SFC `src="./setup.js"` reads the LITERAL file bytes — it is NOT TS
+    // import resolution. When both `setup.js` and `setup.ts` exist it MUST
+    // resolve to the literal `.js`, never substitute to `.ts`.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/workspace/src/setup.js", "/workspace/src/setup.ts"]);
+
+    let resolved = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.vue".to_string(),
+                specifier: "./setup.js".to_string(),
+                kind: ResolveRequestKind::SfcSrcAttr,
+                phase: ResolvePhase::CodegenBlocker,
+            },
+        )
+        .expect("an SFC `src=\"./setup.js\"` must resolve to the literal file");
+
+    assert_eq!(
+        resolved.source_id, "/workspace/src/setup.js",
+        "an SFC `src=` must NOT substitute `.js` -> `.ts` (reads literal bytes)"
+    );
+}
+
+#[test]
+fn sfc_src_attr_js_does_not_substitute_to_ts_even_when_js_absent() {
+    // An SFC `src="./setup.js"` is a LITERAL file reference, not TS import
+    // resolution — the `.js` -> `.ts` extension rewrite never applies. With only
+    // `setup.ts` present (no `setup.js`), the `src` does NOT resolve to the
+    // `.ts` sibling: it stays unresolved (a missing-file `src=`), distinguishing
+    // the literal-bytes semantics from import substitution.
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/workspace/src/setup.ts"]);
+
+    let resolved = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/workspace/src/App.vue".to_string(),
+            specifier: "./setup.js".to_string(),
+            kind: ResolveRequestKind::SfcSrcAttr,
+            phase: ResolvePhase::CodegenBlocker,
+        },
+    );
+
+    assert!(
+        resolved.is_none(),
+        "an SFC `src=\"./setup.js\"` must NOT substitute to the `.ts` sibling \
+         (literal file reference, not TS import resolution); got: {resolved:?}"
+    );
+}
+
+#[test]
+fn esm_import_js_still_substitutes_to_ts_when_js_absent() {
+    // Contrast with the SFC src case: an ESM IMPORT `./setup.js` DOES substitute
+    // to the `.ts` sibling (TS file-extension-substitution).
+    let resolver = ProjectResolver::new(vec![project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+        ProjectMembership::MatchAll,
+    )]);
+    let reader = TestReader::with_files(&["/workspace/src/setup.ts"]);
+
+    let resolved = resolver
+        .resolve_with_reader(
+            &reader,
+            &ResolveRequest {
+                importer_id: "/workspace/src/App.ts".to_string(),
+                specifier: "./setup.js".to_string(),
+                kind: ResolveRequestKind::EsmImport,
+                phase: ResolvePhase::ProviderGraph,
+            },
+        )
+        .expect("an ESM import `./setup.js` must substitute to its `.ts` sibling");
+
+    assert_eq!(resolved.source_id, "/workspace/src/setup.ts");
 }
 
 #[test]
@@ -1220,7 +1549,9 @@ fn native_project_resolver_alias_works() {
         ProjectMembership::MatchAll,
     )]);
     assert!(
-        resolver.owner_for_file("/workspace/src/App.vue").is_some(),
+        resolver
+            .nearest_config_for_path("/workspace/src/App.vue")
+            .is_some(),
         "NativeProjectResolver alias should be interchangeable with ProjectResolver"
     );
 }
@@ -1291,8 +1622,8 @@ fn resolve_relative_unowned_to_owned_target() {
         "Vue target owned by a project should get CarrierPublicApi"
     );
     assert!(
-        resolved.provider_id.ends_with(".vue.ts"),
-        "provider_id for owned Vue target should be .vue.ts: {}",
+        resolved.provider_id.ends_with(".vue.verter.ts"),
+        "provider_id for owned Vue target should be .vue.verter.ts: {}",
         resolved.provider_id
     );
     assert_eq!(
@@ -1407,6 +1738,7 @@ fn resolve_alias_requires_project_owner() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: None,
         paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
@@ -1457,6 +1789,7 @@ fn resolve_tsconfig_paths_arbitrary_patterns() {
                 vec!["/workspace/node_modules/nuxt/dist/app/*".to_string()],
             ),
         ],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![p]);
     let reader = TestReader::with_files(&[
@@ -1529,6 +1862,7 @@ fn preferred_specifier_returns_tsconfig_alias() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: None,
         paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
@@ -1554,6 +1888,7 @@ fn preferred_specifier_returns_none_when_no_match() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: None,
         paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/other/Foo.vue"]);
@@ -1583,6 +1918,7 @@ fn preferred_specifier_prefers_shortest() {
                 vec!["/workspace/src/components/*".to_string()],
             ),
         ],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/components/Bar.vue"]);
@@ -1611,6 +1947,7 @@ fn preferred_specifier_round_trips() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: None,
         paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
@@ -1647,20 +1984,21 @@ fn preferred_specifier_none_for_provider_paths() {
     app_project.compiler_options = IdeProjectCompilerOptions {
         base_url: None,
         paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
 
-    // .vue.ts is a provider path, not a real file — should not match
+    // .vue.verter.ts is a provider path, not a real file — should not match
     let result = resolver.preferred_specifier(
         &reader,
         "/workspace/src/App.ts",
-        "/workspace/src/Foo.vue.ts",
+        "/workspace/src/Foo.vue.verter.ts",
     );
 
     assert!(
         result.is_none(),
-        "provider paths (.vue.ts) should return None — got: {result:?}"
+        "provider paths (.vue.verter.ts) should return None — got: {result:?}"
     );
 }
 
@@ -1682,6 +2020,7 @@ fn preferred_specifier_multi_target_first_wins() {
                 "/workspace/lib/*".to_string(),
             ],
         )],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/Foo.vue", "/workspace/lib/Foo.vue"]);
@@ -1714,6 +2053,7 @@ fn preferred_specifier_multi_target_shadowed() {
                 "/workspace/lib/*".to_string(),
             ],
         )],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![app_project]);
     // Only lib/Bar.vue exists (NOT src/Bar.vue)
@@ -2241,7 +2581,7 @@ fn bare_package_json_reread_per_importer() {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/repo")),
         }]);
         *engine.project_graph.write() = graph;
         engine.rebuild_and_publish();
@@ -2295,7 +2635,7 @@ fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier()
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/repo")),
         }]);
         *engine.project_graph.write() = graph;
         engine.rebuild_and_publish();
@@ -2380,7 +2720,7 @@ fn package_imports_reread_per_importer() {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/repo")),
         }]);
         *engine.project_graph.write() = graph;
         engine.rebuild_and_publish();
@@ -2439,7 +2779,7 @@ fn node_modules_missing_ancestor_manifests_do_not_trigger_reads() {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/repo")),
         }]);
         *engine.project_graph.write() = graph;
         engine.rebuild_and_publish();
@@ -2475,8 +2815,8 @@ fn provider_id_for_source_vue_without_ownership() {
     let resolver = NativeProjectResolver::new(vec![]);
     assert_eq!(
         resolver.provider_id_for_source("/foo.vue"),
-        Some("/foo.vue.ts".to_string()),
-        "Vue file should get .ts suffix even without project ownership"
+        Some("/foo.vue.verter.ts".to_string()),
+        "Vue file should get the reserved .verter.ts API suffix even without project ownership"
     );
 }
 
@@ -2783,6 +3123,7 @@ fn tsconfig_path_to_package_dir_respects_type_import_context() {
                     .to_string(),
             ],
         )],
+        ..Default::default()
     };
     let resolver = ProjectResolver::new(vec![project]);
     let mut reader = TestReader::with_files(&[
@@ -3116,4 +3457,306 @@ fn join_paths_preserves_unc_host_prefix() {
         join_paths("//server/share/proj/src", "./Foo.vue"),
         "/server/share/proj/src/Foo.vue"
     );
+}
+
+// ── Project-reference cycle termination ──
+
+/// Builds a package project rooted at `/workspace/packages/{name}` with its
+/// tsconfig at `/workspace/packages/{name}/tsconfig.json`, referencing the
+/// given tsconfig paths.
+fn referencing_project(name: &str, references: &[&str]) -> IdeProjectConfig {
+    let root = format!("/workspace/packages/{name}");
+    let mut config = project(
+        &root,
+        "/workspace",
+        Some(&format!("{root}/tsconfig.json")),
+        ProjectMembership::MatchAll,
+    );
+    config.references = references.iter().map(|r| (*r).to_string()).collect();
+    config
+}
+
+/// A project that resolves the given bare specifier to `src/index.ts` under
+/// its own root via tsconfig `paths` + `baseUrl`.
+fn resolving_project(name: &str, specifier: &str) -> IdeProjectConfig {
+    let mut config = referencing_project(name, &[]);
+    config.compiler_options = IdeProjectCompilerOptions {
+        base_url: Some(format!("/workspace/packages/{name}/src")),
+        paths: vec![(specifier.to_string(), vec!["index".to_string()])],
+        ..Default::default()
+    };
+    config
+}
+
+fn resolve_bare(
+    resolver: &ProjectResolver,
+    reader: &TestReader,
+    importer_id: &str,
+    specifier: &str,
+) -> Option<ResolveResult> {
+    resolver.resolve_with_reader(
+        reader,
+        &ResolveRequest {
+            importer_id: importer_id.to_string(),
+            specifier: specifier.to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::ProviderGraph,
+        },
+    )
+}
+
+#[test]
+fn cyclic_project_references_terminate_without_overflow() {
+    // Two-cycle: A references B's tsconfig, B references A's. A specifier
+    // that no branch resolves must return None instead of recursing across
+    // the reference cycle until the stack overflows.
+    let a = referencing_project("a", &["/workspace/packages/b/tsconfig.json"]);
+    let b = referencing_project("b", &["/workspace/packages/a/tsconfig.json"]);
+    let resolver = ProjectResolver::new(vec![a, b]);
+    let reader = TestReader::default();
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "missing-lib",
+    );
+    assert!(
+        resolved.is_none(),
+        "unresolvable specifier across a reference cycle must be None"
+    );
+
+    // Control: the same shape WITHOUT the back-edge resolves through the
+    // single reference — cycle termination must not disable reference
+    // resolution itself.
+    let a = referencing_project("a", &["/workspace/packages/b/tsconfig.json"]);
+    let b = resolving_project("b", "shared");
+    let resolver = ProjectResolver::new(vec![a, b]);
+    let reader = TestReader::with_files(&["/workspace/packages/b/src/index.ts"]);
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "shared",
+    )
+    .expect("non-cyclic single reference must still resolve");
+    assert_eq!(resolved.source_id, "/workspace/packages/b/src/index.ts");
+    assert_eq!(resolved.resolution_kind, ResolutionKind::ProjectReference);
+}
+
+#[test]
+fn n_cycle_project_references_terminate() {
+    // Three-cycle: A → B → C → A. Must terminate with None, not overflow.
+    let a = referencing_project("a", &["/workspace/packages/b/tsconfig.json"]);
+    let b = referencing_project("b", &["/workspace/packages/c/tsconfig.json"]);
+    let c = referencing_project("c", &["/workspace/packages/a/tsconfig.json"]);
+    let resolver = ProjectResolver::new(vec![a, b, c]);
+    let reader = TestReader::default();
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "missing-lib",
+    );
+    assert!(
+        resolved.is_none(),
+        "unresolvable specifier across a 3-cycle must be None"
+    );
+}
+
+#[test]
+fn deep_acyclic_project_reference_chain_still_resolves() {
+    // Acyclic chain A → B → C → D where only D resolves the specifier. The
+    // terminal project must still be reached: cycle/stack guards must not
+    // block legitimately deep transitive reference chains, and declared
+    // first-match-wins ordering must hold.
+    let a = referencing_project("a", &["/workspace/packages/b/tsconfig.json"]);
+    let b = referencing_project("b", &["/workspace/packages/c/tsconfig.json"]);
+    let c = referencing_project("c", &["/workspace/packages/d/tsconfig.json"]);
+    let d = resolving_project("d", "deep-lib");
+    let resolver = ProjectResolver::new(vec![a, b, c, d]);
+    let reader = TestReader::with_files(&["/workspace/packages/d/src/index.ts"]);
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "deep-lib",
+    )
+    .expect("deep acyclic reference chain must resolve through the terminal project");
+    assert_eq!(resolved.source_id, "/workspace/packages/d/src/index.ts");
+    assert_eq!(resolved.resolution_kind, ResolutionKind::ProjectReference);
+    assert_eq!(
+        resolved.owner_tsconfig_path.as_deref(),
+        Some("/workspace/packages/d/tsconfig.json")
+    );
+}
+
+#[test]
+fn cyclic_branch_skipped_but_sibling_reference_resolves() {
+    // Importer project A references [B, C] in declared order. B references
+    // back to A (a cycle); C resolves the specifier. The cyclic B branch is
+    // skipped without poisoning the walk — the later sibling C must still
+    // resolve.
+    let a = referencing_project(
+        "a",
+        &[
+            "/workspace/packages/b/tsconfig.json",
+            "/workspace/packages/c/tsconfig.json",
+        ],
+    );
+    let b = referencing_project("b", &["/workspace/packages/a/tsconfig.json"]);
+    let c = resolving_project("c", "sib");
+    let resolver = ProjectResolver::new(vec![a, b, c]);
+    let reader = TestReader::with_files(&["/workspace/packages/c/src/index.ts"]);
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "sib",
+    )
+    .expect("sibling reference after a cyclic branch must still resolve");
+    assert_eq!(resolved.source_id, "/workspace/packages/c/src/index.ts");
+    assert_eq!(resolved.resolution_kind, ResolutionKind::ProjectReference);
+
+    // NEGATIVE: a specifier nothing resolves still terminates as None even
+    // with the cyclic branch present.
+    assert!(resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "missing-lib",
+    )
+    .is_none());
+}
+
+/// Builds `count` chained projects `{prefix}0 → {prefix}1 → …`, each
+/// referencing the next one's tsconfig (acyclic by construction). The LAST
+/// project resolves `specifier` via its own tsconfig `paths` + `baseUrl`.
+fn chained_projects(prefix: &str, count: usize, specifier: &str) -> Vec<IdeProjectConfig> {
+    (0..count)
+        .map(|i| {
+            let name = format!("{prefix}{i}");
+            if i + 1 == count {
+                resolving_project(&name, specifier)
+            } else {
+                let next = format!("/workspace/packages/{prefix}{}/tsconfig.json", i + 1);
+                referencing_project(&name, &[next.as_str()])
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn diamond_project_references_resolve_through_both_arms() {
+    // Diamond whose arms share one long chain: A references [B, C]; B reaches
+    // the shared chain head l1 through a 10-project prefix (p1..p10), C
+    // references l1 directly; the chain l1 → … → l250 ends in a reference to
+    // R, the only project resolving the specifier.
+    //
+    // The B arm runs first and walks the shared chain, but its longer prefix
+    // exhausts the depth fuse before reaching R (1 + 10 + 250 > 256), so it
+    // pushes and pops l1..l245 on the way out. The C arm then re-enters the
+    // SAME chain on a shorter path (1 + 250 <= 256) and resolves through R.
+    // This discriminates push-on-descend/pop-on-return: if the active-set pop
+    // (or the depth restore) on branch return were missing, the C arm would
+    // see l1 as still active (or run on a drained budget), skip the chain,
+    // and return None instead of Some.
+    let mut projects = vec![
+        referencing_project(
+            "a",
+            &[
+                "/workspace/packages/b/tsconfig.json",
+                "/workspace/packages/c/tsconfig.json",
+            ],
+        ),
+        referencing_project("b", &["/workspace/packages/p1/tsconfig.json"]),
+        referencing_project("c", &["/workspace/packages/l1/tsconfig.json"]),
+    ];
+    for i in 1..=10usize {
+        let next = if i < 10 {
+            format!("/workspace/packages/p{}/tsconfig.json", i + 1)
+        } else {
+            "/workspace/packages/l1/tsconfig.json".to_string()
+        };
+        projects.push(referencing_project(&format!("p{i}"), &[next.as_str()]));
+    }
+    for i in 1..=250usize {
+        let next = if i < 250 {
+            format!("/workspace/packages/l{}/tsconfig.json", i + 1)
+        } else {
+            "/workspace/packages/r/tsconfig.json".to_string()
+        };
+        projects.push(referencing_project(&format!("l{i}"), &[next.as_str()]));
+    }
+    projects.push(resolving_project("r", "diamond-lib"));
+    let resolver = ProjectResolver::new(projects);
+    let reader = TestReader::with_files(&["/workspace/packages/r/src/index.ts"]);
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "diamond-lib",
+    )
+    .expect("second diamond arm must re-enter the shared chain the first arm popped");
+    assert_eq!(resolved.source_id, "/workspace/packages/r/src/index.ts");
+    assert_eq!(resolved.resolution_kind, ResolutionKind::ProjectReference);
+
+    // NEGATIVE: a specifier nothing resolves still terminates as None across
+    // the same diamond instead of hanging or overflowing.
+    assert!(resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "missing-lib",
+    )
+    .is_none());
+}
+
+#[test]
+fn project_reference_depth_budget_bounds_deep_chain() {
+    // Over-budget side: an ACYCLIC chain of 300 linked projects whose LAST
+    // project is the only resolver. No cycle exists, so the active-set guard
+    // never fires — only the depth fuse bounds this walk. The terminal
+    // project sits beyond PROJECT_REFERENCE_DEPTH_LIMIT, so the fuse must
+    // stop the descent and return None rather than walk (or overflow into)
+    // arbitrarily deep reference chains.
+    let projects = chained_projects("deep", 300, "over-lib");
+    let resolver = ProjectResolver::new(projects);
+    let reader = TestReader::with_files(&["/workspace/packages/deep299/src/index.ts"]);
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/deep0/src/App.ts",
+        "over-lib",
+    );
+    // NEGATIVE: the beyond-budget terminal resolver must NOT be reached.
+    assert!(
+        resolved.is_none(),
+        "resolver beyond the depth budget must not be reached: {resolved:?}"
+    );
+
+    // Under-budget side: the same shape at 10 projects — comfortably inside
+    // the fuse. The budget must not cut off legitimate sub-budget chains.
+    let projects = chained_projects("short", 10, "under-lib");
+    let resolver = ProjectResolver::new(projects);
+    let reader = TestReader::with_files(&["/workspace/packages/short9/src/index.ts"]);
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/short0/src/App.ts",
+        "under-lib",
+    )
+    .expect("sub-budget acyclic chain must still resolve through its terminal project");
+    assert_eq!(
+        resolved.source_id,
+        "/workspace/packages/short9/src/index.ts"
+    );
+    assert_eq!(resolved.resolution_kind, ResolutionKind::ProjectReference);
 }

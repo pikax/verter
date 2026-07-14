@@ -5,7 +5,8 @@
 //! synthesized `default` symbol/export inventory. It runs NO `Instantiate`, NO
 //! semantic dispatch, and NO OXC at render time (static-guarded by
 //! `non_vue_api_projector_has_no_dispatch_or_oxc`): every input is already-cached
-//! shallow state. It produces the content behind the `Foo.svelte.ts` api file.
+//! shallow state. It produces the content behind the `Foo.svelte.verter.ts`
+//! api file.
 //!
 //! Rendered declarations, in order:
 //! 1. the TYPE-ONLY import / re-export prelude — minimal `import type` lines
@@ -32,7 +33,7 @@ use crate::framework::api_projector::{ComponentApiProjector, ComponentApiProject
 use crate::types::{PublicApiMode, TscResponse};
 
 /// The F13 derived-callback-event helper types rendered into every Svelte
-/// `.svelte.ts` shim.
+/// `.svelte.verter.ts` shim.
 ///
 /// The `$events` map values are HANDLER types uniformly (the component `on:`
 /// helper checks `handler: $events[K]`), produced from the TWO event models:
@@ -66,6 +67,10 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             file_language,
             mode,
             profile: _,
+            // The Svelte shim renders purely from cached shallow state — it
+            // runs no cross-file macro-type resolution, so the batch-shared
+            // cold seed / session view is accepted and ignored here.
+            render_seed: _,
         } = cx;
 
         // Carrier-narrowness: the public-API surface is produced only for the
@@ -76,10 +81,18 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             return None;
         }
 
-        // The testing-API surface is Vue-only — Svelte returns None
-        // for `Testing`, distinct from the `Public` mode's `Some`.
-        if mode == PublicApiMode::Testing {
-            return None;
+        // Mode handling is EXPLICIT (no silent fall-through for a future
+        // `PublicApiMode` variant):
+        // - `Public` and `Declaration` BOTH render the same shim. The Svelte
+        //   shim is already a STRICTLY VALID `.d.ts` — pure declarations only
+        //   (type-only imports, `type`/`interface`, `declare const … export
+        //   default …`), no runtime/value statements — so the declaration
+        //   carrier surface reuses it directly.
+        // - `Testing` is the Vue-only debug surface — Svelte returns `None`,
+        //   distinct from the rendered `Some`.
+        match mode {
+            PublicApiMode::Public | PublicApiMode::Declaration => {}
+            PublicApiMode::Testing => return None,
         }
 
         // Read the ALREADY-CACHED shallow state for the resolved canonical — NO

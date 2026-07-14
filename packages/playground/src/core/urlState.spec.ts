@@ -114,21 +114,6 @@ describe("urlState", () => {
       expect(result?.language).toBeUndefined();
     });
 
-    it("preserves typeChecker", () => {
-      const state = makeState({ typeChecker: "tsgo" });
-      serializeToHash(state);
-      const result = deserializeFromHash();
-      expect(result?.typeChecker).toBe("tsgo");
-    });
-
-    it("omits typeChecker when tsc (default)", () => {
-      const state = makeState({ typeChecker: "tsc" });
-      serializeToHash(state);
-      const result = deserializeFromHash();
-      // When tsc, it's not serialized, so deserialization returns undefined
-      expect(result?.typeChecker).toBeUndefined();
-    });
-
     it("roundtrips multi-file state with import map and versions", () => {
       const state = makeState({
         files: {
@@ -283,23 +268,7 @@ describe("urlState", () => {
       expect(flat["_language"]).toBeUndefined();
     });
 
-    it("serializes _typeChecker when not tsc", () => {
-      const state = makeState({ typeChecker: "tsgo" });
-      serializeToHash(state);
-      const hash = location.hash.slice(1);
-      const flat = decodeHash(hash);
-      expect(flat["_typeChecker"]).toBe("tsgo");
-    });
-
-    it("omits _typeChecker when tsc (default)", () => {
-      const state = makeState({ typeChecker: "tsc" });
-      serializeToHash(state);
-      const hash = location.hash.slice(1);
-      const flat = decodeHash(hash);
-      expect(flat["_typeChecker"]).toBeUndefined();
-    });
-
-    it("omits _typeChecker when undefined", () => {
+    it("never serializes _typeChecker (the type checker is the single browser capability)", () => {
       const state = makeState();
       serializeToHash(state);
       const hash = location.hash.slice(1);
@@ -448,22 +417,17 @@ describe("urlState", () => {
       expect(result!.language).toBeUndefined();
     });
 
-    it("extracts _typeChecker metadata", () => {
+    it("ignores a legacy _typeChecker metadata key (never a file, never a selection)", () => {
+      // Old shared URLs may carry a retired engine selection; it is skipped
+      // as metadata — never surfaced as a user file or an engine choice.
       const flat: Record<string, string> = {
         "App.vue": "",
-        _typeChecker: "tsgo",
+        _typeChecker: "some-retired-engine",
       };
       window.location.hash = `#${encodeFlat(flat)}`;
       const result = deserializeFromHash();
-      expect(result!.typeChecker).toBe("tsgo");
+      expect((result as unknown as Record<string, unknown>).typeChecker).toBeUndefined();
       expect(result!.files["_typeChecker"]).toBeUndefined();
-    });
-
-    it("returns undefined typeChecker when _typeChecker is absent", () => {
-      const flat: Record<string, string> = { "App.vue": "" };
-      window.location.hash = `#${encodeFlat(flat)}`;
-      const result = deserializeFromHash();
-      expect(result!.typeChecker).toBeUndefined();
     });
 
     it("extracts _isProduction and _ssr from flat object", () => {

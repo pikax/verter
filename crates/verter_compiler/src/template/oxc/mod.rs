@@ -33,7 +33,13 @@ fn parse_expression<'alloc>(
     ignored: &[&'alloc str],
     ide_completion: bool,
 ) -> OxcParsedExpression<'alloc> {
-    if span.start >= span.end {
+    let source_slice = &input[span.start as usize..span.end as usize];
+    // A whitespace-only span (`{{ }}`, `{{   }}`) is an EMPTY interpolation, not a
+    // parse error: it references nothing and must NOT mark template liveness
+    // incomplete. Handle it exactly like a zero-width span so `errors` stays `None`
+    // (the gate stays closed and a genuinely-unused binding is still demoted),
+    // instead of feeding OXC a blank slice it rejects as a syntax error.
+    if span.start >= span.end || source_slice.trim().is_empty() {
         return OxcParsedExpression {
             offset: span.start,
             expression: None,
@@ -43,7 +49,6 @@ fn parse_expression<'alloc>(
         };
     }
 
-    let source_slice = &input[span.start as usize..span.end as usize];
     let parser = oxc_parser::Parser::new(alloc, source_slice, source_type);
 
     match parser.parse_expression() {

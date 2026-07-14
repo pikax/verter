@@ -71,7 +71,9 @@ mod tests {
                 workspace_aliases: vec![],
                 compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
                 references: vec![],
-                membership: verter_workspace::ProjectMembership::default(),
+                membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                    &verter_workspace::CanonicalPath::new("/ws"),
+                ),
             },
         ]));
         ws

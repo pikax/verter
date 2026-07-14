@@ -5,9 +5,11 @@
 //! relative/absolute paths. Produces [`ResolveResult`] containing both the
 //! source path and the provider-graph path used by the type provider.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use crate::canonical_path::CanonicalPath;
+use crate::membership::ConfiguredMembership;
 use crate::types::PackageManifest;
 use crate::types::{
     ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase, ResolveRequest,
@@ -28,6 +30,22 @@ pub struct WorkspaceAlias {
 pub struct IdeProjectCompilerOptions {
     pub base_url: Option<String>,
     pub paths: Vec<(String, Vec<String>)>,
+    /// `compilerOptions.allowJs` — when set (or `checkJs`), `.js`/`.jsx`/
+    /// `.cjs`/`.mjs` join the project's supported-extension set.
+    pub allow_js: bool,
+    /// `compilerOptions.checkJs` — implies `allowJs` for membership purposes
+    /// (TypeScript treats `checkJs` as turning on JS type-checking, which
+    /// requires the JS files to be project members).
+    pub check_js: bool,
+}
+
+impl IdeProjectCompilerOptions {
+    /// Whether JavaScript files are project members (either `allowJs` or
+    /// `checkJs` is set).
+    #[must_use]
+    pub fn js_is_member(&self) -> bool {
+        self.allow_js || self.check_js
+    }
 }
 
 /// Membership filter for a tsconfig project.
@@ -52,12 +70,18 @@ pub struct IdeProjectConfig {
     pub workspace_aliases: Vec<WorkspaceAlias>,
     pub compiler_options: IdeProjectCompilerOptions,
     pub references: Vec<String>,
-    pub membership: ProjectMembership,
+    /// Exact configured membership — the SAME [`ConfiguredMembership`] the
+    /// snapshot's `configured_owner_resolution_for_file` consults, so the
+    /// resolver and the ownership authority never diverge on a glob-vs-exact
+    /// membership answer. A fallback (tsconfig-less) config carries a
+    /// [`ConfiguredMembership::match_all_under_root`] membership.
+    pub membership: ConfiguredMembership,
 }
 
 impl IdeProjectConfig {
     pub fn new(root: String, workspace_root: String, tsconfig_path: Option<String>) -> Self {
         let provider_root = root.clone();
+        let membership = ConfiguredMembership::match_all_under_root(&CanonicalPath::new(&root));
         Self {
             root,
             workspace_root,
@@ -66,56 +90,15 @@ impl IdeProjectConfig {
             workspace_aliases: Vec::new(),
             compiler_options: IdeProjectCompilerOptions::default(),
             references: Vec::new(),
-            membership: ProjectMembership::MatchAll,
+            membership,
         }
     }
 
-    /// Whether `file_id` is a member of this project.
-    ///
-    /// Architecture-guard exception: the `/node_modules/` substring check
-    /// below IS the primitive that the public `WorkspaceAccess::is_workspace_owned`
-    /// and `is_package_backed` accessors are built on (see
-    /// `Engine::is_workspace_owned` in engine.rs). Calling the typed API from
-    /// inside its own implementation would be circular. See exception
-    /// class (1) in `crates/verter_session/tests/cases/architecture_guards.rs` →
-    /// `no_node_modules_substring_outside_workspace_api`.
+    /// Whether `file_id` is a member of this project, per the exact
+    /// [`ConfiguredMembership`] (materialized file set, or the static spec in
+    /// bridge mode). One membership engine — no second glob evaluator.
     pub fn matches_file(&self, file_id: &str) -> bool {
-        let normalized_file = normalize_canonical_id(file_id);
-        if normalized_file.contains("/node_modules/") {
-            return false;
-        }
-        if !normalized_starts_with(file_id, &self.root) {
-            return false;
-        }
-
-        match &self.membership {
-            ProjectMembership::MatchAll => true,
-            ProjectMembership::IncludeExclude {
-                files,
-                include,
-                exclude,
-            } => {
-                if matches_any_pattern_for_root(&normalized_file, &self.root, exclude) {
-                    return false;
-                }
-
-                if files
-                    .iter()
-                    .map(|candidate| {
-                        normalize_project_membership_entry(&self.root, candidate, false)
-                    })
-                    .any(|candidate| candidate == normalized_file)
-                {
-                    return true;
-                }
-
-                if !include.is_empty() {
-                    return matches_any_pattern_for_root(&normalized_file, &self.root, include);
-                }
-
-                !exclude.is_empty()
-            }
-        }
+        self.membership.contains(&CanonicalPath::new(file_id))
     }
 }
 
@@ -141,7 +124,25 @@ impl ProjectResolver {
         Self { projects }
     }
 
-    pub fn owner_for_file(&self, file_id: &str) -> Option<&IdeProjectConfig> {
+    /// Every project config that EFFECTIVELY claims `file_id`, most-specific
+    /// (nearest-root) first, with genuine overlap PRESERVED (non-collapsing).
+    ///
+    /// Configured owners take precedence: when any configured project claims the
+    /// file, only the configured candidates survive (after nearest-root pruning — a
+    /// strict-ancestor root loses to a deeper co-claiming root, so `extends`/breadth
+    /// at an ancestor root does not make a descendant package file ambiguous when a
+    /// descendant configured project also claims it) and fallbacks are suppressed;
+    /// otherwise the matching fallback configs are returned.
+    ///
+    /// This is the resolver's path→config lookup for import resolution and
+    /// provider-path derivation — NOT the carrier-ownership authority (that is
+    /// `verter_session`'s `CarrierOwnershipResolution`, which wraps the snapshot's
+    /// exact `configured_owner_resolution_for_file` and fails closed on a genuine
+    /// overlap). This lookup therefore never collapses an overlap into a no-owner
+    /// answer; callers choose nearest / any via [`Self::nearest_config_for_path`].
+    /// Candidates come out in the resolver's pre-sorted project precedence order
+    /// (deepest root first), so the first element is the nearest.
+    pub fn effective_configs_for_path(&self, file_id: &str) -> Vec<&IdeProjectConfig> {
         // Collect every configured project whose membership claims the file.
         let configured: Vec<&IdeProjectConfig> = self
             .projects
@@ -149,56 +150,43 @@ impl ProjectResolver {
             .filter(|project| project.tsconfig_path.is_some() && project.matches_file(file_id))
             .collect();
 
-        // Nearest-root effective ownership (same rule as
-        // `WorkspaceSnapshot::configured_owner_resolution_for_file`): a
-        // configured candidate whose root is a STRICT ANCESTOR of another
-        // matching candidate's root loses. `extends`/breadth at an ancestor
-        // root must not make a descendant package file ambiguous when a
-        // descendant configured project also claims it.
-        let effective: Vec<&IdeProjectConfig> = configured
-            .iter()
-            .copied()
-            .filter(|candidate| {
-                let candidate_root = normalize_canonical_id(&candidate.root);
-                !configured.iter().any(|other| {
-                    if std::ptr::eq(*other, *candidate) {
-                        return false;
-                    }
-                    let other_root = normalize_canonical_id(&other.root);
-                    // `other` strictly under `candidate` ⇒ candidate is an
-                    // ancestor ⇒ drop the ancestor candidate. The length check
-                    // makes containment STRICT (equal roots are not ancestors).
-                    other_root.len() > candidate_root.len()
-                        && normalized_starts_with(&other_root, &candidate_root)
+        if !configured.is_empty() {
+            // Nearest-root pruning: drop a configured candidate whose root is a
+            // STRICT ANCESTOR of another matching candidate's root. The length
+            // check makes containment STRICT (equal roots are not ancestors).
+            return configured
+                .iter()
+                .copied()
+                .filter(|candidate| {
+                    let candidate_root = normalize_canonical_id(&candidate.root);
+                    !configured.iter().any(|other| {
+                        if std::ptr::eq(*other, *candidate) {
+                            return false;
+                        }
+                        let other_root = normalize_canonical_id(&other.root);
+                        other_root.len() > candidate_root.len()
+                            && normalized_starts_with(&other_root, &candidate_root)
+                    })
                 })
-            })
-            .collect();
-
-        match effective.as_slice() {
-            // Unique effective configured owner.
-            [only] => return Some(only),
-            // Same-root / incomparable-root overlap → genuine ambiguity.
-            [_, ..] => return None,
-            // No configured owner → fall through to fallback selection.
-            [] => {}
+                .collect();
         }
 
-        // No configured owner: a single fallback may own the file, but two
-        // overlapping fallbacks stay ambiguous.
-        let mut fallback: Option<&IdeProjectConfig> = None;
-        let mut fallback_ambiguous = false;
-        for project in &self.projects {
-            if project.tsconfig_path.is_some() || !project.matches_file(file_id) {
-                continue;
-            }
-            if fallback.is_some() {
-                fallback_ambiguous = true;
-            } else {
-                fallback = Some(project);
-            }
-        }
+        // No configured owner: the matching fallback (tsconfig-less) configs.
+        self.projects
+            .iter()
+            .filter(|project| project.tsconfig_path.is_none() && project.matches_file(file_id))
+            .collect()
+    }
 
-        (!fallback_ambiguous).then_some(fallback).flatten()
+    /// The nearest (most-specific-root) effective config for `file_id`, or `None`.
+    ///
+    /// The resolver-internal alias/target/provider-path lookups take the nearest; a
+    /// genuine overlap yields the deterministically-first candidate (projects are
+    /// pre-sorted nearest-root-first) rather than collapsing to `None`. Import
+    /// resolution is not the fail-closed ownership authority — that role belongs to
+    /// `verter_session`'s `CarrierOwnershipResolution`.
+    pub fn nearest_config_for_path(&self, file_id: &str) -> Option<&IdeProjectConfig> {
+        self.effective_configs_for_path(file_id).into_iter().next()
     }
 
     fn project_for_ownership(
@@ -234,18 +222,19 @@ impl ProjectResolver {
 
     /// Map a source file path to the provider-graph path used by the type provider.
     ///
-    /// For a framework CARRIER file (`.vue` / `.svelte`) this appends `.ts`
-    /// (the public API shim — the uniform api suffix from the
-    /// `VirtualFileNaming` column); for non-carrier files the source path is
-    /// returned as-is. The carrier-extension set is derived from the language
-    /// registry (the registry is the single classification authority), so a
-    /// new carrier needs no edit here. This is a pure path transform that does
-    /// not require project ownership — callers that need ownership must check
-    /// it separately via `owner_for_file()`.
+    /// For a framework CARRIER file (`.vue` / `.svelte`) this appends the
+    /// reserved API virtual-file suffix [`CARRIER_API_VIRTUAL_SUFFIX`]
+    /// (`.verter.ts` — the redirect-reached public API shim, the uniform api
+    /// suffix from the `VirtualFileNaming` column); for non-carrier files the
+    /// source path is returned as-is. The carrier-extension set is derived from
+    /// the language registry (the registry is the single classification
+    /// authority), so a new carrier needs no edit here. This is a pure path
+    /// transform that does not require project ownership — callers that need
+    /// ownership must check it separately via `nearest_config_for_path()`.
     pub fn provider_id_for_source(&self, source_id: &str) -> Option<String> {
         let normalized_source = normalize_canonical_id(source_id);
         if path_is_carrier(&normalized_source) {
-            Some(format!("{}.ts", normalized_source))
+            Some(format!("{normalized_source}{CARRIER_API_VIRTUAL_SUFFIX}"))
         } else {
             Some(normalized_source)
         }
@@ -272,10 +261,12 @@ impl ProjectResolver {
 
     /// Reverse-map a provider-graph path back to its source file path.
     ///
-    /// Strips `.tsx`, `.jsx`, or `.ts` suffixes from a carrier virtual path
-    /// (e.g., `foo.vue.tsx` -> `foo.vue`, `Bar.svelte.ts` -> `Bar.svelte`).
-    /// The carrier-extension set is derived from the language registry. For
-    /// non-carrier paths, returns the path as-is if owned by a project.
+    /// Strips the carrier virtual suffixes from a carrier virtual path: the IDE
+    /// `.tsx`/`.jsx` companion (e.g. `foo.vue.tsx` -> `foo.vue`) or the
+    /// reserved API suffix [`CARRIER_API_VIRTUAL_SUFFIX`] (`.verter.ts` — e.g.
+    /// `Bar.svelte.verter.ts` -> `Bar.svelte`). The carrier-extension set is
+    /// derived from the language registry. For non-carrier paths, returns the
+    /// path as-is if owned by a project.
     pub fn source_id_from_provider_id(&self, provider_id: &str) -> Option<String> {
         let normalized = normalize_canonical_id(provider_id);
 
@@ -285,21 +276,22 @@ impl ProjectResolver {
             && path_is_carrier(&normalized[..normalized.len() - 4])
         {
             let candidate = &normalized[..normalized.len() - 4];
-            if self.owner_for_file(candidate).is_some() {
+            if self.nearest_config_for_path(candidate).is_some() {
                 return Some(candidate.to_string());
             }
         }
-        // Carrier API virtual paths: strip the trailing `.ts` (`foo.vue.ts` ->
-        // `foo.vue`).
-        if normalized.ends_with(".ts") && path_is_carrier(&normalized[..normalized.len() - 3]) {
-            let candidate = &normalized[..normalized.len() - 3];
-            if self.owner_for_file(candidate).is_some() {
+        // Carrier API virtual paths: strip the reserved `.verter.ts` API suffix
+        // (`foo.vue.verter.ts` -> `foo.vue`). The reserved infix is why this is
+        // unambiguous against a real `.svelte.ts` rune module — a rune path
+        // never carries the `.verter.` infix.
+        if let Some(candidate) = normalized.strip_suffix(CARRIER_API_VIRTUAL_SUFFIX) {
+            if path_is_carrier(candidate) && self.nearest_config_for_path(candidate).is_some() {
                 return Some(candidate.to_string());
             }
         }
 
         // Non-carrier: provider path == source path (if owned by a project)
-        if self.owner_for_file(&normalized).is_some() {
+        if self.nearest_config_for_path(&normalized).is_some() {
             return Some(normalized);
         }
 
@@ -321,7 +313,7 @@ impl ProjectResolver {
         reader: &dyn crate::traits::WorkspaceRead,
         request: &ResolveRequest,
     ) -> Option<ResolveResult> {
-        let importer_owner = self.owner_for_file(&request.importer_id);
+        let importer_owner = self.nearest_config_for_path(&request.importer_id);
         let ctx = ResolutionContext {
             phase: request.phase,
             kind: request.kind,
@@ -364,7 +356,7 @@ impl ProjectResolver {
 
     /// Build a [`ResolveResult`] from a resolved source path.
     ///
-    /// Looks up `owner_for_file()` on the **target** (not importer) for correct
+    /// Looks up `nearest_config_for_path()` on the **target** (not importer) for correct
     /// `provider_id`/`provider_specifier`/`provider_target`/`owner_tsconfig_path`.
     fn build_resolve_result(
         &self,
@@ -372,14 +364,14 @@ impl ProjectResolver {
         source_id: String,
         resolution_kind: ResolutionKind,
     ) -> ResolveResult {
-        let target_owner = self.owner_for_file(&source_id);
+        let target_owner = self.nearest_config_for_path(&source_id);
         let provider_id = target_owner
             .and_then(|_| self.provider_id_for_source(&source_id))
             .unwrap_or_else(|| source_id.clone());
         let provider_target = match target_owner {
             // Any framework CARRIER (`.vue` / `.svelte`) targets the public API
-            // virtual file (`{src}.ts`) for cross-file component typing — the
-            // carrier-extension set is the registry's, not a `.vue` literal.
+            // virtual file (`{src}.verter.ts`) for cross-file component typing —
+            // the carrier-extension set is the registry's, not a `.vue` literal.
             Some(_) if path_is_carrier(&normalize_canonical_id(&source_id)) => {
                 ProviderTarget::CarrierPublicApi
             }
@@ -423,14 +415,14 @@ impl ProjectResolver {
         source_id: String,
         resolution_kind: ResolutionKind,
     ) -> ResolveResult {
-        let target_owner = self.owner_for_file(&source_id);
+        let target_owner = self.nearest_config_for_path(&source_id);
         let provider_id = target_owner
             .and_then(|_| self.provider_id_for_source(&source_id))
             .unwrap_or_else(|| source_id.clone());
         let provider_target = match target_owner {
             // Any framework CARRIER (`.vue` / `.svelte`) targets the public API
-            // virtual file (`{src}.ts`) for cross-file component typing — the
-            // carrier-extension set is the registry's, not a `.vue` literal.
+            // virtual file (`{src}.verter.ts`) for cross-file component typing —
+            // the carrier-extension set is the registry's, not a `.vue` literal.
             Some(_) if path_is_carrier(&normalize_canonical_id(&source_id)) => {
                 ProviderTarget::CarrierPublicApi
             }
@@ -656,7 +648,7 @@ impl ProjectResolver {
         importer_id: &str,
         target_id: &str,
     ) -> Option<String> {
-        let owner = self.owner_for_file(importer_id)?;
+        let owner = self.nearest_config_for_path(importer_id)?;
         let normalized_target = normalize_canonical_id(target_id);
         let mut candidates: Vec<String> = Vec::new();
 
@@ -716,6 +708,10 @@ impl ProjectResolver {
         best
     }
 
+    /// Non-recursive entry for project-reference resolution: seeds the
+    /// traversal state with the importing project's own tsconfig so a
+    /// reference back-edge to the importer terminates instead of reprocessing
+    /// it, then delegates to the bounded recursive walk.
     fn resolve_project_references(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
@@ -723,7 +719,36 @@ impl ProjectResolver {
         specifier: &str,
         ctx: ResolutionContext,
     ) -> Option<String> {
+        let mut state =
+            ProjectReferenceTraversalState::seeded_with(importer_owner.tsconfig_path.as_deref());
+        self.resolve_project_references_inner(reader, importer_owner, specifier, ctx, &mut state)
+    }
+
+    /// Walks the importer's declared `references` in order (first match wins):
+    /// each referenced project's workspace aliases, tsconfig `paths`, and
+    /// `baseUrl` are checked before descending into its own references.
+    ///
+    /// The descent is bounded by [`ProjectReferenceTraversalState`]: an edge
+    /// to a tsconfig already on the active path (a `references` cycle) or past
+    /// the depth fuse terminates only that branch — later sibling references
+    /// still run. Active-set discipline is push-on-descend / pop-on-return, so
+    /// a diamond (A refs B and C, both ref D) resolves through both arms.
+    fn resolve_project_references_inner(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        importer_owner: &IdeProjectConfig,
+        specifier: &str,
+        ctx: ResolutionContext,
+        state: &mut ProjectReferenceTraversalState,
+    ) -> Option<String> {
         for reference in &importer_owner.references {
+            // Back-edge to a project already on the active descent path: its
+            // aliases/paths/baseUrl were checked when it was entered (or by
+            // the entry point, for the seed), so skip only this branch.
+            if state.active.contains(reference.as_str()) {
+                continue;
+            }
+
             let Some(project) = self
                 .projects
                 .iter()
@@ -754,13 +779,60 @@ impl ProjectResolver {
                 }
             }
 
-            if let Some(resolved) = self.resolve_project_references(reader, project, specifier, ctx)
-            {
-                return Some(resolved);
+            // Transitive descent, gated by the stack-safety fuse. Exhaustion
+            // terminates only this branch; siblings still run.
+            if state.remaining_depth == 0 {
+                continue;
+            }
+            state.remaining_depth -= 1;
+            state.active.insert(reference.clone());
+            let resolved =
+                self.resolve_project_references_inner(reader, project, specifier, ctx, state);
+            state.active.remove(reference.as_str());
+            state.remaining_depth += 1;
+            if resolved.is_some() {
+                return resolved;
             }
         }
 
         None
+    }
+}
+
+/// Traversal state for one project-reference resolution walk.
+///
+/// Two guards with distinct roles: `active` is the semantic cycle guard —
+/// the set of tsconfig paths currently on the descent path, matched by exact
+/// string equality against the same `tsconfig_path` values stored on the
+/// resolver's projects (production paths arrive canonicalized through the
+/// snapshot/VFS path; `ProjectResolver::new` does not normalize them itself)
+/// — and `remaining_depth` is the stack-safety fuse that unconditionally
+/// bounds the walk regardless of key normalization.
+struct ProjectReferenceTraversalState {
+    active: HashSet<String>,
+    remaining_depth: u32,
+}
+
+/// Stack-safety fuse for transitive project-reference descent. Generous
+/// enough for any real acyclic reference chain (monorepo chains are at most
+/// tens of projects deep) while staying far below the recursion depth that
+/// exhausts a thread stack — the unbounded walk overflowed at tens of
+/// thousands of frames.
+const PROJECT_REFERENCE_DEPTH_LIMIT: u32 = 256;
+
+impl ProjectReferenceTraversalState {
+    /// Fresh state whose active set is seeded with the starting project's own
+    /// tsconfig path (when it has one), so a reference cycle back to the
+    /// importer terminates at the back-edge.
+    fn seeded_with(importer_tsconfig: Option<&str>) -> Self {
+        let mut active = HashSet::new();
+        if let Some(tsconfig) = importer_tsconfig {
+            active.insert(tsconfig.to_string());
+        }
+        Self {
+            active,
+            remaining_depth: PROJECT_REFERENCE_DEPTH_LIMIT,
+        }
     }
 }
 
@@ -782,16 +854,45 @@ pub fn carrier_ide_provider_path(source_id: &str, is_jsx: bool) -> String {
     format!("{source_id}{ext}")
 }
 
-/// The carrier-independent API virtual-file derivation: append `.ts` to the
-/// FULL carrier canonical (`Foo.vue` → `Foo.vue.ts`, `Foo.svelte` →
-/// `Foo.svelte.ts`). Mirrors `carrier_ide_provider_path` for the API
-/// (`.d.ts`-style) provider surface. `provider_id_for_source` additionally
-/// gates on carrier classification; the LSP cold-start fallback (which
-/// already knows it holds a carrier) routes through this rather than
-/// hardcoding `{src}.vue.ts`.
+/// The reserved carrier API virtual-file suffix: the `.verter.` infix marks a
+/// REDIRECT-reached public-API carrier surface (never a bare-import probe
+/// target), uniformly across adapters. A bare `.svelte.ts` API carrier would
+/// collide with a Svelte rune-module extension (tsgo probes `.svelte.ts` before
+/// `.svelte.tsx`), so the API carrier carries this reserved infix; no real
+/// adapter source or rune-module extension carries `.verter.`.
+///
+/// This MIRRORS the `VirtualFileNaming` column's `import_surface`
+/// `Suffix(".verter.ts")` in `verter_session`'s framework descriptor (the
+/// single naming authority). The two derivations cannot import each other
+/// (`verter_session` depends on `verter_workspace`, not the reverse), so they
+/// are kept byte-for-byte in sync by the `virtual_file_naming_characterization`
+/// guard rather than a shared import.
+pub const CARRIER_API_VIRTUAL_SUFFIX: &str = ".verter.ts";
+
+/// The carrier-independent API virtual-file derivation: append the reserved
+/// [`CARRIER_API_VIRTUAL_SUFFIX`] (`.verter.ts`) to the FULL carrier canonical
+/// (`Foo.vue` → `Foo.vue.verter.ts`, `Foo.svelte` → `Foo.svelte.verter.ts`).
+/// Mirrors `carrier_ide_provider_path` for the API (`.d.ts`-style) provider
+/// surface. `provider_id_for_source` additionally gates on carrier
+/// classification; the LSP cold-start fallback (which already knows it holds a
+/// carrier) routes through this rather than hardcoding `{src}.vue.verter.ts`.
 #[must_use]
 pub fn carrier_api_provider_path(source_id: &str) -> String {
-    format!("{source_id}.ts")
+    format!("{source_id}{CARRIER_API_VIRTUAL_SUFFIX}")
+}
+
+/// The registry-classified framework CARRIER source extensions (`vue`, `svelte`,
+/// …), WITHOUT a leading dot — the single classification authority the
+/// inserted-import specifier rewrite probes a bare `./Comp` against (one
+/// `Comp.{ext}` candidate per extension). Owned `String`s so callers are free of
+/// the global registry's borrow. A new carrier extends the registry, not callers.
+#[must_use]
+pub fn carrier_source_extensions() -> Vec<String> {
+    verter_language::LanguageRegistry::global()
+        .carrier_extensions()
+        .iter()
+        .map(|ext| (*ext).to_string())
+        .collect()
 }
 
 /// Whether `path` is a framework CARRIER file (`.vue` / `.svelte`), by the
@@ -847,14 +948,6 @@ fn normalized_starts_with(path: &str, prefix: &str) -> bool {
         && (normalized.len() == prefix.len()
             || prefix.ends_with('/')
             || normalized.as_bytes().get(prefix.len()) == Some(&b'/'))
-}
-
-fn matches_any_pattern_for_root(path: &str, root: &str, patterns: &[String]) -> bool {
-    patterns
-        .iter()
-        .map(|pattern| normalize_project_membership_entry(root, pattern, true))
-        .filter_map(|pattern| glob::Pattern::new(&pattern).ok())
-        .any(|pattern| pattern.matches(path))
 }
 
 fn resolve_tsconfig_paths(
@@ -1034,6 +1127,11 @@ fn probe_path(reader: &dyn crate::traits::WorkspaceRead, base: &str) -> Option<S
         if let Some(resolved) = resolve_existing_path(reader, &base) {
             return Some(resolved);
         }
+        // NOTE: the `nodenext` `.js`->`.ts` extension rewrite is NOT applied
+        // here. It is a TYPESCRIPT-IMPORT-resolution rule and is applied only in
+        // `probe_path_for_context` for import-like request kinds — never for an
+        // SFC `src=` attribute (which reads the literal file bytes) and never
+        // for a `types`/`typings` manifest probe (already declaration paths).
     } else {
         for extension in probe_extensions() {
             let candidate = format!("{base}{extension}");
@@ -1059,6 +1157,18 @@ fn probe_path_for_context(
     ctx: ResolutionContext,
 ) -> Option<String> {
     let normalized = normalize_canonical_id(base);
+    // TS file-extension-substitution for an explicit JS-family IMPORT specifier
+    // prefers the SOURCE sibling (`./x.js` -> `./x.ts`) over a co-located
+    // declaration file, so the source-`.ts`/`.tsx` sibling is tried BEFORE the
+    // `.d.ts` companion. This is a TYPESCRIPT-IMPORT rule, so it applies ONLY to
+    // import-like kinds — NEVER to an SFC `src=` attribute (`<script
+    // src="./setup.js">` reads the literal file bytes; substituting `.ts` would
+    // change which external file is consumed).
+    if ctx.kind != ResolveRequestKind::SfcSrcAttr {
+        if let Some(resolved) = resolve_ts_source_sibling(reader, &normalized) {
+            return Some(resolved);
+        }
+    }
     if prefers_declaration_files(ctx) {
         if let Some(resolved) = resolve_declaration_companion(reader, &normalized) {
             return Some(resolved);
@@ -1171,6 +1281,42 @@ fn resolve_declaration_companion(
     None
 }
 
+/// TypeScript's `nodenext` extension rewrite: a JS-family runtime specifier
+/// resolves to its TypeScript SOURCE sibling (`./x.js` -> `./x.ts`). Maps the
+/// runtime extension to its source siblings only (`.ts`/`.tsx`/`.mts`/`.cts`;
+/// `.jsx` -> `.tsx`); the `.d.*` declaration companion is a SEPARATE, lower
+/// fallback handled by `resolve_declaration_companion`, so the source sibling
+/// always wins when both exist (matching TS file-extension-substitution).
+/// Returns the first existing source sibling, or `None`.
+fn resolve_ts_source_sibling(
+    reader: &dyn crate::traits::WorkspaceRead,
+    candidate: &str,
+) -> Option<String> {
+    let normalized = normalize_canonical_id(candidate);
+    let (runtime_ext, source_exts): (&str, &[&str]) = if normalized.ends_with(".mjs") {
+        (".mjs", &[".mts"])
+    } else if normalized.ends_with(".cjs") {
+        (".cjs", &[".cts"])
+    } else if normalized.ends_with(".jsx") {
+        (".jsx", &[".tsx"])
+    } else if normalized.ends_with(".js") {
+        (".js", &[".ts", ".tsx"])
+    } else {
+        return None;
+    };
+
+    let stem = normalized.strip_suffix(runtime_ext)?;
+
+    for source_ext in source_exts {
+        let sibling = format!("{stem}{source_ext}");
+        if let Some(resolved) = resolve_existing_path(reader, &sibling) {
+            return Some(resolved);
+        }
+    }
+
+    None
+}
+
 fn package_follow_is_confirmed(
     reader: &dyn crate::traits::WorkspaceRead,
     importer_id: &str,
@@ -1247,39 +1393,6 @@ fn split_path_parts(path: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(str::to_string)
         .collect()
-}
-
-fn normalize_project_membership_entry(
-    root: &str,
-    value: &str,
-    allow_directory_glob: bool,
-) -> String {
-    let normalized_value = normalize_canonical_id(value);
-    let resolved = if Path::new(&normalized_value).is_absolute()
-        || normalized_value.as_bytes().get(1) == Some(&b':')
-        || normalized_value.starts_with('/')
-    {
-        normalized_value
-    } else {
-        format!(
-            "{}/{}",
-            normalize_canonical_id(root).trim_end_matches('/'),
-            normalized_value
-                .trim_start_matches("./")
-                .trim_start_matches('/')
-        )
-    };
-
-    if !allow_directory_glob
-        || resolved.contains('*')
-        || resolved.contains('?')
-        || resolved.contains('[')
-        || Path::new(&resolved).extension().is_some()
-    {
-        return resolved;
-    }
-
-    format!("{resolved}/**/*")
 }
 
 fn compare_projects(a: &IdeProjectConfig, b: &IdeProjectConfig) -> std::cmp::Ordering {

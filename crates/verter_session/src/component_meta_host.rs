@@ -216,7 +216,7 @@ impl ComponentMetaHost {
         })
     }
 
-    /// Open a new isolated session in [`ExecutionMode::Batch`] mode.
+    /// Open a new isolated session in [`MetaExecutionMode::Batch`] mode.
     ///
     /// Test harness and MCP server callers use this path. LSP callers stay on
     /// [`Self::open_session`] (Interactive mode).

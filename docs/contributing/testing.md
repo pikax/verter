@@ -191,20 +191,26 @@ pnpm exec playwright test --project=preview 2>&1 | grep "error"  # wasteful re-r
 Integration tests verify Verter against real-world open-source Vue projects:
 
 ```bash
-# Run integration test for a specific project (skip baseline, reuse checkout)
-pnpm integration-test --skip-build --skip-baseline --no-clone <project>
+# Run integration test for a specific project (skip baseline, reuse checkout).
+# Substitute the project name for $PROJECT — angle-bracket placeholders are shell
+# redirects, so a copy-pasted `<project>` is a syntax error, not a prompt to fill in.
+pnpm integration-test --skip-build --skip-baseline --no-clone "$PROJECT"
 ```
 
 See the [CI/CD page](./ci-cd.md) for details on the integration test workflow.
 
 ## Server Cleanup
 
-After starting any dev server, preview server, or other long-running process for testing, always kill it when done. Stale servers can interfere with subsequent test runs:
+After starting any dev server, preview server, or other long-running process for testing, always terminate it when done — stale servers interfere with subsequent test runs. Capture the PID at spawn and terminate **that** PID. A port is a diagnostic, not proof of ownership: `lsof -t -i:<port>` returns whoever holds the port, which may be your own editor's server or another agent's. Never terminate by image name or pattern (`pkill -f node`, `taskkill /F /IM node.exe`, `Stop-Process -Name`).
 
 ```bash
-# Unix
-kill $(lsof -t -i:4173)
+pnpm --filter @verter/playground preview & SERVER_PID=$!   # capture at spawn
 
-# Windows
-taskkill //F //PID <pid>
+kill "$SERVER_PID"                                          # Unix — terminate only what you started
+taskkill //F //T //PID "$(cat /proc/$SERVER_PID/winpid)"    # Windows — see both caveats below
 ```
+
+Two Windows caveats, both established by running the commands, not by reading the flags:
+
+- **`$!` is the MSYS pid, not the Windows pid `taskkill` expects.** Passing `$SERVER_PID` directly prints `ERROR: The process "…" not found`, exits 128, and terminates nothing — hence the `/proc/<pid>/winpid` lookup.
+- **`//T` does not reap descendants.** It terminates the named process (exit 0, `SUCCESS: … has been terminated`) while its children survive, so `pnpm`'s child `vite`/`node` can outlive the kill. Confirm the server is really gone (`kill -0 "$SERVER_PID"`, or re-probe the port) instead of trusting the success line, and terminate any survivor by its own recorded PID.

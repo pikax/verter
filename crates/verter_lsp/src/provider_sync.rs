@@ -1,11 +1,79 @@
 use crate::project_resolver::NativeProjectResolver;
 use dashmap::DashMap;
+use verter_semantic::analysis::types::Hash16;
+use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderPathKind {
     Ide,
     Api,
+    /// The consumer-facing declaration companion (`.d.<ext>.ts`): the public
+    /// declaration a bare framework-carrier import resolves to. Distinct from
+    /// `Api` (the redirect-reached `.verter.ts` public surface) — both can be
+    /// live for one carrier under the dual-overlay model.
+    Decl,
     Shadow,
+}
+
+/// A provider path kind that is NEVER a declaration overlay (`Decl`).
+///
+/// The generic stale-path closers (`background_drain::close_stale_provider_paths`,
+/// `sync_coordinator::close_stale_paths`, `workspace_scanner::close_stale_paths`)
+/// consume THIS kind, not [`ProviderPathKind`], so the type system FORBIDS them from
+/// naming — and therefore from issuing a raw `close_dts` against — a `Decl` overlay.
+/// A declaration overlay is closed ONLY through the declaration-overlay lifecycle
+/// owner (`DeclOverlayOwner`), which serializes the close against any concurrent
+/// open of the same overlay. This makes the "stray unguarded Decl close" class a
+/// compile-time impossibility at those call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonDeclProviderPathKind {
+    Ide,
+    Api,
+    Shadow,
+}
+
+impl NonDeclProviderPathKind {
+    /// The [`ProviderPathKind`] this non-decl kind corresponds to (for shared
+    /// dispatch — e.g. the `Api` surface-store `forget`/`finalize` logic — that is
+    /// itself written over `ProviderPathKind` but is only ever reached with a
+    /// non-decl kind here).
+    pub fn as_provider_path_kind(self) -> ProviderPathKind {
+        match self {
+            Self::Ide => ProviderPathKind::Ide,
+            Self::Api => ProviderPathKind::Api,
+            Self::Shadow => ProviderPathKind::Shadow,
+        }
+    }
+
+    /// Narrow a [`ProviderPathKind`] to its non-decl counterpart, or `None` for
+    /// `Decl` (which the generic closers must never receive).
+    pub fn from_provider_path_kind(kind: ProviderPathKind) -> Option<Self> {
+        match kind {
+            ProviderPathKind::Ide => Some(Self::Ide),
+            ProviderPathKind::Api => Some(Self::Api),
+            ProviderPathKind::Shadow => Some(Self::Shadow),
+            ProviderPathKind::Decl => None,
+        }
+    }
+}
+
+/// Narrow a generic close-target slice to its NON-DECL subset, DROPPING any `Decl`
+/// entry — the single conversion every generic stale-path closer's input goes
+/// through. A `Decl` path that reaches a generic closer's input (e.g. a carrier
+/// sync transition whose prior `decl_path` differs from the next) is silently
+/// dropped here: its lifecycle is owned by `DeclOverlayOwner`, not the generic
+/// close, so the generic closer must not touch it. The type of the result
+/// ([`NonDeclProviderPathKind`]) then makes the closer structurally unable to issue
+/// a `close_dts` against a declaration overlay.
+pub fn non_decl_close_targets(
+    paths: &[(ProviderPathKind, String)],
+) -> Vec<(NonDeclProviderPathKind, String)> {
+    paths
+        .iter()
+        .filter_map(|(kind, path)| {
+            NonDeclProviderPathKind::from_provider_path_kind(*kind).map(|k| (k, path.clone()))
+        })
+        .collect()
 }
 
 /// Typed ownership binding for provider sync state.
@@ -40,26 +108,127 @@ impl ProviderOwnerBinding {
     }
 }
 
+/// The receipt-attested identity of the carrier IDE provider surface that was
+/// actually committed (published to the store / opened as a direct buffer) for a
+/// source.
+///
+/// Stamped onto the committed [`ProviderSyncState`] ONLY by
+/// [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state),
+/// which is gated by a validated
+/// [`ProviderReadyReceipt`](crate::external_ts::ProviderReadyReceipt); the identity is
+/// the receipt's `CarrierIde` companion fingerprint (its content + source-map hashes),
+/// i.e. the EXACT bytes the provider serves. A later capture requires the store's
+/// CURRENT IDE surface to be this exact committed one — a surface RECORDED for a
+/// publish that FAILED or never committed carries a different content/map identity and
+/// is refused, so a provider offset (produced against the last successfully published
+/// content) is never mapped through newer, uncommitted content/map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedCarrierIdeSurface {
+    /// Content-addressed hash (`Hash16`) of the committed IDE companion bytes.
+    pub content_hash: Hash16,
+    /// Content-addressed hash (`Hash16`) of the committed IDE companion's source-map
+    /// JSON (`[0; 16]` when the surface carries no map).
+    pub map_hash: Hash16,
+}
+
+/// The monotonic identity of the readiness receipt a carrier provider state was last
+/// committed under — the compare-and-swap guard the receipt-gated
+/// [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state)
+/// uses to REFUSE a stale receipt overwriting a newer committed state.
+///
+/// Ordered lexicographically `(ownership_generation, source_revision)`: an ownership
+/// change advances the snapshot generation; a same-owner content edit advances the
+/// per-source content-transition revision. A commit whose receipt is STRICTLY OLDER than
+/// the currently-committed stamp is refused (no state/stamp overwrite), so a
+/// prepare-then-open transaction that is superseded mid-flight can never overwrite the
+/// state a newer transaction already committed. `None` on a state that was never committed
+/// through the gate (an unresolved editor-liveness / non-carrier commit, which carries no
+/// receipt).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CarrierCommitStamp {
+    /// The owning-project ownership generation the receipt was minted at.
+    pub ownership_generation: SnapshotGeneration,
+    /// The per-source content revision the receipt attests (captured at open time).
+    pub source_revision: u64,
+}
+
+impl CarrierCommitStamp {
+    /// Whether `self` is STRICTLY OLDER than `other` in the lexicographic
+    /// `(ownership_generation, source_revision)` order — the stale-receipt predicate the
+    /// admission gate refuses on. Equal or newer receipts are admitted (a monotonic
+    /// compare-and-swap that always moves the committed identity forward, never backward).
+    #[must_use]
+    pub fn is_stale_against(&self, other: &CarrierCommitStamp) -> bool {
+        (self.ownership_generation, self.source_revision)
+            < (other.ownership_generation, other.source_revision)
+    }
+
+    /// Whether `self` and `other` carry the SAME `(ownership_generation, source_revision)`
+    /// key. At an equal key the admission gate treats a commit as idempotent ONLY when it
+    /// reproduces the identical committed artifact (the same receipt-attested IDE surface);
+    /// an equal-key commit carrying a DIFFERENT artifact is refused, so a torn/superseded
+    /// production sharing a revision can never overwrite the committed surface.
+    #[must_use]
+    pub fn is_same_key(&self, other: &CarrierCommitStamp) -> bool {
+        self.ownership_generation == other.ownership_generation
+            && self.source_revision == other.source_revision
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderSyncState {
     pub owner_binding: ProviderOwnerBinding,
     pub ide_path: Option<String>,
     pub api_path: Option<String>,
+    /// The consumer-facing declaration companion path (`.d.<ext>.ts`).
+    pub decl_path: Option<String>,
     pub shadow_path: Option<String>,
     pub ide_background_loaded: bool,
     pub api_background_loaded: bool,
+    pub decl_background_loaded: bool,
     pub shadow_background_loaded: bool,
+    /// The receipt-attested identity of the committed carrier IDE surface (set only by
+    /// the receipt-gated [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state)).
+    /// `None` for an UNRESOLVED editor-liveness carrier and for non-carrier / self-file
+    /// commits (which record their surface only AFTER a successful direct sync and need
+    /// no membership stamp). See [`Self::authorizes_carrier_ide_capture`].
+    pub committed_ide_surface: Option<CommittedCarrierIdeSurface>,
+    /// The monotonic identity of the readiness receipt this state was last committed
+    /// under (set only by the receipt-gated
+    /// [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state)).
+    /// The compare-and-swap oracle that REFUSES a stale receipt overwriting a newer
+    /// committed state — see [`CarrierCommitStamp`]. `None` for a non-carrier / unresolved
+    /// commit (which carries no receipt).
+    pub commit_stamp: Option<CarrierCommitStamp>,
 }
 
 impl ProviderSyncState {
     pub fn active_paths(&self) -> Vec<(ProviderPathKind, String)> {
         let mut paths = Vec::new();
-        for kind in [
-            ProviderPathKind::Ide,
-            ProviderPathKind::Api,
-            ProviderPathKind::Shadow,
-        ] {
+        for kind in ALL_PATH_KINDS {
             if let Some(path) = self.path_for_kind(kind) {
+                paths.push((kind, path.to_string()));
+            }
+        }
+        paths
+    }
+
+    /// The active provider paths EXCLUDING the declaration overlay (`Decl`) — the
+    /// close-target set the generic stale-path closers consume.
+    ///
+    /// A declaration overlay's lifecycle is owned exclusively by `DeclOverlayOwner`
+    /// (it must be closed only when no open carrier root still reaches it, serialized
+    /// against concurrent opens), so it is NEVER part of a generic stale-path close.
+    /// Returning [`NonDeclProviderPathKind`] makes that a type-level guarantee: the
+    /// closers cannot even name the `Decl` kind.
+    pub fn active_non_decl_paths(&self) -> Vec<(NonDeclProviderPathKind, String)> {
+        let mut paths = Vec::new();
+        for kind in [
+            NonDeclProviderPathKind::Ide,
+            NonDeclProviderPathKind::Api,
+            NonDeclProviderPathKind::Shadow,
+        ] {
+            if let Some(path) = self.path_for_kind(kind.as_provider_path_kind()) {
                 paths.push((kind, path.to_string()));
             }
         }
@@ -70,6 +239,7 @@ impl ProviderSyncState {
         match kind {
             ProviderPathKind::Ide => self.ide_path.as_deref(),
             ProviderPathKind::Api => self.api_path.as_deref(),
+            ProviderPathKind::Decl => self.decl_path.as_deref(),
             ProviderPathKind::Shadow => self.shadow_path.as_deref(),
         }
     }
@@ -78,6 +248,7 @@ impl ProviderSyncState {
         match kind {
             ProviderPathKind::Ide => self.ide_background_loaded,
             ProviderPathKind::Api => self.api_background_loaded,
+            ProviderPathKind::Decl => self.decl_background_loaded,
             ProviderPathKind::Shadow => self.shadow_background_loaded,
         }
     }
@@ -86,6 +257,7 @@ impl ProviderSyncState {
         match kind {
             ProviderPathKind::Ide => self.ide_background_loaded = loaded,
             ProviderPathKind::Api => self.api_background_loaded = loaded,
+            ProviderPathKind::Decl => self.decl_background_loaded = loaded,
             ProviderPathKind::Shadow => self.shadow_background_loaded = loaded,
         }
     }
@@ -95,6 +267,32 @@ impl ProviderSyncState {
         self.owner_binding.is_unresolved()
     }
 
+    /// Whether this committed state authorizes capturing a carrier IDE surface with
+    /// the given content / source-map identity as the source's LIVE IDE surface.
+    ///
+    /// An OWNED carrier reaches the provider only through the receipt-gated membership
+    /// commit, which stamps the exact published IDE-surface identity
+    /// ([`committed_ide_surface`](Self::committed_ide_surface)). A capture must therefore
+    /// be that exact published surface: a newer surface RECORDED for a publish that
+    /// FAILED or never committed carries a differing content/map identity and is refused
+    /// — mapping the provider's offsets (produced against the last successfully
+    /// published content) through the newer content/map would be wrong, not merely
+    /// stale. An OWNED state missing the stamp fails closed (no captured surface ⇒ no
+    /// mapping through uncommitted content).
+    ///
+    /// An UNRESOLVED (editor-liveness) carrier records its IDE surface only AFTER a
+    /// successful direct sync and carries no membership stamp, so any live surface for
+    /// it is capturable.
+    pub fn authorizes_carrier_ide_capture(&self, content_hash: Hash16, map_hash: Hash16) -> bool {
+        if self.owner_binding.is_unresolved() {
+            return true;
+        }
+        match &self.committed_ide_surface {
+            Some(stamp) => stamp.content_hash == content_hash && stamp.map_hash == map_hash,
+            None => false,
+        }
+    }
+
     /// Create an unresolved (no committed owner) IDE-only sync state for a
     /// given IDE path.
     pub fn unresolved(ide_path: String) -> Self {
@@ -102,10 +300,14 @@ impl ProviderSyncState {
             owner_binding: ProviderOwnerBinding::Unresolved,
             ide_path: Some(ide_path),
             api_path: None,
+            decl_path: None,
             shadow_path: None,
             ide_background_loaded: false,
             api_background_loaded: false,
+            decl_background_loaded: false,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         }
     }
 
@@ -122,11 +324,7 @@ impl ProviderSyncState {
     }
 
     pub fn carry_background_loaded_from(&mut self, previous: &ProviderSyncState) {
-        for kind in [
-            ProviderPathKind::Ide,
-            ProviderPathKind::Api,
-            ProviderPathKind::Shadow,
-        ] {
+        for kind in ALL_PATH_KINDS {
             if self.path_for_kind(kind) == previous.path_for_kind(kind) {
                 self.set_background_loaded(kind, previous.background_loaded_for_kind(kind));
             }
@@ -136,6 +334,7 @@ impl ProviderSyncState {
     pub fn is_background_loaded_path(&self, path: &str) -> bool {
         (self.ide_path.as_deref() == Some(path) && self.ide_background_loaded)
             || (self.api_path.as_deref() == Some(path) && self.api_background_loaded)
+            || (self.decl_path.as_deref() == Some(path) && self.decl_background_loaded)
             || (self.shadow_path.as_deref() == Some(path) && self.shadow_background_loaded)
     }
 }
@@ -144,27 +343,6 @@ impl ProviderSyncState {
 pub struct ProviderSyncTransition {
     pub next: ProviderSyncState,
     pub stale_paths: Vec<(ProviderPathKind, String)>,
-}
-
-pub fn carrier_sync_state_for_source(
-    resolver: &NativeProjectResolver,
-    source_id: &str,
-    is_jsx: bool,
-) -> Option<ProviderSyncState> {
-    let owner = resolver.owner_for_file(source_id)?;
-    let owner_key = owner
-        .tsconfig_path
-        .clone()
-        .unwrap_or_else(|| owner.root.clone());
-    Some(ProviderSyncState {
-        owner_binding: ProviderOwnerBinding::Owned(owner_key),
-        ide_path: resolver.provider_ide_id_for_source(source_id, is_jsx),
-        api_path: resolver.provider_id_for_source(source_id),
-        shadow_path: None,
-        ide_background_loaded: false,
-        api_background_loaded: false,
-        shadow_background_loaded: false,
-    })
 }
 
 /// The owner binding the CURRENT snapshot resolver would assign to `source_id`.
@@ -178,7 +356,7 @@ pub fn current_owner_binding_for_source(
     resolver: &NativeProjectResolver,
     source_id: &str,
 ) -> ProviderOwnerBinding {
-    match resolver.owner_for_file(source_id) {
+    match resolver.nearest_config_for_path(source_id) {
         Some(owner) => {
             let owner_key = owner
                 .tsconfig_path
@@ -230,7 +408,7 @@ pub fn non_carrier_sync_state_for_source(
     resolver: &NativeProjectResolver,
     source_id: &str,
 ) -> Option<ProviderSyncState> {
-    let owner = resolver.owner_for_file(source_id)?;
+    let owner = resolver.nearest_config_for_path(source_id)?;
     let owner_key = owner
         .tsconfig_path
         .clone()
@@ -239,10 +417,14 @@ pub fn non_carrier_sync_state_for_source(
         owner_binding: ProviderOwnerBinding::Owned(owner_key),
         ide_path: None,
         api_path: None,
+        decl_path: None,
         shadow_path: resolver.provider_id_for_source(source_id),
         ide_background_loaded: false,
         api_background_loaded: false,
+        decl_background_loaded: false,
         shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
     })
 }
 
@@ -256,11 +438,7 @@ pub fn stale_paths_for_transition(
     // The type provider already has the correct TSX content; only the owner metadata changes.
     if previous.is_unresolved() && owner_changed {
         let mut stale = Vec::new();
-        for kind in [
-            ProviderPathKind::Ide,
-            ProviderPathKind::Api,
-            ProviderPathKind::Shadow,
-        ] {
+        for kind in ALL_PATH_KINDS {
             let prev_path = previous.path_for_kind(kind);
             let next_path = next.path_for_kind(kind);
             if let Some(path) = prev_path {
@@ -274,11 +452,7 @@ pub fn stale_paths_for_transition(
     }
 
     let mut stale = Vec::new();
-    for kind in [
-        ProviderPathKind::Ide,
-        ProviderPathKind::Api,
-        ProviderPathKind::Shadow,
-    ] {
+    for kind in ALL_PATH_KINDS {
         let prev_path = previous.path_for_kind(kind);
         let next_path = next.path_for_kind(kind);
         if let Some(path) = prev_path {
@@ -326,9 +500,10 @@ pub fn remove_sync_state(
 }
 
 /// All provider path kinds, in deterministic order.
-const ALL_PATH_KINDS: [ProviderPathKind; 3] = [
+const ALL_PATH_KINDS: [ProviderPathKind; 4] = [
     ProviderPathKind::Ide,
     ProviderPathKind::Api,
+    ProviderPathKind::Decl,
     ProviderPathKind::Shadow,
 ];
 
@@ -385,10 +560,14 @@ pub fn open_unresolved_carrier_state(
         owner_binding: ProviderOwnerBinding::Unresolved,
         ide_path: Some(desired_ide_path),
         api_path: None,
+        decl_path: None,
         shadow_path: None,
         ide_background_loaded: prior_matches_and_live,
         api_background_loaded: false,
+        decl_background_loaded: false,
         shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
     }
 }
 
@@ -457,6 +636,7 @@ pub fn revert_unsynced_kinds(
         match kind {
             ProviderPathKind::Ide => committed.ide_path = prev_path,
             ProviderPathKind::Api => committed.api_path = prev_path,
+            ProviderPathKind::Decl => committed.decl_path = prev_path,
             ProviderPathKind::Shadow => committed.shadow_path = prev_path,
         }
         committed
@@ -586,9 +766,13 @@ pub fn open_unresolved_carrier_commit(
             ide_background_loaded: prior_live_ide_path.is_some(),
             ide_path: prior_live_ide_path,
             api_path: None,
+            decl_path: None,
             shadow_path: None,
             api_background_loaded: false,
+            decl_background_loaded: false,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         }
     });
 

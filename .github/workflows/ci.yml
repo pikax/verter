@@ -97,13 +97,39 @@ jobs:
               - 'crates/verter_actions/**'
               - 'crates/verter_lsp/**'
               - 'crates/verter_span/**'
+              - 'crates/verter_type_runtime/**'
               - 'packages/vue-vscode/**'
               - 'packages/language-shared/**'
               - 'packages/typescript-plugin/**'
               - '.github/workflows/ci.yml'
+            native:
+              - 'crates/verter_napi/**'
+              - 'crates/verter_compiler/**'
+              - 'crates/verter_parser/**'
+              - 'crates/verter_analysis/**'
+              - 'crates/verter_session/**'
+              - 'crates/verter_workspace/**'
+              - 'crates/verter_semantic/**'
+              - 'crates/verter_ffi/**'
+              - 'crates/verter_diagnostics/**'
+              - 'crates/verter_actions/**'
+              - 'crates/verter_span/**'
+              - 'crates/verter_type_runtime/**'
+              - 'packages/native/**'
+              - 'packages/unplugin/**'
+              - 'packages/typescript-plugin/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
             dx:
               - 'crates/verter_dx_baseline/**'
               - 'crates/verter_lsp/**'
+              # The crate that OWNS CompletionResolveData, is_actionable, tsserver
+              # completion parsing, offset stamping, and resolve routing — the
+              # exact logic the real-provider auto-import parity gate proves. A
+              # runtime-only resolve regression MUST trip this filter, or the
+              # parity gate would silently skip.
+              - 'crates/verter_type_runtime/**'
               - 'packages/dx-harness/**'
               - 'packages/lsp-test-client/**'
               - 'scripts/dx/**'
@@ -269,6 +295,19 @@ jobs:
         # so `pnpm -r run test` never reaches these specs — same convention as
         # the carrier-routing guards step above.
         run: pnpm run test:scripts
+      - name: Extension-provider headless guards (auto-import + diagnostics)
+        # Regression-guards the in-process EXTENSION type provider headlessly (no
+        # VS Code, no LSP) via `ExtensionTsService`:
+        #   - autoimport: surfaces an unimported export with a `source` resolve
+        #     key and resolves the import edit.
+        #   - diagnostics (GAP-2): unions the SEMANTIC + SYNTACTIC + SUGGESTION
+        #     passes, reaching parity with the native TS / TSGO pull model
+        #     (reverting the syntactic/suggestion handlers makes it throw).
+        # The shared Rust resolve path is covered by the tsserver parity gate;
+        # these prove the extension-specific TS-side shaping. Run by explicit path
+        # for the same reason as the carrier-routing guards above.
+        run: |
+          pnpm vitest run packages/vue-vscode/src/extensionTsService.autoimport.spec.ts packages/vue-vscode/src/extensionTsService.diagnostics.spec.ts
       - name: Test report
         if: always()
         uses: dorny/test-reporter@v1
@@ -592,6 +631,17 @@ jobs:
           DX_REPO_ROOT: ${{ github.workspace }}
           DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
         run: node scripts/dx/dx-ci-gate.mjs
+      # Real-provider auto-import PARITY (Issue #1's headline guarantee): spawns the
+      # vendored tsgo AND the pinned tsserver through the baseline bridge, resolves
+      # an unimported-symbol completion through each, and asserts BOTH produce the
+      # SAME auto-import edit. `DX_REQUIRE_PROVIDERS=1` makes a provider that fails
+      # to spawn a HARD FAILURE so this proof can never vacuously skip on a runner
+      # where the assets are present.
+      - name: Real-provider auto-import parity gate
+        env:
+          DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
+          DX_REQUIRE_PROVIDERS: "1"
+        run: pnpm --filter @verter/dx-harness exec vitest --run test/providerResolveParity.integration.test.ts
       # The verter raw-LSP spine: drives the REAL verter-lsp over the vendored
       # hermetic corpus (pinned tsserver, no network) and FAILS unless verter-lsp
       # starts, reaches readiness, RESPONDS to hover/definition/completion, and

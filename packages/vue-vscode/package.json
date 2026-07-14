@@ -25,7 +25,7 @@
     "build": "node esbuild.mjs --production",
     "build:dev": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "test": "vitest run src/carrier-routing-no-vue-gate.spec.ts",
+    "test": "vitest run src/carrier-routing-no-vue-gate.spec.ts src/extensionTsService.diagnostics.spec.ts src/extensionTsService.autoimport.spec.ts src/extensionTsService.codefix.spec.ts src/package.spec.ts src/sharedTsgoLaunch.spec.ts src/d1AcceptanceGate.spec.ts src/runSummaryOracle.spec.ts",
     "vscode:prepublish": "node esbuild.mjs --production",
     "prepare:e2e": "cargo build -p verter_lsp --manifest-path ../../Cargo.toml && pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm run build:dev && tsc -p tsconfig.test.json",
     "pretest:e2e": "pnpm run prepare:e2e",
@@ -40,6 +40,7 @@
     "benchmark:startup": "node e2e/startupBenchmark.mjs",
     "benchmark:completion": "node e2e/completionBenchmark.mjs",
     "package": "node package.mjs",
+    "package:dev:universal": "node package.mjs --allow-universal",
     "package:win32-x64": "node package.mjs --target win32-x64",
     "package:linux-x64": "node package.mjs --target linux-x64",
     "package:linux-arm64": "node package.mjs --target linux-arm64",
@@ -84,6 +85,17 @@
         "label": "Verter Vue Analysis"
       }
     ],
+    "configurationDefaults": {
+      "emmet.includeLanguages": {
+        "vue": "html"
+      },
+      "[vue]": {
+        "editor.formatOnType": true
+      },
+      "[svelte]": {
+        "editor.formatOnType": true
+      }
+    },
     "configuration": {
       "type": "object",
       "title": "Verter",
@@ -680,11 +692,6 @@
   "icon": "logo.png",
   "engines": {
     "vscode": "^1.110.0"
-  },
-  "configurationDefaults": {
-    "emmet.includeLanguages": {
-      "vue": "html"
-    }
   },
   "vsce": {
     "dependencies": false,

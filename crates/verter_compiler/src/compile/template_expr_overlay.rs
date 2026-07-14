@@ -28,8 +28,182 @@
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 
-use crate::ast::types::TemplateAst;
-use crate::template::oxc::{parse_template_expressions, types::OxcParsedAst};
+use rustc_hash::FxHashSet;
+
+use crate::ast::types::{AstNodeKind, TagType, TemplateAst};
+use crate::template::code_gen::vdom::element::to_pascal_case;
+use crate::template::oxc::{
+    parse_template_expressions,
+    types::{OxcNodeData, OxcParsedAst},
+};
+use crate::utils::oxc::bindings::collect_expression_free_ref_spans;
+
+/// Collect the set of identifier names a `<template>` references.
+///
+/// Reads ONLY the typed template IR — expression-binding facts, v-for source
+/// references, and component tag names — never a raw-source string scan. The
+/// returned set is the AST-driven "used in template" inventory consumed by two
+/// callers: script import-elision (runtime lane) and unused-binding liveness
+/// (IDE lane). Both must agree on what counts as a template use, so the logic
+/// lives here once rather than being re-derived per lane.
+///
+/// `oxc_ast` is the parsed template-expression overlay; `template_ast` is the
+/// structural template AST (for component tag names); `source` is the SFC text
+/// (only sliced for already-located tag-name / v-for spans, never parsed).
+///
+/// Returns `(used, complete)`. `complete` is `false` when ANY template
+/// expression failed to parse — its referenced identifiers are then UNKNOWN, so
+/// the set cannot be trusted for the unused-binding gate. The caller treats an
+/// incomplete result as the conservative `None` (fail open: no demotion).
+pub fn collect_template_used_vars(
+    oxc_ast: &OxcParsedAst<'_>,
+    template_ast: &TemplateAst,
+    source: &str,
+) -> (FxHashSet<String>, bool) {
+    let mut vars = FxHashSet::default();
+    let mut complete = true;
+
+    // 1. Identifiers from every expression binding (interpolations, v-if
+    //    conditions, directive values, dynamic args). A template-EXPRESSION parse
+    //    error (`{{ count + }}`, `{{ @@@ }}`) makes that expression's references
+    //    unknowable — mark the whole set INCOMPLETE so the gate fails open. This
+    //    is distinct from an SFC-level tokenizer error (which the caller already
+    //    gates on); a structurally-valid template can still carry an individually
+    //    unparseable interpolation.
+    for expr in oxc_ast.iter_expressions() {
+        // A parse FAILURE (`errors: Some`) makes this expression's references
+        // unknowable — fail open. An EMPTY interpolation (`{{ }}`) parses cleanly
+        // with no expression and `errors: None`, and references nothing, so it is
+        // NOT incomplete. Distinguish the two by `errors`, never by `bindings`
+        // being `None` (which an empty interpolation also produces).
+        if expr.errors.is_some() {
+            complete = false;
+        }
+        // LIVENESS routes through the COMPLETE `Visit` span collector over the
+        // parsed expression — NOT the runtime `BindingVisitor` binding facts, whose
+        // hand-rolled walker drops whole statement/expression families (a `switch`
+        // inside an IIFE, etc.) behind a `_ => {}` arm. The default `walk::*`
+        // traversal visits every node, so a setup binding referenced only inside a
+        // nested construct in an interpolation is never missed.
+        //
+        // Global-named references are retained (a setup binding may shadow a JS
+        // global). The expression AST carries substring-relative spans, so each
+        // span is shifted by `expr.offset` to slice the file-relative `source`.
+        // No per-expression scope-local `ignored` set is threaded here: a v-for /
+        // v-slot scope local that leaks into this set is harmless for the gate —
+        // over-inclusion only SUPPRESSES a diagnostic (the conservative-safe
+        // direction), it never demotes a used binding.
+        if let Some(ref expression) = expr.expression {
+            let mut spans = FxHashSet::default();
+            collect_expression_free_ref_spans(expression, &FxHashSet::default(), &mut spans);
+            for span in spans {
+                let start = (span.start + expr.offset) as usize;
+                let end = (span.end + expr.offset) as usize;
+                vars.insert(source[start..end].to_string());
+            }
+        }
+    }
+
+    // 2. Identifiers from v-for AND v-slot source/reference expressions. Both
+    //    carry the free-identifier NAMES their expressions use (a v-slot default-
+    //    slot binding's defaults/type refs, a v-for source). Counting a v-slot
+    //    reference as a use is safe for this gate: it can only SUPPRESS a
+    //    diagnostic, never fabricate one.
+    //
+    //    Liveness reads `liveness_reference_names`, NOT the runtime `references`
+    //    spans. That set is collected by the COMPLETE `Visit` walker, so a setup
+    //    binding referenced ONLY inside a nested callback in the source / default
+    //    (`v-for="x in rows.map(r => fmt(r))"`, `#default="{ row = list.map(r => fmt(r)) }"`)
+    //    is recorded; it RETAINS global-named identifiers (a binding may SHADOW a
+    //    JS global, so `v-for="x in Date"` over a `const Date` binding is a real
+    //    use); and it carries NAMES, so liveness never depends on the partial
+    //    wrapped→file-relative span shift.
+    for node_data in &oxc_ast.data {
+        if let OxcNodeData::Element(el) = node_data {
+            if let Some(ref v_for) = el.v_for {
+                // A v-for whose source expression failed to parse has unknowable
+                // references — fail open.
+                if v_for.parsed.has_errors() {
+                    complete = false;
+                }
+                for name in &v_for.parsed.liveness_reference_names {
+                    vars.insert(name.clone());
+                }
+            }
+            if let Some(ref v_slot) = el.v_slot {
+                if v_slot.parsed.has_errors() {
+                    complete = false;
+                }
+                for name in &v_slot.parsed.liveness_reference_names {
+                    vars.insert(name.clone());
+                }
+            }
+        }
+    }
+
+    // 3. Component tag names from the structural template AST. A component tag
+    //    can resolve to a setup binding under ANY of Vue's casing forms, so each
+    //    tag contributes every candidate name (see `component_tag_candidates`).
+    for node in &template_ast.nodes {
+        if let AstNodeKind::Element(el) = &node.kind {
+            if el.tag_type == TagType::Component {
+                let tag_name =
+                    &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
+                for candidate in component_tag_candidates(tag_name) {
+                    vars.insert(candidate);
+                }
+            }
+        }
+    }
+
+    (vars, complete)
+}
+
+/// The set of setup-binding NAMES a component tag may resolve to, covering every
+/// casing form Vue/JSX component resolution accepts.
+///
+/// Vue resolves `<my-comp/>` against a setup binding registered as `myComp`
+/// (camelCase) OR `MyComp` (PascalCase), and a literal `<myComp/>` / `<MyComp/>`
+/// against the same-cased binding. A MEMBER-style tag (`<Foo.Bar/>`) resolves
+/// against the ROOT binding (`Foo`). Returning every candidate is the
+/// conservative direction: an over-broad match only suppresses a diagnostic, it
+/// never fabricates one, while missing the real binding's casing would
+/// false-positive a used component as unused.
+pub fn component_tag_candidates(tag_name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    // A member-style tag resolves against its ROOT segment.
+    let root = tag_name.split('.').next().unwrap_or(tag_name);
+    let mut push = |s: String| {
+        if !s.is_empty() && !out.contains(&s) {
+            out.push(s);
+        }
+    };
+    // The raw tag (and its member root) verbatim.
+    push(tag_name.to_string());
+    push(root.to_string());
+    // PascalCase and camelCase variants of the root (covers kebab/camel/Pascal
+    // registration forms).
+    let pascal = to_pascal_case(root);
+    let camel = to_camel_case(root);
+    push(pascal);
+    push(camel);
+    out
+}
+
+/// Lower-camelCase a tag name: PascalCase the kebab/snake segments, then
+/// lowercase the leading character. `my-comp` → `myComp`, `MyComp` → `myComp`.
+fn to_camel_case(s: &str) -> String {
+    let pascal = to_pascal_case(s);
+    let mut chars = pascal.chars();
+    match chars.next() {
+        Some(first) => {
+            let mut out: String = first.to_lowercase().collect();
+            out.push_str(chars.as_str());
+            out
+        }
+        None => pascal,
+    }
+}
 
 /// Parse-affecting codegen options that shape the template AST the expressions
 /// cover. Held EXACTLY (not hashed) so two requests that differ here are
@@ -298,5 +472,32 @@ mod tests {
         let a = TemplateExprKey::new("source", (0, 5), &opts, SourceType::tsx(), false);
         let b = TemplateExprKey::new("source", (0, 6), &opts, SourceType::tsx(), false);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn kebab_component_tag_yields_camel_and_pascal_candidates() {
+        let c = component_tag_candidates("my-comp");
+        assert!(c.contains(&"my-comp".to_string()), "raw kebab tag");
+        assert!(c.contains(&"MyComp".to_string()), "PascalCase candidate");
+        assert!(
+            c.contains(&"myComp".to_string()),
+            "camelCase candidate (the binding form a `const myComp` would register)"
+        );
+    }
+
+    #[test]
+    fn camel_component_tag_yields_self_and_pascal() {
+        let c = component_tag_candidates("myComp");
+        assert!(c.contains(&"myComp".to_string()));
+        assert!(c.contains(&"MyComp".to_string()));
+    }
+
+    #[test]
+    fn member_style_tag_counts_root() {
+        let c = component_tag_candidates("Foo.Bar");
+        assert!(
+            c.contains(&"Foo".to_string()),
+            "member-style tag counts its root"
+        );
     }
 }

@@ -128,6 +128,16 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     let effective_program = &parser_ret.program;
     let effective_content_str = content_str;
 
+    // Unused-binding LIVENESS completeness for the script source: a clean parse
+    // gives a complete program to the free-reference collector, but ANY OXC parse
+    // error (a genuine syntax error routed through recovery, OR a TSX-only failure
+    // whose degraded program OXC still hands back empty) means the collector
+    // UNDER-COUNTS script references. An under-counted script ref would OMIT a
+    // genuinely-used binding from the unwrap surface → false TS6133. So a script
+    // with parse errors is INCOMPLETE and the liveness gate must fail open. (This
+    // is purely a liveness signal; it does NOT change the recovery codegen path.)
+    let script_complete = parser_ret.errors.is_empty();
+
     let parse_result = parse_script_with_companion(
         effective_program,
         ScriptMode::Setup,
@@ -175,13 +185,10 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         if let ScriptItem::Import(imp) = item {
             let abs_start = content_start + imp.span.start;
             let abs_end = content_start + imp.span.end;
-            // Rewrite .vue imports to .vue.ts so type providers resolve them
-            // to the public API output instead of the IDE (.vue.tsx) output.
-            // Uses prepend_left so the sourcemap accounts for the extra bytes.
-            if imp.source.ends_with(".vue") {
-                let quote_pos = content_start + imp.source_span.end - 1;
-                ct.prepend_left(quote_pos, ".ts");
-            }
+            // The in-project bare `.vue` specifier is emitted VERBATIM: a bare
+            // framework-carrier import resolves natively to the `.d.vue.ts`
+            // declaration carrier (emitted + proactively opened) through tsgo's
+            // basename-append probe — no compile-time specifier rewrite.
             ct.move_with_suffix(abs_start, abs_end, hoist_pos, "\n");
         }
     }
@@ -192,10 +199,10 @@ pub(super) fn process_tsx_script_setup<'alloc>(
     // function wrapper (TS1232) while the user types a broken statement below them.
     if let Some(plan) = &recovery_plan {
         for imp in &plan.imports {
-            if imp.source.ends_with(".vue") {
-                let quote_pos = imp.source_span.end - 1;
-                ct.prepend_left(quote_pos, ".ts");
-            }
+            // The recovered import's bare `.vue` specifier is emitted verbatim —
+            // it resolves natively to the `.d.vue.ts` declaration carrier (see the
+            // clean-path hoist above). The recovered source span is needed only to
+            // hoist the statement, not to rewrite the specifier.
             ct.move_with_suffix(imp.span.start, imp.span.end, hoist_pos, "\n");
         }
     }
@@ -209,24 +216,10 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         }
     }
 
-    // Rewrite .vue specifiers in re-exports (e.g., `export { Foo } from './Foo.vue'`).
-    // These aren't hoisted, but their specifiers still need .vue → .vue.ts.
-    for item in &parse_result.items {
-        if let ScriptItem::Export(exp) = item {
-            if let (Some(src), Some(src_span)) = (exp.source, exp.source_span) {
-                if src.ends_with(".vue") {
-                    let quote_pos = content_start + src_span.end - 1;
-                    ct.prepend_left(quote_pos, ".ts");
-                }
-            }
-        }
-    }
-
-    // Rewrite .vue specifiers in dynamic imports (e.g., `import('./Foo.vue')`).
-    for src_span in &parse_result.vue_dynamic_import_spans {
-        let quote_pos = content_start + src_span.end - 1;
-        ct.prepend_left(quote_pos, ".ts");
-    }
+    // In-project `.vue` re-export (`export { Foo } from './Foo.vue'`) and dynamic
+    // import (`import('./Foo.vue')`) specifiers are emitted VERBATIM — a bare
+    // framework-carrier import resolves natively to the `.d.vue.ts` declaration
+    // carrier, so there is no compile-time specifier rewrite for either form.
 
     // Extract bindings
     // Note: binding spans have mixed coordinate systems (see script/macros.rs:93):
@@ -567,12 +560,13 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         }
 
         // Build block scope with shallowUnwrapRef destructuring.
-        // Includes ALL setup bindings except Props/PropsAliased (accessed via __props).
-        // Imports are already in scope from hoisting, so they're excluded too.
-        // Non-template bindings are intentionally included so that:
-        //  1. IntelliSense always shows unwrapped types in the template
-        //  2. TS flags unused destructured bindings (the LSP remaps these
-        //     diagnostics to the original declaration via the offset comments)
+        // Includes every LIVE setup binding except Props/PropsAliased (accessed
+        // via __props). Imports are already in scope from hoisting, so they're
+        // excluded too. Bindings used in script/style (but not the template) are
+        // intentionally included so IntelliSense always shows unwrapped types in
+        // the template. A PROVEN-unused binding is OMITTED here (see the
+        // liveness/omission block below) so its SOURCE `const name` carries TS6133
+        // directly at its mapped span — never an unmapped destructure copy.
         let mut import_names: FxHashSet<&str> = parse_result
             .items
             .iter()
@@ -685,26 +679,121 @@ pub(super) fn process_tsx_script_setup<'alloc>(
         }
 
         if !setup_bindings.is_empty() {
-            let entries: String = setup_bindings
+            // Liveness inventory: a setup binding is "used somewhere" if it is
+            // referenced by the template, the script body, or a style `v-bind()`.
+            // This drives whether the binding PARTICIPATES in the
+            // `___VERTER___unwrapped` object + destructure block. A used binding
+            // keeps a VALUE-READ entry so its source decl stays live (correct —
+            // it is used) and the template can read the unwrapped local. An
+            // unused binding is OMITTED entirely from the unwrapped object AND
+            // the destructure block, so the user's original `const name` is its
+            // sole remaining occurrence and TypeScript surfaces TS6133 at the
+            // SOURCE decl span (which the source map maps back to the real
+            // declaration line — unlike a synthesized destructure copy, which
+            // has no per-binding source mapping and would collapse the
+            // diagnostic to line 1).
+            //
+            // A type-only entry (`undefined as unknown as typeof name`) does NOT
+            // work: `typeof name` is itself a type-query REFERENCE to `name`, so
+            // it keeps the SOURCE decl live and tsc never flags it; the
+            // diagnostic instead falls on the unmapped `const { name } =
+            // ___VERTER___unwrapped` destructure copy and collapses to line 1.
+            // Omission is the only shape that lands TS6133 on the source decl.
+            // Template IntelliSense / `shallowUnwrapRef` typing is unaffected
+            // because an omitted binding is, by definition, referenced nowhere
+            // (template included), so nothing reads its unwrapped property.
+            //
+            // ── THE CONSERVATIVE SAFETY INVARIANT: unknown => used ──
+            // Omission is allowed ONLY on a PROVEN-unused binding. If usage
+            // cannot be determined COMPLETELY and SOUNDLY across template +
+            // script + style, EVERY binding keeps its value-read (no TS6133).
+            // A false negative (a real unused binding left undiagnosed) is the
+            // correct tradeoff for a diagnostic gate; a false positive (a used
+            // binding flagged unused) is not acceptable. The gate is therefore
+            // `all_sources_complete && !used`.
+            //
+            // All three sources are typed-IR/AST facts — no string heuristics,
+            // no name matching:
+            //  - template:   `options.template_used_vars` (expression bindings ∪
+            //                 v-for/v-slot refs ∪ component-tag candidates), built
+            //                 from the COMPLETE `ide_completion = false` overlay.
+            //                 `None` ⇒ INCOMPLETE (parse errors / no template).
+            //  - script body: `collect_setup_binding_refs` (complete `Visit`
+            //                 free-reference collector), sound only when
+            //                 `script_complete` (the `<script setup>` parsed
+            //                 without error; a recovered program under-counts).
+            //  - style:       `options.style_v_bind_vars`, sound only when
+            //                 `options.style_usage_complete`.
+            let setup_name_set: FxHashSet<&str> = setup_bindings.iter().map(|(n, _)| *n).collect();
+            let script_refs = collect_setup_binding_refs(effective_program, &setup_name_set);
+            let style_v_bind_set: FxHashSet<&str> = options
+                .style_v_bind_vars
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+
+            // All usage sources must be complete for ANY omission to be sound.
+            // Template usage is complete only when the overlay produced a set
+            // (`Some`) with no per-expression parse error; style usage is complete
+            // only when every `v-bind()` parsed; script usage is complete only when
+            // the `<script setup>` parsed without error (a recovered/degraded
+            // program makes the `Visit` collector under-count). ANY incomplete
+            // source ⇒ the gate fails open (no omission).
+            let all_sources_complete = options.template_used_vars.is_some()
+                && options.style_usage_complete
+                && script_complete;
+
+            let is_used_somewhere = |name: &str| -> bool {
+                script_refs.contains(name)
+                    || style_v_bind_set.contains(name)
+                    || define_props_var == Some(name)
+                    || match &options.template_used_vars {
+                        Some(tpl) => tpl.contains(name),
+                        None => true,
+                    }
+            };
+
+            // A binding is OMITTED from the unwrapped object + destructure block
+            // ONLY when all usage sources are complete AND it is referenced
+            // nowhere. Otherwise (any source incomplete, or used anywhere) it
+            // keeps its value-read entry — the fail-open default.
+            let should_omit =
+                |name: &str| -> bool { all_sources_complete && !is_used_somewhere(name) };
+
+            // Live (kept) bindings: everything not proven-unused. These are the
+            // only bindings that appear in the unwrapped object and destructure;
+            // proven-unused bindings are dropped so their SOURCE decl carries the
+            // TS6133 at its mapped position.
+            let live_bindings: Vec<(&str, BindingType)> = setup_bindings
+                .iter()
+                .copied()
+                .filter(|(name, _)| !should_omit(name))
+                .collect();
+
+            let entries: String = live_bindings
                 .iter()
                 .map(|(name, _)| {
                     let jsdoc = binding_source_info
                         .get(name)
                         .and_then(|info| info.jsdoc.as_deref());
                     if options.is_jsx {
-                        // JSX mode: plain binding (no TS cast)
+                        // JSX mode: no TS casts — a live binding reads the value.
                         if let Some(jsdoc) = jsdoc {
                             format!("{}\n    {}: {}", jsdoc, name, name)
                         } else {
                             format!("{}: {}", name, name)
                         }
-                    } else if let Some(jsdoc) = jsdoc {
-                        format!(
-                            "{}\n    {}: {} as unknown as typeof {}",
-                            jsdoc, name, name, name
-                        )
                     } else {
-                        format!("{}: {} as unknown as typeof {}", name, name, name)
+                        // TSX mode: `name as unknown as typeof name` keeps the
+                        // decl live (value-read) AND carries the unwrapped type.
+                        if let Some(jsdoc) = jsdoc {
+                            format!(
+                                "{}\n    {}: {} as unknown as typeof {}",
+                                jsdoc, name, name, name
+                            )
+                        } else {
+                            format!("{}: {} as unknown as typeof {}", name, name, name)
+                        }
                     }
                 })
                 .collect::<Vec<_>>()
@@ -723,13 +812,15 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             //
             // Split into `const` (truly immutable: SetupConst, LiteralConst) and
             // `let` (assignable: SetupRef, SetupLet, SetupReactiveConst, SetupMaybeRef)
-            // so that v-model assignment handlers don't trigger TS2588.
-            let const_names: Vec<&str> = setup_bindings
+            // so that v-model assignment handlers don't trigger TS2588. Only LIVE
+            // bindings are destructured — a proven-unused binding is omitted so
+            // its source decl, not an unmapped destructure copy, carries TS6133.
+            let const_names: Vec<&str> = live_bindings
                 .iter()
                 .filter(|(_, bt)| matches!(bt, BindingType::SetupConst | BindingType::LiteralConst))
                 .map(|(name, _)| *name)
                 .collect();
-            let let_names: Vec<&str> = setup_bindings
+            let let_names: Vec<&str> = live_bindings
                 .iter()
                 .filter(|(_, bt)| {
                     !matches!(bt, BindingType::SetupConst | BindingType::LiteralConst)
@@ -776,26 +867,34 @@ pub(super) fn process_tsx_script_setup<'alloc>(
             }
             destruct_block.push_str(" /* verter-destructured-end */\n");
 
-            // Emit void(name) for bindings referenced in script body or style v-bind().
-            // This prevents TS from flagging them as "unused" when they're only used
-            // in script (not in template) or only in style v-bind() expressions.
-            let setup_name_set: FxHashSet<&str> = setup_bindings.iter().map(|(n, _)| *n).collect();
-            let mut script_refs = collect_setup_binding_refs(effective_program, &setup_name_set);
-            // Merge style v-bind references
-            for name in &options.style_v_bind_vars {
-                if setup_name_set.contains(name.as_str()) {
-                    // We need a &str that lives long enough — use the setup_bindings entry
-                    if let Some((n, _)) = setup_bindings.iter().find(|(n, _)| *n == name.as_str()) {
-                        script_refs.insert(n);
-                    }
+            // Keep `___VERTER___unwrapped` itself live when NOTHING is
+            // destructured from it: if EVERY setup binding is proven-unused (and
+            // thus omitted), the destructure reads nothing and the temp would
+            // become a spurious TS6133. `void X;` is a no-op value-read. When at
+            // least one live binding is destructured, the destructure already
+            // reads the temp, so the guard is unnecessary (and omitted to keep
+            // the common-case output unchanged).
+            if const_names.is_empty() && let_names.is_empty() {
+                destruct_block.push_str(&format!("void {P}unwrapped;\n", P = PREFIX));
+            }
+
+            // Emit void(name) for bindings referenced in script body or style
+            // v-bind(). This keeps the block-scoped DESTRUCTURED copy alive so
+            // TS does not flag it when the binding is used only in the script
+            // (not the template) or only in a style `v-bind()`. Reuses the same
+            // typed-IR `script_refs` / `style_v_bind_set` computed above for the
+            // unwrapped-entry liveness decision — one shared usage inventory.
+            // Only LIVE bindings have a destructured copy; a script/style-used
+            // binding is always live (used somewhere ⇒ not omitted), so iterating
+            // `live_bindings` never voids a name that was dropped.
+            let mut block_copy_used = false;
+            for (name, _) in &live_bindings {
+                if script_refs.contains(name) || style_v_bind_set.contains(name) {
+                    destruct_block.push_str(&format!("void({});", name));
+                    block_copy_used = true;
                 }
             }
-            if !script_refs.is_empty() {
-                for (name, _) in &setup_bindings {
-                    if script_refs.contains(name) {
-                        destruct_block.push_str(&format!("void({});", name));
-                    }
-                }
+            if block_copy_used {
                 destruct_block.push('\n');
             }
 

@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use verter_workspace::{
     IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectId,
-    ProjectMembership, ProjectRank, VfsProjectConfig, WorkspaceAccess,
+    ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };
 
 fn build_multi_project_workspace() -> Arc<MemoryWorkspace> {
@@ -56,9 +56,12 @@ fn build_multi_project_workspace() -> Arc<MemoryWorkspace> {
             compiler_options: IdeProjectCompilerOptions {
                 base_url: Some("/shared".to_string()),
                 paths: vec![("@a/*".to_string(), vec!["./src-a/*".to_string()])],
+                ..Default::default()
             },
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/shared"),
+            ),
         },
         VfsProjectConfig {
             root: "/shared".to_string(),
@@ -71,9 +74,12 @@ fn build_multi_project_workspace() -> Arc<MemoryWorkspace> {
             compiler_options: IdeProjectCompilerOptions {
                 base_url: Some("/shared".to_string()),
                 paths: vec![("@b/*".to_string(), vec!["./src-b/*".to_string()])],
+                ..Default::default()
             },
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/shared"),
+            ),
         },
     ]);
     workspace.set_project_graph(graph);

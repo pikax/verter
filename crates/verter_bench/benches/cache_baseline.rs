@@ -49,8 +49,8 @@ use std::time::Instant;
 use verter_session::HostConfig;
 use verter_session::VerterHost;
 use verter_workspace::{
-    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectMembership,
-    ProjectRank, VfsProjectConfig, WorkspaceAccess,
+    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank,
+    VfsProjectConfig, WorkspaceAccess,
 };
 
 const BASELINE_NUM_COMPONENTS: usize = 16;
@@ -104,7 +104,9 @@ fn build_baseline_host(num_components: usize) -> (Arc<VerterHost>, Vec<String>) 
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/workspace"),
+            ),
         },
     ]);
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));

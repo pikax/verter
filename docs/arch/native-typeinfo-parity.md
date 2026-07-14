@@ -2654,7 +2654,8 @@ is created. Both tables live in this one module.
 > own block maps (`emitBlockRows`, `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`,
 > the prereq/mechanism maps), NOT from §10.4.1. `--check` regenerates all three files
 > (`typeinfo_ignored_test_manifest_rows.rs`, `typeinfo_additional_proof_rows.rs`,
-> `typeinfo_parity_blocks.rs`) from these inputs and byte-compares. The U0-FINISH-B
+> `typeinfo_parity_blocks.rs`) from these inputs and runs an LF-normalized content compare
+> (CRLF checkouts normalize to LF per the Cross-Platform rule). The U0-FINISH-B
 > oracle/proof substrate is LANDED (built per the LOCKED
 > `docs/arch/u0-oracle-harness-design.md`): the executable proof registry
 > (`oracle_query_specs.rs` — hand-authored pure data per that design, not a generated

@@ -12,9 +12,8 @@
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use super::nav_features::{
-    handle_completion, handle_goto_definition, handle_hover, handle_references, handle_rename,
-};
+use super::nav_features::{handle_completion, handle_hover};
+use super::nav_features_navigation::{handle_goto_definition, handle_references, handle_rename};
 use super::VerterLanguageServer;
 
 /// Audit-aware wrapper for
@@ -85,7 +84,7 @@ pub(super) async fn handle_completion_with_audit(
 }
 
 /// Audit-aware wrapper for
-/// [`super::nav_features::handle_goto_definition`].
+/// [`super::nav_features_navigation::handle_goto_definition`].
 pub(super) async fn handle_goto_definition_with_audit(
     server: &VerterLanguageServer,
     params: GotoDefinitionParams,
@@ -121,7 +120,7 @@ pub(super) async fn handle_goto_definition_with_audit(
 }
 
 /// Audit-aware wrapper for
-/// [`super::nav_features::handle_references`].
+/// [`super::nav_features_navigation::handle_references`].
 pub(super) async fn handle_references_with_audit(
     server: &VerterLanguageServer,
     params: ReferenceParams,
@@ -149,7 +148,7 @@ pub(super) async fn handle_references_with_audit(
 }
 
 /// Audit-aware wrapper for
-/// [`super::nav_features::handle_rename`].
+/// [`super::nav_features_navigation::handle_rename`].
 pub(super) async fn handle_rename_with_audit(
     server: &VerterLanguageServer,
     params: RenameParams,

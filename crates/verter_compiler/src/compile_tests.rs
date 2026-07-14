@@ -6145,7 +6145,8 @@ import { helperFn } from "./helpers";
 fn companion_script_type_only_import_not_in_returned() {
     // Companion <script> imports that are only used as type assertions should NOT
     // be in __returned__. This matches Vue's official compiler behavior.
-    // Regression test for CurrencyCodes build failure in judis-app.
+    // Regression test: a type-only companion-script import must not appear in
+    // __returned__ (a build failure otherwise, matching the official compiler).
     let result = compile_sfc(
         r#"<script lang="ts">
 import { computed, defineComponent } from "vue";
@@ -14494,13 +14495,20 @@ fn pure_runtime_ts_target_parses_template_expressions_once() {
 }
 
 #[test]
-fn pure_tsx_ts_target_parses_template_expressions_once() {
+fn pure_tsx_ts_target_parses_template_expressions_twice() {
+    // The IDE/TSX target builds TWO overlays: the `ide_completion = true` lane
+    // that drives TSX template codegen, and the `ide_completion = false` lane
+    // that drives unused-binding LIVENESS. The two completion modes store
+    // different binding facts (completion mode intentionally suppresses real
+    // references), so they cannot share an overlay — the extra liveness parse is
+    // the accepted correctness cost of using a SOUND usage source for the TS6133
+    // gate (the zero-extra-parse optimisation is abandoned for liveness).
     reset_parse_template_expressions_calls();
     let _ = compile_with_target(TS_OVERLAY_SFC, CompileTarget::IDE, false);
     assert_eq!(
         parse_template_expressions_call_count(),
-        1,
-        "pure TSX target parses template expressions exactly once"
+        2,
+        "pure TSX target parses once for codegen (completion=true) + once for liveness (completion=false)"
     );
 }
 
@@ -14513,23 +14521,24 @@ fn js_combined_target_does_not_share_overlay_across_source_types() {
         false,
     );
     let calls = parse_template_expressions_call_count();
-    // Runtime lane parses with `tsx()`, TSX lane parses with `jsx()` — two
-    // distinct overlays, never shared.
+    // Three distinct overlays, never shared across source types or completion
+    // modes: the runtime lane parses with `tsx()/completion=false`, the liveness
+    // lane with `jsx()/completion=false` (a JS SFC's liveness uses the JS source
+    // type, so it does NOT collide with the runtime `tsx()` entry), and the TSX
+    // lane with `jsx()/completion=true`.
     assert_eq!(
-        calls, 2,
-        "JS BUNDLER|TSX must parse twice (tsx runtime + jsx TSX), got {calls}"
+        calls, 3,
+        "JS BUNDLER|TSX parses tsx runtime + jsx liveness + jsx TSX, got {calls}"
     );
-    // Prove WHICH source types parsed — not just that there were two parses.
+    // Prove WHICH source types parsed — not just that there were three parses.
     // `tsx()` records `(is_typescript = true, is_jsx = true)`; `jsx()` records
-    // `(is_typescript = false, is_jsx = true)`. The JS combined compile must
-    // parse the runtime lane with `tsx()` and the TSX lane with `jsx()`, in
-    // that order — proving the TSX lane genuinely parsed as JavaScript (`jsx()`),
-    // not merely that it built a second overlay.
+    // `(is_typescript = false, is_jsx = true)`. Order: runtime `tsx()`, then the
+    // liveness `jsx()` overlay, then the TSX-codegen `jsx()` overlay.
     let source_types = parse_template_expressions_source_types();
     assert_eq!(
         source_types,
-        vec![(true, true), (false, true)],
-        "JS combined must parse runtime=tsx() then TSX=jsx(); got {source_types:?}"
+        vec![(true, true), (false, true), (false, true)],
+        "JS combined must parse runtime=tsx(), liveness=jsx(), TSX=jsx(); got {source_types:?}"
     );
 }
 
@@ -14606,8 +14615,8 @@ fn template_expression_overlay_source_type_matrix() {
     );
     let js_combined_calls = parse_template_expressions_call_count();
     assert_eq!(
-        js_combined_calls, 2,
-        "JS combined target must parse twice (no cross-source-type sharing), got {js_combined_calls}"
+        js_combined_calls, 3,
+        "JS combined parses tsx runtime + jsx liveness + jsx TSX (no cross-source-type sharing), got {js_combined_calls}"
     );
 
     let js_runtime_only = compile_with_target(JS_OVERLAY_SFC, CompileTarget::BUNDLER, false);
@@ -14758,7 +14767,7 @@ import { shallowUnwrapRef as ___VERTER___shallowUnwrapRef, enhanceElementWithPro
 const msg = 'hi'
 
 // @ts-ignore
-let ___VERTER___instance!: Omit<InstanceType<import('./App.vue.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
+let ___VERTER___instance!: Omit<InstanceType<import('./App.vue.verter.ts')['default']>, '$attrs'> & { $attrs: ___VERTER___Attrs };
 void ___VERTER___instance;
 const ___VERTER___directiveAccessor = ___VERTER___retrieveSetupDirectives(___VERTER___instance);
 void ___VERTER___directiveAccessor;
@@ -14793,6 +14802,8 @@ void (___VERTER___instance).valueOf;
 
 return {};
 } // close templateBindingFN
+
+export { default } from './App.vue.verter.ts';
 
 type ___VERTER___attributes = {};
 "#
@@ -14849,6 +14860,27 @@ fn template_expression_overlay_pins_absolute_output_bytes() {
     // Guard the goldens themselves against accidental triviality.
     assert!(TS_OVERLAY_GOLDEN_RUNTIME.contains("_createElementBlock(\"p\""));
     assert!(TS_OVERLAY_GOLDEN_TSX.contains("<p title={msg}>{ msg }</p>"));
+
+    // The IDE carrier exports the component's PUBLIC FACADE — a clean
+    // `export default` re-exported from the API carrier (`.verter.ts`). A bare
+    // consumer `import Comp from "./Comp.vue"` resolves natively to the
+    // `.d.vue.ts` declaration carrier; the self-import that types
+    // `___VERTER___instance` targets the API carrier, NOT the IDE output.
+    assert!(
+        tsx.contains("export { default } from './App.vue.verter.ts';"),
+        "IDE carrier must re-export the public default from the API carrier:\n{tsx}"
+    );
+    assert!(
+        tsx.contains("import('./App.vue.verter.ts')"),
+        "instance self-import must target the .verter.ts API carrier:\n{tsx}"
+    );
+    // Template internals stay LOCAL (non-exported): the binding fn is a plain
+    // `export function` helper, never the component's public default.
+    assert!(
+        !tsx.contains("export default ___VERTER___")
+            && !tsx.contains("export { ___VERTER___TemplateBindingFN as default }"),
+        "template internals must NOT be exported as the public default:\n{tsx}"
+    );
 }
 
 /// A malformed template interpolation surfaces an identical diagnostic whether
@@ -15060,4 +15092,101 @@ function handlePing(e) { void e; }
         tsx.code
     );
     assert_no_spread_event_antipatterns(&tsx.code);
+}
+
+// ── ISSUE-7: unused `<script setup>` local → TS6133 (full compile path) ─────
+//
+// End-to-end through `compile_tsx`, which computes `template_used_vars` in the
+// compile pipeline and plumbs it into IDE codegen. A binding used NOWHERE must
+// be OMITTED from the `___VERTER___unwrapped` object + destructure block (so its
+// SOURCE decl is its sole occurrence and TS6133 lands on the MAPPED declaration,
+// not an unmapped destructure copy that collapses to line 1); a binding used in
+// the template must keep its value read.
+
+#[test]
+fn tsx_unused_script_setup_local_is_omitted_from_unwrap() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const foo = 1
+</script>
+
+<template>
+  <div>hello</div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    // Omitted: no value-read entry, no retired type-only entry, and crucially
+    // NO `typeof foo` anywhere (which would keep the source decl live and
+    // mis-position TS6133 to line 1).
+    assert!(
+        !tsx.code.contains("foo: foo as unknown as typeof foo"),
+        "unused `foo` must NOT keep its value-read unwrap entry.\nTSX:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("foo: undefined as unknown as typeof foo"),
+        "unused `foo` must NOT use the retired type-only unwrap entry.\nTSX:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("typeof foo"),
+        "unused `foo` must not be referenced via `typeof foo` (keeps source decl live).\nTSX:\n{}",
+        tsx.code
+    );
+    // The user's `const foo` decl survives untouched (it carries TS6133).
+    assert!(
+        tsx.code.contains("const foo = 1"),
+        "the source `const foo` decl must remain.\nTSX:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_used_script_setup_local_keeps_value_read() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const foo = 1
+</script>
+
+<template>
+  <div>{{ foo }}</div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    assert!(
+        tsx.code.contains("foo: foo as unknown as typeof foo"),
+        "template-used `foo` must keep its value-read unwrap entry.\nTSX:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("foo: undefined as unknown as typeof foo"),
+        "template-used `foo` must NOT be demoted to a type-only entry.\nTSX:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_script_used_only_local_keeps_value_read() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const foo = 1
+console.log(foo)
+</script>
+
+<template>
+  <div>hello</div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    assert!(
+        tsx.code.contains("foo: foo as unknown as typeof foo"),
+        "script-used `foo` must keep its value-read unwrap entry.\nTSX:\n{}",
+        tsx.code
+    );
 }

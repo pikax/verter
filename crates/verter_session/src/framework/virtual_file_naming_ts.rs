@@ -4,10 +4,10 @@
 //! The Rust [`FrameworkAdapterDescriptor`] table (the
 //! [`VirtualFileNaming`] column) is the SINGLE authority for an adapter's
 //! IDE / API / testing-API / sidecar virtual-file suffixes. The committed
-//! TypeScript module `packages/typescript-plugin/src/generated/virtual-file-naming.ts`
-//! is a GENERATED, BYTE-PINNED mirror of that column — the LSP / ts-plugin
-//! naming derivations consume it (the consumer rewiring is a later
-//! vertical; this lands the column + the mirror + the freshness pin).
+//! TypeScript module `packages/language-shared/src/virtual-file-naming.generated.ts`
+//! is a GENERATED, BYTE-PINNED mirror of that column — the browser-safe
+//! `@verter/language-shared` carrier-naming CORE derives from it, and the
+//! Node ts-plugin / LSP naming derivations consume that one CORE.
 //!
 //! [`render_virtual_file_naming_ts`] renders the canonical TS module text
 //! from the descriptor rows; the freshness test
@@ -16,14 +16,14 @@
 //! a descriptor-row change without a regen fails the gate.
 
 use crate::framework::descriptor::{
-    svelte_descriptor, svelte_rune_module_naming, vue_descriptor, FrameworkAdapterDescriptor,
-    VirtualFileNaming, VirtualPathPolicy,
+    svelte_descriptor, svelte_rune_module_naming, vue_descriptor, DeclarationSurface,
+    FrameworkAdapterDescriptor, VirtualFileNaming, VirtualPathPolicy,
 };
 
 /// The committed path of the generated mirror, relative to the workspace
 /// root. The freshness test and any regen path reference this one place.
 pub const VIRTUAL_FILE_NAMING_TS_PATH: &str =
-    "packages/typescript-plugin/src/generated/virtual-file-naming.ts";
+    "packages/language-shared/src/virtual-file-naming.generated.ts";
 
 /// Every adapter descriptor that carries a virtual-file naming column, in
 /// a deterministic order. Adding an adapter row here (and regenerating)
@@ -44,13 +44,11 @@ pub fn render_virtual_file_naming_ts() -> String {
         let Some(naming) = descriptor.virtual_file_naming.as_ref() else {
             continue;
         };
-        // The carrier extension (`.vue` / `.svelte`) is `.{carrier_language}`.
-        // It is the prefix every virtual-file suffix appends to, so the TS
-        // plugin builds its carrier-extension + per-suffix regexes from it.
-        let carrier_ext = descriptor
-            .carrier_language
-            .as_ref()
-            .map(|lang| format!(".{}", lang.as_str()));
+        // The carrier extension (`.vue` / `.svelte`) is `.{carrier_language}`,
+        // DERIVED from the descriptor (never a hand-matched literal here). It is
+        // the prefix every virtual-file suffix appends to, so the TS plugin
+        // builds its carrier-extension + per-suffix regexes from it.
+        let carrier_ext = descriptor.carrier_extension();
         render_descriptor_entry(
             &mut out,
             descriptor.tag_const_name(),
@@ -103,7 +101,18 @@ fn render_descriptor_entry(
         "    sidecarSuffixes: {},\n",
         render_str_array(naming.sidecar_suffixes)
     ));
+    out.push_str(&format!(
+        "    declarationSurface: {},\n",
+        render_declaration_surface(naming.declaration_surface)
+    ));
     out.push_str("  },\n");
+}
+
+fn render_declaration_surface(surface: DeclarationSurface) -> String {
+    match surface {
+        DeclarationSurface::None => "{ kind: \"none\" }".to_string(),
+        DeclarationSurface::ExtensionMiddleTs => "{ kind: \"extensionMiddleTs\" }".to_string(),
+    }
 }
 
 fn render_path_policy(policy: &VirtualPathPolicy) -> String {
@@ -190,12 +199,23 @@ export type VirtualPathPolicy =
   | VirtualPathSuffix
   | VirtualPathJsxConditional;
 
+export interface DeclarationSurfaceNone {
+  kind: "none";
+}
+
+export interface DeclarationSurfaceExtensionMiddleTs {
+  kind: "extensionMiddleTs";
+}
+
+export type DeclarationSurface = DeclarationSurfaceNone | DeclarationSurfaceExtensionMiddleTs;
+
 export interface VirtualFileNaming {
   carrierExtension: string | null;
   ide: VirtualPathPolicy;
   importSurface: VirtualPathPolicy;
   testingApiSuffix: string | null;
   sidecarSuffixes: string[];
+  declarationSurface: DeclarationSurface;
 }
 
 export const VIRTUAL_FILE_NAMING: Readonly<Record<string, VirtualFileNaming>> = {
@@ -218,12 +238,13 @@ mod tests {
         assert!(a.contains("carrierExtension: \".vue\""));
         assert!(a.contains("carrierExtension: \".svelte\""));
         assert!(a.contains("kind: \"jsxConditional\", jsx: \".jsx\", nonJsx: \".tsx\""));
-        // The import surface is the `.ts` API file (suffix policy).
-        assert!(a.contains("importSurface: { kind: \"suffix\", suffix: \".ts\" }"));
+        // The import surface is the reserved `.verter.ts` API file (suffix
+        // policy) — the redirect-reached infix, never a bare `.ts`.
+        assert!(a.contains("importSurface: { kind: \"suffix\", suffix: \".verter.ts\" }"));
         assert!(a.contains("testingApiSuffix: \".__verter_test.ts\""));
         assert!(a.contains("sidecarSuffixes: []"));
         // The Svelte COMPONENT row renders its fixed `.tsx` IDE suffix policy,
-        // the `.ts` import surface, and a NULL testing surface.
+        // the `.verter.ts` import surface, and a NULL testing surface.
         assert!(a.contains("FRAMEWORK_TAG_SVELTE: {"));
         assert!(a.contains("ide: { kind: \"suffix\", suffix: \".tsx\" }"));
         // The Svelte row's testing surface is null (no `.svelte.__verter_test`).
@@ -242,5 +263,26 @@ mod tests {
     fn render_starts_with_the_do_not_edit_banner() {
         let rendered = render_virtual_file_naming_ts();
         assert!(rendered.starts_with("// @generated by verter — DO NOT EDIT BY HAND.\n"));
+    }
+
+    #[test]
+    fn render_includes_the_declaration_surface_column() {
+        let a = render_virtual_file_naming_ts();
+        // The component carriers render the extension-middle `.d.<ext>.ts`
+        // declaration surface (the bare-import-probed declaration carrier).
+        assert!(
+            a.contains("declarationSurface: { kind: \"extensionMiddleTs\" }"),
+            "the component carriers render an extension-middle declaration surface column"
+        );
+        // The mirror schema/type carries the column.
+        assert!(
+            a.contains("declarationSurface: DeclarationSurface;"),
+            "the VirtualFileNaming TS interface declares the declarationSurface field"
+        );
+        // The rune module projects no declaration carrier.
+        assert!(
+            a.contains("declarationSurface: { kind: \"none\" }"),
+            "the rune-module row renders a none declaration surface"
+        );
     }
 }

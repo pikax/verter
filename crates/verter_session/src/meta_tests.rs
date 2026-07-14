@@ -151,12 +151,12 @@ fn open_session_defaults_to_interactive_mode() {
     let batch = project.open_session_batch().expect("batch session");
     assert_eq!(
         interactive.execution_mode(),
-        crate::meta::ExecutionMode::Interactive,
+        crate::meta::MetaExecutionMode::Interactive,
         "open_session() default must be Interactive",
     );
     assert_eq!(
         batch.execution_mode(),
-        crate::meta::ExecutionMode::Batch,
+        crate::meta::MetaExecutionMode::Batch,
         "open_session_batch() must return Batch mode",
     );
 }

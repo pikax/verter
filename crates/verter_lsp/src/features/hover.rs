@@ -12,7 +12,7 @@ use crate::documents::sfc_scanner::{
 };
 use crate::features::hover_event_tokens::{
     camelize_event_name, capitalize_first, event_directive_hover, hyphenate_event_name,
-    vue_event_attr_label,
+    v_model_hover, vue_event_attr_label,
 };
 
 /// Hover result from verter's own analysis, optionally carrying a Vue-specific
@@ -317,7 +317,7 @@ pub fn build_child_component_hover(
         let mut fallback_emits = handler_props
             .iter()
             .filter_map(|(name, signature)| {
-                let vue_attr = crate::tsgo::merge::jsx_prop_to_vue_attr(name)?;
+                let vue_attr = crate::type_provider::merge::jsx_prop_to_vue_attr(name)?;
                 if !vue_attr.starts_with('@') {
                     return None;
                 }
@@ -376,7 +376,7 @@ pub fn build_child_event_hover(
         .unwrap_or_default();
 
     if let Some(prop) = template.prop_definitions.iter().find(|prop| {
-        crate::tsgo::merge::jsx_prop_to_vue_attr(&prop.name).as_deref() == Some(vue_attr)
+        crate::type_provider::merge::jsx_prop_to_vue_attr(&prop.name).as_deref() == Some(vue_attr)
     }) {
         let signature = prop
             .type_annotation
@@ -385,7 +385,8 @@ pub fn build_child_event_hover(
                 handler_props
                     .iter()
                     .find(|(name, _)| {
-                        crate::tsgo::merge::jsx_prop_to_vue_attr(name).as_deref() == Some(vue_attr)
+                        crate::type_provider::merge::jsx_prop_to_vue_attr(name).as_deref()
+                            == Some(vue_attr)
                     })
                     .map(|(_, signature)| signature.clone())
             })
@@ -423,7 +424,7 @@ pub fn build_child_event_hover(
     handler_props
         .iter()
         .find(|(name, _)| {
-            crate::tsgo::merge::jsx_prop_to_vue_attr(name).as_deref() == Some(vue_attr)
+            crate::type_provider::merge::jsx_prop_to_vue_attr(name).as_deref() == Some(vue_attr)
         })
         .map(|(_, signature)| {
             make_hover(format!(
@@ -510,6 +511,14 @@ fn hover_in_template(
     // source token. We reconstruct the hover label/range from the existing
     // `TemplateDirective` / `TemplateAttribute` spans instead.
     if let Some(hover) = event_directive_hover(offset as u32, source, analysis, line_index) {
+        return Some(hover);
+    }
+    // Source-owned `v-model` directive-name + arg hover. Runs BEFORE the
+    // attribute-name suppression: the `v-model` name and its `:show` arg are Vue
+    // syntax tokens the generated TSX renames/overwrites, so the TypeProvider can
+    // never describe the source token. TSGO supplies the bound prop TYPE (via the
+    // mapped prop-name codegen); this hover supplies the Vue source context.
+    if let Some(hover) = v_model_hover(offset as u32, source, analysis, line_index) {
         return Some(hover);
     }
     if let Some(hover) = template_ref_hover(offset as u32, source, analysis, line_index) {
@@ -1399,7 +1408,7 @@ fn handler_signature_for_event(
             handler_props
                 .iter()
                 .find(|(name, _)| {
-                    crate::tsgo::merge::jsx_prop_to_vue_attr(name).as_deref()
+                    crate::type_provider::merge::jsx_prop_to_vue_attr(name).as_deref()
                         == Some(vue_attr.as_str())
                 })
                 .map(|(_, signature)| signature.clone())

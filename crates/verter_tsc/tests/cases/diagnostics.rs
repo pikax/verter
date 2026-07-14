@@ -16,7 +16,6 @@ struct Diag {
     line: u32,
     col: u32,
     ts_code: u32,
-    #[allow(dead_code)]
     message: String,
 }
 
@@ -126,6 +125,42 @@ fn assert_error_at(diags: &[Diag], file_suffix: &str, line: u32, ts_code: u32) {
     assert!(
         !matching.is_empty(),
         "expected TS{ts_code} at {file_suffix}:{line}, found none.\nAll diags for file: {:#?}",
+        diags
+            .iter()
+            .filter(|d| d.file.ends_with(file_suffix))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Assert an error exists at an EXACT `(line, col)` in `file_suffix` for `ts_code`,
+/// whose message contains `msg_substr` (e.g. the quoted symbol name `'unusedVar'`).
+///
+/// This is stricter than [`assert_error_at`]: it pins the column (so a collapse to
+/// `(1,1)` or a wrong-column remap fails) AND a message substring (so a wrong-symbol
+/// regression fails). The substring is matched structurally against the parsed
+/// `Diag.message` — no brittle full-message equality.
+fn assert_error_at_named(
+    diags: &[Diag],
+    file_suffix: &str,
+    line: u32,
+    col: u32,
+    ts_code: u32,
+    msg_substr: &str,
+) {
+    let matching: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.file.ends_with(file_suffix)
+                && d.line == line
+                && d.col == col
+                && d.ts_code == ts_code
+                && d.message.contains(msg_substr)
+        })
+        .collect();
+    assert!(
+        !matching.is_empty(),
+        "expected TS{ts_code} at {file_suffix}:({line},{col}) whose message contains \
+         {msg_substr:?}, found none.\nAll diags for file: {:#?}",
         diags
             .iter()
             .filter(|d| d.file.ends_with(file_suffix))
@@ -402,6 +437,16 @@ fn verter_tsc_diagnostics_e2e() {
     // ScriptSetupErrors.vue — ref/computed/reactive at known lines
     assert_error_at(&diags, "ScriptSetupErrors.vue", 6, 2345); // ref<number>('hello')
     assert_error_at(&diags, "ScriptSetupErrors.vue", 10, 2322); // computed return type
+                                                                // ISSUE-7: an unused top-level `<script setup>` local maps TS6133 back to its
+                                                                // SOURCE decl line (the IDE codegen no longer keeps it artificially live via
+                                                                // the `___VERTER___unwrapped` value-read). Both proven-unused locals are pinned
+                                                                // at their exact decl `(line, col)` AND by symbol name in the SAME run, so a
+                                                                // collapse to `(1,1)`, a wrong-line/column remap, or a wrong/missing symbol
+                                                                // all fail this gate (not just a "some TS6133 somewhere in the file" check).
+                                                                // `const unusedVar = ...` — used nowhere; decl maps to (14, 1).
+    assert_error_at_named(&diags, "ScriptSetupErrors.vue", 14, 1, 6133, "'unusedVar'");
+    // `const user = reactive<User>(...)` — never read after declaration; decl maps to (17, 1).
+    assert_error_at_named(&diags, "ScriptSetupErrors.vue", 17, 1, 6133, "'user'");
     assert_error_at(&diags, "ScriptSetupErrors.vue", 18, 2322); // reactive User.id
     assert_error_at(&diags, "ScriptSetupErrors.vue", 19, 2322); // reactive User.name
     assert_error_at(&diags, "ScriptSetupErrors.vue", 20, 2322); // reactive User.email

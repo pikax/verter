@@ -130,6 +130,54 @@ export interface CompileBatchInput {
    * `defaultMode` (which itself defaults to "session").
    */
   requestedMode?: CompileCacheMode;
+  /**
+   * Explicit per-component scoped-style / HMR id. Threaded into this
+   * input's compile profile ONLY on the `"runtime-render"` lane
+   * (scoped-style / HMR identity is per-component, not per-build). Omit to
+   * let codegen auto-generate the id.
+   */
+  componentId?: string;
+}
+
+/** The compile lane for {@link VerterHost.compileMany}. */
+export type CompileManyTarget = "host-backed" | "runtime-render";
+
+/**
+ * The batch-level render profile for the `"runtime-render"` lane. Every
+ * field is output-affecting and uniform across a single bundler build. It
+ * is REQUIRED for the render lane (the host fails closed when it is absent —
+ * it never substitutes production/client defaults).
+ */
+export interface CompileBatchRenderProfile {
+  /**
+   * Codegen filename override (component-name extraction, scope-id
+   * derivation, source-map source/file). Omit to fall back to the canonical
+   * id — same semantics as `HostCompileProfile.filename`.
+   */
+  filename?: string;
+  isProduction: boolean;
+  ssr: boolean;
+  forceJs: boolean;
+  forceVapor: boolean;
+  sourceMap: boolean;
+  /**
+   * Preserve template comments. TRI-STATE: omit to keep the compiler
+   * default (`!isProduction` — dev preserves, prod strips), same semantics
+   * as an omitted `HostCompileProfile.comments`. Do NOT collapse an omitted
+   * value to `false`.
+   */
+  comments?: boolean;
+  hmrStrategy: "none" | "vite" | "webpack";
+  /** Runtime module import specifier (e.g. "vue"). */
+  runtimeModuleName?: string;
+  /** Types module import specifier. */
+  typesModuleName?: string;
+  /** Custom interpolation delimiter — open. Set together with `delimiterClose`. */
+  delimiterOpen?: string;
+  /** Custom interpolation delimiter — close. */
+  delimiterClose?: string;
+  /** Custom-element tag names (affect template codegen). */
+  customElements?: string[];
 }
 
 export interface CompileBatchOptions {
@@ -145,14 +193,39 @@ export interface CompileBatchOptions {
    * unset. Defaults to "session" (the host default).
    */
   defaultMode?: CompileCacheMode;
+  /**
+   * The compile lane. `"host-backed"` (default) runs the full session
+   * wrapper; `"runtime-render"` runs the render-only bundler lane, which
+   * REQUIRES `compileProfile`.
+   */
+  target?: CompileManyTarget;
+  /**
+   * The batch-level render profile for the `"runtime-render"` lane.
+   * REQUIRED for that lane; ignored by `"host-backed"`.
+   */
+  compileProfile?: CompileBatchRenderProfile;
 }
 
 export interface CompileBatchEntry {
   canonicalId: string;
   code: string;
   sourceMap?: string;
+  /**
+   * The compiled Main module language ("ts" / "js" / "jsx"), or undefined
+   * on an error/panic outcome. Bundler consumers (vite sub-request
+   * routing) read it.
+   */
+  lang?: string;
   /** All compilation errors for this file. Empty on success. */
   errors: string[];
+  /**
+   * Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
+   * compile, separate from the fatal `errors`. Populated by the
+   * RuntimeRender lane's soft-macro contract (an unresolved imported
+   * macro type renders successfully and reports a warning here). Always
+   * empty on the HostBacked lane and on any fatal outcome.
+   */
+  diagnostics: HostDiagnostic[];
   durationMs: number;
   /**
    * True iff this input was served from a warm cache slot (the
@@ -209,7 +282,7 @@ export type {
   HostIdeProjectConfig,
 } from "./host-types";
 
-import type { HostCompileProfile } from "./host-types";
+import type { HostCompileProfile, HostDiagnostic } from "./host-types";
 
 // ---------------------------------------------------------------------------
 // Native-specific overrides: accept Buffer in addition to string
@@ -254,7 +327,7 @@ export interface NativeBlockOverrideRequest {
   overrides: NativeBlockOverrideEntry[];
 }
 
-export type HostPublicApiMode = "public" | "testing";
+export type HostPublicApiMode = "public" | "testing" | "declaration";
 
 // =============================================================================
 // Workspace (filesystem-backed VFS)

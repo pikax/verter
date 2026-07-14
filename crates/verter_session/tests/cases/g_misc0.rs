@@ -150,6 +150,8 @@ mod tls_harness_in_crate;
 mod tracer_stack_reentrant_observe_safe;
 #[path = "g_misc0/uniqueness_check_release_active.rs"]
 mod uniqueness_check_release_active;
+#[path = "g_misc0/upsert_always_canonicalizes_supplied_canonical_id.rs"]
+mod upsert_always_canonicalizes_supplied_canonical_id;
 #[path = "g_misc0/vue_relocation_no_shim.rs"]
 mod vue_relocation_no_shim;
 #[path = "g_misc0/walker_parity_baselines_have_full_coverage.rs"]

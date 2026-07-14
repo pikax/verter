@@ -17,7 +17,24 @@
 
 pub mod path;
 pub use path::{
-    canonicalize_path, canonicalize_path_cow, is_under_dir, longest_project_root, CanonicalPath,
+    canonicalize_path, canonicalize_path_cow, fs_is_case_insensitive, fs_paths_equal, is_under_dir,
+    longest_project_root, CanonicalPath, InjectedPathKey,
+};
+
+pub mod uri;
+pub use uri::{
+    file_uri_to_path, normalize_file_uri_for_cache, path_to_file_uri_string, percent_decode,
+};
+
+pub mod tsgo_offset;
+pub use tsgo_offset::{utf16_offset_to_byte, utf16_offset_to_line_col};
+
+pub mod utf16_line_index;
+pub use utf16_line_index::{LineCol, OffsetError, Utf16LineIndex};
+
+pub mod diag_source;
+pub use diag_source::{
+    DiagnosticContentSource, DiagnosticSourceCache, OverlayThenFallback, SourceFile,
 };
 
 // ======================== Span (SFC-absolute) ========================

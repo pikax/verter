@@ -827,6 +827,93 @@ suite(`Completion [${FIXTURE_NAME}]`, function () {
     expectNoInternalLeakage(completions!);
   });
 
+  // ── Auto-import on accept (provider-neutral resolve) ───────────
+  // End-to-end proof of Issue #1's fix: accepting an unimported-symbol
+  // completion resolves an `import` edit through `completionItem/resolve`. This
+  // exercises the real verter-lsp completion → resolve → carrier re-anchor on a
+  // real `.vue` SFC, across whichever provider the suite runs (tsgo / tsserver).
+  // It is the end-to-end companion to the dx-harness real-provider parity gate.
+  test("auto-import: accepting an unimported symbol resolves an import edit", async function () {
+    if (!TYPE_PROVIDER) return this.skip();
+    if (FIXTURE_NAME !== "single-project") {
+      console.log("    N/A");
+      return;
+    }
+    // The resolve polling loop below waits up to 30s for the provider to sync and
+    // resolve the auto-import; raise the per-test Mocha timeout above that deadline
+    // (the suite default is 15s, which this loop would otherwise overrun).
+    this.timeout(40_000);
+
+    const autoDoc = await openAndReady("src/AutoImportCase.vue");
+
+    // The `computed` reference is unimported; position the cursor at the end of
+    // the `computed` identifier so the provider offers it as an auto-import.
+    const pos = findPosition(autoDoc, "computed(() =>", "computed".length);
+    expect(pos, "should find the unimported `computed` reference").to.exist;
+
+    // Wait until the provider offers `computed` (it needs the file synced), then
+    // force VS Code to RESOLVE the first items (the 4th arg = itemResolveCount),
+    // which fires `completionItem/resolve` and populates `additionalTextEdits`.
+    let resolvedImport: vscode.CompletionItem | undefined;
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const list = await vscode.commands.executeCommand<vscode.CompletionList>(
+        "vscode.executeCompletionItemProvider",
+        autoDoc.uri,
+        pos!,
+        undefined,
+        50, // itemResolveCount — force resolve of the leading items
+      );
+      const computedItem = list?.items.find((i) => completionLabel(i) === "computed");
+      if (computedItem?.additionalTextEdits && computedItem.additionalTextEdits.length > 0) {
+        resolvedImport = computedItem;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+
+    expect(
+      resolvedImport,
+      "accepting `computed` must resolve an auto-import edit (additionalTextEdits)",
+    ).to.exist;
+
+    const edits = resolvedImport!.additionalTextEdits!;
+    const insertedText = edits.map((e) => e.newText).join("");
+    console.log(`    auto-import resolved edit: ${JSON.stringify(insertedText)}`);
+
+    // The resolved edit brings `computed` into scope. TypeScript's quick-fix may
+    // either add a NEW import line (`import { computed } from "vue"`) or MERGE
+    // `computed` into the existing `import { ref } from "vue"`; in the merge case
+    // the edit's text may be only `, computed` (no re-emitted module specifier),
+    // so the discriminating, both-case-safe assertion is that `computed` appears
+    // in the inserted text. (Before the fix, tsserver/extension returned NO edit
+    // at all — `additionalTextEdits` was empty — so reaching here already proves
+    // the provider-neutral resolve produced an actionable import.)
+    expect(insertedText, "the resolved edit brings `computed` into scope").to.include("computed");
+    // A NEW import line must reference the `vue` module; a merge into the existing
+    // import need not re-emit the specifier. So require the module ONLY when the
+    // edit is not a bare merge fragment (i.e. it contains the `import` keyword).
+    if (/\bimport\b/.test(insertedText)) {
+      expect(insertedText, "a fresh import line imports `computed` from `vue`").to.match(
+        /["']vue["']/,
+      );
+    }
+
+    // Negative: the edit must NOT corrupt by landing in the template — it is a
+    // targeted import insertion in the <script setup> region. Derive the template
+    // boundary from the live document instead of hardcoding a line so the guard
+    // tracks the fixture: every edit must start strictly above `<template>`.
+    const text = autoDoc.getText();
+    const templateLine = autoDoc.positionAt(text.indexOf("<template>")).line;
+    expect(templateLine, "the fixture has a <template> block").to.be.greaterThan(0);
+    for (const edit of edits) {
+      expect(
+        edit.range.start.line,
+        "the import edit lands in the <script setup>, not the template",
+      ).to.be.lessThan(templateLine);
+    }
+  });
+
   test("completion scenarios do not log panic markers", function () {
     assertLogNotContains("panicked at", "completion flows should not trigger Rust panics");
     assertLogNotContains("thread 'main' panicked", "completion flows should not crash the server");

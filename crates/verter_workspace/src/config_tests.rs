@@ -415,6 +415,220 @@ fn membership_with_exclude() {
     }
 }
 
+#[test]
+fn exclude_only_carries_the_default_include() {
+    // FIX 1: a tsconfig with ONLY `exclude` (no `files`, no `include`) must keep
+    // TypeScript's implicit default `**/*` include MINUS the excludes. The
+    // producer (`load_project_membership_inner`) models the default include
+    // EXPLICITLY: when neither `files` nor `include` is present, the produced
+    // membership carries the default `{dir}/**/*` include glob.
+    //
+    // DISCRIMINATING: before FIX 1 an exclude-only config produced
+    // `IncludeExclude { include: [], .. }` (empty include) ⇒ it owned NOTHING;
+    // this asserts a NON-EMPTY default include is synthesized.
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        tmp.path().join("tsconfig.json"),
+        r#"{ "exclude": ["dist"] }"#,
+    )
+    .unwrap();
+
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let membership = load_project_membership(&ws, &tsconfig_path);
+    match membership {
+        ProjectMembership::IncludeExclude {
+            files,
+            include,
+            exclude,
+        } => {
+            assert!(
+                files.is_empty(),
+                "an exclude-only config declares no `files`"
+            );
+            assert!(
+                !include.is_empty(),
+                "an exclude-only config must carry the implicit default `**/*` include \
+                 (was empty before the fix ⇒ owned nothing)"
+            );
+            assert!(
+                include.iter().any(|g| g.ends_with("/**/*")),
+                "the synthesized default include must be the `**/*` glob, got {include:?}"
+            );
+            assert!(!exclude.is_empty(), "the explicit exclude is preserved");
+        }
+        ProjectMembership::MatchAll => panic!("should be IncludeExclude (has an exclude key)"),
+    }
+}
+
+#[test]
+fn explicit_empty_files_does_not_synthesize_default_include() {
+    // FIX 1 distinction: an EXPLICIT `"files": []` (solution-style, owns
+    // nothing but its references) must stay DISTINCT from "no files key at all".
+    // `has_files` is true here, so NO default include is synthesized — the
+    // include stays empty (owns nothing but references).
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("tsconfig.json"), r#"{ "files": [] }"#).unwrap();
+
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let membership = load_project_membership(&ws, &tsconfig_path);
+    match membership {
+        ProjectMembership::IncludeExclude { files, include, .. } => {
+            assert!(files.is_empty(), "explicit `files: []` is empty");
+            assert!(
+                include.is_empty(),
+                "an explicit `files: []` must NOT synthesize a default include \
+                 (it owns nothing but its references), got {include:?}"
+            );
+        }
+        ProjectMembership::MatchAll => {
+            panic!("an explicit `files` key must produce IncludeExclude, not MatchAll")
+        }
+    }
+}
+
+/// Write `base.json` + `tsconfig.json` (which `extends` it) into a temp dir and
+/// return the produced membership for the child. Mirrors the single-file temp
+/// pattern above but exercises the `extends` inheritance path.
+fn membership_from_extends(base_body: &str, child_body: &str) -> ProjectMembership {
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("base.json"), base_body).unwrap();
+    std::fs::write(tmp.path().join("tsconfig.json"), child_body).unwrap();
+
+    let tsconfig_path = tmp
+        .path()
+        .join("tsconfig.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    load_project_membership(&ws, &tsconfig_path)
+}
+
+#[test]
+fn inherited_explicit_empty_files_does_not_synthesize_default_include() {
+    // An `extends` base that declares an EXPLICIT `"files": []` (solution-style,
+    // owns nothing but its references) must keep that distinction across
+    // inheritance: the child (which adds only `exclude`) must NOT synthesize a
+    // default `**/*` include and must own NOTHING but references.
+    //
+    // DISCRIMINATING: the inner recursion inherits only the files/include/exclude
+    // VECTORS, not whether an ancestor DECLARED `files`/`include`. A base with no
+    // membership keys inherits as `MatchAll` ⇒ `(empty, empty, empty)`, which is
+    // byte-indistinguishable from a base that declared `files: []`. So before the
+    // fix this WRONGLY synthesized `{dir}/**/*` and owned `src/Foo.vue`.
+    let membership = membership_from_extends(
+        r#"{ "files": [] }"#,
+        r#"{ "extends": "./base.json", "exclude": ["dist"] }"#,
+    );
+    match membership {
+        ProjectMembership::IncludeExclude {
+            files,
+            include,
+            exclude,
+        } => {
+            assert!(files.is_empty(), "inherited explicit `files: []` is empty");
+            assert!(
+                include.is_empty(),
+                "an inherited explicit `files: []` must NOT synthesize a default include \
+                 (it owns nothing but its references), got {include:?}"
+            );
+            assert!(
+                !exclude.is_empty(),
+                "the child's explicit exclude is preserved"
+            );
+        }
+        ProjectMembership::MatchAll => {
+            panic!("an inherited explicit `files` key must produce IncludeExclude, not MatchAll")
+        }
+    }
+}
+
+#[test]
+fn inherited_explicit_empty_include_does_not_synthesize_default_include() {
+    // Sibling of the above for an inherited EXPLICIT `"include": []`. Same root
+    // cause, same fix: inherited declared-but-empty `include` must suppress the
+    // default-include synthesis.
+    let membership = membership_from_extends(
+        r#"{ "include": [] }"#,
+        r#"{ "extends": "./base.json", "exclude": ["dist"] }"#,
+    );
+    match membership {
+        ProjectMembership::IncludeExclude {
+            files,
+            include,
+            exclude,
+        } => {
+            assert!(files.is_empty(), "no files key anywhere in the chain");
+            assert!(
+                include.is_empty(),
+                "an inherited explicit `include: []` must NOT synthesize a default include \
+                 (it owns nothing but its references), got {include:?}"
+            );
+            assert!(
+                !exclude.is_empty(),
+                "the child's explicit exclude is preserved"
+            );
+        }
+        ProjectMembership::MatchAll => {
+            panic!("an inherited explicit `include` key must produce IncludeExclude, not MatchAll")
+        }
+    }
+}
+
+#[test]
+fn inherited_real_include_still_owns_default_via_inheritance() {
+    // Regression guard for the fix: an `extends` base that declares a REAL
+    // (non-empty) `include` must still propagate that include to the child — the
+    // child does NOT synthesize a default include (the inherited include is the
+    // effective set), and the inherited include is what owns files.
+    let membership = membership_from_extends(
+        r#"{ "include": ["src"] }"#,
+        r#"{ "extends": "./base.json", "exclude": ["dist"] }"#,
+    );
+    match membership {
+        ProjectMembership::IncludeExclude {
+            files,
+            include,
+            exclude,
+        } => {
+            assert!(files.is_empty(), "no files key anywhere in the chain");
+            assert_eq!(
+                include.len(),
+                1,
+                "the inherited REAL `include` (`src`) is preserved, not replaced by a \
+                 synthesized default, got {include:?}"
+            );
+            assert!(
+                include[0].ends_with("/src/**/*"),
+                "the inherited include points at the base's `src` (the real declared \
+                 include, NOT the bare-`**/*` synthesized default), got {include:?}"
+            );
+            assert!(
+                !exclude.is_empty(),
+                "the child's explicit exclude is preserved"
+            );
+        }
+        ProjectMembership::MatchAll => {
+            panic!("should be IncludeExclude (has an inherited include)")
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // load_project_references
 // ═══════════════════════════════════════════════════════════════════════════
@@ -801,5 +1015,218 @@ fn discover_tsconfigs_matches_tsconfig_named_files_only() {
             .count(),
         2, // root/tsconfig.json + subdir/tsconfig.json
         "should find both root and nested user-source tsconfig.json",
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// has_configured_ts_project_anywhere — the bounded owned-tsgo spawn precondition
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A root-only owned-startup gate — a configured project exists ONLY IFF
+/// `<root>/tsconfig.json` is a file. Replicated locally as the DISCRIMINATOR baseline:
+/// the packages-only monorepo the bounded precondition must accept is EXACTLY the
+/// layout a root-only gate rejects, so asserting both on the same fixture proves the
+/// precondition is not root-only.
+fn root_only_gate(root: &std::path::Path) -> bool {
+    root.join("tsconfig.json").is_file()
+}
+
+/// DISCRIMINATING: a mainstream monorepo whose configs live only at
+/// `packages/*/tsconfig.json` (NO root `tsconfig.json`) HAS a configured project,
+/// so the bounded precondition accepts it — while the OLD root-only gate rejected
+/// it (the bug this closes). The two assertions on the SAME fixture prove the new
+/// behaviour is not root-only behaviour.
+#[test]
+fn has_configured_ts_project_anywhere_accepts_packages_only_monorepo() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let touch = |rel: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "{}").unwrap();
+    };
+    // A packages-only monorepo: configs live under packages/*, NEVER at the root.
+    touch("packages/app/tsconfig.json");
+    touch("packages/lib/tsconfig.json");
+    // A README at the root so the root dir is non-empty but carries no tsconfig.
+    touch("README.md");
+
+    // The OLD root-only gate REJECTS this layout (no `<root>/tsconfig.json`) — the
+    // exact bug: a valid monorepo yields NO owned tsgo provider.
+    assert!(
+        !root_only_gate(root),
+        "sanity: the root-only gate rejects a packages-only monorepo (the bug)"
+    );
+    // The bounded precondition ACCEPTS it — at least one configured project exists.
+    assert!(
+        super::has_configured_ts_project_anywhere(root),
+        "a packages/*/tsconfig.json-only monorepo HAS a configured project, so the \
+         owned-tsgo spawn precondition must accept it"
+    );
+}
+
+/// A workspace with NO `tsconfig.json` anywhere has NO configured project — the
+/// precondition returns false (owned tsgo fails closed by NOT spawning, never a
+/// config-less inferred project).
+#[test]
+fn has_configured_ts_project_anywhere_rejects_workspace_with_no_tsconfig() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let touch = |rel: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "x").unwrap();
+    };
+    touch("src/index.ts");
+    touch("packages/app/src/main.ts");
+    touch("package.json");
+
+    assert!(
+        !super::has_configured_ts_project_anywhere(root),
+        "a workspace with no tsconfig anywhere has no configured project"
+    );
+    // A root-only gate agrees here (no root tsconfig) — this case is not the discriminator.
+    assert!(!root_only_gate(root));
+}
+
+/// The precondition prunes `node_modules` + `.git` + framework-GENERATED dot-dirs
+/// (like `.nuxt`) at descent: a workspace whose ONLY tsconfig lives inside
+/// `node_modules` (a package-manager artifact) or a generated `.nuxt` build dir has NO
+/// authored configured project, so it is rejected. The prune is NARROW — it does NOT
+/// exclude a bare authored package name (see
+/// `has_configured_ts_project_anywhere_accepts_bare_build_output_named_package_dirs`)
+/// nor an authored dot config dir (see
+/// `has_configured_ts_project_anywhere_accepts_authored_dot_dir_config`).
+#[test]
+fn has_configured_ts_project_anywhere_prunes_node_modules_git_and_generated_dot_dirs() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let touch = |rel: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "{}").unwrap();
+    };
+    // The ONLY tsconfigs live in pruned subtrees — none is an authored project.
+    touch("node_modules/some-dep/tsconfig.json");
+    touch("node_modules/.pnpm/x/node_modules/x/tsconfig.json");
+    touch(".git/tsconfig.json");
+    touch(".nuxt/tsconfig.json");
+    touch("src/main.ts");
+
+    assert!(
+        !super::has_configured_ts_project_anywhere(root),
+        "a tsconfig only inside node_modules / .git / a generated dot-dir (.nuxt) is not \
+         an authored configured project — the precondition prunes those subtrees and \
+         rejects the workspace"
+    );
+
+    // But a real authored config UNDER a non-pruned dir (alongside the pruned ones)
+    // IS found — proving the prune does not over-reject.
+    touch("apps/web/tsconfig.json");
+    assert!(
+        super::has_configured_ts_project_anywhere(root),
+        "an authored packages/apps tsconfig outside node_modules must be found"
+    );
+}
+
+/// DISCRIMINATING: an AUTHORED config dir whose name starts with `.` but is NOT a
+/// framework-GENERATED dir — e.g. `.storybook/tsconfig.json` — IS an authored
+/// configured project, so the precondition accepts a workspace whose ONLY config lives
+/// there. The OLD all-dot-dirs prune REJECTED it (rejecting a workspace whose only
+/// configured project is under a dot-dir — the bug this closes), while a
+/// `node_modules`-only tsconfig stays pruned. The two assertions on sibling fixtures
+/// prove the prune is narrowed to node_modules + `.git` + generated dot-dirs, NOT
+/// every dot-directory.
+#[test]
+fn has_configured_ts_project_anywhere_accepts_authored_dot_dir_config() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let touch = |rel: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "{}").unwrap();
+    };
+    // The ONLY authored config lives under `.storybook` (an authored tooling dir, NOT a
+    // framework-generated dot-dir).
+    touch(".storybook/tsconfig.json");
+    touch("src/main.ts");
+
+    // A root-only gate rejects it (no `<root>/tsconfig.json`), and the OLD all-dot-dirs
+    // prune ALSO rejected it — the bug: a `.storybook`-configured workspace yielded NO
+    // owned tsgo provider even though it HAS a configured project.
+    assert!(
+        !root_only_gate(root),
+        "sanity: the root-only gate rejects a `.storybook`-only workspace"
+    );
+    assert!(
+        super::has_configured_ts_project_anywhere(root),
+        "an authored `.storybook/tsconfig.json` is a configured project — the narrowed \
+         prune (node_modules + .git + generated dot-dirs, NOT every dot-dir) must \
+         accept it"
+    );
+
+    // The DISCRIMINATOR sibling: a workspace whose ONLY tsconfig lives in `node_modules`
+    // is still pruned (a package-manager artifact, never an authored project).
+    let tmp_nm = tempfile::tempdir().expect("tempdir");
+    let root_nm = tmp_nm.path();
+    std::fs::create_dir_all(root_nm.join("node_modules/dep")).unwrap();
+    std::fs::write(root_nm.join("node_modules/dep/tsconfig.json"), "{}").unwrap();
+    assert!(
+        !super::has_configured_ts_project_anywhere(root_nm),
+        "a `node_modules`-only tsconfig must still be pruned (never an authored project)"
+    );
+}
+
+/// DISCRIMINATING: a workspace whose ONLY configured project lives in a BARE (non-dot)
+/// authored package directory that happens to share a
+/// name with a build-output dir — `packages/build/tsconfig.json`, and likewise `out` /
+/// `dist` / `target` / `coverage` — IS a configured project, so the precondition MUST
+/// accept it. A prune-by-basename blocklist that pruned those bare names false-negatived
+/// this exact layout and reintroduced the "OWNED refuses to spawn" bug (a spawn
+/// precondition must err toward SPAWNING; the per-query `BoundProject` gate is the real
+/// authority). RED against the bare-name blocklist, GREEN after narrowing the prune to
+/// `node_modules` + `.git` + generated dot-dirs only.
+#[test]
+fn has_configured_ts_project_anywhere_accepts_bare_build_output_named_package_dirs() {
+    // Every one of these was in the pre-fix prune-by-basename blocklist, yet each is a
+    // legitimate authored package name a carrier can bind to.
+    for pkg in ["build", "out", "dist", "target", "coverage"] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let cfg = root.join("packages").join(pkg).join("tsconfig.json");
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        std::fs::write(&cfg, "{}").unwrap();
+        // A README at the root so the tree is non-empty but carries no root tsconfig.
+        std::fs::write(root.join("README.md"), "x").unwrap();
+
+        // No root tsconfig ⇒ a root-only gate rejects it; the narrowed precondition accepts.
+        assert!(
+            !root_only_gate(root),
+            "sanity: no root tsconfig for the `packages/{pkg}` fixture"
+        );
+        assert!(
+            super::has_configured_ts_project_anywhere(root),
+            "a bare authored `packages/{pkg}/tsconfig.json` IS a configured project — the \
+             prune must NOT exclude an ambiguous authored-source name (it did before the \
+             fix, false-refusing OWNED spawn)"
+        );
+    }
+}
+
+/// A classic single-root workspace (`<root>/tsconfig.json`) is still accepted —
+/// the precondition is a SUPERSET of a root-only gate, never a regression.
+#[test]
+fn has_configured_ts_project_anywhere_still_accepts_root_tsconfig() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    std::fs::write(root.join("tsconfig.json"), "{}").unwrap();
+
+    assert!(
+        root_only_gate(root),
+        "sanity: a root-only gate accepts a root tsconfig"
+    );
+    assert!(
+        super::has_configured_ts_project_anywhere(root),
+        "a classic single-root workspace is still accepted (a superset of a root-only gate)"
     );
 }

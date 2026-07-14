@@ -4131,6 +4131,35 @@ mod foundations_guards {
             "crates/verter_tsc/src/checker.rs",
             "crates/verter_tsc/src/reporter.rs",
             "crates/verter_tsc/src/tsconfig.rs",
+            // rc tsgo-engine binary discovery (`discover_tsgo`) — real-OS
+            // pnpm-store + classic-sibling walk to locate the installed
+            // `typescript@>=7` platform binary the `--api` transport spawns;
+            // a subprocess binary is real-FS by nature, never workspace
+            // source (sibling of the `verter_type_runtime` IPC entries).
+            "crates/verter_tsgo_api/src/transport/spawn.rs",
+            // Relay-shim rendezvous advertisement — the IPC file a shim
+            // writes on startup so a `verter_lsp` control client can DISCOVER
+            // it (create_dir_all / write / read / read_dir / remove). An IPC
+            // rendezvous artifact is real-FS by nature (a separate process
+            // reads it off disk); never workspace/semantic source, never
+            // routable through `WorkspaceAccess` (sibling of the `spawn.rs`
+            // subprocess-binary IPC entry).
+            "crates/verter_tsgo_api/src/control/advertisement.rs",
+            // Relay-shim control endpoint — a Unix-domain-socket file is a
+            // real filesystem artifact the OS binds, so the listener owns its
+            // full socket-file lifecycle (`#[cfg(unix)]`): it creates +
+            // validates a PRIVATE per-session `0o700` parent subdir
+            // (`DirBuilder` mode-`0o700` create + `symlink_metadata` — a real
+            // dir, euid-owned, exactly owner-rwx), holds the grandparent to a
+            // sticky-or-euid/root-owned secure-permissions ceiling
+            // (`create_dir_all` + `metadata`), removes a stale socket before
+            // bind and its own socket on drop (`std::fs::remove_file`), chmods
+            // the bound socket to owner-only `0o600` (`set_permissions` /
+            // `Permissions::from_mode`), and removes the now-empty private
+            // subdir on `Drop` (`remove_dir`). This socket-file lifecycle is
+            // real-FS by nature, never workspace source (same category as the
+            // `advertisement.rs` IPC rendezvous file).
+            "crates/verter_tsgo_api/src/control/transport.rs",
             // Audit substrate's `current_process_rss` reads
             // `/proc/self/statm` (Linux) for memory-delta
             // accounting; matches the historic
@@ -4489,6 +4518,12 @@ mod foundations_guards {
         "pub mod host_resolve_type_audit",
         // verter_ffi::convert (host::cross_file::CrossFileResult)
         "pub mod cross_file",
+        // Project-bound external-TypeScript-engine contract: the
+        // provider-neutral three-layer seam (`ExternalTsProjectResolver` /
+        // `CarrierRegistry` / `EngineBackend`) in which a config-less op for a
+        // production carrier source is unrepresentable. Additive — the contract
+        // is defined but not yet wired live over the inferred LSP path.
+        "pub mod external_ts",
         // Fact-based cache architecture (R5, R6, R28, R29) — new
         // content-addressed file artifact store + per-file structural
         // hash, both consumed by tests and by future-stage host paths.
@@ -4968,7 +5003,6 @@ mod foundations_guards {
             "crates/verter_lsp/src/config.rs",
             "crates/verter_lsp/src/features/completion.rs",
             "crates/verter_lsp/src/server/sync_orchestration.rs",
-            "crates/verter_lsp/src/tsgo/merge.rs",
             "crates/verter_lsp/src/workspace_scanner.rs",
             "crates/verter_mcp/src/server.rs",
             "crates/verter_napi/src/lib.rs",
@@ -5349,6 +5383,96 @@ mod foundations_guards {
         for needle in FIXED_NEEDLES {
             if line.contains(needle) {
                 return true;
+            }
+        }
+        // Debt-ledger citation vocabulary. A comment that cross-references a
+        // `docs/arch` debt-ledger row (`tracked as ROW <id>`), or frames a known
+        // bounded limitation as a deferred, ledger-tracked follow-up
+        // (`deferred (tracked as ...)`), is project-management prose, not
+        // final-state. The durable rationale for a bounded residual belongs in
+        // the `docs/arch` architecture doc; the source comment must state the
+        // invariant, never cite the ledger row that tracks the follow-up.
+        //
+        // `deferred (tracked as` is matched CASE-INSENSITIVELY: the parenthetical
+        // pairing of a deferral with a tracker is the citation pattern regardless
+        // of capitalisation (`Deferred (tracked as ...)` at a sentence start is
+        // the same form), and the phrase carries no legitimate final-state sense.
+        if lower.contains("deferred (tracked as") {
+            return true;
+        }
+        // A ledger-row reference. Two entrances share one shape — the noun `row`
+        // at a word boundary, one space, then a LEDGER ID: a single ASCII letter
+        // immediately followed by an ASCII digit run, closed by a trailing word
+        // boundary (`F3`, `E5`, `F1`, `C12`).
+        //
+        // (b1) The cited form `tracked as row <id>`, matched CASE-INSENSITIVELY
+        // (against the lowercased line) so `tracked as ROW F3` and lowercase
+        // `tracked as row e5` trip identically. The `tracked as row ` context plus
+        // the `<letter><digit>` tail is what makes the case-insensitive `row` safe:
+        // `tracked as row-major` (hyphen, no space after `row`), `tracked as row N`
+        // (letter, no digit), `tracked as row 5` (digit, no leading letter), and
+        // `tracked as ROW_MAJOR` (underscore, no space) all lack the ledger token
+        // and are preserved.
+        {
+            let needle = "tracked as row ";
+            let lower_bytes = lower.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = lower[search_from..].find(needle) {
+                let abs = search_from + rel;
+                // Leading word boundary on `tracked` so `untracked as row A1` (the
+                // needle inside a longer word) is not the citation form.
+                let is_word_start = abs == 0
+                    || !(lower_bytes[abs - 1].is_ascii_alphanumeric()
+                        || lower_bytes[abs - 1] == b'_');
+                let mut i = abs + needle.len();
+                if is_word_start && i < lower_bytes.len() && lower_bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                    let digit_start = i;
+                    while i < lower_bytes.len() && lower_bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    if i > digit_start
+                        && (i >= lower_bytes.len()
+                            || !(lower_bytes[i].is_ascii_alphanumeric() || lower_bytes[i] == b'_'))
+                    {
+                        return true;
+                    }
+                }
+                search_from = abs + needle.len();
+            }
+        }
+        // (b2) A bare standalone id `ROW <id>` with no citation verb, matched
+        // CASE-SENSITIVELY on the uppercase ledger noun (lowercase `row a1` is an
+        // ordinary table/grid cell). The leading word boundary excludes
+        // `NARROW`/`ARROW`/`BORROW`; the `<UPPER><digit>` shape excludes `ROW MAJOR`
+        // (letter, not digit) and `ROW 0` (digit, not a letter); and the trailing
+        // word boundary after the digit run excludes longer identifiers like
+        // `ROW F3B`. A rare legitimate uppercase `ROW <id>` label is expected to be
+        // rephrased — the same rephrase-on-collision tradeoff the cutover-pass
+        // `C<n>` and the framework-block scans already make.
+        {
+            let needle = "ROW ";
+            let bytes = line.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(needle) {
+                let abs = search_from + rel;
+                let is_word_start =
+                    abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
+                let mut i = abs + needle.len();
+                if is_word_start && i < bytes.len() && bytes[i].is_ascii_uppercase() {
+                    i += 1;
+                    let digit_start = i;
+                    while i < bytes.len() && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    if i > digit_start
+                        && (i >= bytes.len()
+                            || !(bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_'))
+                    {
+                        return true;
+                    }
+                }
+                search_from = abs + needle.len();
             }
         }
         // Bare `cutover` (case-insensitive) — any cutover-stage
@@ -6549,6 +6673,8 @@ mod foundations_guards {
             "postc",                     // postC<digit> cutover marker
             "pass c",                    // Pass C<digit> cutover marker
             "gap ",                      // gap <digit> framework-adapter marker
+            "tracked as row",            // debt-ledger citation (`tracked as ROW <id>`)
+            "deferred (tracked as",      // deferred, ledger-tracked follow-up framing
         ];
         let lower = src.to_ascii_lowercase();
         if LOWER_ROOTS.iter().any(|r| lower.contains(r)) {
@@ -6556,6 +6682,13 @@ mod foundations_guards {
         }
         // Uppercase-anchored `PE\d+` branch: check raw text.
         if src.contains("PE") {
+            return true;
+        }
+        // `ROW <id>` debt-ledger branch: case-sensitive (uppercase `ROW `). The
+        // per-line scan applies the word-boundary + `<UPPER><digit>` tail
+        // discriminator; the cheap necessary condition is the literal `ROW `
+        // (uppercase, trailing space) anywhere in the file.
+        if src.contains("ROW ") {
             return true;
         }
         // Bare cutover-pass label `C<digit>` branch: case-sensitive
@@ -6925,6 +7058,28 @@ mod foundations_guards {
         // only these isolate the bare branch.
         "// G9 cutover left a soundness gap",
         "// typed-IR cutover note",
+        // Debt-ledger citation vocabulary — a comment that cross-references a
+        // `docs/arch` debt-ledger row, or frames a known bounded limitation as a
+        // deferred, ledger-tracked follow-up. One fixture uniquely pins each of
+        // the three signals: the case-insensitive `deferred (tracked as` phrase,
+        // the case-insensitive cited `tracked as row <id>` form, and the
+        // case-sensitive bare `ROW <id>` scan.
+        // Real-form citation — all three signals fire on this line.
+        "// stamping a fresh generation is deferred (tracked as ROW F3 in `docs/arch/external-ts-engine-architecture.md`).",
+        // Cited uppercase form without the `deferred` prefix — fires (b1) + (b2).
+        "// (tracked as ROW E5): making the prune waiter-aware is a follow-up.",
+        // Bare standalone id, no citation verb — pins the case-sensitive (b2) scan.
+        "// see ROW F1 for the cancellation-safety follow-up.",
+        // Lowercase cited form — flagged ONLY by the case-insensitive (b1) scan
+        // (the bare (b2) scan requires uppercase `ROW`), so it both pins (b1) and
+        // proves the cited form is caught regardless of capitalisation.
+        "// same window is tracked as row E5 in `docs/arch`.",
+        // `deferred (tracked as` with a lowercase `ledger row` object (no ledger
+        // id) — flagged ONLY by the deferral phrase, so it pins that needle.
+        "// making it cancellation-safe is deferred (tracked as a docs/arch ledger row).",
+        // Sentence-initial capital `Deferred` — proves the deferral phrase is
+        // matched case-insensitively.
+        "// Deferred (tracked as a `docs/arch` ledger row).",
     ];
 
     #[test]
@@ -7138,6 +7293,34 @@ mod foundations_guards {
             "// the codomain C99 is well-defined.",            // C99 bare
             "// see RFC C1 in the appendix.", // `C1` mid-comment, not comment-leading, no trigger
             "// ClassName carries the C identifier prefix.", // `C` then letter — not a digit label
+            // Debt-ledger-citation negatives — the discriminating forms are the
+            // case-insensitive `deferred (tracked as` phrase, the case-insensitive
+            // cited `tracked as row <id>` form, and the case-sensitive bare
+            // `ROW <id>` scan. Ordinary prose using `deferred` as a technical
+            // adjective, `tracked as row` without a `<letter><digit>` ledger id,
+            // lowercase `row` bytes, or uppercase `ROW` inside a word / followed by
+            // a non-ledger tail must all be preserved.
+            "// full type lowering is deferred to the session-side resolver.",
+            "// the seen attribute names are tracked as source-backed spans.",
+            "// the ROW MAJOR traversal order is cache-friendly.",
+            "// the ROW 0 header stays pinned across horizontal scrolls.",
+            "// the ARROW keys move the selection by one step.",
+            "// each matrix row maps to one output channel.",
+            "// the ROW STRIDE governs the pixel-buffer layout.",
+            // `tracked as row-major` / `tracked as row N` pair the tracking verb
+            // with the common noun, not a ledger id (hyphen or bare letter, no
+            // `<letter><digit>` token), so the cited (b1) scan preserves them.
+            "// the tensor is tracked as row-major bytes in the output buffer.",
+            "// the value is tracked as row N of the wide-column table.",
+            // Leading word boundary: `untracked as row A1` has the needle inside a
+            // longer word, so the cited (b1) scan preserves it.
+            "// the cell is untracked as row A1 after the compaction pass.",
+            // `tracked as ROW_MAJOR` — underscore, no space after `row`, so neither
+            // the cited (b1) nor the bare (b2) scan fires.
+            "// the layout is tracked as ROW_MAJOR metadata.",
+            // `ROW F3B` — the `<letter><digit>` run is followed by another
+            // identifier byte, so the (b2) trailing word boundary preserves it.
+            "// ACTIVE ROW F3B carries compact per-lane metadata.",
         ];
         for line in allowed {
             assert!(
@@ -7895,6 +8078,10 @@ mod foundations_guards {
             "materializes the Verter-owned `@verter/svelte-jsx` shim into the host data directory for TSGO/inferred-project resolution (tool setup, not semantic input); reads it back via byte-compare; never the user workspace. Test fixtures use temp-dir scratch space.",
         ),
         (
+            "crates/verter_lsp/src/external_ts/carrier_publish_store.rs",
+            "materializes the Verter-owned carrier-snapshot store (content-addressed blobs + atomic manifest) into a per-host temp directory for the tsserver plugin to read synchronously (tool output mirroring the in-memory ProviderSurfaceStore, not semantic input); never the user workspace. Test fixtures use temp-dir scratch space.",
+        ),
+        (
             "crates/verter_lsp/src/config.rs",
             "test fixtures only (`#[cfg(test)] mod tests` blocks set up tmp directories for `discover_lint_config` tests). No production-path call.",
         ),
@@ -7905,6 +8092,10 @@ mod foundations_guards {
         (
             "crates/verter_lsp/src/test_utils.rs",
             "LSP unit-test utilities — temp workspace creation and `canonicalize` for fixture path resolution.",
+        ),
+        (
+            "crates/verter_lsp/src/real_provider_tests/rename.rs",
+            "real-provider rename integration tests (`#[cfg(test)] mod real_provider_tests`) — the `read_file` helper uses `std::fs::read_to_string` to read on-disk fixture content for a CLOSED file and assert the on-disk-vs-LSP-edit contract. Same test-fixture-read category as `test_harness.rs`/`test_utils.rs`; not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
         ),
         (
             "crates/verter_mcp/src/baseline.rs",
@@ -7937,6 +8128,18 @@ mod foundations_guards {
         (
             "crates/verter_tsc/src/tsconfig.rs",
             "verter-tsc binary CLI — reads tsconfig files outside the host's WorkspaceAccess (separate from the LSP/session tsconfig path). Doc comment also references `std::fs::canonicalize` behaviour for documentation.",
+        ),
+        (
+            "crates/verter_tsgo_api/src/transport/spawn.rs",
+            "rc tsgo-engine binary discovery (`discover_tsgo`) — walks the pnpm virtual store + classic `@typescript/` sibling layout on the REAL OS filesystem to locate the installed `typescript@>=7` platform binary (`tsc`/`tsc.exe`) the `--api` transport spawns. Real-FS by nature (a subprocess binary cannot be read through the in-memory VFS); same category as `verter_type_runtime/src/tsgo/ipc.rs` + `verter_tsc/src/reporter.rs`. Not a NativeFs/VFS disk-boundary bypass — never reads workspace/semantic state.",
+        ),
+        (
+            "crates/verter_tsgo_api/src/control/advertisement.rs",
+            "relay-shim rendezvous advertisement — the shim (a standalone editor-spawned process, NOT a session/VFS host) writes an advertisement JSON into `--control-dir` (`create_dir_all` + `write`) so a SEPARATE `verter_lsp` control client can discover + verify it (`read` / `read_dir`) and remove it on teardown (`remove_advertisement`). An IPC rendezvous file is real-FS by nature — a different process reads it off disk — and cannot be routed through the in-memory VFS/`WorkspaceAccess`. Same category as `spawn.rs` + `verter_type_runtime/src/tsgo/ipc.rs`; not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
+        ),
+        (
+            "crates/verter_tsgo_api/src/control/transport.rs",
+            "relay-shim control endpoint transport — the control protocol rides same-user local IPC (a Windows named pipe / a Unix-domain socket). On Unix a UDS is a real filesystem artifact the OS binds, so the listener owns its full socket-file lifecycle (`#[cfg(unix)]`): it creates + validates a PRIVATE per-session `0o700` parent subdir (`std::fs::DirBuilder` mode-`0o700` create + `std::fs::symlink_metadata` — a real dir, euid-owned, exactly owner-rwx), holds the grandparent `control_dir` to a secure-permissions ceiling (`std::fs::create_dir_all` + `std::fs::metadata` — owned by us with no group/other write, or sticky and owned by us or root), removes a stale socket before `bind` and its own socket on `Drop` (`std::fs::remove_file`), chmods the bound socket to owner-only `0o600` (`std::fs::set_permissions` / `Permissions::from_mode`), and removes the now-empty private subdir on `Drop` (`std::fs::remove_dir`). This whole socket-file lifecycle is real-FS by nature (the pipe/UDS namespace is the OS, not the VFS); same category as `advertisement.rs` + `spawn.rs`, not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
         ),
         (
             "crates/verter_type_runtime/src/discovery.rs",
@@ -12829,28 +13032,26 @@ mod typed_ir_resolver_guards {
     //   * W4.5 — host_manage.rs (2) + meta_resolve/graph_predicates.rs
     //
     // Permanent exception entries (per the rule-scope clauses above):
-    //   * `verter_workspace/src/resolver.rs:84` — exception class (1):
-    //     the workspace classification API's own primitive.
     //   * `verter_lsp/src/server_utils.rs:22` — exception class (2):
     //     filesystem-event handler running below the workspace
     //     registry. The LSP `did_change_watched_files` gate.
     //
-    // These two stay in the allowlist permanently. Neither is a
-    // resolver-pipeline site. The matching call sites carry pointer
-    // comments back to this rule-scope block.
+    // Exception class (1) — the workspace classification API's own
+    // primitive — no longer needs a substring site: project membership
+    // resolves through the exact `ConfiguredMembership` (materialized
+    // file set / static spec), so `Project::matches_file` performs no
+    // `/node_modules/` substring classification. The single remaining
+    // allowlist site is exception class (2).
+    //
+    // This entry stays in the allowlist permanently. It is not a
+    // resolver-pipeline site. The matching call site carries a pointer
+    // comment back to this rule-scope block.
     // -----------------------------------------------------------------------
-    const NODE_MODULES_ALLOWLIST: &[(&str, u32, &str)] = &[
-        (
-            "crates/verter_lsp/src/server_utils.rs",
-            22,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_workspace/src/resolver.rs",
-            84,
-            r#".contains("/node_modules/")"#,
-        ),
-    ];
+    const NODE_MODULES_ALLOWLIST: &[(&str, u32, &str)] = &[(
+        "crates/verter_lsp/src/server_utils.rs",
+        22,
+        r#".contains("/node_modules/")"#,
+    )];
 
     fn scan_node_modules_substring() -> Vec<(String, u32, String)> {
         let files = collect_production_rs_files();
@@ -12911,18 +13112,6 @@ mod typed_ir_resolver_guards {
             "verter_lsp::server_utils::is_config_file must carry a rule-scope \
              pointer comment naming the architecture guard and the \
              filesystem-event-handler exception class. Restore the \
-             docstring or remove the allowlist entry.",
-        );
-
-        // Site 2 — workspace API primitive.
-        let ws_src = super::read_workspace_file("crates/verter_workspace/src/resolver.rs");
-        assert!(
-            ws_src.contains("Architecture-guard exception")
-                && ws_src.contains("WorkspaceAccess::is_workspace_owned")
-                && ws_src.contains("no_node_modules_substring_outside_workspace_api"),
-            "verter_workspace::Project::matches_file must carry a rule-scope \
-             pointer comment naming the architecture guard and the \
-             workspace-API-primitive exception class. Restore the \
              docstring or remove the allowlist entry.",
         );
 
@@ -16049,7 +16238,7 @@ mod single_resolution_engine_guards {
         // surfaces to every compile consumer — pass-through of
         // already-resolved data, NOT a new engine path.
         ("crates/verter_compiler/src/script/prepared.rs", 10),
-        ("crates/verter_compiler/src/tsc/script.rs", 37),
+        ("crates/verter_compiler/src/tsc/script.rs", 35),
         ("crates/verter_parser/src/utils/oxc/script/mod.rs", 1),
         (
             "crates/verter_parser/src/utils/oxc/vue/script/bindings.rs",

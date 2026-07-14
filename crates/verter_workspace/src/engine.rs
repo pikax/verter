@@ -685,24 +685,6 @@ impl Engine {
             .resolve_for_project_with_reader(reader, owner, specifier, ctx)
     }
 
-    /// Get the owning project for a file.
-    pub(crate) fn owner_for_file(
-        &self,
-        canonical_id: &str,
-    ) -> Option<crate::types::ProjectOwnership> {
-        let root = self.published_state.load_full()?;
-        root.snapshot.single_owner_for_file(canonical_id).map(|id| {
-            let project = root.snapshot.project(id);
-            crate::types::ProjectOwnership {
-                project_root: project.root.as_str().to_string(),
-                tsconfig_path: root
-                    .snapshot
-                    .tsconfig_path(id)
-                    .map(|p| p.as_str().to_string()),
-            }
-        })
-    }
-
     /// Whether `canonical_id` (or its realpath) is claimed by any
     /// registered workspace project.
     ///
@@ -1278,7 +1260,7 @@ fn ide_project_config_from_ownership(project: &OwnershipProject) -> IdeProjectCo
             config.compiler_options = compiler_options.clone();
             config.references = references.iter().map(|r| r.as_str().to_string()).collect();
             config.workspace_aliases = workspace_aliases.clone();
-            config.membership = crate::snapshot_builder::spec_to_membership(&membership.spec);
+            config.membership = membership.clone();
             config
         }
         ProjectPayload::Fallback { .. } => IdeProjectConfig::new(

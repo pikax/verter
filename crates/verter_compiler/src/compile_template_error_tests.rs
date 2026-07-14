@@ -163,8 +163,9 @@ fn no_error_duplicate_attribute_class_and_v_bind_class() {
 }
 
 #[test]
-fn no_error_duplicate_attribute_nexus_virtualizer_pattern() {
-    // Reproduces the Virtualizer.vue template pattern from nexus-ui
+fn no_error_duplicate_attribute_generic_virtualizer_pattern() {
+    // A generic virtualizer SFC: a `generic="T">` script-setup plus a template with
+    // a repeated `:style`/`style` shape — must NOT raise a DuplicateAttribute error.
     let src = r#"<script setup lang="ts" generic="T extends Record<string, any>">
 import { ref } from 'vue'
 const stickyTop = ref(0)

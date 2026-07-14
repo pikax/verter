@@ -1,12 +1,22 @@
+// The carrier-membership / provider-sync paths must never hold a synchronous guard
+// across an `.await` (the single-writer actor + reconciler lock discipline). Deny it
+// crate-wide so a regression fails the build, matching `verter_type_runtime`.
+#![deny(clippy::await_holding_lock)]
+
 pub mod analysis;
 pub mod audit_harness;
 pub mod capabilities;
+pub mod carrier_cache;
+pub mod carrier_registry;
 pub mod config;
 pub mod css;
 pub mod documents;
 pub mod extension_provider;
+pub mod external_ts;
+pub mod external_ts_sync;
 pub mod features;
 pub mod project_resolver;
+pub mod provider_surface_store;
 pub mod provider_sync;
 pub mod server;
 pub mod statistics;
@@ -14,6 +24,7 @@ pub mod svelte_assets;
 pub mod sync_coordinator;
 pub mod tsgo;
 pub mod tsserver;
+pub mod type_provider;
 pub mod utils;
 pub mod workspace_scanner;
 pub mod workspace_state;
@@ -32,6 +43,8 @@ mod integration_tests;
 #[cfg(test)]
 mod real_provider_tests;
 #[cfg(test)]
+mod resilient_provider_tests;
+#[cfg(test)]
 mod test_harness;
 #[cfg(test)]
 mod test_utils;
@@ -39,7 +52,7 @@ mod test_utils;
 use std::sync::Arc;
 use verter_session::VerterHost;
 
-use tsgo::traits::TypeProvider;
+use type_provider::traits::TypeProvider;
 
 /// Which TypeScript type provider backend is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +96,18 @@ pub struct LspConfig {
     /// Sent to the extension via `$/verter/typeProviderStatus` so it can show a meaningful
     /// status bar warning (e.g., "Node.js not found", "TypeScript not installed").
     pub type_provider_none_reason: Option<String>,
+    /// TEST SEAM: when `true`, `did_open` does NOT eagerly prewarm an imported
+    /// child carrier's `{carrier}.ts` PUBLIC-API surface. Production leaves this
+    /// `false` (the prewarm makes hover/completion/go-to-def on `<ChildComponent>`
+    /// work immediately). With suppression on, the ONLY sync of a closed child's
+    /// API surface would come from INSIDE `handle_rename`'s own sync-before-query —
+    /// so this seam drives the WOULD-BE discriminator for that path. That lane is
+    /// currently `#[ignore]`'d: under tsserver the in-`handle_rename` sync opens the
+    /// child too late to join the parent's program (the Block H-membership
+    /// program-membership gap), so suppression does NOT prove `handle_rename`'s own
+    /// sync closes the closed child today — it pins the seam against which Block
+    /// H-membership is validated.
+    pub suppress_imported_carrier_prewarm: bool,
 }
 
 /// Controls what data `verter_lsp` sends to the type provider.

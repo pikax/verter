@@ -19,8 +19,9 @@ use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::documents::uri_to_canonical_id;
 use crate::features::hover;
-use crate::tsgo::merge;
+use crate::type_provider::merge;
 
+use super::child_prop_rename::ChildPropUsageClass;
 use super::server_utils::{
     event_name_match_rank, extract_word_at_offset, goto_response_from_locations,
     is_default_export_component_carrier, listener_prop_candidates, location_from_span,
@@ -382,13 +383,93 @@ impl VerterLanguageServer {
         let template = analysis.template.as_ref()?;
         let offset = doc.line_index.position_to_offset(position)?;
 
+        // ── Props (cursor on a `<Child prop=…>` prop NAME) ──────────────────
+        // SHARED resolution with cross-file rename: component match + prop
+        // `name_span` containment + child resolution come from the one
+        // `resolve_child_prop_usage_at_cursor`, so the two paths cannot drift. The
+        // navigation conveniences below (shorthand parent binding, template-level
+        // prop definitions, the final navigate-to-child-file fallback) stay
+        // goto-definition-ONLY — they are NOT safe rename declarations, so rename
+        // must not inherit them. A prop-name cursor is mutually exclusive with the
+        // directive cursors the events/v-model/slot loop handles.
+        if let ChildPropUsageClass::Resolved(resolved) =
+            self.resolve_child_prop_usage_at_cursor(uri, position)
+        {
+            let mut locations = Vec::new();
+
+            // For shorthand props, also resolve the parent binding.
+            if resolved.usage.parent_is_shorthand {
+                if let Some(parent_def) = self.resolve_template_identifier(
+                    uri,
+                    &analysis,
+                    &doc.line_index,
+                    &resolved.usage.parent_prop_name,
+                ) {
+                    match parent_def {
+                        GotoDefinitionResponse::Scalar(loc) => locations.push(loc),
+                        GotoDefinitionResponse::Array(locs) => locations.extend(locs),
+                        GotoDefinitionResponse::Link(links) => {
+                            locations.extend(links.into_iter().map(|link| Location {
+                                uri: link.target_uri,
+                                range: link.target_selection_range,
+                            }));
+                        }
+                    }
+                }
+            }
+
+            // Find matching prop field in child's defineProps (the safe rename decl).
+            let mut child_found = false;
+            if let Some(decl_span) = self.resolve_child_macro_prop_declaration(&resolved) {
+                if let Some(loc) =
+                    location_from_span(&resolved.child.uri, &resolved.child.line_index, decl_span)
+                {
+                    locations.push(loc);
+                    child_found = true;
+                }
+            }
+            // Fallback: template-level prop definitions (navigation convenience).
+            if !child_found {
+                if let Some(child_template) = resolved.child.analysis.template.as_ref() {
+                    if let Some(prop_def) = child_template
+                        .prop_definitions
+                        .iter()
+                        .find(|d| d.name == resolved.usage.parent_prop_name)
+                    {
+                        if let Some(loc) = location_from_span(
+                            &resolved.child.uri,
+                            &resolved.child.line_index,
+                            prop_def.span,
+                        ) {
+                            locations.push(loc);
+                            child_found = true;
+                        }
+                    }
+                }
+            }
+            // Final fallback: navigate to child file (navigation convenience).
+            if !child_found && !resolved.usage.parent_is_shorthand {
+                locations.push(Location {
+                    uri: resolved.child.uri.clone(),
+                    range: Range::default(),
+                });
+            }
+
+            if !locations.is_empty() {
+                return Some(goto_response_from_locations(locations));
+            }
+        }
+
         for element in &template.elements {
             if !element.is_component && element.tag != "template" {
                 continue;
             }
 
-            // For <template #slot> elements, find the parent component
-            let (component, child) = if element.tag == "template" {
+            // For <template #slot> elements, find the parent component. The props
+            // hit is handled BEFORE this loop via the shared usage resolver; this
+            // loop resolves only directive cursors (events / v-model / slots), so it
+            // needs only the resolved child component document.
+            let child = if element.tag == "template" {
                 // Walk up to the parent element to find the component
                 let parent_idx = match element.parent_index {
                     Some(idx) => idx as usize,
@@ -410,11 +491,10 @@ impl VerterLanguageServer {
                     Some(component) => component,
                     None => continue,
                 };
-                let child = match self.resolve_component_document_for_usage(uri, &analysis, comp) {
+                match self.resolve_component_document_for_usage(uri, &analysis, comp) {
                     Some(child) => child,
                     None => continue,
-                };
-                (comp, child)
+                }
             } else {
                 let comp = template.components.iter().find(|c| {
                     offset >= c.span.start
@@ -425,83 +505,11 @@ impl VerterLanguageServer {
                     Some(c) => c,
                     None => continue,
                 };
-                let child = match self.resolve_component_document_for_usage(uri, &analysis, comp) {
+                match self.resolve_component_document_for_usage(uri, &analysis, comp) {
                     Some(c) => c,
                     None => continue,
-                };
-                (comp, child)
-            };
-
-            // ── Props ───────────────────────────────────────────────
-            for prop in &component.props {
-                if offset >= prop.name_span.start && offset < prop.name_span.end {
-                    let mut locations = Vec::new();
-
-                    // For shorthand props, also resolve the parent binding
-                    if prop.is_shorthand {
-                        if let Some(parent_def) = self.resolve_template_identifier(
-                            uri,
-                            &analysis,
-                            &doc.line_index,
-                            &prop.name,
-                        ) {
-                            match parent_def {
-                                GotoDefinitionResponse::Scalar(loc) => locations.push(loc),
-                                GotoDefinitionResponse::Array(locs) => locations.extend(locs),
-                                GotoDefinitionResponse::Link(links) => {
-                                    locations.extend(links.into_iter().map(|link| Location {
-                                        uri: link.target_uri,
-                                        range: link.target_selection_range,
-                                    }));
-                                }
-                            }
-                        }
-                    }
-
-                    // Find matching prop field in child's defineProps
-                    let mut child_found = false;
-                    for mac in child.analysis.macros.iter() {
-                        if let Some(prop_field) =
-                            mac.prop_fields.iter().find(|f| f.name == prop.name)
-                        {
-                            if let Some(loc) =
-                                location_from_span(&child.uri, &child.line_index, prop_field.span)
-                            {
-                                locations.push(loc);
-                                child_found = true;
-                            }
-                        }
-                    }
-                    // Fallback: template-level prop definitions
-                    if !child_found {
-                        if let Some(child_template) = child.analysis.template.as_ref() {
-                            if let Some(prop_def) = child_template
-                                .prop_definitions
-                                .iter()
-                                .find(|d| d.name == prop.name)
-                            {
-                                if let Some(loc) =
-                                    location_from_span(&child.uri, &child.line_index, prop_def.span)
-                                {
-                                    locations.push(loc);
-                                    child_found = true;
-                                }
-                            }
-                        }
-                    }
-                    // Final fallback: navigate to child file
-                    if !child_found && !prop.is_shorthand {
-                        locations.push(Location {
-                            uri: child.uri.clone(),
-                            range: Range::default(),
-                        });
-                    }
-
-                    if !locations.is_empty() {
-                        return Some(goto_response_from_locations(locations));
-                    }
                 }
-            }
+            };
 
             // ── Events (v-on) ───────────────────────────────────────
             for directive in &element.directives {
@@ -709,7 +717,7 @@ impl VerterLanguageServer {
         })
     }
 
-    /// Post-process type provider definition results to follow barrel re-exports.
+    /// Resolve type provider definition results through barrel re-exports.
     ///
     /// When the type provider returns a location in a barrel file (`.ts`/`.js` with
     /// re-exports), resolve each location to the terminal declaration so the user
@@ -1104,7 +1112,7 @@ mod canonicalize_provider_path_tests {
 
     #[test]
     fn delegates_to_owner_strips_extended_prefix_and_trailing_slash() {
-        // Pre-fix the hand-rolled body omitted the `//?/` extended-prefix strip
+        // The hand-rolled body previously omitted the `//?/` extended-prefix strip
         // and the trailing-slash strip, so a Windows extended-prefix path keyed
         // `get_analysis` under `//?/D:/x/` and missed the cache. Delegating to
         // the owner produces the same `d:/x` every other producer keys on.

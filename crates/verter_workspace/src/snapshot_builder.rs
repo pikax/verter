@@ -9,8 +9,8 @@ use rustc_hash::FxHashSet;
 use crate::canonical_path::CanonicalPath;
 use crate::membership::{
     typescript_default_excludes, ConfiguredMembership, FallbackMembership, StaticMembershipSpec,
+    SupportedExtensions,
 };
-use crate::normalized_glob::NormalizedGlob;
 use crate::resolver::{IdeProjectConfig, ProjectMembership, ProjectResolver};
 use crate::workspace_snapshot::{
     compare_project_precedence, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
@@ -83,7 +83,8 @@ pub fn build_workspace_snapshot(
             let compiler_options = load_compiler_options(ws, &entry.path);
             let raw_references = load_project_references(ws, &entry.path);
 
-            let spec = membership_to_spec(&project_root, &raw_membership);
+            let supported = supported_extensions_for(&compiler_options);
+            let spec = membership_to_spec(&project_root, &raw_membership, &supported);
             let materialized_files = materialize_from_spec(&spec, &project_root, Some(ws));
 
             let references = raw_references
@@ -194,38 +195,93 @@ pub fn build_workspace_snapshot_simple(
     }
 }
 
-/// Convert the old `ProjectMembership` enum to the new `StaticMembershipSpec`.
+/// The carrier extensions the live `LanguageRegistry` registers (`.vue`,
+/// `.svelte`, …) WITHOUT a leading dot, the framework-agnostic authority for
+/// `extraFileExtensions`-style membership. Never a hardcoded list.
+pub fn registry_carrier_extensions() -> Vec<String> {
+    verter_language::LanguageRegistry::global()
+        .carrier_extensions()
+        .iter()
+        .map(|e| (*e).to_string())
+        .collect()
+}
+
+/// Build the supported-extension set for a configured project from its parsed
+/// compiler options (for the `allowJs`/`checkJs` JS-family gate) and the
+/// registered carrier extensions.
+pub fn supported_extensions_for(
+    compiler_options: &crate::resolver::IdeProjectCompilerOptions,
+) -> SupportedExtensions {
+    SupportedExtensions::new(
+        compiler_options.js_is_member(),
+        &registry_carrier_extensions(),
+    )
+}
+
+/// Convert the old `ProjectMembership` enum to the new `StaticMembershipSpec`,
+/// applying the supported-extension expansion rule.
 ///
-/// Fills in TypeScript defaults when the old representation was `MatchAll`.
+/// Fills in TypeScript defaults when the old representation was `MatchAll`. A
+/// no-extension directory / bare-star include glob expands into one glob per
+/// supported extension; an extension-specific glob is kept verbatim; `files`
+/// are exact and immune; `exclude` is literal.
 pub fn membership_to_spec(
     project_root: &CanonicalPath,
     membership: &ProjectMembership,
+    supported: &SupportedExtensions,
 ) -> StaticMembershipSpec {
     match membership {
-        ProjectMembership::MatchAll => StaticMembershipSpec::with_typescript_defaults(project_root),
+        ProjectMembership::MatchAll => {
+            StaticMembershipSpec::with_supported_extension_defaults(project_root, supported)
+        }
         ProjectMembership::IncludeExclude {
             files,
             include,
             exclude,
         } => {
-            let files_cp: Vec<CanonicalPath> =
-                files.iter().map(|f| CanonicalPath::new(f)).collect();
-
-            let include_globs: Vec<NormalizedGlob> =
-                include.iter().map(|g| NormalizedGlob::new(g)).collect();
-
-            let exclude_globs: Vec<NormalizedGlob> = if exclude.is_empty() {
-                typescript_default_excludes(project_root)
+            let files_refs: Vec<&str> = files.iter().map(String::as_str).collect();
+            let include_refs: Vec<&str> = include.iter().map(String::as_str).collect();
+            if exclude.is_empty() {
+                // No explicit exclude → TS defaults (node_modules etc.).
+                let mut spec = StaticMembershipSpec::from_includes(
+                    project_root,
+                    &files_refs,
+                    &include_refs,
+                    &[],
+                    supported,
+                );
+                spec.exclude = typescript_default_excludes(project_root);
+                spec
             } else {
-                exclude.iter().map(|g| NormalizedGlob::new(g)).collect()
-            };
-
-            StaticMembershipSpec {
-                files: files_cp,
-                include: include_globs,
-                exclude: exclude_globs,
+                let exclude_refs: Vec<&str> = exclude.iter().map(String::as_str).collect();
+                StaticMembershipSpec::from_includes(
+                    project_root,
+                    &files_refs,
+                    &include_refs,
+                    &exclude_refs,
+                    supported,
+                )
             }
         }
+    }
+}
+
+/// Build the exact [`ConfiguredMembership`] from the raw parsed
+/// `files`/`include`/`exclude` membership, applying the supported-extension
+/// expansion. The materialized set is left empty (bridge mode — `contains`
+/// falls to the static spec), for callers with no filesystem walk (the legacy
+/// `ProjectGraph` path and resolver-config tests). One membership
+/// representation, no second glob evaluator.
+pub fn configured_membership_from_raw(
+    root: &str,
+    membership: &ProjectMembership,
+    compiler_options: &crate::resolver::IdeProjectCompilerOptions,
+) -> ConfiguredMembership {
+    let supported = supported_extensions_for(compiler_options);
+    let spec = membership_to_spec(&CanonicalPath::new(root), membership, &supported);
+    ConfiguredMembership {
+        spec,
+        materialized_files: FxHashSet::default(),
     }
 }
 
@@ -301,7 +357,11 @@ fn build_resolver_from_projects(projects: &[OwnershipProject]) -> ProjectResolve
                 config.compiler_options = compiler_options.clone();
                 config.references = references.iter().map(|r| r.as_str().to_string()).collect();
                 config.workspace_aliases = workspace_aliases.clone();
-                config.membership = spec_to_membership(&membership.spec);
+                // Carry the EXACT configured membership onto the resolver
+                // config — the same materialized set the snapshot's
+                // `configured_owner_resolution_for_file` consults. No lossy
+                // exact→glob round-trip, no second membership engine.
+                config.membership = membership.clone();
                 config
             }
             ProjectPayload::Fallback { .. } => IdeProjectConfig::new(
@@ -313,26 +373,6 @@ fn build_resolver_from_projects(projects: &[OwnershipProject]) -> ProjectResolve
         .collect();
 
     ProjectResolver::new(ide_configs)
-}
-
-/// Convert StaticMembershipSpec back to ProjectMembership for the resolver.
-pub(crate) fn spec_to_membership(spec: &StaticMembershipSpec) -> ProjectMembership {
-    if spec.files.is_empty() && spec.include.is_empty() && spec.exclude.is_empty() {
-        return ProjectMembership::MatchAll;
-    }
-    ProjectMembership::IncludeExclude {
-        files: spec.files.iter().map(|f| f.as_str().to_string()).collect(),
-        include: spec
-            .include
-            .iter()
-            .map(|g| g.as_str().to_string())
-            .collect(),
-        exclude: spec
-            .exclude
-            .iter()
-            .map(|g| g.as_str().to_string())
-            .collect(),
-    }
 }
 
 /// Bridge: Convert a legacy `VfsProjectConfig` to an `OwnershipProject`.
@@ -347,20 +387,15 @@ pub fn ownership_project_from_vfs_config(
     let workspace_root = CanonicalPath::new(&config.workspace_root);
 
     if let Some(ref tsconfig) = config.tsconfig_path {
-        // Configured project
-        let spec = membership_to_spec(&root, &config.membership);
-        let materialized_files = materialize_from_spec(&spec, &root, None);
-
+        // Configured project — the legacy `VfsProjectConfig` already carries the
+        // exact `ConfiguredMembership`, so no re-conversion / re-materialization.
         OwnershipProject {
             id,
             root,
             workspace_root,
             payload: ProjectPayload::Configured {
                 tsconfig_path: CanonicalPath::new(tsconfig),
-                membership: ConfiguredMembership {
-                    spec,
-                    materialized_files,
-                },
+                membership: config.membership.clone(),
                 compiler_options: config.compiler_options.clone(),
                 references: config
                     .references

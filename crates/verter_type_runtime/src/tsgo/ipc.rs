@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use crate::codec::{LineIndex, PositionEncoding};
 use crate::protocol::*;
 use crate::traits::{ProviderFuture, TypeProvider};
-#[cfg(all(test, feature = "__lsp_tests"))]
+#[cfg(test)]
 use crate::uri::percent_decode;
 use crate::uri::{file_uri_to_path, normalize_file_uri_for_cache, path_to_file_uri_string};
 
@@ -217,7 +217,7 @@ async fn stdin_writer_loop(
 }
 
 /// Legacy single-channel wrapper for backward compat (tests).
-#[cfg(all(test, feature = "__lsp_tests"))]
+#[cfg(test)]
 async fn stdin_writer_loop_single(
     stdin: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
     rx: mpsc::Receiver<StdinMessage>,
@@ -249,6 +249,26 @@ struct LspTransport {
 
 /// Default timeout for LSP requests (10 seconds).
 const REQUEST_TIMEOUT_SECS: u64 = 10;
+
+/// List-level cap on completion-detail enrichment
+/// ([`TsgoTypeProvider::get_completion_details`]).
+///
+/// Each enriched item costs one `completionItem/resolve` round-trip (a
+/// [`REQUEST_TIMEOUT_SECS`]-bounded request); a member enumeration can return a
+/// large list, so only the leading (sorted-order = most relevant) items are
+/// enriched and the tail passes through unchanged — still present in the list,
+/// still lazily resolvable. Bounds the worst-case enrichment cost independent of
+/// list size.
+const MAX_COMPLETION_DETAIL_ENRICH: usize = 50;
+
+/// Max in-flight `completionItem/resolve` requests while enriching a completion
+/// list ([`TsgoTypeProvider::get_completion_details`]).
+///
+/// Bounds concurrency over the (already list-capped) enriched subset so the
+/// worst case is `ceil(MAX_COMPLETION_DETAIL_ENRICH / this) × REQUEST_TIMEOUT_SECS`
+/// rather than a serial `N × REQUEST_TIMEOUT_SECS`, without flooding the
+/// single-process tsgo transport with the whole batch at once.
+const COMPLETION_DETAIL_RESOLVE_CONCURRENCY: usize = 8;
 
 /// Timeout for the `initialize` request (30 seconds).
 /// The first request can be slow if tsgo is cold-started (e.g., npx download,
@@ -295,7 +315,7 @@ impl LspTransport {
         timeout_secs: u64,
         priority: ProviderPriority,
     ) -> Result<serde_json::Value, TypeProviderError> {
-        let _trace = crate::type_runtime_trace_scope!(
+        crate::type_runtime_trace_scope_async!(
             "tsgo_transport_request",
             format!(
                 "method={} priority={:?} {}",
@@ -303,98 +323,102 @@ impl LspTransport {
                 priority,
                 summarize_lsp_params(&params),
             ),
-        );
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            async {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-        let body = serde_json::to_string(&msg)
-            .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
+                let msg = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": method,
+                    "params": params,
+                });
+                let body = serde_json::to_string(&msg)
+                    .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+                let (tx, rx) = oneshot::channel();
+                self.pending.lock().await.insert(id, tx);
 
-        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-        self.tx_for_priority(priority)
-            .send(StdinMessage::Frame(frame.into_bytes()))
-            .await
-            .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
+                let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+                self.tx_for_priority(priority)
+                    .send(StdinMessage::Frame(frame.into_bytes()))
+                    .await
+                    .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await;
-        match result {
-            Ok(Ok(val)) => {
-                // Reset consecutive failures on any successful response
-                self.consecutive_failures.store(0, Ordering::Relaxed);
-                // Check for JSON-RPC error
-                if let Some(err) = val.get("error") {
-                    let msg = err
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("unknown error");
-                    crate::type_runtime_trace_event!(
-                        "tsgo_transport_request_error",
-                        format!("method={} id={} message={}", method, id, msg),
-                    );
-                    return Err(TypeProviderError::new(msg));
-                }
-                crate::type_runtime_trace_event!(
-                    "tsgo_transport_request_result",
-                    format!(
-                        "method={} id={} result_kind={}",
-                        method,
-                        id,
-                        val.get("result")
-                            .map(|result| match result {
-                                serde_json::Value::Null => "null",
-                                serde_json::Value::Array(_) => "array",
-                                serde_json::Value::Object(_) => "object",
-                                serde_json::Value::String(_) => "string",
-                                serde_json::Value::Bool(_) => "bool",
-                                serde_json::Value::Number(_) => "number",
-                            })
-                            .unwrap_or("missing"),
-                    ),
-                );
-                Ok(val
-                    .get("result")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null))
-            }
-            Ok(Err(_)) => {
-                crate::type_runtime_trace_event!(
-                    "tsgo_transport_request_error",
-                    format!(
-                        "method={} id={} message=response channel closed",
-                        method, id
-                    ),
-                );
-                Err(TypeProviderError::new("response channel closed"))
-            }
-            Err(_) => {
-                // Timeout — clean up the pending entry to prevent leak
-                self.pending.lock().await.remove(&id);
-                let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-                if count >= HANG_THRESHOLD {
-                    tracing::error!(
-                        "TSGO appears hung ({count} consecutive timeouts) — triggering restart"
-                    );
-                    if let Some(notify) = &self.crash_notify {
-                        notify.notify_waiters();
+                let result =
+                    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await;
+                match result {
+                    Ok(Ok(val)) => {
+                        // Reset consecutive failures on any successful response
+                        self.consecutive_failures.store(0, Ordering::Relaxed);
+                        // Check for JSON-RPC error
+                        if let Some(err) = val.get("error") {
+                            let msg = err
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("unknown error");
+                            crate::type_runtime_trace_event!(
+                                "tsgo_transport_request_error",
+                                format!("method={} id={} message={}", method, id, msg),
+                            );
+                            return Err(TypeProviderError::new(msg));
+                        }
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_request_result",
+                            format!(
+                                "method={} id={} result_kind={}",
+                                method,
+                                id,
+                                val.get("result")
+                                    .map(|result| match result {
+                                        serde_json::Value::Null => "null",
+                                        serde_json::Value::Array(_) => "array",
+                                        serde_json::Value::Object(_) => "object",
+                                        serde_json::Value::String(_) => "string",
+                                        serde_json::Value::Bool(_) => "bool",
+                                        serde_json::Value::Number(_) => "number",
+                                    })
+                                    .unwrap_or("missing"),
+                            ),
+                        );
+                        Ok(val
+                            .get("result")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null))
+                    }
+                    Ok(Err(_)) => {
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_request_error",
+                            format!(
+                                "method={} id={} message=response channel closed",
+                                method, id
+                            ),
+                        );
+                        Err(TypeProviderError::new("response channel closed"))
+                    }
+                    Err(_) => {
+                        // Timeout — clean up the pending entry to prevent leak
+                        self.pending.lock().await.remove(&id);
+                        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                        if count >= HANG_THRESHOLD {
+                            tracing::error!(
+                                "TSGO appears hung ({count} consecutive timeouts) — triggering restart"
+                            );
+                            if let Some(notify) = &self.crash_notify {
+                                notify.notify_waiters();
+                            }
+                        }
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_request_error",
+                            format!("method={} id={} message=timeout", method, id),
+                        );
+                        Err(TypeProviderError::new(format!(
+                            "request '{method}' timed out after {timeout_secs}s"
+                        )))
                     }
                 }
-                crate::type_runtime_trace_event!(
-                    "tsgo_transport_request_error",
-                    format!("method={} id={} message=timeout", method, id),
-                );
-                Err(TypeProviderError::new(format!(
-                    "request '{method}' timed out after {timeout_secs}s"
-                )))
             }
-        }
+        )
+        .await
     }
 
     /// Send an LSP notification at a specific priority (no response expected).
@@ -405,7 +429,7 @@ impl LspTransport {
         params: serde_json::Value,
         priority: ProviderPriority,
     ) -> Result<(), TypeProviderError> {
-        let _trace = crate::type_runtime_trace_scope!(
+        crate::type_runtime_trace_scope_async!(
             "tsgo_transport_notify",
             format!(
                 "method={} priority={:?} {}",
@@ -413,43 +437,48 @@ impl LspTransport {
                 priority,
                 summarize_lsp_params(&params),
             ),
-        );
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        });
-        let body = serde_json::to_string(&msg)
-            .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
+            async {
+                let msg = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": method,
+                    "params": params,
+                });
+                let body = serde_json::to_string(&msg)
+                    .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
-        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-        match self
-            .tx_for_priority(priority)
-            .try_send(StdinMessage::Frame(frame.into_bytes()))
-        {
-            Ok(()) => {
-                crate::type_runtime_trace_event!(
-                    "tsgo_transport_notify_result",
-                    format!("method={} queued=true", method),
-                );
-                Ok(())
+                let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+                match self
+                    .tx_for_priority(priority)
+                    .try_send(StdinMessage::Frame(frame.into_bytes()))
+                {
+                    Ok(()) => {
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_notify_result",
+                            format!("method={} queued=true", method),
+                        );
+                        Ok(())
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            "TSGO stdin channel full — dropping notification '{method}'"
+                        );
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_notify_result",
+                            format!("method={} queued=false reason=full", method),
+                        );
+                        Err(TypeProviderError::new("channel full"))
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        crate::type_runtime_trace_event!(
+                            "tsgo_transport_notify_result",
+                            format!("method={} queued=false reason=closed", method),
+                        );
+                        Err(TypeProviderError::new("stdin writer closed"))
+                    }
+                }
             }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!("TSGO stdin channel full — dropping notification '{method}'");
-                crate::type_runtime_trace_event!(
-                    "tsgo_transport_notify_result",
-                    format!("method={} queued=false reason=full", method),
-                );
-                Err(TypeProviderError::new("channel full"))
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                crate::type_runtime_trace_event!(
-                    "tsgo_transport_notify_result",
-                    format!("method={} queued=false reason=closed", method),
-                );
-                Err(TypeProviderError::new("stdin writer closed"))
-            }
-        }
+        )
+        .await
     }
 
     /// Send an LSP notification at Interactive priority (no response expected).
@@ -474,14 +503,6 @@ async fn drain_pending(pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::
     }
 }
 
-/// Test-only re-export of `drain_pending` for use in resilient.rs tests.
-#[cfg(all(test, feature = "__lsp_tests"))]
-pub async fn drain_pending_for_test(
-    pending: &Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>,
-) {
-    drain_pending(pending).await;
-}
-
 /// Read loop that processes JSON-RPC messages from the child's stdout
 /// and dispatches responses to pending request channels.
 /// Also handles `textDocument/publishDiagnostics` notifications and
@@ -493,7 +514,7 @@ async fn read_loop(
     stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static,
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
-    contents_cache: Arc<Mutex<HashMap<String, String>>>,
+    contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
     interactive_tx: mpsc::Sender<StdinMessage>,
     crash_notify: Option<Arc<Notify>>,
 ) {
@@ -633,36 +654,42 @@ async fn read_loop(
                         // match our path_to_uri keys (literal colon, original case).
                         let uri = normalize_file_uri(raw_uri);
                         // Look up the file content so we can resolve LSP positions
-                        // to byte offsets. The content cache is keyed by file path,
-                        // so convert the URI first and normalize for case-insensitive
-                        // matching on Windows.
+                        // to byte offsets. The content cache is keyed by file path, so
+                        // convert the URI first; on a case-insensitive filesystem
+                        // (Windows / default macOS) fall back to a case-folded match so
+                        // a case-variant key still resolves.
                         let content = {
                             let path = uri_to_file_path(raw_uri);
                             let cache = contents_cache.lock().await;
-                            // Try exact match first, then case-insensitive on Windows.
-                            #[allow(clippy::unnecessary_lazy_evaluations)]
+                            // Exact match first, then — only on a case-insensitive
+                            // filesystem — a folded match through the single shared
+                            // FS-identity policy (`verter_span::path`), so the case
+                            // policy never diverges per OS at this call site.
                             cache.get(&path).cloned().or_else(|| {
-                                #[cfg(windows)]
-                                {
-                                    let lower = path.to_lowercase();
+                                if verter_span::path::fs_is_case_insensitive() {
                                     cache
                                         .iter()
-                                        .find(|(k, _)| k.to_lowercase() == lower)
+                                        .find(|(k, _)| verter_span::path::fs_paths_equal(k, &path))
                                         .map(|(_, v)| v.clone())
-                                }
-                                #[cfg(not(windows))]
-                                {
+                                } else {
                                     None
                                 }
                             })
                         };
                         if content.is_some() {
+                            let diag_file = uri_to_file_path(raw_uri);
                             let diags = params
                                 .get("diagnostics")
                                 .and_then(|v| v.as_array())
                                 .map(|arr| {
                                     arr.iter()
-                                        .filter_map(|d| parse_lsp_diagnostic(d, content.as_deref()))
+                                        .filter_map(|d| {
+                                            parse_lsp_diagnostic(
+                                                d,
+                                                content.as_deref(),
+                                                Some(diag_file.as_str()),
+                                            )
+                                        })
                                         .collect::<Vec<_>>()
                                 })
                                 .unwrap_or_default();
@@ -703,7 +730,11 @@ async fn read_loop(
 /// works for diagnostics on line 0.
 ///
 /// `position_to_offset` interprets `character` as UTF-16 code units (LSP default).
-fn parse_lsp_diagnostic(d: &serde_json::Value, content: Option<&str>) -> Option<TypeDiagnostic> {
+fn parse_lsp_diagnostic(
+    d: &serde_json::Value,
+    content: Option<&str>,
+    file_path: Option<&str>,
+) -> Option<TypeDiagnostic> {
     let range = d.get("range")?;
     let start = range.get("start")?;
     let end = range.get("end")?;
@@ -720,6 +751,24 @@ fn parse_lsp_diagnostic(d: &serde_json::Value, content: Option<&str>) -> Option<
             .map(|n| n.to_string())
             .or_else(|| v.as_str().map(String::from))
     });
+
+    // TSGO returns native LSP `DiagnosticTag`s (1 = Unnecessary, 2 = Deprecated)
+    // in an integer array. Map the known values onto the provider-neutral carrier
+    // (unknown tag numbers are ignored) so the LSP merge re-emits the fade /
+    // strikethrough — the same gray-out parity the `.vue` path needs.
+    let tags = d
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| match t.as_u64() {
+                    Some(1) => Some(TypeDiagnosticTag::Unnecessary),
+                    Some(2) => Some(TypeDiagnosticTag::Deprecated),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let start_line = start.get("line")?.as_u64()? as u32;
     let start_char = start.get("character")?.as_u64()? as u32;
@@ -740,12 +789,93 @@ fn parse_lsp_diagnostic(d: &serde_json::Value, content: Option<&str>) -> Option<
         )
     };
 
+    // LSP `relatedInformation` carries the secondary "see declaration here" spans
+    // (each `{ location: { uri, range }, message }`). `parse_lsp_related_info` keeps
+    // ONLY a same-file related span whose content is available AND whose position is
+    // in range — it converts through the CHECKED offset converter and DROPS the
+    // entry for a cross-file/no-content span OR an out-of-range same-file position
+    // (never stores a packed position, never clamps to EOF). A dropped secondary
+    // link beats a bogus one.
+    let primary_file = file_path.map(verter_span::path::canonicalize_path);
+    let related_information = d
+        .get("relatedInformation")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|ri| parse_lsp_related_info(ri, content, primary_file.as_deref()))
+                .collect()
+        })
+        .unwrap_or_default();
+
     Some(TypeDiagnostic {
         message,
         severity,
         start: start_offset,
         end: end_offset,
         code,
+        tags,
+        related_information,
+    })
+}
+
+/// Parse one LSP `relatedInformation` entry into a [`DiagnosticRelatedInfo`].
+///
+/// The entry shape is `{ location: { uri, range: { start, end } }, message }`.
+/// [`DiagnosticRelatedInfo::start`]/[`DiagnosticRelatedInfo::end`] are REAL byte
+/// offsets in `path` — never a packed `(line<<16)|character` position. A real
+/// offset is available ONLY when the related `location.uri` resolves to the SAME
+/// canonical file the parser holds content for (`primary_file` / `primary_content`);
+/// both sides are canonicalized before the equality (`primary_file` upstream,
+/// `path` via [`uri_to_file_path`]) so a same file spelled differently still
+/// matches.
+///
+/// Returns `None` (skip this entry, never fabricate, never store a packed value)
+/// when the message/location/uri/range fields are missing, when the related span
+/// is cross-file (no content for it), OR when a same-file position is OUT OF RANGE
+/// for the content — fail-closed: a dropped secondary link beats a bogus one.
+fn parse_lsp_related_info(
+    ri: &serde_json::Value,
+    primary_content: Option<&str>,
+    primary_file: Option<&str>,
+) -> Option<DiagnosticRelatedInfo> {
+    let message = ri.get("message")?.as_str()?.to_string();
+    let location = ri.get("location")?;
+    let path = uri_to_file_path(location.get("uri")?.as_str()?);
+    let range = location.get("range")?;
+    let start = range.get("start")?;
+    let end = range.get("end")?;
+    // CHECKED `u64 → u32`: a malformed coordinate larger than `u32::MAX` (e.g.
+    // `2^32`) would WRAP to an in-range line/column under a lossy `as u32` cast,
+    // then PASS the checked position converter (which only rejects past-EOF
+    // positions), fabricating a valid-looking but WRONG related link. Dropping the
+    // whole related entry (fail-closed) on an out-of-u32-range coordinate is the
+    // only defense, because the corruption would happen in the cast BEFORE the
+    // converter runs.
+    let start_line = u32::try_from(start.get("line")?.as_u64()?).ok()?;
+    let start_char = u32::try_from(start.get("character")?.as_u64()?).ok()?;
+    let end_line = u32::try_from(end.get("line")?.as_u64()?).ok()?;
+    let end_char = u32::try_from(end.get("character")?.as_u64()?).ok()?;
+
+    // A real byte offset exists only for a same-file related span (the parser holds
+    // that file's content). A cross-file span has no content here, so there is no
+    // real offset — DROP it rather than store a packed position the merge would
+    // mis-read as a byte offset. Both paths are already canonicalized.
+    let same_file = primary_file == Some(path.as_str());
+    let content = primary_content.filter(|_| same_file)?;
+    // Even a same-file related span can be MALFORMED (a line/col past EOF). The
+    // fail-open `position_to_offset` would CLAMP that to `content.len()` and forge a
+    // bogus "see declaration" link at EOF, so the related-info path uses the CHECKED
+    // converter and DROPS the entry (returns `None`) when the position is out of
+    // range — never clamps. The primary-span path keeps its own clamp/recovery
+    // behavior (out of scope here).
+    let start_byte = position_to_offset_checked(content, start_line, start_char)?;
+    let end_byte = position_to_offset_checked(content, end_line, end_char)?;
+
+    Some(DiagnosticRelatedInfo {
+        path,
+        start: start_byte,
+        end: end_byte,
+        message,
     })
 }
 
@@ -780,6 +910,39 @@ pub fn position_to_offset_with_encoding(
 /// `character` is interpreted as UTF-16 code units (used by TSGO and tsserver).
 fn position_to_offset(content: &str, line: u32, character: u32) -> u32 {
     position_to_offset_with_encoding(content, line, character, PositionEncoding::Utf16)
+}
+
+/// Convert an LSP 0-based `(line, character)` to a byte offset, returning `None` when the position
+/// is OUT OF RANGE for `content` instead of clamping it to EOF.
+///
+/// [`position_to_offset_with_encoding`] fails OPEN — a past-EOF line or a column past the line end
+/// clamps to `content.len()` / the line end and returns a valid-looking WRONG offset. That is
+/// acceptable for a navigation sentinel, but for an EDIT a clamped wrong offset corrupts the file,
+/// so the edit path validates the position is real and DROPS it otherwise. EDIT-PATH-LOCAL: does
+/// not change the shared codec. `character` is UTF-16 code units.
+fn position_to_offset_checked(content: &str, line: u32, character: u32) -> Option<u32> {
+    let idx = LineIndex::new(content, PositionEncoding::Utf16);
+    if line as usize >= idx.line_count() {
+        return None; // past-EOF line
+    }
+    // The line's UTF-16 width; a column past it would clamp.
+    let line_start = idx.line_start(line as usize)?;
+    let line_end = idx.line_end(line as usize)?; // before the newline / EOF
+    let line_text = content.get(line_start as usize..line_end as usize)?;
+    let line_utf16_len: u32 = line_text.encode_utf16().count() as u32;
+    if character > line_utf16_len {
+        return None; // column past the line end
+    }
+    let target = crate::codec::LineColumn { line, character };
+    let offset = idx.position_to_offset(target)?;
+    // A column landing between the two halves of an astral (surrogate-pair) character is not a
+    // UTF-16 scalar boundary; the codec rounds it to an adjacent character, yielding an offset that
+    // does NOT map back to the requested column. Require the round-trip to be exact so an EDIT is
+    // only accepted at a real boundary; drop it otherwise.
+    if idx.offset_to_position(offset)? != target {
+        return None;
+    }
+    Some(offset)
 }
 
 /// Parse an LSP Location JSON value into a `TypeLocation`, using content for offset resolution.
@@ -831,6 +994,33 @@ fn parse_lsp_location(loc: &serde_json::Value, content: Option<&str>) -> Option<
     })
 }
 
+/// Parse a batch of LSP `Location` JSON values into `TypeLocation`s, resolving EACH location's
+/// byte offsets against that location's OWN file content.
+///
+/// References (and definition / type-definition) span multiple files: a location in file `B`
+/// returned from a query on file `A` carries a `range` whose line:col must be converted to a byte
+/// offset using `B`'s content, NOT `A`'s. Passing the queried file's single snapshot to every
+/// location converts cross-file ranges against the wrong file, packing garbage byte offsets that
+/// surface downstream as line-0 / wrong-position results.
+///
+/// `content_for(target_path)` hands back the target file's content (from the contents cache);
+/// `parse_lsp_location` falls back to a disk read when it returns `None`.
+fn parse_lsp_locations_per_target<'a>(
+    locations: &[serde_json::Value],
+    content_for: impl Fn(&str) -> Option<&'a str>,
+) -> Vec<TypeLocation> {
+    locations
+        .iter()
+        .filter_map(|loc| {
+            let target_path = loc
+                .get("uri")
+                .and_then(|value| value.as_str())
+                .map(uri_to_file_path)?;
+            parse_lsp_location(loc, content_for(&target_path))
+        })
+        .collect()
+}
+
 /// Convert a `file://` URI from TSGO into the shared CANONICAL filesystem-path
 /// ID used in every path-bearing DTO this provider returns (`TypeLocation`,
 /// `RenameLocation`, `TypeCodeEdit`).
@@ -845,22 +1035,41 @@ fn uri_to_file_path(uri: &str) -> String {
 }
 
 /// Percent-decode a URI string. Handles standard `%XX` encoding.
-#[cfg(all(test, feature = "__lsp_tests"))]
+#[cfg(test)]
 fn percent_decode_uri(uri: &str) -> String {
     percent_decode(uri)
 }
 
 /// Normalize a `file://` URI for use as a cache key.
 ///
-/// TSGO sends URIs with percent-encoding and lowercase paths on Windows
-/// (e.g., `file:///c%3A/users/someone/...`), while our `path_to_uri` produces
-/// literal colons with original case (e.g., `file:///C:/Users/Someone/...`).
+/// On a case-insensitive filesystem (Windows + default macOS) TSGO may send URIs with
+/// percent-encoding and lowercased path segments (e.g., `file:///c%3A/users/someone/...`),
+/// while our `path_to_uri` produces literal colons with original case
+/// (e.g., `file:///C:/Users/Someone/...`).
 ///
 /// This function normalizes both forms to the same canonical representation:
 /// 1. Percent-decodes the URI (so `%3A` → `:`)
-/// 2. On Windows, lowercases the entire URI for case-insensitive matching
+/// 2. Folds the whole decoded URI to lowercase IFF the host filesystem is
+///    case-insensitive — the single shared `verter_span::path::fs_is_case_insensitive`
+///    policy (Windows + default macOS fold; a case-sensitive filesystem (Linux) preserves
+///    case).
 fn normalize_file_uri(uri: &str) -> String {
     normalize_file_uri_for_cache(uri)
+}
+
+/// The single key convention for the `contents` cache.
+///
+/// The cache is keyed by canonical filesystem path so every producer/consumer of
+/// a carrier's content agrees on identity: the file-lifecycle inserts, the
+/// position-mapping reads, `cached_content` (read cross-surface by the OWNED
+/// `--api` diagnostics route with the engine's own `root_files` form), and the
+/// edit-target snapshot scanners in [`crate::contents_snapshot`] (which key by
+/// this same `canonicalize_path`). A raw-string insert paired with a differently
+/// slashed / drive-cased lookup (e.g. the engine echoes `c:/…` while a didOpen
+/// used `C:\…`) is a FALSE miss that would strand a carrier's content; routing
+/// every access through this helper makes the insert and lookup forms agree.
+fn contents_key(path: &str) -> String {
+    verter_span::path::canonicalize_path(path)
 }
 
 /// Parse an LSP CompletionItem JSON value into a `Completion`.
@@ -900,6 +1109,18 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
             .map(String::from)
             .or_else(|| v.get("value").and_then(|v2| v2.as_str()).map(String::from))
     });
+    // The `textEdit.newText` — the text a SURVIVING replace-range commits (per
+    // LSP the editor applies it and ignores `insertText`), and the preferred
+    // plain-insert fallback when the range is dropped fail-closed below.
+    let text_edit_new_text = item
+        .get("textEdit")
+        .and_then(|te| te.get("newText"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    // The explicit `insertText` — the plain-insert text used only when there is
+    // no `textEdit`. Carried distinctly from `text_edit_new_text` so the consumer
+    // chooses the right text per LSP semantics (newText for an edit; insertText
+    // for a plain insert) and never falls back to the display `label`.
     let insert_text = item
         .get("insertText")
         .and_then(|v| v.as_str())
@@ -908,28 +1129,64 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
         .get("sortText")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // tsgo speaks LSP, so an item carries the real `insertTextFormat` (1 = plain,
+    // 2 = snippet) when it is a snippet completion. Map the wire integer to the
+    // neutral carrier; any unknown value is treated as no signal (fail-closed).
+    let insert_text_format = item
+        .get("insertTextFormat")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| match n {
+            1 => Some(CompletionInsertTextFormat::PlainText),
+            2 => Some(CompletionInsertTextFormat::Snippet),
+            _ => None,
+        });
+    // Strict, fail-closed, shared with the tsserver provider: a malformed or
+    // empty `commitCharacters` array yields `None` rather than `Some(vec![])`.
+    let commit_characters = parse_commit_characters(item.get("commitCharacters"));
+    let filter_text = item
+        .get("filterText")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let preselect = item.get("preselect").and_then(|v| v.as_bool());
+    // LSP `labelDetails` ({ detail?, description? }). Only minted when at least
+    // one sub-field is a string — an empty object carries no signal.
+    let label_details = item.get("labelDetails").and_then(parse_label_details);
 
-    // Parse textEdit range for edit_range_start/end
+    // The textEdit replace-range is applied as a REAL edit when the completion is accepted, so it
+    // is fail-closed: when the content is unavailable, or the range cannot be proven against it,
+    // the range is DROPPED (endpoints stay `None`) and the consumer degrades to a plain insert
+    // rather than emitting a packed or clamped offset that would corrupt the file.
     let (edit_range_start, edit_range_end) = item
         .get("textEdit")
         .and_then(|te| {
             let range = te.get("range")?;
             let start = range.get("start")?;
             let end = range.get("end")?;
-            let sl = start.get("line")?.as_u64()? as u32;
-            let sc = start.get("character")?.as_u64()? as u32;
-            let el = end.get("line")?.as_u64()? as u32;
-            let ec = end.get("character")?.as_u64()? as u32;
-            if let Some(c) = content {
-                Some((
-                    Some(position_to_offset(c, sl, sc)),
-                    Some(position_to_offset(c, el, ec)),
-                ))
-            } else {
-                Some((Some(pack_position(sl, sc)), Some(pack_position(el, ec))))
+            let sl = u32::try_from(start.get("line")?.as_u64()?).ok()?;
+            let sc = u32::try_from(start.get("character")?.as_u64()?).ok()?;
+            let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
+            let ec = u32::try_from(end.get("character")?.as_u64()?).ok()?;
+            let c = content?;
+            let s = position_to_offset_checked(c, sl, sc)?;
+            let e = position_to_offset_checked(c, el, ec)?;
+            if s > e {
+                return None;
             }
+            Some((Some(s), Some(e)))
         })
         .unwrap_or((None, None));
+
+    // Preserve the upstream-LSP resolve handle as the provider-pure
+    // `CompletionResolveData::Lsp` variant: the item's own `label` plus its
+    // opaque `data` blob, replayed verbatim by `resolve_completion`. An item
+    // with no `data` carries no resolve handle.
+    let data = item
+        .get("data")
+        .filter(|d| !d.is_null())
+        .map(|d| CompletionResolveData::Lsp {
+            label: label.clone(),
+            data: d.clone(),
+        });
 
     Some(Completion {
         label,
@@ -938,10 +1195,112 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
         documentation,
         edit_range_start,
         edit_range_end,
+        text_edit_new_text,
         insert_text,
         sort_text,
-        data: item.get("data").cloned(),
+        insert_text_format,
+        commit_characters,
+        filter_text,
+        preselect,
+        label_details,
+        data,
     })
+}
+
+/// Parse an LSP `CompletionItemLabelDetails`-shaped JSON value
+/// (`{ detail?, description? }`) into the neutral [`CompletionLabelDetails`]
+/// carrier. Returns `None` unless at least one sub-field is a string, so an
+/// empty `{}` (no signal) does not mint an empty carrier.
+fn parse_label_details(value: &serde_json::Value) -> Option<CompletionLabelDetails> {
+    let detail = value
+        .get("detail")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let description = value
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if detail.is_none() && description.is_none() {
+        return None;
+    }
+    Some(CompletionLabelDetails {
+        detail,
+        description,
+    })
+}
+
+/// Parse an LSP `Command`-shaped JSON value (`{ title, command, arguments? }`)
+/// into the neutral [`CompletionCommand`] carrier. Returns `None` unless BOTH
+/// `title` and `command` are strings — a partial object is not a valid command
+/// and is dropped fail-closed (never fabricated).
+fn parse_lsp_command(value: Option<&serde_json::Value>) -> Option<CompletionCommand> {
+    let value = value?;
+    let title = value.get("title").and_then(|v| v.as_str())?.to_string();
+    let command = value.get("command").and_then(|v| v.as_str())?.to_string();
+    let arguments = value
+        .get("arguments")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.to_vec());
+    Some(CompletionCommand {
+        title,
+        command,
+        arguments,
+    })
+}
+
+/// Extract the lazy `detail` (signature) and `documentation` from an LSP
+/// `completionItem/resolve` response.
+///
+/// LSP returns `documentation` as either a plain string or a
+/// `MarkupContent { kind, value }` object; both spellings are handled. Either
+/// field may be absent (the server returned no enrichment for that item), in
+/// which case the corresponding slot is `None`.
+fn extract_resolve_detail_and_documentation(
+    resolve_response: &serde_json::Value,
+) -> (Option<String>, Option<String>) {
+    let detail = resolve_response
+        .get("detail")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let documentation = resolve_response.get("documentation").and_then(|v| {
+        v.as_str()
+            .map(String::from)
+            .or_else(|| v.get("value").and_then(|v2| v2.as_str()).map(String::from))
+    });
+    (detail, documentation)
+}
+
+/// Overlay a resolved `detail`/`documentation` onto a completion item without
+/// discarding any of its other fields — crucially the typed resolve handle, so a
+/// detail-enriched item can still be resolved for auto-import.
+///
+/// `None` for either slot leaves the item's list-time value untouched (the
+/// resolve did not enrich that slot). This mirrors the tsserver-family
+/// [`crate::tsserver::ipc::enrich_completion_with_entry_details`] convention so
+/// the two provider families behave identically through
+/// [`crate::traits::TypeProvider::get_completion_details`].
+fn fold_lsp_resolve_detail_into_completion(
+    item: &Completion,
+    detail: Option<String>,
+    documentation: Option<String>,
+) -> Completion {
+    Completion {
+        label: item.label.clone(),
+        kind: item.kind,
+        detail: detail.or_else(|| item.detail.clone()),
+        documentation: documentation.or_else(|| item.documentation.clone()),
+        edit_range_start: item.edit_range_start,
+        edit_range_end: item.edit_range_end,
+        text_edit_new_text: item.text_edit_new_text.clone(),
+        insert_text: item.insert_text.clone(),
+        sort_text: item.sort_text.clone(),
+        insert_text_format: item.insert_text_format,
+        commit_characters: item.commit_characters.clone(),
+        filter_text: item.filter_text.clone(),
+        preselect: item.preselect,
+        label_details: item.label_details.clone(),
+        data: item.data.clone(),
+    }
 }
 
 /// Convert a byte offset into an LSP `(line, character)` position with explicit encoding.
@@ -975,6 +1334,16 @@ fn offset_to_position(content: &str, offset: u32) -> (u32, u32) {
     offset_to_position_with_encoding(content, offset, PositionEncoding::Utf16)
 }
 
+/// The `--api` checker session minted by [`TsgoTypeProvider::initialize_api_session`]:
+/// the opaque server session id plus the pipe path the `--api` checker connects to.
+#[derive(Debug, Clone)]
+pub struct TsgoApiSession {
+    /// The server-assigned session id (`InitializeAPISessionResult.sessionId`).
+    pub session_id: String,
+    /// The server-minted pipe path (a Windows named pipe / Unix-domain socket).
+    pub pipe: String,
+}
+
 /// A `TypeProvider` backed by a real TSGO process (`tsgo --lsp --stdio`).
 ///
 /// Spawns the process, initializes the LSP connection, and translates
@@ -986,7 +1355,7 @@ pub struct TsgoTypeProvider {
     /// Document version counter per path.
     versions: Arc<Mutex<HashMap<String, i32>>>,
     /// Cached file contents for byte-offset → LSP position conversion.
-    contents: Arc<Mutex<HashMap<String, String>>>,
+    contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
     /// Cached diagnostics from textDocument/publishDiagnostics push notifications.
     /// Used as fallback when pull diagnostics (textDocument/diagnostic) fails.
     diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>>,
@@ -1073,7 +1442,7 @@ impl TsgoTypeProvider {
         let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        let contents_cache: Arc<Mutex<HashMap<String, String>>> =
+        let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         // Start the read loop in a background task (uses interactive_tx for auto-replies)
@@ -1108,13 +1477,26 @@ impl TsgoTypeProvider {
             });
         }
 
-        // Send initialize request (use longer timeout for cold starts)
+        // Send initialize request (use longer timeout for cold starts).
+        //
+        // The client capabilities are built by `build_client_capabilities()` —
+        // an LSP server gates every optional feature on what the client
+        // advertises, so a capability the client never declares is silently
+        // dropped and TSGO never emits data this provider's handlers are ready
+        // to consume. The helper advertises EXACTLY the completion- and
+        // diagnostic-channel capabilities TSGO's handlers consume (diagnostic
+        // `tagSupport` on both channels; `completionItem.resolveSupport` for the
+        // `completionItem/resolve` round-trips; `contextSupport` + the
+        // `completionItemKind` valueSet). TSGO's base features (hover / definition /
+        // references / rename / signatureHelp / codeAction / semanticTokens /
+        // documentHighlight / inlayHint / pull-diagnostic) are left to TSGO's static
+        // server-side registration and are not advertised here.
         let init_result = transport
             .request_with_priority(
                 "initialize",
                 serde_json::json!({
                     "processId": std::process::id(),
-                    "capabilities": {},
+                    "capabilities": build_client_capabilities(),
                     "rootUri": root_uri,
                     "workspaceFolders": [{
                         "uri": root_uri,
@@ -1142,6 +1524,50 @@ impl TsgoTypeProvider {
         })
     }
 
+    /// Attach an `--api` checker session to THIS `tsgo --lsp` process by sending
+    /// `custom/initializeAPISession` over the existing `--lsp` connection. Returns
+    /// the server-minted pipe path the `--api` checker connects to.
+    ///
+    /// This is the OWNED one-instance attach seam: the dual-surface provider drives
+    /// BOTH the `--lsp` features (this provider's existing methods) AND the `--api`
+    /// checker over the SAME process / shared `project.Session`. The pipe path is
+    /// returned verbatim (a `\\.\pipe\tsgo-api-…` on Windows, a UDS path on Unix);
+    /// the caller connects it. No second process is spawned.
+    pub async fn initialize_api_session(&self) -> Result<TsgoApiSession, TypeProviderError> {
+        let result = self
+            .transport
+            .request(
+                verter_tsgo_api::attach::INITIALIZE_API_SESSION_METHOD,
+                serde_json::json!({}),
+            )
+            .await?;
+        let pipe = result
+            .get("pipe")
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| {
+                TypeProviderError::new(format!(
+                    "custom/initializeAPISession result missing `pipe`: {result}"
+                ))
+            })?
+            .to_string();
+        let session_id = result
+            .get("sessionId")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        Ok(TsgoApiSession { session_id, pipe })
+    }
+
+    /// The cached content of an opened file (`didOpen`/`update` overlay), if
+    /// present. The `--api` diagnostic normalization (UTF-16 offset → byte /
+    /// (line,col)) needs the carrier's exact text; the `--lsp` surface already
+    /// caches every opened document's content for its own byte-offset ↔ position
+    /// conversion, so the dual-surface OWNED provider reads it back through here
+    /// rather than re-tracking a second copy.
+    pub async fn cached_content(&self, path: &str) -> Option<Arc<str>> {
+        self.contents.lock().await.get(&contents_key(path)).cloned()
+    }
+
     /// Convert a file path to a `file://` URI.
     fn path_to_uri(path: &str) -> String {
         path_to_file_uri_string(path)
@@ -1164,13 +1590,13 @@ impl TsgoTypeProvider {
         } else {
             "typescript"
         };
-        let content = rewrite_vue_imports_for_tsgo(content, path);
+        let content = content.to_string();
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsgo_update_file",
                 format!(
                     "path={} uri={} content_len={}",
@@ -1178,26 +1604,29 @@ impl TsgoTypeProvider {
                     uri,
                     content.len()
                 ),
-            );
-            contents_cache
-                .lock()
-                .await
-                .insert(path_owned.clone(), content.clone());
-            versions.lock().await.insert(path_owned, 1);
-            transport
-                .notify_with_priority(
-                    "textDocument/didOpen",
-                    serde_json::json!({
-                        "textDocument": {
-                            "uri": uri,
-                            "languageId": lang_id,
-                            "version": 1,
-                            "text": content,
-                        }
-                    }),
-                    priority,
-                )
-                .await
+                async {
+                    contents_cache
+                        .lock()
+                        .await
+                        .insert(contents_key(&path_owned), Arc::from(content.as_str()));
+                    versions.lock().await.insert(path_owned, 1);
+                    transport
+                        .notify_with_priority(
+                            "textDocument/didOpen",
+                            serde_json::json!({
+                                "textDocument": {
+                                    "uri": uri,
+                                    "languageId": lang_id,
+                                    "version": 1,
+                                    "text": content,
+                                }
+                            }),
+                            priority,
+                        )
+                        .await
+                }
+            )
+            .await
         })
     }
 
@@ -1218,7 +1647,7 @@ impl TsgoTypeProvider {
         } else {
             "typescript"
         };
-        let content = rewrite_vue_imports_for_tsgo(content, path);
+        let content = content.to_string();
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
@@ -1227,7 +1656,7 @@ impl TsgoTypeProvider {
             contents_cache
                 .lock()
                 .await
-                .insert(path_owned.clone(), content.clone());
+                .insert(contents_key(&path_owned), Arc::from(content.as_str()));
 
             let mut vers = versions.lock().await;
             if let Some(v) = vers.get_mut(&path_owned) {
@@ -1277,7 +1706,10 @@ impl TsgoTypeProvider {
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            contents_cache.lock().await.remove(&path_owned);
+            contents_cache
+                .lock()
+                .await
+                .remove(&contents_key(&path_owned));
             versions.lock().await.remove(&path_owned);
             transport
                 .notify_with_priority(
@@ -1290,27 +1722,184 @@ impl TsgoTypeProvider {
     }
 }
 
-/// Rewrite carrier import specifiers (`.vue` / `.svelte`) to their api `.ts`
-/// virtual file for TSGO cross-file resolution.
+/// Build the LSP `ClientCapabilities` object sent in the tsgo `initialize` request.
 ///
-/// TSGO resolves cross-file carrier imports through the public API output
-/// (`Foo.vue.ts` / `Bar.svelte.ts`), which has a proper `export default` for
-/// component types. The IDE output (`.tsx`) is a full JSX file that can leak
-/// DOM types into importers. The carrier-extension set is the registry's
-/// (`LanguageRegistry::carrier_extensions()`) — the single classification
-/// authority — not a hand-matched literal.
+/// An LSP server gates every optional feature on what the client advertises: a
+/// capability the client never declares is silently dropped, so tsgo would never
+/// emit data this provider's handlers are ready to consume. This helper owns the
+/// COMPLETION and DIAGNOSTIC channels, and advertises EXACTLY the completion- and
+/// diagnostic-channel capabilities tsgo's handlers actually consume — no more (an
+/// over-claimed completion/diagnostic capability invites the server to compute
+/// work the client discards, or register a sub-feature this thin provider cannot
+/// service):
 ///
-/// NOTE: We use `.vue.ts` (not `.d.vue.ts`) because TypeScript treats
-/// `.d.vue.ts` as a declaration file and forbids regular imports from it.
-pub(crate) fn rewrite_vue_imports_for_tsgo(content: &str, _path: &str) -> String {
-    let mut out = content.to_string();
-    for ext in verter_language::LanguageRegistry::global().carrier_extensions() {
-        // `ext` is the bare extension WITHOUT a leading dot (`vue` / `svelte`).
-        out = out
-            .replace(&format!(".{ext}'"), &format!(".{ext}.ts'"))
-            .replace(&format!(".{ext}\""), &format!(".{ext}.ts\""));
-    }
-    out
+/// Scope note: this helper does NOT enumerate tsgo's BASE features — hover,
+/// definition, typeDefinition, references, rename, signatureHelp, codeAction,
+/// semanticTokens, documentHighlight, inlayHint, and the pull `textDocument/diagnostic`
+/// request itself. The provider fully consumes those responses today; they work
+/// because tsgo statically registers those providers server-side regardless of
+/// client capabilities, and no OPTIONAL gated sub-feature of them is consumed. They
+/// are intentionally left to tsgo's static server-side registration and are not
+/// advertised here.
+///
+/// - `textDocument.publishDiagnostics.tagSupport` / `textDocument.diagnostic.tagSupport`
+///   (`valueSet [1, 2]`) — tsgo attaches `DiagnosticTag`s (1 = Unnecessary fade,
+///   2 = Deprecated strikethrough) only when the client understands them; the
+///   `parse_lsp_diagnostic` tag mapping re-emits the fade / strikethrough on both
+///   the push and pull channels. The `valueSet` enumerates the tags we render.
+///   Spec note: the PUSH-channel `publishDiagnostics.tagSupport` is the
+///   spec-defined capability (`PublishDiagnosticsClientCapabilities.tagSupport`).
+///   The PULL-channel `textDocument.diagnostic.tagSupport` is NOT a field defined
+///   by LSP 3.17 (`DiagnosticClientCapabilities` has no `tagSupport` member) — it
+///   is a NON-SPEC field retained for compatibility (tsgo may read it as a private
+///   extension to gate pull-diagnostic tags) and is intentionally kept as-is.
+/// - `textDocument.completion.completionItem.resolveSupport` (`documentation`,
+///   `detail`, `additionalTextEdits`) — tsgo computes a `completionItem/resolve`
+///   property lazily only when the client lists it. This provider folds `detail` +
+///   `documentation` back in [`TsgoTypeProvider::get_completion_details`] and
+///   `additionalTextEdits` (the auto-import edits) in
+///   [`TsgoTypeProvider::resolve_completion`]; WITHOUT this, tsgo silently drops
+///   `additionalTextEdits` and completion-driven auto-import never applies its
+///   import edit.
+/// - `textDocument.completion.contextSupport` (`true`) —
+///   [`TsgoTypeProvider::get_completions`] ALWAYS sends `CompletionParams.context`
+///   (the trigger kind/character). Per LSP 3.17 a server honours that field only
+///   when the client declares `contextSupport: true`; WITHOUT it tsgo may ignore
+///   the trigger context entirely, so completions stop being trigger-aware.
+/// - `textDocument.completion.completionItemKind.valueSet` (`1..=25`) — the
+///   completion parser [`parse_completion_item`] maps the full standard
+///   `CompletionItemKind` range generically. The LSP DEFAULT value set when this
+///   field is omitted is `Text..Reference` (1..=18), so Class (7) — the kind
+///   component-tag completions depend on — is INSIDE the default range and is
+///   preserved regardless. The valueSet is advertised to stop tsgo DOWNGRADING the
+///   UPPER standard kinds 19..=25 (Folder, EnumMember, Constant, Struct, Event,
+///   Operator, TypeParameter), which fall OUTSIDE the default range. The `valueSet`
+///   is EXACTLY the parser's range `1..=25` (no over-claim past it).
+///
+/// NOT advertised — `completionItem.dataSupport`: there is NO `dataSupport`
+/// capability in the LSP spec. `CompletionItem.data` is a transparent
+/// passthrough — the server stamps it on each item and the client MUST echo the
+/// same blob back on `completionItem/resolve` regardless of any advertised
+/// capability. Both resolve sites here ([`TsgoTypeProvider::get_completion_details`]
+/// and [`TsgoTypeProvider::resolve_completion`]) replay the item's opaque `data`
+/// verbatim, and tsgo's resolve handler reads `params.Data` unconditionally (it
+/// embeds the file name there to re-locate the language service); tsgo never reads
+/// a `dataSupport` flag, so advertising it would be a meaningless non-spec field.
+///
+/// Completion fidelity: the parser DOES read `insertTextFormat` (snippet vs
+/// plain), `commitCharacters`, `filterText`, `preselect`, and `labelDetails`, so
+/// the matching client capabilities (`snippetSupport`, `commitCharactersSupport`,
+/// `preselectSupport`, `labelDetailsSupport`) ARE advertised below — a server
+/// only emits those item fields when the client claims support for them
+/// (`filterText` needs no capability flag). The resolve handlers fold back the
+/// STANDARD resolve property `labelDetails` in addition to `detail`/
+/// `documentation`/`additionalTextEdits`, so `resolveSupport.properties` lists
+/// those four. `command` is NOT a standard resolve property and is NOT advertised
+/// (it is still folded opportunistically if the server returns one).
+///
+/// Intentionally NOT advertised (no handler fulfills them — over-claim would be a
+/// silent no-op or worse): `documentSymbol`, `foldingRange`, `callHierarchy`,
+/// `typeHierarchy`, `selectionRange`, `linkedEditingRange`, and `workspace/symbol`
+/// (this provider issues none of those requests); completion `insertReplaceSupport`
+/// (the completion parser maps a single `textEdit` range, not an insert/replace
+/// pair); and `dataSupport` (not a real LSP capability — `data` is a
+/// spec-transparent passthrough, see above).
+fn build_client_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        "textDocument": {
+            // PUSH channel: `publishDiagnostics.tagSupport` IS the spec-defined
+            // diagnostic-tag capability (`PublishDiagnosticsClientCapabilities`).
+            // `relatedInformation: true` is the spec-defined gate for the secondary
+            // "see declaration here" spans (`PublishDiagnosticsClientCapabilities.
+            // relatedInformation`): a server only attaches `Diagnostic.
+            // relatedInformation` when the client advertises it, so without this tsgo
+            // silently strips the related spans `parse_lsp_diagnostic` is ready to
+            // consume (the same silent-degradation class as the tag/completion gates).
+            "publishDiagnostics": {
+                "tagSupport": { "valueSet": [1, 2] },
+                "relatedInformation": true
+            },
+            // PULL channel: `diagnostic.tagSupport` is NOT defined by LSP 3.17
+            // (`DiagnosticClientCapabilities` has no `tagSupport`). It is a NON-SPEC
+            // field retained for compatibility — tsgo may read it as a private
+            // extension to gate pull-diagnostic tags — and is intentionally kept.
+            // `diagnostic.relatedInformation` is likewise NOT an LSP 3.17 field
+            // (`DiagnosticClientCapabilities` has no `relatedInformation` member); it
+            // is retained alongside the tag flag as a private-extension hint so tsgo
+            // may gate pull-channel related spans the same way as the push channel.
+            "diagnostic": {
+                "tagSupport": { "valueSet": [1, 2] },
+                "relatedInformation": true
+            },
+            "completion": {
+                // `get_completions` ALWAYS sends `CompletionParams.context` (the
+                // trigger kind/character). Per LSP 3.17 a server only honours that
+                // field when the client advertises `contextSupport: true`; without
+                // it tsgo may ignore the trigger context and stop being trigger-aware.
+                "contextSupport": true,
+                // The completion parser (`parse_completion_item`) maps the full
+                // standard `CompletionItemKind` range (1..=25) generically. The LSP
+                // default value set (when omitted) is `Text..Reference` (1..=18), so
+                // Class = 7 — on which component-tag completions depend — is INSIDE
+                // that default range and preserved regardless. The valueSet stops tsgo
+                // DOWNGRADING the UPPER kinds 19..=25 (outside the default range) to
+                // `Text`. Advertise EXACTLY the parser's range 1..=25.
+                "completionItemKind": {
+                    "valueSet": [
+                        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+                        19, 20, 21, 22, 23, 24, 25
+                    ]
+                },
+                "completionItem": {
+                    // A server only attaches these item fields when the client
+                    // advertises support; the completion parser reads each one,
+                    // so claim them here. `snippetSupport` gates `insertTextFormat`,
+                    // `commitCharactersSupport` gates `commitCharacters`,
+                    // `preselectSupport` gates `preselect`, `labelDetailsSupport`
+                    // gates `labelDetails`. `filterText` needs no capability flag —
+                    // a server may always send it.
+                    "snippetSupport": true,
+                    "commitCharactersSupport": true,
+                    "preselectSupport": true,
+                    "labelDetailsSupport": true,
+                    // Only the STANDARD resolve properties this provider folds back
+                    // are listed; listing any other invites discarded work.
+                    // `labelDetails` IS a standard resolve property; `command` is
+                    // NOT — advertising resolve-support for it would over-claim, so
+                    // it is omitted (resolve_completion still folds a `command`
+                    // opportunistically if the server happens to return one). `data`
+                    // rides every resolve round-trip transparently per the LSP spec
+                    // — there is no `dataSupport` capability to advertise.
+                    "resolveSupport": {
+                        "properties": [
+                            "documentation",
+                            "detail",
+                            "additionalTextEdits",
+                            "labelDetails"
+                        ]
+                    }
+                }
+            },
+            // `get_code_actions` pulls fixes via `textDocument/codeAction`. Without
+            // `codeActionLiteralSupport` TSGO may degrade to command-only actions
+            // whose edits arrive only on a follow-up `codeAction/resolve` — a
+            // resolve round-trip this provider does not implement — so advertise
+            // literal support to keep the INLINE `WorkspaceEdit` on the action.
+            // The value set lists the kinds the handler actually requests in
+            // `context.only`: `quickfix` (the gate TSGO's quickfix providers honor —
+            // this block ships the TS6133 unused-declaration QUICKFIX surface only).
+            // The `source.removeUnused` SOURCE action is deferred to the `source.*`
+            // backlog and is NOT requested here. NO `resolveSupport`/`dataSupport` —
+            // that would force the resolve path.
+            "codeAction": {
+                "codeActionLiteralSupport": {
+                    "codeActionKind": {
+                        "valueSet": ["quickfix"]
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Build the `workspace/didChangeConfiguration` payload for TSGO path aliases.
@@ -1332,6 +1921,14 @@ fn build_paths_config_payload(paths: serde_json::Value) -> serde_json::Value {
 }
 
 impl TypeProvider for TsgoTypeProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
+    fn supports_completion_resolve(&self) -> bool {
+        true
+    }
+
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         tracing::debug!("TSGO open_file: {} ({} bytes)", path, content.len());
         let uri = Self::path_to_uri(path);
@@ -1344,13 +1941,13 @@ impl TypeProvider for TsgoTypeProvider {
         } else {
             "typescript"
         };
-        let content = rewrite_vue_imports_for_tsgo(content, path);
+        let content = content.to_string();
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsgo_open_file",
                 format!(
                     "path={} uri={} content_len={}",
@@ -1358,31 +1955,34 @@ impl TypeProvider for TsgoTypeProvider {
                     uri,
                     content.len()
                 ),
-            );
-            contents_cache
-                .lock()
-                .await
-                .insert(path_owned.clone(), content.clone());
-            // Mark as opened with version 1
-            versions.lock().await.insert(path_owned, 1);
-            transport
-                .notify(
-                    "textDocument/didOpen",
-                    serde_json::json!({
-                        "textDocument": {
-                            "uri": uri,
-                            "languageId": lang_id,
-                            "version": 1,
-                            "text": content,
-                        }
-                    }),
-                )
-                .await?;
-            crate::type_runtime_trace_event!(
-                "tsgo_open_file_result",
-                "opened=true version=1".to_string()
-            );
-            Ok(())
+                async {
+                    contents_cache
+                        .lock()
+                        .await
+                        .insert(contents_key(&path_owned), Arc::from(content.as_str()));
+                    // Mark as opened with version 1
+                    versions.lock().await.insert(path_owned, 1);
+                    transport
+                        .notify(
+                            "textDocument/didOpen",
+                            serde_json::json!({
+                                "textDocument": {
+                                    "uri": uri,
+                                    "languageId": lang_id,
+                                    "version": 1,
+                                    "text": content,
+                                }
+                            }),
+                        )
+                        .await?;
+                    crate::type_runtime_trace_event!(
+                        "tsgo_open_file_result",
+                        "opened=true version=1".to_string()
+                    );
+                    Ok(())
+                }
+            )
+            .await
         })
     }
 
@@ -1395,22 +1995,25 @@ impl TypeProvider for TsgoTypeProvider {
     fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         tracing::debug!("TSGO load_file: {} ({} bytes)", path, content.len());
         let path_owned = path.to_string();
-        let content_owned = rewrite_vue_imports_for_tsgo(content, path);
+        let content_owned = content.to_string();
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsgo_load_file",
                 format!("path={} content_len={}", path_owned, content_owned.len()),
-            );
-            contents_cache
-                .lock()
-                .await
-                .insert(path_owned, content_owned);
-            crate::type_runtime_trace_event!(
-                "tsgo_load_file_result",
-                "cached_only=true".to_string()
-            );
-            Ok(())
+                async {
+                    contents_cache
+                        .lock()
+                        .await
+                        .insert(contents_key(&path_owned), content_owned.into());
+                    crate::type_runtime_trace_event!(
+                        "tsgo_load_file_result",
+                        "cached_only=true".to_string()
+                    );
+                    Ok(())
+                }
+            )
+            .await
         })
     }
 
@@ -1426,7 +2029,7 @@ impl TypeProvider for TsgoTypeProvider {
         } else {
             "typescript"
         };
-        let content = rewrite_vue_imports_for_tsgo(content, path);
+        let content = content.to_string();
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let versions = Arc::clone(&self.versions);
@@ -1435,7 +2038,7 @@ impl TypeProvider for TsgoTypeProvider {
             contents_cache
                 .lock()
                 .await
-                .insert(path_owned.clone(), content.clone());
+                .insert(contents_key(&path_owned), Arc::from(content.as_str()));
 
             let mut vers = versions.lock().await;
             if let Some(v) = vers.get_mut(&path_owned) {
@@ -1498,22 +2101,31 @@ impl TypeProvider for TsgoTypeProvider {
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsgo_close_file",
                 format!("path={} uri={}", path_owned, uri),
-            );
-            contents_cache.lock().await.remove(&path_owned);
-            versions.lock().await.remove(&path_owned);
-            transport
-                .notify(
-                    "textDocument/didClose",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri }
-                    }),
-                )
-                .await?;
-            crate::type_runtime_trace_event!("tsgo_close_file_result", "closed=true".to_string());
-            Ok(())
+                async {
+                    contents_cache
+                        .lock()
+                        .await
+                        .remove(&contents_key(&path_owned));
+                    versions.lock().await.remove(&path_owned);
+                    transport
+                        .notify(
+                            "textDocument/didClose",
+                            serde_json::json!({
+                                "textDocument": { "uri": uri }
+                            }),
+                        )
+                        .await?;
+                    crate::type_runtime_trace_event!(
+                        "tsgo_close_file_result",
+                        "closed=true".to_string()
+                    );
+                    Ok(())
+                }
+            )
+            .await
         })
     }
 
@@ -1537,7 +2149,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character, content_snapshot) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch, Some(c.clone()))
@@ -1597,6 +2209,163 @@ impl TypeProvider for TsgoTypeProvider {
         })
     }
 
+    /// Enrich a completion list with lazy `detail`/`documentation` via the LSP
+    /// `completionItem/resolve` round-trip.
+    ///
+    /// The bare `textDocument/completion` list omits the signature detail and
+    /// documentation for most entries (the server computes them lazily on
+    /// resolve). TSGO inheriting the trait default returned items UNCHANGED, so
+    /// TSGO-backed members reached the type-expansion backend
+    /// (`TypeProviderAdapter::query_members_at_offset`) with no detail while
+    /// tsserver-backed members carried `completionEntryDetails` enrichment — the
+    /// completion-detail parity gap (GAP-1).
+    ///
+    /// Only an item carrying the upstream-LSP resolve handle
+    /// ([`CompletionResolveData::Lsp`]) can be resolved; an item without one
+    /// (no `data` at list time) passes through unchanged. Each resolved item
+    /// folds its `detail`/`documentation` via
+    /// [`fold_lsp_resolve_detail_into_completion`], preserving its resolve handle
+    /// so a later auto-import resolve still works. A per-item resolve failure
+    /// degrades to the un-enriched item (never drops it). Returns a list the SAME
+    /// length and ORDER as the input (empty only when the input is empty) so the
+    /// adapter's `if detailed.is_empty()` fallback keeps the original list.
+    ///
+    /// **Bounded** (review finding: an unbounded serial hot-path). Each item
+    /// needs its own `completionItem/resolve` round-trip (10s transport timeout
+    /// each); a naive serial loop costs `N × 10s` worst case on a wedged
+    /// provider, and `N` can be large for a member enumeration (`obj.` over a
+    /// wide type, a namespace import) reached through
+    /// [`crate::provider_adapter::TypeProviderAdapter::query_members_at_offset`].
+    /// Two bounds cap that:
+    ///   - a LIST-LEVEL cap ([`MAX_COMPLETION_DETAIL_ENRICH`]) — only the leading
+    ///     items (sorted-order = most relevant) are enriched; the tail passes
+    ///     through unchanged (still present, still resolvable lazily);
+    ///   - BOUNDED CONCURRENCY ([`COMPLETION_DETAIL_RESOLVE_CONCURRENCY`]) over
+    ///     the enriched subset, so the worst case is
+    ///     `ceil(cap / concurrency) × 10s`, not `N × 10s`.
+    fn get_completion_details<'a>(
+        &'a self,
+        path: &'a str,
+        _offset: u32,
+        items: &'a [Completion],
+    ) -> ProviderFuture<'a, Vec<Completion>> {
+        let uri = Self::path_to_uri(path);
+        let transport = Arc::clone(&self.transport);
+        Box::pin(async move {
+            if items.is_empty() {
+                return Ok(Vec::new());
+            }
+            let enrich_count = items.len().min(MAX_COMPLETION_DETAIL_ENRICH);
+            crate::type_runtime_trace_scope_async!(
+                "tsgo_get_completion_details",
+                format!(
+                    "path={} uri={} item_count={} enrich_count={}",
+                    path,
+                    uri,
+                    items.len(),
+                    enrich_count
+                ),
+                async {
+                    // Bounded-concurrency enrichment of the leading `enrich_count` items.
+                    // Each task owns its inputs (the future cannot borrow `items`) and
+                    // reports its index so the output preserves input order. A semaphore
+                    // caps in-flight resolves.
+                    let semaphore = Arc::new(tokio::sync::Semaphore::new(
+                        COMPLETION_DETAIL_RESOLVE_CONCURRENCY,
+                    ));
+                    let mut join_set: tokio::task::JoinSet<(usize, Completion)> =
+                        tokio::task::JoinSet::new();
+                    // Re-parent spawned resolves under this scope's span. A spawned
+                    // task runs on its own task-local, so capture the active context
+                    // here and seed each child future with it.
+                    let trace_ctx = crate::trace::current_type_runtime_trace_context();
+                    for (idx, item) in items.iter().take(enrich_count).enumerate() {
+                        // Only an upstream-LSP resolve handle can be re-issued via
+                        // `completionItem/resolve`; an item without one cannot be enriched
+                        // and is passed through unchanged (no task spawned).
+                        let Some(CompletionResolveData::Lsp { label, data }) = item.data.as_ref()
+                        else {
+                            continue;
+                        };
+                        let resolve_item = serde_json::json!({
+                            "label": label,
+                            "data": data,
+                            "textDocument": { "uri": uri },
+                        });
+                        let transport = Arc::clone(&transport);
+                        let semaphore = Arc::clone(&semaphore);
+                        let item = item.clone();
+                        let resolve_future = async move {
+                            // The permit bounds in-flight resolves; if the semaphore is
+                            // somehow closed, fall back to the un-enriched item.
+                            let _permit = match semaphore.acquire().await {
+                                Ok(permit) => permit,
+                                Err(_) => return (idx, item),
+                            };
+                            match transport
+                                .request("completionItem/resolve", resolve_item)
+                                .await
+                            {
+                                Ok(resolved) => {
+                                    let (detail, documentation) =
+                                        extract_resolve_detail_and_documentation(&resolved);
+                                    let folded = fold_lsp_resolve_detail_into_completion(
+                                        &item,
+                                        detail,
+                                        documentation,
+                                    );
+                                    (idx, folded)
+                                }
+                                // A per-item resolve failure must not drop the item.
+                                Err(_) => (idx, item),
+                            }
+                        };
+                        // Only seed the per-task trace state when there is an active
+                        // context to re-parent under. With tracing disabled (`trace_ctx
+                        // == None`) the spawn skips the task-local wrapper entirely, so
+                        // the default path pays no task-local install cost per resolve.
+                        match trace_ctx {
+                            Some(_) => {
+                                join_set.spawn(
+                                    crate::trace::with_type_runtime_trace_context_async(
+                                        trace_ctx,
+                                        resolve_future,
+                                    ),
+                                );
+                            }
+                            None => {
+                                join_set.spawn(resolve_future);
+                            }
+                        }
+                    }
+
+                    // Start from a verbatim clone (preserves the tail beyond the cap and
+                    // any leading item without a resolve handle), then overlay enriched
+                    // items by index.
+                    let mut enriched: Vec<Completion> = items.to_vec();
+                    while let Some(joined) = join_set.join_next().await {
+                        if let Ok((idx, completion)) = joined {
+                            enriched[idx] = completion;
+                        }
+                        // A panicked/cancelled task leaves the verbatim clone in place.
+                    }
+
+                    crate::type_runtime_trace_event!(
+                        "tsgo_get_completion_details_result",
+                        format!(
+                            "path={} item_count={} enriched_count={} enriched=true",
+                            path,
+                            enriched.len(),
+                            enrich_count
+                        ),
+                    );
+                    Ok(enriched)
+                }
+            )
+            .await
+        })
+    }
+
     fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
         tracing::debug!("TSGO get_hover: {} at offset {}", path, offset);
         let uri = Self::path_to_uri(path);
@@ -1606,7 +2375,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character, cache_hit) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
                         let (line, character) = offset_to_position(c, offset);
                         (line, character, true)
@@ -1614,94 +2383,100 @@ impl TypeProvider for TsgoTypeProvider {
                     None => (0, offset, false),
                 }
             };
-            let _trace = crate::type_runtime_trace_scope!(
+            crate::type_runtime_trace_scope_async!(
                 "tsgo_get_hover",
                 format!(
                     "path={} uri={} offset={} line={} character={} content_cache_hit={}",
                     path_owned, uri, offset, line, character, cache_hit,
                 ),
-            );
-            let result = transport
-                .request(
-                    "textDocument/hover",
-                    serde_json::json!({
-                        "textDocument": { "uri": uri },
-                        "position": { "line": line, "character": character },
-                    }),
-                )
-                .await?;
+                async {
+                    let result = transport
+                        .request(
+                            "textDocument/hover",
+                            serde_json::json!({
+                                "textDocument": { "uri": uri },
+                                "position": { "line": line, "character": character },
+                            }),
+                        )
+                        .await?;
 
-            if result.is_null() {
-                crate::type_runtime_trace_event!(
-                    "tsgo_get_hover_result",
-                    format!("path={} has_hover=false", path_owned),
-                );
-                return Ok(None);
-            }
-
-            tracing::debug!("TSGO hover raw response: {result}");
-
-            // Parse hover result — handles all LSP content formats:
-            //   MarkupContent: { kind, value }
-            //   MarkedString:  { language, value } | string
-            //   MarkedString[]: array of MarkedString
-            let contents = if let Some(c) = result.get("contents") {
-                if let Some(arr) = c.as_array() {
-                    // MarkedString[] — language blocks become fenced code,
-                    // plain strings become documentation outside the fence.
-                    let mut code_parts = Vec::new();
-                    let mut doc_parts = Vec::new();
-                    for item in arr {
-                        if let Some(s) = item.as_str() {
-                            doc_parts.push(s.to_string());
-                        } else if let Some(lang) = item.get("language").and_then(|l| l.as_str()) {
-                            let val = item
-                                .get("value")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default();
-                            code_parts.push(format!("```{lang}\n{val}\n```"));
-                        } else if let Some(val) = item.get("value").and_then(|v| v.as_str()) {
-                            code_parts.push(val.to_string());
-                        }
+                    if result.is_null() {
+                        crate::type_runtime_trace_event!(
+                            "tsgo_get_hover_result",
+                            format!("path={} has_hover=false", path_owned),
+                        );
+                        return Ok(None);
                     }
-                    let mut result = code_parts.join("\n");
-                    if !doc_parts.is_empty() {
-                        if !result.is_empty() {
-                            result.push_str("\n\n");
+
+                    tracing::debug!("TSGO hover raw response: {result}");
+
+                    // Parse hover result — handles all LSP content formats:
+                    //   MarkupContent: { kind, value }
+                    //   MarkedString:  { language, value } | string
+                    //   MarkedString[]: array of MarkedString
+                    let contents = if let Some(c) = result.get("contents") {
+                        if let Some(arr) = c.as_array() {
+                            // MarkedString[] — language blocks become fenced code,
+                            // plain strings become documentation outside the fence.
+                            let mut code_parts = Vec::new();
+                            let mut doc_parts = Vec::new();
+                            for item in arr {
+                                if let Some(s) = item.as_str() {
+                                    doc_parts.push(s.to_string());
+                                } else if let Some(lang) =
+                                    item.get("language").and_then(|l| l.as_str())
+                                {
+                                    let val = item
+                                        .get("value")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default();
+                                    code_parts.push(format!("```{lang}\n{val}\n```"));
+                                } else if let Some(val) = item.get("value").and_then(|v| v.as_str())
+                                {
+                                    code_parts.push(val.to_string());
+                                }
+                            }
+                            let mut result = code_parts.join("\n");
+                            if !doc_parts.is_empty() {
+                                if !result.is_empty() {
+                                    result.push_str("\n\n");
+                                }
+                                result.push_str(&doc_parts.join("\n\n"));
+                            }
+                            result
+                        } else if let Some(value) = c.get("value").and_then(|v| v.as_str()) {
+                            value.to_string()
+                        } else if let Some(s) = c.as_str() {
+                            s.to_string()
+                        } else {
+                            format!("{c}")
                         }
-                        result.push_str(&doc_parts.join("\n\n"));
-                    }
-                    result
-                } else if let Some(value) = c.get("value").and_then(|v| v.as_str()) {
-                    value.to_string()
-                } else if let Some(s) = c.as_str() {
-                    s.to_string()
-                } else {
-                    format!("{c}")
+                    } else {
+                        crate::type_runtime_trace_event!(
+                            "tsgo_get_hover_result",
+                            format!("path={} has_hover=false missing_contents=true", path_owned),
+                        );
+                        return Ok(None);
+                    };
+
+                    crate::type_runtime_trace_event!(
+                        "tsgo_get_hover_result",
+                        format!(
+                            "path={} has_hover=true contents_len={} preview={}",
+                            path_owned,
+                            contents.len(),
+                            trace_preview(&contents, 120),
+                        ),
+                    );
+
+                    Ok(Some(HoverInfo {
+                        contents,
+                        range_start: None,
+                        range_end: None,
+                    }))
                 }
-            } else {
-                crate::type_runtime_trace_event!(
-                    "tsgo_get_hover_result",
-                    format!("path={} has_hover=false missing_contents=true", path_owned),
-                );
-                return Ok(None);
-            };
-
-            crate::type_runtime_trace_event!(
-                "tsgo_get_hover_result",
-                format!(
-                    "path={} has_hover=true contents_len={} preview={}",
-                    path_owned,
-                    contents.len(),
-                    trace_preview(&contents, 120),
-                ),
-            );
-
-            Ok(Some(HoverInfo {
-                contents,
-                range_start: None,
-                range_end: None,
-            }))
+            )
+            .await
         })
     }
 
@@ -1728,7 +2503,7 @@ impl TypeProvider for TsgoTypeProvider {
                 Ok(val) => {
                     let content = {
                         let cache = contents_cache.lock().await;
-                        cache.get(&path_owned).cloned()
+                        cache.get(&contents_key(&path_owned)).cloned()
                     };
 
                     let diags = val
@@ -1736,7 +2511,13 @@ impl TypeProvider for TsgoTypeProvider {
                         .and_then(|v| v.as_array())
                         .map(|arr| {
                             arr.iter()
-                                .filter_map(|d| parse_lsp_diagnostic(d, content.as_deref()))
+                                .filter_map(|d| {
+                                    parse_lsp_diagnostic(
+                                        d,
+                                        content.as_deref(),
+                                        Some(path_owned.as_str()),
+                                    )
+                                })
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
@@ -1780,7 +2561,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch)
@@ -1815,9 +2596,13 @@ impl TypeProvider for TsgoTypeProvider {
                         .and_then(|value| value.as_str())
                         .map(uri_to_file_path)?;
                     let target_content = if target_path == path_owned {
-                        cache.get(&path_owned).map(|text| text.as_str())
+                        cache
+                            .get(&contents_key(&path_owned))
+                            .map(|text| text.as_ref())
                     } else {
-                        cache.get(&target_path).map(|text| text.as_str())
+                        cache
+                            .get(&contents_key(&target_path))
+                            .map(|text| text.as_ref())
                     };
                     parse_lsp_location(loc, target_content)
                 })
@@ -1838,7 +2623,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch)
@@ -1873,9 +2658,13 @@ impl TypeProvider for TsgoTypeProvider {
                         .and_then(|value| value.as_str())
                         .map(uri_to_file_path)?;
                     let target_content = if target_path == path_owned {
-                        cache.get(&path_owned).map(|text| text.as_str())
+                        cache
+                            .get(&contents_key(&path_owned))
+                            .map(|text| text.as_ref())
                     } else {
-                        cache.get(&target_path).map(|text| text.as_str())
+                        cache
+                            .get(&contents_key(&target_path))
+                            .map(|text| text.as_ref())
                     };
                     parse_lsp_location(loc, target_content)
                 })
@@ -1890,14 +2679,11 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character, content_snapshot) = {
+            let (line, character) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
-                    Some(c) => {
-                        let (l, ch) = offset_to_position(c, offset);
-                        (l, ch, Some(c.clone()))
-                    }
-                    None => (0, offset, None),
+                match cache.get(&contents_key(&path_owned)) {
+                    Some(c) => offset_to_position(c, offset),
+                    None => (0, offset),
                 }
             };
             let result = transport
@@ -1912,10 +2698,15 @@ impl TypeProvider for TsgoTypeProvider {
                 .await?;
 
             let locations = result.as_array().cloned().unwrap_or_default();
-            Ok(locations
-                .iter()
-                .filter_map(|loc| parse_lsp_location(loc, content_snapshot.as_deref()))
-                .collect())
+            // References are cross-file: each location's byte offsets must be computed against
+            // THAT location's own file, not the queried file. Look up each target's content (disk
+            // fallback inside `parse_lsp_location`), exactly as `get_definition` does — reusing the
+            // queried file's single snapshot for every location packs cross-file offsets against
+            // the WRONG file.
+            let cache = contents_cache.lock().await;
+            Ok(parse_lsp_locations_per_target(&locations, |target_path| {
+                cache.get(target_path).map(|text| text.as_ref())
+            }))
         })
     }
 
@@ -1929,14 +2720,11 @@ impl TypeProvider for TsgoTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            let (line, character, content_snapshot) = {
+            let (line, character) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
-                    Some(c) => {
-                        let (l, ch) = offset_to_position(c, offset);
-                        (l, ch, Some(c.clone()))
-                    }
-                    None => (0, offset, None),
+                match cache.get(&contents_key(&path_owned)) {
+                    Some(c) => offset_to_position(c, offset),
+                    None => (0, offset),
                 }
             };
             let result = transport
@@ -1954,8 +2742,23 @@ impl TypeProvider for TsgoTypeProvider {
                 return Ok(vec![]);
             }
 
+            // Cross-file rename: convert each edit's range against ITS OWN target file's content
+            // (disk fallback inside the parser), never the queried file's single snapshot — a
+            // line-0 edit in the wrong file CORRUPTS it. Snapshot ONLY this workspace edit's target
+            // files and RELEASE the async mutex before parsing, so the per-target blocking disk
+            // fallback never runs under the lock (a multi-file rename would otherwise stall the
+            // provider). Scanning the response bounds the snapshot to the touched files.
+            let target_paths = crate::contents_snapshot::lsp_workspace_edit_target_paths(&result);
+            let cache_snapshot = {
+                let guard = contents_cache.lock().await;
+                crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
+            };
             let mut locations = Vec::new();
-            parse_workspace_edit_locations(&result, content_snapshot.as_deref(), &mut locations);
+            parse_workspace_edit_locations(
+                &result,
+                &|target_path| cache_snapshot.get(target_path).map(|text| text.as_ref()),
+                &mut locations,
+            );
             Ok(locations)
         })
     }
@@ -1972,7 +2775,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => offset_to_position(c, offset),
                     None => (0, offset),
                 }
@@ -2000,22 +2803,51 @@ impl TypeProvider for TsgoTypeProvider {
         path: &str,
         start_offset: u32,
         end_offset: u32,
+        diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         let uri = Self::path_to_uri(path);
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let diagnostics = diagnostics.to_vec();
         Box::pin(async move {
-            let (start_line, start_char, end_line, end_char, content_snapshot) = {
+            // TSGO's quickfix path requires a non-empty `context.diagnostics` whose
+            // codes are INTEGERS (it skips string-coded diagnostics). With nothing
+            // to act on, skip the round-trip.
+            if diagnostics.is_empty() {
+                return Ok(vec![]);
+            }
+            let (start_line, start_char, end_line, end_char, context_diagnostics) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
-                    Some(c) => {
-                        let (sl, sc) = offset_to_position(c, start_offset);
-                        let (el, ec) = offset_to_position(c, end_offset);
-                        (sl, sc, el, ec, Some(c.clone()))
-                    }
-                    None => (0, start_offset, 0, end_offset, None),
-                }
+                let content = cache.get(&contents_key(&path_owned));
+                let to_pos = |off: u32| match content {
+                    Some(c) => offset_to_position(c, off),
+                    None => (0, off),
+                };
+                let (sl, sc) = to_pos(start_offset);
+                let (el, ec) = to_pos(end_offset);
+                // Synthesize the LSP `Diagnostic` array TSGO matches fixes against:
+                // each diagnostic's TSX byte range mapped to a line/character range
+                // via the SAME `offset_to_position` used for the request range, plus
+                // its INTEGER error code.
+                let context_diagnostics: Vec<serde_json::Value> = diagnostics
+                    .iter()
+                    .map(|d| {
+                        let (dsl, dsc) = to_pos(d.start);
+                        let (del, dec) = to_pos(d.end);
+                        serde_json::json!({
+                            "range": {
+                                "start": { "line": dsl, "character": dsc },
+                                "end": { "line": del, "character": dec },
+                            },
+                            "code": d.code,
+                            "severity": 1,
+                            "source": "ts",
+                            "message": "",
+                        })
+                    })
+                    .collect();
+                (sl, sc, el, ec, context_diagnostics)
             };
             let result = transport
                 .request(
@@ -2026,15 +2858,42 @@ impl TypeProvider for TsgoTypeProvider {
                             "start": { "line": start_line, "character": start_char },
                             "end": { "line": end_line, "character": end_char },
                         },
-                        "context": { "diagnostics": [] },
+                        "context": {
+                            "diagnostics": context_diagnostics,
+                            // `quickfix` is the gate TSGO's quickfix providers honor;
+                            // this block requests the TS6133 unused-declaration
+                            // QUICKFIX surface only. The `source.removeUnused` SOURCE
+                            // action is deferred to the `source.*` backlog — not
+                            // requested here. (When tsgo ports the per-diagnostic
+                            // remove-unused codefix it returns under `quickfix`.)
+                            "only": ["quickfix"],
+                        },
                     }),
                 )
                 .await?;
 
             let items = result.as_array().cloned().unwrap_or_default();
+            // Cross-file code-action edits: resolve each edit's range against ITS OWN target file's
+            // content (disk fallback inside the parser), never the queried file's single snapshot.
+            // Snapshot ONLY the files these actions target and RELEASE the async mutex before
+            // parsing, so the per-target blocking disk fallback never runs under the lock (a fix-all
+            // could stall the provider). Scanning the responses bounds the snapshot to touched files.
+            let mut target_paths: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for item in &items {
+                target_paths.extend(crate::contents_snapshot::lsp_code_action_target_paths(item));
+            }
+            let cache_snapshot = {
+                let guard = contents_cache.lock().await;
+                crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
+            };
             Ok(items
                 .iter()
-                .filter_map(|item| parse_code_action(item, content_snapshot.as_deref()))
+                .filter_map(|item| {
+                    parse_code_action(item, &|target_path| {
+                        cache_snapshot.get(target_path).map(|text| text.as_ref())
+                    })
+                })
                 .collect())
         })
     }
@@ -2047,7 +2906,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let content_snapshot = {
                 let cache = contents_cache.lock().await;
-                cache.get(&path_owned).cloned()
+                cache.get(&contents_key(&path_owned)).cloned()
             };
             let result = transport
                 .request(
@@ -2080,7 +2939,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character, content_snapshot) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch, Some(c.clone()))
@@ -2119,7 +2978,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (start_line, start_char, end_line, end_char, content_snapshot) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
                         let (sl, sc) = offset_to_position(c, start_offset);
                         let (el, ec) = offset_to_position(c, end_offset);
@@ -2152,16 +3011,25 @@ impl TypeProvider for TsgoTypeProvider {
     fn resolve_completion(
         &self,
         path: &str,
-        data: serde_json::Value,
+        data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         let uri = Self::path_to_uri(path);
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         let path_owned = path.to_string();
         Box::pin(async move {
-            // Build a minimal CompletionItem with the data field for resolve
+            // TSGO resolves through the upstream-LSP handle. A non-LSP resolve
+            // key cannot have originated from this provider — fail closed.
+            let CompletionResolveData::Lsp { label, data } = data else {
+                return Ok(None);
+            };
+            // Reissue the upstream `completionItem/resolve` with the entry's own
+            // `label` + opaque `data` carried on the typed `Lsp` resolve handle
+            // (both captured by `parse_tsgo_completion` at list time). The label
+            // is the entry's real label — the upstream server needs the original
+            // completion item identity to resolve its `additionalTextEdits`.
             let resolve_item = serde_json::json!({
-                "label": "",
+                "label": label,
                 "data": data,
                 "textDocument": { "uri": uri },
             });
@@ -2170,53 +3038,53 @@ impl TypeProvider for TsgoTypeProvider {
                 .request("completionItem/resolve", resolve_item)
                 .await?;
 
-            // Parse additionalTextEdits from the response
+            // Parse additionalTextEdits from the response. Edits may be absent —
+            // a resolve can still enrich the item with detail/documentation/
+            // labelDetails/command, so an empty edit list is NOT a reason to
+            // return `None` (review: previously it was, dropping every non-edit
+            // enrichment).
             let edits = result
                 .get("additionalTextEdits")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
 
-            if edits.is_empty() {
-                return Ok(None);
-            }
-
             let content_snapshot = {
                 let cache = contents_cache.lock().await;
-                cache.get(&path_owned).cloned()
+                cache.get(&contents_key(&path_owned)).cloned()
             };
 
             let additional_text_edits: Vec<ResolvedTextEdit> = edits
                 .iter()
-                .filter_map(|edit| {
-                    let range = edit.get("range")?;
-                    let start = range.get("start")?;
-                    let end = range.get("end")?;
-                    let sl = start.get("line")?.as_u64()? as u32;
-                    let sc = start.get("character")?.as_u64()? as u32;
-                    let el = end.get("line")?.as_u64()? as u32;
-                    let ec = end.get("character")?.as_u64()? as u32;
-                    let new_text = edit.get("newText")?.as_str()?.to_string();
-
-                    let (start_offset, end_offset) = if let Some(ref c) = content_snapshot {
-                        (position_to_offset(c, sl, sc), position_to_offset(c, el, ec))
-                    } else {
-                        (pack_position(sl, sc), pack_position(el, ec))
-                    };
-
-                    Some(ResolvedTextEdit {
-                        start: start_offset,
-                        end: end_offset,
-                        new_text,
-                    })
-                })
+                .filter_map(|edit| parse_additional_text_edit(edit, content_snapshot.as_deref()))
                 .collect();
 
-            if additional_text_edits.is_empty() {
+            // The resolve response may also carry the lazy detail/documentation
+            // and a refined `labelDetails` (a STANDARD resolve property we
+            // advertise). A post-accept `command` is folded OPPORTUNISTICALLY: we
+            // do NOT advertise resolve-support for `command` (it is not a standard
+            // resolve property), but if the server returns one anyway, passing it
+            // through is harmless — fold them all.
+            let (detail, documentation) = extract_resolve_detail_and_documentation(&result);
+            let label_details = result.get("labelDetails").and_then(parse_label_details);
+            let command = parse_lsp_command(result.get("command"));
+
+            // Return a result when ANY enrichment is present; otherwise `None`
+            // (nothing to resolve) so the caller treats "no enrichment" uniformly.
+            if additional_text_edits.is_empty()
+                && detail.is_none()
+                && documentation.is_none()
+                && label_details.is_none()
+                && command.is_none()
+            {
                 Ok(None)
             } else {
                 Ok(Some(CompletionResolveResult {
                     additional_text_edits,
+                    detail,
+                    documentation,
+                    label_details,
+                    command,
                 }))
             }
         })
@@ -2316,10 +3184,16 @@ impl TypeProvider for TsgoTypeProvider {
                         .and_then(|v| v.as_array())
                         .cloned()
                         .unwrap_or_default();
-                    let content = contents_cache.lock().await.get(&path_owned).cloned();
+                    let content = contents_cache
+                        .lock()
+                        .await
+                        .get(&contents_key(&path_owned))
+                        .cloned();
                     Ok(items
                         .iter()
-                        .filter_map(|d| parse_lsp_diagnostic(d, content.as_deref()))
+                        .filter_map(|d| {
+                            parse_lsp_diagnostic(d, content.as_deref(), Some(path_owned.as_str()))
+                        })
                         .collect())
                 }
                 Err(_) => {
@@ -2387,9 +3261,17 @@ impl TypeProvider for TsgoTypeProvider {
 }
 
 /// Extract rename locations from a WorkspaceEdit JSON response.
-fn parse_workspace_edit_locations(
+/// Parse a workspace edit's rename locations, resolving EACH edit's byte offsets against the
+/// content of the file that edit targets.
+///
+/// A rename's edits are keyed by target URI (`changes: { [uri]: … }` or `documentChanges`), so a
+/// cross-file rename touches several files. `content_for(target_path)` hands back each target's own
+/// content; converting every edit against the queried file's single snapshot would pack cross-file
+/// edit offsets against the WRONG file — and a rename edit at a wrong (line-0) offset CORRUPTS the
+/// file. Mirrors the per-target content lookup `get_references` / `get_definition` use.
+fn parse_workspace_edit_locations<'a>(
     result: &serde_json::Value,
-    content: Option<&str>,
+    content_for: &impl Fn(&str) -> Option<&'a str>,
     locations: &mut Vec<RenameLocation>,
 ) {
     // Handle `changes: { [uri]: TextEdit[] }` format
@@ -2397,7 +3279,7 @@ fn parse_workspace_edit_locations(
         for (change_uri, edits) in changes {
             if let Some(arr) = edits.as_array() {
                 for edit in arr {
-                    if let Some(loc) = parse_rename_edit(change_uri, edit, content) {
+                    if let Some(loc) = parse_rename_edit(change_uri, edit, content_for) {
                         locations.push(loc);
                     }
                 }
@@ -2414,7 +3296,7 @@ fn parse_workspace_edit_locations(
                 .unwrap_or_default();
             if let Some(edits) = dc.get("edits").and_then(|v| v.as_array()) {
                 for edit in edits {
-                    if let Some(loc) = parse_rename_edit(dc_uri, edit, content) {
+                    if let Some(loc) = parse_rename_edit(dc_uri, edit, content_for) {
                         locations.push(loc);
                     }
                 }
@@ -2423,21 +3305,66 @@ fn parse_workspace_edit_locations(
     }
 }
 
-fn parse_rename_edit(
+fn parse_rename_edit<'a>(
     uri: &str,
     edit: &serde_json::Value,
-    content: Option<&str>,
+    content_for: &impl Fn(&str) -> Option<&'a str>,
 ) -> Option<RenameLocation> {
     let range = edit.get("range")?;
-    let (start, end) = parse_range_to_offsets(range, content)?;
-    Some(RenameLocation {
-        // Canonical filesystem-path ID, matching `TypeLocation.path` and the
-        // tsserver provider — NOT the raw `file://` URI (which would split file
-        // identity vs the documents/VFS layer on Windows).
-        path: uri_to_file_path(uri),
-        start,
-        end,
-    })
+    // Canonical filesystem-path ID, matching `TypeLocation.path` and the tsserver provider — NOT
+    // the raw `file://` URI (which would split file identity vs the documents/VFS layer on
+    // Windows). The same canonical path keys the per-target content lookup.
+    let path = uri_to_file_path(uri);
+    // Resolve each rename edit's range against ITS OWN file content, with a per-target disk fallback
+    // for a cache miss. FAIL CLOSED via the STRICT converter: a rename is a WRITE edit, so a total
+    // cache+disk miss or an out-of-range position DROPS the location (returns None) rather than
+    // packing a line-0 / clamped offset that CORRUPTS the file. The caller collects via push-if-Some,
+    // so a dropped location skips only that span.
+    let (start, end) = parse_range_to_offsets_strict_with_disk_fallback(range, &path, content_for)?;
+    Some(RenameLocation { path, start, end })
+}
+
+/// Parse an LSP `ParameterInformation.label`, which is EITHER a JSON string OR a
+/// two-element array of unsigned integers (`[start, end)` UTF-16 offsets into the
+/// enclosing signature label).
+///
+/// `signature_label_utf16_len` is the UTF-16 code-unit length of the ENCLOSING
+/// signature label; the offset form is bounds-checked against it.
+///
+/// Fail-closed (returns `None` so the parameter is dropped, NEVER rendered with a
+/// fabricated label or a wrong/truncated/out-of-bounds bold span) for any of:
+/// - a shape that is neither a string nor a 2-element array;
+/// - an offset element that is not a `u64` (e.g. negative, fractional) or that
+///   exceeds `u32::MAX` (`u32::try_from` overflow — a truncating `as u32` would
+///   silently fabricate a wrong span);
+/// - an empty or inverted span (`start >= end`);
+/// - an out-of-bounds span (`end > signature_label_utf16_len`).
+///
+/// An offset span that is truncated, inverted, or out of bounds would bold the
+/// WRONG run of the signature label (worse than no offsets), so it is rejected
+/// rather than emitted.
+fn parse_lsp_parameter_label(
+    value: &serde_json::Value,
+    signature_label_utf16_len: u32,
+) -> Option<ParameterLabelKind> {
+    if let Some(s) = value.as_str() {
+        return Some(ParameterLabelKind::Simple(s.to_string()));
+    }
+    if let Some(arr) = value.as_array() {
+        if arr.len() == 2 {
+            // Checked: a value beyond u32::MAX must NOT truncate into a wrong
+            // offset — drop the offset form instead (`as u32` would fabricate).
+            let start = u32::try_from(arr[0].as_u64()?).ok()?;
+            let end = u32::try_from(arr[1].as_u64()?).ok()?;
+            // Reject empty/inverted spans and out-of-bounds spans: either would
+            // bold the wrong span of the label.
+            if start >= end || end > signature_label_utf16_len {
+                return None;
+            }
+            return Some(ParameterLabelKind::Offsets(start, end));
+        }
+    }
+    None
 }
 
 /// Parse a SignatureHelp from a JSON response.
@@ -2449,6 +3376,9 @@ fn parse_signature_help(result: &serde_json::Value) -> SignatureHelp {
             arr.iter()
                 .filter_map(|sig| {
                     let label = sig.get("label")?.as_str()?.to_string();
+                    // UTF-16 length of THIS signature label; the offset-form param
+                    // labels below bounds-check their `end` against it.
+                    let label_utf16_len = label.encode_utf16().count() as u32;
                     let documentation = sig.get("documentation").and_then(extract_markup_string);
                     let parameters = sig
                         .get("parameters")
@@ -2457,7 +3387,15 @@ fn parse_signature_help(result: &serde_json::Value) -> SignatureHelp {
                             params
                                 .iter()
                                 .filter_map(|p| {
-                                    let plabel = p.get("label")?.as_str()?.to_string();
+                                    // LSP `ParameterInformation.label` is EITHER a
+                                    // string OR a `[start, end)` UTF-16 offset pair
+                                    // into the signature label. Parse whichever the
+                                    // server sent; fail-closed (skip) on neither —
+                                    // never fabricate offsets.
+                                    let plabel = parse_lsp_parameter_label(
+                                        p.get("label")?,
+                                        label_utf16_len,
+                                    )?;
                                     let pdoc =
                                         p.get("documentation").and_then(extract_markup_string);
                                     Some(ParameterInfo {
@@ -2468,10 +3406,18 @@ fn parse_signature_help(result: &serde_json::Value) -> SignatureHelp {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    // LSP `SignatureInformation.activeParameter` (optional,
+                    // per-signature). Carried when present; checked (an out-of-range
+                    // index → `None`, never a truncated wrong index).
+                    let active_parameter = sig
+                        .get("activeParameter")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|v| u32::try_from(v).ok());
                     Some(SignatureInfo {
                         label,
                         documentation,
                         parameters,
+                        active_parameter,
                     })
                 })
                 .collect()
@@ -2480,19 +3426,28 @@ fn parse_signature_help(result: &serde_json::Value) -> SignatureHelp {
 
     SignatureHelp {
         signatures,
+        // Checked: an out-of-range index becomes `None`, never a truncated value.
         active_signature: result
             .get("activeSignature")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32),
+            .and_then(|v| u32::try_from(v).ok()),
         active_parameter: result
             .get("activeParameter")
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32),
+            .and_then(|v| u32::try_from(v).ok()),
     }
 }
 
 /// Parse a CodeAction from a JSON response.
-fn parse_code_action(item: &serde_json::Value, content: Option<&str>) -> Option<TypeCodeAction> {
+/// Parse a code action, resolving EACH edit's byte offsets against the content of the file that
+/// edit targets. A code action's edits are keyed by target URI, so a cross-file quick-fix /
+/// refactor edits several files; `content_for(target_path)` supplies each target's own content.
+/// Converting every edit against the queried file's single snapshot packs cross-file edit offsets
+/// against the WRONG file — the same one-snapshot hazard fixed for references / rename.
+fn parse_code_action<'a>(
+    item: &serde_json::Value,
+    content_for: &impl Fn(&str) -> Option<&'a str>,
+) -> Option<TypeCodeAction> {
     let title = item.get("title")?.as_str()?.to_string();
     let kind = item.get("kind").and_then(|v| v.as_str()).map(String::from);
 
@@ -2502,7 +3457,8 @@ fn parse_code_action(item: &serde_json::Value, content: Option<&str>) -> Option<
             for (change_uri, text_edits) in changes {
                 if let Some(arr) = text_edits.as_array() {
                     for te in arr {
-                        if let Some(ce) = parse_text_edit_to_code_edit(change_uri, te, content) {
+                        if let Some(ce) = parse_text_edit_to_code_edit(change_uri, te, content_for)
+                        {
                             edits.push(ce);
                         }
                     }
@@ -2518,7 +3474,7 @@ fn parse_code_action(item: &serde_json::Value, content: Option<&str>) -> Option<
                     .unwrap_or_default();
                 if let Some(arr) = dc.get("edits").and_then(|v| v.as_array()) {
                     for te in arr {
-                        if let Some(ce) = parse_text_edit_to_code_edit(dc_uri, te, content) {
+                        if let Some(ce) = parse_text_edit_to_code_edit(dc_uri, te, content_for) {
                             edits.push(ce);
                         }
                     }
@@ -2527,20 +3483,69 @@ fn parse_code_action(item: &serde_json::Value, content: Option<&str>) -> Option<
         }
     }
 
+    // An edit-less action is not actionable — drop it, mirroring
+    // `parse_tsserver_code_action`, so a no-op action never leaves the parse
+    // boundary (every edit may have failed closed on unresolvable content).
+    if edits.is_empty() {
+        return None;
+    }
+
     Some(TypeCodeAction { title, kind, edits })
 }
 
-fn parse_text_edit_to_code_edit(
+/// Parse one completion `additionalTextEdit` (e.g. an auto-import insertion) into a resolved
+/// byte-offset edit against the file's content.
+///
+/// FAIL CLOSED: an `additionalTextEdit` is a WRITE edit. On a content miss the edit is DROPPED (no
+/// `pack_position` line-0 sentinel); the range converts through the CHECKED converter so an
+/// out-of-range position drops rather than clamping to EOF, and an inverted span drops too. A
+/// `line`/`character` exceeding `u32::MAX` drops here via the checked `u32::try_from` — never a
+/// silent `as u32` truncation that would wrap a huge value into an in-range offset and land the
+/// WRITE at the wrong location. The caller collects via `filter_map`, so a dropped edit skips only
+/// itself.
+fn parse_additional_text_edit(
+    edit: &serde_json::Value,
+    content: Option<&str>,
+) -> Option<ResolvedTextEdit> {
+    let range = edit.get("range")?;
+    let start = range.get("start")?;
+    let end = range.get("end")?;
+    let sl = u32::try_from(start.get("line")?.as_u64()?).ok()?;
+    let sc = u32::try_from(start.get("character")?.as_u64()?).ok()?;
+    let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
+    let ec = u32::try_from(end.get("character")?.as_u64()?).ok()?;
+    let new_text = edit.get("newText")?.as_str()?.to_string();
+
+    let c = content?;
+    let start_offset = position_to_offset_checked(c, sl, sc)?;
+    let end_offset = position_to_offset_checked(c, el, ec)?;
+    if start_offset > end_offset {
+        return None;
+    }
+
+    Some(ResolvedTextEdit {
+        start: start_offset,
+        end: end_offset,
+        new_text,
+    })
+}
+
+fn parse_text_edit_to_code_edit<'a>(
     uri: &str,
     te: &serde_json::Value,
-    content: Option<&str>,
+    content_for: &impl Fn(&str) -> Option<&'a str>,
 ) -> Option<TypeCodeEdit> {
     let range = te.get("range")?;
     let new_text = te.get("newText")?.as_str()?.to_string();
-    let (start, end) = parse_range_to_offsets(range, content)?;
+    // Canonical filesystem-path ID (see `parse_rename_edit`), not the raw URI; keys the content.
+    let path = uri_to_file_path(uri);
+    // Per-target content with a disk fallback for a cache miss. FAIL CLOSED via the STRICT converter:
+    // a total cache+disk miss or an out-of-range position DROPS the edit (returns None) rather than
+    // packing a line-0 / clamped offset that the merge layer would apply at the WRONG location and
+    // corrupt the file. The caller collects via push-if-Some, so a dropped edit skips only itself.
+    let (start, end) = parse_range_to_offsets_strict_with_disk_fallback(range, &path, content_for)?;
     Some(TypeCodeEdit {
-        // Canonical filesystem-path ID (see `parse_rename_edit`), not the raw URI.
-        path: uri_to_file_path(uri),
+        path,
         start,
         end,
         new_text,
@@ -2661,6 +3666,46 @@ fn parse_range_to_offsets(range: &serde_json::Value, content: Option<&str>) -> O
     }
 }
 
+/// Like [`parse_range_to_offsets`], but FAIL CLOSED for EDIT paths: resolves the target content
+/// (cache → disk) and, when content is unavailable, returns `None` (NO `pack_position` sentinel).
+/// With content present it converts through the CHECKED [`position_to_offset_checked`], so an
+/// out-of-range position DROPS instead of clamping to EOF, and an inverted `start > end` span drops
+/// too.
+///
+/// Edit-producing parsers (`parse_text_edit_to_code_edit`, `parse_rename_edit`) route through this
+/// so a total cache+disk miss or an out-of-range position never packs a line-0 / clamped offset that
+/// the merge layer would apply as a corrupting WRITE. Navigation-only callers keep the lenient
+/// `parse_range_to_offsets` (a packed sentinel is a tolerable display miss).
+fn parse_range_to_offsets_strict_with_disk_fallback<'a>(
+    range: &serde_json::Value,
+    path: &str,
+    content_for: &impl Fn(&str) -> Option<&'a str>,
+) -> Option<(u32, u32)> {
+    let start = range.get("start")?;
+    let end = range.get("end")?;
+    let sl = u32::try_from(start.get("line")?.as_u64()?).ok()?;
+    let sc = u32::try_from(start.get("character")?.as_u64()?).ok()?;
+    let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
+    let ec = u32::try_from(end.get("character")?.as_u64()?).ok()?;
+
+    let disk_content;
+    let content = match content_for(path) {
+        Some(content) => Some(content),
+        None => {
+            disk_content = std::fs::read_to_string(path).ok();
+            disk_content.as_deref()
+        }
+    };
+    // FAIL CLOSED on a total content miss — never pack a line-0 offset for a WRITE edit.
+    let c = content?;
+    let s = position_to_offset_checked(c, sl, sc)?;
+    let e = position_to_offset_checked(c, el, ec)?;
+    if s > e {
+        return None;
+    }
+    Some((s, e))
+}
+
 /// Extract a string from a MarkupContent or plain string JSON value.
 fn extract_markup_string(v: &serde_json::Value) -> Option<String> {
     v.as_str()
@@ -2668,13 +3713,90 @@ fn extract_markup_string(v: &serde_json::Value) -> Option<String> {
         .or_else(|| v.get("value").and_then(|v2| v2.as_str()).map(String::from))
 }
 
-/// Find the tsgo binary on the system.
+/// The explicit, highest-precedence tsgo-binary override env var.
+///
+/// Mirrors how `--tsdk` lets a user pin the tsserver SDK: when set and pointing
+/// at an existing file, this exact path wins over every discovered location. It
+/// is the escape hatch for a non-standard install (e.g. a hand-built tsgo) and
+/// keeps the canonical precedence honest (explicit override first).
+pub const TSGO_BINARY_ENV: &str = "VERTER_TSGO_BIN";
+
+/// Canonical tsgo discovery for production and tests.
+///
+/// Searches in strict precedence order so the same tsgo is found regardless of
+/// entry point (R-Shared-Optimized-Codebase: one shared discovery path, not a
+/// test-harness-only fork):
+///
+/// 1. **Explicit override** — the `VERTER_TSGO_BIN` env var, when it names an
+///    existing file (the analog of `--tsdk` for tsserver).
+/// 2. **Workspace `node_modules`** — the rc `@typescript/typescript-*` binary
+///    installed as a workspace dependency (flat-npm OR pnpm layout). This is the
+///    common real-project case (a project that pins `typescript@>=7` in
+///    `package.json`) that the npm/npx cache misses.
+/// 3. **npm/npx cache** — the rc native binary under the npm or npx cache.
+///
+/// `workspace_root` is the directory whose `node_modules` is searched in tier 2;
+/// pass `None` (or a root without a matching `node_modules`) to skip straight to
+/// the cache tier. Discovery is rc-only: there is no `tsgo`-on-`PATH` lookup and
+/// no `.bin/tsgo` shim probe (a global `tsgo` is the retired native-preview
+/// engine). Returns the existing [`TsgoBinaryLookupError`] (cache
+/// checked-locations) when no binary is found in any tier.
+pub fn find_tsgo_binary_canonical(
+    workspace_root: Option<&std::path::Path>,
+) -> Result<String, TsgoBinaryLookupError> {
+    // Tier 1: explicit override.
+    if let Some(path) = tsgo_binary_env_override() {
+        tracing::debug!("TSGO discovery: using {TSGO_BINARY_ENV} override at {path}");
+        return Ok(path);
+    }
+
+    // Tier 2: workspace node_modules (flat-npm + pnpm).
+    if let Some(root) = workspace_root {
+        let node_modules = root.join("node_modules");
+        if let Some(path) = find_tsgo_binary_under_node_modules(&node_modules) {
+            tracing::debug!("TSGO discovery: found in workspace node_modules at {path}");
+            return Ok(path);
+        }
+    }
+
+    // Tiers 3 + 4: PATH, then npm/npx cache.
+    find_tsgo_binary()
+}
+
+/// Read the [`TSGO_BINARY_ENV`] override, returning it only when it names an
+/// existing file. An unset or stale (non-existent) override is ignored so a
+/// leftover env var never wedges discovery.
+fn tsgo_binary_env_override() -> Option<String> {
+    let raw = std::env::var_os(TSGO_BINARY_ENV)?;
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(&raw);
+    path.is_file().then(|| path.to_string_lossy().to_string())
+}
+
+/// Find the rc tsgo engine binary from an explicit override or the npm/npx
+/// cache.
 ///
 /// Checks (in order):
-/// 1. `tsgo` on PATH
-/// 2. Native binary from npm/npx cache (`@typescript/native-preview-{platform}/lib/tsgo`)
-/// 3. npm/npx shims in cache
+/// 1. The [`TSGO_BINARY_ENV`] (`VERTER_TSGO_BIN`) override, when it names an
+///    existing file — the dev/baseline/oracle-gen callers' escape hatch when
+///    the engine lives outside the workspace `node_modules`.
+/// 2. The rc native binary from the npm/npx cache
+///    (`@typescript/typescript-{platform}/lib/tsc`).
+///
+/// This is the rc-only PATH/cache tier of [`find_tsgo_binary_canonical`]
+/// (tier 3); production should call the canonical entry point so the workspace
+/// `node_modules` tier is honored first. There is intentionally NO `tsgo`-on-`PATH`
+/// lookup and NO `.bin/tsgo` shim probe: a global `tsgo` is the retired
+/// native-preview engine, so resolving one would silently launch the legacy
+/// engine. Discovery fails closed instead.
 pub fn find_tsgo_binary() -> Result<String, TsgoBinaryLookupError> {
+    if let Some(path) = tsgo_binary_env_override() {
+        tracing::debug!("TSGO discovery: using {TSGO_BINARY_ENV} override at {path}");
+        return Ok(path);
+    }
+
     let cache_roots = collect_npm_cache_roots(
         npm_config_cache_from_env(),
         npm_config_get_cache(),
@@ -2682,12 +3804,106 @@ pub fn find_tsgo_binary() -> Result<String, TsgoBinaryLookupError> {
     );
     tracing::debug!("TSGO discovery: cache roots = {:?}", cache_roots);
 
-    let result = find_tsgo_binary_in(which_cmd("tsgo"), &cache_roots);
+    let result = find_tsgo_binary_in(&cache_roots);
     match &result {
         Ok(path) => tracing::debug!("TSGO discovery: selected binary at {path}"),
         Err(err) => tracing::debug!("TSGO discovery failed: {err}"),
     }
     result
+}
+
+/// Resolve the tsgo native binary from a workspace `node_modules` directory.
+///
+/// `find_tsgo_binary` searches PATH + the npm/npx cache, which misses a tsgo
+/// installed as a workspace dependency (pnpm or flat npm layout). This locates
+/// the platform-specific rc `@typescript/typescript-{plat}-{arch}` binary
+/// directly under `<node_modules>`:
+///
+/// - flat npm: `<node_modules>/@typescript/typescript-{plat}/lib/tsc[.exe]`
+/// - pnpm:     `<node_modules>/.pnpm/@typescript+typescript-{plat}@*/node_modules/@typescript/typescript-{plat}/lib/tsc[.exe]`
+///
+/// Platform-aware (reuses [`tsgo_native_binary_rel_paths`]); returns `None` when
+/// no binary is present. Paths are built with `Path::join`, never string
+/// concatenation, so it is portable across macOS / Windows / Linux.
+pub fn find_tsgo_binary_under_node_modules(node_modules: &std::path::Path) -> Option<String> {
+    // Flat npm layout: <node_modules>/@typescript/typescript-*/lib/tsc[.exe].
+    // `flat_npm_tsgo_candidate_paths` produces the rc `tsc` candidates (the sole
+    // engine source); the first existing candidate wins.
+    for candidate in flat_npm_tsgo_candidate_paths(node_modules) {
+        if candidate.exists() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    // pnpm layout: <node_modules>/.pnpm/<pkg>@<ver>/node_modules/@typescript/typescript-*/lib/tsc[.exe].
+    // The rc `typescript` package is the sole engine SOURCE; mtime ordering
+    // breaks ties between multiple installed rc store entries.
+    let pnpm_dir = node_modules.join(".pnpm");
+    if let Ok(entries) = std::fs::read_dir(&pnpm_dir) {
+        let store_dirs: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+            .map(|e| e.path())
+            .collect();
+
+        for source in TSGO_ENGINE_SOURCES {
+            let mut dirs: Vec<PathBuf> = store_dirs
+                .iter()
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with(source.pnpm_store_prefix))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
+            // Prefer the most recently modified store entry (newest install) of
+            // THIS source.
+            dirs.sort_by_key(|b| std::cmp::Reverse(entry_modified(b)));
+            for dir in dirs {
+                for candidate in pnpm_store_tsgo_candidate_paths(&dir) {
+                    if candidate.exists() {
+                        return Some(candidate.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Build the flat-npm tsgo candidate paths under a `node_modules` directory.
+///
+/// Pure path construction (no filesystem access) so the layout math is unit
+/// testable on every platform: `<node_modules>/@typescript/typescript-{plat}-{arch}/lib/tsc[.exe]`.
+/// Built with `Path::join` (never string concatenation) for portability.
+fn flat_npm_tsgo_candidate_paths(node_modules: &std::path::Path) -> Vec<PathBuf> {
+    tsgo_native_binary_rel_paths()
+        .into_iter()
+        .map(|rel| {
+            // `rel` is rooted at "node_modules/…"; strip that prefix to join
+            // under the given node_modules dir.
+            let rel_under_nm = rel
+                .strip_prefix("node_modules/")
+                .map(str::to_owned)
+                .unwrap_or(rel);
+            node_modules.join(rel_under_nm)
+        })
+        .collect()
+}
+
+/// Build the pnpm-store tsgo candidate paths under a single pnpm store entry
+/// (`<node_modules>/.pnpm/@typescript+typescript-{plat}@{ver}`).
+///
+/// Pure path construction (no filesystem access): the store entry nests a real
+/// `node_modules/@typescript/typescript-{plat}-{arch}/lib/tsc[.exe]`, so
+/// the relative paths join verbatim. Built with `Path::join` for portability.
+fn pnpm_store_tsgo_candidate_paths(store_entry: &std::path::Path) -> Vec<PathBuf> {
+    tsgo_native_binary_rel_paths()
+        .into_iter()
+        .map(|rel| store_entry.join(rel))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2717,15 +3933,14 @@ impl std::fmt::Display for TsgoBinaryLookupError {
 
 impl std::error::Error for TsgoBinaryLookupError {}
 
-fn find_tsgo_binary_in(
-    path_hit: Option<String>,
-    cache_roots: &[PathBuf],
-) -> Result<String, TsgoBinaryLookupError> {
-    if let Some(path) = path_hit {
-        tracing::debug!("TSGO discovery: found on PATH at {path}");
-        return Ok(path);
-    }
-
+/// Resolve the rc tsgo engine binary from the npm/npx cache roots.
+///
+/// rc-only: scans each cache root's `_npx/*` entries (newest install first) for
+/// the rc `@typescript/typescript-{plat}/lib/tsc[.exe]` native binary. There is
+/// intentionally no `.bin/tsgo` shim probe — a `tsgo`-named shim is the retired
+/// native-preview engine. Returns the checked-locations error when no rc binary
+/// is present.
+fn find_tsgo_binary_in(cache_roots: &[PathBuf]) -> Result<String, TsgoBinaryLookupError> {
     let mut checked_locations = Vec::new();
     let mut npx_entries = Vec::new();
 
@@ -2757,63 +3972,7 @@ fn find_tsgo_binary_in(
         }
     }
 
-    for entry in &npx_entries {
-        for rel_path in tsgo_shim_rel_paths() {
-            let candidate = entry.join(rel_path);
-            push_checked_location(&mut checked_locations, candidate.display().to_string());
-            if candidate.exists() {
-                return Ok(candidate.to_string_lossy().to_string());
-            }
-        }
-    }
-
     Err(TsgoBinaryLookupError::new(checked_locations))
-}
-
-fn which_cmd(cmd: &str) -> Option<String> {
-    let which = if cfg!(windows) { "where" } else { "which" };
-    std::process::Command::new(which)
-        .arg(cmd)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| pick_best_which_candidate(&s).map(|c| c.to_string()))
-}
-
-/// Pick the best candidate from `where`/`which` output.
-///
-/// On Windows, `where tsgo` may return multiple lines:
-/// ```text
-/// C:\Program Files\nodejs\tsgo       ← POSIX shell script (npm shim for Git Bash)
-/// C:\Program Files\nodejs\tsgo.cmd   ← Windows cmd shim
-/// ```
-/// A POSIX shell script is not executable via `CreateProcess`, so we prefer
-/// `.exe` > `.cmd` > `.bat` > first candidate. On Unix, `which` returns a
-/// single line so the preference is a no-op.
-fn pick_best_which_candidate(output: &str) -> Option<&str> {
-    let candidates: Vec<&str> = output
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .collect();
-    if candidates.is_empty() {
-        return None;
-    }
-
-    // Priority order: .exe > .cmd > .bat
-    let extensions: &[&str] = &[".exe", ".cmd", ".bat"];
-    for ext in extensions {
-        if let Some(c) = candidates
-            .iter()
-            .find(|c| c.len() >= ext.len() && c[c.len() - ext.len()..].eq_ignore_ascii_case(ext))
-        {
-            return Some(c);
-        }
-    }
-
-    // Fallback: first candidate (Unix `which` output, or Windows without known extensions)
-    Some(candidates[0])
 }
 
 fn collect_npm_cache_roots(
@@ -2869,48 +4028,92 @@ fn dirs_or_home() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
 
-fn tsgo_native_binary_rel_paths() -> Vec<&'static str> {
-    let mut rel_paths = Vec::new();
+/// The TS≥7 tsgo-engine binary source — the installed `typescript@>=7`
+/// package's native binary. Mirrors the gate's discovery
+/// (`tools/tsgo-api-gate/run-gate.mjs`): the published `typescript@7.x` (e.g.
+/// `7.0.2`) ships the typescript-go engine as `tsc` (renamed from `tsgo`) in
+/// `@typescript/typescript-{plat}-{arch}`. This is the SOLE engine source.
+const TSGO_ENGINE_SOURCES: &[TsgoEngineSource] = &[TsgoEngineSource {
+    scope_package_prefix: "@typescript/typescript-",
+    pnpm_store_prefix: "@typescript+typescript-",
+    binary_stem: "tsc",
+}];
+
+/// One TS≥7 tsgo-engine binary source (package family + binary name).
+#[derive(Clone, Copy)]
+struct TsgoEngineSource {
+    /// The scoped platform-package name prefix, e.g. `@typescript/typescript-`
+    /// (the `{plat}-{arch}` suffix is appended per target).
+    scope_package_prefix: &'static str,
+    /// The pnpm-store entry prefix, e.g. `@typescript+typescript-`.
+    pnpm_store_prefix: &'static str,
+    /// The binary file stem (no extension): `tsc` for the rc engine.
+    binary_stem: &'static str,
+}
+
+/// The `{plat}-{arch}` platform-package suffixes, current platform first so its
+/// binary is preferred within each source. Plain data — no filesystem.
+fn tsgo_platform_arch_suffixes() -> Vec<&'static str> {
+    let mut suffixes = Vec::new();
 
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    rel_paths.push("node_modules/@typescript/native-preview-win32-x64/lib/tsgo.exe");
+    suffixes.push("win32-x64");
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-    rel_paths.push("node_modules/@typescript/native-preview-win32-arm64/lib/tsgo.exe");
+    suffixes.push("win32-arm64");
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    rel_paths.push("node_modules/@typescript/native-preview-linux-x64/lib/tsgo");
+    suffixes.push("linux-x64");
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    rel_paths.push("node_modules/@typescript/native-preview-linux-arm64/lib/tsgo");
+    suffixes.push("linux-arm64");
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    rel_paths.push("node_modules/@typescript/native-preview-darwin-x64/lib/tsgo");
+    suffixes.push("darwin-x64");
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    rel_paths.push("node_modules/@typescript/native-preview-darwin-arm64/lib/tsgo");
+    suffixes.push("darwin-arm64");
 
-    for rel_path in [
-        "node_modules/@typescript/native-preview-win32-x64/lib/tsgo.exe",
-        "node_modules/@typescript/native-preview-win32-arm64/lib/tsgo.exe",
-        "node_modules/@typescript/native-preview-linux-x64/lib/tsgo",
-        "node_modules/@typescript/native-preview-linux-arm64/lib/tsgo",
-        "node_modules/@typescript/native-preview-darwin-x64/lib/tsgo",
-        "node_modules/@typescript/native-preview-darwin-arm64/lib/tsgo",
+    // Append the remaining platforms (cross-compilation / test stability); the
+    // current-platform suffix (if any) stays first via the dedup below.
+    for s in [
+        "win32-x64",
+        "win32-arm64",
+        "linux-x64",
+        "linux-arm64",
+        "darwin-x64",
+        "darwin-arm64",
     ] {
-        if !rel_paths.contains(&rel_path) {
-            rel_paths.push(rel_path);
+        if !suffixes.contains(&s) {
+            suffixes.push(s);
         }
     }
 
-    rel_paths
+    suffixes
 }
 
-fn tsgo_shim_rel_paths() -> &'static [&'static str] {
-    if cfg!(windows) {
-        &[
-            "node_modules/.bin/tsgo.cmd",
-            "node_modules/.bin/tsgo.bat",
-            "node_modules/.bin/tsgo",
-        ]
-    } else {
-        &["node_modules/.bin/tsgo"]
+/// The relative path under `<node_modules>` to a source's platform binary,
+/// e.g. `node_modules/@typescript/typescript-win32-x64/lib/tsc.exe`. The `.exe`
+/// suffix is added on Windows. Built as an owned `String` (each source/platform
+/// combination is distinct), portable across OSes.
+fn tsgo_source_rel_path(source: &TsgoEngineSource, plat_arch: &str) -> String {
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    format!(
+        "node_modules/{}{}/lib/{}{}",
+        source.scope_package_prefix, plat_arch, source.binary_stem, ext
+    )
+}
+
+/// The TS≥7 native-binary relative paths under `<node_modules>`: the rc
+/// `@typescript/typescript-*` `tsc` binary (the sole engine source), current
+/// platform first.
+fn tsgo_native_binary_rel_paths() -> Vec<String> {
+    let suffixes = tsgo_platform_arch_suffixes();
+    let mut rel_paths = Vec::new();
+    for source in TSGO_ENGINE_SOURCES {
+        for plat_arch in &suffixes {
+            let rel = tsgo_source_rel_path(source, plat_arch);
+            if !rel_paths.contains(&rel) {
+                rel_paths.push(rel);
+            }
+        }
     }
+    rel_paths
 }
 
 fn entry_modified(path: &Path) -> std::time::SystemTime {
@@ -2949,11 +4152,21 @@ fn normalize_npm_cache_root(root: PathBuf) -> PathBuf {
 }
 
 fn cache_root_key(path: &Path) -> String {
+    // Windows `\` separators normalize to `/` so the same root reached via either
+    // separator dedups; backslash is a valid filename char on Unix, so that part
+    // stays Windows-only. Case folds on a case-insensitive filesystem (Windows /
+    // default macOS) through the single shared FS-identity policy so case-variant
+    // roots dedup, and is preserved on a case-sensitive one (Linux).
     let value = path.to_string_lossy();
-    if cfg!(windows) {
-        value.replace('\\', "/").to_ascii_lowercase()
+    let separator_normalized = if cfg!(windows) {
+        value.replace('\\', "/")
     } else {
         value.into_owned()
+    };
+    if verter_span::path::fs_is_case_insensitive() {
+        separator_normalized.to_ascii_lowercase()
+    } else {
+        separator_normalized
     }
 }
 
@@ -2980,9 +4193,9 @@ pub fn create_test_project(dir: &Path) -> std::io::Result<()> {
 }
 
 // Ungated unit tests for the pure URI→canonical-path DTO parsers. These run in
-// the canonical `cargo nextest run --workspace` gate (no `__lsp_tests` harness
-// dependency) so the G1 contract — every path-bearing TSGO DTO carries the
-// shared CANONICAL filesystem ID, not a raw `file://` URI — is enforced.
+// the canonical `cargo nextest run --workspace` gate so the G1 contract — every
+// path-bearing TSGO DTO carries the shared CANONICAL filesystem ID, not a raw
+// `file://` URI — is enforced.
 #[cfg(test)]
 mod dto_path_canonicalization_tests {
     use super::{parse_rename_edit, parse_text_edit_to_code_edit, uri_to_file_path};
@@ -3017,10 +4230,137 @@ mod dto_path_canonicalization_tests {
     fn parse_rename_edit_stores_canonical_path_not_raw_uri() {
         // The DTO path must be the canonical filesystem ID, NEVER the raw URI.
         // Reverting `parse_rename_edit` to `path: uri.to_string()` fails this.
-        let loc = parse_rename_edit("file:///D:/proj/App.vue", &edit_json(), None).unwrap();
+        // Seed resolvable content keyed by the CANONICAL path so the fail-closed rename
+        // location survives; the assertion under test is the canonical path, not the raw URI.
+        let content = "ab";
+        let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/App.vue").then_some(content) };
+        let loc = parse_rename_edit("file:///D:/proj/App.vue", &edit_json(), &content_for).unwrap();
         assert_eq!(loc.path, "d:/proj/App.vue");
         assert_ne!(loc.path, "file:///D:/proj/App.vue");
         assert!(!loc.path.starts_with("file://"));
+    }
+
+    /// Per-target cross-file RENAME IPC: each rename edit's line:col range is converted against ITS
+    /// OWN file's content. The cache-miss target falls back to a per-target DISK read — never the
+    /// queried file's snapshot — so the byte offset lands on the real symbol, not line 0.
+    ///
+    /// Discriminating: the symbol sits on LINE 2 (`character` 0 of that line) of the target file,
+    /// so the correct offset is well past 0. Resolving against the queried-file snapshot (or
+    /// packing line:col) would yield a different, wrong offset; the test asserts the EXACT offset
+    /// computed from the target's own content.
+    #[test]
+    fn parse_rename_edit_resolves_each_target_against_its_own_file_disk_fallback() {
+        use super::{position_to_offset, uri_to_file_path};
+
+        // Target file content: the renamed symbol is on line 2 (0-based), not line 0.
+        let target_src = "// header line 0\nconst pad = 1;\nexport const renamed = 2;\n";
+        let want_off = target_src.find("renamed").expect("symbol present") as u32;
+        let (want_line, want_char) = super::offset_to_position(target_src, want_off);
+        assert_eq!(want_line, 2, "fixture precondition: symbol on line 2");
+
+        // Write the target to a real temp file, derive its canonical path + matching file:// URI.
+        let dir = std::env::temp_dir().join(format!(
+            "verter_tsgo_rename_pertarget_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("target.ts");
+        std::fs::write(&file, target_src).unwrap();
+        let canonical = uri_to_file_path(&format!(
+            "file:///{}",
+            file.to_string_lossy().replace('\\', "/")
+        ));
+        let uri = super::path_to_file_uri_string(&canonical);
+
+        let edit = serde_json::json!({
+            "range": {
+                "start": { "line": want_line, "character": want_char },
+                "end": { "line": want_line, "character": want_char + "renamed".len() as u32 },
+            }
+        });
+
+        // `content_for` is a CACHE MISS for this path → forces the per-target disk fallback.
+        let loc = parse_rename_edit(&uri, &edit, &|_p: &str| None)
+            .expect("rename edit resolves through the per-target disk fallback");
+
+        let want_end =
+            position_to_offset(target_src, want_line, want_char + "renamed".len() as u32);
+        assert_eq!(
+            (loc.start, loc.end),
+            (want_off, want_end),
+            "the rename edit must resolve against the TARGET file's own content (disk fallback), \
+             not pack a line-0 offset — got start={} end={}, want start={want_off} end={want_end}",
+            loc.start,
+            loc.end,
+        );
+        // Discriminating negative: a cache miss must resolve via disk, never pack a line:col
+        // sentinel `pack_position(line, char)`; assert we did NOT get that.
+        assert_ne!(
+            loc.start,
+            super::pack_position(want_line, want_char),
+            "must NOT be the packed line:col fallback (that is the corrupting line-0 path)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Twin of the rename per-target test for CODE ACTIONS: a code-action text edit's range is
+    /// resolved against ITS OWN target file with the per-target disk fallback on a cache miss.
+    #[test]
+    fn parse_text_edit_resolves_each_target_against_its_own_file_disk_fallback() {
+        use super::{position_to_offset, uri_to_file_path};
+
+        let target_src = "import a from 'x';\nconst y = 1;\nexport const fixme = 3;\n";
+        let want_off = target_src.find("fixme").expect("symbol present") as u32;
+        let (want_line, want_char) = super::offset_to_position(target_src, want_off);
+        assert_eq!(want_line, 2, "fixture precondition: symbol on line 2");
+
+        let dir = std::env::temp_dir().join(format!(
+            "verter_tsgo_codeaction_pertarget_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("target.ts");
+        std::fs::write(&file, target_src).unwrap();
+        let canonical = uri_to_file_path(&format!(
+            "file:///{}",
+            file.to_string_lossy().replace('\\', "/")
+        ));
+        let uri = super::path_to_file_uri_string(&canonical);
+
+        let te = serde_json::json!({
+            "range": {
+                "start": { "line": want_line, "character": want_char },
+                "end": { "line": want_line, "character": want_char + "fixme".len() as u32 },
+            },
+            "newText": "fixed"
+        });
+
+        let edit = parse_text_edit_to_code_edit(&uri, &te, &|_p: &str| None)
+            .expect("code-action edit resolves through the per-target disk fallback");
+
+        let want_end = position_to_offset(target_src, want_line, want_char + "fixme".len() as u32);
+        assert_eq!(
+            (edit.start, edit.end),
+            (want_off, want_end),
+            "the code-action edit must resolve against the TARGET file's own content (disk \
+             fallback), not pack a line-0 offset",
+        );
+        assert_ne!(
+            edit.start,
+            super::pack_position(want_line, want_char),
+            "must NOT be the packed line:col fallback"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3032,3058 +4372,172 @@ mod dto_path_canonicalization_tests {
             },
             "newText": "x"
         });
-        let edit = parse_text_edit_to_code_edit("file:///D:/proj/App.vue", &te, None).unwrap();
+        // Seed resolvable content keyed by the CANONICAL path so the fail-closed edit survives;
+        // the assertion under test is that the stored path is canonical, not the raw `file://` URI.
+        let content = "ab";
+        let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/App.vue").then_some(content) };
+        let edit =
+            parse_text_edit_to_code_edit("file:///D:/proj/App.vue", &te, &content_for).unwrap();
         assert_eq!(edit.path, "d:/proj/App.vue");
         assert_ne!(edit.path, "file:///D:/proj/App.vue");
         assert!(!edit.path.starts_with("file://"));
     }
-}
 
-// Tests that depend on LSP-internal types (PositionMapper, uri_to_canonical_id, merge)
-// are kept in verter_lsp. Only transport-level tests that use runtime-local types live here.
-#[cfg(all(test, feature = "__lsp_tests"))]
-mod tests {
-    use super::*;
-    use tokio::process::{ChildStdin, ChildStdout};
-
-    /// Create an `LspTransport` for tests using a single channel for all priority lanes.
-    fn test_transport(stdin_tx: mpsc::Sender<StdinMessage>) -> LspTransport {
-        LspTransport {
-            interactive_tx: stdin_tx.clone(),
-            normal_tx: stdin_tx.clone(),
-            background_tx: stdin_tx,
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            crash_notify: None,
-        }
+    /// A URI whose canonical path is guaranteed absent on disk: built under the OS temp dir with a
+    /// process- and time-unique segment, then removed so neither the file nor its parent exists.
+    /// Returned in the same `file://` form production resolves through.
+    fn absent_target_uri(tag: &str) -> String {
+        use super::{path_to_file_uri_string, uri_to_file_path};
+        let dir = std::env::temp_dir().join(format!(
+            "verter_tsgo_{}_{}_{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Ensure absence: remove the directory tree if a prior run left it behind.
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("gone.ts");
+        let canonical = uri_to_file_path(&format!(
+            "file:///{}",
+            file.to_string_lossy().replace('\\', "/")
+        ));
+        path_to_file_uri_string(&canonical)
     }
 
-    /// Create an `LspTransport` for tests with shared pending map.
-    fn test_transport_with_pending(
-        stdin_tx: mpsc::Sender<StdinMessage>,
-        pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
-    ) -> LspTransport {
-        LspTransport {
-            interactive_tx: stdin_tx.clone(),
-            normal_tx: stdin_tx.clone(),
-            background_tx: stdin_tx,
-            pending,
-            next_id: AtomicI64::new(1),
-            consecutive_failures: AtomicU32::new(0),
-            crash_notify: None,
-        }
-    }
-
-    /// rewrite_vue_imports_for_tsgo rewrites .vue imports to .vue.ts for type resolution
+    /// A code-action text edit whose target is absent from the cache AND unreadable on disk must be
+    /// DROPPED (returns `None`). Fails if the converter emits a packed line:col offset on a cache +
+    /// disk miss — that offset would corrupt the WRONG file.
     #[test]
-    fn test_rewrite_vue_imports_to_vue_ts() {
-        let input = r#"import Foo from './Foo.vue'
-import Bar from "@/components/Bar.vue"
-const x = 1;"#;
-        let result = rewrite_vue_imports_for_tsgo(input, "App.vue.tsx");
-        assert!(
-            result.contains("./Foo.vue.ts'"),
-            "single-quote import should be rewritten to .vue.ts, got: {result}"
-        );
-        assert!(
-            result.contains("@/components/Bar.vue.ts\""),
-            "double-quote import should be rewritten to .vue.ts, got: {result}"
-        );
-        assert!(
-            !result.contains("from './Foo.vue'"),
-            ".vue should not remain in single-quote import"
-        );
-        assert!(
-            result.contains("const x = 1;"),
-            "non-import content should be preserved"
-        );
-        // Negative: should NOT rewrite to .vue.tsx or .d.vue.ts
-        assert!(
-            !result.contains(".vue.tsx"),
-            ".vue imports must NOT be rewritten to .vue.tsx"
-        );
-        assert!(
-            !result.contains(".d.vue.ts"),
-            ".vue imports must NOT be rewritten to .d.vue.ts (declaration file)"
-        );
-    }
-
-    /// The carrier import rewrite covers `.svelte` too (generalized to the
-    /// carrier-extension set), while preserving Vue behavior exactly.
-    #[test]
-    fn test_rewrite_svelte_imports_to_svelte_ts() {
-        let input = r#"import C from './C.svelte'
-import D from "@/D.svelte"
-import V from './V.vue'"#;
-        let result = rewrite_vue_imports_for_tsgo(input, "App.svelte.tsx");
-        assert!(
-            result.contains("./C.svelte.ts'"),
-            "single-quote .svelte import rewritten to .svelte.ts: {result}"
-        );
-        assert!(
-            result.contains("@/D.svelte.ts\""),
-            "double-quote .svelte import rewritten: {result}"
-        );
-        // Vue behavior preserved exactly (negative — generalization didn't
-        // regress Vue).
-        assert!(
-            result.contains("./V.vue.ts'"),
-            "vue still rewritten: {result}"
-        );
-        assert!(!result.contains(".svelte.tsx"), "no .svelte.tsx");
-    }
-
-    /// rewrite_vue_imports_for_tsgo rewrites to .vue.ts for JSX files too
-    #[test]
-    fn test_rewrite_vue_imports_jsx_to_vue_ts() {
-        let input = r#"import Foo from './Foo.vue'"#;
-        let result = rewrite_vue_imports_for_tsgo(input, "App.vue.jsx");
-        assert!(
-            result.contains("./Foo.vue.ts'"),
-            "JSX file should also rewrite to .vue.ts, got: {result}"
-        );
-        // Negative: should NOT rewrite to .vue.jsx or .d.vue.ts
-        assert!(
-            !result.contains(".vue.jsx"),
-            "JSX file should NOT rewrite to .vue.jsx"
-        );
-        assert!(
-            !result.contains(".d.vue.ts"),
-            "should NOT use declaration file extension"
-        );
-    }
-
-    /// @ai-generated — rewrite_vue_imports_for_tsgo is a no-op when there are no .vue imports
-    #[test]
-    fn test_rewrite_vue_imports_no_vue() {
-        let input = r#"import { ref } from 'vue'
-import utils from './utils'"#;
-        let result = rewrite_vue_imports_for_tsgo(input, "App.vue.tsx");
-        assert_eq!(
-            result, input,
-            "content without .vue imports should be unchanged"
-        );
-    }
-
-    /// rewrite_vue_imports_for_tsgo must NOT double-rewrite already-rewritten .vue.ts imports
-    #[test]
-    fn test_rewrite_vue_imports_no_double_rewrite() {
-        // IDE codegen already produces .vue.ts imports via prepend_left
-        let input = r#"import Foo from './Foo.vue.ts'
-import Bar from "@/components/Bar.vue.ts"
-const x = 1;"#;
-        let result = rewrite_vue_imports_for_tsgo(input, "App.vue.tsx");
-        assert!(
-            !result.contains(".vue.ts.ts"),
-            "must NOT double-rewrite .vue.ts to .vue.ts.ts, got: {result}"
-        );
-        assert!(
-            result.contains("./Foo.vue.ts'"),
-            ".vue.ts imports should be preserved unchanged, got: {result}"
-        );
-        assert!(
-            result.contains("@/components/Bar.vue.ts\""),
-            ".vue.ts imports should be preserved unchanged, got: {result}"
-        );
-    }
-
-    /// rewrite_vue_imports_for_tsgo handles mixed .vue and .vue.ts imports
-    #[test]
-    fn test_rewrite_vue_imports_mixed() {
-        // Some imports already rewritten by codegen, some not (e.g. FullProject mode)
-        let input = r#"import Foo from './Foo.vue.ts'
-import Bar from './Bar.vue'"#;
-        let result = rewrite_vue_imports_for_tsgo(input, "App.vue.tsx");
-        assert!(
-            result.contains("./Foo.vue.ts'"),
-            "already-rewritten import should stay .vue.ts, got: {result}"
-        );
-        assert!(
-            result.contains("./Bar.vue.ts'"),
-            "unrewritten .vue import should become .vue.ts, got: {result}"
-        );
-        assert!(
-            !result.contains(".vue.ts.ts"),
-            "must NOT double-rewrite, got: {result}"
-        );
-    }
-
-    /// @ai-generated — rewrite_vue_imports_for_tsgo does not touch .vue in non-import contexts
-    #[test]
-    fn test_rewrite_vue_imports_no_false_positives() {
-        // .vue in a variable name or comment (without quotes) should not be rewritten
-        let input = "const vueFile = 'hello'; // .vue files are great";
-        let result = rewrite_vue_imports_for_tsgo(input, "App.vue.tsx");
-        assert_eq!(
-            result, input,
-            "non-import .vue occurrences should be unchanged"
-        );
-    }
-
-    #[test]
-    fn test_build_paths_config_payload_includes_paths_only() {
-        let payload = build_paths_config_payload(serde_json::json!({
-            "@/*": ["src/*"],
-            "@pkg/*": ["packages/*"],
-        }));
-
-        // baseUrl must NOT be present — TSGO 7.0 rejects it with TS5102
-        assert!(
-            payload["settings"]["typescript"]["tsserver"]["compilerOptions"]["baseUrl"].is_null(),
-            "baseUrl must not be in the payload"
-        );
-        assert_eq!(
-            payload["settings"]["typescript"]["tsserver"]["compilerOptions"]["paths"],
-            serde_json::json!({
-                "@/*": ["src/*"],
-                "@pkg/*": ["packages/*"],
-            })
-        );
-    }
-
-    fn tsgo_bin_or_skip() -> Option<String> {
-        match find_tsgo_binary() {
-            Ok(bin) => Some(bin),
-            Err(err) => {
-                if std::env::var("VERTER_REQUIRE_TSGO")
-                    .map(|v| v == "1")
-                    .unwrap_or(false)
-                {
-                    panic!(
-                        "tsgo not found, but VERTER_REQUIRE_TSGO=1 is set; install tsgo or prewarm npx cache ({err})",
-                    );
-                }
-                eprintln!("skipping: {err}");
-                None
-            }
-        }
-    }
-
-    /// @ai-generated — path_to_uri produces correct file URIs
-    #[test]
-    fn test_path_to_uri() {
-        assert_eq!(
-            TsgoTypeProvider::path_to_uri("/home/user/App.vue.tsx"),
-            "file:///home/user/App.vue.tsx"
-        );
-        assert_eq!(
-            TsgoTypeProvider::path_to_uri("C:/Users/dev/App.vue.tsx"),
-            "file:///C:/Users/dev/App.vue.tsx"
-        );
-    }
-
-    /// @ai-generated — Regression: URI passed to path_to_uri must not double-wrap.
-    ///
-    /// Before the fix, `$/onDidChangeTsOrJsFile` passed a `file://` URI directly
-    /// to `update_file()`, which calls `path_to_uri()` internally. This produced
-    /// `file:///file:///...` — a double-wrapped URI that TSGO couldn't resolve.
-    /// The fix converts URIs to filesystem paths first via `uri_to_canonical_id`.
-    #[test]
-    fn test_uri_to_canonical_id_then_path_to_uri_roundtrip() {
-        use crate::documents::uri_to_canonical_id;
-        use tower_lsp_server::ls_types::Uri;
-
-        // Windows URI → canonical path → correct TSGO URI
-        let win_uri: Uri = "file:///d:/dev/project/src/utils.ts".parse().unwrap();
-        let path = uri_to_canonical_id(&win_uri);
-        assert_eq!(path, "d:/dev/project/src/utils.ts");
-        let tsgo_uri = TsgoTypeProvider::path_to_uri(&path);
-        assert_eq!(tsgo_uri, "file:///d:/dev/project/src/utils.ts");
-
-        // Unix URI → canonical path → correct TSGO URI
-        let unix_uri: Uri = "file:///home/user/project/src/utils.ts".parse().unwrap();
-        let path = uri_to_canonical_id(&unix_uri);
-        assert_eq!(path, "/home/user/project/src/utils.ts");
-        let tsgo_uri = TsgoTypeProvider::path_to_uri(&path);
-        assert_eq!(tsgo_uri, "file:///home/user/project/src/utils.ts");
-
-        // Regression: passing a raw URI string (without conversion) would double-wrap
-        let raw_uri_str = "file:///d:/dev/project/src/utils.ts";
-        let bad_result = TsgoTypeProvider::path_to_uri(raw_uri_str);
-        assert!(
-            bad_result.starts_with("file:///file:"),
-            "Passing a raw URI to path_to_uri should double-wrap (this is the bug we prevent): {}",
-            bad_result
-        );
-    }
-
-    /// @ai-generated — uri_to_file_path converts file:// URIs to filesystem paths
-    #[test]
-    fn test_uri_to_file_path() {
-        // Windows URI
-        assert_eq!(
-            uri_to_file_path("file:///d:/dev/project/src/utils.ts"),
-            "d:/dev/project/src/utils.ts"
-        );
-        // Drive letter is lowered by the canonical owner — TSGO emits the same
-        // `c:/...` ID as documents/VFS (pre-fix this stayed `C:/...` and split
-        // file identity on Windows go-to-def/hover/rename/code-actions).
-        assert_eq!(
-            uri_to_file_path("file:///C:/Users/test/file.ts"),
-            "c:/Users/test/file.ts"
-        );
-        assert_ne!(
-            uri_to_file_path("file:///C:/Users/test/file.ts"),
-            "C:/Users/test/file.ts"
-        );
-
-        // Percent-encoded Windows URI (TSGO sends these)
-        assert_eq!(
-            uri_to_file_path("file:///c%3A/users/david/appdata/local/temp/test.tsx"),
-            "c:/users/david/appdata/local/temp/test.tsx"
-        );
-
-        // Unix URI
-        assert_eq!(
-            uri_to_file_path("file:///home/user/project/file.ts"),
-            "/home/user/project/file.ts"
-        );
-
-        // Non-file URI (e.g., untitled) passes through unchanged
-        assert_eq!(
-            uri_to_file_path("untitled:Untitled-1"),
-            "untitled:Untitled-1"
-        );
-
-        // file:// with authority (UNC) — authority preserved as the `//` UNC
-        // prefix and canonicalized, NOT dropped to `server/share/file.ts`.
-        assert_eq!(
-            uri_to_file_path("file://server/share/file.ts"),
-            "//server/share/file.ts"
-        );
-        assert_ne!(
-            uri_to_file_path("file://server/share/file.ts"),
-            "server/share/file.ts"
-        );
-    }
-
-    /// @ai-generated — percent_decode_uri decodes %XX sequences
-    #[test]
-    fn test_percent_decode_uri() {
-        // %3A → ':'
-        assert_eq!(
-            percent_decode_uri("file:///c%3A/users/dev"),
-            "file:///c:/users/dev"
-        );
-        // Multiple encodings
-        assert_eq!(
-            percent_decode_uri("file:///c%3A/my%20files/app%2Evue"),
-            "file:///c:/my files/app.vue"
-        );
-        // No encoding — passthrough
-        assert_eq!(
-            percent_decode_uri("file:///C:/Users/dev/app.tsx"),
-            "file:///C:/Users/dev/app.tsx"
-        );
-        // Case-insensitive hex digits
-        assert_eq!(percent_decode_uri("file:///c%3a/test"), "file:///c:/test");
-        // Invalid percent encoding (incomplete) — passthrough
-        assert_eq!(percent_decode_uri("file:///c%3"), "file:///c%3");
-        assert_eq!(percent_decode_uri("file:///c%"), "file:///c%");
-        // Invalid hex digit — passthrough
-        assert_eq!(percent_decode_uri("file:///c%GG"), "file:///c%GG");
-    }
-
-    /// @ai-generated — normalize_file_uri normalizes TSGO URIs to match path_to_uri keys.
-    ///
-    /// TSGO sends percent-encoded lowercase URIs like `file:///c%3A/users/someone/...`.
-    /// Our path_to_uri produces `file:///C:/Users/Someone/...`. normalize_file_uri
-    /// must produce the same canonical form for both inputs.
-    #[test]
-    fn test_normalize_file_uri() {
-        let our_uri = "file:///C:/Users/Someone/AppData/Local/Temp/test/App.vue.tsx";
-        let tsgo_uri = "file:///c%3A/users/someone/appdata/local/temp/test/App.vue.tsx";
-
-        let our_normalized = normalize_file_uri(our_uri);
-        let tsgo_normalized = normalize_file_uri(tsgo_uri);
-
-        // On Windows, both should normalize to the same lowercase form
-        #[cfg(windows)]
-        assert_eq!(
-            our_normalized, tsgo_normalized,
-            "normalized URIs must match: ours={our_normalized}, tsgo={tsgo_normalized}"
-        );
-
-        // On non-Windows, percent-decoding still happens
-        #[cfg(not(windows))]
-        assert_eq!(
-            normalize_file_uri("file:///c%3A/users/test"),
-            "file:///c:/users/test"
-        );
-    }
-
-    /// @ai-generated — normalize_file_uri produces matching keys for diagnostics cache
-    #[test]
-    fn test_normalize_file_uri_cache_key_match() {
-        // Simulate what open_file does: path_to_uri → normalize → cache key
-        let path = "C:/Users/Someone/AppData/Local/Temp/verter_test/App.vue.tsx";
-        let our_key = normalize_file_uri(&TsgoTypeProvider::path_to_uri(path));
-
-        // Simulate what read_loop does with TSGO's publishDiagnostics URI
-        let tsgo_raw = "file:///c%3A/users/someone/appdata/local/temp/verter_test/app.vue.tsx";
-        let tsgo_key = normalize_file_uri(tsgo_raw);
-
-        #[cfg(windows)]
-        assert_eq!(
-            our_key, tsgo_key,
-            "open_file cache key and read_loop cache key must match"
-        );
-    }
-
-    /// @ai-generated — parse_lsp_location stores a filesystem path, not a URI
-    #[test]
-    fn test_parse_lsp_location_stores_filesystem_path() {
-        let content = "const foo = 1;\nconst bar = 2;\n";
-        let loc = serde_json::json!({
-            "uri": "file:///d:/dev/project/src/utils.ts",
-            "range": {
-                "start": { "line": 0, "character": 6 },
-                "end": { "line": 0, "character": 9 }
-            }
-        });
-
-        let result = parse_lsp_location(&loc, Some(content)).unwrap();
-
-        // The path should be a filesystem path, NOT a file:// URI.
-        // Before the fix, this was "file:///d:/dev/project/src/utils.ts".
-        assert_eq!(result.path, "d:/dev/project/src/utils.ts");
-        assert!(!result.path.starts_with("file:"), "path must not be a URI");
-    }
-
-    /// @ai-generated — parse_lsp_location + path_to_uri roundtrip produces correct URI
-    #[test]
-    fn test_parse_lsp_location_path_feeds_into_path_to_uri_correctly() {
-        use crate::tsgo::merge;
-
-        let loc = serde_json::json!({
-            "uri": "file:///d:/dev/project/src/utils.ts",
+    fn parse_text_edit_to_code_edit_drops_when_content_unavailable() {
+        let te = serde_json::json!({
             "range": {
                 "start": { "line": 0, "character": 0 },
-                "end": { "line": 0, "character": 5 }
-            }
-        });
-
-        let result = parse_lsp_location(&loc, None).unwrap();
-        let uri = merge::file_path_to_uri(&result.path).unwrap();
-        let uri_str = uri.to_string();
-
-        // Must produce a valid file:// URI with exactly 3 slashes on Windows
-        assert_eq!(uri_str, "file:///d:/dev/project/src/utils.ts");
-        // And NOT double-wrapped like file:///file:///...
-        assert!(
-            !uri_str.contains("file:///file:"),
-            "URI must not be double-wrapped"
-        );
-    }
-
-    /// @ai-generated — offset_to_position handles single-line and multi-line content
-    #[test]
-    fn test_offset_to_position() {
-        assert_eq!(offset_to_position("hello world", 0), (0, 0));
-        assert_eq!(offset_to_position("hello world", 5), (0, 5));
-        assert_eq!(offset_to_position("line1\nline2\nline3", 0), (0, 0));
-        assert_eq!(offset_to_position("line1\nline2\nline3", 6), (1, 0));
-        assert_eq!(offset_to_position("line1\nline2\nline3", 8), (1, 2));
-        assert_eq!(offset_to_position("line1\nline2\nline3", 12), (2, 0));
-        assert_eq!(offset_to_position("line1\nline2\nline3", 16), (2, 4));
-        // offset at content length
-        assert_eq!(offset_to_position("ab\ncd", 5), (1, 2));
-    }
-
-    /// @ai-generated — TSGO process spawns and initializes successfully
-    #[tokio::test]
-    async fn test_tsgo_spawn_and_initialize() {
-        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsgo_test_init");
-        let _ = std::fs::remove_dir_all(&tmp);
-        create_test_project(&tmp).unwrap();
-
-        let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
-        let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await;
-
-        // Clean up
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        assert!(
-            provider.is_ok(),
-            "TSGO should initialize: {:?}",
-            provider.err()
-        );
-    }
-
-    /// @ai-generated — TSGO processes open_file and hover for a .ts file
-    #[tokio::test]
-    async fn test_tsgo_hover_on_ts_file() {
-        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsgo_test_hover");
-        let _ = std::fs::remove_dir_all(&tmp);
-        create_test_project(&tmp).unwrap();
-
-        // Write a simple TS file
-        let ts_path = tmp.join("test.ts");
-        std::fs::write(&ts_path, "const msg: string = \"hello\";\n").unwrap();
-
-        let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
-        let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
-
-        // Open the file
-        let file_path = ts_path.to_str().unwrap().replace('\\', "/");
-        provider
-            .open_file(&file_path, "const msg: string = \"hello\";\n")
-            .await
-            .unwrap();
-
-        // Give TSGO a moment to process
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-
-        // Hover on "msg" (offset 6 on line 0)
-        let hover = provider.get_hover(&file_path, 6).await.unwrap();
-
-        // Clean up
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        // TSGO should return hover info with the type
-        assert!(hover.is_some(), "TSGO should return hover info for 'msg'");
-        if let Some(info) = &hover {
-            eprintln!("TSGO hover result: {}", info.contents);
-            assert!(
-                info.contents.contains("string") || info.contents.contains("msg"),
-                "hover should mention the type or identifier, got: {}",
-                info.contents
-            );
-        }
-    }
-
-    /// @ai-generated — Full E2E: Vue → verter TSX → TSGO hover
-    #[tokio::test]
-    async fn test_e2e_vue_to_tsgo_hover() {
-        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsgo_e2e_hover");
-        let _ = std::fs::remove_dir_all(&tmp);
-        create_test_project(&tmp).unwrap();
-
-        // Create a Vue SFC
-        let vue_source = r#"<script setup lang="ts">
-const msg: string = "hello";
-const count: number = 42;
-</script>
-<template>
-  <div>{{ msg }} {{ count }}</div>
-</template>"#;
-
-        // Generate TSX using verter_session — upsert then trigger compilation via get_virtual_file
-        let host =
-            verter_session::VerterHost::new_standalone(verter_session::HostConfig::default());
-        let _ = host.upsert(verter_session::UpsertRequest {
-            canonical_id: Some("App.vue".to_string()),
-            input_id: "App.vue".to_string(),
-            source: std::sync::Arc::from(vue_source),
-            file_language: verter_session::FileLanguage::vue(),
-            aliases: vec![],
-        });
-
-        // Trigger compilation (upsert only parses; get_virtual_file compiles lazily)
-        let profile = verter_session::CompileProfile {
-            source_map: true,
-            target: verter_session::CompileTarget::IDE
-                | verter_session::CompileTarget::TEMPLATE_DATA,
-            ..Default::default()
-        };
-        let _compiled = host
-            .get_virtual_file(verter_session::VirtualQuery {
-                raw_id: None,
-                canonical_id: Some("App.vue".to_string()),
-                node_kind: Some(verter_session::VirtualNodeKind::Main),
-                compile_profile: profile.clone(),
-            })
-            .expect("compilation should succeed");
-
-        let tsx = host
-            .get_ide("App.vue", &profile)
-            .expect("should have cached TSX after compilation");
-
-        eprintln!(
-            "Generated TSX ({} bytes):\n{}",
-            tsx.code.len(),
-            &tsx.code[..200.min(tsx.code.len())]
-        );
-
-        // Write TSX to disk so TSGO can find it
-        let tsx_path = tmp.join("App.vue.tsx");
-        std::fs::write(&tsx_path, &*tsx.code).unwrap();
-
-        let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
-        let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
-
-        // Open the TSX file in TSGO
-        let tsx_file_path = tsx_path.to_str().unwrap().replace('\\', "/");
-        provider.open_file(&tsx_file_path, &tsx.code).await.unwrap();
-
-        // Wait for TSGO to process
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-
-        // Hover on "msg" — find its byte offset in the TSX
-        let msg_offset = tsx.code.find("const msg").map(|i| i as u32 + 6);
-        assert!(msg_offset.is_some(), "TSX should contain 'const msg'");
-        let offset = msg_offset.unwrap();
-        let (line, character) = offset_to_position(&tsx.code, offset);
-        eprintln!("Hovering at byte offset {offset} → line {line}, character {character}");
-
-        let hover = provider.get_hover(&tsx_file_path, offset).await.unwrap();
-
-        if let Some(info) = &hover {
-            eprintln!("E2E TSGO hover on msg: {}", info.contents);
-        }
-
-        assert!(
-            hover.is_some(),
-            "TSGO should return hover info for 'msg' in TSX at offset {} (line {}, char {})",
-            offset,
-            line,
-            character
-        );
-
-        // Clean up
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    /// @ai-generated — Regression: TSGO stays alive after workspace/configuration request.
-    ///
-    /// After initialization, tsgo sends `workspace/configuration` which previously
-    /// crashed because we replied with `null` instead of an array. This test verifies
-    /// the connection survives by waiting for tsgo to settle, then making a request.
-    #[tokio::test]
-    async fn test_tsgo_survives_workspace_configuration() {
-        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsgo_test_ws_config");
-        let _ = std::fs::remove_dir_all(&tmp);
-        create_test_project(&tmp).unwrap();
-
-        // Write a TS file for testing
-        std::fs::write(tmp.join("test.ts"), "const x: number = 42;\n").unwrap();
-
-        let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
-        let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
-
-        let file_path = tmp.join("test.ts").to_str().unwrap().replace('\\', "/");
-        provider
-            .open_file(&file_path, "const x: number = 42;\n")
-            .await
-            .unwrap();
-
-        // Wait long enough for tsgo to send workspace/configuration and process our reply.
-        // Previously, tsgo would crash here because we replied with `null`.
-        tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
-
-        // If tsgo crashed, this will fail with a pipe error.
-        let hover_result = provider.get_hover(&file_path, 6).await;
-
-        // Clean up
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        assert!(
-            hover_result.is_ok(),
-            "TSGO should still be alive after workspace/configuration — got: {:?}",
-            hover_result.err()
-        );
-        let hover = hover_result.unwrap();
-        assert!(
-            hover.is_some(),
-            "hover on 'x' should return info (proves tsgo is processing)"
-        );
-    }
-
-    /// Recursively copy a directory tree.
-    fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dst)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            let src_path = entry.path();
-            let dst_path = dst.join(entry.file_name());
-            if src_path.is_dir() {
-                copy_dir_recursive(&src_path, &dst_path)?;
-            } else {
-                std::fs::copy(&src_path, &dst_path)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Create a test project with `node_modules/vue` available so that TSGO can
-    /// resolve Vue's type declarations (including compiler macros like `defineProps`).
-    ///
-    /// For pnpm workspaces, searches the pnpm store for the Vue package and creates
-    /// a directory junction from `<dir>/node_modules/vue` to the real package.
-    /// For non-pnpm setups, tries the workspace root `node_modules/vue` directly.
-    fn create_test_project_with_vue_types(dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        // Find the workspace root node_modules
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_default();
-        let workspace_nm = manifest_dir.join("../../node_modules");
-
-        // Find the vue package directory
-        let vue_path = if workspace_nm.join("vue/dist/vue.d.ts").exists() {
-            workspace_nm.join("vue").canonicalize()?
-        } else {
-            // Search pnpm store: node_modules/.pnpm/vue@*/node_modules/vue
-            let pnpm_dir = workspace_nm.join(".pnpm");
-            let mut found = None;
-            if pnpm_dir.exists() {
-                for entry in std::fs::read_dir(&pnpm_dir)? {
-                    let entry = entry?;
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.starts_with("vue@") && !name_str.contains("node_modules") {
-                        let candidate = entry.path().join("node_modules/vue");
-                        if candidate.join("dist/vue.d.ts").exists() {
-                            found = Some(candidate.canonicalize()?);
-                            break;
-                        }
-                    }
-                }
-            }
-            found.ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "vue types not found")
-            })?
-        };
-
-        // Create node_modules/@verter/types with the vue macros type declarations.
-        // TSGO resolves these via standard node_modules resolution.
-        let verter_types_dir = dir.join("node_modules/@verter/types");
-
-        // Copy the full dist directory tree (re-exports need submodule files)
-        let dist_src = manifest_dir.join("../../packages/types/dist");
-        if dist_src.exists() {
-            copy_dir_recursive(&dist_src, &verter_types_dir)?;
-        } else {
-            std::fs::create_dir_all(&verter_types_dir)?;
-        }
-
-        // Copy the vue macros .d.ts (which contains defineProps_Box, etc.)
-        let vue_macros_src = manifest_dir.join("../../packages/types/src/vue/vue.macros.ts");
-        let vue_macros_content = if vue_macros_src.exists() {
-            std::fs::read_to_string(&vue_macros_src)?
-        } else {
-            // Fallback: try the dist version
-            let dist_src = manifest_dir.join("../../packages/types/dist/vue/vue.macros.d.ts");
-            std::fs::read_to_string(&dist_src)?
-        };
-
-        // Append vue macros to the index
-        let index_path = verter_types_dir.join("index.d.ts");
-        let existing = if index_path.exists() {
-            std::fs::read_to_string(&index_path)?
-        } else {
-            String::new()
-        };
-        let combined = format!(
-            "// Auto-generated for TSGO E2E tests\n{}\n{}",
-            existing, vue_macros_content
-        );
-        std::fs::write(&index_path, combined)?;
-
-        // Ensure package.json exists
-        let pkg_path = verter_types_dir.join("package.json");
-        if !pkg_path.exists() {
-            std::fs::write(
-                &pkg_path,
-                r#"{"name":"@verter/types","types":"index.d.ts"}"#,
-            )?;
-        }
-
-        // Also create node_modules/vue junction for Vue's type declarations
-        // (defineProps, withDefaults, etc. are exported from @vue/runtime-core)
-        let vue_parent = vue_path.parent().unwrap();
-        let nm_dir = dir.join("node_modules");
-
-        // Link vue
-        let vue_dst = nm_dir.join("vue");
-        #[cfg(windows)]
-        {
-            let _ = std::process::Command::new("cmd")
-                .args([
-                    "/C",
-                    "mklink",
-                    "/J",
-                    &vue_dst.to_string_lossy(),
-                    &vue_path.to_string_lossy(),
-                ])
-                .output();
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = std::os::unix::fs::symlink(&vue_path, &vue_dst);
-        }
-
-        // Link @vue scope (peer deps for vue's type imports)
-        let at_vue_src = vue_parent.join("@vue");
-        if at_vue_src.exists() {
-            let at_vue_dst = nm_dir.join("@vue");
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("cmd")
-                    .args([
-                        "/C",
-                        "mklink",
-                        "/J",
-                        &at_vue_dst.to_string_lossy(),
-                        &at_vue_src.to_string_lossy(),
-                    ])
-                    .output();
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = std::os::unix::fs::symlink(&at_vue_src, &at_vue_dst);
-            }
-        }
-
-        let tsconfig = r#"{
-  "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "jsx": "preserve",
-    "jsxImportSource": "vue",
-    "allowImportingTsExtensions": true
-  },
-  "include": ["**/*.ts", "**/*.tsx"]
-}"#;
-        std::fs::write(dir.join("tsconfig.json"), tsconfig)?;
-        Ok(())
-    }
-
-    /// Helper: compile Vue SFC to TSX, spawn TSGO, hover at a byte offset, return hover text.
-    /// Returns `None` if tsgo binary or vue types are not available (skip).
-    async fn e2e_hover_at(vue_source: &str, file_stem: &str, offset: u32) -> Option<String> {
-        let tsgo_bin = tsgo_bin_or_skip()?;
-
-        let tmp = std::env::temp_dir().join(format!("verter_tsgo_e2e_{}", file_stem));
-        let _ = std::fs::remove_dir_all(&tmp);
-        if create_test_project_with_vue_types(&tmp).is_err() {
-            eprintln!("skipping: could not create test project with vue types");
-            return None;
-        }
-
-        let host =
-            verter_session::VerterHost::new_standalone(verter_session::HostConfig::default());
-        let file_id = format!("{}.vue", file_stem);
-        let _ = host.upsert(verter_session::UpsertRequest {
-            canonical_id: Some(file_id.clone()),
-            input_id: file_id.clone(),
-            source: std::sync::Arc::from(vue_source),
-            file_language: verter_session::FileLanguage::vue(),
-            aliases: vec![],
-        });
-        let profile = verter_session::CompileProfile {
-            source_map: false,
-            target: verter_session::CompileTarget::IDE
-                | verter_session::CompileTarget::TEMPLATE_DATA,
-            embed_ambient_types: false,
-            ..Default::default()
-        };
-        let _ = host
-            .get_virtual_file(verter_session::VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(file_id.clone()),
-                node_kind: Some(verter_session::VirtualNodeKind::Main),
-                compile_profile: profile.clone(),
-            })
-            .expect("compilation should succeed");
-        let tsx = host
-            .get_ide(&file_id, &profile)
-            .expect("should have cached TSX");
-
-        eprintln!(
-            "Generated TSX for {} ({} bytes):\n{}",
-            file_stem,
-            tsx.code.len(),
-            &tsx.code
-        );
-
-        let tsx_path = tmp.join(format!("{}.vue.tsx", file_stem));
-        std::fs::write(&tsx_path, &*tsx.code).unwrap();
-
-        let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
-        let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
-
-        let tsx_file_path = tsx_path.to_str().unwrap().replace('\\', "/");
-        provider.open_file(&tsx_file_path, &tsx.code).await.unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-
-        let hover = provider.get_hover(&tsx_file_path, offset).await.unwrap();
-
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        if let Some(h) = hover {
-            eprintln!("TSGO hover for {}: {}", file_stem, h.contents);
-            Some(h.contents)
-        } else {
-            eprintln!("TSGO returned no hover for {}", file_stem);
-            None
-        }
-    }
-
-    /// Helper: compile Vue SFC to TSX, return the code.
-    fn compile_vue_to_tsx(vue_source: &str, file_stem: &str) -> String {
-        compile_vue_to_tsx_with_map(vue_source, file_stem).0
-    }
-
-    /// Helper: compile Vue SFC to TSX, return (code, source_map_json).
-    fn compile_vue_to_tsx_with_map(vue_source: &str, file_stem: &str) -> (String, Option<String>) {
-        let host =
-            verter_session::VerterHost::new_standalone(verter_session::HostConfig::default());
-        let file_id = format!("{}.vue", file_stem);
-        let _ = host.upsert(verter_session::UpsertRequest {
-            canonical_id: Some(file_id.clone()),
-            input_id: file_id.clone(),
-            source: std::sync::Arc::from(vue_source),
-            file_language: verter_session::FileLanguage::vue(),
-            aliases: vec![],
-        });
-        let profile = verter_session::CompileProfile {
-            source_map: true,
-            target: verter_session::CompileTarget::IDE
-                | verter_session::CompileTarget::TEMPLATE_DATA,
-            embed_ambient_types: false,
-            ..Default::default()
-        };
-        let _ = host
-            .get_virtual_file(verter_session::VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(file_id.clone()),
-                node_kind: Some(verter_session::VirtualNodeKind::Main),
-                compile_profile: profile.clone(),
-            })
-            .expect("compilation should succeed");
-        let tsx = host
-            .get_ide(&file_id, &profile)
-            .expect("should have cached TSX");
-        (
-            tsx.code.to_string(),
-            tsx.source_map.as_ref().map(|s| s.to_string()),
-        )
-    }
-
-    /// @ai-generated — E2E: withDefaults(defineProps({bar: String}), {}) — the props
-    /// variable must have a typed result, not `any`.
-    #[tokio::test]
-    async fn test_e2e_with_defaults_boxed_not_any() {
-        let vue_source = r#"<script setup lang="ts">
-const props = withDefaults(defineProps({ bar: String }), {})
-</script>
-<template>
-  <div>{{ bar }}</div>
-</template>"#;
-        let tsx = compile_vue_to_tsx(vue_source, "wd_boxed");
-        // Hover on the "props" variable
-        let search = "const props = withDefaults";
-        let offset = tsx
-            .find(search)
-            .expect("TSX should contain const props = withDefaults") as u32
-            + 6; // skip "const "
-
-        let hover = e2e_hover_at(vue_source, "wd_boxed", offset).await;
-        let Some(contents) = hover else { return };
-        assert!(
-            !contents.contains(": any") && !contents.is_empty(),
-            "props must NOT be 'any' — TSGO returned: {}",
-            contents
-        );
-    }
-
-    /// @ai-generated — E2E: defineProps({msg: String}) — the props variable
-    /// must preserve the runtime arg type.
-    #[tokio::test]
-    async fn test_e2e_define_props_boxed_not_any() {
-        let vue_source = r#"<script setup lang="ts">
-const props = defineProps({ msg: String })
-</script>
-<template><div>{{ msg }}</div></template>"#;
-        let tsx = compile_vue_to_tsx(vue_source, "dp_boxed");
-        let search = "const props = defineProps";
-        let offset = tsx
-            .find(search)
-            .expect("TSX should contain const props = defineProps") as u32
-            + 6; // hover on "props"
-
-        let hover = e2e_hover_at(vue_source, "dp_boxed", offset).await;
-        let Some(contents) = hover else { return };
-        eprintln!("defineProps hover: {}", contents);
-        assert!(
-            !contents.contains(": any") && !contents.is_empty(),
-            "defineProps result must NOT be 'any' — TSGO returned: {}",
-            contents
-        );
-    }
-
-    /// @ai-generated — E2E: defineEmits(['change', 'update']) — the emit variable
-    /// must preserve the emits array type.
-    #[tokio::test]
-    async fn test_e2e_define_emits_boxed_not_any() {
-        let vue_source = r#"<script setup lang="ts">
-const emit = defineEmits(['change', 'update'])
-</script>
-<template><div></div></template>"#;
-        let tsx = compile_vue_to_tsx(vue_source, "de_boxed");
-        let search = "const emit = defineEmits";
-        let offset = tsx
-            .find(search)
-            .expect("TSX should contain const emit = defineEmits") as u32
-            + 6; // hover on "emit"
-
-        let hover = e2e_hover_at(vue_source, "de_boxed", offset).await;
-        let Some(contents) = hover else { return };
-        // The emit function type is (event: "change" | "update", ...args: any[]) => void
-        // "...args: any[]" is the correct spread type — only reject if the whole result is ": any"
-        let is_typed_correctly =
-            !contents.is_empty() && (contents.contains("(event:") || contents.contains("emit"));
-        assert!(
-            is_typed_correctly,
-            "defineEmits result must be a typed emit function — TSGO returned: {}",
-            contents
-        );
-    }
-
-    /// @ai-generated — E2E: defineModel<string>('firstName') — the model variable
-    /// must preserve the type.
-    #[tokio::test]
-    async fn test_e2e_define_model_boxed_not_any() {
-        let vue_source = r#"<script setup lang="ts">
-const firstName = defineModel<string>('firstName')
-</script>
-<template><div></div></template>"#;
-        let tsx = compile_vue_to_tsx(vue_source, "dm_boxed");
-        let search = "const firstName = defineModel";
-        let offset = tsx
-            .find(search)
-            .expect("TSX should contain const firstName = defineModel") as u32
-            + 6; // hover on "firstName"
-
-        let hover = e2e_hover_at(vue_source, "dm_boxed", offset).await;
-        let Some(contents) = hover else { return };
-        assert!(
-            !contents.contains(": any") && !contents.is_empty(),
-            "defineModel result must NOT be 'any' — TSGO returned: {}",
-            contents
-        );
-    }
-
-    /// @ai-generated — E2E: withDefaults + runtime props — template binding `bar`
-    /// must be typed (not any/unknown) via shallowUnwrapRef destructuring.
-    #[tokio::test]
-    async fn test_e2e_with_defaults_template_binding_not_any() {
-        let vue_source = r#"<script setup lang="ts">
-const props = withDefaults(defineProps({ bar: String }), {})
-</script>
-<template>
-  <div>{{ bar }}</div>
-</template>"#;
-        let tsx = compile_vue_to_tsx(vue_source, "wd_tpl");
-        // Find "bar" in the shallowUnwrapRef section (template binding)
-        // The new codegen uses "bar } = ___VERTER___unwrapped" or similar destructuring
-        let search = "const props = withDefaults";
-        let offset = tsx
-            .find(search)
-            .expect("TSX should contain const props = withDefaults") as u32
-            + 6; // hover on "props"
-
-        let hover = e2e_hover_at(vue_source, "wd_tpl", offset).await;
-        let Some(contents) = hover else { return };
-        assert!(
-            !contents.contains(": any") && !contents.is_empty(),
-            "withDefaults props must NOT be 'any' — TSGO returned: {}",
-            contents
-        );
-    }
-
-    // ── Virtual @verter/types injection tests ──────────────────────────
-
-    /// Get the standalone @verter/types d.ts content from the compiled constant.
-    /// This is the same content the LSP writes to node_modules.
-    fn verter_types_standalone_dts() -> &'static str {
-        verter_session::VERTER_TYPES_STANDALONE_DTS
-    }
-
-    /// Create a test project with Vue types but WITHOUT @verter/types on disk.
-    /// Only Vue and @vue junctions are created.
-    fn create_test_project_without_verter_types(dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_default();
-        let workspace_nm = manifest_dir.join("../../node_modules");
-
-        // Find the vue package directory
-        let vue_path = if workspace_nm.join("vue/dist/vue.d.ts").exists() {
-            workspace_nm.join("vue").canonicalize()?
-        } else {
-            let pnpm_dir = workspace_nm.join(".pnpm");
-            let mut found = None;
-            if pnpm_dir.exists() {
-                for entry in std::fs::read_dir(&pnpm_dir)? {
-                    let entry = entry?;
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.starts_with("vue@") && !name_str.contains("node_modules") {
-                        let candidate = entry.path().join("node_modules/vue");
-                        if candidate.join("dist/vue.d.ts").exists() {
-                            found = Some(candidate.canonicalize()?);
-                            break;
-                        }
-                    }
-                }
-            }
-            found.ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "vue types not found")
-            })?
-        };
-
-        // Only create vue + @vue junctions (NO @verter/types)
-        let nm_dir = dir.join("node_modules");
-        std::fs::create_dir_all(&nm_dir)?;
-
-        let vue_parent = vue_path.parent().unwrap();
-        let vue_dst = nm_dir.join("vue");
-        #[cfg(windows)]
-        {
-            let _ = std::process::Command::new("cmd")
-                .args([
-                    "/C",
-                    "mklink",
-                    "/J",
-                    &vue_dst.to_string_lossy(),
-                    &vue_path.to_string_lossy(),
-                ])
-                .output();
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = std::os::unix::fs::symlink(&vue_path, &vue_dst);
-        }
-
-        let at_vue_src = vue_parent.join("@vue");
-        if at_vue_src.exists() {
-            let at_vue_dst = nm_dir.join("@vue");
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("cmd")
-                    .args([
-                        "/C",
-                        "mklink",
-                        "/J",
-                        &at_vue_dst.to_string_lossy(),
-                        &at_vue_src.to_string_lossy(),
-                    ])
-                    .output();
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = std::os::unix::fs::symlink(&at_vue_src, &at_vue_dst);
-            }
-        }
-
-        let tsconfig = r#"{
-  "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "jsx": "preserve",
-    "jsxImportSource": "vue",
-    "allowImportingTsExtensions": true
-  },
-  "include": ["**/*.ts", "**/*.tsx"]
-}"#;
-        std::fs::write(dir.join("tsconfig.json"), tsconfig)?;
-        Ok(())
-    }
-
-    /// @ai-generated — E2E: Verify that writing @verter/types to disk and using open_file
-    /// allows TSGO to resolve the imports. Tests three approaches:
-    /// 1. Pure virtual (open_file only, no disk file) — expected to fail
-    /// 2. Skeleton on disk (dir + package.json + stub) + virtual overlay — may work
-    /// 3. Full file on disk — known to work
-    ///
-    /// The LSP should use whichever minimal approach works.
-    #[tokio::test]
-    async fn test_e2e_virtual_verter_types_injection() {
-        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsgo_e2e_virtual_types");
-        let _ = std::fs::remove_dir_all(&tmp);
-        if create_test_project_without_verter_types(&tmp).is_err() {
-            eprintln!("skipping: could not create test project with vue types");
-            return;
-        }
-
-        // Compile Vue SFC to TSX (with embed_ambient_types: false — normal imports)
-        let vue_source = r#"<script setup lang="ts">
-const props = withDefaults(defineProps({ bar: String }), {})
-</script>
-<template>
-  <div>{{ bar }}</div>
-</template>"#;
-
-        let tsx = compile_vue_to_tsx(vue_source, "virtual_types");
-
-        // Verify TSX imports from @verter/types (not embedded declare module)
-        assert!(
-            tsx.contains(r#"from "@verter/types""#),
-            "TSX should import from @verter/types"
-        );
-
-        // Write the full @verter/types to disk (LSP-managed, transparent to user)
-        let verter_types_dir = tmp.join("node_modules/@verter/types");
-        std::fs::create_dir_all(&verter_types_dir).unwrap();
-        let types_content = verter_types_standalone_dts();
-        std::fs::write(verter_types_dir.join("index.d.ts"), types_content).unwrap();
-        std::fs::write(
-            verter_types_dir.join("package.json"),
-            r#"{"name":"@verter/types","types":"index.d.ts"}"#,
-        )
-        .unwrap();
-
-        // Write TSX to disk
-        let tsx_path = tmp.join("App.vue.tsx");
-        std::fs::write(&tsx_path, &tsx).unwrap();
-
-        // Spawn TSGO
-        let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
-        let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
-
-        // Open the TSX file
-        let tsx_file_path = tsx_path.to_str().unwrap().replace('\\', "/");
-        provider.open_file(&tsx_file_path, &tsx).await.unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-
-        // Hover on the props variable
-        let search = "const props = withDefaults";
-        let offset = tsx
-            .find(search)
-            .expect("TSX should contain const props = withDefaults") as u32
-            + 6; // skip "const "
-
-        let hover = provider.get_hover(&tsx_file_path, offset).await.unwrap();
-
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        let contents = hover
-            .map(|h| h.contents)
-            .unwrap_or_else(|| "NO HOVER".to_string());
-        eprintln!("LSP-managed @verter/types hover: {}", contents);
-        assert!(
-            !contents.contains(": any") && contents != "NO HOVER",
-            "props must NOT be 'any' with LSP-managed @verter/types — got: {}",
-            contents
-        );
-    }
-
-    /// @ai-generated — E2E: Test the exact user file with explicit vue imports.
-    /// Tests: import { withDefaults, defineProps } from 'vue' + multiline
-    #[tokio::test]
-    async fn test_e2e_with_defaults_explicit_import() {
-        let vue_source = r#"<script lang="ts" setup>
-import { withDefaults, defineProps } from 'vue';
-
-const props = withDefaults(
-  defineProps({
-    bar: String,
-  }),
-  {},
-);
-
-</script>
-
-<template>
-  <div>{{ props }}</div>
-  <div>{{ $props }}</div>
-  <div>{{ bar }}</div>
-</template>
-"#;
-        let tsx = compile_vue_to_tsx(vue_source, "explicit_import");
-
-        // Find "props" in "const props = withDefaults(...)"
-        let search = "const props = withDefaults";
-        let offset = tsx.find(search).expect("should find const props") as u32 + 6; // "props"
-
-        let hover = e2e_hover_at(vue_source, "explicit_import", offset).await;
-        let Some(contents) = hover else { return };
-        eprintln!("Explicit import hover on props: {}", contents);
-        assert!(
-            !contents.contains(": any"),
-            "props must NOT be 'any' with explicit vue import — TSGO returned: {}",
-            contents
-        );
-    }
-
-    /// @ai-generated — E2E: Replicates real LSP timing where TSGO spawns BEFORE
-    /// @verter/types is written to disk. This matches the actual flow:
-    /// 1. main.rs spawns TSGO
-    /// 2. initialized() materialises @verter/types to node_modules
-    /// 3. didOpen sends TSX files
-    ///
-    /// Tests whether TSGO can resolve @verter/types that appear after startup.
-    #[tokio::test]
-    async fn test_e2e_verter_types_written_after_tsgo_spawn() {
-        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsgo_e2e_late_types");
-        let _ = std::fs::remove_dir_all(&tmp);
-        if create_test_project_without_verter_types(&tmp).is_err() {
-            eprintln!("skipping: could not create test project with vue types");
-            return;
-        }
-
-        // Compile Vue SFC to TSX
-        let vue_source = r#"<script setup lang="ts">
-const props = withDefaults(defineProps({ bar: String }), {})
-</script>
-<template>
-  <div>{{ bar }}</div>
-</template>"#;
-        let tsx = compile_vue_to_tsx(vue_source, "late_types");
-
-        // Write TSX to disk (needed for TSGO)
-        let tsx_path = tmp.join("App.vue.tsx");
-        std::fs::write(&tsx_path, &tsx).unwrap();
-
-        // 1. Spawn TSGO FIRST — no @verter/types on disk yet
-        let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
-        let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
-
-        // Let TSGO initialise
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-        // 2. NOW write @verter/types to disk (simulates initialized() handler)
-        let verter_types_dir = tmp.join("node_modules/@verter/types");
-        std::fs::create_dir_all(&verter_types_dir).unwrap();
-        std::fs::write(
-            verter_types_dir.join("index.d.ts"),
-            verter_types_standalone_dts(),
-        )
-        .unwrap();
-        std::fs::write(
-            verter_types_dir.join("package.json"),
-            r#"{"name":"@verter/types","types":"index.d.ts"}"#,
-        )
-        .unwrap();
-
-        // 3. Open the TSX file (simulates didOpen handler)
-        let tsx_file_path = tsx_path.to_str().unwrap().replace('\\', "/");
-        provider.open_file(&tsx_file_path, &tsx).await.unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-
-        // Hover on props
-        let search = "const props = withDefaults";
-        let offset = tsx
-            .find(search)
-            .expect("TSX should contain const props = withDefaults") as u32
-            + 6;
-
-        let hover = provider.get_hover(&tsx_file_path, offset).await.unwrap();
-
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        let contents = hover
-            .map(|h| h.contents)
-            .unwrap_or_else(|| "NO HOVER".to_string());
-        eprintln!("Late-written @verter/types hover: {}", contents);
-        assert!(
-            !contents.contains(": any") && contents != "NO HOVER",
-            "props must NOT be 'any' when @verter/types written after TSGO spawn — got: {}",
-            contents
-        );
-    }
-
-    // ── Parsing helper unit tests ─────────────────────────────────────
-
-    /// @ai-generated — position_to_offset converts line/char to byte offset
-    #[test]
-    fn test_position_to_offset_fn() {
-        let content = "line1\nline2\nline3";
-        assert_eq!(position_to_offset(content, 0, 0), 0);
-        assert_eq!(position_to_offset(content, 0, 3), 3);
-        assert_eq!(position_to_offset(content, 1, 0), 6);
-        assert_eq!(position_to_offset(content, 1, 2), 8);
-        assert_eq!(position_to_offset(content, 2, 0), 12);
-    }
-
-    #[test]
-    fn test_position_to_offset_utf16_bmp() {
-        // "cafÃ©\nworld" — 'Ã©' is 2 bytes UTF-8, 1 UTF-16 code unit
-        let content = "cafÃ©\nworld";
-        // UTF-16 char 4 = end of "cafÃ©" = byte 5
-        assert_eq!(position_to_offset(content, 0, 4), 5);
-        assert_eq!(position_to_offset(content, 1, 0), 6);
-    }
-
-    #[test]
-    fn test_position_to_offset_utf16_supplementary() {
-        // "aðŸ˜€b" — 'ðŸ˜€' is 4 bytes UTF-8, 2 UTF-16 code units
-        let content = "aðŸ˜€b";
-        // UTF-16: 'a'=1, 'ðŸ˜€'=2 (surrogate pair), 'b' at char 3 = byte 5
-        assert_eq!(position_to_offset(content, 0, 3), 5);
-    }
-
-    #[test]
-    fn test_offset_to_position_utf16_bmp() {
-        // byte 5 = end of "cafÃ©" = UTF-16 char 4
-        assert_eq!(offset_to_position("cafÃ©\nworld", 5), (0, 4));
-    }
-
-    #[test]
-    fn test_offset_to_position_utf16_supplementary() {
-        // 'b' at byte 5 = UTF-16 char 3
-        assert_eq!(offset_to_position("aðŸ˜€b", 5), (0, 3));
-    }
-
-    /// @ai-generated — parse_completion_item parses a JSON completion item
-    #[test]
-    fn test_parse_completion_item() {
-        let json = serde_json::json!({
-            "label": "myVar",
-            "kind": 6,
-            "detail": "const myVar: string",
-            "insertText": "myVar",
-            "sortText": "0myVar"
-        });
-        let item = parse_completion_item(&json, None).unwrap();
-        assert_eq!(item.label, "myVar");
-        assert!(matches!(item.kind, Some(CompletionKind::Variable)));
-        assert_eq!(item.detail.as_deref(), Some("const myVar: string"));
-        assert_eq!(item.insert_text.as_deref(), Some("myVar"));
-    }
-
-    #[test]
-    fn test_parse_completion_item_lsp_kind_property() {
-        // LSP kind 10 = Property — must map to CompletionKind::Property, not Text
-        let json = serde_json::json!({ "label": "name", "kind": 10 });
-        let item = parse_completion_item(&json, None).unwrap();
-        assert_eq!(
-            item.kind,
-            Some(CompletionKind::Property),
-            "LSP kind 10 (Property) must not fall to Text fallback"
-        );
-    }
-
-    #[test]
-    fn test_parse_completion_item_lsp_kind_16_is_not_property() {
-        // LSP kind 16 = Color, NOT Property. Verify it doesn't map to Property.
-        let json = serde_json::json!({ "label": "red", "kind": 16 });
-        let item = parse_completion_item(&json, None).unwrap();
-        assert_ne!(
-            item.kind,
-            Some(CompletionKind::Property),
-            "LSP kind 16 (Color) must not be mapped to Property"
-        );
-    }
-
-    /// @ai-generated — parse_lsp_location parses an LSP Location with content
-    #[test]
-    fn test_parse_lsp_location() {
-        let json = serde_json::json!({
-            "uri": "file:///test.ts",
-            "range": {
-                "start": { "line": 1, "character": 0 },
-                "end": { "line": 1, "character": 5 }
-            }
-        });
-        let content = "line1\nline2\n";
-        let loc = parse_lsp_location(&json, Some(content)).unwrap();
-        // URI is converted to filesystem path (Unix: /test.ts)
-        assert_eq!(loc.path, "/test.ts");
-        assert_eq!(loc.start, 6);
-        assert_eq!(loc.end, 11);
-    }
-
-    #[test]
-    fn test_parse_lsp_location_without_inline_content_reads_disk_content() {
-        let temp_root =
-            std::env::temp_dir().join(format!("verter-tsgo-location-disk-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_root);
-        std::fs::create_dir_all(&temp_root).unwrap();
-        let file_path = temp_root.join("types.ts");
-        let content = "export interface Props {\n  label: string;\n}\n";
-        std::fs::write(&file_path, content).unwrap();
-        let uri = path_to_file_uri_string(file_path.to_string_lossy().as_ref());
-        let json = serde_json::json!({
-            "uri": uri,
-            "range": {
-                "start": { "line": 1, "character": 2 },
-                "end": { "line": 1, "character": 7 }
-            }
-        });
-
-        let loc = parse_lsp_location(&json, None).unwrap();
-        assert_eq!(loc.start, 27);
-        assert_eq!(loc.end, 32);
-
-        let _ = std::fs::remove_dir_all(&temp_root);
-    }
-
-    /// @ai-generated — parse_lsp_diagnostic extracts diagnostics from JSON
-    #[test]
-    fn test_parse_lsp_diagnostic() {
-        let json = serde_json::json!({
-            "range": {
-                "start": { "line": 0, "character": 5 },
-                "end": { "line": 0, "character": 10 }
+                "end": { "line": 0, "character": 1 }
             },
-            "severity": 1,
-            "code": 2322,
-            "message": "Type error"
+            "newText": "x"
         });
-        let diag = parse_lsp_diagnostic(&json, None).unwrap();
-        assert_eq!(diag.message, "Type error");
-        assert!(matches!(diag.severity, TypeDiagnosticSeverity::Error));
-        assert_eq!(diag.code.as_deref(), Some("2322"));
+        let uri = absent_target_uri("code_edit_gone");
+        let edit = parse_text_edit_to_code_edit(&uri, &te, &|_p| None);
+        assert!(
+            edit.is_none(),
+            "a code-action edit whose content is unavailable must be DROPPED (fail-closed), never \
+             packed: {edit:?}"
+        );
     }
 
-    /// @ai-generated — parse_signature_help parses a SignatureHelp response
+    /// A rename edit whose target is absent from the cache AND unreadable on disk must be DROPPED —
+    /// a rename is a WRITE edit, so a packed line:col offset would corrupt the file.
     #[test]
-    fn test_parse_signature_help_fn() {
-        let json = serde_json::json!({
-            "signatures": [{
-                "label": "fn(x: number): void",
-                "documentation": "A test function",
-                "parameters": [{ "label": "x", "documentation": "The number param" }]
-            }],
-            "activeSignature": 0,
-            "activeParameter": 0
-        });
-        let sig = parse_signature_help(&json);
-        assert_eq!(sig.signatures.len(), 1);
-        assert_eq!(sig.signatures[0].label, "fn(x: number): void");
-        assert_eq!(sig.signatures[0].parameters.len(), 1);
-        assert_eq!(sig.active_signature, Some(0));
+    fn parse_rename_edit_drops_when_content_unavailable() {
+        let uri = absent_target_uri("rename_gone");
+        let loc = parse_rename_edit(&uri, &edit_json(), &|_p| None);
+        assert!(
+            loc.is_none(),
+            "a rename edit whose content is unavailable must be DROPPED (fail-closed), never \
+             packed: {loc:?}"
+        );
     }
 
-    /// @ai-generated — decode_semantic_tokens decodes delta-encoded tokens
+    /// A code-action edit whose content IS available but whose position is OUT OF RANGE (past EOF)
+    /// is DROPPED, not clamped to a content-length offset — a clamped WRITE corrupts the file.
     #[test]
-    fn test_decode_semantic_tokens() {
-        let content = "const msg = 'hello';\nconst count = 42;\n";
-        let data: Vec<serde_json::Value> = vec![
-            0.into(),
-            0.into(),
-            5.into(),
-            15.into(),
-            0.into(),
-            0.into(),
-            6.into(),
-            3.into(),
-            8.into(),
-            0.into(),
-        ];
-        let tokens = decode_semantic_tokens(&data, Some(content));
-        assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].start, 0);
-        assert_eq!(tokens[0].length, 5);
-        assert_eq!(tokens[1].start, 6);
-        assert_eq!(tokens[1].length, 3);
-    }
-
-    /// @ai-generated — parse_document_highlight parses highlight JSON
-    #[test]
-    fn test_parse_document_highlight() {
-        let json = serde_json::json!({
+    fn parse_text_edit_to_code_edit_drops_out_of_range_position() {
+        let te = serde_json::json!({
             "range": {
-                "start": { "line": 0, "character": 6 },
-                "end": { "line": 0, "character": 9 }
+                // Line 999 is far past the 1-line content → the codec would clamp to EOF.
+                "start": { "line": 999, "character": 0 },
+                "end": { "line": 999, "character": 3 }
             },
-            "kind": 2
+            "newText": "boom"
         });
-        let content = "const msg = 'hello';\n";
-        let hl = parse_document_highlight(&json, Some(content)).unwrap();
-        assert_eq!(hl.start, 6);
-        assert_eq!(hl.end, 9);
-        assert!(matches!(hl.kind, TypeDocumentHighlightKind::Read));
+        let content = "short";
+        let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/oob.ts").then_some(content) };
+        let edit = parse_text_edit_to_code_edit("file:///D:/proj/oob.ts", &te, &content_for);
+        assert!(
+            edit.is_none(),
+            "an out-of-range code-action edit must be DROPPED, never clamped to EOF: {edit:?}"
+        );
     }
 
-    /// @ai-generated — parse_code_action extracts edits from code action JSON
+    /// A `line`/`character` that exceeds `u32::MAX` must DROP the edit. The danger is a SILENT
+    /// `as u32` truncation: `u32::MAX as u64 + 1` wraps to `0`, an in-range (line 0 / char 0)
+    /// position the checked converter would ACCEPT — so the edit would land at the wrong offset.
+    /// Content is valid and the wrapped position is in range, so the ONLY reason to drop is the
+    /// overflow itself; that is what makes this discriminating.
     #[test]
-    fn test_parse_code_action() {
-        let json = serde_json::json!({
-            "title": "Add import",
-            "kind": "quickfix",
-            "edit": {
-                "changes": {
-                    "file:///test.ts": [{
-                        "range": {
-                            "start": { "line": 0, "character": 0 },
-                            "end": { "line": 0, "character": 0 }
-                        },
-                        "newText": "import { ref } from 'vue';\n"
-                    }]
-                }
-            }
+    fn parse_text_edit_to_code_edit_drops_on_position_overflow() {
+        // u32::MAX + 1 → truncates to 0 (a VALID line 0 / char 0) under a lossy `as u32`.
+        let overflow = u32::MAX as u64 + 1;
+        let te = serde_json::json!({
+            "range": {
+                "start": { "line": overflow, "character": 0 },
+                "end": { "line": 0, "character": 1 }
+            },
+            "newText": "boom"
         });
-        let action = parse_code_action(&json, None).unwrap();
-        assert_eq!(action.title, "Add import");
-        assert_eq!(action.kind.as_deref(), Some("quickfix"));
-        assert_eq!(action.edits.len(), 1);
-        assert_eq!(action.edits[0].new_text, "import { ref } from 'vue';\n");
-    }
-
-    // ── Dead pipe / process crash regression tests ──────────────
-
-    /// Helper: spawn a short-lived child process that exits immediately.
-    /// Returns the child handle, piped stdin, and piped stdout.
-    async fn spawn_short_lived_process() -> (Child, ChildStdin, ChildStdout) {
-        let mut child = if cfg!(windows) {
-            tokio::process::Command::new("cmd")
-                .args(["/c", "exit", "0"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("failed to spawn cmd")
-        } else {
-            tokio::process::Command::new("true")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("failed to spawn true")
-        };
-        let stdin = child.stdin.take().expect("no stdin");
-        let stdout = child.stdout.take().expect("no stdout");
-        (child, stdin, stdout)
-    }
-
-    /// Helper: spawn a long-lived child process without going through a shell wrapper.
-    ///
-    /// On Windows we avoid `cmd /c timeout` because the drop/kill cleanup tests can
-    /// hang inside Tokio's process wrapper when the child is a shell-managed command.
-    /// Spawning the long-lived binary directly keeps the lifecycle behavior consistent
-    /// with Linux/macOS `sleep`.
-    fn spawn_long_lived_process(stdin: Stdio, stdout: Stdio, kill_on_drop: bool) -> Child {
-        let mut command = if cfg!(windows) {
-            let mut command = tokio::process::Command::new("powershell");
-            command.args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Start-Sleep -Seconds 30",
-            ]);
-            command
-        } else {
-            let mut command = tokio::process::Command::new("sleep");
-            command.arg("30");
-            command
-        };
-
-        command
-            .stdin(stdin)
-            .stdout(stdout)
-            .stderr(Stdio::null())
-            .kill_on_drop(kill_on_drop)
-            .spawn()
-            .expect("failed to spawn long-lived process")
-    }
-
-    async fn wait_for_process_exit(pid: u32, timeout: std::time::Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            if !is_process_alive(pid) {
-                return true;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    }
-
-    /// @ai-generated — Regression: notify fails with descriptive error when child process has died.
-    ///
-    /// Simulates the OS error 232 "The pipe is being closed" scenario on Windows.
-    /// The transport must return a `TypeProviderError`, not panic or hang.
-    #[tokio::test]
-    async fn test_notify_fails_on_dead_pipe() {
-        let (mut child, stdin, _stdout) = spawn_short_lived_process().await;
-
-        // Wait for the process to exit so the pipe is truly closed
-        let _ = child.wait().await;
-
-        // Set up channel-based transport. The writer loop will fail on the dead pipe.
-        let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
-
-        let transport = test_transport(stdin_tx);
-
-        let result = transport
-            .notify("textDocument/didOpen", serde_json::json!({"test": true}))
-            .await;
-        // With channel-based transport, the send succeeds (channel is open), but the
-        // writer loop may fail silently on the dead pipe. The notify itself won't error
-        // since it's fire-and-forget via channel. This is acceptable — the crash_notify
-        // mechanism handles dead pipe detection.
-        // If the writer loop has already exited (channel closed), send fails.
-        // Either way, the test should not hang.
-        let _ = result;
-    }
-
-    /// @ai-generated — Regression: request fails with write/flush error when child process has died.
-    ///
-    /// The request must not hang waiting for a response from a dead process.
-    #[tokio::test]
-    async fn test_request_fails_on_dead_pipe() {
-        let (mut child, stdin, _stdout) = spawn_short_lived_process().await;
-
-        // Wait for the process to exit
-        let _ = child.wait().await;
-
-        let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
-
-        let transport = test_transport(stdin_tx);
-
-        // With the channel approach, the send succeeds but the writer may fail silently.
-        // The request will time out because no response comes. Use a short timeout to avoid
-        // waiting the full 10s.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            transport.request("textDocument/hover", serde_json::json!({"test": true})),
-        )
-        .await;
-        // Either the channel send fails (writer exited), or we time out. Both are acceptable.
-        // The critical thing is that we do NOT hang.
-        if let Ok(inner) = result {
-            // If it completed, it should be an error (either channel closed or write error)
-            assert!(inner.is_err(), "request should fail on dead pipe");
-        }
-        // If it timed out, that's also fine — the test passed without hanging.
-    }
-
-    /// @ai-generated — Regression: read_loop exits gracefully on EOF without panic.
-    ///
-    /// When the child process dies, stdout closes (EOF). The read_loop must
-    /// exit cleanly, not loop forever or panic.
-    #[tokio::test]
-    async fn test_read_loop_exits_on_eof() {
-        let (mut child, stdin, stdout) = spawn_short_lived_process().await;
-
-        // Wait for the process to exit (stdout will close)
-        let _ = child.wait().await;
-
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let contents_cache: Arc<Mutex<HashMap<String, String>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
-
-        // The read_loop should exit quickly on EOF, not hang
-        let handle = tokio::spawn(read_loop(
-            stdout,
-            pending,
-            diagnostics_cache,
-            contents_cache,
-            stdin_tx,
-            None,
-        ));
-
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        let content = "ab";
+        let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/ovf.ts").then_some(content) };
+        let edit = parse_text_edit_to_code_edit("file:///D:/proj/ovf.ts", &te, &content_for);
         assert!(
-            result.is_ok(),
-            "read_loop should exit within 5 seconds on EOF, not hang"
-        );
-        // The join handle should complete without panic
-        result.unwrap().expect("read_loop should not panic");
-    }
-
-    /// @ai-generated — Regression: pending requests get channel-closed error when read_loop exits.
-    ///
-    /// If a request is registered but the read_loop dies (process crash), the
-    /// pending sender is dropped, causing the receiver to get a RecvError.
-    /// This must result in a "response channel closed" error, not a hang.
-    #[tokio::test]
-    async fn test_pending_request_channel_closed_on_read_loop_exit() {
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        // Register a pending request manually
-        let (tx, rx) = oneshot::channel();
-        pending.lock().await.insert(42, tx);
-
-        // Drop the sender side by removing it — simulates read_loop exiting
-        // and the pending HashMap being dropped/cleared
-        pending.lock().await.remove(&42);
-        // tx is now dropped, so rx should get an error
-
-        let result = rx.await;
-        assert!(
-            result.is_err(),
-            "receiver should get error when sender is dropped (read_loop died)"
-        );
-    }
-
-    /// @ai-generated — Regression: TsgoTypeProvider operations fail cleanly after process death.
-    ///
-    /// This is an end-to-end test using a real process that exits immediately.
-    /// All TypeProvider operations should return errors, not hang or panic.
-    #[tokio::test]
-    async fn test_provider_operations_fail_after_process_death() {
-        let (mut child, stdin, stdout) = spawn_short_lived_process().await;
-
-        // Wait for the process to exit
-        let _ = child.wait().await;
-
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
-        let transport = Arc::new(test_transport_with_pending(
-            stdin_tx.clone(),
-            Arc::clone(&pending),
-        ));
-
-        // Start the read_loop (it will exit immediately on EOF)
-        let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let contents_cache: Arc<Mutex<HashMap<String, String>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        tokio::spawn(read_loop(
-            stdout,
-            Arc::clone(&pending),
-            Arc::clone(&diagnostics_cache),
-            Arc::clone(&contents_cache),
-            stdin_tx,
-            None,
-        ));
-
-        let provider = TsgoTypeProvider {
-            transport,
-            child,
-            versions: Arc::new(Mutex::new(HashMap::new())),
-            contents: Arc::new(Mutex::new(HashMap::new())),
-            diagnostics_cache,
-        };
-
-        // All operations should NOT hang, which is the critical invariant.
-        // With channel-based transport, fire-and-forget notifications (open/update/close)
-        // may appear to succeed on the first call if the writer loop hasn't exited yet.
-        // Subsequent calls will fail once the writer loop detects the dead pipe and exits.
-        //
-        // request()-based operations (get_diagnostics, get_hover) have a 10s internal timeout,
-        // so we need 12s here to accommodate the internal timeout + buffer.
-        let timeout = std::time::Duration::from_secs(12);
-
-        // First call: may succeed (channel send works, writer loop hasn't failed yet)
-        let result =
-            tokio::time::timeout(timeout, provider.open_file("test.tsx", "const x = 1;")).await;
-        assert!(result.is_ok(), "open_file should not hang");
-
-        // Give the writer loop time to detect the dead pipe and exit
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // Subsequent calls should fail because the writer loop has exited (channel closed)
-        let result =
-            tokio::time::timeout(timeout, provider.update_file("test.tsx", "const x = 2;")).await;
-        assert!(result.is_ok(), "update_file should not hang");
-
-        let result = tokio::time::timeout(timeout, provider.close_file("test.tsx")).await;
-        assert!(result.is_ok(), "close_file should not hang");
-
-        // get_diagnostics does a transport.request() with a 10s internal timeout.
-        // On a dead pipe, the request either fails fast (channel closed) or times out
-        // and falls back to cache. Either way, it should complete within 12s.
-        let result = tokio::time::timeout(timeout, provider.get_diagnostics("test.tsx")).await;
-        assert!(result.is_ok(), "get_diagnostics should not hang");
-        let diags = result.unwrap();
-        assert!(
-            diags.is_ok(),
-            "get_diagnostics should succeed (cache fallback)"
-        );
-        assert!(diags.unwrap().is_empty(), "no cached diagnostics expected");
-    }
-
-    /// @ai-generated — E2E: TSGO returns type diagnostics via pull diagnostics.
-    ///
-    /// Uses a plain TypeScript file with a clear type error to verify the full
-    /// pipeline: open_file → get_diagnostics (textDocument/diagnostic request)
-    /// → TSGO returns type errors.
-    ///
-    /// Before the fix, get_diagnostics relied on push diagnostics (publishDiagnostics)
-    /// which TSGO doesn't send. Now uses pull diagnostics (textDocument/diagnostic).
-    #[tokio::test]
-    async fn test_e2e_tsgo_diagnostics_for_type_error() {
-        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsgo_e2e_diag");
-        let _ = std::fs::remove_dir_all(&tmp);
-        create_test_project(&tmp).unwrap();
-
-        // Simple TypeScript file with a clear type error.
-        // Using plain .ts (not Verter-generated TSX) avoids dependency on @verter/types.
-        let ts_content = r#"const x: number = "hello";
-const y: boolean = 42;
-"#;
-
-        let ts_path = tmp.join("error.ts");
-        std::fs::write(&ts_path, ts_content).unwrap();
-
-        let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
-        let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
-
-        // Open the TS file in TSGO (this registers a pending notify)
-        let ts_file_path = ts_path.to_str().unwrap().replace('\\', "/");
-        provider.open_file(&ts_file_path, ts_content).await.unwrap();
-
-        // get_diagnostics waits for TSGO to send publishDiagnostics via the pending notify.
-        // The 3s internal timeout + 10s outer timeout gives TSGO time to type-check.
-        let diags = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            provider.get_diagnostics(&ts_file_path),
-        )
-        .await
-        .expect("should not hang")
-        .expect("should not error");
-
-        // get_diagnostics now uses pull diagnostics (textDocument/diagnostic request),
-        // so it should return results directly without relying on push notifications.
-
-        eprintln!("TSGO returned {} diagnostics", diags.len());
-        for d in &diags {
-            eprintln!("  [{:?}] {} (code: {:?})", d.severity, d.message, d.code);
-        }
-
-        // TSGO should report type errors: "hello" not assignable to number, 42 not assignable to boolean.
-        assert!(
-            !diags.is_empty(),
-            "TSGO should report at least one diagnostic for type errors"
+            edit.is_none(),
+            "a u64>u32::MAX position must be DROPPED, never truncated into an in-range offset: \
+             {edit:?}"
         );
 
-        // Verify at least one diagnostic mentions type incompatibility
-        let has_type_error = diags.iter().any(|d| d.message.contains("not assignable"));
-        assert!(
-            has_type_error,
-            "should have a 'not assignable' diagnostic, got: {:?}",
-            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
-        );
-
-        // Negative: diagnostics should also be cached for fallback
-        let cache_key = normalize_file_uri(&TsgoTypeProvider::path_to_uri(&ts_file_path));
-        let cached = provider.diagnostics_cache.lock().await;
-        assert!(
-            cached.get(&cache_key).is_some(),
-            "diagnostics should be cached after pull request"
-        );
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    /// @ai-generated — E2E: TSGO returns type diagnostics for Verter-generated TSX from a Vue SFC.
-    ///
-    /// Compiles a Vue SFC with a clear type error (assigning `{}` to a `const boolean`)
-    /// through verter_session to produce TSX, then feeds it to TSGO and verifies that
-    /// pull diagnostics return the expected type error.
-    ///
-    /// This tests the full pipeline: Vue SFC → Verter TSX codegen → TSGO type check.
-    #[tokio::test]
-    async fn test_e2e_tsgo_diagnostics_for_vue_sfc() {
-        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsgo_e2e_vue_diag");
-        let _ = std::fs::remove_dir_all(&tmp);
-        if create_test_project_with_vue_types(&tmp).is_err() {
-            eprintln!("skipping: could not create test project with vue types");
-            return;
-        }
-
-        // Vue SFC with a clear type error: assigning {} to a const boolean
-        let vue_source = r#"<script lang="ts" setup>
-const isLoggedIn = false;
-let hasPermission = false;
-
-isLoggedIn = {};
-</script>
-<template>
-  <div v-if="isLoggedIn && hasPermission">Full Access</div>
-  <div v-else>No Access</div>
-</template>"#;
-
-        let tsx_code = compile_vue_to_tsx(vue_source, "TypeErrorComp");
-        eprintln!("Generated TSX ({} bytes):\n{}", tsx_code.len(), &tsx_code);
-
-        // Verify the TSX contains the type error scenario
-        assert!(
-            tsx_code.contains("isLoggedIn"),
-            "TSX should contain isLoggedIn"
-        );
-
-        let tsx_path = tmp.join("TypeErrorComp.vue.tsx");
-        std::fs::write(&tsx_path, &tsx_code).unwrap();
-
-        let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
-        let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
-
-        let tsx_file_path = tsx_path.to_str().unwrap().replace('\\', "/");
-        provider.open_file(&tsx_file_path, &tsx_code).await.unwrap();
-
-        // Give TSGO a moment to process the project types before requesting diagnostics.
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-        let diags = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            provider.get_diagnostics(&tsx_file_path),
-        )
-        .await
-        .expect("should not hang")
-        .expect("should not error");
-
-        eprintln!("TSGO returned {} diagnostics for Vue SFC", diags.len());
-        for d in &diags {
-            eprintln!("  [{:?}] {} (code: {:?})", d.severity, d.message, d.code);
-        }
-
-        // The TSX has `isLoggedIn = {}` which assigns an object to a const boolean.
-        // TSGO should report at least one type error.
-        assert!(
-            !diags.is_empty(),
-            "TSGO should report at least one diagnostic for the Vue SFC type error"
-        );
-
-        // Verify at least one diagnostic mentions assignment or type incompatibility
-        let has_type_error = diags.iter().any(|d| {
-            d.message.contains("not assignable")
-                || d.message.contains("Cannot assign")
-                || d.message.contains("constant")
+        // POSITIVE CONTROL: an in-range position with the SAME content still produces the correct
+        // edit — the overflow guard must not change in-range behavior.
+        let te_ok = serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 1 }
+            },
+            "newText": "x"
         });
-        assert!(
-            has_type_error,
-            "should have a type/assignment error diagnostic, got: {:?}",
-            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
-        );
-
-        // Negative: no diagnostic should mention missing ___VERTER___ types
-        // (they should be resolved via @verter/types in node_modules)
-        let has_verter_type_error = diags
-            .iter()
-            .any(|d| d.message.contains("___VERTER___") && d.message.contains("Cannot find"));
-        assert!(
-            !has_verter_type_error,
-            "should NOT have errors about missing ___VERTER___ types — they should resolve via @verter/types"
-        );
-
-        let _ = std::fs::remove_dir_all(&tmp);
+        let ok = parse_text_edit_to_code_edit("file:///D:/proj/ovf.ts", &te_ok, &content_for)
+            .expect("an in-range edit must still be produced");
+        assert_eq!((ok.start, ok.end), (0, 1), "in-range offsets unchanged");
     }
 
-    /// @ai-generated — E2E: TSGO diagnostics for type errors in template expressions
-    /// (v-if, interpolations) must be returned by TSGO and must map back to Vue SFC
-    /// positions via the source map.
-    #[tokio::test]
-    async fn test_e2e_tsgo_diagnostics_in_template_expressions() {
-        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsgo_e2e_template_diag");
-        let _ = std::fs::remove_dir_all(&tmp);
-        if create_test_project_with_vue_types(&tmp).is_err() {
-            eprintln!("skipping: could not create test project with vue types");
-            return;
-        }
-
-        // Vue SFC with type errors specifically in template expressions:
-        // 1. v-if calls checkAccess(name) where name is string but param expects number
-        // 2. Interpolation references undefined variable `missing`
-        let vue_source = r#"<script lang="ts" setup>
-function checkAccess(level: number): boolean {
-  return level > 0;
-}
-const name: string = "hello";
-</script>
-<template>
-  <div v-if="checkAccess(name)">Access granted</div>
-  <p>{{ missing }}</p>
-</template>"#;
-
-        let (tsx_code, source_map_json) =
-            compile_vue_to_tsx_with_map(vue_source, "TemplateDiagComp");
-        eprintln!("Generated TSX ({} bytes):\n{}", tsx_code.len(), &tsx_code);
-        if let Some(ref sm) = source_map_json {
-            eprintln!("Source map ({} bytes): {}", sm.len(), sm);
-            // Dump all source map tokens to understand coverage
-            let parsed_map = oxc_sourcemap::SourceMap::from_json_string(sm).unwrap();
-            eprintln!("Source map tokens:");
-            for token in parsed_map.get_tokens() {
-                let has_src = token.get_source_id().is_some();
-                eprintln!(
-                    "  gen {}:{} → src {}:{} (has_source: {})",
-                    token.get_dst_line(),
-                    token.get_dst_col(),
-                    token.get_src_line(),
-                    token.get_src_col(),
-                    has_src
-                );
-            }
-        } else {
-            eprintln!("WARNING: no source map generated");
-        }
-
-        // Verify the TSX contains our template expressions
-        assert!(
-            tsx_code.contains("checkAccess"),
-            "TSX should contain checkAccess call from template"
-        );
-
-        let tsx_path = tmp.join("TemplateDiagComp.vue.tsx");
-        std::fs::write(&tsx_path, &tsx_code).unwrap();
-
-        let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
-        let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
-
-        let tsx_file_path = tsx_path.to_str().unwrap().replace('\\', "/");
-        provider.open_file(&tsx_file_path, &tsx_code).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-        let diags = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            provider.get_diagnostics(&tsx_file_path),
-        )
-        .await
-        .expect("should not hang")
-        .expect("should not error");
-
-        eprintln!(
-            "TSGO returned {} diagnostics for template expressions",
-            diags.len()
-        );
-        for d in &diags {
-            eprintln!(
-                "  [{:?}] {}..{} {} (code: {:?})",
-                d.severity, d.start, d.end, d.message, d.code
-            );
-        }
-
-        // TSGO should report diagnostics for the template type errors
-        assert!(
-            !diags.is_empty(),
-            "TSGO should report diagnostics for template expression type errors"
-        );
-
-        // Now test position mapping: verify template diagnostics map back to Vue SFC
-        use crate::documents::line_index::LineIndex;
-        use crate::documents::position_map::PositionMapper;
-        use crate::tsgo::merge::tsx_range_to_vue_range;
-        use tower_lsp_server::ls_types::PositionEncoding;
-
-        let source_map = source_map_json.expect("source map must be present for mapping");
-        let mapper = PositionMapper::from_json(&source_map).expect("valid source map");
-        let tsx_li = LineIndex::new(&tsx_code, PositionEncoding::Utf16);
-        let vue_li = LineIndex::new(vue_source, PositionEncoding::Utf16);
-
-        // Template starts at line 6 (0-indexed) in the Vue source: "<template>"
-        let template_start_line = vue_source[..vue_source.find("<template>").unwrap()]
-            .chars()
-            .filter(|c| *c == '\n')
-            .count() as u32;
-        eprintln!("Template starts at Vue line {template_start_line} (0-indexed)");
-
-        let mut mapped_count = 0u32;
-        let mut template_diag_count = 0u32;
-        for d in &diags {
-            // Debug each step of the mapping pipeline
-            let start_pos = tsx_li.offset_to_position(d.start);
-            let end_pos = tsx_li.offset_to_position(d.end);
-            eprintln!(
-                "  Debug: TSX offset {}..{} → TSX pos {:?}..{:?}",
-                d.start, d.end, start_pos, end_pos
-            );
-            if let (Some(sp), Some(ep)) = (&start_pos, &end_pos) {
-                let vue_start = mapper.tsx_to_vue(sp.line, sp.character);
-                let vue_end = mapper.tsx_to_vue(ep.line, ep.character);
-                eprintln!("    → Vue pos {:?}..{:?}", vue_start, vue_end);
-                if let (Some(vs), Some(ve)) = (&vue_start, &vue_end) {
-                    let start_lsp = tower_lsp_server::ls_types::Position {
-                        line: vs.line,
-                        character: vs.column,
-                    };
-                    let end_lsp = tower_lsp_server::ls_types::Position {
-                        line: ve.line,
-                        character: ve.column,
-                    };
-                    let s_off = vue_li.position_to_offset(&start_lsp);
-                    let e_off = vue_li.position_to_offset(&end_lsp);
-                    eprintln!("    → Vue offsets: start={:?}, end={:?}", s_off, e_off);
-                }
-            }
-
-            let vue_range = tsx_range_to_vue_range(d.start, d.end, &tsx_li, &mapper, &vue_li);
-            if let Some(range) = vue_range {
-                mapped_count += 1;
-                eprintln!(
-                    "  Mapped: TSX {}..{} → Vue {}:{}..{}:{} — {}",
-                    d.start,
-                    d.end,
-                    range.start.line,
-                    range.start.character,
-                    range.end.line,
-                    range.end.character,
-                    d.message
-                );
-                if range.start.line >= template_start_line {
-                    template_diag_count += 1;
-                }
-            } else {
-                eprintln!(
-                    "  DROPPED: TSX {}..{} — {} (failed to map)",
-                    d.start, d.end, d.message
-                );
-            }
-        }
-
-        eprintln!(
-            "Mapped: {mapped_count}/{}, in template: {template_diag_count}",
-            diags.len()
-        );
-
-        // At least one diagnostic must successfully map to a template line
-        assert!(
-            template_diag_count > 0,
-            "At least one TSGO diagnostic should map to a template position (line >= {template_start_line}), \
-             but {mapped_count}/{} mapped total and 0 were in the template region",
-            diags.len()
-        );
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    /// @ai-generated — Verify source map round-trip for template positions.
-    /// Regression test: template expression positions must map correctly
-    /// Vue→TSX→Vue (round-trip) for both valid and invalid expressions.
+    /// A rename span whose `character` exceeds `u32::MAX` must DROP the location. `u32::MAX + 1`
+    /// truncates to `0` (a valid char 0 on line 0) under a lossy `as u32`, so the checked converter
+    /// alone cannot catch it — the truncation must fail closed BEFORE the converter runs.
     #[test]
-    fn test_source_map_roundtrip_template_positions() {
-        use crate::documents::position_map::PositionMapper;
-
-        // Helper: compile, build mapper, assert round-trip for a Vue position
-        fn assert_roundtrip(vue_source: &str, name: &str, vue_line: u32, vue_col: u32) {
-            let (_tsx_code, source_map_json) = compile_vue_to_tsx_with_map(vue_source, name);
-            let sm_json = source_map_json.expect("source map must be present");
-            let mapper = PositionMapper::from_json(&sm_json).expect("valid source map");
-
-            let tsx_pos = mapper.vue_to_tsx(vue_line, vue_col);
-            assert!(
-                tsx_pos.is_some(),
-                "[{name}] vue_to_tsx should succeed for Vue {vue_line}:{vue_col}",
-            );
-            let tsx_pos = tsx_pos.unwrap();
-            let vue_rt = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.column);
-            assert!(
-                vue_rt.is_some(),
-                "[{name}] tsx_to_vue round-trip should succeed for TSX {}:{}",
-                tsx_pos.line,
-                tsx_pos.column,
-            );
-            let vue_rt = vue_rt.unwrap();
-            assert_eq!(
-                vue_rt.line, vue_line,
-                "[{name}] Round-trip line mismatch: expected {vue_line} got {}",
-                vue_rt.line,
-            );
-            assert_eq!(
-                vue_rt.column, vue_col,
-                "[{name}] Round-trip column mismatch: expected {vue_col} got {}",
-                vue_rt.column,
-            );
-        }
-
-        // Case 1: v-if with OXC-unparseable expression (= {} is invalid JS)
-        // The expression fallback path must still emit mapped source tokens.
-        let broken_expr = "<script lang=\"ts\" setup>\nlet isLoggedIn = false;\nlet hasPermission = false;\n\n</script>\n<template>\n  <div v-if=\"isLoggedIn && hasPermission = {} && 1 ===2\">Full Access</div>\n  <div v-else-if=\"isLoggedIn && !hasPermission\">Limited Access</div>\n  <div v-else>No Access</div>\n</template>\n";
-        // "hasPermission" starts at col 27 on line 6 (0-indexed)
-        assert_roundtrip(broken_expr, "BrokenExpr", 6, 27);
-
-        // Case 2: v-if with valid expression (normal binding resolution)
-        let valid_expr = r#"<script lang="ts" setup>
-let show = true;
-</script>
-<template>
-  <div v-if="show">Hello</div>
-</template>
-"#;
-        // "show" starts at col 13 on line 4 (0-indexed)
-        assert_roundtrip(valid_expr, "ValidExpr", 4, 13);
-
-        // Case 3: interpolation expression
-        let interp = r#"<script lang="ts" setup>
-const msg = "hi";
-</script>
-<template>
-  <p>{{ msg }}</p>
-</template>
-"#;
-        // "msg" in interpolation: line 4, col 8 (after "  <p>{{ ")
-        // Actually the {{ is at col 5, msg at col 8
-        assert_roundtrip(interp, "Interpolation", 4, 8);
-
-        // Case 4: interpolation on same line as v-if (blank line between blocks)
-        // Reproduces the compound.vue hover issue where isLoggedIn in {{isLoggedIn}}
-        // maps to the wrong TSX position without the mapped emission fix.
-        let compound = "<script lang=\"ts\" setup>\nlet isLoggedIn = false;\nlet hasPermission = false;\n\n</script>\n\n<template>\n  <div v-if=\"isLoggedIn && hasPermission && 1 ===2\">Full  {{isLoggedIn}}</div>\n  <div v-else-if=\"isLoggedIn && !hasPermission\">Limited Access</div>\n  <div v-else>No Access</div>\n</template>\n";
-        // isLoggedIn in {{isLoggedIn}} — char 68 on line 7 (0-indexed)
-        assert_roundtrip(compound, "CompoundInterp", 7, 68);
-    }
-
-    // ─── pick_best_which_candidate tests ─────────────────────────
-
-    /// Regression test: Windows `where tsgo` returns a POSIX shell script first,
-    /// then the .cmd shim. We must prefer the .cmd over the extensionless file.
-    #[test]
-    fn test_pick_best_which_prefers_cmd_over_extensionless() {
-        let output = "C:\\Program Files\\nodejs\\tsgo\nC:\\Program Files\\nodejs\\tsgo.cmd\n";
-        let result = pick_best_which_candidate(output);
-        assert_eq!(result, Some("C:\\Program Files\\nodejs\\tsgo.cmd"));
-        assert!(
-            !result.unwrap().ends_with("\\tsgo"),
-            "must NOT pick the extensionless shell script"
-        );
-    }
-
-    /// .exe is preferred over .cmd
-    #[test]
-    fn test_pick_best_which_prefers_exe_over_cmd() {
-        let output = "C:\\tsgo.cmd\nC:\\tsgo.exe\n";
-        let result = pick_best_which_candidate(output);
-        assert_eq!(result, Some("C:\\tsgo.exe"));
-        assert_ne!(result, Some("C:\\tsgo.cmd"), "must prefer .exe over .cmd");
-    }
-
-    /// Single entry (typical Unix `which` output) — returns it unchanged
-    #[test]
-    fn test_pick_best_which_single_entry() {
-        let output = "/usr/local/bin/tsgo\n";
-        let result = pick_best_which_candidate(output);
-        assert_eq!(result, Some("/usr/local/bin/tsgo"));
-    }
-
-    /// Empty output → None
-    #[test]
-    fn test_pick_best_which_empty() {
-        assert!(pick_best_which_candidate("").is_none());
-        assert!(pick_best_which_candidate("  \n  \n").is_none());
-    }
-
-    /// Case-insensitive extension matching (.EXE, .Cmd)
-    #[test]
-    fn test_pick_best_which_case_insensitive() {
-        let output = "C:\\tsgo\nC:\\tsgo.EXE\n";
-        let result = pick_best_which_candidate(output);
-        assert_eq!(result, Some("C:\\tsgo.EXE"));
-        assert_ne!(
-            result,
-            Some("C:\\tsgo"),
-            "must prefer .EXE over extensionless"
-        );
-    }
-
-    /// .bat is preferred over extensionless but not over .cmd
-    #[test]
-    fn test_pick_best_which_bat_priority() {
-        // .bat preferred over extensionless
-        let output = "C:\\tsgo\nC:\\tsgo.bat\n";
-        assert_eq!(pick_best_which_candidate(output), Some("C:\\tsgo.bat"));
-
-        // .cmd preferred over .bat
-        let output2 = "C:\\tsgo.bat\nC:\\tsgo.cmd\n";
-        assert_eq!(pick_best_which_candidate(output2), Some("C:\\tsgo.cmd"));
-    }
-
-    #[test]
-    fn test_collect_npm_cache_roots_uses_env_then_npm_then_default() {
-        let roots = collect_npm_cache_roots(
-            Some(std::path::PathBuf::from("/env-cache")),
-            Some(std::path::PathBuf::from("/npm-cache")),
-            Some(std::path::PathBuf::from("/default-cache")),
-        );
-
-        assert_eq!(
-            roots,
-            vec![
-                std::path::PathBuf::from("/env-cache"),
-                std::path::PathBuf::from("/npm-cache"),
-                std::path::PathBuf::from("/default-cache")
-            ]
-        );
-    }
-
-    #[test]
-    fn test_collect_npm_cache_roots_deduplicates_preserving_order() {
-        let roots = collect_npm_cache_roots(
-            Some(std::path::PathBuf::from("/shared-cache")),
-            Some(std::path::PathBuf::from("/shared-cache")),
-            Some(std::path::PathBuf::from("/default-cache")),
-        );
-
-        assert_eq!(
-            roots,
-            vec![
-                std::path::PathBuf::from("/shared-cache"),
-                std::path::PathBuf::from("/default-cache")
-            ]
-        );
-    }
-
-    #[test]
-    fn test_find_tsgo_binary_in_prefers_path_hit() {
-        let cache_root = std::env::temp_dir().join(format!(
-            "verter_tsgo_lookup_path_preference_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&cache_root);
-        std::fs::create_dir_all(cache_root.join("_npx/entry/node_modules/.bin")).unwrap();
-        std::fs::write(cache_root.join("_npx/entry/node_modules/.bin/tsgo"), "shim").unwrap();
-
-        let result = find_tsgo_binary_in(
-            Some("/usr/local/bin/tsgo".to_string()),
-            &[cache_root.clone()],
-        )
-        .unwrap();
-
-        assert_eq!(result, "/usr/local/bin/tsgo");
-
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[test]
-    fn test_find_tsgo_binary_in_prefers_native_binary_over_shim() {
-        let cache_root = std::env::temp_dir().join(format!(
-            "verter_tsgo_lookup_native_preference_{}",
-            std::process::id()
-        ));
-        let native_rel = tsgo_native_binary_rel_paths()
-            .into_iter()
-            .next()
-            .expect("expected at least one native tsgo path");
-        let native_path = cache_root.join("_npx/entry").join(&native_rel);
-        let shim_path = cache_root.join("_npx/entry/node_modules/.bin/tsgo");
-
-        let _ = std::fs::remove_dir_all(&cache_root);
-        std::fs::create_dir_all(native_path.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(shim_path.parent().unwrap()).unwrap();
-        std::fs::write(&native_path, "native").unwrap();
-        std::fs::write(&shim_path, "shim").unwrap();
-
-        let result = find_tsgo_binary_in(None, &[cache_root.clone()]).unwrap();
-
-        assert_eq!(std::path::PathBuf::from(result), native_path);
-
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    #[test]
-    fn test_find_tsgo_binary_in_reports_checked_roots_when_not_found() {
-        let cache_root =
-            std::env::temp_dir().join(format!("verter_tsgo_lookup_missing_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&cache_root);
-        std::fs::create_dir_all(cache_root.join("_npx/entry")).unwrap();
-
-        let err = find_tsgo_binary_in(None, &[cache_root.clone()]).unwrap_err();
-        let display = err.to_string();
-
-        assert!(
-            display.contains(cache_root.to_string_lossy().as_ref()),
-            "error should mention cache root, got: {display}"
-        );
-        assert!(
-            display.contains("_npx"),
-            "error should mention the _npx search path, got: {display}"
-        );
-
-        let _ = std::fs::remove_dir_all(cache_root);
-    }
-
-    /// Verify that kill_on_drop prevents orphaned child processes.
-    /// Spawns a long-lived child, drops it, then checks the process is dead.
-    #[tokio::test]
-    #[cfg_attr(
-        windows,
-        ignore = "Tokio child drop lifecycle checks are flaky on Windows and can hang the test binary"
-    )]
-    async fn test_kill_on_drop_prevents_orphans() {
-        let child = spawn_long_lived_process(Stdio::null(), Stdio::null(), true);
-
-        let pid = child.id().expect("child should have a PID");
-
-        // Drop the child — kill_on_drop should kill it.
-        drop(child);
-
-        let exited = wait_for_process_exit(pid, std::time::Duration::from_secs(5)).await;
-        assert!(
-            exited,
-            "child process (PID {pid}) should exit within 5s after drop"
-        );
-        assert!(
-            !is_process_alive(pid),
-            "child process (PID {pid}) must not still be running after drop"
-        );
-    }
-
-    /// Verify that explicit Drop on TsgoTypeProvider calls start_kill().
-    /// We create a mock-like scenario: spawn a process, wrap it in
-    /// the TsgoTypeProvider-like struct, drop it, confirm process is dead.
-    #[tokio::test]
-    #[cfg_attr(
-        windows,
-        ignore = "Tokio child drop lifecycle checks are flaky on Windows and can hang the test binary"
-    )]
-    async fn test_drop_kills_child_process() {
-        let mut child = spawn_long_lived_process(Stdio::piped(), Stdio::null(), false);
-
-        let pid = child.id().expect("child should have a PID");
-        let stdin = child.stdin.take().expect("no stdin");
-
-        // Construct a minimal TsgoTypeProvider-like setup.
-        // We only need the child and transport to test Drop behavior.
-        let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
-
-        let transport = Arc::new(test_transport(stdin_tx));
-
-        let provider = TsgoTypeProvider {
-            transport,
-            child,
-            versions: Arc::new(Mutex::new(HashMap::new())),
-            contents: Arc::new(Mutex::new(HashMap::new())),
-            diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
-        };
-
-        // Drop the provider — Drop impl should call start_kill().
-        drop(provider);
-
-        let exited = wait_for_process_exit(pid, std::time::Duration::from_secs(5)).await;
-        assert!(
-            exited,
-            "TSGO child (PID {pid}) should exit within 5s when TsgoTypeProvider is dropped"
-        );
-        assert!(
-            !is_process_alive(pid),
-            "TSGO child (PID {pid}) must not still be running after TsgoTypeProvider is dropped"
-        );
-    }
-
-    /// Verify child_pid() returns the process ID.
-    #[tokio::test]
-    async fn test_child_pid_returns_id() {
-        let (mut child, stdin, _stdout) = spawn_short_lived_process().await;
-        let expected_pid = child.id();
-
-        let _ = child.wait().await;
-
-        let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
-
-        let transport = Arc::new(test_transport(stdin_tx));
-
-        let provider = TsgoTypeProvider {
-            transport,
-            child,
-            versions: Arc::new(Mutex::new(HashMap::new())),
-            contents: Arc::new(Mutex::new(HashMap::new())),
-            diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
-        };
-
-        // After the process has exited, id() returns None.
-        // But we stored the PID before wait(), so we can verify the method exists.
-        // For a running process, id() returns Some(pid).
-        let _ = expected_pid;
-        // The child_pid() method should delegate to child.id()
-        let pid = provider.child_pid();
-        // Note: After wait(), tokio Child::id() returns None on some platforms.
-        // The important thing is the method exists and doesn't panic.
-        assert!(
-            pid.is_none() || pid == expected_pid,
-            "child_pid() should return the child's PID or None after exit"
-        );
-    }
-
-    /// Helper: check if a process with the given PID is still alive.
-    fn is_process_alive(pid: u32) -> bool {
-        #[cfg(windows)]
-        {
-            use std::process::Command;
-            let output = Command::new("tasklist")
-                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-                .output();
-            match output {
-                Ok(out) => {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    // tasklist returns the process info line if it exists,
-                    // or "INFO: No tasks are running which match the specified criteria."
-                    !stdout.contains("No tasks") && stdout.contains(&pid.to_string())
-                }
-                Err(_) => false,
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            // On Unix, use kill -0 to check if process exists.
-            use std::process::Command;
-            Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        }
-    }
-
-    // ── Channel-based transport tests (Fix 1, 2, 4) ─────────────────
-
-    /// @ai-generated — stdin_writer_loop exits cleanly on Shutdown message
-    #[tokio::test]
-    async fn stdin_writer_loop_exits_on_shutdown() {
-        let (client_reader, server_writer) = tokio::io::duplex(4096);
-        let (tx, rx) = mpsc::channel::<StdinMessage>(16);
-
-        // Spawn the writer loop with the server-side writer
-        let handle = tokio::spawn(stdin_writer_loop_single(server_writer, rx));
-
-        // Send a frame and verify it arrives
-        tx.send(StdinMessage::Frame(b"hello\n".to_vec()))
-            .await
-            .unwrap();
-        // Small delay for the writer to process
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Send Shutdown
-        tx.send(StdinMessage::Shutdown).await.unwrap();
-
-        // The writer task should complete within 1s
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
-        assert!(
-            result.is_ok(),
-            "stdin_writer_loop should exit after Shutdown"
-        );
-
-        // Verify we can read the frame that was written
-        let mut reader = BufReader::new(client_reader);
-        let mut buf = String::new();
-        let n = reader.read_line(&mut buf).await.unwrap();
-        assert!(n > 0, "should have read the frame");
-        assert_eq!(buf.trim(), "hello");
-    }
-
-    /// @ai-generated — Channel transport doesn't deadlock under concurrent load with server→client requests.
-    ///
-    /// Regression test for Fix 1: proves the channel approach handles concurrent writes
-    /// + read_loop replies without hanging.
-    #[tokio::test]
-    async fn concurrent_requests_with_server_requests_do_not_deadlock() {
-        // Create duplex streams to simulate child stdin/stdout
-        let (client_stdout_reader, mut mock_stdout_writer) = tokio::io::duplex(64 * 1024);
-        let (mock_stdin_reader, _client_stdin_writer) = tokio::io::duplex(64 * 1024);
-
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let contents_cache: Arc<Mutex<HashMap<String, String>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        // Set up the channel-based writer
-        let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(64);
-        tokio::spawn(stdin_writer_loop_single(mock_stdin_reader, stdin_rx));
-
-        let transport = Arc::new(test_transport_with_pending(
-            stdin_tx.clone(),
-            Arc::clone(&pending),
-        ));
-
-        // Start the read loop
-        tokio::spawn(read_loop(
-            client_stdout_reader,
-            Arc::clone(&pending),
-            diagnostics_cache,
-            contents_cache,
-            stdin_tx,
-            None,
-        ));
-
-        // Spawn a mock "TSGO" task that reads requests from mock_stdout_writer
-        // and interleaves workspace/configuration server→client requests with responses.
-        let mock_tsgo = tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt;
-
-            // For simplicity, send responses for IDs 1..=10 with a server request before each.
-            for id in 1..=10i64 {
-                // First, send a server→client workspace/configuration request
-                let server_req = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 10000 + id,
-                    "method": "workspace/configuration",
-                    "params": { "items": [{}] }
-                });
-                let body = serde_json::to_string(&server_req).unwrap();
-                let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-                mock_stdout_writer
-                    .write_all(frame.as_bytes())
-                    .await
-                    .unwrap();
-                mock_stdout_writer.flush().await.unwrap();
-
-                // Small delay to let read_loop process the server request
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-
-                // Then send the actual response
-                let response = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": { "value": format!("response_{id}") }
-                });
-                let body = serde_json::to_string(&response).unwrap();
-                let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-                mock_stdout_writer
-                    .write_all(frame.as_bytes())
-                    .await
-                    .unwrap();
-                mock_stdout_writer.flush().await.unwrap();
+    fn parse_rename_edit_drops_on_position_overflow() {
+        let overflow = u32::MAX as u64 + 1;
+        let edit = serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": overflow }
             }
         });
-
-        // Fire 10 concurrent requests
-        let mut join_set = tokio::task::JoinSet::new();
-        for _ in 0..10 {
-            let t = Arc::clone(&transport);
-            join_set.spawn(async move { t.request("test/method", serde_json::json!({})).await });
-        }
-
-        // All should complete within 5s (with no deadlock)
-        let all_results = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            let mut results = Vec::new();
-            while let Some(r) = join_set.join_next().await {
-                results.push(r);
-            }
-            results
-        })
-        .await;
-
+        let content = "ab";
+        let content_for = |p: &str| -> Option<&str> { (p == "d:/proj/ovf.ts").then_some(content) };
+        let loc = parse_rename_edit("file:///D:/proj/ovf.ts", &edit, &content_for);
         assert!(
-            all_results.is_ok(),
-            "All concurrent requests should complete within 5s (no deadlock)"
+            loc.is_none(),
+            "a u64>u32::MAX rename position must be DROPPED, never truncated: {loc:?}"
         );
 
-        let results = all_results.unwrap();
-        for (i, r) in results.iter().enumerate() {
-            assert!(
-                r.is_ok(),
-                "request {} task should not panic: {:?}",
-                i,
-                r.as_ref().err()
-            );
-            // The request itself may succeed or fail depending on timing, but should NOT hang
-        }
-
-        // Mock TSGO should also have completed
-        let _ = mock_tsgo.await;
-    }
-
-    /// @ai-generated — Timed-out requests are removed from the pending map.
-    ///
-    /// Regression test for Fix 2: after timeout, the pending HashMap must be cleaned up.
-    #[tokio::test]
-    async fn timed_out_request_is_removed_from_pending() {
-        // Create a channel where the receiver is immediately dropped (simulating a dead writer)
-        let (stdin_tx, _stdin_rx) = mpsc::channel::<StdinMessage>(16);
-
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        let transport = test_transport_with_pending(stdin_tx, Arc::clone(&pending));
-
-        // Send a request that will time out (nobody reads from the channel to respond)
-        // Use a very short timeout by racing with a sleep
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            transport.request("test/timeout", serde_json::json!({})),
-        )
-        .await;
-
-        // The outer timeout fires first (100ms < 10s internal timeout).
-        // But the important thing is to verify the pending map behavior.
-        // Since the channel send succeeds (receiver not dropped yet), the request
-        // inserts into pending and waits for a response that never comes.
-        // The outer timeout fires, but the internal pending entry remains unless
-        // we explicitly clean it up.
-        // Let's test the internal timeout path with a modified approach:
-        // Just verify that after the transport's own timeout mechanism fires,
-        // the pending entry is cleaned up.
-        drop(result); // Ignore the outer timeout result
-
-        // Verify pending is empty (the request was ID 1)
-        // If the request is still in-flight (because 10s hasn't elapsed), manually check.
-        // For this test, we check the pending map directly.
-        // Since the channel is still alive, the request is in-flight.
-        // We need to actually wait for the internal timeout.
-        // Instead, let's drop the transport and verify cleanup doesn't panic.
-        // Better approach: verify that pending has at most the 1 entry that was inserted.
-        let count = pending.lock().await.len();
-        assert!(
-            count <= 1,
-            "pending map should have at most 1 entry, got {count}"
-        );
-    }
-
-    /// @ai-generated — Shutdown completes within timeout when TSGO is unresponsive.
-    ///
-    /// Regression test for Fix 4: shutdown doesn't hang even if the provider never responds.
-    #[tokio::test]
-    async fn shutdown_completes_within_timeout_when_provider_unresponsive() {
-        // Create a channel where we just drop the receiver (simulating unresponsive TSGO)
-        let (stdin_tx, _rx) = mpsc::channel::<StdinMessage>(16);
-
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        let transport = Arc::new(test_transport_with_pending(stdin_tx, pending));
-
-        // Simulate the shutdown path: 3s internal timeout + Shutdown message
-        let shutdown_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                let _ = transport.request("shutdown", serde_json::Value::Null).await;
-                let _ = transport.notify("exit", serde_json::Value::Null).await;
-            })
-            .await;
-            let _ = transport.interactive_tx.send(StdinMessage::Shutdown).await;
-        })
-        .await;
-
-        assert!(
-            shutdown_result.is_ok(),
-            "Shutdown should complete within 5s even when provider is unresponsive"
-        );
-    }
-
-    /// @ai-generated — Completion coalescing: stale requests are detected via generation counter.
-    #[tokio::test]
-    async fn stale_completion_request_detected_by_generation_counter() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        let counter = AtomicU64::new(0);
-
-        // Simulate first request: gen = counter.fetch_add(1) → gen = 0, counter = 1
-        let gen = counter.fetch_add(1, Ordering::Relaxed);
-        assert_eq!(gen, 0);
-        assert_eq!(counter.load(Ordering::Relaxed), 1);
-
-        // This request is still current (counter == gen + 1)
-        assert_eq!(
-            counter.load(Ordering::Relaxed),
-            gen + 1,
-            "first request should not be stale"
-        );
-
-        // Simulate second request arriving: counter becomes 2
-        let gen2 = counter.fetch_add(1, Ordering::Relaxed);
-        assert_eq!(gen2, 1);
-        assert_eq!(counter.load(Ordering::Relaxed), 2);
-
-        // Now the first request is stale (counter != gen + 1)
-        assert_ne!(
-            counter.load(Ordering::Relaxed),
-            gen + 1,
-            "first request should now be stale"
-        );
-
-        // But the second request is current
-        assert_eq!(
-            counter.load(Ordering::Relaxed),
-            gen2 + 1,
-            "second request should be current"
-        );
-    }
-
-    /// @ai-generated — E2E: real TSGO concurrent requests complete without deadlock.
-    #[tokio::test]
-    async fn e2e_concurrent_requests_complete_without_deadlock() {
-        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
-            return;
-        };
-
-        let tmp = std::env::temp_dir().join("verter_tsgo_test_concurrent");
-        let _ = std::fs::remove_dir_all(&tmp);
-        create_test_project(&tmp).unwrap();
-
-        // Write a TS file
-        let ts_path = tmp.join("concurrent.ts");
-        std::fs::write(
-            &ts_path,
-            "const x: number = 42;\nconst y: string = 'hello';\n",
-        )
-        .unwrap();
-
-        let root_uri = TsgoTypeProvider::path_to_uri(tmp.to_str().unwrap());
-        let provider = TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await.unwrap();
-
-        let file_path = ts_path.to_str().unwrap().replace('\\', "/");
-        provider
-            .open_file(
-                &file_path,
-                "const x: number = 42;\nconst y: string = 'hello';\n",
-            )
-            .await
-            .unwrap();
-
-        // Give TSGO a moment to process
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        // Fire 5 concurrent hover requests at different offsets
-        let (r1, r2, r3, r4, r5) =
-            tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                tokio::join!(
-                    provider.get_hover(&file_path, 6),
-                    provider.get_hover(&file_path, 22),
-                    provider.get_hover(&file_path, 0),
-                    provider.get_hover(&file_path, 15),
-                    provider.get_hover(&file_path, 10),
-                )
-            })
-            .await
-            .expect("All concurrent hover requests should complete within 10s (no deadlock)");
-
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        let hover_results = [&r1, &r2, &r3, &r4, &r5];
-        // At least some should succeed (TSGO may return None for some offsets)
-        let successes = hover_results.iter().filter(|r| r.is_ok()).count();
-        assert!(successes > 0, "At least some hover requests should succeed");
-        // None should have errored
-        let errors = hover_results.iter().filter(|r| r.is_err()).count();
-        assert!(errors == 0, "No hover requests should error");
-    }
-
-    /// @ai-generated — read_loop skips caching diagnostics for files not in contents_cache.
-    ///
-    /// During background sync, TSGO publishes diagnostics for tsconfig files after
-    /// each didOpen. These are project-level diagnostics we never query, so they
-    /// should not be cached. Only diagnostics for files in our contents_cache
-    /// (i.e., synced TSX/JSX from .vue compilation) should be stored.
-    #[tokio::test]
-    async fn test_read_loop_skips_diagnostics_for_unknown_files() {
-        use tokio::io::AsyncWriteExt;
-
-        let (client_stdout_reader, mut mock_writer) = tokio::io::duplex(64 * 1024);
-
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let contents_cache: Arc<Mutex<HashMap<String, String>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        // Pre-populate contents_cache with a known synced file.
-        // Key must match what uri_to_file_path() returns for the URI.
-        contents_cache.lock().await.insert(
-            "d:/project/src/App.vue.tsx".to_string(),
-            "const x = 1;".to_string(),
-        );
-
-        let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
-        tokio::spawn(stdin_writer_loop_single(
-            tokio::io::duplex(1024).1,
-            stdin_rx,
-        ));
-
-        tokio::spawn(read_loop(
-            client_stdout_reader,
-            pending,
-            Arc::clone(&diagnostics_cache),
-            Arc::clone(&contents_cache),
-            stdin_tx,
-            None,
-        ));
-
-        // Send publishDiagnostics for a tsconfig file (NOT in contents_cache)
-        let tsconfig_notif = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/publishDiagnostics",
-            "params": {
-                "uri": "file:///d:/project/tsconfig.app.json",
-                "diagnostics": [{
-                    "range": {
-                        "start": {"line": 0, "character": 0},
-                        "end": {"line": 0, "character": 5}
-                    },
-                    "message": "Some tsconfig error",
-                    "severity": 1
-                }]
+        // POSITIVE CONTROL: the in-range rename span still resolves to the correct offsets.
+        let edit_ok = serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 1 }
             }
         });
-        let body = serde_json::to_string(&tsconfig_notif).unwrap();
-        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-        mock_writer.write_all(frame.as_bytes()).await.unwrap();
-
-        // Send publishDiagnostics for a synced TSX file (IS in contents_cache)
-        let tsx_notif = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "textDocument/publishDiagnostics",
-            "params": {
-                "uri": "file:///d:/project/src/App.vue.tsx",
-                "diagnostics": [{
-                    "range": {
-                        "start": {"line": 0, "character": 0},
-                        "end": {"line": 0, "character": 5}
-                    },
-                    "message": "Type error in component",
-                    "severity": 1
-                }]
-            }
-        });
-        let body = serde_json::to_string(&tsx_notif).unwrap();
-        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
-        mock_writer.write_all(frame.as_bytes()).await.unwrap();
-        mock_writer.flush().await.unwrap();
-
-        // Give read_loop time to process both messages
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let cache = diagnostics_cache.lock().await;
-
-        // Synced file diagnostics SHOULD be cached
-        let tsx_uri = normalize_file_uri("file:///d:/project/src/App.vue.tsx");
-        assert!(
-            cache.contains_key(&tsx_uri),
-            "synced TSX file diagnostics should be cached"
-        );
-        assert_eq!(
-            cache[&tsx_uri].len(),
-            1,
-            "should have exactly 1 diagnostic for synced file"
-        );
-
-        // tsconfig diagnostics should NOT be cached
-        let tsconfig_uri = normalize_file_uri("file:///d:/project/tsconfig.app.json");
-        assert!(
-            !cache.contains_key(&tsconfig_uri),
-            "tsconfig diagnostics should NOT be cached (not a synced file)"
-        );
+        let ok = parse_rename_edit("file:///D:/proj/ovf.ts", &edit_ok, &content_for)
+            .expect("an in-range rename span must still resolve");
+        assert_eq!((ok.start, ok.end), (0, 1), "in-range offsets unchanged");
     }
 }
+
+// Transport-level tests that use runtime-local types live in the sibling
+// `ipc_tests.rs`. Tests that depend on LSP-internal types (PositionMapper,
+// uri_to_canonical_id, merge) or on `verter_session` compilation stay in
+// `verter_lsp`.
+#[cfg(test)]
+#[path = "ipc_tests.rs"]
+mod tests;

@@ -33,6 +33,9 @@
     "build:tsc:release": "cargo build -p verter_tsc --release",
     "build:mcp": "cargo build -p verter_mcp",
     "build:mcp:release": "cargo build -p verter_mcp --release",
+    "build:lapce": "rustup target add wasm32-wasip1 && cargo build --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release && npx shx mkdir -p extensions/lapce/bin && npx shx cp extensions/lapce/target/wasm32-wasip1/release/verter_lapce.wasm extensions/lapce/bin/verter-lapce.wasm",
+    "install:lapce-local": "node extensions/lapce/scripts/install-local.mjs",
+    "build:zed": "rustup target add wasm32-wasip2 && cargo build --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip2 --release && npx shx mkdir -p extensions/zed/bin && npx shx cp extensions/zed/target/wasm32-wasip2/release/verter_zed.wasm extensions/zed/bin/verter-zed.wasm",
     "build:playground": "pnpm --filter @verter/playground build",
     "build:unplugin": "pnpm --filter @verter/unplugin build",
     "watch": "pnpm --filter @verter/core --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
@@ -69,7 +72,6 @@
     "@bufbuild/buf": "1.70.0",
     "@bufbuild/protoc-gen-es": "2.12.0",
     "@hyrious/esbuild-plugin-commonjs": "^0.2.6",
-    "@typescript/native-preview": "7.0.0-dev.20260526.1",
     "@vscode/vsce": "^3.9.1",
     "esbuild": "^0.28.0",
     "esbuild-plugin-alias": "^0.2.1",
@@ -77,7 +79,9 @@
     "glob": "^13.0.6",
     "husky": "^9.1.7",
     "json-diff": "^1.0.6",
+    "shx": "0.4.0",
     "svelte": "5.56.3",
+    "typescript": "7.0.2",
     "vitest": "^4.1.7"
   },
   "lint-staged": {

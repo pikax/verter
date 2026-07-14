@@ -65,6 +65,15 @@ pub fn process_import<'a>(
                 ImportDeclarationSpecifier::ImportSpecifier(s) => {
                     bindings.push(ScriptBinding {
                         name: s.local.name.as_str(),
+                        // The module-exported name: `import { Imported as Local }`
+                        // carries `Imported` here, `import { Foo }` carries `Foo`.
+                        // Read from the typed import specifier, never re-sliced.
+                        // For a string-literal export name (`import { "x-y" as
+                        // Local }`) this is the UNQUOTED value (`x-y`); the
+                        // typed `ModuleExportName` variant records the quoting in
+                        // `imported_is_string_literal`.
+                        imported: Some(s.imported.name().as_str()),
+                        imported_is_string_literal: !s.imported.is_identifier(),
                         span: Span::from(s.local.span),
                         is_type_only: s.import_kind.is_type(),
                         import_kind: Some(ImportSpecifierKind::Named),
@@ -73,6 +82,8 @@ pub fn process_import<'a>(
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
                     bindings.push(ScriptBinding {
                         name: s.local.name.as_str(),
+                        imported: None,
+                        imported_is_string_literal: false,
                         span: Span::from(s.local.span),
                         is_type_only: false,
                         import_kind: Some(ImportSpecifierKind::Default),
@@ -81,6 +92,8 @@ pub fn process_import<'a>(
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
                     bindings.push(ScriptBinding {
                         name: s.local.name.as_str(),
+                        imported: None,
+                        imported_is_string_literal: false,
                         span: Span::from(s.local.span),
                         is_type_only: false,
                         import_kind: Some(ImportSpecifierKind::Namespace),
@@ -113,6 +126,8 @@ pub fn process_named_export<'a>(export: &ExportNamedDeclaration<'a>) -> ScriptEx
         };
         bindings.push(ScriptBinding {
             name,
+            imported: None,
+            imported_is_string_literal: false,
             span: Span::from(spec.exported.span()),
             is_type_only: false,
             import_kind: None,
@@ -147,6 +162,8 @@ pub fn process_all_export<'a>(
         };
         vec![ScriptBinding {
             name,
+            imported: None,
+            imported_is_string_literal: false,
             span: Span::from(exported.span()),
             is_type_only: false,
             import_kind: None,
@@ -176,6 +193,8 @@ fn extract_declaration_bindings<'a>(decl: &Declaration<'a>, bindings: &mut Vec<S
             if let Some(id) = &func.id {
                 bindings.push(ScriptBinding {
                     name: id.name.as_str(),
+                    imported: None,
+                    imported_is_string_literal: false,
                     span: Span::from(id.span),
                     is_type_only: false,
                     import_kind: None,
@@ -186,6 +205,8 @@ fn extract_declaration_bindings<'a>(decl: &Declaration<'a>, bindings: &mut Vec<S
             if let Some(id) = &class.id {
                 bindings.push(ScriptBinding {
                     name: id.name.as_str(),
+                    imported: None,
+                    imported_is_string_literal: false,
                     span: Span::from(id.span),
                     is_type_only: false,
                     import_kind: None,
@@ -211,6 +232,8 @@ fn collect_binding_pattern_names<'a>(
         BindingPattern::BindingIdentifier(id) => {
             bindings.push(ScriptBinding {
                 name: id.name.as_str(),
+                imported: None,
+                imported_is_string_literal: false,
                 span: Span::from(id.span),
                 is_type_only: false,
                 import_kind: None,

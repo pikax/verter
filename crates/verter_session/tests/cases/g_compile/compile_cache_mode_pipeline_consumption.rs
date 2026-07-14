@@ -265,15 +265,21 @@ fn compile_many_honors_per_input_requested_mode() {
             canonical_id: "/M.vue".to_string(),
             source: source.clone(),
             requested_mode: Some(CompileCacheMode::Session),
+            component_id: None,
         },
         CompileBatchInput {
             canonical_id: "/M.vue".to_string(),
             source: source.clone(),
             requested_mode: Some(CompileCacheMode::Stateless),
+            component_id: None,
         },
     ];
 
-    let results = host.compile_many(inputs, CompileBatchOptions::default());
+    let results = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        verter_session::host_compile::CompileManyTarget::HostBacked,
+    );
     assert_eq!(results.len(), 2, "one entry per original input position");
 
     // Position 0 requested Session.
@@ -335,10 +341,15 @@ fn compile_many_content_warm_hit_reports_cache_hit() {
             canonical_id: "/W.vue".to_string(),
             source: source.clone(),
             requested_mode: Some(CompileCacheMode::Content),
+            component_id: None,
         }]
     };
 
-    let first = host.compile_many(inputs(), CompileBatchOptions::default());
+    let first = host.compile_many(
+        inputs(),
+        CompileBatchOptions::default(),
+        verter_session::host_compile::CompileManyTarget::HostBacked,
+    );
     assert_eq!(first.len(), 1);
     assert_eq!(
         first[0].actual_mode,
@@ -354,7 +365,11 @@ fn compile_many_content_warm_hit_reports_cache_hit() {
         "the first Content compile is a cold miss"
     );
 
-    let second = host.compile_many(inputs(), CompileBatchOptions::default());
+    let second = host.compile_many(
+        inputs(),
+        CompileBatchOptions::default(),
+        verter_session::host_compile::CompileManyTarget::HostBacked,
+    );
     assert_eq!(second.len(), 1);
     assert_eq!(
         second[0].actual_mode,
@@ -397,9 +412,14 @@ fn compile_many_error_after_downgrade_reports_true_mode() {
         canonical_id: "/E.vue".to_string(),
         source,
         requested_mode: Some(CompileCacheMode::Content),
+        component_id: None,
     }];
 
-    let results = host.compile_many(inputs, CompileBatchOptions::default());
+    let results = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        verter_session::host_compile::CompileManyTarget::HostBacked,
+    );
     assert_eq!(results.len(), 1);
     let entry = &results[0];
 

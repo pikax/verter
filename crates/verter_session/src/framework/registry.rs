@@ -738,8 +738,8 @@ mod tests {
             matches!(svelte.surface, SurfaceRegistration::Adapter(_)),
             "Svelte registers a real surface adapter (the Deferred arm is superseded)"
         );
-        // The api-leg clause holds: import surface is a distinct `.ts` API
-        // file -> api_projector Some.
+        // The api-leg clause holds: import surface is a distinct `.verter.ts`
+        // API file -> api_projector Some.
         assert_eq!(
             svelte
                 .descriptor
@@ -747,7 +747,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .api_surface_suffix(),
-            Some(".ts")
+            Some(".verter.ts")
         );
     }
 

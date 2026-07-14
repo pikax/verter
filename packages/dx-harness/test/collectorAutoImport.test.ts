@@ -251,6 +251,43 @@ describe("verifyAutoImport — the resolved edit must STRUCTURALLY bind the exac
     expect(events.some((e) => e.signal === "auto_import_applied")).toBe(false);
   });
 
+  // The EXACT resolved-edit text the real providers emit for the
+  // `providerResolveParity` integration scenario (an unimported `myHelper` from
+  // `./helper`). Captured from a live tsgo/tsserver run so the pure collector is
+  // pinned to the real provider output shape, including tsserver's CRLF.
+  const realImportEdit = (newText: string): CanonicalCompletionItem => ({
+    label: "myHelper",
+    additionalTextEdits: [importEdit(newText)],
+  });
+  const realScenarioBefore = "myHelper\n";
+  const realExpected = { symbol: "myHelper", module: "./helper" } as const;
+
+  it("ACCEPTS the real tsgo resolved import edit (LF) as a bound auto-import", () => {
+    // tsgo emitted: `import { myHelper } from "./helper";\n\n`
+    const item = realImportEdit('import { myHelper } from "./helper";\n\n');
+    const events = verifyAutoImport({
+      key,
+      before: realScenarioBefore,
+      item,
+      expectedImport: realExpected,
+    });
+    expect(events.every((e) => e.ok)).toBe(true);
+    expect(events.some((e) => e.signal === "auto_import_applied" && e.ok)).toBe(true);
+  });
+
+  it("ACCEPTS the real tsserver resolved import edit (CRLF) — provider parity at the collector", () => {
+    // tsserver emitted the SAME import with CRLF: `import { myHelper } from "./helper";\r\n\r\n`
+    const item = realImportEdit('import { myHelper } from "./helper";\r\n\r\n');
+    const events = verifyAutoImport({
+      key,
+      before: realScenarioBefore,
+      item,
+      expectedImport: realExpected,
+    });
+    expect(events.every((e) => e.ok)).toBe(true);
+    expect(events.some((e) => e.signal === "auto_import_applied" && e.ok)).toBe(true);
+  });
+
   it("PASSES a merge that NEWLY binds the symbol in an existing same-module import", () => {
     // `before` imports a DIFFERENT name from `./helper`; the resolved item rewrites that
     // import to ALSO bind `helperValue`. The binding is new (absent in `before`, present

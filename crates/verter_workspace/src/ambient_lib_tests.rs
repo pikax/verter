@@ -11,10 +11,12 @@
 use std::sync::Arc;
 
 use crate::ambient_lib::{AmbientLibError, AmbientLibSpec};
+use crate::canonical_path::CanonicalPath;
+use crate::membership::ConfiguredMembership;
 use crate::memory::{MemoryOptions, MemoryWorkspace};
 use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 use crate::project_key::ProjectStableKey;
-use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
+use crate::resolver::IdeProjectCompilerOptions;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
 
 const STUB_LIB_ES5: &str = r#"
@@ -44,7 +46,7 @@ fn make_project(
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::default(),
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new(project_root)),
     }
 }
 
