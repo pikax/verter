@@ -7,10 +7,14 @@ and reachable in the landed code**.
 
 Everything in this document was decided by an architecture consult run against the source: two
 independent unprimed legs plus a code-verifying decider on the contested points. Where the legs
-converged independently, it says so — that convergence is the strongest evidence available for any
-of these rulings. The consult's own artefacts lived in an ephemeral scratch directory that will be
-destroyed; the substance is reproduced here in full, because a citation to a wiped path is worth
-nothing.
+converged independently, it says so — that convergence is the strongest evidence available for any of
+these rulings.
+
+**The consult's own transcripts no longer exist**, along with every other scratch artefact from this
+effort. That is precisely why this document reproduces the substance in full rather than citing it:
+a pointer to a wiped path is worth nothing, so there are no pointers here. Everything you need to
+implement this is in the prose below, and every source citation resolves against the committed
+repository in front of you.
 
 ## 1. The invariant, and the violation
 
@@ -170,38 +174,122 @@ If some component is nonetheless deferred, the deferral is valid **only** with a
 A prose row, a debug assertion, or "currently zero callers" is **not** a fail-closed mechanism. A
 debt row that leaves an existing public insert operational has no fail-closed at all.
 
-## 5. Port the stronger type — `codex/bugb-independent` @ `4cc13cfbb`
+## 5. Make non-cacheability INTRINSIC TO THE TYPE — full specification
 
-An independent solve of this same bug, written from the same base (`44d2a7528`) without sight of the
-first attempt, converged on the same probe (same name, same signature position — the probe is *not*
-the novel part) but is **strictly better on the one axis that matters**. Branch and worktree are
-preserved. Verified first-hand: `crates/verter_session/src/resolver_core/fact_read_set.rs:267` on
-that branch declares
+This is the single highest-value change in this document, and it is small. It kills the root-cause
+*shape* of the entire class with the compiler, rather than closing one more site.
+
+**You will build this from this specification.** An independent implementation of exactly this design
+was written and verified — it passed the full workspace gate (all tests, zero failures, both surfaces),
+added **zero** new clippy errors, and its headline test **survived mutation** (reverting the predicate
+turned the test red; restoring it turned it green). So this is **known-viable, not speculative**. But
+that implementation was never pushed and **no longer exists** — there is no diff to copy, no branch to
+fetch. Rebuild it from the prose. It is roughly a day's work and it is worth it.
+
+### The defect, visible in the committed code today
+
+Go and read `crates/verter_session/src/resolver_core/fact_read_set.rs`. The finalise result is a
+two-variant enum:
 
 ```rust
 pub enum FactReadSetFinalise {
+    Ok(Arc<[FactVersionRef]>),   // sealed, sorted, deduplicated signature
+    Overflow,                     // exceeded FACT_SIGNATURE_CAP; refuse admission
+}
+```
+
+Now read `install_fact_tracer` in `crates/verter_session/src/fact_signature_helpers.rs`. Its signature
+is the bug:
+
+```rust
+pub(crate) fn install_fact_tracer<F, R>(host: &VerterHost, f: F)
+    -> (R, FactReadSetFinalise, bool)   // ← the third element is `fenced_serve_observed`
+```
+
+**The facts and the non-cacheability verdict travel as separate values, and the verdict is a bare
+`bool` a caller can simply not bind.** Then read `SignatureAdmission::from_finalise` in
+`crates/verter_session/src/cache_runtime/admission.rs`:
+
+```rust
+pub(crate) fn from_finalise(finalise: FactReadSetFinalise) -> Self {
+    match finalise {
+        FactReadSetFinalise::Ok(facts) => SignatureAdmission::Cacheable(ReadSetSignature::new(facts)),
+        FactReadSetFinalise::Overflow  => SignatureAdmission::NonCacheable(NonAdmissionReason::SignatureOverflow),
+    }
+}
+```
+
+**It never sees the boolean.** It cannot: the boolean is not part of its input type. So a compute that
+consumed a non-cacheable read finalises as `Ok(facts)` and lifts to `Cacheable` — clean facts from a
+dirty compute, and every caller of `from_finalise` inherits the hole for free. That is not a missing
+check at one site. **That is the class**, expressed as a type, and every individual hole in §7 is some
+layer dropping exactly this kind of dropped-flag signal.
+
+### The fix
+
+**Fold the verdict into the finalise result and delete the boolean.**
+
+```rust
+pub enum FactReadSetFinalise {
+    /// Sealed and clean: this signature may authorize a shared-cache admission.
     Ok(Arc<[FactVersionRef]>),
+    /// The observations are complete and may be bubbled into an enclosing tracer,
+    /// but the compute ALSO consumed a non-cacheable read. The value may be returned
+    /// to this caller; these facts must NEVER authorize a shared-cache admission.
     NonCacheable(Arc<[FactVersionRef]>),
+    /// Signature exceeded FACT_SIGNATURE_CAP. No partial signature is returned.
     Overflow,
 }
 ```
 
-The boolean is **removed** from tracer installation, and an exhaustive, wildcard-free match forces
-every consumer to route `NonCacheable` into an unresolved-provenance refusal and `Overflow` into a
-signature-overflow refusal. The consequence is the point:
+The `NonCacheable` arm **still carries the facts**, and that is deliberate — an enclosing tracer may
+legitimately need the observations even though *this* layer may not publish. What it must never do is
+be mistakable for `Ok`.
 
-> **A consumer cannot obtain clean facts from a non-cacheable compute.** Non-cacheability becomes
-> **intrinsic to the type**, not a flag travelling beside it.
+Then:
 
-The checkpoint's own enum (`fact_read_set.rs:262` on the implementation lane) has only `Ok` and
-`Overflow`; non-cacheability rides **alongside** the facts as a separate boolean. **That droppable
-boolean is the root-cause shape of this entire class** — every hole in the register below is some
-layer dropping exactly that kind of signal. Being fair to the checkpoint: its three production
-callers *do* bind the boolean today, so it is not broken by this. The defect is that **the type
-permits dropping it.**
+1. **`FactReadSet::finalise`** returns `NonCacheable(facts)` whenever the read set observed a
+   non-cacheable read, `Overflow` on cap exceedance, and `Ok(facts)` otherwise. The precedence is
+   `Overflow` > `NonCacheable` > `Ok` (an overflowed signature is unusable regardless).
+2. **`install_fact_tracer` drops its third return value**: its type becomes
+   `(R, FactReadSetFinalise)`. The `fenced_serve_observed` boolean — and any sibling non-cacheability
+   boolean threaded beside the facts — **ceases to exist as a separate value**. This is the load-bearing
+   step: there is no longer a flag to forget.
+3. **`SignatureAdmission::from_finalise` becomes an exhaustive, WILDCARD-FREE match** over all three
+   arms, failing closed:
+   - `Ok(facts)` → `Cacheable(ReadSetSignature::new(facts))`
+   - `NonCacheable(_)` → `NonCacheable(NonAdmissionReason::UnresolvedProvenance)` — refuse the write,
+     **return the value to the caller**
+   - `Overflow` → `NonCacheable(NonAdmissionReason::SignatureOverflow)`
 
-**Port the three-variant type.** It is a compiler-enforced kill of the root cause and it costs
-almost nothing.
+   **Never a `_ =>` arm.** The wildcard is what would let a future fourth reason silently become
+   cacheable; its absence is what makes the compiler your auditor when someone adds one.
+4. **Fix the resulting compile errors — that list IS your audit.** Every site that destructured the old
+   3-tuple or matched the old 2-variant enum now fails to compile, and each failure is a place that was
+   free to ignore non-cacheability. In the committed tree the production tracer installations are in:
+   `component_meta_materialize.rs`, `component_meta_caches.rs` (two sites), `host_manage/prepared_decl.rs`,
+   `framework/script_facts.rs`, `project_semantic_dispatch/mod.rs` (two sites),
+   `project_semantic_dispatch/relation.rs`, `typeinfo/framework_surface/svelte_exec.rs`, and
+   `typeinfo/framework_surface/vue_exec/mod.rs`; the `from_finalise` consumers are in
+   `cache_runtime/node.rs`, `framework/script_facts.rs` and `host_resolve/virtual_file_pipeline.rs`.
+   Re-derive that list with `grep -rn "install_fact_tracer(\|from_finalise" crates/verter_session/src/`
+   rather than trusting it — it will have drifted.
+5. **Do not add a convenience accessor** like `fn facts(&self) -> Option<&[FactVersionRef]>` that
+   returns the facts for both `Ok` and `NonCacheable`. That would restore the exact hole you are
+   closing, in a friendlier costume.
+
+### Why this is the right shape
+
+> **A consumer cannot obtain clean facts from a non-cacheable compute.** Non-cacheability stops being
+> a flag that travels *beside* the evidence and becomes a property *of* the evidence.
+
+The checkpoint's probe (§3) connects *admission* to a scope. This connects the *evidence* to its own
+validity. They are complementary, and neither substitutes for the other — but this one is what makes
+the compiler refuse the mistake, and it is the reason the independent implementation was judged better
+on the axis that matters. Being fair to what landed: its production callers *do* bind the boolean
+today, so the checkpoint is not broken by this. The defect is that **the type permits dropping it**,
+and this class has now demonstrated three times that anything the type permits, someone eventually
+does.
 
 ## 6. The headline deliverable: a systematic AUDIT, not more patches
 

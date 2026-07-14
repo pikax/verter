@@ -3,41 +3,75 @@
 > **The cache-poisoning class described here is OPEN and REACHABLE in the landed code, and a
 > reachable stack-overflow crash in the shared resolver has NOT been started.** What landed is a
 > **checkpoint**: it closes several individually-proven poison sites and repairs a regression the work
-> introduced, but it does not close the class. If you are here to continue the work, these documents
-> are what you execute from — not a history of what happened.
+> introduced, but it does not close the class. These documents are what you **execute from** — not a
+> history of what happened.
 
-This directory is the **committed, durable** record of the single-resolution-engine effort. It exists
-because the working ledger that drove it lives in `.feedback/` and in scratch directories under
-`/private/tmp/`, all of which are ephemeral — a wipe already destroyed one ledger mid-effort and cost
-a full re-grounding. Everything of substance from those places has been carried **into** these files.
-Treat scratch as gone; treat this directory as the record.
+## This is all that survives — by design
+
+The effort that produced these documents ran on one machine, with a working ledger in a gitignored
+directory, dozens of design briefs and consult transcripts in temporary scratch directories, and
+several long-lived local branches. **None of that exists any more, and none of it was pushed.** If
+something is not in this repository, it is gone.
+
+That is why these files carry **content, not pointers**. Every design decision, every mechanism and
+every piece of evidence that mattered is written out here in full, so it can be implemented by
+someone who has never seen any of the original artefacts. **You should find no reference in these
+documents to a file, branch or commit you cannot resolve** — if you do, treat it as a bug in the
+document, not as something to go hunting for.
 
 ## Read in this order
 
 1. **[`single-engine-cutover-state.md`](single-engine-cutover-state.md)** — the goal, what actually
-   landed versus what is merely written, the branches and where the code lives, the remaining
-   sequence, the other open defects, and landing hygiene. **Start here.**
+   landed versus what is merely written, the remaining sequence, the open defects (including one
+   **live regression**), and landing hygiene. **Start here.**
 2. **[`cache-admission-closure-design.md`](cache-admission-closure-design.md)** — the headline
    remaining deliverable, implementer-ready: the invariant, why the class kept regrowing (the
-   root-cause account everyone was working from was **false**), the ruled mechanism (invert scope
-   ownership), the type to port from the independent solve, the four known live-production holes, and
-   the mandate to **audit rather than patch** — patching sites has failed three times, and the known
-   hole set is **not exhaustive**.
+   root-cause account everyone worked from was **false**), the ruled mechanism (invert scope
+   ownership), a full specification of the type change that kills the root cause — written so you can
+   build it from the prose alone — the four known live holes, and the mandate to **audit rather than
+   patch**, because the known hole set is **not exhaustive**.
 3. **[`shared-engine-crash-fix-design.md`](shared-engine-crash-fix-design.md)** — the reachable
    stack-overflow crash, implementer-ready: the iterative heap-worklist rewrite of the shared
    projection primitive, the dual-rail fuse, and the crash regressions that **must** run in a 2 MB
-   subprocess because the workspace `RUST_MIN_STACK` **hides** the crash.
+   subprocess because the workspace stack setting **hides** the crash.
 4. **[`verification-traps.md`](verification-traps.md)** — four ways this toolchain hands you a **false
    green**, and the two reasoning failures that let a proven bug hide for three review rounds. Read it
    before you trust any "the gate is clean" claim, including your own.
 
 ## Conventions
 
-Claims carry their evidence. Statements verified first-hand against the tree say so and cite the file
-and symbol. Statements taken from the working ledger or a review leg and **not** independently
-re-derived are labelled **(reported, not re-verified)**. Where two sources contradicted each other,
-the contradiction is written down rather than silently resolved. A question that could not be settled
-appears as an open question with a named way to settle it — never as a fact.
+Claims carry their evidence. Anything verified first-hand against the committed tree cites the file
+and symbol, and **you can check it**. Anything asserted from work that no longer exists is labelled
+**(reported, not re-verifiable)** — re-derive it if it is load-bearing for you. Where two sources
+contradicted each other, the contradiction is written down rather than silently resolved. A question
+that could not be settled appears as an open question with a named way to settle it — never as a fact.
 
 Line numbers drift. **Paths and symbol names are the durable part of any citation**; treat a line
 number as a hint, not an address.
+
+## Getting started on a fresh machine
+
+```bash
+pnpm install                                  # required before any JS/TS test or workspace Node script
+node scripts/gate.mjs                         # THE canonical Rust gate — builds once, runs BOTH surfaces
+cargo clippy --workspace -- -D warnings       # expect dead-code errors; see the state doc before deleting
+cargo fmt --all --check
+pnpm test                                     # only if you touched TypeScript
+```
+
+Four things to know before you trust any result:
+
+- **`node scripts/gate.mjs` is the gate.** A bare `cargo test --workspace --tests` **silently skips
+  roughly 4,400 tests** (feature unification drops the `verter_session` integration binaries) and
+  exits 0 looking healthy. Never use it as a gate.
+- **A shell pipeline lies about exit status.** `cargo clippy … | tee out.txt` returns **tee's** status,
+  not clippy's — it always "passes". Every false "clippy is clean" report in this effort was this.
+- **Crash regressions need a 2 MB stack pinned inside a subprocess**, or the bug they exist to catch
+  **hides** and they pass vacuously. See
+  [`shared-engine-crash-fix-design.md`](shared-engine-crash-fix-design.md) §6.
+- **A passing suite is not proof.** Before claiming a fix is covered, revert your own change and
+  confirm the test goes **red**. A zero-coverage "fix" was caught in this codebase by exactly that
+  check, after review had passed it.
+
+All four, plus the rest, are in [`verification-traps.md`](verification-traps.md). Read it **before**
+you report anything as green.

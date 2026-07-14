@@ -106,8 +106,9 @@ A long fix chain once tracked progress by counting compile errors (261 → 164 �
 success. The first honest test run was **400 failures**. A compile-error count measures nothing about
 behaviour. **The completion signal is a green run, never a compile-error count.**
 
-### A worktree's git history can be unbisectable
+### Do not assume history is bisectable
 
-The implementation branch contains commits that **do not compile**. Any argument of the form "this
-was green at commit X" is unsafe there, and `git bisect` over it is unsound. It lands as a **squash**
-for this reason among others.
+The development history behind this work contained commits that **did not compile**, so any argument
+of the form "this was green at commit X" was unsafe over it, and `git bisect` across it would have
+been unsound. That history is not in this repository — the work arrives as a **squash**, which is part
+of why. The habit is what generalises: before you trust a bisect, confirm the range actually builds.

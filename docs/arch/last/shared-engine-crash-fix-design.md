@@ -4,8 +4,10 @@
 in a primitive that **every** dispatch consumer goes through. It is pre-existing, it is not caused
 by the cutover work, and it is not fixed by the landed checkpoint. The design below was decided by a
 three-leg architecture consult (two independent legs plus a decider, all code-grounded, unanimous on
-the core) and is ready to implement. Its brief lived in an ephemeral scratch directory; the
-substance is reproduced here because that directory will be wiped.
+the core) and is ready to implement. **The consult's transcripts and the implementation brief no
+longer exist** — nothing from that effort was pushed — so the substance is reproduced here in full.
+Everything you need is in this document; every source citation resolves against the committed
+repository in front of you.
 
 ## 1. The defect
 
@@ -234,7 +236,8 @@ arguments unprojected** — together with the observable ordering of `substituti
 
 Do this **after** the cache-admission closure
 ([`cache-admission-closure-design.md`](cache-admission-closure-design.md)) and **before**
-reintroducing the reducer. The reducer's earlier work-in-progress version was built against the
-recursive primitive and carried a stack-safety claim that is **empirically false**; it was discarded
-and is reflog-preserved only. **Do not resurrect it** — rebuild it against the new primitive, where
-its only mechanical hazard is adapting to the `Complete` / `Partial` outcome.
+reintroducing the reducer. An earlier work-in-progress version of that reducer was built against the
+**recursive** primitive and carried a stack-safety claim that is **empirically false**; it was
+discarded and **no longer exists anywhere**. That is fine — it should not be resurrected in any case.
+Rebuild the reducer against the new primitive, where its only mechanical hazard is adapting to the
+`Complete` / `Partial` outcome, and do not re-inherit its false no-budget stack-safety assumption.
