@@ -94,11 +94,23 @@ left live in another. **After every fix, grep the whole tree for the pattern you
 
 ## Ground truth you should not re-derive
 
-- **True base failing set: 5 of 118 executed** real-provider tests (63 tsserver + 54 tsgo), properly provisioned.
+- **The base failing set was measured as 5 of 118 executed** real-provider tests (claimed 63 tsserver + 54 tsgo).
   Names: completion ×2, hover, rename, a completion/edit race. **The number was quoted as 2, then 7, then 11
   before anyone measured it on a tree that could actually run the suite.** Do not quote a baseline you did not
   measure.
-- A **provisioned, built base tree** exists at `D:/dev/personal/verter-base-c6f5` — reuse it rather than cold-rebuilding.
+- **⚠ The tsgo half of that number is NOT reproducible from the base tree, and its provenance is UNVERIFIED.**
+  `D:/dev/personal/verter-base-c6f5` (detached at `c6f50174d`) contains **no tsgo at all**:
+  `@typescript/native-preview` is absent from the `single-project` fixture *and* from root `node_modules`, and no
+  tsgo binary exists anywhere in the tree. So the 54 tsgo tests either sourced tsgo from **elsewhere on the
+  machine** — plausibly the very Native Preview install that causes the reported bug, or a `VERTER_TSGO_BIN` — or
+  they did not execute, and the count is wrong for the fourth time. **Nobody has established which.** A baseline
+  whose engine provenance is unknown is not a baseline: **re-establish it, recording where tsgo came from, before
+  trusting `5 of 118`.** This is the same defect that produced 2 → 7 → 11 → 5, one layer further down.
+- **What the base tree DOES have** (real, and expensive to recreate — keep it): a complete pnpm install (`.pnpm`,
+  1908 packages), the `single-project` fixture provisioned with `typescript@5.9.3` (which is what makes the
+  **tsserver** half non-vacuous), and incremental cargo state in `target/deps`. **What it does NOT have:** a built
+  binary (`target/debug` holds no `verter_lsp`), tsgo, and provisioning for **19 of its 20 fixtures**. It is a
+  tsserver-half baseline, not a full one.
 - **`CARGO_BUILD_JOBS=2` is mandatory** on this machine; MSVC `link.exe` dies with `0xc0000142` otherwise.
 - **Canonical Rust gate:** `cargo nextest run --workspace` **plus** `cargo test -p verter_session --tests`. Bare
   `cargo test --workspace --tests` **silently skips ~4404 tests**.

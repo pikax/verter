@@ -72,9 +72,18 @@ A **Windows Job Object / Linux cgroup** makes containment a **property of the ch
 process table*. **macOS has no kernel-enforced equivalent** — its bar is a supervisor process, and the ledger
 states that limit rather than hiding it. Enumerate-and-confirm is a stopgap with four disclosed residuals.
 
-### D. The 5 pre-existing failures
+### D. The 5 pre-existing failures — but FIRST, re-establish the baseline
 
-The properly-provisioned base fails **5 of 118 executed** real-provider tests (completion ×2, hover, rename, a
+**Do not start from `5 of 118`. Establish it.** The base tree (`verter-base-c6f5`) contains **no tsgo** — no
+`@typescript/native-preview` in the fixture or at root, no tsgo binary anywhere — so the claimed **54 tsgo** tests
+cannot have sourced their engine from it. They either took it from **elsewhere on the machine** (unverified, and
+if it was the Native Preview install, the baseline is entangled with the very bug under investigation) or they
+did not run. **A baseline whose engine provenance is unknown is not a baseline** — and this is the fourth time
+this number has moved. **First deliverable of this section: re-measure, and record WHERE EACH ENGINE CAME FROM.**
+It is the same class as the gitignored fixtures below, one layer down: a suite that reports a count without
+proving what it actually executed against.
+
+The base then fails some set of real-provider tests (last measured: **5** — completion ×2, hover, rename, a
 completion/edit race). Under the **STRICT** gate default (see
 [`04-open-decisions.md`](04-open-decisions.md), GI-15) **a nonzero gate blocks with no exclusion list** — so this
 block must **fix or formally disposition** those 5 (owner + gate per row) before anything else can land behind a
