@@ -1975,12 +1975,12 @@ pub(crate) fn source_has_explicit_object_surface_fact(
     use verter_type_expr::facts::{
         ClosedTypeFact, ProjectedTypeFact, ResolvedLocalShape, SemanticTypeSource,
     };
-    match source {
+    matches!(
+        source,
         SemanticTypeSource::Closed(ClosedTypeFact::Object(_))
-        | SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(_))
-        | SemanticTypeSource::Projected(ProjectedTypeFact::Surface(_)) => true,
-        _ => false,
-    }
+            | SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(_))
+            | SemanticTypeSource::Projected(ProjectedTypeFact::Surface(_))
+    )
 }
 
 /// Source-domain sibling of [`component_meta_registry_ref_name`]: the bare

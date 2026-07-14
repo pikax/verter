@@ -821,21 +821,14 @@ fn navigate_expr(
             }
             // A selected INDEX-SIGNATURE member's authored key / value
             // positions.
-            (NavigatePosition::Member(member), TypeBodyPathStep::IndexSignatureKey) => match member
-            {
-                ObjectMember::IndexSignature(index) => {
-                    NavigatePosition::Expr(index.key_type.clone())
-                }
-                _ => return Err(LocatorBodyDerefError::PathUnresolved),
-            },
-            (NavigatePosition::Member(member), TypeBodyPathStep::IndexSignatureValue) => {
-                match member {
-                    ObjectMember::IndexSignature(index) => {
-                        NavigatePosition::Expr(index.value_type.clone())
-                    }
-                    _ => return Err(LocatorBodyDerefError::PathUnresolved),
-                }
-            }
+            (
+                NavigatePosition::Member(ObjectMember::IndexSignature(index)),
+                TypeBodyPathStep::IndexSignatureKey,
+            ) => NavigatePosition::Expr(index.key_type.clone()),
+            (
+                NavigatePosition::Member(ObjectMember::IndexSignature(index)),
+                TypeBodyPathStep::IndexSignatureValue,
+            ) => NavigatePosition::Expr(index.value_type.clone()),
             // A bare function-typed EXPRESSION position's parameter / return
             // sub-steps (defensive totality over the closed vocabulary — the
             // producers address function positions through their member step,

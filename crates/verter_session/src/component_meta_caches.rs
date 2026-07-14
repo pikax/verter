@@ -2006,7 +2006,7 @@ impl ShapeCacheDb {
                 // the value: `ReturnOnly` hands it back to the winner, so
                 // neither needs a side-channel cell to survive the flight.
                 match single_entry_admission(probe, compute().into()) {
-                    SingleEntryOutcome::Cacheable(value, facts)
+                    SingleEntryOutcome::Cacheable(value, _facts)
                         if crate::cache_runtime::refuse_result_cache_admission_if_partial(
                             value.result_is_partial(),
                         ) =>

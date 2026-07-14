@@ -547,10 +547,7 @@ pub(crate) fn decompose_indexed_access_chain_node(
     // Collect outer→inner, then reverse so the path reads base→terminal.
     let mut rev_path: Vec<PathSegment> = Vec::new();
     let mut current = node;
-    loop {
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, current) else {
-            break;
-        };
+    while let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, current) {
         match data.as_ref() {
             SemanticNodeData::IndexedAccess { object, index } => match index {
                 IndexKey::String(s) => {

@@ -290,6 +290,10 @@ enum DemandCell<D> {
 
 type TypeCell = Arc<OnceLock<DemandCell<LoweredTypeDecl>>>;
 type ValueCell = Arc<OnceLock<DemandCell<LoweredValueDecl>>>;
+type LoweredDeclGroups = (
+    Vec<(String, LoweredTypeDecl)>,
+    Vec<(String, LoweredValueDecl)>,
+);
 
 /// Outcome of a demanded per-symbol lowering ([`DeclBodyMemo::lower_demanded`]).
 ///
@@ -2014,10 +2018,7 @@ pub(crate) fn lowered_decls_from_env_and_program(
     env: &EvalEnv,
     program: &oxc_ast::ast::Program<'_>,
     source: &str,
-) -> (
-    Vec<(String, LoweredTypeDecl)>,
-    Vec<(String, LoweredValueDecl)>,
-) {
+) -> LoweredDeclGroups {
     let mut retained_types: FxHashMap<String, RetainedTypeTransients> = FxHashMap::default();
     let mut retained_values: FxHashMap<String, RetainedValueTransients> = FxHashMap::default();
     for (index, stmt) in program.body.iter().enumerate() {

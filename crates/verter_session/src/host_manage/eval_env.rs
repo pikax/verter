@@ -993,19 +993,19 @@ impl VerterHost {
                     // Node-domain fast paths: resolve the field's value node
                     // once (structural mirror member / authored member
                     // position through the one dispatch) and classify it.
-                    let fast = payload
-                        .and_then(|payload| {
-                            engine
-                                .macro_field_value_node(
-                                    canonical,
-                                    ctx.macro_index,
-                                    ctx.output_path.as_ref(),
-                                )
-                                .map(|field_value| (payload, field_value))
-                        })
-                        .and_then(|(payload, field_value)| {
-                            engine.try_fast_shallow_field_expr(canonical, payload, field_value)
-                        });
+                    let fast = match payload {
+                        Some(payload) => engine
+                            .macro_field_value_node(
+                                canonical,
+                                ctx.macro_index,
+                                ctx.output_path.as_ref(),
+                            )
+                            .map(|field_value| (payload, field_value)),
+                        None => None,
+                    }
+                    .and_then(|(payload, field_value)| {
+                        engine.try_fast_shallow_field_expr(canonical, payload, field_value)
+                    });
 
                     let expansion = if let Some(fast) = fast {
                         fast_to_expansion(fast)

@@ -191,78 +191,71 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         // (3) Single-member import path: `ImportedRoot['member']`.
-        if let crate::semantic_query::SemanticNodeData::IndexedAccess { object, index } =
-            root_data.as_ref()
+        if let crate::semantic_query::SemanticNodeData::IndexedAccess {
+            object,
+            index: crate::semantic_query::IndexKey::String(member_name),
+        } = root_data.as_ref()
         {
-            if let crate::semantic_query::IndexKey::String(member_name) = index {
-                let object_data =
-                    crate::project_semantic_dispatch::node_data_for(self.ctx, *object);
-                let root_name = object_data.as_deref().and_then(|data| {
-                    data.bare_ref_head().and_then(|(name, _)| {
-                        data.carrier_type_args()
-                            .is_empty()
-                            .then(|| std::sync::Arc::clone(name))
-                    })
-                });
-                if let Some(root_name) = root_name {
-                    if self.bare_ref_origin_in_scope(scope_canonical_id, root_name.as_ref())
-                        == BareRefOrigin::Imported
-                    {
-                        let root_identity =
-                            self.root_identity_in_scope(scope_canonical_id, root_name.as_ref())?;
-                        if is_package_canonical(self.ctx, &root_identity.canonical_id) {
-                            return symbolic_preserve(field_value);
-                        }
-                        let member_name = std::sync::Arc::clone(member_name);
-                        let prepared = self.prepared_type_decl(
-                            &root_identity.canonical_id,
-                            &root_identity.symbol_name,
-                        )?;
-                        let member = prepared.member_index.get(member_name.as_ref())?.clone();
-                        let param_names: FxHashSet<&str> = prepared
-                            .type_parameters
-                            .iter()
-                            .map(|param| param.name.as_str())
-                            .collect();
-                        let dispatch =
-                            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                                self.ctx,
-                            );
-                        let member_node = dispatch.raise_authored_locator_to_hot(
-                            &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                                member.ty.clone(),
-                            ),
-                            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                                crate::semantic_query::ProjectionMode::Navigate,
-                            ),
-                        )?;
-                        if node_references_type_param_names(
-                            self.ctx,
-                            member_node.node(),
-                            &param_names,
-                            0,
-                        ) {
-                            return None;
-                        }
-                        let exactness = match crate::meta_resolve::exactness::classify_node(
-                            &dispatch,
-                            member_node.node(),
-                        ) {
-                            verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
-                                FastShallowFieldExprExactness::Concrete
-                            }
-                            _ => FastShallowFieldExprExactness::Symbolic,
-                        };
-                        return Some(FastShallowFieldExpr {
-                            hot: member_node,
-                            semantic_source: verter_type_expr::facts::SemanticTypeSource::Authored(
-                                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                                    member.ty,
-                                ),
-                            ),
-                            exactness,
-                        });
+            let object_data = crate::project_semantic_dispatch::node_data_for(self.ctx, *object);
+            let root_name = object_data.as_deref().and_then(|data| {
+                data.bare_ref_head().and_then(|(name, _)| {
+                    data.carrier_type_args()
+                        .is_empty()
+                        .then(|| std::sync::Arc::clone(name))
+                })
+            });
+            if let Some(root_name) = root_name {
+                if self.bare_ref_origin_in_scope(scope_canonical_id, root_name.as_ref())
+                    == BareRefOrigin::Imported
+                {
+                    let root_identity =
+                        self.root_identity_in_scope(scope_canonical_id, root_name.as_ref())?;
+                    if is_package_canonical(self.ctx, &root_identity.canonical_id) {
+                        return symbolic_preserve(field_value);
                     }
+                    let member_name = std::sync::Arc::clone(member_name);
+                    let prepared = self.prepared_type_decl(
+                        &root_identity.canonical_id,
+                        &root_identity.symbol_name,
+                    )?;
+                    let member = prepared.member_index.get(member_name.as_ref())?.clone();
+                    let param_names: FxHashSet<&str> = prepared
+                        .type_parameters
+                        .iter()
+                        .map(|param| param.name.as_str())
+                        .collect();
+                    let dispatch =
+                        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+                    let member_node = dispatch.raise_authored_locator_to_hot(
+                        &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
+                        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                            crate::semantic_query::ProjectionMode::Navigate,
+                        ),
+                    )?;
+                    if node_references_type_param_names(
+                        self.ctx,
+                        member_node.node(),
+                        &param_names,
+                        0,
+                    ) {
+                        return None;
+                    }
+                    let exactness = match crate::meta_resolve::exactness::classify_node(
+                        &dispatch,
+                        member_node.node(),
+                    ) {
+                        verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+                            FastShallowFieldExprExactness::Concrete
+                        }
+                        _ => FastShallowFieldExprExactness::Symbolic,
+                    };
+                    return Some(FastShallowFieldExpr {
+                        hot: member_node,
+                        semantic_source: verter_type_expr::facts::SemanticTypeSource::Authored(
+                            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty),
+                        ),
+                        exactness,
+                    });
                 }
             }
         }
