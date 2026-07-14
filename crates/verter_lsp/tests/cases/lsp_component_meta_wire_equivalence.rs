@@ -44,20 +44,21 @@ async fn lsp_json_ffi_projection_and_protocol_bytes_are_equivalent() {
         analysis_level: verter_session::AnalysisLevel::Full,
         ..HostConfig::default()
     }));
-    host.upsert(verter_session::UpsertRequest {
-        canonical_id: Some("/WireEq.vue".to_string()),
-        input_id: "/WireEq.vue".to_string(),
-        source: r#"<script setup lang="ts">
+    let _ = host
+        .upsert(verter_session::UpsertRequest {
+            canonical_id: Some("/WireEq.vue".to_string()),
+            input_id: "/WireEq.vue".to_string(),
+            source: r#"<script setup lang="ts">
 type Named = { x: number }
 defineProps<{ label: string; named: Named }>()
 defineEmits<{ change: [next: number] }>()
 </script>
 <template><div /></template>"#
-            .into(),
-        file_language: verter_session::FileLanguage::vue(),
-        aliases: Vec::new(),
-    })
-    .unwrap();
+                .into(),
+            file_language: verter_session::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
     let service = build_test_server(Arc::clone(&host));
 
     // (1) The ACTUAL LSP custom method — the JSON wire DTO.

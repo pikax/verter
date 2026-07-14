@@ -52,14 +52,15 @@ use crate::resolver_core::{
 use crate::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 fn upsert_vue(host: &VerterHost, id: &str, src: &str) {
-    host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: id.to_string(),
-        source: Arc::from(src),
-        file_language: FileLanguage::vue(),
-        aliases: Vec::new(),
-    })
-    .expect("upsert");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(src),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert");
 }
 
 /// A parent SFC whose single template root is an IMPORTED child component.

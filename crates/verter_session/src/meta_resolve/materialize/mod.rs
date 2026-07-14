@@ -11,11 +11,10 @@
 //! callsites keep working without churn.
 
 mod field_types;
-pub(crate) mod utility_types;
 
 pub(crate) use field_types::{
-    lower_type_expr_for_shape_subject, package_backed_object_like_root_identity_with_fence,
-    reduce_member_value_graph_native_with_context, type_expr_materialize_reduction_context,
+    package_backed_object_like_root_identity_with_fence,
+    reduce_member_value_graph_native_with_context,
 };
 // Re-export ONLY the per-sink output capability TYPE so the
 // `output_materialization` owner module can name it for its explicit
@@ -29,14 +28,10 @@ pub(crate) use field_types::MetaResolveFieldTypesOutputCap;
 // constructor's signature. Like the output-cap re-export above, the `new()`
 // CONSTRUCTOR stays sink-private (`mint: pub(in …::field_types)`), so this
 // widens only who can NAME the type, not who can mint it.
-pub(crate) use field_types::RegistryMemberShapeKeyCap;
 // The node-domain registry member-surface stabiliser + the stabilised-value
 // carrier: the node-first second pass that reduces a first-pass
 // `MaterializeStructureDb` node through the `ShapeCacheDb` member-node slot,
 // reproducing the `_until_stable_full` reduction context.
-pub(crate) use field_types::{
-    stabilize_registry_member_surface_node_with_shape_cache, RegistryMemberStabilizedValue,
-};
 // The node-domain reduction-context helper: consumed by the stabiliser
 // (same module) and by the publication finaliser's node-start per-field
 // reducer (`output_sink::reduce_field_value_node`).

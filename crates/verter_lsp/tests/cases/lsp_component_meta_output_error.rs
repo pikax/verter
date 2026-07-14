@@ -50,18 +50,19 @@ async fn component_meta_output_failure_surfaces_as_jsonrpc_error_not_null() {
         analysis_level: verter_session::AnalysisLevel::Full,
         ..HostConfig::default()
     }));
-    host.upsert(verter_session::UpsertRequest {
-        canonical_id: Some("/LspOutputFail.vue".to_string()),
-        input_id: "/LspOutputFail.vue".to_string(),
-        source: r#"<script setup lang="ts">
+    let _ = host
+        .upsert(verter_session::UpsertRequest {
+            canonical_id: Some("/LspOutputFail.vue".to_string()),
+            input_id: "/LspOutputFail.vue".to_string(),
+            source: r#"<script setup lang="ts">
 defineProps<{ label: string }>()
 </script>
 <template><div /></template>"#
-            .into(),
-        file_language: verter_session::FileLanguage::vue(),
-        aliases: Vec::new(),
-    })
-    .unwrap();
+                .into(),
+            file_language: verter_session::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
     let service = build_test_server(Arc::clone(&host));
 
     // Control 1: the un-forced request returns the real FFI JSON payload.

@@ -1055,7 +1055,7 @@ pub(crate) fn project_model(
         )
     };
 
-    if let SemanticOutcome::Degraded(_) = presence_outcome {
+    if let SemanticOutcome::Degraded(reason) = presence_outcome {
         // Record the degradation so the consumer observes the missing
         // payload through the diagnostic stream rather than as a silent
         // shell — the published source below stays the model's authored
@@ -1063,7 +1063,7 @@ pub(crate) fn project_model(
         diag_sink.push(super::macro_expansion_for_query_error(
             macro_index,
             MacroExpansionKind::DefineProps,
-            "model-payload-raise-failed".to_string(),
+            format!("model-payload-raise-failed:{reason:?}"),
         ));
     }
 

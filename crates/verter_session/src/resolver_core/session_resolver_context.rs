@@ -645,6 +645,7 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     }
 
     #[inline]
+    #[cfg(test)]
     fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool {
         ResolverContext::workspace_is_workspace_owned(self.inner, canonical_id)
     }

@@ -2307,8 +2307,7 @@ fn component_meta_lane_misalignment_fails_closed_not_silent_truncation() {
 /// conversion under `catch_unwind` and return the panic payload string.
 fn conversion_panic_message(convert: impl FnOnce() + std::panic::UnwindSafe) -> String {
     let payload = std::panic::catch_unwind(convert)
-        .err()
-        .expect("a misaligned lane must refuse the conversion");
+        .expect_err("a misaligned lane must refuse the conversion");
     payload
         .downcast_ref::<String>()
         .cloned()

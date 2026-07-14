@@ -268,18 +268,6 @@ mod projector {
         }
     }
 
-    impl sealed::Sealed
-        for crate::host_manage::component_meta_methods::HostManageComponentMetaOutputCap<'_, '_>
-    {
-    }
-    impl OutputProjector
-        for crate::host_manage::component_meta_methods::HostManageComponentMetaOutputCap<'_, '_>
-    {
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_> {
-            self.dispatch_for_projector()
-        }
-    }
-
     impl sealed::Sealed for crate::typeinfo::raise::TypeinfoRaiseOutputCap<'_, '_> {}
     impl OutputProjector for crate::typeinfo::raise::TypeinfoRaiseOutputCap<'_, '_> {
         fn dispatch(&self) -> &ProjectSemanticDispatch<'_> {
@@ -428,19 +416,6 @@ mod carrier {
                 Self(self.0.clone())
             }
 
-            /// Borrow the inner [`TypeExpr`]. Requires an [`OutputProjector`]
-            /// capability — the unwrap-locality gate. The capability is the
-            /// proof the caller is a true output sink; it is not otherwise
-            /// consulted. The borrow read-surface (paired with the live by-value
-            /// `into_type_expr`): retained as the carrier's documented
-            /// capability-gated read accessor — the per-field sentinel gate now
-            /// reads the node-domain fact off the carrier `node_id` rather than
-            /// borrowing the `TypeExpr`, so this borrow has no current caller.
-            #[cfg_attr(not(test), allow(dead_code))]
-            pub(super) fn type_expr<P: OutputProjector + ?Sized>(&self, _cap: &P) -> &TypeExpr {
-                &self.0
-            }
-
             /// Read the inner [`TypeExpr`] out, consuming the payload. Requires
             /// an [`OutputProjector`] capability — the unwrap-locality gate.
             pub(super) fn into_type_expr<P: OutputProjector + ?Sized>(self, _cap: &P) -> TypeExpr {
@@ -581,19 +556,6 @@ mod carrier {
         /// fact off the carrier `node_id` instead of borrowing the `TypeExpr`, so
         /// the borrow accessor (like the sibling `node_id` accessor) has no
         /// current caller but stays as the carrier's read contract.
-        #[cfg_attr(not(test), allow(dead_code))]
-        pub(crate) fn type_expr<P: OutputProjector + ?Sized>(&self, cap: &P) -> &TypeExpr {
-            self.type_expr.0.type_expr(cap)
-        }
-
-        /// Read the inner [`TypeExpr`] payload out, consuming the carrier.
-        /// Requires an [`OutputProjector`] capability — the compiler-enforced
-        /// unwrap-locality gate for the by-value read sites. Delegates to the
-        /// vault's capability-gated accessor.
-        pub(crate) fn into_type_expr<P: OutputProjector + ?Sized>(self, cap: &P) -> TypeExpr {
-            self.type_expr.0.into_type_expr(cap)
-        }
-
         /// Test-only carrier assembly from a raw [`TypeExpr`] (no capability
         /// required). Gated `#[cfg(any(test, feature = "test-support"))]` — NOT
         /// `#[cfg(any(test, debug_assertions))]` — so it is reachable ONLY from

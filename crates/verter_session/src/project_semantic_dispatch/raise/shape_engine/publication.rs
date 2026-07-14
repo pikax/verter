@@ -25,7 +25,9 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, PrimitiveName, TypeExpr};
+#[cfg(test)]
+use verter_type_expr::TypeExpr;
+use verter_type_expr::{LiteralValue, MappedModifier, MemberVisibility, PrimitiveName};
 
 use super::super::ProjectSemanticDispatch;
 use super::{
@@ -285,6 +287,7 @@ mod combine {
     /// `type_expr_has_structural_top_level`), but exact-unknown root is FALSE
     /// (`matches!(Parenthesized(_), Unknown)` is false, so a `Parenthesized`
     /// wrapper is never an exact-unknown root even around an `Unknown`).
+    #[cfg(test)]
     pub(super) fn parenthesized(inner: PublicationScore) -> PublicationScore {
         PublicationScore {
             symbolic_carriers: inner.symbolic_carriers,
@@ -296,6 +299,7 @@ mod combine {
 
     /// A standalone `Rest` (`...T`; `&TypeExpr` front only): the inner's carriers,
     /// no self-penalty; STRUCTURAL root.
+    #[cfg(test)]
     pub(super) fn rest(inner: PublicationScore) -> PublicationScore {
         PublicationScore {
             symbolic_carriers: inner.symbolic_carriers,
@@ -710,6 +714,7 @@ fn fold_node_publication(
 /// `type_expr_has_structural_top_level` / `matches!(_, Unknown)` semantics
 /// EXACTLY, so `compare_type_expr_improvement`'s existing callers see
 /// byte-identical verdicts.
+#[cfg(test)]
 pub(in crate::project_semantic_dispatch) fn type_expr_publication_score(
     expr: &TypeExpr,
 ) -> PublicationScore {
@@ -787,6 +792,7 @@ pub(in crate::project_semantic_dispatch) fn type_expr_publication_score(
 /// The `(symbolic_carriers, generic_detail)` contribution of one `&TypeExpr`
 /// object member — mirrors the per-member arms of `count_symbolic_carriers_in_expr`
 /// + `count_generic_detail_in_expr`.
+#[cfg(test)]
 fn object_member_score(member: &verter_type_expr::ObjectMember) -> (usize, usize) {
     use verter_type_expr::ObjectMember;
     match member {
@@ -814,6 +820,7 @@ fn object_member_score(member: &verter_type_expr::ObjectMember) -> (usize, usize
 }
 
 /// The [`FnScore`] of a `&FunctionExpr` — feeds the shared [`function_score`].
+#[cfg(test)]
 fn function_expr_score(function: &verter_type_expr::FunctionExpr) -> FnScore {
     function_score(
         function

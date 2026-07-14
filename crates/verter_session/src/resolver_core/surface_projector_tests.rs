@@ -78,7 +78,7 @@ fn member(
 /// 15)` here and FAIL this test.
 #[test]
 fn native_prop_rows_keep_all_visibilities_with_wire_default_spans() {
-    let members = vec![
+    let members = [
         member(
             "label",
             false,

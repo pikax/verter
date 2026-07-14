@@ -469,6 +469,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
     }
 
     #[inline]
+    #[cfg(test)]
     fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool {
         self.inner.workspace().is_workspace_owned(canonical_id)
     }

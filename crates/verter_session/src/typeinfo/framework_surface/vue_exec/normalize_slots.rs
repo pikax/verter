@@ -499,17 +499,18 @@ mod raise_miss_normalization_tests {
         use crate::types::{FileLanguage, UpsertRequest};
 
         let host = make_host();
-        host.upsert(UpsertRequest {
-            canonical_id: None,
-            input_id: "/dep.ts".to_string(),
-            source: Arc::from(
-                "export type Source = { foo: string; bar: number };\n\
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: "/dep.ts".to_string(),
+                source: Arc::from(
+                    "export type Source = { foo: string; bar: number };\n\
                  export type PickAlias = Pick<Source, 'foo'>;\n",
-            ),
-            file_language: FileLanguage::script_ts(),
-            aliases: Vec::new(),
-        })
-        .unwrap();
+                ),
+                file_language: FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let graph = host.project_type_store().semantic_graph();
         let shallow = dispatch

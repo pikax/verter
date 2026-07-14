@@ -323,10 +323,10 @@ fn fenced_import_serve_refuses_script_facts_publication() {
 ///   3. the sibling VALIDATION tracer stayed CACHEABLE. Only a
 ///      signature-CONSUMING `install_fact_tracer` emits the overflow audit event
 ///      + host counter (the cacheability path peeks overflow without emitting),
-///      so a ZERO counter says no signature-consuming boundary overflowed — i.e.
-///      `provider.validate` finalised `Ok` and its `SignatureAdmission` was
-///      Cacheable. That is what makes (2) attributable to the import tracer
-///      ALONE rather than to a second, independent refusal.
+///        so a ZERO counter says no signature-consuming boundary overflowed — i.e.
+///        `provider.validate` finalised `Ok` and its `SignatureAdmission` was
+///        Cacheable. That is what makes (2) attributable to the import tracer
+///        ALONE rather than to a second, independent refusal.
 ///
 /// Reverting the import boundary to a raw tracer whose finalise is discarded
 /// makes `import_non_cacheable` false and the entry publishes: (2) fails.

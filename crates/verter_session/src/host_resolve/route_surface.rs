@@ -16,6 +16,7 @@
 //! - `collect_external_types_from_loaded_files` — adapter that drives the
 //!   `HostExternalMacroTypeCollector` over a file's macro-type deps.
 
+#[cfg(test)]
 use std::sync::Arc;
 
 use super::external_macro_collector::HostExternalMacroTypeCollector;
@@ -309,6 +310,7 @@ impl VerterHost {
     /// On the WASM path, tries `self.files` first.
     /// Both fall back to reading from the VFS workspace.
     /// For Vue SFCs, extracts only `<script>` / `<script setup>` content.
+    #[cfg(test)]
     pub(crate) fn read_dep_source_for_type_resolution(
         &self,
         dep_canonical: &str,

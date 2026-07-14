@@ -7,7 +7,6 @@
 //! contributes a private `impl VerterHost { … }` block that
 //! continues the parent shell's impl chain.
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::types::*;
@@ -396,40 +395,6 @@ impl VerterHost {
         self.ws().file_exists(canonical_id)
     }
 
-    /// THE single host parse entry for the borrowed eval-program form.
-    ///
-    /// Produces a fresh `ParsedEvalProgram` per call. The parse lives and dies
-    /// on the caller's stack (the OXC arena is `!Send` and must never enter host
-    /// caches or thread-locals); the `IndexedReady` materialise closure threads
-    /// the parsed program by reference so a cold canonical build parses exactly
-    /// once. Concurrent cold callers collapse on `indexed_singleflight`.
-    ///
-    /// Returns `None` when the parse panicked (fatal syntax fault) —
-    /// callers fall back to default analysis / an empty env rather than
-    /// re-parsing under a different source type.
-    pub(crate) fn parse_eval_program(
-        &self,
-        canonical_id: &str,
-        whole_hash: Hash16,
-        eval_source: &Arc<str>,
-        source_type: oxc_span::SourceType,
-    ) -> Option<Rc<crate::ParsedEvalProgram>> {
-        self.provenance
-            .eval_program_parses
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let parsed = crate::ParsedEvalProgram::parse(Arc::clone(eval_source), source_type);
-        component_meta_trace_custom!(
-            "parse_eval_program",
-            format!(
-                "owner={} bytes={} whole_hash={whole_hash:?} parse_failed={}",
-                canonical_id,
-                eval_source.len(),
-                parsed.is_none(),
-            ),
-        );
-        parsed.map(Rc::new)
-    }
-
     pub(super) fn external_type_resolution_inputs(
         &self,
         canonical_id: &str,
@@ -487,9 +452,6 @@ impl VerterHost {
                     .map(|serve| serve.indexed)
                 {
                     return Some(ExternalTypeResolutionInputs {
-                        framework_parse: indexed.framework_parse.clone(),
-                        whole_hash: indexed.whole_hash,
-                        eval_source: Arc::clone(&indexed.eval_source),
                         analysis: Arc::clone(&indexed.external_type_analysis),
                         analysis_cache_hit: true,
                     });
@@ -503,7 +465,7 @@ impl VerterHost {
         // Project-global `FileArtifactStore` fast path. The read is
         // **current-content-pinned** — never the content-agnostic
         // `get_any`. `ExternalTypeResolutionInputs` carries the dep's
-        // `whole_hash` and `external_type_analysis`; that analysis feeds
+        // `external_type_analysis`; that analysis feeds
         // cross-file macro-type resolution (`defineProps<Foo>` etc.) and
         // the observed `whole_hash` roots the consumer's
         // `fact_dep_signature`. With the own-canonical drain retired, a
@@ -522,9 +484,6 @@ impl VerterHost {
             .or_else(|| self.artifact_current_indexed(canonical_id));
         if let Some(facts) = cached_facts {
             let inputs = ExternalTypeResolutionInputs {
-                framework_parse: facts.framework_parse.clone(),
-                whole_hash: facts.whole_hash,
-                eval_source: Arc::clone(&facts.eval_source),
                 analysis: Arc::clone(&facts.external_type_analysis),
                 analysis_cache_hit: true,
             };
@@ -537,9 +496,6 @@ impl VerterHost {
         // shared with every other reader.
         let indexed = self.ensure_indexed_ready_serve(canonical_id)?.indexed;
         let inputs = ExternalTypeResolutionInputs {
-            framework_parse: indexed.framework_parse.clone(),
-            whole_hash: indexed.whole_hash,
-            eval_source: Arc::clone(&indexed.eval_source),
             analysis: Arc::clone(&indexed.external_type_analysis),
             // The materialiser publishes once per content generation; warm
             // hits return the same artifact through the fast path. Treat

@@ -299,7 +299,7 @@ fn retired_kind_b_bridge_tombstone_self_test_discriminates() {
 const OWNER_REL: &str = "src/project_semantic_dispatch/output_materialization.rs";
 
 /// The FULL `::`-joined capability self-type paths the EXPLICIT
-/// `impl OutputProjector for <Cap>` registration is allowed for — the EIGHT
+/// `impl OutputProjector for <Cap>` registration is allowed for — the seven
 /// true-output-sink capabilities (one per exact output-sink module that
 /// legitimately projects). Compared as a MULTISET against the observed full
 /// self-type paths (NOT deduped last-idents — so two impls for `a::b::Cap` and
@@ -320,7 +320,6 @@ const OWNER_REL: &str = "src/project_semantic_dispatch/output_materialization.rs
 /// hardening_history: replaced the register_output_capability! macro-invocation inventory + the closed-leaf Item::Mod count; the impl comparison is a FULL-self-type-path MULTISET (closing the dup-last-ident gap) and the trusted-surface inventory bans ImplItem/TraitItem-macros, a use-`sealed::Sealed as` alias, and any owner-wide TypeExpr-alias (closed-allowlist completeness over the trusted owner surface). No scanner-evasion spelling hardening rounds.
 /// ```
 const SANCTIONED_OUTPUT_CAPS: &[&str] = &[
-    "crate::host_manage::component_meta_methods::HostManageComponentMetaOutputCap",
     "crate::meta_resolve::materialize::MetaResolveFieldTypesOutputCap",
     "crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap",
     "crate::resolver_core::component_meta_query_engine::MetaQueryRegistryOutputCap",
@@ -1112,17 +1111,15 @@ fn carrier_uncapped_typeexpr_methods(file: &syn::File) -> Vec<String> {
                 // alias-launder vector: it lets a method return `&X` instead of
                 // `&TypeExpr`, evading the return-type recogniser. Ban it at the
                 // declaration (the vault has no legitimate `TypeExpr` alias).
-                syn::Item::Type(t) if in_vault => {
-                    if type_alias_aliases_type_expr(t) {
-                        out.push(format!(
-                            "`type {} = …` aliases `TypeExpr` inside the carrier/payload vault — a \
-                             `TypeExpr` alias in the vault is a laundering vector (a method can \
-                             return the alias instead of `TypeExpr` to evade the return-type \
-                             allowlist); the vault has NO legitimate `TypeExpr` alias, so it is \
-                             banned at the declaration",
-                            t.ident
-                        ));
-                    }
+                syn::Item::Type(t) if in_vault && type_alias_aliases_type_expr(t) => {
+                    out.push(format!(
+                        "`type {} = …` aliases `TypeExpr` inside the carrier/payload vault — a \
+                         `TypeExpr` alias in the vault is a laundering vector (a method can \
+                         return the alias instead of `TypeExpr` to evade the return-type \
+                         allowlist); the vault has NO legitimate `TypeExpr` alias, so it is \
+                         banned at the declaration",
+                        t.ident
+                    ));
                 }
                 _ => {}
             }
@@ -2203,18 +2200,6 @@ const KIND_B_BRIDGE_MODULES: &[&str] = &[
 /// Sorted by cap name so the comparison against the live registry is
 /// order-stable.
 const SANCTIONED_SINK_MODULES: &[(&str, &[&str])] = &[
-    (
-        "HostManageComponentMetaOutputCap",
-        &[
-            "crate :: host_manage :: component_meta_methods",
-            // The sink-owned macro-output expansion demand API — a descendant of
-            // the mint scope whose whole reachable production scope is output-only
-            // (it mints the cap INTERNALLY in `materialize_admitted_expansion_node`
-            // + materialises; its only other submodule is the `#[cfg(test)]` parity
-            // suite). A genuine co-sink for this cap, NOT a non-sink helper.
-            "crate :: host_manage :: component_meta_methods :: macro_output_expansion",
-        ],
-    ),
     (
         "MetaQueryRegistryOutputCap",
         &["crate :: resolver_core :: component_meta_query_engine :: registry_decl"],
@@ -4605,16 +4590,6 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
         "crate::typeinfo::raise",
         "project_node_to_type_expr_for_test",
     ),
-    // The query-engine surface projector (successor of the retired
-    // `surface_view_to_projected_surface` / `projected_surface_from_semantic_node*`
-    // ProjectedSurface-bridge raisers — registry + intrinsic consumers now read
-    // `SurfaceView` directly) — sink-internal, confined to the
-    // `component_meta_query_engine` subtree (the forgeable input is the leak the
-    // re-export removal closes; it stays reachable only in-subtree).
-    (
-        "crate::resolver_core::component_meta_query_engine::surface",
-        "surface_view_to_registry_type_expr",
-    ),
     // The route-fixpoint terminal raiser: materialises the sealed
     // `AdmittedRouteProjectionNode` (minted only by the in-subtree route/surface
     // adapters after their node-domain acceptance gate) into the published
@@ -4625,18 +4600,6 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
     (
         "crate::resolver_core::component_meta_query_engine::surface",
         "materialize_route_projection_node",
-    ),
-    // The registry-publication terminal raiser: materialises the sealed
-    // `RegistryPublicationNode` (the no-admission-claim carrier minted only by the
-    // in-subtree registry candidate path for a first-pass / stabilised member-surface
-    // node — an arbitrary `Miss`/`Recursive`/`Tainted`/degenerate outcome) into the
-    // published `TypeExpr` through the SAME `materialize_published_node` surface sink.
-    // Sink-internal, confined to the `component_meta_query_engine` subtree — same
-    // category as `materialize_route_projection_node` above; the carried node is the
-    // input, not a caller-forged surface/member.
-    (
-        "crate::resolver_core::component_meta_query_engine::surface",
-        "materialize_registry_publication_node",
     ),
     // The framework-surface member raiser — confined to `vue_exec`, reachable
     // only through a token-gated normalizer.
@@ -12201,18 +12164,14 @@ mod semantic_api_wire_input_witness {
 
 /// Direct materialize PRIMITIVE idents — obtaining a bare `TypeExpr` from the
 /// sealed output boundary (the capability accessors `materialize_output_type_expr`
-/// / `materialize_reduced_output_type_expr` / `into_type_expr` / the
-/// `carrier.type_expr(&cap)` method) plus the local raise/unwrap wrappers that
+/// / `materialize_reduced_output_type_expr` / `into_type_expr`) plus the local raise/unwrap wrappers that
 /// compose them. EXACT whole-ident match (so `materialize_output_type_expr_for_test`
 /// — the `#[cfg(test)]` sibling — is NOT a primitive).
 const HOT_MAT_DIRECT_IDENTS: &[&str] = &[
     "materialize_output_type_expr",
     "materialize_reduced_output_type_expr",
     "into_type_expr",
-    "type_expr", // the `carrier.type_expr(&cap)` accessor (method-call form only)
     "materialize_published_node",
-    "materialize_component_meta_type_expr_until_stable",
-    "materialize_component_meta_type_expr_until_stable_full",
     "materialize_admitted_expansion_node",
     "raise_member_value",
 ];
@@ -12252,8 +12211,6 @@ const HOT_DECIDE_STANDALONE_IDENTS: &[&str] = &["type_expr_to_object_shape"];
 const HOT_DECIDE_TAINTED_GATE_IDENTS: &[&str] = &[
     "type_expr_contains_semantic_miss",
     "type_expr_root_is_unmaterialized_sentinel",
-    "type_expr_contains_reducible_operator",
-    "component_meta_registry_has_explicit_object_surface",
     "dispatch_route_expr_is_materialized",
 ];
 
@@ -12290,15 +12247,6 @@ const HOT_LOWERING_IDENTS: &[&str] = &[
     // a materialized-value decide — its `matches!(expr, TypeOf)` input
     // classification is publication classification.
     "shallow_lower_type_expr_with_context",
-    // The TypeExpr-START shape-subject lowering (one tear-free scope
-    // observation + one shallow lowering shared by the cache-key subject, the
-    // peek, the cold reduce, and the admit self-root): it lowers its `expr`
-    // input through `shallow_lower_type_expr_with_context` INTERNALLY and
-    // returns the settled node. The whole-expression materialiser
-    // (`materialize_component_meta_type_expr_until_stable_full`) delegates its
-    // `expr` lowering here, so feeding `expr` to it is a pipeline feed, not a
-    // materialized-value decide.
-    "lower_type_expr_for_shape_subject",
 ];
 
 /// Method idents that PROPAGATE taint from receiver to result (and, for the
@@ -12462,44 +12410,9 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
         "component_meta_query_engine/surface.rs",
         "materialize_route_projection_node",
     ),
-    // The registry-publication terminal: materialises a registry member-surface
-    // node (held in the no-admission-claim `RegistryPublicationNode` carrier — an
-    // arbitrary `Miss`/`Recursive`/`Tainted`/degenerate outcome, NOT a
-    // route-admitted node) ONCE through the SAME `materialize_published_node`
-    // surface sink. Pure one-shot publication — no decision on the result; the
-    // object-surface fact is read off the node separately.
-    (
-        "component_meta_query_engine/surface.rs",
-        "materialize_registry_publication_node",
-    ),
-    // The registry-publication SurfaceView converter (successor of the retired
-    // `surface_view_to_projected_surface` after the ProjectedSurface bridge was
-    // retired): materialises a one-level `SurfaceView` into the published
-    // registry `TypeExpr` ONCE through the sealed `MetaQuerySurfaceOutputCap`.
-    // The produced `TypeExpr` is a terminal OUTPUT value only — the registry
-    // object-surface decision reads the node-domain fact off the producing
-    // NODE, never this value.
-    (
-        "component_meta_query_engine/surface.rs",
-        "surface_view_to_registry_type_expr",
-    ),
     (
         "component_meta_query_engine/registry_decl.rs",
         "materialize_member_surface_node_core",
-    ),
-    (
-        "meta_resolve/materialize/field_types.rs",
-        "materialize_component_meta_type_expr_until_stable",
-    ),
-    // The reduced-output materialization envelope: lowers `expr`, reduces, and
-    // raises the reduced node into the sealed carrier ONCE
-    // (`materialize_reduced_output_type_expr`). Its cache-admission gate reads the
-    // node-domain root-sentinel fact off the carrier node
-    // (`node_root_is_unmaterialized_sentinel_with_dispatch`), not a materialised
-    // `TypeExpr`, so it makes no decision on the materialised value.
-    (
-        "meta_resolve/materialize/field_types.rs",
-        "materialize_component_meta_type_expr_until_stable_full",
     ),
     (
         "meta_resolve/materialize/field_types.rs",
@@ -12582,17 +12495,12 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ("vue_exec/imported_elements.rs", "render_params_text"),
     ("vue_exec/normalize.rs", "index_signatures_from_surface"),
     ("vue_exec/normalize.rs", "model_prop_fields"),
-    // The sealed carrier mint accessors — the lowest-level sanctioned mint
-    // boundary. Each `into_type_expr` / `type_expr` accessor delegates down the
-    // sealed `OutputTypeExpr` chain and returns the `TypeExpr` with no decision;
-    // they ARE the materialization primitive, not a consumer of it.
+    // The sealed carrier consuming accessor is the lowest-level sanctioned mint
+    // boundary. It returns the `TypeExpr` with no decision and is the
+    // materialization primitive, not a consumer of it.
     (
         "project_semantic_dispatch/output_materialization.rs",
         "into_type_expr",
-    ),
-    (
-        "project_semantic_dispatch/output_materialization.rs",
-        "type_expr",
     ),
     // Per-member publication DTO builders (props / expose / object-member / slot
     // binding leaf surfaces): mint each member's value once through the
@@ -12667,8 +12575,7 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ),
     // The `defineModel` publication terminal: resolves the macro payload node,
     // decides reducibility on the payload NODE (`classify_node_reduction_gates`),
-    // materialises the payload ONCE (raise + a conditional
-    // `materialize_component_meta_type_expr_until_stable`), and builds the model
+    // materialises the payload ONCE through the graph-native reducer and builds the model
     // `ExpandedField` DTO. No decision is made on the materialised value — the
     // only branch is the node-domain reducibility fact. Takes NO `TypeExpr`
     // param, so the self-policing rail seeds nothing.
@@ -12694,20 +12601,14 @@ fn hot_attrs_are_excluded(attrs: &[syn::Attribute]) -> bool {
         })
 }
 
-/// Whether a method-call ident is a direct materialize primitive. `type_expr`
-/// counts ONLY as a method call WITH an argument (`carrier.type_expr(&cap)`).
-fn hot_method_is_direct_verb(ident: &str, has_args: bool) -> bool {
-    if ident == "type_expr" {
-        return has_args;
-    }
+/// Whether a method-call ident is a direct materialize primitive.
+fn hot_method_is_direct_verb(ident: &str, _has_args: bool) -> bool {
     HOT_MAT_DIRECT_IDENTS.contains(&ident)
 }
 
-/// Whether a FREE-FN / assoc-fn last-segment ident is a direct materialize
-/// primitive (the carrier accessor `type_expr` is a method, never a free fn, so
-/// it is excluded here to avoid a false fire on an unrelated free `type_expr`).
+/// Whether a free/associated function's last segment is a direct primitive.
 fn hot_free_fn_is_direct_verb(ident: &str) -> bool {
-    ident != "type_expr" && HOT_MAT_DIRECT_IDENTS.contains(&ident)
+    HOT_MAT_DIRECT_IDENTS.contains(&ident)
 }
 
 // ---------------------------------------------------------------------------

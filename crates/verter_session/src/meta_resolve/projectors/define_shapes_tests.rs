@@ -137,7 +137,7 @@ defineEmits<{ save: [id: number] } & { save: [name: string] }>()
              of its contributors; got {demanded:?}"
         );
     };
-    let labels: Vec<String> = arms.iter().flat_map(|arm| tuple_labels(arm)).collect();
+    let labels: Vec<String> = arms.iter().flat_map(tuple_labels).collect();
     assert!(
         labels.iter().any(|label| label == "id") && labels.iter().any(|label| label == "name"),
         "both contributors' payloads participate in the merged member; got \

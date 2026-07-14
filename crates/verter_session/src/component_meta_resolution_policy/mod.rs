@@ -48,7 +48,6 @@ use crate::VerterHost;
 
 mod core;
 mod cycle_guard;
-pub(crate) mod policy_helpers;
 mod raw_restoration;
 mod slot_preservation;
 

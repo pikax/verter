@@ -387,7 +387,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         use super::output_materialization::{OutputProjector, TestOutputCap};
         let cap = TestOutputCap::new(self);
         cap.materialize_reduced_output_type_expr(node, context)
-            .into_type_expr(&cap)
+            .type_expr_for_test()
+            .clone()
     }
 
     /// `execute` variant that returns the full [`CacheRead`].
@@ -474,6 +475,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// references and package-backed references stop as shallow `Ref`
     /// carriers the consumer re-resolves on demand. Workspace-imported
     /// interior branches still expand.
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn raise_and_reduce_observation(
         &self,
         node: SemanticNodeId,
@@ -4140,6 +4142,7 @@ pub(crate) fn project_node_publication_score_with_dispatch(
 /// semantics EXACTLY, so `compare_type_expr_improvement`'s existing callers see
 /// byte-identical verdicts.
 #[must_use]
+#[cfg(test)]
 pub(crate) fn type_expr_publication_score(expr: &TypeExpr) -> PublicationScore {
     shape_engine::type_expr_publication_score(expr)
 }
@@ -4299,46 +4302,6 @@ pub(crate) fn node_root_is_published_operator_with_dispatch(
     node: SemanticNodeId,
 ) -> bool {
     shape_engine::project_node_root_is_published_operator(dispatch, node).unwrap_or(false)
-}
-
-/// Node-domain equivalent of `matches!(raise(node), TypeExpr::TypeOf(_))`: whether
-/// `node`'s NORMALIZED raised root is a `TypeOf`. Reads the post-normalized raised
-/// root off the ROOT-ONLY projection (no `TypeExpr` materialised), so an
-/// `Intersection([{}, TypeOf])` collapsed by the projection answers `true`. A
-/// whole-raise `None` is `false`.
-#[must_use]
-pub(crate) fn node_root_is_typeof_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: SemanticNodeId,
-) -> bool {
-    shape_engine::project_node_root_is_typeof(dispatch, node).unwrap_or(false)
-}
-
-/// Node-domain equivalent of `matches!(raise(node), TypeExpr::Object(_))`: whether
-/// `node`'s NORMALIZED raised root is EXACTLY an `Object` (NOT a `Union` /
-/// `Intersection` root). Reads the post-normalized raised root off the ROOT-ONLY
-/// projection (no `TypeExpr` materialised), so an `Intersection([{}, Object])`
-/// collapsed by the projection answers `true`, matching the `TypeExpr` predicate
-/// on the raised value. A whole-raise `None` is `false`.
-#[must_use]
-pub(crate) fn node_root_is_object_surface_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: SemanticNodeId,
-) -> bool {
-    shape_engine::project_node_root_is_object_surface(dispatch, node).unwrap_or(false)
-}
-
-/// Node-domain equivalent of `matches!(raise(node), TypeExpr::IndexedAccess { .. })`:
-/// whether `node`'s NORMALIZED raised root is an `IndexedAccess`. Reads the
-/// post-normalized raised root off the ROOT-ONLY projection (no `TypeExpr`
-/// materialised), so an `Intersection([{}, IndexedAccess])` collapsed by the
-/// projection answers `true`. A whole-raise `None` is `false`.
-#[must_use]
-pub(crate) fn node_root_is_indexed_access_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: SemanticNodeId,
-) -> bool {
-    shape_engine::project_node_root_is_indexed_access(dispatch, node).unwrap_or(false)
 }
 
 /// Node-domain equivalent of `type_expr_contains_semantic_miss(raise(node))`:

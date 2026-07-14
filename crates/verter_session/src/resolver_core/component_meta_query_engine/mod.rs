@@ -172,8 +172,6 @@ pub(crate) use surface::MetaQuerySurfaceOutputCap;
 // registry-symbol resolution with budget) live in the private
 // `helpers` child module. All entries are `pub(super)` and used from
 // the engine impl in sibling modules plus the inline test module.
-#[cfg(test)]
-use helpers::type_expr_references_type_params;
 
 pub(crate) const SEMANTIC_MISS: &str = "semanticMiss";
 pub(crate) const SEMANTIC_OBJECT_SURFACE: &str = "semanticObjectSurface";

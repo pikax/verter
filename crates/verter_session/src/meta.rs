@@ -1168,38 +1168,6 @@ impl MetaSession {
         Ok(f(&self.runtime))
     }
 
-    /// Test-only demand probe under THIS session's overlay view: the
-    /// session-bound sibling of
-    /// [`crate::test_only::semantic_source_probe::demand_type_expr`].
-    /// Overlay-only fixtures are invisible to a bare-host (base-view)
-    /// dispatch, so assertions over a session-published source demand it
-    /// through a [`crate::resolver_core::SessionResolverContext`] bound to
-    /// the same overlay view the producing query ran under. Raise,
-    /// reduction, and materialisation all route through the ONE shared
-    /// dispatch — no second engine.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn demand_semantic_source_type_expr(
-        &self,
-        owner_canonical: &str,
-        source: &verter_type_expr::facts::SemanticTypeSource,
-    ) -> Option<verter_type_expr::TypeExpr> {
-        let host = self.project.host();
-        self.with_overlay_view(|view| {
-            let base = host
-                .resolver_store_view_read()
-                .into_owned_view()
-                .with_session_overlay(host, view);
-            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let ctx =
-                crate::resolver_core::SessionResolverContext::new(host, view, &base, overlay);
-            crate::project_semantic_dispatch::semantic_source::demand_semantic_source_type_expr_with_ctx(
-                &ctx,
-                owner_canonical,
-                source,
-            )
-        })
-    }
-
     /// Run a closure with a borrowed
     /// [`crate::session_view::OverlaidViewRef`] over this session's
     /// current overlay map.

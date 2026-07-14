@@ -443,7 +443,6 @@ struct LoweredStatementBatch {
 pub struct DeclBodyMemo {
     key: SnapshotKey,
     eval_source: Arc<str>,
-    raw_source: Arc<str>,
     framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
     source_type: oxc_span::SourceType,
     /// `None` on a seeded memo (every entry pre-filled; nothing to
@@ -500,7 +499,6 @@ impl DeclBodyMemo {
     pub(crate) fn new(
         key: SnapshotKey,
         eval_source: Arc<str>,
-        raw_source: Arc<str>,
         framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
         source_type: oxc_span::SourceType,
         service: Arc<DeclLoweringService>,
@@ -515,7 +513,6 @@ impl DeclBodyMemo {
         Self {
             key,
             eval_source,
-            raw_source,
             framework_parse,
             source_type,
             service: Some(service),
@@ -547,7 +544,6 @@ impl DeclBodyMemo {
         let memo = Self {
             key,
             eval_source: Arc::from(""),
-            raw_source: Arc::from(""),
             framework_parse: None,
             source_type: oxc_span::SourceType::ts(),
             service: None,

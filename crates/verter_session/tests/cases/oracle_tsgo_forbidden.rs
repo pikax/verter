@@ -220,8 +220,10 @@ fn oracle_consumption_path_has_no_tsgo_spawn() {
     // `required-features` bin gate). Exclude it from the CONSUMPTION-path scan;
     // every OTHER `oracle_core` file must stay tsgo-free.
     files.retain(|p| {
-        let s = p.to_string_lossy();
-        !s.contains("oracle_core/gen.rs") && !s.contains("oracle_core/gen/")
+        let relative = p
+            .strip_prefix(&oracle_root)
+            .expect("collected oracle source must stay under oracle_root");
+        relative != Path::new("gen.rs") && !relative.starts_with("gen")
     });
     if registry.exists() {
         files.push(registry);

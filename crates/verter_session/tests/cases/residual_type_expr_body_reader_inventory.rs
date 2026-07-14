@@ -3073,7 +3073,7 @@ fn count_pending_in(rows: &[ReaderRow]) -> usize {
 fn graph_backed_pending_is_a_non_growth_bounded_class() {
     let pending = count_pending_in(RESIDUAL_BODY_READERS);
     assert!(
-        pending <= GRAPH_BACKED_PENDING_CAP,
+        pending == GRAPH_BACKED_PENDING_CAP,
         "GraphBackedPending is a non-growth bounded set with an empty bound of \
          {GRAPH_BACKED_PENDING_TARGET} — it must never GROW. The class has {pending} rows but the \
          non-growth cap is {GRAPH_BACKED_PENDING_CAP}: a new graph-backed reader was added (to \
@@ -3125,7 +3125,7 @@ fn graph_backed_pending_cap_reddens_on_growth() {
         "self-test: the empty pending inventory sits exactly AT the cap"
     );
     assert!(
-        count_pending_in(&at_cap) <= GRAPH_BACKED_PENDING_CAP,
+        count_pending_in(&at_cap) == GRAPH_BACKED_PENDING_CAP,
         "self-test (cap GREEN): the cap predicate PASSES at exactly {GRAPH_BACKED_PENDING_CAP} \
          pending rows"
     );
@@ -3165,7 +3165,7 @@ fn graph_backed_pending_cap_reddens_on_growth() {
          the bound counts ONLY GraphBackedPending rows"
     );
     assert!(
-        count_pending_in(&mixed) <= GRAPH_BACKED_PENDING_CAP,
+        count_pending_in(&mixed) == GRAPH_BACKED_PENDING_CAP,
         "self-test (cap scope GREEN): a non-pending row keeps the cap predicate GREEN"
     );
 }

@@ -740,7 +740,6 @@ impl VerterHost {
         let decl_bodies = Arc::new(crate::decl_body_memo::DeclBodyMemo::new(
             snapshot_key,
             Arc::clone(&eval_source),
-            Arc::clone(&raw_source),
             framework_parse.clone(),
             source_type,
             Arc::clone(&self.decl_lowering),

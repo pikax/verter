@@ -3,8 +3,8 @@
 //! [`materialize_admitted_expansion_node`]) and the sink-owned demand API.
 //!
 //! The sink is the SINGLE place a node-domain expansion artifact becomes an
-//! `ExpandedNormalizedExpr`, materialising via the authorized-owner
-//! `HostManageComponentMetaOutputCap`. The artifact and materialiser are
+//! `ExpandedNormalizedExpr` by publishing a content-free semantic source. The
+//! artifact and materialiser are
 //! MODULE-PRIVATE to `macro_output_expansion`: no module outside it can name,
 //! construct, or materialise them — the only crate-visible entrances are the
 //! closed-demand methods (resolver ctx + owner canonical + macro index + the

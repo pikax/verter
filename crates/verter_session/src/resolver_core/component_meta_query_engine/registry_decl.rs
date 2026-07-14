@@ -112,27 +112,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// materialize-then-re-lower bridge.
     ///
     /// [`HotTypeRef`]: crate::semantic_query::HotTypeRef
-    pub(crate) fn materialize_member_surface_expr(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &verter_type_expr::TypeExpr,
-        nested_surface: bool,
-    ) -> verter_type_expr::TypeExpr {
-        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-        use crate::semantic_query::ProjectionMode;
-
-        let dispatch = ProjectSemanticDispatch::new(self.ctx);
-        let Some(base) = dispatch.lower_type_expr_in_scope_with_mode(
-            scope_canonical_id,
-            expr,
-            ProjectionMode::Navigate,
-        ) else {
-            return expr.clone();
-        };
-        self.materialize_member_surface_node_core(scope_canonical_id, base, nested_surface)
-            .unwrap_or_else(|| expr.clone())
-    }
-
     /// Demand-based member-surface API for a `Pick<Root, members…>` route.
     ///
     /// The OUT-OF-SUBTREE entry point for the routed-Pick member surface
@@ -281,26 +260,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | MaterializeOutcome::Tainted(id) => Some(id),
             MaterializeOutcome::Error(_) => None,
         }
-    }
-
-    /// TEST-ONLY node-input reach for the handle-capable equivalence fixtures,
-    /// which lower a fixture `TypeExpr` to a node IN THE TEST and assert the
-    /// node-core produces the same surface the `TypeExpr` arm
-    /// ([`Self::materialize_member_surface_expr`]) yields. Named `_for_test` so
-    /// it can never masquerade as a production node-input API; gated
-    /// `#[cfg(test)]` so the forgeable-`SemanticNodeId`-input surface has ZERO
-    /// footprint outside test builds (the production node-core stays
-    /// module-private, and out-of-subtree production callers reach the surface
-    /// only through the demand APIs `materialize_pick_member_surface` /
-    /// `materialize_registry_whole_surface_candidate`).
-    #[cfg(test)]
-    pub(crate) fn materialize_member_surface_node_for_test(
-        &mut self,
-        scope_canonical_id: &str,
-        base: crate::semantic_query::SemanticNodeId,
-        nested_surface: bool,
-    ) -> Option<verter_type_expr::TypeExpr> {
-        self.materialize_member_surface_node_core(scope_canonical_id, base, nested_surface)
     }
 
     pub fn resolve_final_prepared_type_target(

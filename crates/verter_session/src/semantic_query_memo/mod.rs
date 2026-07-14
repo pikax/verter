@@ -53,7 +53,6 @@ mod inflight;
 mod interner;
 mod reverse_index;
 mod stats;
-pub(crate) mod synthetic_carrier_guard;
 #[cfg(any(test, debug_assertions))]
 mod test_gates;
 // Test-only observability surface for `SemanticGraphStore` (in-flight

@@ -1125,10 +1125,7 @@ fn expected_assertions_per_fixture() -> Vec<ParityAssertion<'static>> {
 fn dump_fixture_resolutions() {
     let resolutions = collect_all_fixture_resolutions();
     for (i, res_opt) in resolutions.iter().enumerate() {
-        let kind = match res_opt
-            .as_ref()
-            .and_then(|r| extract_resolved_value_type(r))
-        {
+        let kind = match res_opt.as_ref().and_then(extract_resolved_value_type) {
             Some(ty) => format!("kind={} ty={ty:?}", typeexpr_kind(&ty)),
             None => "None".to_string(),
         };

@@ -160,8 +160,7 @@ fn cross_consumer_route_hit_produces_one_entry() {
                     }],
                 ))
             })
-        })
-        .0;
+        });
     };
     do_query("consumer-1");
     do_query("consumer-2");

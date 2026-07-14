@@ -13,55 +13,8 @@
 
 use std::collections::BTreeSet;
 
-use verter_type_expr::TypeExpr;
-
-use super::surface::type_expr_references_names;
 use super::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::ResolverContext;
-
-#[allow(dead_code)]
-pub(super) fn routed_expr_surface_key_expr(
-    root_symbol: &str,
-    route: &super::super::RouteDemand,
-) -> Option<TypeExpr> {
-    match route {
-        super::super::RouteDemand::Whole => Some(TypeExpr::named(root_symbol)),
-        super::super::RouteDemand::MemberPath(path) if !path.is_empty() => Some(path.iter().fold(
-            TypeExpr::named(root_symbol),
-            |object, member| TypeExpr::IndexedAccess {
-                object: std::sync::Arc::new(object),
-                index: std::sync::Arc::new(TypeExpr::string_literal(member.clone())),
-            },
-        )),
-        super::super::RouteDemand::Pick(members) if !members.is_empty() => Some(TypeExpr::Ref {
-            name: std::sync::Arc::from("Pick"),
-            type_arguments: std::sync::Arc::from(vec![
-                TypeExpr::named(root_symbol),
-                TypeExpr::union(
-                    members
-                        .iter()
-                        .cloned()
-                        .map(TypeExpr::string_literal)
-                        .collect(),
-                ),
-            ]),
-        }),
-        super::super::RouteDemand::Omit(members) if !members.is_empty() => Some(TypeExpr::Ref {
-            name: std::sync::Arc::from("Omit"),
-            type_arguments: std::sync::Arc::from(vec![
-                TypeExpr::named(root_symbol),
-                TypeExpr::union(
-                    members
-                        .iter()
-                        .cloned()
-                        .map(TypeExpr::string_literal)
-                        .collect(),
-                ),
-            ]),
-        }),
-        _ => None,
-    }
-}
 
 /// Thin `Option<&str>` wrapper over [`is_package_canonical`]. Its only
 /// consumer is the workspace-classification guard test, so it is gated to
@@ -74,13 +27,6 @@ pub(super) fn is_package_source(ctx: &dyn ResolverContext, source: Option<&str>)
 
 pub(super) fn is_package_canonical(ctx: &dyn ResolverContext, canonical_id: &str) -> bool {
     ctx.workspace_is_package_backed(canonical_id)
-}
-
-pub(super) fn strip_parens_expr(expr: &TypeExpr) -> &TypeExpr {
-    match expr {
-        TypeExpr::Parenthesized(inner) => strip_parens_expr(inner),
-        other => other,
-    }
 }
 
 pub(super) fn is_builtin_name(name: &str) -> bool {
@@ -175,13 +121,4 @@ where
             prepared.as_ref(),
         ),
     }))
-}
-
-pub(super) fn type_expr_references_type_params(
-    expr: &TypeExpr,
-    type_params: &[verter_type_expr::TypeParam],
-) -> bool {
-    type_expr_references_names(expr, &|name| {
-        type_params.iter().any(|param| param.name == name)
-    })
 }

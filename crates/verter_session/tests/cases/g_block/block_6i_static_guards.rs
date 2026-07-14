@@ -999,7 +999,7 @@ fn ax_hybrid_projector_layer_name_predicates_retired() {
         );
     }
 
-    // The pure reducible-operator predicate lives in the sibling
+    // The graph-native reducible-operator predicate lives in the sibling
     // `published_reducer` module (no reverse-boundary access, so it stays a
     // free-standing helper). The published-surface field-type driver
     // `reduce_published_field_types` is the HIGH-LEVEL publication API and lives
@@ -1019,9 +1019,13 @@ fn ax_hybrid_projector_layer_name_predicates_retired() {
          finalize child module; the per-field reducer it wraps is sink-private)."
     );
     assert!(
-        reducer_src.contains("pub(crate) fn type_expr_contains_reducible_operator("),
+        reducer_src.contains("pub(crate) fn node_contains_reducible_operator("),
         "name-predicate-retired guard: `projectors/published_reducer.rs` MUST host \
-         `type_expr_contains_reducible_operator`."
+         the graph-native `node_contains_reducible_operator`."
+    );
+    assert!(
+        !reducer_src.contains("pub(crate) fn type_expr_contains_reducible_operator("),
+        "name-predicate-retired guard: the duplicate TypeExpr predicate must stay absent"
     );
 
     // The mod.rs MUST re-export the helpers so existing callers reach the

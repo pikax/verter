@@ -94,14 +94,4 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn wildcard_route_fuse_consumed_for_tests(&self) -> usize {
         self.fuse_state.wildcard_sources_processed
     }
-
-    /// Cache size for the structural materialiser's final-result
-    /// cache (ctx-owned `MaterializeStructureDb::live_count()`).
-    #[cfg(test)]
-    pub(crate) fn materialized_member_surface_cache_len(&self) -> usize {
-        self.ctx
-            .project_type_store()
-            .materialize_structure_db()
-            .live_count()
-    }
 }

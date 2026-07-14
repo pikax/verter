@@ -825,7 +825,7 @@ fn output_boundaries_discriminate_plain_shell_from_reduce_then_raise() {
         Some(PrimitiveName::String),
         "the reduced signature's parameter is substituted to `string`"
     );
-    match materialized.type_expr(&cap) {
+    match materialized.type_expr_for_test() {
         TypeExpr::Function(_) => {}
         other => panic!(
             "materialize_reduced_output_type_expr MUST reduce THEN raise: `typeof f<string>` \
@@ -833,7 +833,7 @@ fn output_boundaries_discriminate_plain_shell_from_reduce_then_raise() {
         ),
     }
     assert!(
-        !matches!(materialized.type_expr(&cap), TypeExpr::TypeOf(_)),
+        !matches!(materialized.type_expr_for_test(), TypeExpr::TypeOf(_)),
         "the projection boundary must NOT leave the operator un-reduced as `TypeExpr::TypeOf` — \
          that would mean it skipped the reduce step"
     );

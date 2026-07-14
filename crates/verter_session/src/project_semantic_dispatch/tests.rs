@@ -20162,7 +20162,7 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     );
     let inst_ctx = dispatch.instantiate_context_for(&base0.canonical_id, navigate);
     let level1 = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(slot0, args0, inst_ctx.clone()),
+        crate::semantic_query::InstantiateKey::new(slot0, args0, inst_ctx),
     )) {
         QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
         other => panic!("Grow<string> must instantiate to its grown body, got {other:?}"),

@@ -1383,37 +1383,22 @@ fn registry_completeness_walk_hard_fails_on_metadata_error_self_test() {
          non-directory WITHOUT panicking — a missing `src/`/`tests/` is a legitimate skip"
     );
 
-    // A path that traverses THROUGH a regular file as if it were a directory
-    // produces a non-`NotFound` metadata IO error (`NotADirectory` on Unix, an
-    // analogous non-NotFound kind on Windows). `registry_completeness_classified_as_dir`
-    // MUST panic on it; `Path::is_dir()` would silently return `false` (the
-    // fail-open class this guard closes).
-    let regular_file = scratch.join("regular.txt");
-    fs::write(&regular_file, b"not a directory").expect("write regular file");
-    let through_file = regular_file.join("src");
-
-    // Sanity precondition: confirm this scratch path is the IO-error (NOT
-    // NotFound) case on this platform, so the test discriminates rather than
-    // passing vacuously where the path resolves to NotFound.
-    let probe = fs::metadata(&through_file);
-    assert!(
-        probe
-            .as_ref()
-            .err()
-            .is_some_and(|e| e.kind() != std::io::ErrorKind::NotFound),
-        "self-test precondition: traversing through a regular file must yield a \
-         non-NotFound metadata IO error on this platform; got {probe:?}"
-    );
-
-    let panicked =
-        std::panic::catch_unwind(|| registry_completeness_classified_as_dir(&through_file))
-            .is_err();
+    // Inject a deterministic non-NotFound failure. Windows reports a path that
+    // traverses through a regular file as `NotFound`, while Unix reports
+    // `NotADirectory`; injection exercises the fail-closed branch portably.
+    let panicked = std::panic::catch_unwind(|| {
+        registry_completeness_classified_as_dir_from(
+            &scratch,
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "planted metadata refusal",
+            )),
+        )
+    })
+    .is_err();
     assert!(
         panicked,
-        "classifier must HARD-FAIL (panic) on a non-NotFound metadata IO error \
-         instead of silently treating the path as a non-directory. `Path::is_dir()` \
-         would return `false` here, dropping a subtree from the registry-completeness \
-         scan — that fail-open is exactly what this classifier closes."
+        "classifier must hard-fail on a non-NotFound metadata error"
     );
 
     fs::remove_dir_all(&scratch).ok();
@@ -1437,7 +1422,14 @@ fn registry_completeness_walk_hard_fails_on_metadata_error_self_test() {
 /// registry for several — so this guard's fail-closed walk discipline gets
 /// its own distinctly-named helper and self-test.
 fn registry_completeness_classified_as_dir(path: &std::path::Path) -> bool {
-    match fs::metadata(path) {
+    registry_completeness_classified_as_dir_from(path, fs::metadata(path))
+}
+
+fn registry_completeness_classified_as_dir_from(
+    path: &std::path::Path,
+    metadata: std::io::Result<std::fs::Metadata>,
+) -> bool {
+    match metadata {
         Ok(meta) => meta.is_dir(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => panic!(

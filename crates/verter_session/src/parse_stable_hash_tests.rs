@@ -55,7 +55,6 @@ fn indexed_for(source: &str) -> Arc<IndexedReady> {
             parse_env_hash: [0u8; 16],
         },
         Arc::clone(&eval_source),
-        Arc::clone(&eval_source),
         None,
         SourceType::ts(),
         Arc::new(DeclLoweringService::new()),

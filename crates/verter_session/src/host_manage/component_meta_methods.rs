@@ -53,24 +53,10 @@ use crate::resolver_core::component_meta_registry::{
     upsert_component_meta_registry_entry, PendingComponentMetaRegistryRef,
 };
 
-crate::project_semantic_dispatch::output_materialization::define_output_capability! {
-    /// The host-method component-meta output-sink capability: the host
-    /// method here that materializes a resolved member node into a published
-    /// `TypeExpr` holds this to materialize the node into a sealed output
-    /// carrier and unwrap it. Its constructor is visible ONLY within
-    /// `crate::host_manage::component_meta_methods` — NOT the whole
-    /// `host_manage` subtree — so the Kind-B bridge sibling
-    /// `host_manage::eval_env` (`fast_to_expansion`) cannot mint it: a
-    /// planted `HostManageComponentMetaOutputCap::new` there is `E0624`.
-    pub(crate) struct HostManageComponentMetaOutputCap;
-    mint: pub(in crate::host_manage::component_meta_methods)
-}
-
 // The sink-owned macro-output expansion demand API + its MODULE-PRIVATE
 // node-domain artifact and materialiser live in the child sink module
 // `macro_output_expansion` (a descendant of this cap's
-// `pub(in crate::host_manage::component_meta_methods)` mint scope, so it can mint
-// the cap; its whole reachable PRODUCTION scope is output-only). The eval_env
+// `pub(in crate::host_manage::component_meta_methods)` subtree. The eval_env
 // expansion branches drive the re-exported `expand_*_output` demand methods.
 pub(crate) mod macro_output_expansion;
 

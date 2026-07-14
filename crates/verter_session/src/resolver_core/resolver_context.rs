@@ -487,6 +487,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// actual workspace ownership. Per CLAUDE.md macro-traversal rule,
     /// callers MUST NOT substitute `path.contains("/node_modules/")`
     /// for this method.
+    #[cfg(test)]
     fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool;
 
     /// Whether `canonical_id` is package-backed per the workspace's
@@ -1145,6 +1146,7 @@ impl ResolverContext for crate::VerterHost {
     }
 
     #[inline]
+    #[cfg(test)]
     fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool {
         self.workspace().is_workspace_owned(canonical_id)
     }

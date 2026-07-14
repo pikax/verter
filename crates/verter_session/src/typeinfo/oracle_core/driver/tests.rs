@@ -218,14 +218,20 @@ fn snapshot_path_uses_full_manifest_rooted_infix() {
         "utility_composition/u_abc.json"
     );
     let path = snapshot_abs_path("utility_composition", "u_abc");
-    let s = path.to_string_lossy();
     // The FULL infix is required — joining only `oracle_snapshots/` would read
     // the wrong directory (§Q1).
     assert!(
-        s.ends_with("src/typeinfo/typeinfo_tests/oracle_snapshots/utility_composition/u_abc.json"),
-        "path was {s}"
+        path.ends_with(std::path::Path::new(
+            "src/typeinfo/typeinfo_tests/oracle_snapshots/utility_composition/u_abc.json"
+        )),
+        "path was {}",
+        path.display()
     );
-    assert!(s.contains("verter_session"), "rooted at the crate dir");
+    assert!(
+        path.components()
+            .any(|part| part.as_os_str() == "verter_session"),
+        "rooted at the crate dir"
+    );
 }
 
 // -- validate_env_pins -----------------------------------------------------
@@ -387,10 +393,12 @@ fn corpus_root_is_manifest_rooted() {
     // The final component is `env_corpus_dir_name(id)`, not the raw id —
     // the `:` tag separator maps to `-` at the path boundary.
     let p = corpus_root("blake3:abc");
-    let s = p.to_string_lossy();
     assert!(
-        s.ends_with("src/typeinfo/typeinfo_tests/oracle_env/blake3-abc"),
-        "{s}"
+        p.ends_with(std::path::Path::new(
+            "src/typeinfo/typeinfo_tests/oracle_env/blake3-abc"
+        )),
+        "{}",
+        p.display()
     );
 }
 

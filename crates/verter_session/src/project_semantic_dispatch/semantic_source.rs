@@ -30,6 +30,7 @@ use verter_type_expr::facts::{ClosedTypeFact, ProjectedTypeFact, SemanticTypeSou
 use verter_type_expr::locators::{AuthoredAnchor, AuthoredBodyLocator, MacroPayloadPosition};
 
 use super::ProjectSemanticDispatch;
+#[cfg(test)]
 use crate::locator_identity::{SessionDemandIdentity, SessionDemandRoute};
 use crate::semantic_query::{
     HotTypeRef, NodeScopeId, PathSegment, ProjectionReductionContext, QueryResult,
@@ -1012,6 +1013,7 @@ impl ProjectSemanticDispatch<'_> {
     /// demand, so both sides share one addressing convention. An anchor that
     /// does not parse, an out-of-range ordinal, or a projection miss is an
     /// honest `None`.
+    #[cfg(test)]
     pub(crate) fn replay_session_demand_to_hot(
         &self,
         demand: &SessionDemandIdentity,

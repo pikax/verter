@@ -30,7 +30,7 @@ pub(crate) const SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER: &str =
 ///
 /// Test/debug instrumentation only — gated to match the capture-token
 /// module (absent in release).
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 pub(crate) const PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER: &str =
     "pick_member_route_callable_descent_count";
 

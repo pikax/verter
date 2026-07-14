@@ -54,14 +54,15 @@ fn host() -> VerterHost {
 }
 
 fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
-    host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: id.to_string(),
-        source: Arc::from(source),
-        file_language: FileLanguage::script_ts(),
-        aliases: Vec::new(),
-    })
-    .expect("upsert");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(source),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert");
 }
 
 /// A provider whose route walk produces a real result that cannot be rooted:

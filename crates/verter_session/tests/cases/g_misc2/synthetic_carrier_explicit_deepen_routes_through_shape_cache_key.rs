@@ -388,7 +388,11 @@ fn preprocess(src: &str) -> String {
 /// the exact fail-open class this guard must close. Mirrors the
 /// per-entry hard-failing discipline of `collect_production_rs`.
 fn classified_as_dir(path: &Path) -> bool {
-    match std::fs::metadata(path) {
+    classified_as_dir_from(path, std::fs::metadata(path))
+}
+
+fn classified_as_dir_from(path: &Path, metadata: std::io::Result<std::fs::Metadata>) -> bool {
+    match metadata {
         Ok(meta) => meta.is_dir(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => panic!(
@@ -864,38 +868,21 @@ fn synthetic_deepen_scanner_classified_as_dir_hard_fails_on_metadata_error_self_
          non-directory WITHOUT panicking — a missing `src/` is a legitimate skip"
     );
 
-    // A path that traverses THROUGH a regular file as if it were a
-    // directory produces a non-`NotFound` metadata IO error
-    // (`NotADirectory` on Unix, an analogous non-NotFound kind on
-    // Windows). `classified_as_dir` MUST panic on it; `Path::is_dir()`
-    // would silently return `false` (the fail-open class this guard
-    // closes). We assert the panic discriminates the hard-failing
-    // classifier from a collapsing `is_dir()` classification.
-    let regular_file = scratch.join("regular.txt");
-    std::fs::write(&regular_file, b"not a directory").expect("write regular file");
-    let through_file = regular_file.join("src");
-
-    // Sanity: confirm this scratch path is the IO-error (NOT NotFound)
-    // case on this platform, so the test discriminates rather than
-    // passing vacuously on a platform where the path resolves to
-    // NotFound.
-    let probe = std::fs::metadata(&through_file);
-    assert!(
-        probe
-            .as_ref()
-            .err()
-            .is_some_and(|e| e.kind() != std::io::ErrorKind::NotFound),
-        "self-test precondition: traversing through a regular file must \
-         yield a non-NotFound metadata IO error on this platform; got {probe:?}"
-    );
-
-    let panicked = std::panic::catch_unwind(|| classified_as_dir(&through_file)).is_err();
+    // Inject a deterministic non-NotFound failure; Windows maps the usual
+    // file-as-directory probe to `NotFound`, so a real path is not portable.
+    let panicked = std::panic::catch_unwind(|| {
+        classified_as_dir_from(
+            &scratch,
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "planted metadata refusal",
+            )),
+        )
+    })
+    .is_err();
     assert!(
         panicked,
-        "classifier must HARD-FAIL (panic) on a non-NotFound metadata IO \
-         error instead of silently treating the path as a non-directory. \
-         `Path::is_dir()` would return `false` here, dropping a subtree \
-         from the scan — that fail-open is exactly what this classifier closes."
+        "classifier must hard-fail on a non-NotFound metadata error"
     );
 
     std::fs::remove_dir_all(&scratch).ok();

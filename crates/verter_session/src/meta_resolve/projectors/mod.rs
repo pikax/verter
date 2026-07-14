@@ -46,7 +46,6 @@ use verter_semantic::analysis::type_expand::{
     ExpansionDiagnostic, ExpansionExactness, ExpansionExecutionStatus, ExpansionStopReason,
 };
 use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
-use verter_type_expr::TypeExpr;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
@@ -423,108 +422,6 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 /// `Some(_)` ⇒ the caller may publish or short-circuit WITHOUT
 /// triggering reduction. `None` ⇒ the cache is cold; the caller must
 /// reduce (or publish the Ref shallow per the shallow-by-default rule).
-pub(crate) enum PeekedShape {
-    /// The expression is a bare alias carrier; publish the Ref
-    /// shallow. No reduction needed. `name` is exposed for
-    /// `projectors_peek_tests` behavioural-discrimination assertions;
-    /// production match arms use `_`.
-    BareCarrier {
-        #[allow(dead_code)]
-        name: Arc<str>,
-    },
-    /// The expression is a leaf primitive / literal — publish as-is.
-    Leaf(verter_type_expr::TypeExpr),
-    /// The expression has already been reduced; return the cached
-    /// `MaterializedOutputTypeExpr` verbatim. The peek implementation
-    /// re-emits the cached entry's `fact_dep_signature` into the
-    /// active fact tracer + dispatch dep-signature accumulator via the
-    /// `MaterializeMemoDb::peek` protocol (`bubble_fact_signature` in
-    /// `component_meta_caches.rs:1346`).
-    Cached(crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr),
-}
-
-/// Peek without expansion.
-///
-/// Does NOT consult `RouteDb`, `OwnerImportSurfaceDb`, or rebuild any
-/// workspace view — observes ONLY the request-bound store_view via
-/// `ctx.store_view()` (through the cooperative `MaterializeMemoDb::peek`).
-///
-/// MUST be invoked from a request-bound context; the
-/// `debug_assert!(query_engine.ctx.is_request_bound())` enforces this.
-/// Reaching this from a bare-host context would force a workspace
-/// snapshot rebuild.
-pub(crate) fn peek_member_shape_known(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    scope_canonical_id: &str,
-    expr: &TypeExpr,
-    mode: ProjectionMode,
-) -> Option<PeekedShape> {
-    debug_assert!(
-        query_engine.ctx.is_request_bound(),
-        "peek_member_shape_known invoked from bare-host context — \
-         would force a workspace snapshot rebuild"
-    );
-
-    match expr {
-        TypeExpr::Primitive(_) | TypeExpr::Literal(_) => Some(PeekedShape::Leaf(expr.clone())),
-        TypeExpr::Ref {
-            type_arguments,
-            name,
-        } if type_arguments.is_empty() => Some(PeekedShape::BareCarrier { name: name.clone() }),
-        _ => {
-            // Operator-shape (Pick/Omit/IndexedAccess/Conditional/Mapped)
-            // or generic instantiation: consult `ShapeCacheDb` only.
-            // Does NOT consult RouteDb / OwnerImportSurfaceDb (those
-            // would rebuild HostStoreView and re-introduce the
-            // per-query workspace-snapshot rebuild cost the peek path
-            // exists to avoid).
-            let ctx: &dyn ResolverContext = query_engine.ctx;
-            // Key the operator-shape slot by the EXACT reduction
-            // context the whole-expression materialiser
-            // (`materialize_component_meta_type_expr_until_stable_full`)
-            // writes under, so this peek and that publish share one
-            // cache identity. A bare `published(mode)` key would miss a
-            // `StructuralTransit(Navigate)`-published entry (or, worse,
-            // hit a published entry storing a transit-lowered value).
-            // The subject is the LOWERED settled node — lowered through
-            // the SAME shared pre-peek helper the materialiser keys and
-            // publishes with (`lower_type_expr_for_shape_subject`), so
-            // the peeked node identity and the published node identity
-            // cannot diverge. A composite expression that NESTS a
-            // synthetic carrier has no sound content-free cache key —
-            // bypass the cache (no warm hit available) and report a miss
-            // so the caller cold-computes; a scope with no view-correct
-            // identity likewise yields no key (miss).
-            let reduction_context = super::materialize::type_expr_materialize_reduction_context(
-                ctx,
-                scope_canonical_id,
-                expr,
-                mode,
-            );
-            crate::component_meta_caches::ShapeCacheKey::type_expr_whole_with_context(
-                Arc::<str>::from(scope_canonical_id),
-                expr,
-                reduction_context,
-                || {
-                    super::materialize::lower_type_expr_for_shape_subject(
-                        query_engine,
-                        scope_canonical_id,
-                        expr,
-                        reduction_context,
-                    )
-                    .map(|lowering| lowering.lowered)
-                },
-            )
-            .and_then(|key| {
-                ctx.project_type_store()
-                    .shape_cache_db()
-                    .peek(&key, ctx)
-                    .map(PeekedShape::Cached)
-            })
-        }
-    }
-}
-
 /// Read the [`SurfaceView`] members backing `node`, if `node` resolves
 /// to a `SemanticNodeData::Object` shell. Empty for any other variant
 /// — callers treat the empty surface as "no enumerable members".

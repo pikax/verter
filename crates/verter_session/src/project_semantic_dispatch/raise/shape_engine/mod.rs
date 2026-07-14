@@ -50,9 +50,9 @@ use conversions::{mapped_modifier_for_optionality, mapped_modifier_for_readonly}
 pub(in crate::project_semantic_dispatch) use materialize::fold_to_type_expr;
 pub(in crate::project_semantic_dispatch) use node_domain::node_is_unknown_materializing_failure;
 use node_domain::{type_expr_to_key, RaisedFactsAlg, RaisedShapeAlg};
-pub(in crate::project_semantic_dispatch) use publication::{
-    project_node_publication_score, type_expr_publication_score,
-};
+pub(in crate::project_semantic_dispatch) use publication::project_node_publication_score;
+#[cfg(test)]
+pub(in crate::project_semantic_dispatch) use publication::type_expr_publication_score;
 
 // ===========================================================================
 // The interned structural raised-shape term + key.
@@ -599,6 +599,7 @@ impl NodeShapeEq {
     }
     /// Whether the node's raised shape equals the caller's input `&TypeExpr`.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn eq_to_expr(&self) -> bool {
         self.eq_to_expr
     }
@@ -1329,53 +1330,6 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_is_published_opera
             | RaisedRootKind::Mapped {
                 value_is_semantic_miss: false
             }
-    ))
-}
-
-/// Node-domain equivalent of `matches!(raise(node), TypeExpr::TypeOf(_))`: whether
-/// `node`'s NORMALIZED raised root is a `TypeOf`. Reads the post-normalized
-/// [`RaisedRootKind`] (no `TypeExpr` materialised). `None` when the whole raise is
-/// `None`.
-pub(in crate::project_semantic_dispatch) fn project_node_root_is_typeof(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: SemanticNodeId,
-) -> Option<bool> {
-    Some(matches!(
-        project_node_root_kind(dispatch, node)?,
-        RaisedRootKind::TypeOf
-    ))
-}
-
-/// Node-domain equivalent of `matches!(raise(node), TypeExpr::Object(_))`: whether
-/// `node`'s NORMALIZED raised root is EXACTLY an `Object` (an `Object` / empty
-/// object / `MergedDecl` — a `Union` / `Intersection` root is NOT).
-/// Reads the post-normalized
-/// [`RaisedRootKind`] (no `TypeExpr`
-/// materialised), so e.g. `Intersection([{}, Object])` — which the root-only
-/// projection collapses to its `Object` arm — answers `true`, matching the
-/// `TypeExpr` predicate on the raised value. `None` when the whole raise is `None`.
-pub(in crate::project_semantic_dispatch) fn project_node_root_is_object_surface(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: SemanticNodeId,
-) -> Option<bool> {
-    Some(matches!(
-        project_node_root_kind(dispatch, node)?,
-        RaisedRootKind::Object
-    ))
-}
-
-/// Node-domain equivalent of `matches!(raise(node), TypeExpr::IndexedAccess { .. })`:
-/// whether `node`'s NORMALIZED raised root is an `IndexedAccess`. Reads the
-/// post-normalized [`RaisedRootKind`] (no `TypeExpr` materialised), so
-/// `Intersection([{}, IndexedAccess])` — collapsed by the fold to its
-/// `IndexedAccess` arm — answers `true`. `None` when the whole raise is `None`.
-pub(in crate::project_semantic_dispatch) fn project_node_root_is_indexed_access(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    node: SemanticNodeId,
-) -> Option<bool> {
-    Some(matches!(
-        project_node_root_kind(dispatch, node)?,
-        RaisedRootKind::IndexedAccess
     ))
 }
 

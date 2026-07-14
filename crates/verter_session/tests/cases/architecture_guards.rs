@@ -915,301 +915,6 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     );
 }
 
-/// Analyze the `materialize_registry_whole_surface_candidate` ENGINE METHOD body
-/// in `node_materialize.rs` (the surviving root-surface authority the retired
-/// host-threaded surface bridges were folded into) and return a violation per
-/// structural deviation. The method MUST route through
-/// `dispatch_projected_surface_with_node` (EXACTLY once) +
-/// `surface_view_to_registry_type_expr` (EXACTLY once), with NO fallback / rescue /
-/// retired token — a prepared-decl fallback re-added INTO this method body would
-/// otherwise resurrect the retired walker.
-///
-/// Parameterised over the source so the self-test drives it with synthetic method
-/// bodies. `retired_tokens` is the retired-symbol set the authority bans.
-fn registry_whole_surface_candidate_violations(src: &str, retired_tokens: &[&str]) -> Vec<String> {
-    use syn::visit::Visit;
-    use syn::{Expr, ExprCall, ExprMethodCall};
-
-    const METHOD: &str = "materialize_registry_whole_surface_candidate";
-    // The ONLY method calls the authority body may make: the whole-surface
-    // dispatch projector + the cooperative budget guard.
-    const ALLOWED_METHOD_CALLS: &[&str] = &[
-        "dispatch_projected_surface_with_node",
-        "projection_op_budget_exhausted",
-    ];
-    // The ONLY free / associated-fn calls the authority body may make: the
-    // surface->expr converter, the node-domain object-surface predicate, and the
-    // std enum constructors (structurally inert — they cannot hide a rescue).
-    const ALLOWED_FREE_CALLS: &[&str] = &[
-        "surface_view_to_registry_type_expr",
-        "component_meta_registry_node_has_explicit_object_surface",
-        "Some",
-        "Ok",
-        "Err",
-    ];
-
-    let Ok(file) = syn::parse_file(src) else {
-        return vec![format!(
-            "could not parse source for `{METHOD}` body analysis"
-        )];
-    };
-
-    struct MethodFinder<'a> {
-        method: &'a str,
-        body: Option<syn::Block>,
-    }
-    impl<'ast> Visit<'ast> for MethodFinder<'_> {
-        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
-            if f.sig.ident == self.method {
-                self.body = Some(f.block.clone());
-            }
-            syn::visit::visit_impl_item_fn(self, f);
-        }
-        // A free-fn form (the self-test plants one) is also accepted.
-        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
-            if f.sig.ident == self.method {
-                self.body = Some((*f.block).clone());
-            }
-            syn::visit::visit_item_fn(self, f);
-        }
-    }
-    let mut finder = MethodFinder {
-        method: METHOD,
-        body: None,
-    };
-    syn::visit::Visit::visit_file(&mut finder, &file);
-    let Some(block) = finder.body else {
-        return vec![format!(
-            "engine method `{METHOD}` not found in node_materialize.rs — the root-surface guard anchor moved"
-        )];
-    };
-
-    struct CallCollector<'a> {
-        method_calls: Vec<String>,
-        free_calls: Vec<String>,
-        retired_hits: Vec<String>,
-        retired_tokens: &'a [&'a str],
-    }
-    impl<'ast> Visit<'ast> for CallCollector<'_> {
-        fn visit_expr_method_call(&mut self, mc: &'ast ExprMethodCall) {
-            self.method_calls.push(mc.method.to_string());
-            syn::visit::visit_expr_method_call(self, mc);
-        }
-        fn visit_expr_call(&mut self, call: &'ast ExprCall) {
-            if let Expr::Path(p) = call.func.as_ref() {
-                if let Some(last) = p.path.segments.last() {
-                    self.free_calls.push(last.ident.to_string());
-                }
-            }
-            syn::visit::visit_expr_call(self, call);
-        }
-        fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
-            let id = seg.ident.to_string();
-            if self.retired_tokens.contains(&id.as_str()) {
-                self.retired_hits.push(id);
-            }
-            syn::visit::visit_path_segment(self, seg);
-        }
-    }
-    let mut c = CallCollector {
-        method_calls: Vec::new(),
-        free_calls: Vec::new(),
-        retired_hits: Vec::new(),
-        retired_tokens,
-    };
-    c.visit_block(&block);
-
-    let mut violations = Vec::new();
-    // Exactly one `dispatch_projected_surface_with_node` method call.
-    let dispatch_calls = c
-        .method_calls
-        .iter()
-        .filter(|m| m.as_str() == "dispatch_projected_surface_with_node")
-        .count();
-    if dispatch_calls != 1 {
-        violations.push(format!(
-            "`{METHOD}` body must call `dispatch_projected_surface_with_node` EXACTLY once (the \
-             sole root-surface authority); found {dispatch_calls}. Method calls: {:?}",
-            c.method_calls
-        ));
-    }
-    // Exactly one `surface_view_to_registry_type_expr` converter call.
-    let converter_calls = c
-        .free_calls
-        .iter()
-        .filter(|m| m.as_str() == "surface_view_to_registry_type_expr")
-        .count();
-    if converter_calls != 1 {
-        violations.push(format!(
-            "`{METHOD}` body must call `surface_view_to_registry_type_expr` EXACTLY once (the surface->\
-             expr converter); found {converter_calls}. Free calls: {:?}",
-            c.free_calls
-        ));
-    }
-    // No method call outside the allowed set (`.or_else(...)`, a re-added
-    // `cached_prepared_root_surface()` rescue, any other engine-method escape).
-    for m in &c.method_calls {
-        if !ALLOWED_METHOD_CALLS.contains(&m.as_str()) {
-            violations.push(format!(
-                "`{METHOD}` body makes a non-approved method call `.{m}(...)` — the authority must \
-                 resolve the root surface through `dispatch_projected_surface_with_node` ALONE, no \
-                 `.or_else(...)` fallback / rescue. Approved methods: {ALLOWED_METHOD_CALLS:?}."
-            ));
-        }
-    }
-    // No free call outside the allowed set (a helper-indirection hiding a rescue).
-    for f in &c.free_calls {
-        if !ALLOWED_FREE_CALLS.contains(&f.as_str()) {
-            violations.push(format!(
-                "`{METHOD}` body calls non-approved free function `{f}(...)` — routing through any \
-                 other helper can hide a prepared-decl fallback. Approved: {ALLOWED_FREE_CALLS:?}."
-            ));
-        }
-    }
-    // No retired / forbidden token anywhere in the body.
-    for hit in &c.retired_hits {
-        violations.push(format!(
-            "`{METHOD}` body references retired/forbidden token `{hit}` — a prepared-decl \
-             root-surface rescue must NOT move into this engine method; fix the shared walker \
-             instead."
-        ));
-    }
-    violations
-}
-
-/// The surviving root-surface authority `materialize_registry_whole_surface_candidate`
-/// (node_materialize.rs) resolves a root symbol's whole surface through the shared
-/// dispatch surface projector ALONE: one `dispatch_projected_surface_with_node`
-/// call plus one `surface_view_to_registry_type_expr` call, with NO prepared-decl
-/// root-surface rescue (`cached_prepared_root_surface`) and NO `.or_else(...)`
-/// escape. The retired host-threaded surface bridges and the prepared-decl walker
-/// stay deleted from `dispatch_helpers.rs` (tombstone absence assertion below), so
-/// neither the bridge nor the rescue can reappear.
-#[test]
-fn root_surface_bridges_carry_no_prepared_decl_fallback() {
-    // The rescue + the retired root-surface bridges / walker that were folded into
-    // the node-domain authority must stay deleted. (The two `project_prepared_*`
-    // names were retired earlier; `project_type_surface_expr_via_host_threaded` /
-    // `project_expr_surface_shape_via_host_threaded` /
-    // `dispatch_projected_surface_to_type_expr` are the host-threaded surface
-    // bridges + sink method folded into the authority.)
-    const RETIRED_TOKENS: [&str; 6] = [
-        "cached_prepared_root_surface",
-        "project_prepared_type_surface_expr_via_host_threaded",
-        "project_prepared_type_surface_shape_via_host_threaded",
-        "project_type_surface_expr_via_host_threaded",
-        "project_expr_surface_shape_via_host_threaded",
-        "dispatch_projected_surface_to_type_expr",
-    ];
-
-    // (1) The live root-surface authority routes through dispatch ALONE — no
-    //     rescue, exactly-once dispatch + converter, no retired token in its body.
-    let node_mat_src = read_workspace_file(
-        "crates/verter_session/src/resolver_core/component_meta_query_engine/node_materialize.rs",
-    );
-    let violations = registry_whole_surface_candidate_violations(&node_mat_src, &RETIRED_TOKENS);
-    assert!(
-        violations.is_empty(),
-        "`materialize_registry_whole_surface_candidate` root-surface authority violation(s) — a \
-         prepared-decl root-surface rescue or retired bridge must not move into the authority:\n{}",
-        violations.join("\n")
-    );
-
-    // (2) Tombstone: the retired host-threaded surface bridges + the prepared-decl
-    //     walker must not reappear in dispatch_helpers.rs. Re-introducing any would
-    //     resurrect a walker resolution path the one-engine rule forbids — resolve
-    //     the root surface through `materialize_registry_whole_surface_candidate`
-    //     (dispatch alone) instead.
-    let dispatch_src =
-        read_workspace_file("crates/verter_session/src/meta_resolve/dispatch_helpers.rs");
-    for token in RETIRED_TOKENS {
-        assert!(
-            !dispatch_src.contains(token),
-            "retired root-surface symbol `{token}` reappeared in dispatch_helpers.rs — the \
-             prepared-surface / host-threaded surface bridge is deleted; resolve the root surface \
-             through `materialize_registry_whole_surface_candidate` (dispatch alone), never by \
-             re-adding the bridge or the prepared-decl rescue."
-        );
-    }
-}
-
-#[test]
-fn registry_whole_surface_candidate_self_test_discriminates() {
-    const RETIRED: &[&str] = &[
-        "cached_prepared_root_surface",
-        "project_type_surface_expr_via_host_threaded",
-    ];
-
-    // GREEN: the exact composition — budget guard + one
-    // `dispatch_projected_surface_with_node` + one `surface_view_to_registry_type_expr`
-    // + the node-domain object-surface predicate.
-    let good = r#"
-        impl E {
-            pub(crate) fn materialize_registry_whole_surface_candidate(
-                &mut self, scope: &str, symbol: &str,
-            ) -> Option<(TypeExpr, bool)> {
-                if self.projection_op_budget_exhausted() {
-                    return None;
-                }
-                let (surface, node) = self.dispatch_projected_surface_with_node(scope, symbol)?;
-                let type_expr = surface_view_to_registry_type_expr(&surface)?;
-                let is_object =
-                    component_meta_registry_node_has_explicit_object_surface(self.ctx, node);
-                Some((type_expr, is_object))
-            }
-        }
-    "#;
-    assert!(
-        registry_whole_surface_candidate_violations(good, RETIRED).is_empty(),
-        "self-test: the exact composition body MUST pass; got: {:?}",
-        registry_whole_surface_candidate_violations(good, RETIRED)
-    );
-
-    // RED: a `cached_prepared_root_surface` fallback planted in the body.
-    let fallback = r#"
-        impl E {
-            fn materialize_registry_whole_surface_candidate(&mut self, scope: &str, symbol: &str) -> Option<(TypeExpr, bool)> {
-                let (surface, node) = self.dispatch_projected_surface_with_node(scope, symbol)
-                    .or_else(|| self.cached_prepared_root_surface(scope, symbol))?;
-                let type_expr = surface_view_to_registry_type_expr(&surface)?;
-                Some((type_expr, false))
-            }
-        }
-    "#;
-    let v = registry_whole_surface_candidate_violations(fallback, RETIRED);
-    assert!(
-        v.iter().any(
-            |m| m.contains("cached_prepared_root_surface") || m.contains("non-approved method")
-        ),
-        "self-test: a `cached_prepared_root_surface` fallback in the body MUST FIRE; got: {v:?}"
-    );
-
-    // RED: a missing `dispatch_projected_surface_with_node` call (the body stopped
-    // routing through dispatch).
-    let no_dispatch = r#"
-        impl E {
-            fn materialize_registry_whole_surface_candidate(&mut self, scope: &str, symbol: &str) -> Option<(TypeExpr, bool)> {
-                let surface = self.cached_prepared_root_surface(scope, symbol)?;
-                let type_expr = surface_view_to_registry_type_expr(&surface)?;
-                Some((type_expr, false))
-            }
-        }
-    "#;
-    let v = registry_whole_surface_candidate_violations(no_dispatch, RETIRED);
-    assert!(
-        v.iter().any(|m| m.contains("EXACTLY once")),
-        "self-test: a body missing the `dispatch_projected_surface_with_node` call MUST FIRE; got: {v:?}"
-    );
-
-    // RED: the method missing entirely (anchor moved).
-    let missing = "impl E { fn other(&self) {} }";
-    let v = registry_whole_surface_candidate_violations(missing, RETIRED);
-    assert!(
-        v.iter().any(|m| m.contains("not found")),
-        "self-test: a missing method MUST FIRE the anchor-moved violation; got: {v:?}"
-    );
-}
-
 /// The component-meta RESOLUTION PATH never re-introduces the retired eager
 /// macro-object materialiser nor the prepared-decl member rescue.
 ///
@@ -16241,7 +15946,7 @@ mod single_resolution_engine_guards {
     const READ_SURFACE_MEMBERS_DEF_ALLOWLIST: &[(&str, u32, &str)] = &[
         (
             "crates/verter_session/src/meta_resolve/projectors/mod.rs",
-            533,
+            430,
             "fn read_surface_members(",
         ),
         (
@@ -20949,12 +20654,10 @@ fn enum_variant_struct_body(src: &str, variant: &str) -> String {
 ///       `id: SyntheticBindingId` — no `value_node`, no `SemanticNodeId`;
 ///   (b) the `synthetic_binding_whole` constructor builds
 ///       `ShapeSubject::SyntheticBinding { id }`;
-///   (c) the `ShapeSubject::TypeExpr` structural-hash arm is DELETED and the
-///       shared `classify_type_expr_shape_subject` classifier (routed through
-///       the one `type_expr_contains_synthetic_slot_binding` walker) refuses a
-///       nested carrier with `UnkeyableNested` — so a carrier can never fold
-///       its `value_node` into any keyed subject (the carrier-free class keys
-///       its LOWERED settled node, never the expression).
+///   (c) the `ShapeSubject::TypeExpr` structural-hash arm and its raw-TypeExpr
+///       classifier are DELETED, so all live non-synthetic subjects are already
+///       settled graph nodes and no carrier can fold its `value_node` into a
+///       keyed subject.
 #[test]
 fn synthetic_binding_cache_subject_is_content_free_and_carrier_sealed() {
     let src = read_workspace_file("crates/verter_session/src/component_meta_caches.rs");
@@ -21034,29 +20737,21 @@ fn synthetic_binding_cache_subject_is_content_free_and_carrier_sealed() {
          is the cache key; a module-private `_seal` may follow)"
     );
 
-    // (c) The `ShapeSubject::TypeExpr` structural-hash arm is DELETED — a
-    // `TypeExpr` never enters the shape-cache key — and the shared
-    // classifier refuses a nested carrier through the one depth-safe
-    // carrier walker. The carrier-free class keys its LOWERED settled
-    // node (`MemberValueNode`), so no expression hash exists to fold a
-    // `value_node` into.
+    // (c) The raw-TypeExpr subject and classifier are deleted. Live callers key
+    // already-settled nodes (`MemberValueNode`) or the content-free synthetic
+    // identity, so no expression hash can fold a `value_node` into the key.
     assert!(
         !src.contains("ShapeSubject::TypeExpr"),
         "the `ShapeSubject::TypeExpr` structural-hash arm is deleted — a raw \
          `TypeExpr` must never re-enter the ShapeCacheKey subject (the \
-         TypeExpr-start route keys its lowered settled node instead)"
+         live route keys its already-settled node instead)"
     );
     assert!(
-        src.contains("fn classify_type_expr_shape_subject")
-            && src.contains("type_expr_contains_synthetic_slot_binding"),
-        "the shared `classify_type_expr_shape_subject` classifier must exist and \
-         route carrier detection through the one depth-safe \
-         `type_expr_contains_synthetic_slot_binding` walker"
-    );
-    assert!(
-        src.contains("UnkeyableNested"),
-        "the classifier must expose the nested-carrier `UnkeyableNested` verdict \
-         (the no-sound-key cache-bypass class)"
+        !src.contains("fn classify_type_expr_shape_subject")
+            && !src.contains("type_expr_contains_synthetic_slot_binding")
+            && !src.contains("UnkeyableNested"),
+        "the retired raw-TypeExpr shape-subject classifier and nested-carrier \
+         verdict must stay absent; live cache subjects are graph-native"
     );
 
     // Self-discrimination: the variant extractor detects a planted
@@ -22390,14 +22085,12 @@ impl<'ast> syn::visit::Visit<'ast> for ExpansionSurfaceVisitor {
             // An out-of-line / `#[path]` child mod that is NOT the sanctioned
             // `#[cfg(test)] #[path] mod *_tests;` wiring is a production splice
             // surface.
-            syn::Item::Mod(m) => {
-                if m.content.is_none() && !mod_is_sanctioned_test_wiring(m) {
-                    self.violations.push(format!(
-                        "a production out-of-line / `#[path]` child mod `{}` is forbidden (only the \
-                         sanctioned `#[cfg(test)] #[path] mod *_tests;` wiring is allowed)",
-                        m.ident
-                    ));
-                }
+            syn::Item::Mod(m) if m.content.is_none() && !mod_is_sanctioned_test_wiring(m) => {
+                self.violations.push(format!(
+                    "a production out-of-line / `#[path]` child mod `{}` is forbidden (only the \
+                     sanctioned `#[cfg(test)] #[path] mod *_tests;` wiring is allowed)",
+                    m.ident
+                ));
             }
             _ => {}
         }
@@ -24411,16 +24104,16 @@ fn collect_trait_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
                                     ));
                                 }
                             }
-                            syn::ImplItem::Const(c) => {
-                                if expr_references_producer_builder(&c.expr) {
-                                    out.push(format!(
-                                        "the allowlisted trait impl `impl {trait_spelling} for \
-                                         MacroHotMirror`'s associated `const {}` NAMES a producer \
-                                         builder as a value — an associated const fn-pointer must \
-                                         never reach a lowering builder",
-                                        c.ident
-                                    ));
-                                }
+                            syn::ImplItem::Const(c)
+                                if expr_references_producer_builder(&c.expr) =>
+                            {
+                                out.push(format!(
+                                    "the allowlisted trait impl `impl {trait_spelling} for \
+                                     MacroHotMirror`'s associated `const {}` NAMES a producer \
+                                     builder as a value — an associated const fn-pointer must \
+                                     never reach a lowering builder",
+                                    c.ident
+                                ));
                             }
                             _ => {}
                         }

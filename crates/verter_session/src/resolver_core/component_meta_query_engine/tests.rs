@@ -7,7 +7,6 @@
 //! engine-impl methods as `pub(super)` from sibling modules so the
 //! tests resolve symmetrically regardless of which sibling
 //! `impl<'a> ComponentMetaQueryEngine<'a>` block defined the method.
-use super::type_expr_references_type_params;
 use super::ComponentMetaQueryEngine;
 use crate::types::{AnalysisLevel, HostConfig};
 use crate::VerterHost;
@@ -1124,29 +1123,6 @@ type F<T> = <T>(x: T) => T
          got {return_ty:?}",
     );
 }
-
-#[test]
-fn type_expr_references_type_params_detects_nested_member_routes() {
-    let expr = TypeExpr::IndexedAccess {
-        object: Arc::new(TypeExpr::named("Button")),
-        index: Arc::new(TypeExpr::string_literal("slots")),
-    };
-    let params = vec![verter_type_expr::TypeParam {
-        name: "Button".to_string(),
-        constraint: None,
-        default: None,
-    }];
-
-    assert!(
-        type_expr_references_type_params(&expr, &params),
-        "type-parameter detection should reject member routes rooted at a type parameter",
-    );
-}
-
-// `semantic_node_to_type_expr_preserves_number_index_key_values` moved to
-// `crates/verter_session/src/project_semantic_dispatch/raise.rs` along
-// with the `semantic_node_to_type_expr` function it covered (Step 6.1
-// — function renamed to `ProjectSemanticDispatch::raise_node_to_type_expr`).
 
 #[test]
 fn get_component_meta_resolves_indexed_access_variant_props_and_imported_ref() {
@@ -2414,309 +2390,6 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
     }
 }
 
-// ── `surface_view_to_registry_type_expr` terminal-sink invariants ────
-// These unit tests pin the span/visibility-threading invariants of the
-// terminal registry publication sink directly from a hand-interned
-// `SurfaceView` (real graph value nodes, no walker), plus the
-// registry object-surface FACT provenance (node-domain, never re-derived
-// from the materialised value).
-
-/// A `SurfaceView` wrapping the given members (no signatures, closed).
-fn surface_view_of(
-    members: Vec<crate::semantic_query::SurfaceMember>,
-    has_index_signature: bool,
-) -> crate::semantic_query::SurfaceView {
-    crate::semantic_query::SurfaceView {
-        members: Arc::from(members.into_boxed_slice()),
-        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature,
-    }
-}
-
-/// A surface member over a real interned `value` node with the given
-/// visibility/spans facets.
-fn surface_member_with(
-    name: &str,
-    value: crate::semantic_query::SemanticNodeId,
-    is_method: bool,
-    visibility: verter_type_expr::MemberVisibility,
-    spans: verter_type_expr::MemberSpans,
-) -> crate::semantic_query::SurfaceMember {
-    crate::semantic_query::SurfaceMember {
-        name: Arc::from(name),
-        value,
-        optional: false,
-        readonly: false,
-        is_method,
-        visibility,
-        spans,
-        declaration_origin: None,
-        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-    }
-}
-
-/// Span threading (positive): the terminal sink re-emits the REAL member spans
-/// carried on the graph `SurfaceMember` onto the reconstructed IR property —
-/// it does NOT drop them to `MemberSpans::default()`.
-///
-/// Discriminating: a reconstruction that passed `MemberSpans::default()`
-/// makes every `Some(..)` below `None`, failing the asserts.
-#[test]
-fn surface_view_to_registry_type_expr_reemits_member_spans() {
-    use super::surface::surface_view_to_registry_type_expr;
-    use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
-    use verter_span::Span;
-    use verter_type_expr::MemberSpans;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let value = host
-        .project_type_store()
-        .semantic_graph()
-        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let member = surface_member_with(
-        "label",
-        value,
-        false,
-        verter_type_expr::MemberVisibility::Public,
-        MemberSpans {
-            declaration: Some(Span::new(10, 24)),
-            name: Some(Span::new(10, 15)),
-            type_annotation: Some(Span::new(17, 23)),
-        },
-    );
-    let surface = surface_view_of(vec![member], false);
-
-    let expr = surface_view_to_registry_type_expr(&host, &surface)
-        .expect("a one-member surface should reconstruct to an object type");
-    let TypeExpr::Object(object) = &expr else {
-        panic!("expected an object type, got {expr:?}");
-    };
-    let ObjectMember::Property(property) = &object.properties[0] else {
-        panic!("expected a property member, got {:?}", object.properties[0]);
-    };
-    assert_eq!(
-        property.ty,
-        TypeExpr::Primitive(PrimitiveName::String),
-        "the member value node must materialise at the terminal sink"
-    );
-    assert_eq!(
-        property.spans.declaration,
-        Some(Span::new(10, 24)),
-        "the threaded declaration span must round-trip onto the IR property"
-    );
-    assert_eq!(
-        property.spans.name,
-        Some(Span::new(10, 15)),
-        "the threaded name span must round-trip onto the IR property"
-    );
-    assert_eq!(
-        property.spans.type_annotation,
-        Some(Span::new(17, 23)),
-        "the threaded type-annotation span must round-trip onto the IR property"
-    );
-}
-
-/// Visibility threading: the terminal sink reconstructs a member via
-/// `with_visibility` (NOT `with_spans`), so a non-public member on the graph
-/// surface survives the SurfaceView → TypeExpr publication with its true
-/// accessibility. This is both leak-prevention (the reconstructed surface must
-/// not present a private member as public) and `native_props` fidelity.
-///
-/// Discriminating: against a tree where the reconstruction uses `with_spans`
-/// (which defaults Public), the `Private` / `Protected` assertions below FAIL
-/// (the reconstructed members are Public).
-#[test]
-fn surface_view_to_registry_type_expr_preserves_member_visibility() {
-    use super::surface::surface_view_to_registry_type_expr;
-    use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
-    use verter_type_expr::{MemberSpans, MemberVisibility};
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let graph = host.project_type_store().semantic_graph();
-    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    // A real Function-shaped value node so the protected METHOD member
-    // reconstructs through the Method arm.
-    let function = graph.intern_node(SemanticNodeData::Function {
-        params: Arc::from(Vec::new().into_boxed_slice()),
-        return_type: string,
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
-        signature_span: None,
-        return_type_span: None,
-    });
-
-    let surface = surface_view_of(
-        vec![
-            surface_member_with(
-                "secret",
-                number,
-                false,
-                MemberVisibility::Private,
-                MemberSpans::default(),
-            ),
-            surface_member_with(
-                "guarded",
-                function,
-                true,
-                MemberVisibility::Protected,
-                MemberSpans::default(),
-            ),
-            surface_member_with(
-                "open",
-                string,
-                false,
-                MemberVisibility::Public,
-                MemberSpans::default(),
-            ),
-        ],
-        false,
-    );
-
-    let expr = surface_view_to_registry_type_expr(&host, &surface)
-        .expect("multi-member surface reconstructs");
-    let TypeExpr::Object(object) = &expr else {
-        panic!("expected an object type, got {expr:?}");
-    };
-
-    let find_property = |name: &str| -> MemberVisibility {
-        object
-            .properties
-            .iter()
-            .find_map(|m| match m {
-                ObjectMember::Property(p) if p.name == name => Some(p.visibility),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("property `{name}` must be reconstructed"))
-    };
-    let find_method = |name: &str| -> MemberVisibility {
-        object
-            .properties
-            .iter()
-            .find_map(|m| match m {
-                ObjectMember::Method(m) if m.name == name => Some(m.visibility),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("method `{name}` must be reconstructed"))
-    };
-
-    assert_eq!(
-        find_property("secret"),
-        MemberVisibility::Private,
-        "a private surface property must reconstruct as Private",
-    );
-    assert_eq!(
-        find_method("guarded"),
-        MemberVisibility::Protected,
-        "a protected surface method must reconstruct as Protected",
-    );
-    assert_eq!(
-        find_property("open"),
-        MemberVisibility::Public,
-        "a public surface property stays Public",
-    );
-}
-
-/// Span threading (negative): the GENUINELY synthetic open-surface index
-/// signature stays span-`None`. The surface carries only a
-/// `has_index_signature: bool` — no declared key/value nodes, hence no single
-/// OXC declaration site — so the reconstruction must NOT fabricate spans.
-///
-/// Discriminating: a reconstruction that fabricated a non-`None` span here
-/// (e.g. a byte-0 placeholder) would fail these `None` asserts.
-#[test]
-fn surface_view_to_registry_type_expr_keeps_synthetic_index_signature_span_none() {
-    use super::surface::surface_view_to_registry_type_expr;
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let surface = surface_view_of(Vec::new(), true);
-
-    let expr = surface_view_to_registry_type_expr(&host, &surface)
-        .expect("an open surface should reconstruct to an object type");
-    let TypeExpr::Object(object) = &expr else {
-        panic!("expected an object type, got {expr:?}");
-    };
-    let index = object
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::IndexSignature(sig) => Some(sig),
-            _ => None,
-        })
-        .expect("open surface must reconstruct an index signature");
-    assert_eq!(
-        index.spans.declaration, None,
-        "synthetic open-surface index signature has no source site — must NOT fabricate a span"
-    );
-    assert_eq!(
-        index.spans.key, None,
-        "synthetic open-surface index signature key has no source site"
-    );
-    assert_eq!(
-        index.spans.value, None,
-        "synthetic open-surface index signature value has no source site"
-    );
-}
-
-/// The registry object-surface FACT is decided off the PRODUCING node
-/// (`component_meta_registry_node_has_explicit_object_surface` — an
-/// existential arm-set scan), NEVER re-derived from the materialised
-/// `TypeExpr`. A member whose value is `{ x: string } | number` materialises
-/// to a UNION value (not `TypeExpr::Object`), yet its producing node carries
-/// an object-bearing arm — so the published fact is `true`.
-///
-/// Discriminating: a re-derivation from the materialised value
-/// (`matches!(value, TypeExpr::Object(_))`) returns `false` for the union
-/// value and FAILS the `explicit_object_surface` assert below.
-#[test]
-fn registry_member_object_surface_fact_is_node_domain_not_value_derived() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/mixed.ts".to_string(),
-        Arc::from("export interface Mixed { m: { x: string } | number }\n"),
-    );
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/mixed.ts"));
-
-    let mut engine = ComponentMetaQueryEngine::new(&host);
-    let route = TypeExpr::IndexedAccess {
-        object: Arc::new(TypeExpr::named("Mixed")),
-        index: Arc::new(TypeExpr::string_literal("m")),
-    };
-    let surface = engine.materialize_registry_routed_member_surface("/src/mixed.ts", &route);
-
-    assert!(
-        !matches!(surface.value, TypeExpr::Object(_)),
-        "fixture premise: the routed member value materialises to a NON-Object \
-         (union) value — got {:?}",
-        surface.value,
-    );
-    assert!(
-        surface.explicit_object_surface,
-        "the object-surface fact must come from the node-domain arm-set scan \
-         (an object-bearing union arm ⇒ true); a re-derivation from the \
-         materialised TypeExpr would return false here",
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────
-// Wildcard-route fuse-trip is a PARTIAL, not an absent.
-// A route-only symbol whose wildcard-route fuse is exhausted was NEVER
-// looked up: its `None` MUST NOT admit an ImportedRegistryDb warm
-// negative, and the derived ResolvabilityDb `false` MUST NOT be cached.
-// ─────────────────────────────────────────────────────────────────
-
 /// Build the route-only re-export fixture: `ButtonProps` is
 /// re-exported from `./types` with NO local prepared declaration in
 /// `index.ts`, so resolving it takes the slow wildcard-route lane and
@@ -3449,19 +3122,20 @@ fn broken_decl_body_lease_prepared_decl_scratch_memo_does_not_shadow_recovery() 
 
     // Recover: a content edit republishes the owner from a FRESH parse whose
     // decl-body lease is live, so `Collection` prepares again.
-    host.upsert(crate::UpsertRequest {
-        canonical_id: Some("/oc_src/types.ts".to_string()),
-        input_id: "/oc_src/types.ts".to_string(),
-        source: Arc::from(
-            "export interface Pin { p: number }\n\
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some("/oc_src/types.ts".to_string()),
+            input_id: "/oc_src/types.ts".to_string(),
+            source: Arc::from(
+                "export interface Pin { p: number }\n\
              export interface Collection { primary: string; secondary: string }\n",
-        ),
-        file_language: crate::LanguageRegistry::global()
-            .classify_static("/oc_src/types.ts")
-            .static_resolution(),
-        aliases: Vec::new(),
-    })
-    .expect("the owner re-upserts");
+            ),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static("/oc_src/types.ts")
+                .static_resolution(),
+            aliases: Vec::new(),
+        })
+        .expect("the owner re-upserts");
     assert!(host.ensure_loaded("/oc_src/types.ts"));
 
     // CONTROL — a fresh engine (no scratch entry) reaches the recovered

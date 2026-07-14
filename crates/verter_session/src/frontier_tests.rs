@@ -9,12 +9,9 @@
 //! - Builder lookup does not perform file I/O on cache hits.
 //! - Shared-host reuse: once a file is ready, different entrypoints reuse state.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
-use rustc_hash::FxHashSet;
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

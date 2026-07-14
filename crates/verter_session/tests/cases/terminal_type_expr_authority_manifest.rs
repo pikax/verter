@@ -31,6 +31,7 @@
 //! supersedes: a name/location-keyed enumeration is acceptable here because
 //! both are squashed out when the durable structural rail (the crate-boundary
 //! + `NoTypeExpr` witness confinement) lands, at which point this file and the
+//!
 //! manifest doc are deleted together. It is NOT a landed structural guard and
 //! must not be extended into one.
 //!

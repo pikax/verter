@@ -578,7 +578,6 @@ impl ShallowFileState {
                 parse_env_hash: [0u8; 16],
             },
             Arc::clone(&eval_source),
-            eval_source,
             None,
             oxc_span::SourceType::ts(),
             Arc::new(crate::decl_lowering::DeclLoweringService::new()),

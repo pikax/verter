@@ -537,47 +537,6 @@ fn route_demand_keeps_exact_deep_member_path(
     }
 }
 
-pub(crate) fn component_meta_registry_has_non_object_top_level_surface(
-    expr: &verter_type_expr::TypeExpr,
-) -> bool {
-    use verter_type_expr::TypeExpr;
-
-    match expr {
-        TypeExpr::Parenthesized(inner) => {
-            component_meta_registry_has_non_object_top_level_surface(inner)
-        }
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-            types
-                .iter()
-                .any(component_meta_registry_has_non_object_top_level_surface)
-                || types.iter().any(|ty| !matches!(ty, TypeExpr::Object(_)))
-        }
-        TypeExpr::Ref { .. }
-        | TypeExpr::IndexedAccess { .. }
-        | TypeExpr::Conditional { .. }
-        | TypeExpr::Mapped { .. } => true,
-        TypeExpr::Object(_) => false,
-        _ => false,
-    }
-}
-
-pub(crate) fn component_meta_registry_has_explicit_object_surface(
-    expr: &verter_type_expr::TypeExpr,
-) -> bool {
-    use verter_type_expr::TypeExpr;
-
-    match expr {
-        TypeExpr::Parenthesized(inner) => {
-            component_meta_registry_has_explicit_object_surface(inner)
-        }
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
-            .iter()
-            .any(component_meta_registry_has_explicit_object_surface),
-        TypeExpr::Object(_) => true,
-        _ => false,
-    }
-}
-
 pub(crate) fn collect_component_meta_registry_public_field_refs(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
@@ -2085,61 +2044,10 @@ mod tests {
 
     use super::{
         component_meta_registry_public_indexed_access_route, enqueue_component_meta_registry_ref,
-        owner_component_meta_registry_import_root, RegistryMemberRefPolicy, RouteDemand,
+        owner_component_meta_registry_import_root, RouteDemand,
     };
     use crate::types::{AnalysisLevel, DependencyResolution, HostConfig};
     use crate::VerterHost;
-    use verter_type_expr::{
-        FunctionExpr, FunctionParam, LiteralValue, MethodSignature, ObjectExpr, ObjectMember,
-        ObjectProperty, PrimitiveName, TypeExpr, ValueRef,
-    };
-
-    fn object_with_props(names: &[&str]) -> TypeExpr {
-        TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: names
-                .iter()
-                .map(|name| {
-                    ObjectMember::Property(ObjectProperty::synthetic_public(
-                        (*name).to_string(),
-                        TypeExpr::Primitive(PrimitiveName::String),
-                        false,
-                        false,
-                    ))
-                })
-                .collect(),
-        }))
-    }
-
-    fn empty_object() -> TypeExpr {
-        TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: Vec::new(),
-        }))
-    }
-
-    /// `{ cb: <callable> }` where the property value is a callable surface
-    /// (`() => void`). Built for either a `Function` or a `ConstructorType`
-    /// property value carrying the same `FunctionExpr` payload.
-    fn object_with_callable_prop(constructor: bool) -> TypeExpr {
-        let func = Arc::new(FunctionExpr::synthetic(
-            Vec::new(),
-            Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Void))),
-            Vec::new(),
-        ));
-        let cb = if constructor {
-            TypeExpr::ConstructorType(func)
-        } else {
-            TypeExpr::Function(func)
-        };
-        TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
-                "cb".to_string(),
-                cb,
-                false,
-                false,
-            ))],
-        }))
-    }
-
     #[test]
     fn indexed_access_route_preserves_full_member_path() {
         let expr = verter_semantic::analysis::jsdoc::parse_jsdoc_tag_type_payload(
@@ -2194,36 +2102,6 @@ mod tests {
             output[1].route,
             RouteDemand::member_path(vec!["variants".to_string(), "color".to_string()]),
         );
-    }
-
-    fn property_with_visibility(
-        name: &str,
-        vis: verter_type_expr::MemberVisibility,
-    ) -> ObjectMember {
-        ObjectMember::Property(ObjectProperty::with_visibility(
-            name.to_string(),
-            TypeExpr::Primitive(PrimitiveName::Number),
-            false,
-            false,
-            vis,
-            verter_type_expr::MemberSpans::default(),
-        ))
-    }
-
-    fn merged_property_visibility(
-        merged: &TypeExpr,
-        name: &str,
-    ) -> verter_type_expr::MemberVisibility {
-        let TypeExpr::Object(obj) = merged else {
-            panic!("merged candidate should be object-shaped, got {merged:?}");
-        };
-        obj.properties
-            .iter()
-            .find_map(|m| match m {
-                ObjectMember::Property(p) if p.name == name => Some(p.visibility),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("merged object must contain `{name}`"))
     }
 
     #[test]
@@ -2321,55 +2199,5 @@ export interface AvatarProps {
             Some(("/src/Avatar.vue".to_string(), "AvatarProps".to_string())),
             "registry import roots should collapse direct named owner imports to the canonical defining file instead of keeping the barrel canonical",
         );
-    }
-
-    // -----------------------------------------------------------------
-    // G1 — Conditional / Mapped walker gates on
-    // `cursor.is_whole_surface()`. Under a narrowed cursor the
-    // type-level predicate sides (Conditional.check/extends,
-    // Mapped.source/name_type) must NOT contribute refs.
-    // -----------------------------------------------------------------
-
-    /// Helper: build an explicit `Include` cursor at the root, with
-    /// `Registry` surface kind. The cursor is narrowed → not
-    /// whole-surface.
-    fn narrowed_include_projection(
-        keys: &[&str],
-    ) -> crate::meta_resolve::projection_demand::SurfaceProjection {
-        let mut node =
-            crate::meta_resolve::projection_demand::ProjectionNode::whole_surface_expanded();
-        node.key_filter = crate::meta_resolve::projection_demand::KeyFilter::Include(
-            keys.iter()
-                .map(|k| Arc::<str>::from(*k))
-                .collect::<Vec<_>>()
-                .into(),
-        );
-        crate::meta_resolve::projection_demand::SurfaceProjection {
-            surface: crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
-            root: node,
-        }
-    }
-
-    fn ref_named(name: &str) -> TypeExpr {
-        TypeExpr::Ref {
-            name: name.to_string().into(),
-            type_arguments: Arc::from([]),
-        }
-    }
-
-    fn drain_names(output: &VecDeque<super::PendingComponentMetaRegistryRef>) -> Vec<String> {
-        output.iter().map(|p| p.name.clone()).collect()
-    }
-
-    // -----------------------------------------------------------------
-    // G2 — non-Property ObjectMember arms (Method,
-    // IndexSignature, CallSignature, ConstructSignature) apply the
-    // path-precision gate.
-    // -----------------------------------------------------------------
-
-    fn object_with_member(member: ObjectMember) -> TypeExpr {
-        TypeExpr::Object(Arc::new(ObjectExpr {
-            properties: vec![member],
-        }))
     }
 }

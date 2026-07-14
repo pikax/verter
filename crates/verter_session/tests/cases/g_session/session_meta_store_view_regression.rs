@@ -57,7 +57,6 @@
 //!   bench panic — run it both ways to prove the discrimination.
 
 use verter_session::component_meta_host::ComponentMetaHost;
-use verter_session::meta_resolve::ResolvedComponentMetaState;
 use verter_session::{AnalysisLevel, HostConfig};
 
 const TYPES_TS: &str = r#"export interface ButtonProps { label: string; size?: 'sm' | 'md' }

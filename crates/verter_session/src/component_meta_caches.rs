@@ -77,6 +77,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
+#[cfg(any(test, feature = "test-support"))]
 use verter_type_expr::TypeExpr;
 
 use crate::cache_runtime::admission::{CacheAdmission, CacheEntry, NonAdmissionReason};
@@ -1388,48 +1389,6 @@ impl Default for OwnerCollectionDb {
 //      `bump_project_generation_and_evict` detect cross-generation drift
 //      on overlay open/close.
 
-/// Synthetic-carrier classification of a `TypeExpr`-START shape-route
-/// subject — the ONE classification both the production key constructor
-/// ([`ShapeCacheKey::type_expr_whole_with_context`]) and the test-support
-/// classifier probe route through, so the verdicts cannot drift.
-///
-/// - [`BareCarrier`](Self::BareCarrier): a top-level
-///   `TypeExpr::SyntheticSlotBinding` — redirects to the content-free
-///   [`ShapeSubject::SyntheticBinding`] identity (the carrier's
-///   `value_node` arena ordinal is provenance, never key material).
-/// - [`CarrierFree`](Self::CarrierFree): no carrier anywhere — the sound
-///   subject is the LOWERED settled graph node
-///   ([`ShapeSubject::MemberValueNode`]); the caller lowers ONCE through
-///   the shared dispatch and keys that node.
-/// - [`UnkeyableNested`](Self::UnkeyableNested): a composite that NESTS a
-///   carrier — its identity would depend on the carrier's store-relative
-///   `value_node` ordinal, which has no content-free representation, so
-///   the subject keys NO slot (cache bypass, not value bypass).
-///
-/// Reuses the shared depth-safe, iterative, no-allocation walker
-/// [`crate::semantic_query_memo::synthetic_carrier_guard::type_expr_contains_synthetic_slot_binding`]
-/// — there is exactly one carrier-detection walker.
-enum TypeExprShapeSubjectClass {
-    BareCarrier(crate::semantic_query::SyntheticBindingId),
-    CarrierFree,
-    UnkeyableNested,
-}
-
-fn classify_type_expr_shape_subject(expr: &TypeExpr) -> TypeExprShapeSubjectClass {
-    if let TypeExpr::SyntheticSlotBinding(carrier) = expr {
-        return TypeExprShapeSubjectClass::BareCarrier(
-            crate::semantic_query::SyntheticBindingId::from_carrier_key(carrier),
-        );
-    }
-    if crate::semantic_query_memo::synthetic_carrier_guard::type_expr_contains_synthetic_slot_binding(
-        expr,
-    ) {
-        TypeExprShapeSubjectClass::UnkeyableNested
-    } else {
-        TypeExprShapeSubjectClass::CarrierFree
-    }
-}
-
 /// A module-private zero-sized seal carried by every externally-typed
 /// [`ShapeSubject`] variant. Its type is not nameable outside
 /// `component_meta_caches`, so no other module (in this crate or any
@@ -1471,32 +1430,6 @@ impl MemberShapeNodeSubject {
         Self(member.member().value)
     }
 
-    /// Sanctioned construction from a RAW producing `SemanticNodeId`, gated by
-    /// the non-output [`crate::meta_resolve::materialize::RegistryMemberShapeKeyCap`]
-    /// (mintable only in the field-types materialiser). The registry member-surface
-    /// stabiliser holds the first-pass `MaterializeStructureDb` node directly
-    /// rather than a re-derived `AdmittedPublishedMember`; the capability proves
-    /// the caller is that materialiser, keeping the rule "no arbitrary raw
-    /// `SemanticNodeId` reaches the sealed member-shape subject" intact without
-    /// abusing the publication-admitted token.
-    fn from_registry_node(
-        _cap: &crate::meta_resolve::materialize::RegistryMemberShapeKeyCap,
-        node: crate::semantic_query::SemanticNodeId,
-    ) -> Self {
-        Self(node)
-    }
-
-    /// Sanctioned construction from the TypeExpr-START shape route's
-    /// pre-peek LOWERED subject node. The classifier
-    /// ([`ShapeCacheKey::type_expr_whole_with_context`]) proves the
-    /// expression carrier-free FIRST, then lowers it ONCE through the
-    /// shared dispatch and mints the settled node here — module-private,
-    /// so an arbitrary raw `SemanticNodeId` still cannot reach the sealed
-    /// member-shape subject from outside the classifying constructors.
-    fn from_lowered_type_expr(node: crate::semantic_query::SemanticNodeId) -> Self {
-        Self(node)
-    }
-
     /// Test-only construction from a raw `&SurfaceMember`. The cache-rail
     /// key-identity tests (`query_db_self_root_tests`) build keys directly from
     /// synthetic members to assert the subject collapses siblings sharing
@@ -1518,12 +1451,9 @@ impl MemberShapeNodeSubject {
 
 /// Subject of a [`ShapeCacheKey`] — the *what* whose shape is cached.
 ///
-/// `MemberValueNode` covers BOTH the per-member route whose start point is
-/// the settled `SurfaceMember.value` graph node AND the TypeExpr-START
-/// materialiser route, whose parser-produced annotation is LOWERED once
-/// through the shared dispatch and keyed by its settled node (the former
-/// `TypeExpr` structural-hash subject — deleted: a `TypeExpr` never enters
-/// a cache key). Keyed by the sealed [`MemberShapeNodeSubject`] newtype.
+/// `MemberValueNode` covers the per-member route whose start point is the
+/// settled `SurfaceMember.value` graph node. It is keyed by the sealed
+/// [`MemberShapeNodeSubject`] newtype; a raw `TypeExpr` never enters a cache key.
 /// `SyntheticBinding` covers explicit deepening of a synthetic
 /// slot-binding carrier, keyed by the content-free
 /// [`crate::semantic_query::SyntheticBindingId`]. All subjects share the
@@ -1535,8 +1465,7 @@ impl MemberShapeNodeSubject {
 /// newtype's inner field, the `SyntheticBinding` arm via a module-private
 /// [`ConstructionSeal`] marker. External code matches on the variants
 /// (with `{ .. }`) but builds them ONLY through the `ShapeCacheKey`
-/// constructors. This is the structural half of the synthetic-carrier
-/// confinement — see [`classify_type_expr_shape_subject`].
+/// constructors. This is the structural half of synthetic-carrier confinement.
 ///
 /// `private_interfaces` is allowed deliberately: a module-private
 /// [`ConstructionSeal`] field on a `pub` enum is reachable for matching
@@ -1548,9 +1477,8 @@ impl MemberShapeNodeSubject {
 pub enum ShapeSubject {
     /// Member-value graph-node subject. Sibling members whose
     /// `SurfaceMember.value` is the same settled graph node collapse onto
-    /// each other's warm hits — as do TypeExpr-start materialisations
-    /// whose annotations lower to the same settled node. Keyed by the
-    /// sealed [`MemberShapeNodeSubject`] newtype (its inner arena ordinal
+    /// each other's warm hits. Keyed by the sealed
+    /// [`MemberShapeNodeSubject`] newtype (its inner arena ordinal
     /// is module-private), so a raw `SemanticNodeId` cannot spread into
     /// the shape-key subject. This is a generation/store-scoped
     /// graph-instance memo (single-entry, fact-validated,
@@ -1588,9 +1516,9 @@ impl ShapeSubject {
 
 /// Per-call demand a [`ShapeCacheKey`] addresses — the *how* the shape
 /// will be consumed. Distinct demands for the same subject keep
-/// disjoint entries (e.g. Shallow vs Expanded over the same TypeExpr,
+/// disjoint entries (e.g. Shallow vs Expanded over the same node,
 /// or `Published(Navigate)` vs `StructuralTransit(Navigate)` over the
-/// same expression).
+/// same graph node).
 ///
 /// The terminal-hop demand carries the FULL
 /// [`ProjectionReductionContext`] (mode + demand), not just a bare
@@ -1625,13 +1553,10 @@ impl ShapeDemand {
     /// The single entry point for whole-subject demand construction.
     ///
     /// PRODUCTION callers build the [`ProjectionReductionContext`]
-    /// explicitly and use the `_with_context` constructors: TypeExpr
-    /// subjects via [`ShapeCacheKey::type_expr_whole_with_context`],
-    /// member-value subjects via
+    /// explicitly and use the member-value constructor
     /// [`ShapeCacheKey::surface_member_value_whole_with_context`] (which
-    /// takes a `&SurfaceMember`). The mode-only convenience constructors
-    /// — [`ShapeCacheKey::type_expr_whole`] and the
-    /// `member_value_node_whole_for_test` ctor — wrap a bare
+    /// takes a `&SurfaceMember`). The mode-only
+    /// `member_value_node_whole_for_test` constructor wraps a bare
     /// [`ProjectionMode`] in `ProjectionReductionContext::published(mode)`
     /// for the implicit-Published default and are reserved for TESTS /
     /// schema-probe helpers (`member_value_node_whole_for_test` is
@@ -1677,73 +1602,6 @@ impl ShapeCacheKey {
     /// to [`ShapeSubject::scope_canonical`].
     pub(crate) fn scope_canonical(&self) -> &Arc<str> {
         self.subject.scope_canonical()
-    }
-
-    /// Construct the TypeExpr-START whole-subject key under an explicit
-    /// [`ProjectionReductionContext`], CLASSIFYING the incoming
-    /// expression for synthetic-carrier confinement and keying the
-    /// carrier-free case by its LOWERED settled graph node
-    /// ([`ShapeSubject::MemberValueNode`]) — a raw `TypeExpr` never
-    /// enters the key. The context discriminator keeps the field
-    /// materialiser's per-prop `Published(Navigate)` publication slot
-    /// disjoint from a `StructuralTransit(Navigate)` carrier-lower slot —
-    /// same subject, distinct cache entries.
-    ///
-    /// `lower_carrier_free` runs AT MOST ONCE, only for the carrier-free
-    /// class: the caller lowers the expression through the ONE shared
-    /// dispatch (under the same tear-free scope observation its
-    /// value/self-root publish under) and returns the settled node. The
-    /// materialiser passes its already-lowered pre-peek node; the
-    /// peek-only route lowers through the same shared helper. `None` from
-    /// the closure (no view-correct scope identity to lower against)
-    /// yields no key — cache bypass, not value bypass.
-    ///
-    /// Returns `None` ("no sound cache key") when `expr` NESTS a
-    /// `TypeExpr::SyntheticSlotBinding` carrier under a composite
-    /// (`{x: carrier}`, `carrier | null`, etc.): such a value's identity
-    /// would depend on the carrier's store-relative `value_node` ordinal,
-    /// which has no content-free representation. Callers that get `None`
-    /// run the cold compute and return WITHOUT a cache write (cache
-    /// bypass, not value bypass). Classification
-    /// ([`classify_type_expr_shape_subject`] — shared with the
-    /// test-support probe so verdicts cannot drift):
-    ///   - bare top-level carrier ⇒ redirect to the content-free
-    ///     [`ShapeSubject::SyntheticBinding`] identity (no lowering);
-    ///   - no carrier anywhere ⇒ [`ShapeSubject::MemberValueNode`] over
-    ///     the lowered settled node;
-    ///   - nested carrier ⇒ `None` (no lowering).
-    pub(crate) fn type_expr_whole_with_context(
-        scope: Arc<str>,
-        expr: &TypeExpr,
-        terminal_context: crate::semantic_query::ProjectionReductionContext,
-        lower_carrier_free: impl FnOnce() -> Option<crate::semantic_query::SemanticNodeId>,
-    ) -> Option<Self> {
-        match classify_type_expr_shape_subject(expr) {
-            // A bare top-level carrier redirects to the content-free
-            // synthetic-binding identity — its sound cache key is the
-            // `SyntheticBindingId`, never any structural encoding of the
-            // carrier (which folds `value_node`).
-            TypeExprShapeSubjectClass::BareCarrier(id) => Some(
-                Self::synthetic_binding_whole_with_context(id, terminal_context),
-            ),
-            // A composite that NESTS a carrier has no sound content-free
-            // key.
-            TypeExprShapeSubjectClass::UnkeyableNested => None,
-            // Carrier-free: the sound subject is the settled graph node
-            // the expression lowers to — exact `Eq` on the node, sibling
-            // expressions lowering to the same node collapse onto one
-            // entry (the ratified `MemberValueNode` memo semantics).
-            TypeExprShapeSubjectClass::CarrierFree => {
-                let node = lower_carrier_free()?;
-                Some(Self {
-                    subject: ShapeSubject::MemberValueNode {
-                        scope,
-                        node: MemberShapeNodeSubject::from_lowered_type_expr(node),
-                    },
-                    demand: ShapeDemand::whole_subject_with_context(terminal_context),
-                })
-            }
-        }
     }
 
     /// Test-only: build a member-value-subject key from an ARBITRARY node id.
@@ -1798,21 +1656,6 @@ impl ShapeCacheKey {
     /// whose first-pass node is the same settled graph node collapse onto each
     /// other's warm hits — without requiring an `AdmittedPublishedMember` (the
     /// registry stabiliser already holds the producing node directly).
-    pub(crate) fn registry_member_value_node_whole_with_context(
-        scope: Arc<str>,
-        cap: &crate::meta_resolve::materialize::RegistryMemberShapeKeyCap,
-        node: crate::semantic_query::SemanticNodeId,
-        terminal_context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Self {
-        Self {
-            subject: ShapeSubject::MemberValueNode {
-                scope,
-                node: MemberShapeNodeSubject::from_registry_node(cap, node),
-            },
-            demand: ShapeDemand::whole_subject_with_context(terminal_context),
-        }
-    }
-
     /// Test-only member-value key construction from a raw `&SurfaceMember`. The
     /// cache-rail key-identity tests build keys directly from synthetic members
     /// to assert the subject collapses siblings sharing `.value`; they do not
@@ -1838,10 +1681,8 @@ impl ShapeCacheKey {
     /// free [`crate::semantic_query::SyntheticBindingId`] identity).
     /// Terminal context is implicitly `Published(mode)`.
     ///
-    /// The synthetic explicit-deepen route. There is no production
-    /// consumer yet, so — like the `type_expr_whole` mode-only form, and
-    /// under the SAME `cfg(any(test, feature = "test-support"))` gate — this
-    /// keeps no dead surface in any production build. The only callers are
+    /// Test-support convenience for the synthetic explicit-deepen proof. The
+    /// only callers are
     /// in-crate `#[cfg(test)]` suites and the test-support
     /// `insert_synthetic_carrier_deep_for_test` / `get_synthetic_carrier_deep_for_test`
     /// proof helpers; production keys via
@@ -2260,40 +2101,6 @@ impl ShapeCacheDb {
         self.entries
             .get(&key)
             .map(|entry| entry.value.type_expr_for_test().clone())
-    }
-
-    /// Test-observable: does the TypeExpr shape route classify `expr` to a
-    /// SOUND, keyable subject, or is the subject UNCACHED?
-    ///
-    /// Returns `true` for a keyable classification (a carrier-free
-    /// expression — keyed by its lowered settled node in production — or a
-    /// bare top-level carrier redirected to the content-free
-    /// `SyntheticBinding` identity), and `false` for the unkeyable
-    /// composite that NESTS a synthetic carrier (the subject keys NO slot
-    /// and the caller cache-bypasses). Routes through the SAME
-    /// `classify_type_expr_shape_subject` the production constructor
-    /// consults, so the probe's verdict cannot drift from production. This
-    /// is the SHAPE-route analog of `MaterializationCacheKey`'s
-    /// root-less-anonymous-subject `None` (which already keys no DB slot):
-    /// an unsound/unkeyable subject yields `None` (uncached), never a
-    /// forged key. Read-only — it does NOT touch the cache.
-    ///
-    /// Gated `#[cfg(any(test, feature = "test-support"))]` (NOT
-    /// `debug_assertions`): it is reached directly from the
-    /// `synthetic_carrier_explicit_deepen_proof` integration case (alongside the
-    /// carrier-proof helpers above), so it rides the production-unreachable
-    /// `test-support` feature rather than being present in ordinary debug
-    /// builds.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn type_expr_shape_route_keys_subject_for_test(
-        _scope: Arc<str>,
-        expr: Arc<TypeExpr>,
-        _mode: ProjectionMode,
-    ) -> bool {
-        !matches!(
-            classify_type_expr_shape_subject(expr.as_ref()),
-            TypeExprShapeSubjectClass::UnkeyableNested
-        )
     }
 }
 

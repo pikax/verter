@@ -18,8 +18,8 @@ tree; the clean tree instead carries the final release-state/remaining-work docu
 - Preserved E2E work: `preserve/verter-e2e-ab` at
   `329f2f69349d6008aff10117217a71ba76f60563`; salvage only after first-hand review.
 - Archive refs live under `refs/archive/verter-release-consolidation/{parselower,lsp,framework-adapters}`.
-- Raw integration branch/worktree: `codex/release-consolidation-raw` at
-  `D:/dev/personal/verter-release-consolidation`, based on the exact ParseLower tip.
+- Raw integration branch/worktree: `codex/release-consolidation-raw` in the isolated
+  release-consolidation worktree, based on the exact ParseLower tip.
 - Final branch/worktree: `codex/release-clean`, reconstructed later from the exact release base.
 - The main checkout and its untracked `REVIEW-B-DONE`,
   `packages/playground/public/tsgo.wasm`, and
