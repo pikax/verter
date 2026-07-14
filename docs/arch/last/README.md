@@ -45,10 +45,15 @@ That commit is **documentation and orchestration protocol only — no production
 verification rules the next two blocks are gated on, sweeps a class of defective prescriptions out of the
 protocol/skills/in-repo memories, and opens the gate-integrity ledger.
 
-**Caveat, stated honestly:** its unprimed review reached **zero P0s across five consecutive rounds but never
-returned APPROVED** — successive rounds kept finding finer wording/mechanism items in ~60 KB of prose. It landed
-under the doc-review round cap. An **independent unprimed confirm was dispatched against the landed tip**; if it
-returns findings, they are a follow-up commit, not a re-litigation of the rules themselves.
+**Caveat — it landed with two of its own gates UNMET, and pretending otherwise would make it the first example of
+its own thesis.** Its unprimed review reached **zero P0s across five consecutive rounds but never returned
+APPROVED** — successive rounds kept finding finer wording/mechanism items in ~60 KB of prose — and it landed under
+the doc-review round cap. The **independent post-land confirm never ran**: it was dispatched against the landed
+tip and **stopped mid-flight, leaving a zero-byte output and no verdict**. A dispatched-then-killed gate produces
+exactly what an omitted gate produces — nothing — so it is recorded as **UNRUN**, never as pending and never as
+passed. **[`../gate-integrity-ledger.md`](../gate-integrity-ledger.md) → GI-16 owns the remedy**, and it is a
+ruling for the user: ratify the landing (recording the confirm as *waived*), or run the confirm on the landed tip
+and adopt its findings as a follow-up commit. It may not be closed by the agent that landed the commit.
 
 ## What was rejected
 

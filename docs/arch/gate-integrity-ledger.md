@@ -126,27 +126,36 @@ that to policy rulings, and the ledger must never be the place a governance gate
 |---|---|---|---|---|---|
 | **GI-14** | May an attestation authorize Agent dispatch? | **This block** — owns putting the question, with both options and their consequences, and recording the answer. | Ratifying authority (the user). | Ruled BEFORE this block lands. It may not land carrying an unruled dispatch-authority question, because GI-9's probe design depends on the answer. | The ruling is recorded in this ledger (date + rationale) and the operative rule in `PROTOCOL.md` → Dispatch matches it. Test: `gate_contract_integrity::dispatch_authority_ruling_is_recorded_and_matches_protocol_text`. |
 | **GI-15** | Red baseline vs. green gate | **This block** — owns putting the question and recording the answer. | Ratifying authority (project policy). | Ruled BEFORE this block lands — GI-11's mechanism cannot be built against an unruled bar. | The ruling is recorded here and the operative bar in `PROTOCOL.md` → Verification Gate matches it. Test: `gate_contract_integrity::red_baseline_ruling_is_recorded_and_matches_protocol_text`. |
+| **GI-16** | The rules commit LANDED without its two governance gates — ratify it, or make it pass them. | **This block** — the rules it must satisfy are the rules this commit landed. | Ratifying authority (the user). | Ruled BEFORE this block lands. This block is GATED ON the rules commit, so it cannot be the thing that certifies it. | `5c4693ab1` has neither a clean unprimed approval (final round: zero P0s, never APPROVED, landed under the doc-review round cap) nor an independent post-land confirm (dispatched against the landed tip, STOPPED mid-flight, **zero-byte output, no verdict**). Two coherent rulings: **(a) RATIFY the landing** — record the exception, its reason, and that the confirm is waived, so the record says *waived* rather than implying *passed*; or **(b) RUN THE CONFIRM** on the landed tip and adopt its findings as a follow-up commit. **What is NOT available is leaving it implicit** — an unrun gate that nobody wrote down is indistinguishable from a gate that passed, which is the exact class this commit exists to end. Test: `gate_contract_integrity::rules_commit_governance_status_is_recorded_not_implied`. |
 
-Neither open item is resolved by an agent editing the text until a reviewer stops objecting — that
+No open item here is resolved by an agent editing the text until a reviewer stops objecting — that
 would be optimising the gate instead of the artifact, which is the failure this whole change exists
-to end.
+to end. **GI-16 in particular may not be closed by the agent that landed the commit**, which is the
+whole reason the confirm is dispatched by the tier above the author.
 
-## Ruling status — HONEST, and not yet clean
+## Ruling status — HONEST: it LANDED, and it landed with two gates UNMET
 
 Governance (`/mom-cto-orchestration` → GOVERNANCE) requires a CLEAN unprimed codex approval before
-a rule-bearing change LANDS. **This ledger does not claim one, and the change has not landed.**
-Recorded plainly:
+a rule-bearing change LANDS, and the CTO tier requires an independent post-land confirm.
+**The change LANDED as `5c4693ab1` on `fix/lsp-provider-parity` with NEITHER.** It landed on the
+ratifying authority's explicit wrap-up-and-checkpoint instruction, which is a reason, not an
+approval. Recorded plainly, because a rules commit that says *"a gate that cannot prove it ran is a
+failure"* must not quietly be the thing that proves the point:
 
-- The change is COMMITTED ON A BLOCK BRANCH, unpushed and unmerged, PENDING RATIFICATION. It is
-  prepared, not landed. Nothing here asserts otherwise.
 - Successive unprimed codex architecture legs were run against it (`gpt-5.6-sol`, reasoning effort
   `xhigh`, startup banner verified on each). Each returned `CHANGES REQUIRED`; each round's
-  findings were adopted, and the rows above are what remained after adoption.
+  findings were adopted, and the rows above are what remained after adoption. The final round
+  reached **zero P0s but never returned APPROVED** — it landed under the doc-review round cap.
 - A `CHANGES REQUIRED` verdict is **not** a clean approval and is not presented as one. These rows
   are the RECORDED DISPOSITION the deferral rule demands (owner, resolution gate, acceptance test,
   per row). A disposition is not a substitute for the approval the governance rule demands.
+- **The independent post-land confirm never ran.** It was dispatched against the landed tip and was
+  STOPPED mid-flight, before its review legs, leaving a **zero-byte** output and no verdict. A
+  dispatched-then-killed gate produces exactly what an omitted gate produces: nothing. It is
+  recorded as UNRUN, not as pending, and never as passed.
 - Final governance approval therefore remains OUTSTANDING and belongs to the ratifying authority,
-  not to the agent that wrote the change. An implementing agent cannot self-certify.
+  not to the agent that wrote the change. An implementing agent cannot self-certify. **GI-16 owns
+  the remedy.**
 
 The governing principle these legs established, and which is adopted here: **a mandate whose
 mechanism does not exist is not a rule — it is a gate everyone will learn to skip.** The rules are

@@ -1,10 +1,41 @@
 # Open decisions — the user's to make, not an agent's
 
-Both have an **operative default** written into the rules, so the protocol is **decidable today** and nothing is
-blocked. Both **must be ruled before the gate-integrity block lands**.
+**Three.** GI-14 and GI-15 have an **operative default** written into the rules, so the protocol is **decidable
+today** and nothing is blocked by them. **GI-16 has no default** — it is not a policy fork but a fact about what
+already landed, and the only thing not available is leaving it implicit. All three **must be ruled before the
+gate-integrity block lands**.
 
 **A user ruling does not bypass the governance gate:** the rule-text edit that encodes the ruling still needs prior
 neutral codex approval.
+
+---
+
+## GI-16 — The rules commit landed WITHOUT its two governance gates. Ratify it, or make it pass them.
+
+**This is not a policy question. It is a hole in the record, and it is in the one commit that must not have one.**
+
+`5c4693ab1` — the commit whose entire thesis is *"a gate that cannot prove it ran is a failure"* — carries:
+
+- **No clean unprimed approval.** Its final review round reached **zero P0s but never returned `APPROVED`**; it
+  landed under the doc-review round cap. `CHANGES REQUIRED` with findings adopted is not an approval.
+- **No independent post-land confirm.** One was dispatched against the landed tip and **stopped mid-flight, before
+  its review legs, leaving a zero-byte output and no verdict.** A dispatched-then-killed gate produces exactly what
+  an omitted gate produces: nothing. It is recorded as **UNRUN** — never as pending, never as passed.
+
+It landed on the explicit wrap-up-and-checkpoint instruction. **That is a reason, not an approval**, and the
+distinction is the substance of the commit itself.
+
+**Two coherent rulings:**
+
+| | |
+|---|---|
+| **A. Ratify the landing** | Record the exception, its reason, and that the confirm is **waived** — so the record says *waived* rather than implying *passed*. Cheap, honest, and leaves the rules operative. |
+| **B. Run the confirm** | Dispatch the independent unprimed confirm against the landed tip and adopt its findings as a **follow-up commit**. Slower; it is the only option that actually produces the missing evidence. |
+
+**What is NOT available is leaving it implicit.** An unrun gate that nobody wrote down is indistinguishable from a
+gate that passed — the exact class the commit exists to close. **It may not be closed by the agent that landed
+it**; that is the entire reason the confirm is dispatched by the tier above the author. Owner and acceptance test:
+[`../gate-integrity-ledger.md`](../gate-integrity-ledger.md) → **GI-16**.
 
 ---
 
