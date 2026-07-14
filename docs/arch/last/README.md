@@ -1,10 +1,43 @@
 # `docs/arch/last/` — the consolidated handoff record
 
-> **The cache-poisoning class described here is OPEN and REACHABLE in the landed code, and a
-> reachable stack-overflow crash in the shared resolver has NOT been started.** What landed is a
-> **checkpoint**: it closes several individually-proven poison sites and repairs a regression the work
-> introduced, but it does not close the class. These documents are what you **execute from** — not a
-> history of what happened.
+## ⚠ READ THIS FIRST: the landed commit contains a cache-poison REGRESSION
+
+**This work introduced a cache-poisoning regression, it is present in the code that landed, and the
+base did not have it. This branch must not be merged onward until it is fixed. Fixing it is the next
+agent's first job.**
+
+The fallthrough resolver's admission funnel — `store_node` in
+`crates/verter_session/src/resolver_core/fallthrough_resolver.rs` — has **no non-cacheability rail at
+all**. Confirm it in one command:
+
+```bash
+grep -cE "non_cacheable|CacheabilityProbe|with_cacheability_scope" \
+  crates/verter_session/src/resolver_core/fallthrough_resolver.rs   # ⇒ 0
+```
+
+The file itself never changed — it is byte-identical to its base. What changed is underneath it: this
+lineage deleted the ~31 call sites that folded non-cacheability into cold-compute completeness, and
+**that completeness signal was `store_node`'s only safety gate.** Removing the fold left the gate
+toothless. A fallthrough node computed through a fenced serve or a lease miss, carrying non-empty
+**live-rooted** facts, is now admitted and served warm indefinitely — and because the facts are
+live-rooted, the read-side validation rail can never reject it.
+
+**Hold both halves of the honest caveat.** The missing rail is **proven** (a blob-hash fact, not an
+argument). But **nobody constructed an end-to-end poisoning trace** through `store_node`, so this is a
+**proven-missing safety rail, not a demonstrated exploit**. Do not overstate it — and do not let
+anyone argue you out of it either. **Settle it with a discriminating test, not another opinion:**
+static "this path is safe" reasoning has been wrong **three times** in this work, twice from reviewers
+specifically tasked with attacking the claim. Force a fallthrough node through a fenced serve, assert
+the entry is refused, and watch the test go red against the tree as it stands.
+
+Full mechanism and fix: **[`cache-admission-closure-design.md`](cache-admission-closure-design.md) §0.**
+
+---
+
+> Beyond that regression: **the cache-poisoning class it belongs to is OPEN and REACHABLE in the landed
+> code**, and a **reachable stack-overflow crash** in the shared resolver has **NOT been started**. What
+> landed is a **checkpoint** — it closes several individually-proven poison sites, but it does not close
+> the class. These documents are what you **execute from**, not a history of what happened.
 
 ## This is all that survives — by design
 

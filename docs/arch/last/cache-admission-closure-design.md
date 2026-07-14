@@ -1,9 +1,55 @@
 # Closing the shared-cache admission poison class — implementer-ready design
 
-**Read this first, and read all of it before you write code.** This is not a summary of a fix that
-happened. It is the decided design for work that has **not** been done, and it is the reason the
-landed checkpoint is a checkpoint rather than a completed fix. The class described here is **open
-and reachable in the landed code**.
+## 0. STOP — the landed commit ships a cache-poison REGRESSION, and fixing it is job one
+
+**This work introduced a cache-poisoning regression that is present in the landed code. The base did
+not have it. This branch must not be merged onward until it is fixed.** That distinction — regression,
+not inherited debt — is the whole point of this section, and it is the first thing you should act on.
+Not the type change in §5. This.
+
+**The mechanism, exactly.** The fallthrough resolver's admission funnel,
+`store_node` in `crates/verter_session/src/resolver_core/fallthrough_resolver.rs` (around line 193),
+gates admission on exactly three things:
+
+1. `key.is_cacheable()`,
+2. `crate::request_context::current_cold_compute_completeness().is_partial()`, and
+3. `!result.facts.is_empty()` (or an intrinsic-surface / consumed-bindings value).
+
+**It has no non-cacheability rail at all.** Verify it in one command — the file contains **zero**
+occurrences of any of them:
+
+```bash
+grep -cE "non_cacheable|CacheabilityProbe|with_cacheability_scope" \
+  crates/verter_session/src/resolver_core/fallthrough_resolver.rs   # ⇒ 0
+```
+
+**And the file never changed.** It is byte-identical to its base. What changed is *underneath* it:
+this lineage deleted the roughly **31 call sites that folded non-cacheability into cold-compute
+completeness**. Decoupling those two concerns was architecturally **correct** — a fenced serve should
+not make a result *partial* — but `store_node`'s only safety gate was that very completeness signal.
+Removing the fold **rendered its gate toothless**. Its comment still claims a "single no-poison rail
+shared with the component-meta materialiser"; that rail no longer carries non-cacheability.
+
+**The consequence:** a fallthrough node computed through a fenced serve or a lease miss, carrying
+non-empty **live-rooted** facts, is admitted and served warm **indefinitely**. Live-rooted is the
+sting — the facts validate against the current view on every warm hit, so the read-side rail can never
+reject it (see §2 for why "it roots on a live hash, therefore it is safe" is a category error).
+
+**The honest caveat, and you must hold both halves of it.** The *rail* is **proven absent** — that is
+a blob-hash fact, not an argument. But **nobody constructed an end-to-end poisoning trace through
+`store_node`.** So what is established is a **proven-missing safety rail**, not a demonstrated
+exploit. Do not overstate it, and do not let anyone talk you out of it either: **settle it with a
+discriminating test, not with another opinion.** Static "this path is safe" reasoning has been wrong
+**three times** in this work — including from a read-only diagnostic and from an adversarial reviewer
+told to attack that exact claim (§2, §9). Force a fallthrough node through a fenced serve or a lease
+miss, assert the entry is refused admission, and watch the test go **red** against the tree as it
+stands.
+
+---
+
+**The rest of this document is the decided design for work that has not been done.** It is why the
+landed checkpoint is a checkpoint rather than a completed fix. The class described here is **open and
+reachable in the landed code** — the regression above is the most urgent instance, not the whole of it.
 
 Everything in this document was decided by an architecture consult run against the source: two
 independent unprimed legs plus a code-verifying decider on the contested points. Where the legs
@@ -223,7 +269,19 @@ pub(crate) fn from_finalise(finalise: FactReadSetFinalise) -> Self {
 consumed a non-cacheable read finalises as `Ok(facts)` and lifts to `Cacheable` — clean facts from a
 dirty compute, and every caller of `from_finalise` inherits the hole for free. That is not a missing
 check at one site. **That is the class**, expressed as a type, and every individual hole in §7 is some
-layer dropping exactly this kind of dropped-flag signal.
+layer dropping exactly this kind of signal.
+
+**Scale, on the landed tree — this is why the change is not cosmetic.** Roughly **twenty admission
+sites can structurally obtain clean facts from a non-cacheable compute simply by not reading the third
+tuple element.** They mostly do read it today; nothing makes them. And the forward-looking half is
+worse than the backward-looking half:
+
+> **Every future admission site added to this code is one dropped `_` away from re-introducing the
+> entire bug class.**
+
+A reviewer cannot reliably catch a *missing* binding — three review rounds in this very area each
+missed one. A compiler catches it every time, for free, forever. That asymmetry is the entire argument
+for doing this.
 
 ### The fix
 
@@ -344,16 +402,13 @@ cache validates by "all facts still valid", so **empty facts validate vacuously,
 decider gave a concrete reproducing edit: change a spread binding's resolved keys without changing
 the branch index, and the old consumed-bindings node is served for ever.
 
-> **This hole is also where the checkpoint introduced a regression of its own, and it is the one
-> thing the checkpoint had to fix.** A single function used to do two things at once — mark a
-> request cache-suppressed **and** fold the result to partial. Decoupling those is architecturally
-> **correct** (a fenced serve should not make a result *partial*), and both independent attempts
-> deleted all of its call sites. But the replacement fan-out marks only the thread-local tracers,
-> and **no fallthrough file takes a probe** — so `store_node`, whose admission gate reads only "is
-> the cold compute partial?", started seeing `Complete` and **admitting the poison**, with a comment
-> still describing a rail that no longer existed. Both implementations' `store_node` were
-> byte-identical here: a **shared blind spot, not a differentiator.** Whatever the checkpoint did
-> about this, re-derive it — and mutation-verify it.
+> **⚠ This is also the site of the REGRESSION THIS WORK INTRODUCED, and it SHIPS UNFIXED in the
+> landed commit — see §0, which is your first job.** The pre-existing weaknesses above (no content
+> hash in the key, vacuous empty-fact validation) are inherited debt. The *regression* is separate and
+> newer: this lineage deleted the ~31 call sites that folded non-cacheability into cold-compute
+> completeness, which **rendered `store_node`'s completeness gate toothless** — so a node computed
+> through a fenced serve or a lease miss, carrying non-empty live-rooted facts, is now admitted and
+> served warm. The base did not have this. Fix §0 before you touch anything else in this document.
 
 **(iii) A scalar lane deliberately publishes partial results, against its own no-poison contract.**
 In `crates/verter_session/src/resolver_core/component_meta_request.rs`, partial results are refused

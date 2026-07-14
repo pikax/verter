@@ -1,11 +1,20 @@
 # The single-resolution-engine cutover — where it stands, and what it still owes
 
-> **Read this before you believe anything is fixed.** What landed is a **checkpoint**, not a completed
-> fix. It closes a number of real, individually-proven cache-poisoning holes and repairs a regression
-> the work itself introduced. **The poison class it was fighting remains OPEN and REACHABLE in the
-> landed code**, and a reachable stack-overflow crash in the shared resolver has **not been started**.
-> Both are specified, implementer-ready, in the companion documents. Read this as "the bugs were
-> understood, half-fenced, and written down" — not as "the bugs were fixed".
+> **⚠ The landed code contains a cache-poison REGRESSION this work introduced, and it must be fixed
+> before this branch is merged onward.** The fallthrough resolver's admission funnel lost its
+> non-cacheability rail — not by being edited (the file is byte-identical to its base) but because this
+> lineage deleted the ~31 call sites that fed the completeness signal its gate depends on. The rail's
+> absence is **proven**; an end-to-end poisoning trace was **never constructed** — so it is a
+> proven-missing safety rail, not a demonstrated exploit, and the way to settle it is a **discriminating
+> test, not another opinion**. Full mechanism:
+> [`cache-admission-closure-design.md`](cache-admission-closure-design.md) §0. **That is job one.**
+>
+> **Read the rest before you believe anything else is fixed.** What landed is a **checkpoint**, not a
+> completed fix. It closes a number of real, individually-proven cache-poisoning holes, but **the poison
+> class remains OPEN and REACHABLE in the landed code**, and a reachable stack-overflow crash in the
+> shared resolver has **not been started**. Both are specified, implementer-ready, in the companion
+> documents. Read this as "the bugs were understood, half-fenced, and written down" — not as "the bugs
+> were fixed".
 
 ## Status of the landed code — the five facts
 
@@ -17,7 +26,7 @@ middle one — this document was written as the work was landing, and the tree i
 |---|---|---|
 | **The shared-cache poison class** | **OPEN and reachable.** Individual sites are closed; the class is not. The known hole set is **not exhaustive**. | Read [`cache-admission-closure-design.md`](cache-admission-closure-design.md). If `install_fact_tracer` still returns a bare `bool` beside the facts, §5 is not done. |
 | **The stack-overflow crash** | **NOT FIXED. Not started.** A ~200-deep authored type aborts the process. | `grep -n "fn project_view_node" crates/verter_session/src/project_semantic_dispatch/locator_view.rs` — if it still calls itself, the crash is live. |
-| **The fallthrough regression** (introduced by this work: the cache's non-cacheability gate lost its rail and began admitting poison) | Fix was **in flight** at the time of writing. **Verify.** | Does any fallthrough path take a cacheability probe? `grep -rn "store_node" crates/verter_session/src/resolver_core/fallthrough_resolver.rs` and read its admission gate: if it gates only on "is the cold compute partial?", the hole is **open**. |
+| **The fallthrough poison REGRESSION** — introduced by this work; the base did not have it | **UNFIXED. IT SHIPS.** The admission funnel has **no non-cacheability rail at all**. **Fix this first.** | `grep -cE "non_cacheable\|CacheabilityProbe\|with_cacheability_scope" crates/verter_session/src/resolver_core/fallthrough_resolver.rs` ⇒ **0**. See the closure design §0. |
 | **The dropped policy seam** (`PolicyContext` never constructed ⇒ workspace-ownership classification lost) | Investigation was **in flight**. **Verify** — if unfixed this is a **live regression** violating a CRITICAL rule. | `grep -rn "PolicyContext {" --include="*.rs" crates/verter_session/src/` — **empty means open.** Restore recipe is below. |
 | **Clippy** | Expect **red** (~83 dead-code errors in `verter_session`), **all pre-existing** to this work and mostly the very residue the effort exists to delete. ~13 are design-bearing. | `cargo clippy --workspace -- -D warnings`. Read the landing-hygiene section **before** deleting anything. |
 
@@ -82,16 +91,22 @@ rebuilt from the prose without ever seeing the diff. **Rebuild it; do not hunt f
   brief had named** and that had no tracer at all; a temporal hole where the probe was sampled at
   funnel entry while the compute ran later; and a singleflight follower that could adopt an unadmitted
   result.
-- **The regression this work introduced itself.** One function used to do two things at once — mark a
-  request cache-suppressed **and** fold its result to partial. Decoupling those is architecturally
-  **correct** (a fenced serve should not make a result *partial*), and both independent attempts
-  deleted all of its call sites. But the replacement marked only the thread-local tracers, and **no
-  fallthrough file takes a probe**, so the fallthrough cache's admission gate — which reads only "is
-  the cold compute partial?" — started seeing `Complete` and **admitting the poison**, with a comment
-  still describing a rail that no longer existed. Both independent implementations were byte-identical
-  here: a shared blind spot, not a differentiator.
-
 **Open — in the landed code, reachable, and specified in the companion documents:**
+
+- **⚠ THE REGRESSION THIS WORK INTRODUCED — and it SHIPS UNFIXED.** One function used to do two things
+  at once: mark a request cache-suppressed **and** fold its result to partial. Decoupling those is
+  architecturally **correct** (a fenced serve should not make a result *partial*), and this lineage
+  deleted all ~31 of its call sites. But `store_node` in
+  `crates/verter_session/src/resolver_core/fallthrough_resolver.rs` gated admission on exactly that
+  completeness signal — so deleting the fold **rendered its gate toothless**, while its comment still
+  claims a "single no-poison rail". The file was never edited (it is byte-identical to its base); the
+  rail was removed from underneath it. A fallthrough node computed through a fenced serve or a lease
+  miss, carrying non-empty **live-rooted** facts, is admitted and served warm indefinitely — and
+  live-rooted facts are exactly the ones the read-side rail can never reject. **The base did not have
+  this.** The missing rail is proven by inspection; an end-to-end poisoning trace was never
+  constructed, so treat it as a **proven-missing safety rail, not a demonstrated exploit** — and settle
+  it with a **discriminating test**, never another static safety argument. →
+  **[`cache-admission-closure-design.md`](cache-admission-closure-design.md) §0. This is job one.**
 
 - **The poison class is not closed.** The probe proves a tracer was *active at admission*; it does
   **not** prove the *compute ran inside it*. A caller can compute first and then open an empty scope to
