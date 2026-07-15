@@ -314,11 +314,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 type_arguments,
             } if type_arguments.is_empty()
                 && scope_payload
-                    .map(|payload| payload.scope_type_bindings.contains_key(name.as_ref()))
+                    .map(|payload| payload.scope_type_bindings().contains_key(name.as_ref()))
                     .unwrap_or(false) =>
             {
                 let binding = scope_payload
-                    .and_then(|payload| payload.scope_type_bindings.get(name.as_ref()))
+                    .and_then(|payload| payload.scope_type_bindings().get(name.as_ref()))
                     .expect("matched on scope_type_bindings.contains_key above");
                 let constraint = binding.constraint.as_ref().map(|c| {
                     self.shallow_lower_type_expr_with_context(

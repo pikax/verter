@@ -533,7 +533,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let is_import_backed = has_import_local
                         || has_namespace_prefix
                         || scope_payload.as_ref().is_some_and(|p| {
-                            p.import_bindings.contains_key(value_root.name.as_ref())
+                            p.import_bindings().contains_key(value_root.name.as_ref())
                         });
                     let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
                         (QueryResult::Error(QueryError::Miss), empty_signature()).into();

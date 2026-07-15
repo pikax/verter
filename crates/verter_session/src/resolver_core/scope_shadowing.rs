@@ -95,9 +95,9 @@ impl ScopeShadowing {
             return Self::empty();
         };
         Self::from_payload_parts(
-            payload.scope_type_names.iter(),
-            payload.scope_type_bindings.keys(),
-            payload.import_bindings.keys(),
+            payload.scope_type_names().iter(),
+            payload.scope_type_bindings().keys(),
+            payload.import_bindings().keys(),
         )
     }
 
@@ -122,12 +122,14 @@ impl ScopeShadowing {
 
     /// Build a shadow set directly from a [`PreparedDeclBundle`].
     /// Helper used by [`Self::from_host_scope`] and by tests that
-    /// already hold a bundle. Mirrors
-    /// [`DeclarationScopePayload::from_bundle`] — the union of
-    /// `scope_type_names` + `script_setup_type_bindings` keys becomes
-    /// the shadow set. Keeping the two construction shapes aligned is
-    /// the load-bearing invariant: the dispatch path and the
-    /// materialise path MUST observe the same shadow set per scope.
+    /// already hold a bundle. Reads the SAME three bundle surfaces
+    /// [`Self::from_scope_payload`] reads through the payload view
+    /// (`scope_type_names` + `script_setup_type_bindings` keys +
+    /// `import_bindings` keys), merged by the shared
+    /// `from_payload_parts`. Keeping the two construction shapes
+    /// aligned is the load-bearing invariant: the dispatch path and
+    /// the materialise path MUST observe the same shadow set per
+    /// scope.
     pub(crate) fn from_prepared_decl_bundle(bundle: &PreparedDeclBundle) -> Self {
         Self::from_payload_parts(
             bundle.scope_type_names.iter(),
@@ -220,7 +222,9 @@ mod tests {
         type_bindings: &[&str],
         import_names: &[&str],
     ) -> DeclarationScopePayload {
-        use crate::resolver_core::prepared_decl::ImportBinding;
+        use crate::resolver_core::prepared_decl::{
+            build_prepared_decl_bundle, ImportBinding, ImportCanonicalization,
+        };
         let scope_type_names: rustc_hash::FxHashSet<String> =
             names.iter().map(|s| s.to_string()).collect();
         let mut bindings: FxHashMap<String, TypeParamBinding> = FxHashMap::default();
@@ -237,12 +241,22 @@ mod tests {
                 },
             );
         }
-        DeclarationScopePayload {
-            scope_type_names,
-            scope_value_names: rustc_hash::FxHashSet::default(),
-            scope_type_bindings: bindings,
-            import_bindings,
-        }
+        // The payload is a shared view over a prepared-decl bundle:
+        // build a minimal bundle and stamp the fixture's surfaces onto
+        // its (pub) scope fields.
+        let state = crate::resolver_core::ShallowFileState::service_backed_for_test("");
+        let interner = Arc::new(crate::identity_interner::IdentityInterner::with_default_budget());
+        let mut bundle = build_prepared_decl_bundle(
+            "/shadow-fixture.ts",
+            state,
+            FxHashMap::default(),
+            bindings,
+            ImportCanonicalization::default(),
+            &interner,
+        );
+        bundle.scope_type_names = scope_type_names;
+        bundle.import_bindings = import_bindings;
+        DeclarationScopePayload::from_bundle(&Arc::new(bundle))
     }
 
     #[test]
@@ -330,12 +344,7 @@ mod tests {
         let mut bindings: FxHashMap<String, TypeParamBinding> = FxHashMap::default();
         bindings.insert("T".to_string(), make_binding("T", 0));
 
-        let payload = DeclarationScopePayload {
-            scope_type_names: names.clone(),
-            scope_value_names: rustc_hash::FxHashSet::default(),
-            scope_type_bindings: bindings.clone(),
-            import_bindings: FxHashMap::default(),
-        };
+        let payload = payload_with(&["Pick", "Cfg"], &["T"]);
         let shadow_from_payload = ScopeShadowing::from_scope_payload(Some(&payload));
 
         // Cross-check: every payload-shadowed name is also recognised

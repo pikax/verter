@@ -15,7 +15,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if type_args.is_empty() {
             if let Some(binding) = inputs
                 .scope_payload
-                .and_then(|payload| payload.scope_type_bindings.get(name.as_ref()))
+                .and_then(|payload| payload.scope_type_bindings().get(name.as_ref()))
             {
                 let mut nested: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
                 let constraint = binding.constraint.as_ref().map(|constraint| {

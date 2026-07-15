@@ -706,12 +706,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         use verter_semantic::analysis::type_solver::host::BareRefOrigin;
         let payload = self.scope_payload_for_scope(scope_canonical_id);
         if let Some(payload) = payload.as_deref() {
-            if payload.import_bindings.contains_key(name) {
+            if payload.import_bindings().contains_key(name) {
                 return BareRefOrigin::Imported;
             }
-            if payload.scope_type_bindings.contains_key(name)
-                || payload.scope_type_names.contains(name)
-                || payload.scope_value_names.contains(name)
+            if payload.scope_type_bindings().contains_key(name)
+                || payload.scope_type_names().contains(name)
+                || payload.scope_value_names().contains(name)
             {
                 return BareRefOrigin::Local;
             }

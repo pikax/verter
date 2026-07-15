@@ -894,7 +894,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // a bogus `DeclRef` identity in the shape.
         if ctx
             .scope_payload
-            .is_some_and(|payload| payload.scope_type_bindings.contains_key(name.as_ref()))
+            .is_some_and(|payload| payload.scope_type_bindings().contains_key(name.as_ref()))
         {
             return self.intern_ref_head_carrier(
                 crate::project_semantic_dispatch::carrier::RefHeadResolution::Unresolved,
@@ -1282,9 +1282,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // import shadowing. Absence (no prepared declaration for the
         // anchor) degrades to the payload-aware in-scope resolver.
         let bundle = self.ctx.prepared_decl_bundle(canonical.as_ref());
-        let scope_payload = bundle
-            .as_ref()
-            .map(|b| DeclarationScopePayload::from_bundle(b));
+        let scope_payload = bundle.as_ref().map(DeclarationScopePayload::from_bundle);
         let dep_edges = bundle.as_ref().map(|b| Arc::clone(&b.dep_edges));
         let prepared_anchor: Option<AnchorPreparedDecl> = match key.locator() {
             AuthoredBodyLocator::DeclBody(slot) => match slot.anchor.space {

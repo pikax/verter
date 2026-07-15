@@ -3154,8 +3154,8 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
         // Scope-local shadowing takes priority: a userland `type Partial`
         // in scope wins over the built-in utility.
         if let Some(payload) = payload.as_ref() {
-            if payload.scope_type_names.contains(name)
-                || payload.scope_type_bindings.contains_key(name)
+            if payload.scope_type_names().contains(name)
+                || payload.scope_type_bindings().contains_key(name)
             {
                 return UtilitySource::Shadowed;
             }
@@ -3180,12 +3180,12 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
     fn bare_ref_origin(&self, base: SemanticNodeId, name: &str) -> BareRefOrigin {
         let (_scope_canonical, payload) = self.scope_payload_for_base(base);
         if let Some(payload) = payload.as_ref() {
-            if payload.import_bindings.contains_key(name) {
+            if payload.import_bindings().contains_key(name) {
                 return BareRefOrigin::Imported;
             }
-            if payload.scope_type_bindings.contains_key(name)
-                || payload.scope_type_names.contains(name)
-                || payload.scope_value_names.contains(name)
+            if payload.scope_type_bindings().contains_key(name)
+                || payload.scope_type_names().contains(name)
+                || payload.scope_value_names().contains(name)
             {
                 return BareRefOrigin::Local;
             }

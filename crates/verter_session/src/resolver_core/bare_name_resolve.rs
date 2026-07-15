@@ -35,40 +35,72 @@ use crate::resolver_core::ResolverContext;
 
 /// Declaration-scope context used by bare-name root-identity resolution.
 ///
-/// Derived from a [`PreparedDeclBundle`](super::prepared_decl::PreparedDeclBundle)
-/// — carries the scope-local type/value names + script-setup type
-/// parameter bindings + import bindings in a compact form the
-/// resolver can consult without re-walking the bundle.
+/// A shared VIEW over a
+/// [`PreparedDeclBundle`](super::prepared_decl::PreparedDeclBundle) —
+/// exposes the scope-local type/value names + script-setup type
+/// parameter bindings + import bindings the resolver consults, reading
+/// straight through the bundle `Arc` (construction is one refcount
+/// bump; the bundle's maps are never copied).
 ///
-/// `scope_type_bindings` is keyed to [`TypeParamBinding`], NOT to
-/// `Arc<PreparedTypeDecl>`; script-setup generic parameters carry
+/// [`Self::scope_type_bindings`] is keyed to [`TypeParamBinding`], NOT
+/// to `Arc<PreparedTypeDecl>`; script-setup generic parameters carry
 /// their declaration-site `extends` / default expressions directly
 /// without an intermediate prepared-decl wrapper.
-#[derive(Debug)]
+///
+/// In-scope predicate contract: [`Self::scope_type_names`] is the
+/// bundle's RAW same-file set — script-setup generic params are NOT
+/// unioned in. Every in-scope check consults
+/// [`Self::scope_type_bindings`] alongside it (the resolver rail below,
+/// the dispatch gates, and [`ScopeShadowing`](crate::resolver_core::scope_shadowing::ScopeShadowing)
+/// all check both sources), so the materialized union the payload used
+/// to carry is redundant.
 pub(crate) struct DeclarationScopePayload {
-    pub(crate) scope_type_names: FxHashSet<String>,
-    pub(crate) scope_value_names: FxHashSet<String>,
-    pub(crate) scope_type_bindings: FxHashMap<String, TypeParamBinding>,
-    pub(crate) import_bindings: FxHashMap<String, ImportBinding>,
+    bundle: Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+}
+
+impl std::fmt::Debug for DeclarationScopePayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The bundle itself is not `Debug`; print the payload's
+        // consulted surfaces (same shape the pre-view struct printed).
+        f.debug_struct("DeclarationScopePayload")
+            .field("scope_type_names", self.scope_type_names())
+            .field("scope_value_names", self.scope_value_names())
+            .field("scope_type_bindings", self.scope_type_bindings())
+            .field("import_bindings", self.import_bindings())
+            .finish()
+    }
 }
 
 impl DeclarationScopePayload {
     pub(crate) fn from_bundle(
-        bundle: &crate::resolver_core::prepared_decl::PreparedDeclBundle,
+        bundle: &Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
     ) -> Self {
-        // Include script-setup generic param names in type_names so the
-        // resolver recognises them as in-scope.
-        let mut scope_type_names = bundle.scope_type_names.clone();
-        for param_name in bundle.script_setup_type_bindings.keys() {
-            scope_type_names.insert(param_name.clone());
-        }
-
         Self {
-            scope_type_names,
-            scope_value_names: bundle.scope_value_names.clone(),
-            scope_type_bindings: bundle.script_setup_type_bindings.clone(),
-            import_bindings: bundle.import_bindings.clone(),
+            bundle: Arc::clone(bundle),
         }
+    }
+
+    /// Same-file type names visible in the declaration scope (RAW
+    /// bundle set — check [`Self::scope_type_bindings`] too; see the
+    /// type-level in-scope predicate contract).
+    pub(crate) fn scope_type_names(&self) -> &FxHashSet<String> {
+        &self.bundle.scope_type_names
+    }
+
+    /// Same-file value names visible in the declaration scope.
+    pub(crate) fn scope_value_names(&self) -> &FxHashSet<String> {
+        &self.bundle.scope_value_names
+    }
+
+    /// Script-setup generic type parameter bindings (Vue SFC only;
+    /// empty for non-Vue files).
+    pub(crate) fn scope_type_bindings(&self) -> &FxHashMap<String, TypeParamBinding> {
+        &self.bundle.script_setup_type_bindings
+    }
+
+    /// Resolved import bindings: local name → (canonical_id, exported_name).
+    pub(crate) fn import_bindings(&self) -> &FxHashMap<String, ImportBinding> {
+        &self.bundle.import_bindings
     }
 }
 
@@ -101,9 +133,9 @@ pub(crate) fn resolve_bare_name_in_scope(
     // 1. Declaration-scope payload lookup (scope-local type/value,
     //    script-setup type bindings).
     if let Some(payload) = scope_payload {
-        if payload.scope_type_bindings.contains_key(name)
-            || payload.scope_type_names.contains(name)
-            || payload.scope_value_names.contains(name)
+        if payload.scope_type_bindings().contains_key(name)
+            || payload.scope_type_names().contains(name)
+            || payload.scope_value_names().contains(name)
         {
             return Some(mint_in_scope());
         }
@@ -240,7 +272,7 @@ fn resolve_import_binding_from_facts(
     //    prepared-decl builder may have discovered through script-setup
     //    manifest paths not visible to the raw shallow state).
     if let Some(payload) = scope_payload {
-        if let Some(binding) = payload.import_bindings.get(local_name) {
+        if let Some(binding) = payload.import_bindings().get(local_name) {
             return Some(resolve_imported_type_root_identity(
                 ctx,
                 &binding.canonical_id,
@@ -348,7 +380,7 @@ fn resolve_imported_type_root_identity(
 /// **Script-setup type-parameter bindings are NOT reachable through
 /// this function.** Script-setup parameters are not type-aliases and
 /// therefore not `PreparedTypeDecl`s; the lowering hot path reads
-/// `scope_payload.scope_type_bindings.get(name)` directly to obtain a
+/// `scope_payload.scope_type_bindings().get(name)` directly to obtain a
 /// [`TypeParamBinding`](crate::resolver_core::prepared_decl::TypeParamBinding)
 /// and emits a `SemanticNodeData::TypeParam` without going through
 /// this function.
@@ -465,3 +497,75 @@ pub(crate) fn resolve_namespace_sibling_in_scope(
 #[cfg(test)]
 #[path = "bare_name_resolve_namespace_tests.rs"]
 mod bare_name_resolve_namespace_tests;
+
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+    use crate::resolver_core::prepared_decl::{
+        build_prepared_decl_bundle, ImportCanonicalization, TypeParamBinding,
+    };
+    use crate::resolver_core::ShallowFileState;
+
+    /// `DeclarationScopePayload` is a VIEW over the prepared-decl
+    /// bundle: construction shares the bundle's maps through the
+    /// bundle `Arc` (one refcount bump), never deep-copies them, and
+    /// script-setup generic params stay in `scope_type_bindings`
+    /// (the in-scope disjunction checks bindings + names, so the raw
+    /// `scope_type_names` set no longer materializes the union).
+    #[test]
+    fn payload_shares_bundle_maps_instead_of_copying() {
+        let source = r#"
+export interface Props { label: string }
+export const defaults = { label: 'ok' }
+"#;
+        let state = ShallowFileState::service_backed_for_test(source);
+        let interner = Arc::new(crate::identity_interner::IdentityInterner::with_default_budget());
+        let mut script_setup: FxHashMap<String, TypeParamBinding> = FxHashMap::default();
+        script_setup.insert(
+            "T".to_string(),
+            TypeParamBinding {
+                name: Arc::from("T"),
+                ordinal: 0,
+                constraint: None,
+                default: None,
+            },
+        );
+        let bundle = Arc::new(build_prepared_decl_bundle(
+            "/src/Comp.vue.ts",
+            Arc::clone(&state),
+            FxHashMap::default(),
+            script_setup,
+            ImportCanonicalization::default(),
+            &interner,
+        ));
+
+        let payload = DeclarationScopePayload::from_bundle(&bundle);
+
+        assert!(
+            std::ptr::eq(payload.scope_type_names(), &bundle.scope_type_names),
+            "scope_type_names must be the bundle's own set, not a copy"
+        );
+        assert!(
+            std::ptr::eq(payload.scope_value_names(), &bundle.scope_value_names),
+            "scope_value_names must be the bundle's own set, not a copy"
+        );
+        assert!(
+            std::ptr::eq(
+                payload.scope_type_bindings(),
+                &bundle.script_setup_type_bindings
+            ),
+            "scope_type_bindings must be the bundle's own map, not a copy"
+        );
+        assert!(
+            std::ptr::eq(payload.import_bindings(), &bundle.import_bindings),
+            "import_bindings must be the bundle's own map, not a copy"
+        );
+
+        // Union-removal contract: the script-setup param is visible
+        // through the bindings map, NOT through the raw name set.
+        assert!(payload.scope_type_bindings().contains_key("T"));
+        assert!(!payload.scope_type_names().contains("T"));
+        assert!(payload.scope_type_names().contains("Props"));
+        assert!(payload.scope_value_names().contains("defaults"));
+    }
+}
