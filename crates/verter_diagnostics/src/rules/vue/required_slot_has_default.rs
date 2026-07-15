@@ -1,4 +1,4 @@
-//! Rule: required-slot-has-default
+﻿//! Rule: required-slot-has-default
 //!
 //! Warns when `defineSlots` marks a slot as required (no `?`) but the
 //! corresponding `<slot>` element has fallback content. A required slot should
@@ -32,7 +32,7 @@ use std::collections::HashSet;
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{FileContext, LintRule, RuleCategory};
-use verter_analysis::types::AnalyzedMacroKind;
+use verter_semantic::analysis::types::AnalyzedMacroKind;
 
 pub struct RequiredSlotHasDefault;
 
@@ -104,9 +104,9 @@ impl LintRule for RequiredSlotHasDefault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_analysis::template::{DefinedSlot, TemplateAnalysisSnapshot};
-    use verter_analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
-    use verter_analysis::types::{AnalyzedMacro, AnalyzedMacroKind, AnalyzedSlotField};
+    use verter_semantic::analysis::template::{DefinedSlot, TemplateAnalysisSnapshot};
+    use verter_semantic::analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
+    use verter_semantic::analysis::types::{AnalyzedMacro, AnalyzedMacroKind, AnalyzedSlotField};
     use verter_span::Span;
 
     fn run(file: &FileContext<'_>) -> Vec<crate::diagnostic::LintDiagnostic> {
@@ -140,6 +140,8 @@ mod tests {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(0, 50),
         }
     }
@@ -159,6 +161,8 @@ mod tests {
                 return_type: None,
                 description: None,
                 tags: vec![],
+                payload: None,
+                return_expr_scope: None,
             }])],
             flags: AnalysisFlags::HAS_DEFINE_SLOTS,
             ..Default::default()
@@ -196,6 +200,8 @@ mod tests {
                 return_type: None,
                 description: None,
                 tags: vec![],
+                payload: None,
+                return_expr_scope: None,
             }])],
             flags: AnalysisFlags::HAS_DEFINE_SLOTS,
             ..Default::default()
@@ -229,6 +235,8 @@ mod tests {
                 return_type: None,
                 description: None,
                 tags: vec![],
+                payload: None,
+                return_expr_scope: None,
             }])],
             flags: AnalysisFlags::HAS_DEFINE_SLOTS,
             ..Default::default()
@@ -288,6 +296,8 @@ mod tests {
                     return_type: None,
                     description: None,
                     tags: vec![],
+                    payload: None,
+                    return_expr_scope: None,
                 },
                 AnalyzedSlotField {
                     name: "footer".to_string(),
@@ -297,6 +307,8 @@ mod tests {
                     return_type: None,
                     description: None,
                     tags: vec![],
+                    payload: None,
+                    return_expr_scope: None,
                 },
                 AnalyzedSlotField {
                     name: "sidebar".to_string(),
@@ -306,6 +318,8 @@ mod tests {
                     return_type: None,
                     description: None,
                     tags: vec![],
+                    payload: None,
+                    return_expr_scope: None,
                 },
             ])],
             flags: AnalysisFlags::HAS_DEFINE_SLOTS,

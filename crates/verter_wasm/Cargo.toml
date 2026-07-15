@@ -15,17 +15,31 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 
 [dependencies]
-verter_host = { path = "../verter_host", version = "0.0.1-beta.1", default-features = false }
+verter_audit = { path = "../verter_audit" }
+verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
+verter_session = { path = "../verter_session", version = "0.0.1-beta.1" }
 verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
-verter_analysis = { path = "../verter_analysis", version = "0.0.1-beta.1" }
+verter_semantic = { path = "../verter_semantic" }
+verter_type_expr = { workspace = true }
 verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
+verter_protocol = { path = "../verter_protocol", version = "0.0.1-beta.1" }
 verter_span = { path = "../verter_span" }
-wasm-bindgen = "0.2"
-serde = { workspace = true }
-serde-wasm-bindgen = "0.6"
-console_error_panic_hook = { version = "0.1", optional = true }
-getrandom = { version = "0.3", features = ["wasm_js"] }
+prost = "0.14.3"
+wasm-bindgen = "0.2.122"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde-wasm-bindgen = "0.6.5"
+console_error_panic_hook = { version = "0.1.7", optional = true }
+# Two getrandom versions reach the wasm graph: 0.4 directly, and 0.3
+# transitively via lightningcss -> ahash. The wasm32-unknown-unknown
+# backend selection in `.cargo/config.toml` (`getrandom_backend="wasm_js"`)
+# requires the `wasm_js` cargo feature to also be enabled. We declare
+# both versions here so feature unification activates `wasm_js` on the
+# transitive 0.3 chain too (different majors are distinct crates so we
+# rename the second via `package =`).
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_legacy = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3"
+wasm-bindgen-test = "0.3.72"

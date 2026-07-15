@@ -1,0 +1,1072 @@
+#![deny(missing_docs)]
+//! `VerterHost::resolve_named_symbol_with_audit` —
+//! audited resolution of a named declaration in a file scope, with
+//! optional generic instantiation and a configurable
+//! [`ProjectionMode`].
+//!
+//! Mirrors the lifecycle of
+//! [`crate::host_resolve_type_audit::resolve_type_with_audit`]:
+//! registration → TLS observer install → dispatch.execute →
+//! payload snapshot → finalise.
+//!
+//! Public API surface (the resolve-named-symbol contract):
+//!
+//! ```ignore
+//! // Bare-named-symbol resolvers — NO type-argument parameter. A public
+//! // entry that accepted caller-pre-lowered `SemanticNodeId`s would be a
+//! // cross-view foot-gun (generation-local ids are not view-portable), so
+//! // ALL generic instantiation routes through the wire entry below, which
+//! // lowers its args under the request's one store view.
+//! pub fn resolve_named_symbol_with_audit(
+//!     host: &VerterHost,
+//!     canonical_id: &str,
+//!     name: &str,
+//!     mode: ProjectionMode,
+//! ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError>;
+//!
+//! pub fn resolve_named_symbol_wire_with_audit(
+//!     host: &VerterHost,
+//!     canonical_id: &str,
+//!     name: &str,
+//!     wire_type_args: &[Arc<TypeExpr>], // symbolic; lowered inside the request
+//!     mode: ProjectionMode,
+//! ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError>;
+//!
+//! pub fn resolve_named_symbol(...)  -> Option<SemanticNodeId>;
+//! ```
+//!
+//! Default-mode policy:
+//! - Generic carrier (declaration-site type parameters) → `Navigate`.
+//! - Non-generic decl → `Expanded`.
+//! - Identity returns the alias node verbatim (no unwrap).
+//!
+//! Generic instantiation is WIRE-ONLY: a caller holding symbolic
+//! [`verter_type_expr::TypeExpr`] payloads (the NAPI / WASM adapters'
+//! FFI-JSON decode) enters through
+//! [`VerterHost::resolve_named_symbol_wire_with_audit`], which lowers the
+//! payloads INSIDE the audited request — under the SAME proven-current
+//! store view / dispatch the resolution runs against, via the sanctioned
+//! [`crate::project_semantic_dispatch::ProjectSemanticDispatch::lower_type_expr_in_scope_with_mode`]
+//! bridge in `Navigate` mode — and then resolves. No PUBLIC entry accepts
+//! raw symbolic IR OR caller-pre-lowered node ids, so generation-local node
+//! ids never cross store views (lowering under one view and resolving under
+//! another would key an `InstantiateKey` with foreign-generation ids). The
+//! internal [`crate::typeinfo::types::TypeArgList`] (`&[SemanticNodeId]`)
+//! survives only as the same-view carrier the request body threads AFTER
+//! lowering — never a public parameter.
+
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use verter_audit::{
+    AuditedResult, ProjectionModeTag, RequestAuditRecord, RequestKind, RequestKindPayload,
+    RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit, TypeResolutionPayload, WaitAudit,
+};
+use verter_type_expr::TypeExpr;
+
+use crate::host_audit_runtime::AuditRequestRegistration;
+use crate::host_resolve_type_audit::TypeResolutionRequestError;
+use crate::instant::Instant;
+use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+use crate::request_context::{RequestContext, RequestContextGuard};
+use crate::semantic_query::{
+    NodeScopeId, ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+};
+use crate::VerterHost;
+
+/// Sentinel that flags the caller wants the host's default mode.
+/// Distinct from the `ProjectionMode` enum so callers can opt out
+/// explicitly without our defaulting their `Navigate` argument.
+///
+/// Implementation: callers pass `Some(mode)` to fix the mode, `None`
+/// to take the host's default.
+pub type ResolveMode = Option<ProjectionMode>;
+
+impl VerterHost {
+    /// Resolve `name` in `canonical_id`'s top-level scope, optionally
+    /// instantiating with `type_args`, returning the resolved node and
+    /// the request's audit record.
+    ///
+    /// `mode = None` selects the host's default (Navigate for
+    /// generic carriers, Expanded otherwise). `Some(mode)` overrides
+    /// the default.
+    ///
+    /// Returns an [`crate::AuditedResult`] carrier. The error type is
+    /// the shared [`TypeResolutionRequestError`] — the SAME
+    /// dispatch-fault taxonomy [`Self::resolve_type_with_audit`] uses —
+    /// because this path resolves through the one shared typed-IR
+    /// engine, not the wire request validator. Outcome mapping:
+    /// - `Ok(Some(node))` — dispatch produced a value.
+    /// - `Ok(None)` — a non-fault miss: a dispatch miss classified by
+    ///   `TypeResolutionRequestError::from_query_error`
+    ///   (`Miss` / `RecursiveRef` / `DeclPlaceholder` or a typed
+    ///   semantic sentinel) or a lowering miss — the request was
+    ///   well-formed but resolved no node.
+    /// - `Err(fault)` — a genuine dispatch fault (`BudgetExceeded` /
+    ///   `UnstableState` / `AliasCycle` / `UnsupportedIntrinsic` /
+    ///   `Other` / `ValueDomainMismatch`). `ValueDomainMismatch` rides
+    ///   the text-bearing `Other` carrier.
+    ///
+    /// The carrier's `audit` field is always populated:
+    /// [`verter_audit::AuditCaptureState::ActiveStored`] on the
+    /// full-capture path, or the cheap default-filled record marked
+    /// [`verter_audit::AuditCaptureState::FilteredNoop`] /
+    /// [`verter_audit::AuditCaptureState::AuditDisabled`].
+    #[must_use]
+    pub fn resolve_named_symbol_with_audit(
+        &self,
+        canonical_id: &str,
+        name: &str,
+        mode: ResolveMode,
+    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+        // Bare-named-symbol resolution: no type arguments. Generic
+        // instantiation is wire-only (see the module doc / the
+        // `resolve_named_symbol_wire_with_audit` foot-gun note), so this
+        // public entry never accepts caller-pre-lowered node ids.
+        self.resolve_named_symbol_audited(
+            canonical_id,
+            name,
+            NamedSymbolTypeArgs::Lowered(&[]),
+            mode,
+        )
+    }
+
+    /// Wire-boundary sibling of [`Self::resolve_named_symbol_with_audit`]:
+    /// resolve `name` in `canonical_id`'s top-level scope, instantiating
+    /// with WIRE-DECODED symbolic type arguments (the NAPI / WASM
+    /// `resolveSymbolWithAudit` FFI-JSON decode).
+    ///
+    /// The wire args lower to semantic-graph node ids INSIDE the audited
+    /// request, through the SAME `ProjectSemanticDispatch` (and therefore
+    /// the SAME proven-current store view) the resolution itself runs
+    /// against — node ids are generation-local, so lowering under one view
+    /// and resolving under another would key an `InstantiateKey` with
+    /// foreign-generation ids. Lowering runs the sanctioned
+    /// [`ProjectSemanticDispatch::lower_type_expr_in_scope_with_mode`]
+    /// bridge in `Navigate` mode regardless of the terminal projection mode
+    /// — the args are a context inherited by the instantiation, not the
+    /// body being projected.
+    ///
+    /// A lowering MISS (any single arg failing to lower) is a NON-FAULT
+    /// miss INSIDE the registered request: the carrier returns `Ok(None)`
+    /// WITH its audit record — never a partial instantiation, and never an
+    /// audit-less early return (an absent audit record is reserved for
+    /// failures before a semantic request exists, e.g. a malformed wire
+    /// decode).
+    #[must_use]
+    pub fn resolve_named_symbol_wire_with_audit(
+        &self,
+        canonical_id: &str,
+        name: &str,
+        wire_type_args: &[Arc<TypeExpr>],
+        mode: ResolveMode,
+    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+        self.resolve_named_symbol_audited(
+            canonical_id,
+            name,
+            NamedSymbolTypeArgs::Wire(wire_type_args),
+            mode,
+        )
+    }
+
+    /// The ONE audited request wrapper both the node-id and the wire entry
+    /// points share: registration → TLS observer install → request body →
+    /// payload snapshot → finalise. The request body
+    /// ([`resolve_named_symbol_request`]) acquires exactly ONE store view
+    /// and runs wire-arg lowering (when present) plus the resolution under
+    /// it.
+    fn resolve_named_symbol_audited(
+        &self,
+        canonical_id: &str,
+        name: &str,
+        type_args: NamedSymbolTypeArgs<'_>,
+        mode: ResolveMode,
+    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+        // Registration / context setup mirrors
+        // `resolve_type_with_audit`. We construct the registration
+        // BEFORE installing the TLS guard so the `Noop` arm can
+        // short-circuit when the consumer filter rejects the kind.
+        let request_id = self.next_request_id();
+        crate::request_context::increment_requests_created();
+
+        let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
+        let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
+        // Thread the host's projection-op budget so this dispatch path
+        // honours the same fuse as every other resolution entry-point;
+        // a tripped budget surfaces as a `BudgetExceeded` dispatch
+        // fault on the carrier's `Err` arm rather than running to the
+        // default 2000-op cap.
+        let ctx = RequestContext::with_kind_timing_and_projection_budget(
+            request_id,
+            Arc::<str>::from(canonical_id),
+            RequestKind::TypeResolution,
+            footprint_capture,
+            timing_capture,
+            None,
+            self.config.projection_op_budget,
+        );
+
+        let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
+        debug_assert!(ctx.audit_registration.get().is_none());
+        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+
+        let request_start = Instant::now();
+        let (outcome, effective_mode) = match registration.as_ref() {
+            AuditRequestRegistration::Active(_) => {
+                let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+                resolve_named_symbol_request(self, canonical_id, name, type_args, mode)
+            }
+            AuditRequestRegistration::Noop => {
+                let _noop_guard = verter_audit::install_noop_observer();
+                resolve_named_symbol_request(self, canonical_id, name, type_args, mode)
+            }
+        };
+        let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
+
+        if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
+            let state = if self.config.audit_enabled {
+                verter_audit::AuditCaptureState::FilteredNoop
+            } else {
+                verter_audit::AuditCaptureState::AuditDisabled
+            };
+            let record = noop_type_resolution_record(
+                request_id,
+                canonical_id,
+                ctx.parent_request_id,
+                ctx.trace_id.clone(),
+                state,
+            );
+            return audited_from_outcome(outcome, record);
+        }
+
+        // Build the audit record. Counters come straight off the
+        // RequestContext atomics, which the dispatch
+        // `execute()` instrumentation has been incrementing during
+        // the call.
+        let payload = TypeResolutionPayload {
+            query_mode: ProjectionModeTag::from(effective_mode),
+            hops: u32::try_from(ctx.type_resolution_hops.load(Ordering::Relaxed))
+                .unwrap_or(u32::MAX),
+            navigations: u32::try_from(ctx.type_resolution_navigations.load(Ordering::Relaxed))
+                .unwrap_or(u32::MAX),
+            expansions: u32::try_from(ctx.type_resolution_expansions.load(Ordering::Relaxed))
+                .unwrap_or(u32::MAX),
+            conditional_decisions: u32::try_from(
+                ctx.type_resolution_conditional_decisions
+                    .load(Ordering::Relaxed),
+            )
+            .unwrap_or(u32::MAX),
+            ref_root_cycle_hits: u32::try_from(
+                ctx.type_resolution_ref_root_cycle_hits
+                    .load(Ordering::Relaxed),
+            )
+            .unwrap_or(u32::MAX),
+            projection_ops_executed: u32::try_from(
+                ctx.type_resolution_projection_ops.load(Ordering::Relaxed),
+            )
+            .unwrap_or(u32::MAX),
+            depth_high_water: ctx.type_resolution_depth_high_water.load(Ordering::Relaxed),
+            recursion_limit_reached: ctx
+                .type_resolution_recursion_limit_reached
+                .load(Ordering::Relaxed),
+            walker_diagnostics: Vec::new(),
+            cache_suppress: false,
+            semantic_query_dispatch_mask: ctx.type_resolution_dispatched_query_tags_mask(),
+        };
+
+        let timings = RequestTimingAudit {
+            total_ms,
+            ..RequestTimingAudit::default()
+        };
+        let store = RequestStoreAudit {
+            cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
+            bypass_diagnostics: crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
+            ..RequestStoreAudit::default()
+        };
+        let memory = RequestMemoryAudit {
+            process_rss_peak_bytes: ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
+            ..RequestMemoryAudit::default()
+        };
+        let waits = if ctx.timing_capture {
+            Some(WaitAudit {
+                lock_wait_ns: ctx.lock_wait_ns.load(Ordering::Relaxed),
+                queue_wait_ns: ctx.queue_wait_ns.load(Ordering::Relaxed),
+                lock_acquisitions: ctx.lock_acquisitions.load(Ordering::Relaxed),
+            })
+        } else {
+            None
+        };
+
+        let record = RequestAuditRecord {
+            request_id,
+            canonical_id: canonical_id.to_string(),
+            kind: RequestKind::TypeResolution,
+            parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
+            from_cache: false,
+            timings,
+            memory,
+            store,
+            footprint: None,
+            scheduler: ctx.scheduler_audit.lock().clone(),
+            files: Vec::new(),
+            waits,
+            kind_payload: RequestKindPayload::TypeResolution(payload),
+            capture_state: verter_audit::AuditCaptureState::ActiveStored,
+            trace_id: ctx.trace_id.clone(),
+        };
+
+        let cloned = record.clone();
+        registration.finalize(record);
+        audited_from_outcome(outcome, cloned)
+    }
+
+    /// Non-audit variant. Identical resolution semantics; the audit
+    /// record is dropped at the boundary. A dispatch fault collapses to
+    /// `None` here (the non-audit surface has no error channel) — use
+    /// [`Self::resolve_named_symbol_with_audit`] to observe the typed
+    /// fault.
+    #[must_use]
+    pub fn resolve_named_symbol(
+        &self,
+        canonical_id: &str,
+        name: &str,
+        mode: ResolveMode,
+    ) -> Option<SemanticNodeId> {
+        // Bare-named-symbol resolution (no type arguments) — the non-audit
+        // sibling MUST drop its type-arg parameter too: it forwards to the
+        // now-bare audited entry, so it cannot carry caller-pre-lowered ids
+        // either. Generic instantiation is wire-only.
+        self.resolve_named_symbol_with_audit(canonical_id, name, mode)
+            .into_result()
+            .ok()
+            .flatten()
+    }
+}
+
+/// How a caller supplied the generic type arguments of a named-symbol
+/// resolution: ALREADY-LOWERED semantic node ids (the internal semantic API
+/// surface) or wire-decoded symbolic `TypeExpr` payloads (the FFI boundary),
+/// lowered INSIDE the audited request under the SAME store view the
+/// resolution runs against.
+#[derive(Clone, Copy)]
+enum NamedSymbolTypeArgs<'a> {
+    /// Already-lowered, SAME-VIEW node ids
+    /// ([`crate::typeinfo::types::TypeArgList`]). The bare public entries
+    /// supply only the EMPTY slice here (bare-named-symbol resolution — no
+    /// caller-pre-lowered ids); the variant stays a slice so the request
+    /// body can thread the wire-lowered ids under its own view after
+    /// lowering without a second shape.
+    Lowered(crate::typeinfo::types::TypeArgList<'a>),
+    /// Wire-decoded symbolic payloads, lowered under the request's one view.
+    Wire(&'a [Arc<TypeExpr>]),
+}
+
+/// Compute the resolver's EFFECTIVE projection mode up front — before the
+/// request even acquires a store view — so every early-miss return (a
+/// non-current view under churn, a wire-arg lowering miss) reports the mode
+/// the resolver would actually have used, not a hardcoded fallback. The
+/// generic-carrier probe reads only the host's shallow inventory (not the
+/// request view), so it is safe to compute before view acquisition; a
+/// `Some(mode)` request pins the mode verbatim.
+fn compute_effective_mode(
+    host: &VerterHost,
+    canonical_id: &str,
+    name: &str,
+    requested_mode: ResolveMode,
+) -> ProjectionMode {
+    match requested_mode {
+        Some(mode) => mode,
+        None => {
+            // A generic carrier defaults to Navigate (declaration stays
+            // unexpanded); a non-generic decl defaults to Expanded (callers
+            // receive the full projection). The shallow inventory is the
+            // authority.
+            let is_generic_carrier = host
+                .shallow_file_state(canonical_id)
+                .and_then(|state| {
+                    state
+                        .symbol(name)
+                        .map(|sym| !sym.type_param_names.is_empty())
+                })
+                .unwrap_or(false);
+            if is_generic_carrier {
+                ProjectionMode::Navigate
+            } else {
+                ProjectionMode::Expanded
+            }
+        }
+    }
+}
+
+/// Package a resolve-named-symbol outcome and its audit record into the
+/// [`AuditedResult`] carrier.
+fn audited_from_outcome(
+    outcome: Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    audit: RequestAuditRecord,
+) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    match outcome {
+        Ok(value) => AuditedResult::ok(value, audit),
+        Err(error) => AuditedResult::err(error, audit),
+    }
+}
+
+/// Build the cheap default-filled [`RequestAuditRecord`] returned on
+/// the filtered / disabled path. No per-request counters are collected
+/// — the payload is the zero-valued default and `capture_state`
+/// records why the full path was skipped.
+fn noop_type_resolution_record(
+    request_id: u64,
+    canonical_id: &str,
+    parent_request_id: Option<u64>,
+    trace_id: String,
+    capture_state: verter_audit::AuditCaptureState,
+) -> RequestAuditRecord {
+    RequestAuditRecord {
+        request_id,
+        canonical_id: canonical_id.to_string(),
+        kind: RequestKind::TypeResolution,
+        parent_request_id: parent_request_id.map(|id| id.to_string()),
+        from_cache: false,
+        timings: RequestTimingAudit::default(),
+        memory: RequestMemoryAudit::default(),
+        store: RequestStoreAudit::default(),
+        footprint: None,
+        scheduler: None,
+        files: Vec::new(),
+        waits: None,
+        kind_payload: RequestKindPayload::TypeResolution(TypeResolutionPayload::default()),
+        capture_state,
+        trace_id,
+    }
+}
+
+/// The shared request BODY of the audited entry points: acquire EXACTLY ONE
+/// proven-current store view, build ONE dispatch over it, lower any
+/// wire-decoded type arguments under that dispatch, and resolve under the
+/// SAME view. Returns the resolved node and the *effective* mode (after
+/// default-mode resolution) so the audit payload can record what the
+/// resolver actually ran with.
+#[allow(clippy::type_complexity)]
+fn resolve_named_symbol_request(
+    host: &VerterHost,
+    canonical_id: &str,
+    name: &str,
+    type_args: NamedSymbolTypeArgs<'_>,
+    requested_mode: ResolveMode,
+) -> (
+    Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    ProjectionMode,
+) {
+    // This is a query-RETURNER, not a fenced publisher: it builds a
+    // request-bound dispatch context and returns the resolved node with no
+    // outer `run_stable_request` publish fence. So it MUST resolve against a
+    // PROVEN-CURRENT snapshot — a known-stale (`ReturnOnly`) read would
+    // resolve the query against already-superseded dependency state and
+    // return it as a normal result. Acquire a `CurrentHostStoreView` via a
+    // bounded retry; on sustained churn (`None`) surface a miss rather than
+    // computing against the stale view. A non-current settle is a non-fault
+    // miss (`Ok(None)`) — the FFI surface maps it to a `null` payload, so the
+    // consumer re-queries once the host settles.
+    // Compute the effective mode ONCE, up front — every early-miss return
+    // below (the non-current view, a wire-arg lowering miss) reports THIS
+    // computed default, not a hardcoded `Navigate`, so the audit record
+    // records the mode the resolver would actually have used (`mode = None`
+    // on a non-generic decl defaults to `Expanded`, not `Navigate`).
+    let effective_mode = compute_effective_mode(host, canonical_id, name, requested_mode);
+
+    let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) else {
+        return (Ok(None), effective_mode);
+    };
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::from_current(host, &current_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+
+    // Wire-boundary lowering, INSIDE the audited request and under THIS
+    // dispatch (and therefore this view), in `Navigate` mode — the args are
+    // a context inherited by the instantiation, not the body being
+    // projected. A miss on any single arg is a NON-FAULT `Ok(None)` miss
+    // (the established boundary bail-out semantics, now audit-carrying):
+    // the resolution never runs partially instantiated.
+    let lowered_wire_args: Vec<SemanticNodeId>;
+    let type_args: crate::typeinfo::types::TypeArgList<'_> = match type_args {
+        NamedSymbolTypeArgs::Lowered(args) => args,
+        NamedSymbolTypeArgs::Wire(wire) => {
+            let mut lowered: Vec<SemanticNodeId> = Vec::with_capacity(wire.len());
+            for arg in wire {
+                match dispatch.lower_type_expr_in_scope_with_mode(
+                    canonical_id,
+                    arg.as_ref(),
+                    ProjectionMode::Navigate,
+                ) {
+                    Some(node) => lowered.push(node),
+                    None => return (Ok(None), effective_mode),
+                }
+            }
+            lowered_wire_args = lowered;
+            &lowered_wire_args
+        }
+    };
+
+    resolve_named_symbol_in_current_view(
+        host,
+        &dispatch,
+        canonical_id,
+        name,
+        type_args,
+        effective_mode,
+    )
+}
+
+/// Resolve `name` under an ALREADY-ACQUIRED view/dispatch — the shared
+/// resolution body both the node-id and the wire entries reach through
+/// [`resolve_named_symbol_request`]. It performs NO view acquisition of its
+/// own: every dispatch (and every node id it produces or consumes) belongs
+/// to the caller's one request view.
+///
+/// `type_args` are ALREADY-LOWERED node ids produced under the SAME view as
+/// `dispatch`; no `TypeExpr` enters the semantic API. `effective_mode` is the
+/// resolver's already-resolved projection mode (computed by
+/// [`compute_effective_mode`] before view acquisition, so the request body's
+/// early-miss returns and this path report the SAME mode).
+#[allow(clippy::type_complexity)]
+fn resolve_named_symbol_in_current_view(
+    host: &VerterHost,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical_id: &str,
+    name: &str,
+    type_args: crate::typeinfo::types::TypeArgList<'_>,
+    effective_mode: ProjectionMode,
+) -> (
+    Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    ProjectionMode,
+) {
+    let scope_arc: Arc<str> = Arc::from(canonical_id);
+
+    // Resolve the bare declaration. The dispatch entry-point
+    // memoises this through its `execute_cooperative` path. Note
+    // that `ResolveDecl` may legitimately return an
+    // `Opaque(DeclPlaceholder { … })` carrier when the symbol
+    // exists but its body has not been materialised yet — that is
+    // a *signal* to dispatch through `Instantiate { base, args: [],
+    // context }` (with `context.projection_reduction.mode` the chosen
+    // projection mode), NOT a miss (per `QueryError::DeclPlaceholder`
+    // contract: "Walk/enumerate code treats this as 'expandable via
+    // Instantiate' rather than 'not found.'").
+    let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: ScopeId {
+            canonical_id: Arc::clone(&scope_arc),
+            local_scope: None,
+        },
+        name: Arc::from(name),
+    });
+    let decl_node_opt = match dispatch.execute_type_node(resolve_decl_key) {
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => Some(node),
+        QueryResult::Recursive(node) => Some(node),
+        QueryResult::Error(err) => {
+            // A genuine dispatch fault on the bare-decl probe is a
+            // request fault — surface it. A non-fault miss (any arm
+            // `from_query_error` maps to `None`: `Miss` / `RecursiveRef`
+            // / `DeclPlaceholder` or a typed semantic sentinel) leaves
+            // the fallback node `None` and the Instantiate path below
+            // continues.
+            match TypeResolutionRequestError::from_query_error(&err) {
+                Some(fault) => return (Err(fault), effective_mode),
+                None => None,
+            }
+        }
+    };
+
+    // Always dispatch through `Instantiate` so the body materialises
+    // in the chosen mode. This is the path that lifts a
+    // `DeclPlaceholder` into a concrete body. Build the env-bearing
+    // content-free `ResolvedDeclSlotIdentity` base from the file-scope
+    // and the decl name via `dispatch.type_slot_for(...)` (R6 — the slot
+    // carries no whole_hash; the live whole_hash is re-sourced at
+    // value-compute time); two callers in the same file generation
+    // produce the same slot identity and therefore the same memo key.
+    //
+    // Alias-unwrap policy (the projection mode rides
+    // `context.projection_reduction.mode`):
+    // - `Identity`: dispatch in `Identity` mode, return the
+    //   resolved alias-shell verbatim (do NOT unwrap).
+    // - `Navigate` / `Expanded` / `Shallow`: dispatch with the
+    //   chosen mode, unwrap one `SemanticNodeData::Alias(inner)`
+    //   hop afterwards.
+    let Some(shallow) = host.shallow_file_state(canonical_id) else {
+        return (Ok(decl_node_opt), effective_mode);
+    };
+    let scope_node = NodeScopeId::File {
+        canonical_id: Arc::clone(&scope_arc),
+        whole_hash: shallow.whole_hash,
+        local_scope: None,
+    };
+    let _ = &scope_node;
+    let base = dispatch.type_slot_for(Arc::clone(&scope_arc), Arc::from(name));
+
+    let instantiate_key =
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            base,
+            Arc::from(type_args.to_vec().into_boxed_slice()),
+            dispatch.instantiate_context_for(
+                &scope_arc,
+                crate::semantic_query::ProjectionReductionContext::published(effective_mode),
+            ),
+        ));
+    let node = match dispatch.execute_type_node(instantiate_key) {
+        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+        QueryResult::Recursive(node) => node,
+        QueryResult::Error(err) => {
+            // Instantiate failed. A genuine dispatch fault is surfaced
+            // as `Err`; a non-fault miss falls back to the original
+            // `ResolveDecl` node (when present) so callers still
+            // receive *something* identifiable rather than a None.
+            return (classify_dispatch_error(&err, decl_node_opt), effective_mode);
+        }
+    };
+    let final_node = if matches!(effective_mode, ProjectionMode::Identity) {
+        node
+    } else {
+        match materialize_through_aliases(host, dispatch, node, effective_mode) {
+            Ok(materialized) => materialized,
+            // A hard dispatch fault during nested materialization
+            // propagates as `Err` rather than silently degrading to
+            // the un-materialised placeholder.
+            Err(fault) => return (Err(fault), effective_mode),
+        }
+    };
+    (Ok(Some(final_node)), effective_mode)
+}
+
+/// Classify a `QueryResult::Error(err)` arm into the carrier outcome a
+/// typeinfo resolution entry-point returns.
+///
+/// This is the single decode point the resolve / evaluate paths route
+/// their dispatch errors through, mirroring
+/// [`crate::host_resolve_type_audit::resolve_type_with_audit`]'s split:
+/// - A genuine dispatch FAULT (`BudgetExceeded` / `UnstableState` /
+///   `AliasCycle` / `UnsupportedIntrinsic` / `Other` /
+///   `ValueDomainMismatch`, the last riding the text-bearing `Other`
+///   carrier) → `Err(fault)`.
+/// - A non-fault MISS (`Miss` / `RecursiveRef` / `DeclPlaceholder` or a
+///   typed semantic sentinel — every arm `from_query_error` maps to
+///   `None`) → `Ok(fallback)`, where `fallback` is whatever identifiable
+///   node the caller already resolved (e.g. the bare `ResolveDecl` node)
+///   — `None` when there is none.
+///
+/// Both the top-level Instantiate path and the nested
+/// [`materialize_through_aliases`] placeholder hop route their
+/// `QueryResult::Error` arms through this single decode point, so a real
+/// dispatch fault is never indistinguishable from a miss.
+pub(crate) fn classify_dispatch_error(
+    err: &crate::semantic_query::QueryError,
+    fallback: Option<SemanticNodeId>,
+) -> Result<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    match TypeResolutionRequestError::from_query_error(err) {
+        Some(fault) => Err(fault),
+        None => Ok(fallback),
+    }
+}
+
+/// Walk the alias / placeholder chain on a resolved node until we
+/// land on a concrete body. Used by non-Identity modes to materialise
+/// references that the dispatch returned as
+/// `SemanticNodeData::Alias(inner)` shells or
+/// `SemanticNodeData::Opaque(QueryError::DeclPlaceholder { … })`
+/// carriers, AND to REDUCE operator-bodied top-level aliases
+/// (`type X = Y[K]` / `type X = keyof Y`) through the shared
+/// `IndexedAccess` / `KeyOf` reducer under the publication modes.
+///
+/// This is the SINGLE canonical materializer for every typeinfo
+/// resolution entry-point — both the named-resolve path
+/// ([`resolve_named_symbol_with_audit`]) and the FFI evaluate path
+/// ([`crate::VerterHost::evaluate_type_expression_with_audit`]) route
+/// through it, so an operator alias reduces IDENTICALLY regardless of
+/// which surface requested it (the one-resolver mandate — no
+/// per-surface fork).
+///
+/// Bounded by a small step budget so a pathological cycle can't
+/// hang the resolver — the dispatch's own cycle detection catches
+/// genuine alias cycles and returns `Opaque(AliasCycle)` long
+/// before this loop runs out of steps.
+pub(crate) fn materialize_through_aliases(
+    host: &VerterHost,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    start: SemanticNodeId,
+    mode: ProjectionMode,
+) -> Result<SemanticNodeId, TypeResolutionRequestError> {
+    debug_assert!(!matches!(mode, ProjectionMode::Identity));
+    let store = host.project_type_store().semantic_graph();
+    let mut current = start;
+    for _ in 0..16 {
+        let data = store.node_data(current);
+        match data.as_deref() {
+            Some(SemanticNodeData::Alias(inner)) => {
+                current = *inner;
+                continue;
+            }
+            Some(SemanticNodeData::Opaque(
+                crate::semantic_query::QueryError::DeclPlaceholder {
+                    canonical_id,
+                    name,
+                    whole_hash: _,
+                },
+            )) => {
+                // Materialise the placeholder by dispatching an
+                // empty-args Instantiate against its identity.
+                let base = dispatch.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
+                let key =
+                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                        base,
+                        Arc::from(Vec::new().into_boxed_slice()),
+                        dispatch.instantiate_context_for(
+                            canonical_id,
+                            crate::semantic_query::ProjectionReductionContext::published(mode),
+                        ),
+                    ));
+                let step_result = match dispatch.execute_type_node(key) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        QueryResult::Value(node)
+                    }
+                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                    QueryResult::Error(err) => QueryResult::Error(err),
+                };
+                match classify_materialization_step(step_result, current)? {
+                    MaterializationStep::Continue(next) => {
+                        current = next;
+                        continue;
+                    }
+                    MaterializationStep::Stop(node) => return Ok(node),
+                }
+            }
+            // Operator-bodied alias reduction bridge. A top-level alias whose
+            // body is an `IndexedAccess` (`type X = Y[K]`) or `KeyOf`
+            // (`type X = keyof Y`) operator must be REDUCED to its member type
+            // / key union under the publication modes, matching TypeScript and
+            // the canonical `SemanticQueryKey::IndexedAccess` / `KeyOf` path
+            // (which canonicalise to `ProjectPath` / the keyof builder). There
+            // is STILL ONE reducer — this dispatches the existing shared key, it
+            // does NOT hand-reduce. The carrier-stop gate is the MODE: `Skeleton`
+            // and `Identity` intentionally fall through to the carrier-preserving
+            // terminal arm below so BFS / structural-transit traversal keeps
+            // operator shells (Conditional branches would otherwise collapse for
+            // open generics). The reductions dispatch in publication context
+            // (`published(mode)`), where `may_reduce_operator` is unconditionally
+            // satisfied — so the mode `matches!` IS the whole gate; there is no
+            // second carrier-stop conjunct to consult on this always-published
+            // path.
+            Some(SemanticNodeData::IndexedAccess { object, index })
+                if matches!(
+                    mode,
+                    ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
+                ) =>
+            {
+                let key = SemanticQueryKey::IndexedAccess {
+                    base: *object,
+                    index: index.clone(),
+                    mode,
+                };
+                let step_result = match dispatch.execute_type_node(key) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        QueryResult::Value(node)
+                    }
+                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                    QueryResult::Error(err) => QueryResult::Error(err),
+                };
+                match classify_operator_reduction_step(store, step_result, current)? {
+                    MaterializationStep::Continue(next) => {
+                        current = next;
+                        continue;
+                    }
+                    MaterializationStep::Stop(node) => return Ok(node),
+                }
+            }
+            Some(SemanticNodeData::KeyOf { base })
+                if matches!(
+                    mode,
+                    ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
+                ) =>
+            {
+                // The keyof keyspace is enumerated from the base operand's
+                // member surface (`build_key_of` requires a resolved
+                // `Object` / `Union` / `Intersection` base — an un-resolved
+                // `Ref` / `DeclPlaceholder` base returns the deferred carrier).
+                // At the top-level alias root the operand has only been
+                // substituted, not surfaced, so resolve it through the SHARED
+                // empty-path projection first (one engine — the same
+                // `ProjectPath` surfacing every other publication caller uses),
+                // then hand the surfaced base to the keyof reducer. A symbolic
+                // operand (open `TypeParam`, recursive / miss) round-trips
+                // unchanged and the reducer preserves the carrier.
+                // The base-surfacing pre-step must not ERASE a genuine fault: a
+                // `BudgetExceeded` / `AliasCycle` / … on the operand surfacing is
+                // a request fault that propagates, NOT a silent fall-back to the
+                // un-surfaced base (which would let the `KeyOf` reducer publish a
+                // deferred carrier instead of the fault). The decode routes
+                // through [`classify_base_surfacing`] — the same fault/miss split
+                // as the rest of the resolver.
+                // Reference-carrier pre-resolution. Navigate / Skeleton body
+                // lowering preserves a named operand as a `DeclRef` /
+                // `InstantiationRef` shell (cycle-BFS visibility), and the
+                // empty-path `ProjectPath` surfacing below DELIBERATELY does
+                // not unwrap those carriers (the slot-binding indexed-access
+                // preservation policy in `expand_terminal_step`). `keyof`
+                // under a publication mode demands the operand's member
+                // surface, so resolve the reference ONE level first — the
+                // SAME `ResolveDecl` / `Instantiate` dispatches the
+                // path-walker's terminal-carrier resolution uses — then hand
+                // the resolved node to the surfacing. A non-fault resolution
+                // miss falls back to the carrier (the reducer round-trips it
+                // deferred); a genuine fault propagates.
+                let reference_resolved = match store.node_data(*base).as_deref() {
+                    Some(SemanticNodeData::DeclRef { identity }) => {
+                        let resolve_result = match dispatch.execute_type_node(
+                            SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                                scope: ScopeId {
+                                    canonical_id: Arc::clone(&identity.canonical_id),
+                                    local_scope: None,
+                                },
+                                name: Arc::clone(&identity.decl_name),
+                            }),
+                        ) {
+                            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                                QueryResult::Value(node)
+                            }
+                            QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                            QueryResult::Error(err) => QueryResult::Error(err),
+                        };
+                        classify_base_surfacing(resolve_result, *base)?
+                    }
+                    Some(SemanticNodeData::InstantiationRef {
+                        base: ref_base,
+                        args,
+                    }) => {
+                        let inst_base = dispatch.type_slot_for(
+                            Arc::clone(&ref_base.canonical_id),
+                            Arc::clone(&ref_base.decl_name),
+                        );
+                        let inst_result = match dispatch
+                            .execute_type_node(SemanticQueryKey::Instantiate(
+                            crate::semantic_query::InstantiateKey::new(
+                                inst_base,
+                                Arc::clone(args),
+                                dispatch.instantiate_context_for(
+                                    &ref_base.canonical_id,
+                                    crate::semantic_query::ProjectionReductionContext::published(
+                                        mode,
+                                    ),
+                                ),
+                            ),
+                        )) {
+                            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                                QueryResult::Value(node)
+                            }
+                            QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                            QueryResult::Error(err) => QueryResult::Error(err),
+                        };
+                        classify_base_surfacing(inst_result, *base)?
+                    }
+                    _ => *base,
+                };
+                let surfaced_result =
+                    match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+                        base: reference_resolved,
+                        path: Arc::from(Vec::new().into_boxed_slice()),
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            ProjectionMode::Expanded,
+                        ),
+                    }) {
+                        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                            QueryResult::Value(node)
+                        }
+                        QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                        QueryResult::Error(err) => QueryResult::Error(err),
+                    };
+                let surfaced_base = classify_base_surfacing(surfaced_result, reference_resolved)?;
+                let key = SemanticQueryKey::KeyOf {
+                    base: surfaced_base,
+                    context: crate::semantic_query::ProjectionReductionContext::published(mode),
+                };
+                let step_result = match dispatch.execute_type_node(key) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        QueryResult::Value(node)
+                    }
+                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                    QueryResult::Error(err) => QueryResult::Error(err),
+                };
+                match classify_operator_reduction_step(store, step_result, current)? {
+                    MaterializationStep::Continue(next) => {
+                        current = next;
+                        continue;
+                    }
+                    MaterializationStep::Stop(node) => return Ok(node),
+                }
+            }
+            // Template-literal operator-bodied alias reduction. A top-level
+            // alias whose body is a `TemplateLiteral` (`type X = `on${…}``) is
+            // reduced through the shared `TemplateLiteralReduce` producer under
+            // the publication modes — same one-engine gate as IndexedAccess /
+            // KeyOf above. `Skeleton` / `Identity` fall through to the
+            // carrier-preserving terminal arm so BFS / structural-transit
+            // traversal keeps the template shell.
+            Some(SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            }) if matches!(
+                mode,
+                ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
+            ) =>
+            {
+                let key = SemanticQueryKey::TemplateLiteralReduce {
+                    pattern: Arc::clone(quasis),
+                    args: Arc::clone(expressions),
+                    context: dispatch.template_literal_reduce_context(),
+                };
+                let step_result = match dispatch.execute_type_node(key) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        QueryResult::Value(node)
+                    }
+                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                    QueryResult::Error(err) => QueryResult::Error(err),
+                };
+                match classify_operator_reduction_step(store, step_result, current)? {
+                    MaterializationStep::Continue(next) => {
+                        current = next;
+                        continue;
+                    }
+                    MaterializationStep::Stop(node) => return Ok(node),
+                }
+            }
+            _ => return Ok(current),
+        }
+    }
+    Ok(current)
+}
+
+/// The next action the placeholder-materialisation loop takes after a
+/// nested `Instantiate` dispatch.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MaterializationStep {
+    /// Advance the loop to `next` (the dispatch produced a fresh node).
+    Continue(SemanticNodeId),
+    /// Stop and return `node` as the materialised result.
+    Stop(SemanticNodeId),
+}
+
+/// Decide the loop's next step from the nested `Instantiate` result.
+///
+/// This is the single decode point the placeholder-materialisation loop in
+/// [`materialize_through_aliases`] — the ONE canonical materializer both
+/// typeinfo entry-points share — routes its nested dispatch result
+/// through, mirroring the top-level [`classify_dispatch_error`] split:
+/// - `Value(next)` / `Recursive(next)` → `Continue(next)`, unless the
+///   dispatch returned the same `current` placeholder (no progress), in
+///   which case `Stop(current)`.
+/// - `Error(err)` → a genuine dispatch FAULT propagates as
+///   `Err(fault)`; a non-fault miss keeps the degraded `current` node as
+///   `Ok(Stop(current))`.
+pub(crate) fn classify_materialization_step(
+    result: QueryResult<SemanticNodeId>,
+    current: SemanticNodeId,
+) -> Result<MaterializationStep, TypeResolutionRequestError> {
+    match result {
+        QueryResult::Value(next) | QueryResult::Recursive(next) => {
+            if next == current {
+                // No progress — give up on the degraded node.
+                Ok(MaterializationStep::Stop(current))
+            } else {
+                Ok(MaterializationStep::Continue(next))
+            }
+        }
+        QueryResult::Error(err) => match classify_dispatch_error(&err, Some(current)) {
+            Ok(node) => Ok(MaterializationStep::Stop(node.unwrap_or(current))),
+            Err(fault) => Err(fault),
+        },
+    }
+}
+
+/// Decode the keyof base-surfacing pre-step's empty-path `ProjectPath` result
+/// into the surfaced base node.
+///
+/// The `KeyOf` reducer enumerates its keyspace from a RESOLVED operand surface;
+/// at a top-level alias root the operand has only been substituted, so the
+/// bridge surfaces it through an empty-path `ProjectPath` first. This is the
+/// single decode point for that pre-step, mirroring the resolver's
+/// [`classify_dispatch_error`] fault/miss split:
+/// - `Value(next)` / `Recursive(next)` → the surfaced node.
+/// - `Error(err)` → a genuine dispatch FAULT propagates as `Err(fault)` (so the
+///   `KeyOf` reducer never publishes a deferred carrier that MASKS the fault); a
+///   NON-fault miss falls back to the un-surfaced `base`, which the reducer then
+///   round-trips unchanged as the deferred carrier.
+pub(crate) fn classify_base_surfacing(
+    result: QueryResult<SemanticNodeId>,
+    base: SemanticNodeId,
+) -> Result<SemanticNodeId, TypeResolutionRequestError> {
+    match result {
+        QueryResult::Value(next) | QueryResult::Recursive(next) => Ok(next),
+        QueryResult::Error(err) => match classify_dispatch_error(&err, Some(base)) {
+            Ok(fallback) => Ok(fallback.unwrap_or(base)),
+            Err(fault) => Err(fault),
+        },
+    }
+}
+
+/// Decide the operator-reduction bridge's next step from the nested
+/// `IndexedAccess` / `KeyOf` dispatch result, PRESERVING the operator
+/// `carrier` whenever the shared reducer could not produce a genuine
+/// reduction.
+///
+/// Differs from [`classify_materialization_step`]: an operator alias must
+/// never *degrade* to a worse terminal than its own carrier. When the
+/// reducer returns a NON-FAULT miss carrier (`Miss` / `RecursiveRef` /
+/// `DeclPlaceholder`, or any other arm [`classify_dispatch_error`]
+/// treats as a non-fault), a `Recursive` cycle back-edge, or makes no
+/// progress, the bridge keeps the original `IndexedAccess` / `KeyOf` shell
+/// (matching the pre-bridge carrier-publication behaviour for the cases
+/// the reducer cannot yet resolve — open `TypeParam` operands,
+/// index-signature lookups, etc.) rather than publish a `semanticMiss`.
+///
+/// A FAULT-bearing carrier still PROPAGATES. The shared `ProjectPath`
+/// reducer can return a fault opaque (`AliasCycle` / `BudgetExceeded` /
+/// `UnstableState` / `UnsupportedIntrinsic` / `Other` /
+/// `ValueDomainMismatch`) as a `QueryResult::Value(Opaque(err))` rather
+/// than a `QueryResult::Error`; treating ALL `Opaque(_)` as a
+/// carrier-preserving miss (the original wildcard) would HIDE such a
+/// failed reduction behind a deferred `T[K]` / `keyof T` shell. So the
+/// `Opaque(err)` case is partitioned through the SAME
+/// [`classify_dispatch_error`] fault/miss split the rest of the resolver
+/// uses: a fault surfaces as `Err`, a non-fault preserves the carrier.
+pub(crate) fn classify_operator_reduction_step(
+    store: &crate::semantic_query_memo::SemanticGraphStore,
+    result: QueryResult<SemanticNodeId>,
+    carrier: SemanticNodeId,
+) -> Result<MaterializationStep, TypeResolutionRequestError> {
+    match result {
+        QueryResult::Value(next) => {
+            if next == carrier {
+                // No reduction (same shell) — keep the operator carrier.
+                return Ok(MaterializationStep::Stop(carrier));
+            }
+            // A reducer that returns its result as `Value(Opaque(err))` —
+            // partition the carrier on the fault/non-fault axis. A genuine
+            // FAULT propagates (never masked behind the operator shell); a
+            // non-fault miss preserves the carrier (never degrades to a
+            // `semanticMiss` terminal).
+            if let Some(SemanticNodeData::Opaque(err)) = store.node_data(next).as_deref() {
+                return match classify_dispatch_error(err, Some(carrier)) {
+                    Ok(_) => Ok(MaterializationStep::Stop(carrier)),
+                    Err(fault) => Err(fault),
+                };
+            }
+            Ok(MaterializationStep::Continue(next))
+        }
+        // A recursive back-edge is a cycle, not a reduction: preserve the
+        // operator carrier rather than chase the cycle node.
+        QueryResult::Recursive(_) => Ok(MaterializationStep::Stop(carrier)),
+        QueryResult::Error(err) => match classify_dispatch_error(&err, Some(carrier)) {
+            Ok(_) => Ok(MaterializationStep::Stop(carrier)),
+            Err(fault) => Err(fault),
+        },
+    }
+}

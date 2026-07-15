@@ -1,0 +1,63 @@
+{
+  "slug": "css/injected_selector_list_prune.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "injected_selector_list_prune",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "next",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "from_html",
+    "next"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "next": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<span class=\"a svelte-<scoped>\">x</span> <span class=\"c svelte-<scoped>\">y</span>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<span class=\"a svelte-<scoped>\">x</span> <span class=\"c svelte-<scoped>\">y</span>`, 1); const $$css = {hash: 'svelte-<scoped>', code: '.a.svelte-<scoped>, .c.svelte-<scoped> {color:blue;} .a.svelte-<scoped> {padding:0;}'}; export default function injected_selector_list_prune($$anchor) {$.append_styles($$anchor, $$css); var fragment = root(); $.next(2); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

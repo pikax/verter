@@ -1,0 +1,54 @@
+{
+  "slug": "imports/module_and_instance_slot_order.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./base.js",
+      "kind": "named",
+      "names": [
+        "m"
+      ]
+    },
+    {
+      "source": "./inst.js",
+      "kind": "named",
+      "names": [
+        "i"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "module_and_instance_slot_order",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "escape",
+    "escape",
+    "escape"
+  ],
+  "helperSet": [
+    "escape"
+  ],
+  "helperCounts": {
+    "escape": 3
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

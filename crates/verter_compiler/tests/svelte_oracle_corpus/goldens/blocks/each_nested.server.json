@@ -1,0 +1,43 @@
+{
+  "slug": "blocks/each_nested.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "each_nested",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "ensure_array_like",
+    "ensure_array_like",
+    "escape"
+  ],
+  "helperSet": [
+    "ensure_array_like",
+    "escape"
+  ],
+  "helperCounts": {
+    "ensure_array_like": 2,
+    "escape": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

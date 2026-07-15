@@ -1,0 +1,36 @@
+{
+  "slug": "generated/159_dir_bind_value_quoted.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_59_dir_bind_value_quoted",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr"
+  ],
+  "helperSet": [
+    "attr"
+  ],
+  "helperCounts": {
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

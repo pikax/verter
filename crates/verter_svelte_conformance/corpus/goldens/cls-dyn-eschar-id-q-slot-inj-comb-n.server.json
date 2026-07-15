@@ -1,0 +1,42 @@
+{
+  "slug": "cls-dyn-eschar-id-q-slot-inj-comb-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_dyn_eschar_id_q_slot_inj_comb_n",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot",
+    "attr"
+  ],
+  "helperSet": [
+    "attr",
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1,
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "slug": "attributes/mixed_template_dollar.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "mixed_template_dollar",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "stringify"
+  ],
+  "helperSet": [
+    "attr",
+    "stringify"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "stringify": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

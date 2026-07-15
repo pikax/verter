@@ -1,0 +1,32 @@
+{
+  "slug": "univ-hex-lit-cls-q-el-ext-comb-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "univ_hex_lit_cls_q_el_ext_comb_m",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-zmmrnf",
+    "code": "\n\t.wrap.svelte-<scoped> :where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

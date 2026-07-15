@@ -1,0 +1,84 @@
+{
+  "slug": "components/component_snippet_children.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "component_snippet_children",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "noop",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append",
+    "next",
+    "text",
+    "template_effect",
+    "set_text",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "next",
+    "noop",
+    "reset",
+    "set_text",
+    "template_effect",
+    "text"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "noop": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 2,
+    "set_text": 2,
+    "append": 2,
+    "next": 1,
+    "text": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<span> </span>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; var root = $.from_html(`<span> </span>`); export default function component_snippet_children($$anchor, $$props) {{const header = ($$anchor, item = $.noop) => {var span = root(); var text = $.child(span, true); $.reset(span); $.template_effect(() => $.set_text(text, item())); $.append($$anchor, span);}; Child($$anchor, {header, children: ($$anchor, $$slotProps) => {$.next(); var text_1 = $.text(); $.template_effect(() => $.set_text(text_1, `default ${$$props.p ?? ''}`)); $.append($$anchor, text_1);}, $$slots: {header: true, default: true}});}}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

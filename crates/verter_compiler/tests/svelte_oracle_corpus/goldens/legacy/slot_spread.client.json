@@ -1,0 +1,73 @@
+{
+  "slug": "legacy/slot_spread.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_spread",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "prop",
+    "child",
+    "slot",
+    "spread_props",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "prop",
+    "reset",
+    "slot",
+    "spread_props"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "prop": 1,
+    "child": 1,
+    "slot": 1,
+    "spread_props": 1,
+    "reset": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div><!></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div><!></div>`); export default function slot_spread($$anchor, $$props) {let rest = $.prop($$props, 'rest', 8); var div = root(); var node = $.child(div); $.slot(node, $$props, 'default', $.spread_props({a: '1'}, rest), null); $.reset(div); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

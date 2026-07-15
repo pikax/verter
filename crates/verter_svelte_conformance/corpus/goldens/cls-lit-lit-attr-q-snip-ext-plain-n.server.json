@@ -1,0 +1,32 @@
+{
+  "slug": "cls-lit-lit-attr-q-snip-ext-plain-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_lit_lit_attr_q_snip_ext_plain_n",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) .zz {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

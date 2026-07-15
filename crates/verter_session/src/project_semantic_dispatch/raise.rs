@@ -1,0 +1,5262 @@
+//! `raise_node_to_type_expr` — SemanticNodeId → TypeExpr structural raising
+//!
+//! Reverse of [`shallow_lower_type_expr`](super::lower::shallow_lower_type_expr).
+//! Walks one structural level of a [`SemanticNodeData`] graph payload back
+//! into a [`TypeExpr`] tree. No name resolution, no generic substitution,
+//! no conditional branch selection — those are the [`PathWalker`](super::walk)'s
+//! job. Cycle protection via a per-call `active` visited set.
+//!
+//! **Authority contract:** this is the *only* `SemanticNodeId →
+//! TypeExpr` lowering path in the workspace. Pair with
+//! [`shallow_lower_type_expr`](super::lower::shallow_lower_type_expr)
+//! (forward direction). The invariant test
+//! `semantic_node_to_type_expr_has_exactly_one_path` asserts exactly one
+//! `fn raise_node_to_type_expr` exists in `crates/`.
+
+use std::sync::Arc;
+
+use rustc_hash::{FxHashMap, FxHashSet};
+use verter_type_expr::TypeExpr;
+
+// Re-export the sealed output carriers so the existing
+// `crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr`
+// reference path the per-member publication projectors thread stays
+// stable. The TYPES are the single canonical sealed carriers defined in
+// `super::output_materialization`; this is a name re-export of the one
+// owner type (NOT a second definition / dual path).
+pub(crate) use super::output_materialization::{MaterializedOutputTypeExpr, OutputTypeExpr};
+use super::ProjectSemanticDispatch;
+use crate::instant::Instant;
+use crate::semantic_query::{
+    DepSignature, IndexKey, MapperKey, PathSegment, ProjectionMode, ProjectionReductionContext,
+    QueryError, QueryResult, ReductionDemand, ResolveDeclKey, ScopeId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
+};
+// `HotTypeRef` is only referenced by the test-only `materialize_type_expr`
+// harness wrapper below; the production reverse boundaries take a
+// `SemanticNodeId` directly.
+#[cfg(test)]
+use crate::semantic_query::HotTypeRef;
+
+/// The owner-layer shape engine: the ONE private generic `SemanticNodeData`
+/// fold and its three algebras (materialization vs node-domain facts/key vs
+/// `&TypeExpr` folding). Owns the single exhaustive traversal so the
+/// materialization and the node-domain facts/key cannot drift.
+mod shape_engine;
+
+// Crate-wide re-export of the ONE semantic-primitive-kind → `PrimitiveName`
+// conversion so fact producers (the macro-output expansion sink's leaf-fact
+// projection) reuse the shape engine's mapping instead of duplicating it.
+pub(crate) use shape_engine::semantic_primitive_to_primitive_name;
+
+// Dispatch-wide re-export of the shape engine's failed-query-carrier
+// classification (the SAME `Opaque` variant mapping its materialize /
+// node-domain algebras apply), so raise boundaries fail closed on a
+// projection landing on an `Unknown`-materializing failure node without
+// duplicating the variant split.
+pub(in crate::project_semantic_dispatch) use shape_engine::node_is_unknown_materializing_failure;
+
+// Test-only re-export of the interned shape key so the raised-shape parity
+// suite can assert (type-level) that it is an interned id, NOT a `TypeExpr`
+// owner.
+#[cfg(test)]
+pub(in crate::project_semantic_dispatch) use shape_engine::RaisedShapeKey;
+
+// =====================================================================
+// dispatch trace plumbing for cycle-BFS unit tests.
+//
+// `enable_dispatch_trace_for_test` returns a guard that clears the trace
+// on construction and on drop. `execute_read` pushes a static-string
+// discriminant for every key it processes. The discriminant index is
+// stable (depends only on the variant name), so tests can assert exact
+// counts of `Instantiate`, `ResolveDecl`, etc. dispatches.
+//
+// Plumbing is `#[cfg(test)]`-only: zero footprint outside test builds.
+// =====================================================================
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DISPATCH_TRACE: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+#[allow(dead_code, reason = "consumed by the dispatch-count assertions")]
+pub(crate) struct DispatchTraceGuard;
+
+#[cfg(test)]
+impl Drop for DispatchTraceGuard {
+    fn drop(&mut self) {
+        DISPATCH_TRACE.with(|t| t.borrow_mut().clear());
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code, reason = "consumed by the dispatch-count assertions")]
+pub(crate) fn enable_dispatch_trace_for_test() -> DispatchTraceGuard {
+    DISPATCH_TRACE.with(|t| t.borrow_mut().clear());
+    DispatchTraceGuard
+}
+
+// =====================================================================
+// Per-key dispatch traffic counter (diagnostic only).
+//
+// Counts how many times `execute_read` is invoked with each
+// `SemanticQueryKey`, keyed by a (variant_discriminant, content_hash)
+// digest. Diagnostic-only, `#[cfg(test)]`-gated, zero footprint outside
+// test builds.
+//
+// F18 (r2 review): variant identity uses std::mem::discriminant so the
+// digest does NOT need to be updated when adds new
+// SemanticQueryKey variants. The discriminant is opaque but stable
+// per-variant; pairs with the hash for full key identity.
+// =====================================================================
+
+#[cfg(test)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct SemanticQueryKeyDigest {
+    pub variant: std::mem::Discriminant<crate::semantic_query::SemanticQueryKey>,
+    pub hash: u64,
+}
+
+#[cfg(test)]
+impl SemanticQueryKeyDigest {
+    fn from_key(key: &crate::semantic_query::SemanticQueryKey) -> Self {
+        use std::hash::{Hash, Hasher};
+        // Supplement §5.D.0 r17 — canonicalise the key BEFORE
+        // hashing so probes via the caller's key shape (e.g.
+        // `ProjectMember`) hit the same digest the warm cache stores
+        // (e.g. `ProjectPath` with a length-1 path). Without this,
+        // tests probing `family_cold(&original_key)` always read 0
+        // because the warm cache stores the post-canonical form.
+        let canonical = canonicalise_for_digest(key);
+        let mut hasher = rustc_hash::FxHasher::default();
+        canonical.hash(&mut hasher);
+        Self {
+            variant: std::mem::discriminant(&canonical),
+            hash: hasher.finish(),
+        }
+    }
+}
+
+#[cfg(test)]
+fn canonicalise_for_digest(
+    key: &crate::semantic_query::SemanticQueryKey,
+) -> crate::semantic_query::SemanticQueryKey {
+    use std::sync::Arc;
+
+    use crate::semantic_query::{PathSegment, SemanticQueryKey};
+    match key {
+        SemanticQueryKey::ProjectMember { base, member, mode } => SemanticQueryKey::ProjectPath {
+            base: *base,
+            path: Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(*mode),
+        },
+        SemanticQueryKey::IndexedAccess { base, index, mode } => SemanticQueryKey::ProjectPath {
+            base: *base,
+            path: Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
+            context: crate::semantic_query::ProjectionReductionContext::published(*mode),
+        },
+        SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
+            members: super::canonicalize_node_list(members),
+        },
+        SemanticQueryKey::NormalizeIntersection { members } => {
+            SemanticQueryKey::NormalizeIntersection {
+                members: super::canonicalize_node_list(members),
+            }
+        }
+        other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DISPATCH_KEY_COUNTS:
+        std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+    /// Supplement §5.D.0 r17 — per-key COLD dispatch count.
+    /// Incremented when `execute_read` enters with no warm cache entry
+    /// for the key (cache miss; `build` is invoked).
+    pub(crate) static DISPATCH_KEY_COLD_COUNTS:
+        std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+    /// Supplement §5.D.0 r17 — per-key WARM dispatch count.
+    /// Incremented when `execute_read` enters with the key already in
+    /// the warm cache (cache hit; `build` is NOT invoked).
+    pub(crate) static DISPATCH_KEY_WARM_COUNTS:
+        std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+}
+
+#[cfg(test)]
+pub(crate) fn record_dispatch_key(key: &crate::semantic_query::SemanticQueryKey) {
+    let digest = SemanticQueryKeyDigest::from_key(key);
+    DISPATCH_KEY_COUNTS.with(|c| {
+        *c.borrow_mut().entry(digest).or_insert(0) += 1;
+    });
+}
+
+/// Supplement §5.D.0 r17 — record a COLD dispatch entry for
+/// this key (cache miss, `build` will be invoked).
+#[cfg(test)]
+pub(crate) fn record_dispatch_cold(key: &crate::semantic_query::SemanticQueryKey) {
+    let digest = SemanticQueryKeyDigest::from_key(key);
+    DISPATCH_KEY_COLD_COUNTS.with(|c| {
+        *c.borrow_mut().entry(digest).or_insert(0) += 1;
+    });
+}
+
+/// Supplement §5.D.0 r17 — record a WARM dispatch entry for
+/// this key (cache hit, returning the memoized value).
+#[cfg(test)]
+pub(crate) fn record_dispatch_warm(key: &crate::semantic_query::SemanticQueryKey) {
+    let digest = SemanticQueryKeyDigest::from_key(key);
+    DISPATCH_KEY_WARM_COUNTS.with(|c| {
+        *c.borrow_mut().entry(digest).or_insert(0) += 1;
+    });
+}
+
+/// Supplement §5.D.0 r17 — read the COLD count for `key`.
+/// Returns 0 if the key has not been dispatched on this thread since
+/// thread start. The counter is monotonic; tests sample baselines and
+/// deltas across paired queries.
+#[cfg(test)]
+pub(crate) fn dispatch_cold_for(key: &crate::semantic_query::SemanticQueryKey) -> usize {
+    let digest = SemanticQueryKeyDigest::from_key(key);
+    DISPATCH_KEY_COLD_COUNTS.with(|c| c.borrow().get(&digest).copied().unwrap_or(0) as usize)
+}
+
+/// Supplement §5.D.0 r17 — read the WARM count for `key`.
+#[cfg(test)]
+pub(crate) fn dispatch_warm_for(key: &crate::semantic_query::SemanticQueryKey) -> usize {
+    let digest = SemanticQueryKeyDigest::from_key(key);
+    DISPATCH_KEY_WARM_COUNTS.with(|c| c.borrow().get(&digest).copied().unwrap_or(0) as usize)
+}
+
+#[cfg(test)]
+fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
+    match key {
+        SemanticQueryKey::ResolveDecl(_) => "ResolveDecl",
+        SemanticQueryKey::Instantiate(_) => "Instantiate",
+        SemanticQueryKey::ProjectMember { .. } => "ProjectMember",
+        SemanticQueryKey::IndexedAccess { .. } => "IndexedAccess",
+        SemanticQueryKey::KeyOf { .. } => "KeyOf",
+        SemanticQueryKey::MappedType { .. } => "MappedType",
+        SemanticQueryKey::Conditional { .. } => "Conditional",
+        SemanticQueryKey::TypeOf { .. } => "TypeOf",
+        SemanticQueryKey::NormalizeUnion { .. } => "NormalizeUnion",
+        SemanticQueryKey::NormalizeIntersection { .. } => "NormalizeIntersection",
+        SemanticQueryKey::ProjectPath { .. } => "ProjectPath",
+        SemanticQueryKey::Relate { .. } => "Relate",
+        SemanticQueryKey::ResolveMacroPayload { .. } => "ResolveMacroPayload",
+        SemanticQueryKey::ResolveClassSurface { .. } => "ResolveClassSurface",
+        SemanticQueryKey::ResolveAmbientNamespace { .. } => "ResolveAmbientNamespace",
+        SemanticQueryKey::ResolveEnum { .. } => "ResolveEnum",
+        SemanticQueryKey::ResolveOverloadSet { .. } => "ResolveOverloadSet",
+        SemanticQueryKey::ApparentType { .. } => "ApparentType",
+        SemanticQueryKey::TemplateLiteralReduce { .. } => "TemplateLiteralReduce",
+        SemanticQueryKey::FlowNarrowingAt { .. } => "FlowNarrowingAt",
+        SemanticQueryKey::ContextualTypeAt { .. } => "ContextualTypeAt",
+        SemanticQueryKey::LowerLocator { .. } => "LowerLocator",
+    }
+}
+
+impl<'a> ProjectSemanticDispatch<'a> {
+    /// Raise a [`SemanticNodeId`] back to a [`TypeExpr`].
+    ///
+    /// Pure structural conversion: walks the graph payload one structural
+    /// level at a time, raising sub-ids recursively. Cycle protection via
+    /// a per-call `active` visited set. Returns `None` when the node is
+    /// not present in the host's graph store.
+    ///
+    /// Use this when you have a `SemanticNodeId` (typically the result of
+    /// a [`SemanticQueryApi::execute`] call or a graph-native helper) and
+    /// need a [`TypeExpr`] for downstream payload construction. Operator-
+    /// shape reduction (`IndexedAccess`, `Conditional`, `Mapped`,
+    /// `KeyOf`, `TypeOf`) is the responsibility of the caller — typically
+    /// [`Self::materialize_reduced_output_type_expr`]. This function alone
+    /// is shell-only.
+    fn raise_node_to_type_expr(&self, node: SemanticNodeId) -> Option<TypeExpr> {
+        let mut active = FxHashSet::default();
+        // The shell-only materialization entry: delegate to the shared shape
+        // engine's `MaterializeTypeExprAlg` — the SOLE exhaustive
+        // `SemanticNodeData -> TypeExpr` traversal (owner-local in
+        // [`shape_engine`]). The materialization and the node-domain facts/key
+        // share that ONE fold, so they cannot drift — anti-drift is structural.
+        // This stays MODULE-PRIVATE; out-of-module callers reach it only through
+        // the sealed `OutputProjector` output seam ([`Self::output_shell_raise_sealed`]).
+        shape_engine::fold_to_type_expr(self, node, &mut active)
+    }
+
+    /// Plain shell-only output-materialisation boundary: project a
+    /// [`SemanticNodeId`] back to a compat [`TypeExpr`] WITHOUT operator-shape
+    /// reduction.
+    ///
+    /// This is the output/compat seam for callers that already hold the exact
+    /// graph node they want to materialise (typically the demanded terminal of
+    /// a navigate-driven walk) and want it raised AS-IS. It is a thin wrapper
+    /// over the shell-only [`Self::raise_node_to_type_expr`] primitive, so every
+    /// carrier round-trips here (raw-fallback text → `Unknown { raw }`, the
+    /// synthetic binding, the constructor carrier, the `RecursiveRef` back-edge
+    /// via `Opaque(QueryError::RecursiveRef)`); tuple-element rest fidelity
+    /// rides on the `Tuple` arm's `TupleElement.rest`.
+    ///
+    /// Operator-shape REDUCTION (`IndexedAccess` / `Conditional` / `Mapped`
+    /// / `KeyOf` / `TypeOf`) is NOT performed here — an operator node raises to
+    /// its operator `TypeExpr` un-reduced. Callers that need the operator
+    /// collapsed must go through [`Self::materialize_reduced_output_type_expr`].
+    ///
+    /// The `Option` return is the miss signal: `None` means the requested node —
+    /// or a node required while raising it — is unavailable/unraisable from the
+    /// live graph store. It is deliberately NOT folded into an `Unknown`-sentinel
+    /// here so callers can map a miss to whatever their own output contract
+    /// requires.
+    // Raise-side SHELL seam (no operator reduction). `pub(super)` — the
+    // [`OutputProjector`] capability's `materialize_output_type_expr`
+    // boundary method (in `super::output_materialization`) calls this. The
+    // raw `raise_node_to_type_expr` primitive stays MODULE-PRIVATE; this is
+    // the only out-of-module shell-raise reach.
+    //
+    // It hands back a SEALED [`OutputTypeExpr`] carrier, NEVER a bare
+    // [`TypeExpr`]. That is the structural fence: a `project_semantic_dispatch`
+    // SIBLING module (e.g. `mod.rs`, `evaluate.rs`) can reach this `pub(super)`
+    // seam, but the value it gets back is a sealed carrier it CANNOT unwrap
+    // (the inner `TypeExpr` is capability-gated via
+    // [`OutputTypeExpr::into_type_expr`], and a sibling cannot mint an
+    // `OutputProjector`). So no `pub(super)` seam ever yields a raw
+    // `TypeExpr` to a non-capability holder — closing the bare-delegator
+    // laundering hole. `None` is the miss signal.
+    pub(super) fn output_shell_raise_sealed(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<super::output_materialization::OutputTypeExpr> {
+        self.raise_node_to_type_expr(node)
+            .map(super::output_materialization::OutputTypeExpr::from_raise)
+    }
+
+    /// Test-only `HotTypeRef`-shaped wrapper over the raise-side shell
+    /// delegator, kept so the carrier round-trip tests can drive
+    /// materialisation from a `HotTypeRef` handle. Production callers hold a
+    /// [`SemanticNodeId`] and go through the sealed [`OutputProjector`]
+    /// capability boundary; this helper exists ONLY under test (the
+    /// structural guard `materialize_type_expr_is_not_production_visible`
+    /// asserts it is `#[cfg(test)]`-gated and not production-visible).
+    ///
+    /// [`OutputProjector`]: super::output_materialization::OutputProjector
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn materialize_type_expr(&self, handle: HotTypeRef) -> TypeExpr {
+        use super::output_materialization::{OutputProjector, TestOutputCap};
+        let cap = TestOutputCap::new(self);
+        cap.materialize_output_type_expr(handle.node())
+            .map(|carrier| carrier.into_type_expr(&cap))
+            .unwrap_or(TypeExpr::Unknown {
+                raw: "<materialize miss>".to_string(),
+            })
+    }
+
+    /// Test-only plain SHELL-raise that returns the unwrapped `TypeExpr`
+    /// (rather than a sealed carrier) so the carrier round-trip / reduction
+    /// suites can assert on the projected `TypeExpr`. Mints the
+    /// `#[cfg(test)]` test capability internally and unwraps — tests never
+    /// hold the capability/carrier. `#[cfg(test)]`-gated; not a production
+    /// path.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn materialize_output_type_expr_for_test(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<TypeExpr> {
+        use super::output_materialization::{OutputProjector, TestOutputCap};
+        let cap = TestOutputCap::new(self);
+        cap.materialize_output_type_expr(node)
+            .map(|carrier| carrier.into_type_expr(&cap))
+    }
+
+    /// Test-only REDUCE-then-raise that returns the unwrapped `TypeExpr`
+    /// from the sealed `MaterializedOutputTypeExpr` carrier. Mints the
+    /// `#[cfg(test)]` test capability internally. `#[cfg(test)]`-gated; not
+    /// a production path.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn materialize_reduced_output_type_expr_for_test(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> TypeExpr {
+        use super::output_materialization::{OutputProjector, TestOutputCap};
+        let cap = TestOutputCap::new(self);
+        cap.materialize_reduced_output_type_expr(node, context)
+            .type_expr_for_test()
+            .clone()
+    }
+
+    /// `execute` variant that returns the full [`CacheRead`].
+    ///
+    /// `ProjectSemanticDispatch::execute` (the [`SemanticQueryApi`] trait
+    /// method) discards the dep-signature half of the cache read; this
+    /// variant keeps it so callers like [`Self::raise_and_reduce_with_context`]
+    /// can accumulate dep facts across nested dispatches and merge them into
+    /// the session-layer `fact_versions`. This is the dispatch entry the
+    /// cold-build subtree reducer and the operator sub-reductions
+    /// (`ProjectPath` / `NormalizeIntersection` / macro-payload
+    /// intersection normalisation) ride so their dependency facts are not
+    /// dropped — the dep-signature-preserving peer of the `SemanticQueryApi`
+    /// trait's `execute`.
+    pub(crate) fn execute_read(
+        &self,
+        key: SemanticQueryKey,
+    ) -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>> {
+        // Trace the variant for cycle-BFS unit tests.
+        // Records the variant before key canonicalisation so the
+        // observed call shape matches the caller's intent (sugar
+        // variants are recorded as the caller wrote them).
+        #[cfg(test)]
+        DISPATCH_TRACE.with(|t| t.borrow_mut().push(query_key_discriminant(&key)));
+
+        // Per-key dispatch traffic counter. Records a
+        // (variant_discriminant, content_hash) digest so diagnostic
+        // tests can dump the top-N most-dispatched keys.
+        #[cfg(test)]
+        record_dispatch_key(&key);
+
+        // Delegate to the shared cold-build helper. The helper handles
+        // canonicalisation, sentinel construction, the tracer-wrapped
+        // build closure, and the warm-hit fast path inside
+        // `execute_cooperative`. Routing both `execute` and
+        // `execute_read` through one helper ensures fact-tracer
+        // installation never bypasses any cold-build path.
+        self.execute_via_cold_build_helper(key)
+    }
+
+    /// Context-explicit reduce-then-raise reducer (demand-driven reducer
+    /// spec).
+    ///
+    /// The caller supplies the publication
+    /// [`ProjectionReductionContext`] that flows into every operator
+    /// dispatch and propagates through child traversal selection.
+    /// `Published(Expanded)` keeps whole-surface behaviour;
+    /// `Published(Navigate)` is the per-prop publication boundary that
+    /// stops at the demanded terminal without breadth-enumerating
+    /// composite members or inactive conditional branches.
+    // reduce-then-raise orchestrator; the projection-output boundary
+    // (materialize_reduced_output_type_expr) wraps it, and the production
+    // per-member projectors (field_types.rs) reach it through that boundary.
+    pub(super) fn raise_and_reduce_with_context(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> MaterializedOutputTypeExpr {
+        let mut state = ReduceState::default();
+        let reduced = self.reduce_graph_node_iterative(node, context, &mut state);
+        let type_expr = self
+            .raise_node_to_type_expr(reduced)
+            .unwrap_or(TypeExpr::Unknown {
+                raw: "<raise miss after reduction>".to_string(),
+            });
+        let result_is_partial = state.result_is_partial;
+        MaterializedOutputTypeExpr::from_parts(
+            Some(reduced),
+            OutputTypeExpr::from_raise(type_expr),
+            state.into_dep_signature(),
+            result_is_partial,
+        )
+    }
+
+    /// Consumer-OBSERVATION variant of [`Self::raise_and_reduce_with_context`]:
+    /// the demand walk a consumer performs on a PUBLISHED
+    /// `SemanticTypeSource` (a registry entry / prop source read).
+    ///
+    /// Identical reduce machinery — same arms, same dispatch routing, no
+    /// second engine — with the observation carrier fence armed (see
+    /// [`ReduceState::observation`]): the demand ROOT always executes (an
+    /// authored generic-alias body runs the existing `Instantiate` query, so
+    /// outer type arguments substitute), while INTERIOR owner-local helper
+    /// references and package-backed references stop as shallow `Ref`
+    /// carriers the consumer re-resolves on demand. Workspace-imported
+    /// interior branches still expand.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn raise_and_reduce_observation(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        owner_canonical: &str,
+    ) -> MaterializedOutputTypeExpr {
+        let mut state = ReduceState {
+            observation: Some((Arc::from(owner_canonical), node)),
+            ..ReduceState::default()
+        };
+        let reduced = self.reduce_graph_node_iterative(node, context, &mut state);
+        let type_expr = self
+            .raise_node_to_type_expr(reduced)
+            .unwrap_or(TypeExpr::Unknown {
+                raw: "<raise miss after reduction>".to_string(),
+            });
+        let result_is_partial = state.result_is_partial;
+        MaterializedOutputTypeExpr::from_parts(
+            Some(reduced),
+            OutputTypeExpr::from_raise(type_expr),
+            state.into_dep_signature(),
+            result_is_partial,
+        )
+    }
+
+    /// Whether the observation carrier fence stops `node` as a shallow
+    /// INTERIOR carrier (see [`ReduceState::observation`]). Never stops the
+    /// demand root (the outer carrier always executes so the published
+    /// declaration's own substitution runs), never stops builtin-utility
+    /// applications, and is inert (`false`) on every non-observation reduce
+    /// pass.
+    fn observation_interior_carrier_stop(
+        &self,
+        node: SemanticNodeId,
+        decl_canonical: &Arc<str>,
+        state: &ReduceState,
+    ) -> bool {
+        let Some((owner_canonical, root)) = state.observation.as_ref() else {
+            return false;
+        };
+        if node == *root || decl_canonical.as_ref() == "__builtin__" {
+            return false;
+        }
+        decl_canonical.as_ref() == owner_canonical.as_ref()
+            || self
+                .ctx
+                .workspace_is_package_backed(decl_canonical.as_ref())
+    }
+
+    /// Top-down demand-driven graph reducer
+    /// (demand-driven reducer spec — stack-safe).
+    ///
+    /// Replaces the legacy bottom-up topological reducer. The
+    /// pre-walk visited the ENTIRE reachable subgraph and then reduced
+    /// every visited node — that meant `keyof T` / `{ [K in S]: V }`
+    /// inside non-selected conditional branches, generic arguments, or
+    /// mapped value bodies dispatched their own `KeyOf` /
+    /// `MappedType` keys under `Published(Expanded)`, reifying
+    /// `outputSchema` / `execute` per-member edges that no caller asked
+    /// for. The demand-driven design treats `Published` as "this exact
+    /// node is the demanded terminal of the current step": composite
+    /// children, inactive branches, and operator-operand subgraphs are
+    /// only descended into when the publication boundary demands them.
+    ///
+    /// Iterative work-stack with two frame kinds:
+    ///
+    /// - `Descend(node, context)` — entry frame. Marks
+    ///   `(node, context)` visited and pushes a `Reduce(node, context)`
+    ///   frame followed by the children selected for that node + context
+    ///   (see [`Self::push_demand_children`]). Children are pushed AFTER
+    ///   the Reduce frame so they pop FIRST — the LIFO stack acts as a
+    ///   post-order traversal.
+    /// - `Reduce(node, context)` — closure frame. All selected children
+    ///   have been reduced into `state.mapping`; invoke
+    ///   `reduce_one(node, context, state)` to produce this node's
+    ///   reduction.
+    ///
+    /// `visited` and `mapping` are keyed by
+    /// `(SemanticNodeId, ProjectionReductionContext)` so a
+    /// `StructuralTransit` reduction does not collide with a
+    /// `Published` reduction on the same node — they are distinct
+    /// evaluations.
+    ///
+    /// Stack-safe for arbitrarily deep acyclic structures (≥5000
+    /// levels; verified by stack-safety regression fixtures in §4.1).
+    // Driven by `raise_and_reduce_with_context` above; reached in production
+    // through the reduce-then-raise output boundary
+    // (materialize_reduced_output_type_expr) from the per-member projectors.
+    fn reduce_graph_node_iterative(
+        &self,
+        root: SemanticNodeId,
+        root_context: ProjectionReductionContext,
+        state: &mut ReduceState,
+    ) -> SemanticNodeId {
+        // Loop-5 instrumentation — count every iterative-reduction
+        // entry. One `raise_and_reduce_with_context` produces exactly one of
+        // these.
+        crate::loop5_instrumentation::RAISE_REDUCE_GRAPH_NODE_ITERATIVE_CALLS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Loop-8 instrumentation — wall-clock attribution for the
+        // iterative-reduction body. Calls counter already bumped
+        // above (Loop 5); this guard adds NS-only on drop.
+        let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new_ns_only(
+            &crate::loop5_instrumentation::REDUCE_GRAPH_NODE_ITERATIVE_NS,
+        );
+
+        self.reduce_subtree(root, root_context, state)
+    }
+
+    /// Reduce the subtree rooted at `root` under `context` using the
+    /// top-down demand-driven work stack. Shares `state.visited` /
+    /// `state.mapping` with the caller so cycles are broken once and a
+    /// dispatch-produced new node can re-enter the reducer without
+    /// re-traversing already-resolved subgraphs.
+    ///
+    /// Each `(node, context)` pair reduces at most once per call to
+    /// [`Self::raise_and_reduce_with_context`] — the visited set
+    /// deduplicates entry.
+    #[allow(dead_code)] // wired by reduce_graph_node_iterative + dispatch_operator_with_recurse.
+    fn reduce_subtree(
+        &self,
+        root: SemanticNodeId,
+        root_context: ProjectionReductionContext,
+        state: &mut ReduceState,
+    ) -> SemanticNodeId {
+        if let Some(&already) = state.mapping.get(&(root, root_context)) {
+            return already;
+        }
+        let mut stack: Vec<ReduceFrame> = Vec::with_capacity(8);
+        stack.push(ReduceFrame {
+            node: root,
+            context: root_context,
+            kind: ReduceFrameKind::Descend,
+        });
+        while let Some(frame) = stack.pop() {
+            match frame.kind {
+                ReduceFrameKind::Descend => {
+                    if !state.visited.insert((frame.node, frame.context)) {
+                        // Already in-progress or completed under this
+                        // context. Mapping carries the reduction once
+                        // it lands; cyclic re-entry returns the raw
+                        // node via the rebuild_* fall-through.
+                        continue;
+                    }
+                    let Some(data) = super::node_data_for(self.ctx, frame.node) else {
+                        // No graph data — record a self-identity
+                        // reduction so callers reading `mapping`
+                        // get the raw node.
+                        state
+                            .mapping
+                            .insert((frame.node, frame.context), frame.node);
+                        continue;
+                    };
+                    // Reduce frame is pushed FIRST so it pops AFTER
+                    // children (LIFO post-order).
+                    stack.push(ReduceFrame {
+                        node: frame.node,
+                        context: frame.context,
+                        kind: ReduceFrameKind::Reduce,
+                    });
+                    self.push_demand_children(&data, frame.context, &mut stack);
+                }
+                ReduceFrameKind::Reduce => {
+                    let reduced = self.reduce_one(frame.node, frame.context, state);
+                    state.mapping.insert((frame.node, frame.context), reduced);
+                }
+            }
+        }
+        state
+            .mapping
+            .get(&(root, root_context))
+            .copied()
+            .unwrap_or(root)
+    }
+
+    /// Push child frames for `data` onto `stack` according to the
+    /// demand-driven traversal rules.
+    ///
+    /// The rules are:
+    ///
+    /// - Aliases (`Alias`) push their target with the SAME context —
+    ///   aliases are semantically transparent and inherit the caller's
+    ///   publication demand.
+    /// - Operator operands (`KeyOf.base`, `Mapped.source`,
+    ///   `Conditional.check`/`extends`, `IndexedAccess.index` typed
+    ///   nodes) push as `StructuralTransit`. Their nested operators
+    ///   carrier-stop under [`super::may_reduce_operator`], so they
+    ///   contribute their structural shape without reifying their own
+    ///   members.
+    /// - `IndexedAccess.object` pushes as `Published(Navigate)` under
+    ///   any `Published` parent (`Foo['a']['b']` walks the path
+    ///   navigate-only at intermediate hops; the terminal hop carries
+    ///   the caller's mode through the dispatch). Under
+    ///   `StructuralTransit` parents, the object pushes as
+    ///   `StructuralTransit` (no path materialisation needed for a
+    ///   transit walk).
+    /// - `Conditional` branches are NOT pushed. The conditional
+    ///   dispatch returns the selected branch as its result; that
+    ///   branch is then reduced inline via
+    ///   [`Self::dispatch_operator_with_recurse`]. Inactive branches
+    ///   are never visited — this is the leak fix.
+    /// - `Mapped.value_expr` / `Mapped.name_remap` / `Mapped.parameter_node`
+    ///   are NOT pushed. The `MappedType` dispatch substitutes the
+    ///   binder and evaluates per-key internally under
+    ///   `StructuralTransit` (see `build.rs:1817` / `1852`).
+    /// - `TypeOf` carries `value_root` + path segments — no semantic
+    ///   children to descend.
+    /// - Composite shapes (`Object` members, `Union` /
+    ///   `Intersection` arms, `Tuple` elements, `Array` element,
+    ///   `Function` params / return / type-param constraints/defaults)
+    ///   are pushed ONLY under whole-surface `Published(Expanded)`.
+    ///   Per the spec, per-prop `Published(Navigate)` /
+    ///   `Published(Shallow)` and `StructuralTransit` callers do NOT
+    ///   traverse composite children — the parent IS the demand
+    ///   terminal. This is the structural leak fix: a per-member
+    ///   publication that resolves to an Object stays shallow at the
+    ///   object surface.
+    /// - `InstantiationRef.args` push under the same context the
+    ///   carrier reduces under (args become substituted into the
+    ///   instantiated body; their demand follows the body's demand).
+    /// - Terminals (`Primitive`, `Literal`, `TypeParam`, `Opaque`,
+    ///   `Infer`, `TemplateLiteral`, `DeclRef`)
+    ///   have no semantic operand children for the iterative reducer
+    ///   to pre-resolve.
+    #[allow(dead_code)] // wired by reduce_subtree above.
+    fn push_demand_children(
+        &self,
+        data: &SemanticNodeData,
+        parent_context: ProjectionReductionContext,
+        stack: &mut Vec<ReduceFrame>,
+    ) {
+        match data {
+            SemanticNodeData::Primitive(_)
+            | SemanticNodeData::Literal(_)
+            | SemanticNodeData::Opaque(_)
+            | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::DeclRef { .. }
+            // Unresolved bare-name / dynamic-import / raw-fallback /
+            // synthetic-binding carriers are resolved as a whole by the
+            // dispatch, not rebuilt by this reducer, so they expose no
+            // operand children to pre-resolve here.
+            | SemanticNodeData::BareRef(_)
+            | SemanticNodeData::ImportType(_)
+            | SemanticNodeData::RawFallback { .. }
+            | SemanticNodeData::SyntheticBinding { .. } => {}
+            SemanticNodeData::Alias(target) => {
+                stack.push(ReduceFrame::descend(*target, parent_context));
+            }
+            // Composite shapes — push children ONLY under whole-surface
+            // `Published(Expanded)`. Per-prop / structural-transit
+            // parents skip composite descent (the parent is the demand
+            // terminal).
+            SemanticNodeData::Object(view) => {
+                if is_whole_surface_published(parent_context) {
+                    for member in view.members.iter() {
+                        stack.push(ReduceFrame::descend(member.value, parent_context));
+                    }
+                    for sig in view.call_signatures.iter() {
+                        stack.push(ReduceFrame::descend(*sig, parent_context));
+                    }
+                    for sig in view.construct_signatures.iter() {
+                        stack.push(ReduceFrame::descend(*sig, parent_context));
+                    }
+                    for sig in view.index_signatures.iter() {
+                        stack.push(ReduceFrame::descend(sig.key_type, parent_context));
+                        stack.push(ReduceFrame::descend(sig.value_type, parent_context));
+                    }
+                    if let Some(ks) = view.keyspace {
+                        stack.push(ReduceFrame::descend(ks, parent_context));
+                    }
+                }
+            }
+            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                if is_whole_surface_published(parent_context) {
+                    for arm in arms.iter() {
+                        stack.push(ReduceFrame::descend(*arm, parent_context));
+                    }
+                }
+            }
+            SemanticNodeData::Array { element, .. } => {
+                if is_whole_surface_published(parent_context) {
+                    stack.push(ReduceFrame::descend(*element, parent_context));
+                }
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                if is_whole_surface_published(parent_context) {
+                    for el in elements.iter() {
+                        stack.push(ReduceFrame::descend(el.value, parent_context));
+                    }
+                }
+            }
+            SemanticNodeData::Function {
+                params,
+                return_type,
+                type_parameters,
+                ..
+            } => {
+                if is_whole_surface_published(parent_context) {
+                    for p in params.iter() {
+                        stack.push(ReduceFrame::descend(p.ty, parent_context));
+                    }
+                    stack.push(ReduceFrame::descend(*return_type, parent_context));
+                    for tp in type_parameters.iter() {
+                        if let Some(c) = tp.constraint {
+                            stack.push(ReduceFrame::descend(c, parent_context));
+                        }
+                        if let Some(d) = tp.default {
+                            stack.push(ReduceFrame::descend(d, parent_context));
+                        }
+                    }
+                }
+            }
+            // Operator shapes — operands push as StructuralTransit
+            // (or Published(Navigate) for IndexedAccess.object under a
+            // Published parent). Branches / mapper-internal nodes are
+            // NEVER eagerly pushed — the dispatch picks the selected
+            // branch or evaluates the mapped value per-key.
+            SemanticNodeData::KeyOf { base } => {
+                stack.push(ReduceFrame::descend(
+                    *base,
+                    ProjectionReductionContext::structural_transit(),
+                ));
+            }
+            SemanticNodeData::IndexedAccess { object, index } => {
+                let object_context = indexed_access_object_context(parent_context);
+                stack.push(ReduceFrame::descend(*object, object_context));
+                if let IndexKey::TypeNode(n) = index {
+                    stack.push(ReduceFrame::descend(
+                        *n,
+                        ProjectionReductionContext::structural_transit(),
+                    ));
+                }
+            }
+            SemanticNodeData::Mapped { source, .. } => {
+                // Source pushes as StructuralTransit for key enumeration.
+                // value_expr / name_remap / parameter_node DO NOT push —
+                // the MappedType dispatch substitutes them per-key under
+                // an internal StructuralTransit evaluation (see
+                // build.rs:1817 / 1852).
+                stack.push(ReduceFrame::descend(
+                    *source,
+                    ProjectionReductionContext::structural_transit(),
+                ));
+            }
+            SemanticNodeData::Conditional { check, extends, .. } => {
+                // Check / extends reduce structurally so the conditional
+                // dispatch can decide the selected branch. The branches
+                // themselves are NOT pre-pushed — demand-driven: only the
+                // SELECTED branch is reduced (via the dispatch result).
+                stack.push(ReduceFrame::descend(
+                    *check,
+                    ProjectionReductionContext::structural_transit(),
+                ));
+                stack.push(ReduceFrame::descend(
+                    *extends,
+                    ProjectionReductionContext::structural_transit(),
+                ));
+            }
+            SemanticNodeData::TypeParam {
+                constraint,
+                default,
+                ..
+            } => {
+                if is_whole_surface_published(parent_context) {
+                    if let Some(c) = constraint {
+                        stack.push(ReduceFrame::descend(*c, parent_context));
+                    }
+                    if let Some(d) = default {
+                        stack.push(ReduceFrame::descend(*d, parent_context));
+                    }
+                }
+            }
+            SemanticNodeData::InstantiationRef { args, .. } => {
+                // Args travel with the carrier — substituted into the
+                // body if the carrier's dispatch reifies. Under
+                // Navigate the carrier stays terminal so args effectively
+                // stay un-reduced via the mapping fall-through.
+                for arg in args.iter() {
+                    stack.push(ReduceFrame::descend(*arg, parent_context));
+                }
+            }
+            SemanticNodeData::MergedDecl { contributors } => {
+                // Same-name merged contributors descend like intersection arms
+                // under whole-surface publication.
+                if is_whole_surface_published(parent_context) {
+                    for contributor in contributors.iter() {
+                        stack.push(ReduceFrame::descend(*contributor, parent_context));
+                    }
+                }
+            }
+            // The constructor signature descends like the function
+            // signature under whole-surface publication.
+            SemanticNodeData::ConstructorType { signature } => {
+                if is_whole_surface_published(parent_context) {
+                    stack.push(ReduceFrame::descend(*signature, parent_context));
+                }
+            }
+        }
+    }
+
+    /// Reduce a single node assuming all its demand-selected children
+    /// have already been reduced into `state.mapping`. Returns the
+    /// reduced `SemanticNodeId`.
+    ///
+    /// `context` carries the publication / structural-transit demand;
+    /// child lookups in `state.mapping` are keyed by
+    /// `(child_node, child_context)` where `child_context` is derived
+    /// per the demand-driven traversal rules (see
+    /// [`Self::push_demand_children`]).
+    ///
+    /// Per-shape table:
+    /// - Operator shapes (`IndexedAccess`, `KeyOf`, `Conditional`,
+    ///   `Mapped`, `TypeOf`) dispatch the matching `SemanticQueryKey`
+    ///   with the caller's `context`. `Value(reduced)` with `reduced
+    ///   != node` recurses through [`Self::dispatch_operator_with_recurse`];
+    ///   `Value(node)` (deferred over a free type parameter or
+    ///   carrier-stop) accepts the form.
+    /// - `DeclRef` / `InstantiationRef`: in `Published(Navigate)` /
+    ///   `StructuralTransit`, terminal (DeclRef still follows aliases
+    ///   because aliases are semantically transparent). In
+    ///   `Published(Expanded)`, dispatch `ResolveDecl` /
+    ///   `Instantiate`.
+    /// - Composite shapes (`Object` / `Union` / `Intersection` /
+    ///   `Array` / `Tuple` / `Function`) rebuild via
+    ///   `intern_preserving_scope` when any child reduced; else return
+    ///   `node` unchanged. Child reductions only land in `mapping`
+    ///   under whole-surface `Published(Expanded)` (demand rule)
+    ///   — so non-whole-surface contexts return the parent verbatim.
+    /// - `TemplateLiteral` / `Infer` hard-stops have no dispatch
+    ///   variant and become `Unknown { raw: "<…>" }`.
+    /// - Terminals (`Primitive` / `Literal` / `TypeParam` / `Opaque(…)`)
+    ///   return `node` as-is.
+    #[allow(dead_code)] // wired by reduce_graph_node_iterative above.
+    fn reduce_one(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        state: &mut ReduceState,
+    ) -> SemanticNodeId {
+        let Some(data) = super::node_data_for(self.ctx, node) else {
+            return node;
+        };
+        let mode = context.mode;
+        match data.as_ref() {
+            // --- DeclPlaceholder unwrap (cross-file decl carrier) ---
+            //
+            // `ResolveDecl` returns
+            // `Opaque(DeclPlaceholder { canonical_id, name, whole_hash })`
+            // as a deferred carrier for cross-file declarations.
+            //
+            // The demand reducer unwraps the placeholder via the
+            // matching `Instantiate { args: [] }` ONLY when the caller's
+            // demand resolves deeply through cross-file aliases:
+            //
+            // - `Published(Expanded)` whole-surface — whole-surface
+            //   materialisation deep-resolves cross-file aliases.
+            // - `Published(Navigate)` — the navigate publication
+            //   inherits the consumer's path-precision intent:
+            //   intermediate hops (`IndexedAccess.object`,
+            //   `DeclRef` followed through an IA chain) resolve to
+            //   their bodies so the next hop / index lookup can
+            //   pattern-match. The body is materialised but the
+            //   surface stays shallow under Navigate because
+            //   `push_demand_children` does not push composite
+            //   children.
+            //
+            // Under `StructuralTransit` the carrier stays in place —
+            // transit walks observe the placeholder structurally.
+            //
+            // The architectural "package-backed alias stays shallow"
+            // rule is enforced at the PROJECTOR layer
+            // (`node_package_backed_object_like_root_with_fence`
+            // gate) — not inside the reducer. Reducer-time unwrap
+            // is unconditional within a `Published` demand because
+            // the projector has already decided the alias chain is
+            // workspace-resolvable.
+            SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                canonical_id,
+                name,
+                whole_hash,
+            }) => {
+                if matches!(context.demand, ReductionDemand::StructuralTransit) {
+                    return node;
+                }
+                // Architectural rule: package-backed alias names stay
+                // shallow at the publication boundary. The placeholder
+                // for a `node_modules`-resident declaration is the
+                // intentional carrier — unwrapping it would inline the
+                // package alias's body into the published surface and
+                // violate the "imported alias names (workspace-owned
+                // OR package-backed) — stay shallow regardless of
+                // where they live" half of the shallow-by-default
+                // rule. The projector-layer gate
+                // (`node_package_backed_object_like_root_with_fence`)
+                // only sees the OUTER raised root; a workspace-rooted
+                // IA whose value lands on a package-backed alias
+                // bypasses it. This check is the reducer-side mirror.
+                if self.ctx.workspace_is_package_backed(canonical_id.as_ref()) {
+                    return node;
+                }
+                // The placeholder's `whole_hash` is diagnostic payload only;
+                // the `Instantiate` key is content-free (R6) and the cold
+                // build re-sources the live whole_hash from
+                // `ensure_indexed_ready_serve`.
+                let _ = whole_hash;
+                let base = self.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
+                let inst_ctx = self.instantiate_context_for(&base.defining_canonical, context);
+                let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                    base,
+                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    inst_ctx,
+                ));
+                self.dispatch_operator_with_recurse(node, key, context, state)
+            }
+
+            // --- terminal shapes ---
+            SemanticNodeData::Primitive(_)
+            | SemanticNodeData::Literal(_)
+            | SemanticNodeData::TypeParam { .. }
+            | SemanticNodeData::Opaque(_)
+            // Raw-fallback / synthetic-binding carriers pass through this
+            // reducer unchanged — the dispatch resolves them as a whole.
+            | SemanticNodeData::RawFallback { .. }
+            | SemanticNodeData::SyntheticBinding { .. } => node,
+
+            // Unresolved bare-name / dynamic-import reference carriers: a
+            // PUBLISHED demand completes carrier-head resolution through the
+            // ONE shared normalization seam (the same
+            // `resolve_carrier_subject_node` re-entry the path-walker's
+            // terminal arm drives) — under `Navigate` the head resolves to
+            // its identity carrier (shallow-by-default preserved; closed
+            // builtins execute per the lowering gate), under `Expanded` the
+            // resolution completes eagerly. Carrier-preserving on failure: a
+            // self / opaque result keeps the shallow carrier, and a
+            // structural-transit walk keeps the carrier fully terminal.
+            SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
+                if matches!(context.demand, ReductionDemand::Published) {
+                    let resolved = self.resolve_carrier_subject_node(node, context);
+                    if resolved != node
+                        && !matches!(
+                            self.graph().node_data(resolved).as_deref(),
+                            Some(SemanticNodeData::Opaque(_))
+                        )
+                    {
+                        return self.reduce_subtree(resolved, context, state);
+                    }
+                }
+                node
+            }
+
+            // --- hard-stop operator shapes (no dispatch variant) ---
+            SemanticNodeData::TemplateLiteral { .. } => {
+                self.opaque_unknown_with(node, "<unresolved template literal type>")
+            }
+            SemanticNodeData::Infer { .. } => {
+                self.opaque_unknown_with(node, "<unresolved infer type>")
+            }
+
+            // --- alias unwrap: follow target's reduction ---
+            SemanticNodeData::Alias(target) => state
+                .mapping
+                .get(&(*target, context))
+                .copied()
+                .unwrap_or(*target),
+
+            // --- operator dispatches (context-aware via underlying key) ---
+            SemanticNodeData::IndexedAccess { object, index } => {
+                let object_context = indexed_access_object_context(context);
+                let object = state
+                    .mapping
+                    .get(&(*object, object_context))
+                    .copied()
+                    .unwrap_or(*object);
+                let index = index.clone();
+                self.dispatch_operator_with_recurse(
+                    node,
+                    SemanticQueryKey::IndexedAccess {
+                        base: object,
+                        index,
+                        mode,
+                    },
+                    context,
+                    state,
+                )
+            }
+            SemanticNodeData::KeyOf { base } => {
+                let base_context = ProjectionReductionContext::structural_transit();
+                let base = state
+                    .mapping
+                    .get(&(*base, base_context))
+                    .copied()
+                    .unwrap_or(*base);
+                // raise.rs is a publication-path consumer (the bounded
+                // fixed-point reducer + the typed-IR raise). Forward
+                // the caller's context — `Published(Expanded)` reifies
+                // the keyspace; `Published(Navigate)` /
+                // `StructuralTransit` carrier-stop per
+                // `may_reduce_operator`.
+                self.dispatch_operator_with_recurse(
+                    node,
+                    SemanticQueryKey::KeyOf { base, context },
+                    context,
+                    state,
+                )
+            }
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                distributive,
+            } => {
+                let operand_context = ProjectionReductionContext::structural_transit();
+                let check = state
+                    .mapping
+                    .get(&(*check, operand_context))
+                    .copied()
+                    .unwrap_or(*check);
+                let extends = state
+                    .mapping
+                    .get(&(*extends, operand_context))
+                    .copied()
+                    .unwrap_or(*extends);
+                // Branches are NOT pre-pushed — the dispatch picks the
+                // selected branch and `dispatch_operator_with_recurse`
+                // reduces only that branch under the caller's context
+                // (demand-driven: "reduce only the selected branch").
+                let true_branch = *true_branch_ref;
+                let false_branch = *false_branch_ref;
+                let distributive = *distributive;
+                let reduced = self.dispatch_operator_with_recurse(
+                    node,
+                    SemanticQueryKey::Conditional {
+                        check,
+                        extends,
+                        true_branch,
+                        false_branch,
+                        distributive,
+                    },
+                    context,
+                    state,
+                );
+                // OPEN-conditional demand distribution: when the oracle
+                // DEFERS (the result stays a `Conditional` shell), a
+                // whole-surface `Published(Expanded)` demand distributes
+                // into BOTH branches — each branch reduces under the
+                // caller's context and the shell is rebuilt around the
+                // reduced branch refs. Decided conditionals are untouched
+                // (only the selected branch was reduced), and carrier /
+                // per-prop demands keep the shell fully symbolic.
+                if is_whole_surface_published(context) {
+                    if let Some(SemanticNodeData::Conditional {
+                        check: d_check,
+                        extends: d_extends,
+                        true_branch_ref: d_true,
+                        false_branch_ref: d_false,
+                        distributive: d_dist,
+                    }) = self.graph().node_data(reduced).as_deref().cloned()
+                    {
+                        let reduced_true = self.reduce_subtree(d_true, context, state);
+                        let reduced_false = self.reduce_subtree(d_false, context, state);
+                        if reduced_true != d_true || reduced_false != d_false {
+                            return self.graph().intern_preserving_scope(
+                                reduced,
+                                SemanticNodeData::Conditional {
+                                    check: d_check,
+                                    extends: d_extends,
+                                    true_branch_ref: reduced_true,
+                                    false_branch_ref: reduced_false,
+                                    distributive: d_dist,
+                                },
+                            );
+                        }
+                    }
+                }
+                reduced
+            }
+            SemanticNodeData::Mapped { source, mapper } => {
+                let source_context = ProjectionReductionContext::structural_transit();
+                let source = state
+                    .mapping
+                    .get(&(*source, source_context))
+                    .copied()
+                    .unwrap_or(*source);
+                // Re-key the mapper's `key_space` from any reduction the
+                // source push produced. `value_expr` / `name_remap` /
+                // `parameter_node` are NOT in mapping — the dispatch
+                // substitutes the binder and evaluates per-key
+                // internally.
+                let mapper = remap_mapper(mapper, &state.mapping, source_context);
+                self.dispatch_operator_with_recurse(
+                    node,
+                    SemanticQueryKey::MappedType {
+                        source,
+                        mapper,
+                        context,
+                    },
+                    context,
+                    state,
+                )
+            }
+            SemanticNodeData::TypeOf(_) => {
+                // `typeof value.path<args>`: resolve the value root through the
+                // single typeof query, PROJECT the carrier's dotted path, THEN
+                // apply the carrier's instantiation `type_args` to the projected
+                // signature (resolve → project → apply, mirroring the eager
+                // lowering order and the evaluate/walk arms). This is the
+                // SEMANTIC reduction path (the structural raise/round-trip
+                // preserves `type_args` separately in the
+                // `shape_engine::fold_node` materialisation algebra); the final
+                // reduced node is driven through the demand reducer below.
+                let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+                let value_root = value_root.clone();
+                let path = Arc::clone(path);
+                // Read the carrier args from the SAME borrow (owned copy so the
+                // `data` borrow is not held across the apply call).
+                let type_args: Vec<SemanticNodeId> = data.carrier_type_args().to_vec();
+
+                // 1. Resolve the typeof value root.
+                let typeof_key = self.typeof_key_for(value_root, context);
+                let root_read = self.execute_read(typeof_key);
+                state.merge_dep_signature(&root_read.dep_signature);
+                if root_read.result_is_partial {
+                    state.result_is_partial = true;
+                    crate::request_context::mark_request_result_partial();
+                }
+                let root = match root_read.value {
+                    QueryResult::Value(id) => id,
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => return node,
+                };
+
+                // 2. Project the carrier's dotted path (intermediate hops run in
+                //    Navigate per the path-precision rule, mirroring evaluate).
+                let projected = if path.is_empty() {
+                    root
+                } else {
+                    let projection_path: Arc<[PathSegment]> = Arc::from(
+                        path.iter()
+                            .map(|segment| PathSegment::Member(Arc::clone(segment)))
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    );
+                    let path_read = self.execute_read(SemanticQueryKey::ProjectPath {
+                        base: root,
+                        path: projection_path,
+                        context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                    });
+                    state.merge_dep_signature(&path_read.dep_signature);
+                    if path_read.result_is_partial {
+                        state.result_is_partial = true;
+                        crate::request_context::mark_request_result_partial();
+                    }
+                    match path_read.value {
+                        QueryResult::Value(id) => id,
+                        QueryResult::Recursive(_) | QueryResult::Error(_) => return node,
+                    }
+                };
+
+                // 3. Apply the instantiation `type_args` to the projected
+                //    signature. An arity/shape mismatch composes an honest
+                //    `Opaque(Miss)` AFTER the projection.
+                let final_node = if type_args.is_empty() {
+                    projected
+                } else {
+                    self.apply_typeof_instantiation_args(projected, &type_args)
+                };
+
+                // 4. Drive the reduced node through the demand reducer (same
+                //    result-threading as `dispatch_operator_with_recurse`):
+                //    a self-identity result stays put; an already-reduced node
+                //    is reused; otherwise its demanded children reduce under
+                //    `context`.
+                if final_node == node {
+                    node
+                } else if let Some(&already_reduced) = state.mapping.get(&(final_node, context)) {
+                    already_reduced
+                } else {
+                    self.reduce_subtree(final_node, context, state)
+                }
+            }
+
+            // --- lazy carriers ---
+            SemanticNodeData::DeclRef { identity } => {
+                if self.observation_interior_carrier_stop(node, &identity.canonical_id, state) {
+                    // Observation fence: an INTERIOR owner-local /
+                    // package-backed reference inside an observed
+                    // published source stays the shallow carrier — the
+                    // consumer re-resolves it on demand (registry entry
+                    // / package registry respectively).
+                    return node;
+                }
+                if matches!(mode, ProjectionMode::Navigate)
+                    && userland_instantiation_body_is_closed_object(self.ctx, identity)
+                {
+                    // A `Published(Navigate)` terminal that lands ON a
+                    // closed-object declaration (a nominal interface)
+                    // stays the declaration-reference carrier — the
+                    // published shape is identical to writing the plain
+                    // reference, and the consumer re-resolves it on
+                    // demand (shallow-by-default). This mirrors the
+                    // `InstantiationRef` closed-object carve-out below.
+                    // Alias / operator-bodied declarations still
+                    // resolve: aliases are semantically transparent and
+                    // an operator body is the demanded reduction.
+                    //
+                    // The verdict consulted the declaring file's
+                    // prepared body — root it on the active fact tracer
+                    // so a body-shape edit invalidates the published
+                    // entry.
+                    observe_closedness_walk_consult(self.ctx, identity.canonical_id.as_ref());
+                    return node;
+                }
+                // Navigate follows alias chains because aliases are
+                // semantically transparent. Dispatch and recurse — same
+                // as Expanded for DeclRef.
+                let scope = ScopeId {
+                    canonical_id: Arc::clone(&identity.canonical_id),
+                    local_scope: None,
+                };
+                let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                    scope,
+                    name: Arc::clone(&identity.decl_name),
+                });
+                self.dispatch_operator_with_recurse(node, key, context, state)
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                if self.observation_interior_carrier_stop(node, &base.canonical_id, state) {
+                    // Observation fence: an INTERIOR owner-local /
+                    // package-backed generic application inside an
+                    // observed published source stays the shallow
+                    // carrier `Ref { name, [substituted args] }` — the
+                    // consumer re-resolves it on demand.
+                    return node;
+                }
+                if matches!(context.demand, ReductionDemand::StructuralTransit) {
+                    // Demand-driven: an InstantiationRef inspected by a
+                    // structural-transit caller stays terminal —
+                    // structural observation only; do not reify the
+                    // body.
+                    return node;
+                }
+                if matches!(mode, ProjectionMode::Navigate)
+                    && base.canonical_id.as_ref() != "__builtin__"
+                    && userland_instantiation_body_is_closed_object(self.ctx, base)
+                {
+                    // ChatMessages leak verdict: a
+                    // userland `InstantiationRef` at a
+                    // `Published(Navigate)` publication terminal
+                    // STAYS TERMINAL **when its declared body is a
+                    // closed Object surface** (a generic interface
+                    // like `Tool<INPUT, OUTPUT> { outputSchema:
+                    // ..., execute: ... }`). The earlier
+                    // `Pub(Expanded)` hardcoding eagerly unwrapped
+                    // these and fired
+                    // `ProjectMember(outputSchema|execute)` audit
+                    // edges that no caller demanded.
+                    //
+                    // Userland generic HELPERS whose body is
+                    // operator-shaped (`Lookup<M, I> = M[I]`,
+                    // `MyPick<X, K> = { [P in K]: X[P] }`, etc.)
+                    // DO reduce even under Navigate —
+                    // the type-arg substitution into an operator
+                    // body is the "demanded instantiation is
+                    // reduced as the terminal" case. Closed-object
+                    // bodies behave like nominal interfaces, not
+                    // operator helpers.
+                    //
+                    // Builtin utility types (`Pick`/`Omit`/...,
+                    // `canonical_id == "__builtin__"`) do not match this
+                    // closed-object carve-out — they are gated by the
+                    // open-enumeration-domain carrier-stop (L1) below.
+                    return node;
+                }
+                // L1 (Shallow-By-Default), route/mode-INDEPENDENT: an
+                // object-filter utility (`Pick`/`Omit`) whose enumeration
+                // domain (source argument) is OPEN — an unbound generic, an
+                // open conditional/mapped/indexed/keyof, an instantiation
+                // over open args, or an unresolved declaration — STAYS a
+                // shallow carrier instead of materialising its source, in
+                // EVERY demand context / mode. Materialising an open source
+                // degenerates into full cross-file generic expansion (the
+                // `ChatMessages.vue` `Pick<PropsBase<T>, …>` storm and the
+                // `Table.vue` `Omit<CoreOptions<T>, …>` structural memo-cycle).
+                // A CLOSED source (finite object surface / concrete
+                // instantiation) still materialises path-precisely, in every
+                // mode.
+                //
+                // The domain args are substituted through `mapping` first so a
+                // bound type argument (a closed instantiation) is judged
+                // closed and still reduces.
+                let resolved_args: Vec<SemanticNodeId> = args
+                    .iter()
+                    .map(|id| state.mapping.get(&(*id, context)).copied().unwrap_or(*id))
+                    .collect();
+                if utility_enumeration_domain_is_open_or_unknown(self, base, &resolved_args) {
+                    return node;
+                }
+                let base_key =
+                    self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+                // Observation passes run the Instantiate query itself
+                // CARRIER-PRESERVING (`Published(Shallow)`): the outer
+                // substitution executes, but the substituted body keeps its
+                // interior `DeclRef`/`InstantiationRef` carriers so the
+                // observation fence can hold owner-local / package-backed
+                // member values shallow while the observation walk (the
+                // caller `context`) expands the rest. Non-observation passes
+                // keep the caller-context-derived instantiate demand.
+                let inst_projection = if state.observation.is_some() {
+                    ProjectionReductionContext::published(ProjectionMode::Shallow)
+                } else {
+                    context
+                };
+                let inst_ctx = self.instantiate_context_for(&base.canonical_id, inst_projection);
+                let args: Arc<[SemanticNodeId]> = Arc::from(
+                    args.iter()
+                        .map(|id| state.mapping.get(&(*id, context)).copied().unwrap_or(*id))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+                let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(base_key, args, inst_ctx));
+                self.dispatch_operator_with_recurse(node, key, context, state)
+            }
+
+            // --- composite rebuilds via intern_preserving_scope ---
+            //
+            // Composite children are only reduced under whole-surface
+            // `Published(Expanded)` (demand traversal rule). For
+            // per-prop `Published(Navigate)` / `Published(Shallow)` and
+            // `StructuralTransit`, the composite parent is the demand
+            // terminal — the `rebuild_*` helpers see no child entries
+            // in `mapping` and return `node` unchanged.
+            SemanticNodeData::Object(_) => {
+                rebuild_object(self, node, &state.mapping, context).unwrap_or(node)
+            }
+            SemanticNodeData::Union(arms) => rebuild_union_or_intersection(
+                self,
+                node,
+                arms,
+                /* is_union */ true,
+                &state.mapping,
+                context,
+            )
+            .unwrap_or(node),
+            SemanticNodeData::Intersection(arms) => rebuild_union_or_intersection(
+                self,
+                node,
+                arms,
+                /* is_union */ false,
+                &state.mapping,
+                context,
+            )
+            .unwrap_or(node),
+            SemanticNodeData::Array { element, readonly } => {
+                let new_elem = state
+                    .mapping
+                    .get(&(*element, context))
+                    .copied()
+                    .unwrap_or(*element);
+                if new_elem == *element {
+                    node
+                } else {
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Array {
+                            element: new_elem,
+                            readonly: *readonly,
+                        },
+                    )
+                }
+            }
+            SemanticNodeData::Tuple { elements, readonly } => {
+                rebuild_tuple(self, node, elements, *readonly, &state.mapping, context)
+                    .unwrap_or(node)
+            }
+            SemanticNodeData::Function {
+                params,
+                return_type,
+                type_parameters,
+                signature_span,
+                return_type_span,
+            } => rebuild_function(
+                self,
+                node,
+                params,
+                *return_type,
+                type_parameters,
+                *signature_span,
+                *return_type_span,
+                &state.mapping,
+                context,
+            )
+            .unwrap_or(node),
+            SemanticNodeData::MergedDecl { contributors } => {
+                // Reduce the peer-merged surface, then drive it through the
+                // reducer so its demanded children reduce under `context`.
+                let merged = self.reduce_merged_decl(contributors);
+                if let Some(&already) = state.mapping.get(&(merged, context)) {
+                    already
+                } else {
+                    self.reduce_subtree(merged, context, state)
+                }
+            }
+            // Structural fidelity carriers rebuild from their reduced single
+            // child (like `Array` / `Function`): if the child is unchanged
+            // the shell is preserved, else a scope-preserving shell is
+            // re-interned.
+            SemanticNodeData::ConstructorType { signature } => {
+                let new_sig = state
+                    .mapping
+                    .get(&(*signature, context))
+                    .copied()
+                    .unwrap_or(*signature);
+                if new_sig == *signature {
+                    node
+                } else {
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ConstructorType {
+                            signature: new_sig,
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    /// Helper: dispatch `key` and accumulate the dep_signature from the
+    /// `CacheRead`.
+    ///
+    /// On `Value(result)`:
+    /// - if `result == node` (deferred form), return `node` unchanged.
+    /// - if `result != node`, recursively reduce `result` (it may itself
+    ///   contain further operator nodes), then return that.
+    ///
+    /// On `Recursive(id)` or `Error(_)`: return `node` (deferred form).
+    #[allow(dead_code)] // wired by reduce_one above.
+    fn dispatch_operator_with_recurse(
+        &self,
+        node: SemanticNodeId,
+        key: SemanticQueryKey,
+        context: ProjectionReductionContext,
+        state: &mut ReduceState,
+    ) -> SemanticNodeId {
+        // Loop-5 instrumentation — every operator-node dispatch issues
+        // one `execute_read` (which routes through `execute_cooperative`).
+        crate::loop5_instrumentation::DISPATCH_OPERATOR_WITH_RECURSE_CALLS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Loop-7 instrumentation — per-`SemanticQueryKey`-variant
+        // wall-clock attribution. The kind index is captured BEFORE
+        // `execute_read` consumes the key. The wall-clock window
+        // covers `execute_read` (warm-hit fast-path AND cold-build
+        // close-down) AND any recursive `reduce_subtree` follow-up the
+        // dispatch triggers — i.e. the entire wall-clock cost
+        // attributable to this single operator-node dispatch.
+        let kind_idx = crate::loop5_instrumentation::kind_index_for_key(&key);
+        crate::loop5_instrumentation::DISPATCH_OPERATOR_KIND_CALLS[kind_idx]
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dispatch_started = Instant::now();
+
+        let read = self.execute_read(key);
+        state.merge_dep_signature(&read.dep_signature);
+        // Partial-result propagation: a `result_is_partial=true` read
+        // means the semantic dispatch produced a PARTIAL outcome (budget
+        // exhaustion / cancellation / same-path recursion / walker
+        // fatal). Such a result must not warm any shared cache. Mark the
+        // per-reduce-state flag so the enclosing
+        // `raise_and_reduce_with_context` returns a `MaterializedTypeExpr`
+        // carrying `result_is_partial=true`, AND raise the request-scoped
+        // sticky bit so downstream callers (the projector second pass, the
+        // final ComponentMeta cache admission gate) observe it without
+        // needing a hand-threaded return value. A benign non-cacheable
+        // read (`cache_suppress` without partiality — ReturnOnly /
+        // overflow / unrootable self-root) is NOT folded here: it refuses
+        // only its own inner-memo admission and MUST NOT suppress a
+        // complete component-meta result.
+        if read.result_is_partial {
+            state.result_is_partial = true;
+            crate::request_context::mark_request_result_partial();
+        }
+        let result = match read.value {
+            QueryResult::Value(result) => {
+                if result == node {
+                    node
+                } else if let Some(&already_reduced) = state.mapping.get(&(result, context)) {
+                    already_reduced
+                } else {
+                    // The dispatch produced a new node not yet in
+                    // `mapping`. Drive it through the iterative
+                    // reducer's worklist so its demanded children are
+                    // selectively reduced under `context` (the
+                    // demand-traversal rule). Cycle protection: the
+                    // shared `visited` set deduplicates re-entry.
+                    self.reduce_subtree(result, context, state)
+                }
+            }
+            QueryResult::Recursive(_id) => node,
+            QueryResult::Error(_) => node,
+        };
+
+        let elapsed_ns = dispatch_started.elapsed().as_nanos() as u64;
+        crate::loop5_instrumentation::DISPATCH_OPERATOR_KIND_NS[kind_idx]
+            .fetch_add(elapsed_ns, std::sync::atomic::Ordering::Relaxed);
+        crate::loop5_instrumentation::DISPATCH_OPERATOR_TOTAL_NS
+            .fetch_add(elapsed_ns, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
+
+    /// Helper: convert a reducer-driven hard-stop into an
+    /// `Opaque(QueryError::Other(reason))` interned at the origin node's
+    /// scope so subsequent raises render the documented sentinel.
+    #[allow(dead_code)] // wired by reduce_one above.
+    fn opaque_unknown_with(&self, origin: SemanticNodeId, reason: &str) -> SemanticNodeId {
+        self.graph().intern_preserving_scope(
+            origin,
+            SemanticNodeData::Opaque(QueryError::Other(Arc::from(reason))),
+        )
+    }
+}
+
+/// `(SemanticNodeId, ProjectionReductionContext)` → `SemanticNodeId`
+/// map used by the reducer to fetch already-reduced operand / child
+/// reductions. Keyed by the operand's own context so a structural-
+/// transit reduction does not collide with a publication reduction of
+/// the same node.
+type MappingMap =
+    rustc_hash::FxHashMap<(SemanticNodeId, ProjectionReductionContext), SemanticNodeId>;
+
+/// Top-down demand reducer work-stack frame.
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // wired by reduce_subtree.
+enum ReduceFrameKind {
+    /// Mark `(node, context)` visited, push the matching `Reduce`
+    /// frame, then push the demand-selected children.
+    Descend,
+    /// All demand-selected children have been reduced into
+    /// `state.mapping`; invoke `reduce_one(node, context, state)` and
+    /// record the result.
+    Reduce,
+}
+
+#[allow(dead_code)] // wired by reduce_subtree.
+struct ReduceFrame {
+    node: SemanticNodeId,
+    context: ProjectionReductionContext,
+    kind: ReduceFrameKind,
+}
+
+#[allow(dead_code)] // wired by reduce_subtree.
+impl ReduceFrame {
+    #[inline]
+    fn descend(node: SemanticNodeId, context: ProjectionReductionContext) -> Self {
+        Self {
+            node,
+            context,
+            kind: ReduceFrameKind::Descend,
+        }
+    }
+}
+
+/// `true` when `ctx` is the demand-driven whole-surface publication
+/// demand (`Published + Expanded`). Composite-child traversal pushes
+/// descend frames ONLY in this case; per-prop `Published(Navigate)` /
+/// `Published(Shallow)` and any `StructuralTransit` walk treat the
+/// composite parent as the demand terminal.
+#[allow(dead_code)] // wired by push_demand_children + child-context helpers.
+#[inline]
+fn is_whole_surface_published(ctx: ProjectionReductionContext) -> bool {
+    matches!(ctx.demand, ReductionDemand::Published) && matches!(ctx.mode, ProjectionMode::Expanded)
+}
+
+/// Derive the `IndexedAccess.object` operand context from the parent
+/// IndexedAccess's reduction context.
+///
+/// The demand-driven reducer spec ("`Foo['a']['b']`: intermediate hops are
+/// navigate-only, terminal uses caller mode") describes the
+/// PATH-WALK semantics inside the dispatch's `ProjectPath` builder.
+/// At the iterative-reducer layer the object operand must be REDUCED
+/// enough for the `IndexedAccess` dispatch to look up the index — so
+/// a generic instantiation like `Pick<Foo, 'a'>` materialises its
+/// body and the indexed access can pick `'a'` out of it.
+///
+/// Under any `Published` parent → demote the object operand to
+/// [`ProjectionMode::Navigate`] (demand + provenance + merge_role
+/// preserved). The object operand is the INTERMEDIATE hop of the
+/// indexed-access path (`Root['a']` in `Root['a']['b']`): it must be
+/// navigated (followed through aliases / generic bodies so the outer
+/// `IndexedAccess` dispatch can look up the index) but NOT expanded.
+/// Only the OUTER `IndexedAccess` dispatch keeps the caller's mode, so
+/// the terminal consumed segment is the sole one that expands. This is
+/// the path-precision rule "intermediate hops run in Navigate, the
+/// terminal hop runs in the caller's mode" applied to the
+/// raise/materialize reducer. Inheriting the parent's mode here would
+/// over-expand the intermediate object (e.g. materialise the sibling
+/// members of `Root['a']` that the path never selects) — the
+/// shallow-by-default violation this demotion fixes.
+///
+/// Under `StructuralTransit` parent → `StructuralTransit` (the transit
+/// walk observes the object structurally without materialising it).
+#[allow(dead_code)] // wired by push_demand_children + reduce_one IndexedAccess.
+#[inline]
+fn indexed_access_object_context(
+    parent_context: ProjectionReductionContext,
+) -> ProjectionReductionContext {
+    if matches!(parent_context.demand, ReductionDemand::Published) {
+        parent_context.with_mode(ProjectionMode::Navigate)
+    } else {
+        ProjectionReductionContext::structural_transit()
+    }
+}
+
+/// Re-key a `MapperKey` using `mapping` (substituting any reduced
+/// `key_space` id from the demand walk). The mapper's `value_expr` /
+/// `name_remap` / `parameter_node` are NOT looked up — the dispatch
+/// substitutes them per-key internally under a structural-transit
+/// evaluation (see [`crate::project_semantic_dispatch::evaluate`]'s
+/// context-explicit variant).
+#[allow(dead_code)] // wired by reduce_one above.
+fn remap_mapper(
+    mapper: &MapperKey,
+    mapping: &MappingMap,
+    source_context: ProjectionReductionContext,
+) -> MapperKey {
+    let mut new_mapper = mapper.clone();
+    new_mapper.key_space = mapping
+        .get(&(mapper.key_space, source_context))
+        .copied()
+        .unwrap_or(mapper.key_space);
+    new_mapper
+}
+
+#[allow(dead_code)] // wired by reduce_one above.
+fn rebuild_object(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    mapping: &MappingMap,
+    context: ProjectionReductionContext,
+) -> Option<SemanticNodeId> {
+    let data = super::node_data_for(dispatch.ctx, node)?;
+    let SemanticNodeData::Object(view) = data.as_ref() else {
+        return None;
+    };
+    let mut changed = false;
+    let new_members: Arc<[SurfaceMember]> = {
+        let mut out: Vec<SurfaceMember> = Vec::with_capacity(view.members.len());
+        for m in view.members.iter() {
+            let new_value = mapping.get(&(m.value, context)).copied().unwrap_or(m.value);
+            if new_value != m.value {
+                changed = true;
+            }
+            out.push(SurfaceMember {
+                value: new_value,
+                ..m.clone()
+            });
+        }
+        Arc::from(out.into_boxed_slice())
+    };
+    let new_calls: Arc<[SemanticNodeId]> = {
+        let mut out = Vec::with_capacity(view.call_signatures.len());
+        for sig in view.call_signatures.iter() {
+            let new_sig = mapping.get(&(*sig, context)).copied().unwrap_or(*sig);
+            if new_sig != *sig {
+                changed = true;
+            }
+            out.push(new_sig);
+        }
+        Arc::from(out.into_boxed_slice())
+    };
+    let new_constructs: Arc<[SemanticNodeId]> = {
+        let mut out = Vec::with_capacity(view.construct_signatures.len());
+        for sig in view.construct_signatures.iter() {
+            let new_sig = mapping.get(&(*sig, context)).copied().unwrap_or(*sig);
+            if new_sig != *sig {
+                changed = true;
+            }
+            out.push(new_sig);
+        }
+        Arc::from(out.into_boxed_slice())
+    };
+    if !changed {
+        return Some(node);
+    }
+    let new_view = SurfaceView {
+        members: new_members,
+        call_signatures: new_calls,
+        construct_signatures: new_constructs,
+        index_signatures: view.index_signatures.clone(),
+        keyspace: view.keyspace,
+        has_index_signature: view.has_index_signature,
+    };
+    Some(
+        dispatch
+            .graph()
+            .intern_preserving_scope(node, SemanticNodeData::Object(new_view)),
+    )
+}
+
+#[allow(dead_code)] // wired by reduce_one above.
+fn rebuild_union_or_intersection(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    arms: &Arc<[SemanticNodeId]>,
+    is_union: bool,
+    mapping: &MappingMap,
+    context: ProjectionReductionContext,
+) -> Option<SemanticNodeId> {
+    let mut changed = false;
+    let new_arms: Vec<SemanticNodeId> = arms
+        .iter()
+        .map(|arm| {
+            let new = mapping.get(&(*arm, context)).copied().unwrap_or(*arm);
+            if new != *arm {
+                changed = true;
+            }
+            new
+        })
+        .collect();
+    if !changed {
+        return Some(node);
+    }
+    let data = if is_union {
+        SemanticNodeData::Union(Arc::from(new_arms.into_boxed_slice()))
+    } else {
+        SemanticNodeData::Intersection(Arc::from(new_arms.into_boxed_slice()))
+    };
+    Some(dispatch.graph().intern_preserving_scope(node, data))
+}
+
+#[allow(dead_code)] // wired by reduce_one above.
+fn rebuild_tuple(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    elements: &Arc<[TupleElement]>,
+    readonly: bool,
+    mapping: &MappingMap,
+    context: ProjectionReductionContext,
+) -> Option<SemanticNodeId> {
+    let mut changed = false;
+    let new_elements: Vec<TupleElement> = elements
+        .iter()
+        .map(|el| {
+            let new_value = mapping
+                .get(&(el.value, context))
+                .copied()
+                .unwrap_or(el.value);
+            if new_value != el.value {
+                changed = true;
+            }
+            TupleElement {
+                value: new_value,
+                ..el.clone()
+            }
+        })
+        .collect();
+    if !changed {
+        return Some(node);
+    }
+    Some(dispatch.graph().intern_preserving_scope(
+        node,
+        SemanticNodeData::Tuple {
+            elements: Arc::from(new_elements.into_boxed_slice()),
+            readonly,
+        },
+    ))
+}
+
+#[allow(dead_code)] // wired by reduce_one above.
+#[allow(clippy::too_many_arguments)]
+fn rebuild_function(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    params: &Arc<[crate::semantic_query::FunctionParam]>,
+    return_type: SemanticNodeId,
+    type_parameters: &Arc<[crate::semantic_query::TypeParamDecl]>,
+    signature_span: Option<verter_span::Span>,
+    return_type_span: Option<verter_span::Span>,
+    mapping: &MappingMap,
+    context: ProjectionReductionContext,
+) -> Option<SemanticNodeId> {
+    let mut changed = false;
+    let new_params: Vec<crate::semantic_query::FunctionParam> = params
+        .iter()
+        .map(|p| {
+            let new_ty = mapping.get(&(p.ty, context)).copied().unwrap_or(p.ty);
+            if new_ty != p.ty {
+                changed = true;
+            }
+            crate::semantic_query::FunctionParam {
+                ty: new_ty,
+                ..p.clone()
+            }
+        })
+        .collect();
+    let new_return = mapping
+        .get(&(return_type, context))
+        .copied()
+        .unwrap_or(return_type);
+    if new_return != return_type {
+        changed = true;
+    }
+    let new_type_params: Vec<crate::semantic_query::TypeParamDecl> = type_parameters
+        .iter()
+        .map(|tp| {
+            let new_constraint = tp
+                .constraint
+                .map(|c| mapping.get(&(c, context)).copied().unwrap_or(c));
+            let new_default = tp
+                .default
+                .map(|d| mapping.get(&(d, context)).copied().unwrap_or(d));
+            if new_constraint != tp.constraint || new_default != tp.default {
+                changed = true;
+            }
+            crate::semantic_query::TypeParamDecl {
+                constraint: new_constraint,
+                default: new_default,
+                ..tp.clone()
+            }
+        })
+        .collect();
+    if !changed {
+        return Some(node);
+    }
+    Some(dispatch.graph().intern_preserving_scope(
+        node,
+        SemanticNodeData::Function {
+            params: Arc::from(new_params.into_boxed_slice()),
+            return_type: new_return,
+            type_parameters: Arc::from(new_type_params.into_boxed_slice()),
+            // Node remapping preserves source provenance.
+            signature_span,
+            return_type_span,
+        },
+    ))
+}
+
+// The materialization-grade result of the reduce-then-raise boundary is
+// the sealed [`MaterializedOutputTypeExpr`] carrier
+// (`super::output_materialization`): a private inner sealed `type_expr`
+// payload (capability-gated unwrap) plus the readable facts-rail metadata
+// (`node_id` / `dep_signature` / `result_is_partial`). The all-`pub`-field
+// `MaterializedTypeExpr` struct that previously lived here is retired —
+// handing back a bare `TypeExpr` field at the boundary was the laundering
+// surface the output-materialization capability fence closes.
+
+// Accumulator for `raise_and_reduce_with_context`; reached in production
+// through the reduce-then-raise output boundary from the per-member
+// projectors.
+#[derive(Default)]
+struct ReduceState {
+    visited: FxHashSet<(SemanticNodeId, ProjectionReductionContext)>,
+    mapping: MappingMap,
+    dep_facts: Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+    /// OR-fold of every `read.result_is_partial` observed by `reduce_one`
+    /// during this reduce pass. Propagated into the returned
+    /// `MaterializedTypeExpr.result_is_partial` so direct consumers
+    /// (e.g. `field_types::materialize_component_meta_type_expr_until_stable_full`)
+    /// can refuse to publish a PARTIAL result into shared caches without
+    /// needing to inspect the request-scoped TLS flag. NOT set by a
+    /// benign non-cacheable read (`cache_suppress` without partiality).
+    result_is_partial: bool,
+    /// Consumer-OBSERVATION carrier fence: `Some((owner_canonical, root))`
+    /// when this reduce pass is the observation of a PUBLISHED
+    /// `SemanticTypeSource` (the consumer read of a registry entry / prop
+    /// source). The observation executes the OUTER carrier — the demand
+    /// `root` always resolves/instantiates, so an authored generic-alias
+    /// body runs the existing `Instantiate` query and outer type arguments
+    /// substitute — but INTERIOR named carriers stop shallow when the
+    /// consumer can re-resolve them on demand:
+    ///
+    /// - an OWNER-local helper reference (`canonical == owner_canonical`)
+    ///   stays the shallow `Ref` carrier — the owner's registry publishes
+    ///   the helper as its own entry, so the consumer re-resolves it there
+    ///   (shallow-by-default);
+    /// - a PACKAGE-backed reference stays symbolic — the reducer-side
+    ///   mirror of the "package alias names stay shallow" publication rule.
+    ///
+    /// Workspace-imported interior branches still expand (they have no
+    /// registry entry of their own to re-resolve against). `None` (every
+    /// non-observation reduce pass) keeps the pre-existing demand-walk
+    /// behaviour unchanged.
+    observation: Option<(Arc<str>, SemanticNodeId)>,
+}
+
+// `ReduceState` helpers for `raise_and_reduce_with_context`; reached in
+// production through the reduce-then-raise output boundary from the
+// per-member projectors.
+impl ReduceState {
+    fn merge_dep_signature(&mut self, sig: &DepSignature) {
+        for (canonical, version) in sig.iter() {
+            // Light dedup on (canonical, version) — keeps the
+            // accumulated list O(unique_facts) rather than
+            // O(num_dispatches × facts_per_dispatch).
+            if !self
+                .dep_facts
+                .iter()
+                .any(|(c, v)| Arc::ptr_eq(c, canonical) && v == version)
+                && !self
+                    .dep_facts
+                    .iter()
+                    .any(|(c, v)| c.as_ref() == canonical.as_ref() && v == version)
+            {
+                self.dep_facts
+                    .push((Arc::clone(canonical), version.clone()));
+            }
+        }
+    }
+
+    fn into_dep_signature(self) -> DepSignature {
+        Arc::from(self.dep_facts.into_boxed_slice())
+    }
+}
+
+/// Inspect a userland decl's prepared body to decide whether its
+/// `InstantiationRef` should stay terminal under
+/// `Published(Navigate)`. The discriminator:
+///
+/// - The prepared body's top-level kind is an `Object` /
+///   `Intersection of Objects` / closed nominal interface → the
+///   instantiation is a NOMINAL generic interface; stays terminal.
+/// - The body is operator-shaped (`IndexedAccess`, `KeyOf`,
+///   `Mapped`, `Conditional`, `IndexedAccess` chain, etc.) → the
+///   instantiation is a generic HELPER that materially substitutes
+///   type args; reduces even under Navigate.
+///
+/// When the body cannot be peeked cheaply (no prepared decl,
+/// resolution miss), the function returns `false` — the reducer
+/// proceeds with the `Instantiate` dispatch as the safe default
+/// (matches the earlier behaviour).
+#[allow(dead_code)] // wired by InstantiationRef Navigate-terminal gate.
+pub(super) fn userland_instantiation_body_is_closed_object(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    base: &crate::semantic_query::DeclIdentity,
+) -> bool {
+    // The closed-object SHAPE verdict is a producer-minted FACT
+    // (`KeyDomainClosednessFact.closed_object_shape`, extracted once at lazy
+    // decl-body lowering from the transient contributor bodies) — no
+    // query-time authored-body walk. An absent fact (seeded state, enum
+    // group, no prepared decl) is not provably closed — the safe default.
+    ctx.prepared_type_decl(base.canonical_id.as_ref(), base.decl_name.as_ref())
+        .and_then(|prepared| prepared.key_domain_closedness.clone())
+        .is_some_and(|fact| fact.closed_object_shape)
+}
+
+/// Tri-state verdict of the fact-native KEY-DOMAIN closedness evaluator.
+///
+/// `Unavailable` is EXPLICIT and never collapses into `ProvenOpen`: an
+/// unavailable fact (seeded state, broken lease, missing prepared decl,
+/// unresolved name), a budget exhaustion, or an in-flight cycle refusal is a
+/// REFUSAL to answer, not a proof of openness. Consumers that only need the
+/// carrier-stop direction treat both non-`ProvenClosed` arms identically
+/// (open-OR-UNKNOWN preserves the carrier — the L1 rule), and no verdict is
+/// ever cached across evaluations — each query re-derives it from the live
+/// facts, rooted by `observe_closedness_walk_consult`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClosednessVerdict {
+    /// The walk PROVED a finite enumerable key domain.
+    ProvenClosed,
+    /// The walk PROVED the key domain open (a free/open-bound type
+    /// parameter in a key-reachable position, a non-enumerable surface, an
+    /// arity-unsatisfiable instantiation).
+    ProvenOpen,
+    /// The walk could not decide: missing facts, unresolved names, budget
+    /// exhaustion, cycle refusal, unlowerable positions. NEVER a proof.
+    Unavailable,
+}
+
+impl ClosednessVerdict {
+    pub(super) fn is_closed(self) -> bool {
+        matches!(self, ClosednessVerdict::ProvenClosed)
+    }
+}
+
+/// Root one cross-file consult of the closedness walk on the active fact
+/// tracer.
+///
+/// The openness/closedness predicates read OTHER canonical files than the
+/// query's own inputs: transparent alias-chain hops, barrel re-export hops,
+/// and prepared-decl bodies (`prepared_decl_body_is_closed` /
+/// `prepared_instantiation_key_domain_is_closed`). The verdict — and
+/// therefore the carrier-vs-materialise shape of the published value —
+/// depends on every consulted file's content, so each consult must enter
+/// the published entry's `ReadSetSignature.facts`: an edit to a chain file
+/// then rejects the warm entry on the read-side validator and the verdict
+/// recomputes (the read-side-authoritative cache rule). Emission rides the
+/// SAME `observe_fan_out` rail the module-augmentation stitch uses
+/// (`collect_augmentation_contributions`), so ANY enclosing
+/// `install_fact_tracer` scope — the dispatch memo cold build, the
+/// component-meta result compute, the materialise producer — picks the
+/// fact up without route-specific plumbing; the rooting is
+/// route/mode-independent like the carrier-stop itself.
+///
+/// The observed hash is the consult-time `IndexedReady.whole_hash` (one
+/// atomic observation — never a separate current-content re-read). Non-file
+/// canonicals (the builtin / synthetic / empty sentinels) and files unknown
+/// to the live view observe nothing.
+fn observe_closedness_walk_consult(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    canonical_id: &str,
+) {
+    if crate::semantic_query::is_non_file_base(canonical_id) {
+        return;
+    }
+    // Structurally read-only: observes the consulted file's whole hash
+    // onto the active tracer; fenced-ness flows via the chokepoint flag.
+    if let Some(indexed) = ctx
+        .ensure_indexed_ready_serve(canonical_id)
+        .map(|serve| serve.indexed)
+    {
+        crate::resolver_core::resolver_context::observe_fan_out(
+            crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: canonical_id.to_string(),
+                hash: indexed.whole_hash,
+            },
+        );
+    }
+}
+
+/// Identity-preserving binding for ONE type-parameter slot of the
+/// key-domain walks — the replacement for the bool-only `open_args`
+/// environment. Beyond the open/closed verdict, a closed binding carries
+/// the ACTUAL bound node identity where one is scope-safely available, so
+/// the conditional branch-selection oracle can resolve a check/extends
+/// operand that references a parameter bound to a concrete argument —
+/// even while another (losing) branch contains an open parameter. All
+/// identity is NODE identity (`SemanticNodeId`) — never a borrowed
+/// `TypeExpr` (compile-witnessed by [`key_domain_binding_carries_no_type_expr`]).
+#[derive(Clone, Copy)]
+pub(super) enum KeyDomainBinding {
+    /// Bound to an argument the walk judged OPEN.
+    Open,
+    /// Closed with no concrete identity: a mapper binder, an
+    /// `infer`-introduced name, or an unfilled defaulted parameter pending
+    /// default verification.
+    ClosedAbstract,
+    /// Closed, bound to an interned semantic node (the node route's
+    /// argument identity — scope-free by construction; environment-free
+    /// literal/primitive operands intern to their node identity at
+    /// binding-normalisation time).
+    ClosedNode(SemanticNodeId),
+}
+
+impl KeyDomainBinding {
+    fn is_open(self) -> bool {
+        matches!(self, KeyDomainBinding::Open)
+    }
+}
+
+/// Compile-time witness that the live binding environment carries no
+/// symbolic `TypeExpr` (node identity only) — the ClosedExpr borrow arm is
+/// structurally unrepresentable.
+#[allow(dead_code)]
+fn key_domain_binding_carries_no_type_expr(binding: &KeyDomainBinding) {
+    match binding {
+        KeyDomainBinding::Open | KeyDomainBinding::ClosedAbstract => {}
+        KeyDomainBinding::ClosedNode(id) => {
+            let _: &SemanticNodeId = id;
+        }
+    }
+}
+
+/// The evaluator-layer binding environment: declared type-parameter name →
+/// identity-preserving binding. An ABSENT name is a FREE parameter
+/// (open); a present binding is open or closed per
+/// [`KeyDomainBinding`].
+type KeyDomainBindings<'e> = FxHashMap<&'e str, KeyDomainBinding>;
+
+/// Operand-position policy axis of the node-level [`OpenWalk`].
+///
+/// The per-argument key-domain rule (an open argument confined to member
+/// VALUE positions of a fixed-key body keeps the key domain CLOSED) is
+/// sound only where the enclosing expression consumes the operand's KEY
+/// SET. Where the enclosing operator consumes the operand's VALUES —
+/// `Conditional.check` / `Conditional.extends` (branch selection relates
+/// the operand's value structure) and `IndexedAccess.object` (the access
+/// projects a member VALUE out of the object) — an instantiation is OPEN
+/// if ANY argument is open. Conditional BRANCHES stay in the surrounding
+/// position; `IndexedAccess.index` remains a key/keyspace question
+/// (`KeyDomain`). The mapped `as`-clause name-remap policy is a ROLE
+/// ([`OpenRole::MappedNameRemap`]), not a position — remap operands walk
+/// pinned at `KeyDomain` under that role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum OperandPosition {
+    /// A genuine KEY-DOMAIN position (`Pick`/`Omit` source, mapped
+    /// source/keyspace, indexed-access index): instantiations are judged
+    /// by the per-argument key-domain rule.
+    KeyDomain,
+    /// A VALUE-SENSITIVE operand (`Conditional.check`,
+    /// `Conditional.extends`, `IndexedAccess.object`): an instantiation
+    /// is OPEN if ANY argument is open.
+    ValueSensitive,
+}
+
+/// Whether the prepared declaration `(canonical, name)` resolves to a
+/// surface with a CLOSED enumerable key domain through a BOUNDED walk —
+/// the fact-native Reader-C entry.
+///
+/// The verdict derives from the producer-minted per-declaration
+/// [`verter_type_expr::facts::KeyDomainClosednessFact`] (one
+/// [`verter_type_expr::facts::ClosednessRecipe`] per contributor body,
+/// minted once at lazy decl-body lowering) evaluated by
+/// [`recipe_key_domain_closedness`] under an EMPTY binding environment (a
+/// bare-decl reference binds nothing). Transparent alias hops recurse
+/// through the prepared decl's `name_resolution` (NO route discovery);
+/// recipe ESCAPES deref + shallow-lower the authored position through the
+/// ONE shared lowerer and classify the NODE with the node-route walker —
+/// no query-time `TypeExpr` decision anywhere on this path. Bounded by the
+/// shared node budget + the dispatch-wide in-flight cycle guard; one barrel re-export
+/// hop resolves a re-exported name.
+///
+/// `ProvenClosed` ⇒ the walk proves a finite key domain. `ProvenOpen` ⇒ a
+/// proof of openness (a free type parameter in a key-reachable position, a
+/// non-enumerable surface). `Unavailable` ⇒ a REFUSAL (missing prepared
+/// decl / fact, unresolved name, genuine cycle, budget exhaustion) — never
+/// collapsed into a proof, never cached.
+pub(super) fn prepared_decl_body_is_closed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical_id: &str,
+    decl_name: &str,
+    budget: &mut u32,
+) -> ClosednessVerdict {
+    let key = (Arc::<str>::from(canonical_id), Arc::<str>::from(decl_name));
+    // DISPATCH-WIDE in-flight cycle guard, NOT a permanent visited set:
+    // the key pops on exit, so two SIBLING references to the same decl (a
+    // diamond — `Foo & Bar` both reaching `Shared`) are each judged on
+    // their merits; only a genuine back-edge on the current closedness
+    // chain (true recursion — including one that round-trips through a
+    // recipe escape's lowering and a key-domain gate's fresh walk) refuses
+    // — UNAVAILABLE, not a proof of openness.
+    if !dispatch.push_closedness_active(key) {
+        return ClosednessVerdict::Unavailable;
+    }
+    let verdict = prepared_decl_body_is_closed_unguarded(dispatch, canonical_id, decl_name, budget);
+    dispatch.pop_closedness_active();
+    verdict
+}
+
+/// Cycle-unguarded core of [`prepared_decl_body_is_closed`] — never call
+/// directly; the in-flight insert/remove discipline lives in the wrapper.
+fn prepared_decl_body_is_closed_unguarded(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical_id: &str,
+    decl_name: &str,
+    budget: &mut u32,
+) -> ClosednessVerdict {
+    let ctx = dispatch.ctx;
+    if *budget == 0 {
+        return ClosednessVerdict::Unavailable;
+    }
+    *budget -= 1;
+    // Root this cross-file consult (decl fact OR barrel hop below) on the
+    // active fact tracer — the closedness verdict depends on this file's
+    // content, so an edit here must reject the consuming warm entry.
+    observe_closedness_walk_consult(ctx, canonical_id);
+
+    let Some(prepared) = ctx.prepared_type_decl(canonical_id, decl_name) else {
+        // No local declaration at `(canonical, name)` — the name may be a
+        // barrel RE-EXPORT (`export { LinkProps } from './link'`) rather than
+        // a declaration in this file. Follow the re-export hop through the
+        // shallow export map (cache reads only, no reducer / no execute_read)
+        // and recurse on the resolved source decl, bounded by the same budget
+        // + visited set. Without this a `Pick`/`Omit` over a barrel-reexported
+        // CLOSED interface is mis-classified undecidable (the prepared decl
+        // lives in the source file, not the barrel) and the L1 carrier-stop
+        // wrongly fires on a genuinely-closed cross-file source.
+        if let Some((src_canonical, src_name)) =
+            ctx.resolve_named_type_export_target_shallow(canonical_id, decl_name)
+        {
+            if src_canonical.as_str() != canonical_id || src_name.as_str() != decl_name {
+                return prepared_decl_body_is_closed(dispatch, &src_canonical, &src_name, budget);
+            }
+        }
+        return ClosednessVerdict::Unavailable;
+    };
+    // The producer-minted closedness fact replaces the transient authored
+    // re-borrow. Absent (seeded state, enum group) or empty ⇒ undecidable.
+    let Some(fact) = prepared.key_domain_closedness.clone() else {
+        return ClosednessVerdict::Unavailable;
+    };
+    if fact.body_recipes.is_empty() {
+        return ClosednessVerdict::Unavailable;
+    }
+    let no_bindings: KeyDomainBindings = KeyDomainBindings::default();
+    for recipe in fact.body_recipes.iter() {
+        let verdict =
+            recipe_key_domain_closedness(dispatch, &prepared, recipe, &no_bindings, budget);
+        if !verdict.is_closed() {
+            return verdict;
+        }
+    }
+    ClosednessVerdict::ProvenClosed
+}
+
+/// THE recipe evaluator — shared by the bare prepared-decl route
+/// ([`prepared_decl_body_is_closed`], EMPTY binding environment) and the
+/// instantiated route ([`prepared_instantiation_key_domain_is_closed`],
+/// declared params bound to identity-preserving [`KeyDomainBinding`]s).
+/// One evaluator, one set of arm semantics — the two routes cannot diverge
+/// on what closes a key domain.
+///
+/// The recipe arms are BINDING-INDEPENDENT-SOUND producer facts; the two
+/// binding-dependent leaves resolve against the LIVE environment here, and
+/// the general escape ([`ClosednessRecipe::LowerAndClassify`]) routes
+/// through [`lower_and_classify_key_domain`] — deref + shallow-lower the
+/// authored position, then classify the NODE with the node-route walker
+/// (`OpenWalk`, `KeyDomainProof` role): the SAME classifier the
+/// `Pick`/`Omit` enumeration domain and the mapped source/keyspace run, so
+/// the recipe route and the node route agree by construction. Bounded by
+/// `budget` (one decrement per evaluated recipe node, threaded through the
+/// escape walks); decl-level cycles refuse through the dispatch-wide
+/// in-flight guard (`push_closedness_active`).
+fn recipe_key_domain_closedness(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    recipe: &verter_type_expr::facts::ClosednessRecipe,
+    bindings: &KeyDomainBindings<'_>,
+    budget: &mut u32,
+) -> ClosednessVerdict {
+    use verter_type_expr::facts::ClosednessRecipe;
+    if *budget == 0 {
+        return ClosednessVerdict::Unavailable;
+    }
+    *budget -= 1;
+    match recipe {
+        // Finite leaf surfaces: an enumerable key space / concrete value.
+        ClosednessRecipe::ClosedLeaf => ClosednessVerdict::ProvenClosed,
+        // An object body's NAMED members fix its key set regardless of
+        // their value types; the producer minted this arm only where every
+        // index-signature key is a syntactically closed scalar (anything
+        // else escaped the whole object to the walker).
+        ClosednessRecipe::ObjectClosed => ClosednessVerdict::ProvenClosed,
+        // A function/constructor TYPE is not an enumerable key surface.
+        ClosednessRecipe::OpenLeaf => ClosednessVerdict::ProvenOpen,
+        // Composites close iff every arm closes; the first non-closed
+        // verdict (document order) is the fold's verdict.
+        ClosednessRecipe::AllArms(arms) => {
+            for arm in arms.iter() {
+                let verdict =
+                    recipe_key_domain_closedness(dispatch, prepared, arm, bindings, budget);
+                if !verdict.is_closed() {
+                    return verdict;
+                }
+            }
+            ClosednessVerdict::ProvenClosed
+        }
+        // A first-class type-parameter reference is a LEAF type variable.
+        // Bound to a verified-closed arg/default it is closed (it carries
+        // no own enumerable key space the outer filter would expand);
+        // bound OPEN — or FREE (a bare-referenced generic decl body) — its
+        // key space is undecidable-open.
+        ClosednessRecipe::ParamRef { name } => match bindings.get(name.as_str()) {
+            Some(binding) if !binding.is_open() => ClosednessVerdict::ProvenClosed,
+            _ => ClosednessVerdict::ProvenOpen,
+        },
+        // A bare reference: a bound parameter resolves ONLY through its
+        // binding; otherwise it is a transparent alias hop — require the
+        // referenced declaration's key domain to close. An unresolvable
+        // bare name is UNAVAILABLE (undecidable): treating it as a closed
+        // leaf would wrongly prove an open body closed and let the L1
+        // carrier-stop materialise an undecidable surface.
+        ClosednessRecipe::FollowRefByName { name } => {
+            if let Some(binding) = bindings.get(name.as_str()) {
+                return if binding.is_open() {
+                    ClosednessVerdict::ProvenOpen
+                } else {
+                    ClosednessVerdict::ProvenClosed
+                };
+            }
+            match prepared.name_resolution.get(name.as_str()) {
+                Some(target) => prepared_decl_body_is_closed(
+                    dispatch,
+                    &target.canonical_id,
+                    &target.symbol_name,
+                    budget,
+                ),
+                None => ClosednessVerdict::Unavailable,
+            }
+        }
+        // An indexed access is judged OPERAND-WISE, mirroring the node
+        // walk's `IndexedAccess` arm: the OBJECT operand is VALUE-SENSITIVE
+        // (`Wrap<T>['a']` IS the member value `a`, so a
+        // per-argument-closed-but-any-arg-open object must OPEN the access);
+        // the INDEX stays a key/keyspace question. Each operand lowers ALONE
+        // (so the shared lowerer cannot execute the access and erase the
+        // operand policy) and classifies at its pinned position.
+        ClosednessRecipe::ValueProjection { object, index } => {
+            let object_verdict = lower_and_classify_key_domain_at(
+                dispatch,
+                prepared,
+                object,
+                bindings,
+                budget,
+                OperandPosition::ValueSensitive,
+            );
+            if !object_verdict.is_closed() {
+                return object_verdict;
+            }
+            lower_and_classify_key_domain_at(
+                dispatch,
+                prepared,
+                index,
+                bindings,
+                budget,
+                OperandPosition::KeyDomain,
+            )
+        }
+        ClosednessRecipe::LowerAndClassify { slot } => {
+            lower_and_classify_key_domain(dispatch, prepared, slot, bindings, budget)
+        }
+        ClosednessRecipe::Unsupported => ClosednessVerdict::Unavailable,
+    }
+}
+
+/// The general recipe ESCAPE: deref the authored body position LEASE-ONLY
+/// (the same locator-deref rail the type-parameter bound slots use),
+/// shallow-lower it under the live binding environment through the ONE
+/// shared lowerer (`shallow_lower_type_expr_with_context`, structural
+/// transit — carrier-preserving, no execution, no member materialisation),
+/// and classify the lowered NODE with the node-route walker
+/// (`KeyDomainProof` role). The derefed `TypeExpr` is TRANSIENT lowering
+/// INPUT only — every semantic decision runs on nodes.
+///
+/// The walk budget is the ACTIVE evaluator budget — threaded INTO the node
+/// walk (seed) and written back (remaining) so a recursive body that
+/// resolves through the walk back into the evaluator consumes ONE shared
+/// budget and terminates bounded. A verdict of open WITH the budget
+/// exhausted is UNAVAILABLE (the fuse fired — a refusal, not a proof).
+fn lower_and_classify_key_domain(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    slot: &verter_type_expr::locators::TypeBodySlot,
+    bindings: &KeyDomainBindings<'_>,
+    budget: &mut u32,
+) -> ClosednessVerdict {
+    lower_and_classify_key_domain_at(
+        dispatch,
+        prepared,
+        slot,
+        bindings,
+        budget,
+        OperandPosition::KeyDomain,
+    )
+}
+
+/// Position-pinned variant of [`lower_and_classify_key_domain`] — the
+/// [`ClosednessRecipe::ValueProjection`] operands enter the node walk at
+/// their operand-policy positions (object: value-sensitive; index:
+/// key-domain).
+fn lower_and_classify_key_domain_at(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    slot: &verter_type_expr::locators::TypeBodySlot,
+    bindings: &KeyDomainBindings<'_>,
+    budget: &mut u32,
+    position: OperandPosition,
+) -> ClosednessVerdict {
+    if *budget == 0 {
+        return ClosednessVerdict::Unavailable;
+    }
+    *budget -= 1;
+    let Some(body) = deref_slot_body(dispatch.ctx, slot) else {
+        return ClosednessVerdict::Unavailable;
+    };
+    let lowering = escape_lowering_env(dispatch, prepared, bindings);
+    let node = lower_body_under_env(dispatch, prepared, &body, &lowering.env);
+    classify_lowered_node_key_domain_at(dispatch, node, lowering.bound_params, budget, position)
+}
+
+/// One authored body position (a recipe escape slot OR a `T extends C` /
+/// `T = D` bound slot), derefed LEASE-ONLY through the anchor canonical's
+/// retained snapshot via the shared locator-deref worker. `None` =
+/// unavailable — conservative (undecidable ⇒ refusal).
+fn deref_slot_body(
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    slot: &verter_type_expr::locators::TypeBodySlot,
+) -> Option<TypeExpr> {
+    let serve = ctx.ensure_indexed_ready_serve(slot.anchor.canonical_id.as_ref())?;
+    match serve
+        .indexed
+        .shallow_state
+        .decl_bodies()
+        .deref_locator_body(&verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            slot.clone(),
+        )) {
+        Ok(crate::decl_body_memo::locator_deref::DerefedAuthoredBody {
+            shape: crate::decl_body_memo::DerefedBodyShape::Single(expr),
+            ..
+        }) => Some(expr),
+        // ONLY a broken decl-body lease pin marks non-cacheability: a
+        // transient `LeaseMiss` collapsed to `None` here (undecidable ⇒
+        // refusal) must taint the enclosing traced compute's admission so a
+        // later live-lease demand recomputes. Every other error variant
+        // (`UnknownSymbol`, canonical mismatch, path/annotation absence) is a
+        // DETERMINISTIC refusal — cacheable, never marked.
+        Err(crate::decl_body_memo::locator_deref::LocatorBodyDerefError::LeaseMiss) => {
+            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+                crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+            );
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The lowering environment of a recipe escape: every DECLARED type
+/// parameter of the owning decl maps to its live-binding identity so the
+/// shared lowerer substitutes it — a `ClosedNode` binding maps to its node
+/// (the branch-selection oracle then sees the concrete argument), an
+/// `Open` / `ClosedAbstract` / FREE parameter maps to its interned
+/// `TypeParam` SHELL (so the parameter name cannot be captured by a
+/// same-name `name_resolution` entry — declaration parameters shadow the
+/// file scope). `bound_params` carries the shells the node walk must treat
+/// as CLOSED (`ClosedAbstract` — a closed local with no identity); an
+/// `Open`/FREE shell stays out, so the walk judges it an unbound generic.
+struct EscapeLoweringEnv {
+    env: FxHashMap<String, SemanticNodeId>,
+    bound_params: FxHashSet<SemanticNodeId>,
+}
+
+fn escape_lowering_env(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    bindings: &KeyDomainBindings<'_>,
+) -> EscapeLoweringEnv {
+    let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
+    let mut bound_params: FxHashSet<SemanticNodeId> = FxHashSet::default();
+    for param in prepared.type_parameters.iter() {
+        match bindings.get(param.name.as_str()) {
+            Some(KeyDomainBinding::ClosedNode(id)) => {
+                env.insert(param.name.clone(), *id);
+            }
+            Some(KeyDomainBinding::ClosedAbstract) => {
+                let shell = type_param_shell_node(dispatch, prepared, param);
+                env.insert(param.name.clone(), shell);
+                bound_params.insert(shell);
+            }
+            Some(KeyDomainBinding::Open) | None => {
+                let shell = type_param_shell_node(dispatch, prepared, param);
+                env.insert(param.name.clone(), shell);
+            }
+        }
+    }
+    EscapeLoweringEnv { env, bound_params }
+}
+
+/// The interned `TypeParam` SHELL of one declared parameter — the
+/// declaration-identity node an open/abstract parameter lowers to inside a
+/// recipe escape (hash-consed: every escape of the same decl version
+/// interns the same shell).
+fn type_param_shell_node(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    param: &verter_type_expr::facts::NarrowTypeParam,
+) -> SemanticNodeId {
+    dispatch
+        .ctx
+        .project_type_store()
+        .semantic_graph()
+        .intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
+                whole_hash: crate::semantic_query::HashValue::default(),
+                decl_name: Arc::clone(&prepared.root_identity.symbol_name),
+            },
+            param_index: u16::try_from(param.ordinal).unwrap_or(u16::MAX),
+            constraint: None,
+            default: None,
+            display_name: Arc::from(param.name.as_str()),
+        })
+}
+
+/// Shallow-lower ONE derefed authored body under the escape environment —
+/// the ONE shared lowerer, structural-transit (carrier-preserving; interior
+/// refs intern as `DeclRef`/`InstantiationRef` carriers, never executed).
+fn lower_body_under_env(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    body: &TypeExpr,
+    env: &FxHashMap<String, SemanticNodeId>,
+) -> SemanticNodeId {
+    let scope = crate::semantic_query::NodeScopeId::File {
+        canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
+        whole_hash: crate::semantic_query::HashValue::default(),
+        local_scope: None,
+    };
+    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::empty();
+    let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+    dispatch.shallow_lower_type_expr_with_context(
+        body,
+        env,
+        &scope,
+        &prepared.name_resolution,
+        None,
+        &shadowing,
+        &mut substitutions,
+        ProjectionReductionContext::structural_transit(),
+    )
+}
+
+/// Classify ONE lowered node's key domain with the node-route walker
+/// (`OpenWalk`, `KeyDomainProof` role, key-domain position) and map the
+/// bool onto the tri-state: not-open ⇒ `ProvenClosed`; open with budget
+/// remaining ⇒ `ProvenOpen`; open with the budget EXHAUSTED ⇒
+/// `Unavailable` — the fuse fired mid-walk, so the openness answer may be
+/// the fuse's, not a proof (never collapse a budget abort into a proof).
+fn classify_lowered_node_key_domain(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    bound_params: FxHashSet<SemanticNodeId>,
+    budget: &mut u32,
+) -> ClosednessVerdict {
+    classify_lowered_node_key_domain_at(
+        dispatch,
+        node,
+        bound_params,
+        budget,
+        OperandPosition::KeyDomain,
+    )
+}
+
+/// Position-pinned variant of [`classify_lowered_node_key_domain`].
+fn classify_lowered_node_key_domain_at(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    bound_params: FxHashSet<SemanticNodeId>,
+    budget: &mut u32,
+    position: OperandPosition,
+) -> ClosednessVerdict {
+    let mut walk = OpenWalk::for_role(dispatch, OpenRole::KeyDomainProof, None);
+    walk.bound_params = bound_params;
+    walk.budget = *budget;
+    let open = walk.node_is_open_at(dispatch.ctx, node, position);
+    let exhausted = walk.budget == 0;
+    *budget = walk.budget;
+    if !open {
+        ClosednessVerdict::ProvenClosed
+    } else if exhausted {
+        ClosednessVerdict::Unavailable
+    } else {
+        ClosednessVerdict::ProvenOpen
+    }
+}
+
+/// Whether the instantiation `base<args…>` produces a surface whose
+/// ENUMERABLE KEY SET can be PROVEN to close, given per-argument
+/// identity-preserving bindings — the fact-native Reader-D entry.
+///
+/// The instantiation's key domain closes only when:
+///   1. the target declaration exists (a prepared decl is available, with
+///      ONE barrel re-export hop on a miss),
+///   2. its arity is satisfiable: `required_params <= arg_count <= total_params`
+///      (the trailing `total_params - arg_count` params fall back to defaults),
+///   3. every default supplied for an unfilled param is itself closed —
+///      judged PATH-PRECISELY on the LOWERED default node (the authored
+///      bound slot derefs + lowers under the accumulating environment, so a
+///      default referencing an EARLIER parameter — `<T, U = T>` — forwards
+///      that parameter's live identity), and a VERIFIED-CLOSED default
+///      RE-BINDS its parameter to the lowered default NODE (the
+///      branch-selection oracle then selects on concrete defaults), and
+///   4. the prepared body's KEY SET is closed under those bindings — the
+///      recipe evaluator applies the per-argument key-domain rule: an open
+///      argument confined to member VALUE positions of a fixed-key body
+///      does NOT open the key domain (the node walk never descends value
+///      surfaces under the `KeyDomainProof` role), so `Omit<Foo<T>, …>`
+///      still enumerates path-precisely — WITHOUT materialising members.
+///
+/// Bounded by the same shared budget; arity mismatches are PROVEN open
+/// (decided from available facts); missing facts/defaults are UNAVAILABLE.
+pub(super) fn prepared_instantiation_key_domain_is_closed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    base: &crate::semantic_query::DeclIdentity,
+    args: &[KeyDomainBinding],
+    budget: &mut u32,
+) -> ClosednessVerdict {
+    // DISPATCH-WIDE in-flight guard (shared with the bare-decl route): a
+    // KEY-reachable self-instantiation — including one round-tripping
+    // through a recipe escape's lowering — is a genuine recursion; refuse.
+    let key = (Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+    if !dispatch.push_closedness_active(key) {
+        return ClosednessVerdict::Unavailable;
+    }
+    let verdict =
+        prepared_instantiation_key_domain_is_closed_unguarded(dispatch, base, args, budget);
+    dispatch.pop_closedness_active();
+    verdict
+}
+
+/// Cycle-unguarded core of
+/// [`prepared_instantiation_key_domain_is_closed`] — never call directly;
+/// the in-flight push/pop discipline lives in the wrapper.
+fn prepared_instantiation_key_domain_is_closed_unguarded(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    base: &crate::semantic_query::DeclIdentity,
+    args: &[KeyDomainBinding],
+    budget: &mut u32,
+) -> ClosednessVerdict {
+    let ctx = dispatch.ctx;
+    let arg_count = args.len();
+    // Root the consult of the target decl's file on the active fact tracer
+    // — the key-domain verdict depends on the prepared fact's content, so
+    // an edit to it must reject the consuming warm entry.
+    observe_closedness_walk_consult(ctx, base.canonical_id.as_ref());
+    let prepared = match ctx.prepared_type_decl(base.canonical_id.as_ref(), base.decl_name.as_ref())
+    {
+        Some(prepared) => prepared,
+        None => {
+            // No local declaration at the base identity — it may be a barrel
+            // RE-EXPORT (`export { SelectMenuProps } from './props'`) rather
+            // than a declaration in this file. Follow ONE re-export hop
+            // through the shallow export map (cache reads only) and retry on
+            // the resolved source decl, budget-bounded against re-export
+            // cycles. Without this an `Omit<SelectMenuProps<T>, K>` over a
+            // barrel-reexported generic wrapper is mis-classified undecidable
+            // (the wrapper's prepared decl lives in its source file, not the
+            // barrel) and the L1 carrier-stop wrongly fires.
+            if *budget == 0 {
+                return ClosednessVerdict::Unavailable;
+            }
+            *budget -= 1;
+            if let Some((src_canonical, src_name)) = ctx.resolve_named_type_export_target_shallow(
+                base.canonical_id.as_ref(),
+                base.decl_name.as_ref(),
+            ) {
+                if src_canonical.as_str() != base.canonical_id.as_ref()
+                    || src_name.as_str() != base.decl_name.as_ref()
+                {
+                    let resolved = crate::semantic_query::DeclIdentity {
+                        canonical_id: Arc::from(src_canonical.as_str()),
+                        whole_hash: crate::semantic_query::HashValue::default(),
+                        decl_name: Arc::from(src_name.as_str()),
+                    };
+                    return prepared_instantiation_key_domain_is_closed(
+                        dispatch, &resolved, args, budget,
+                    );
+                }
+            }
+            // Unresolved target ⇒ undecidable.
+            return ClosednessVerdict::Unavailable;
+        }
+    };
+
+    let total_params = prepared.type_parameters.len();
+    let required_params = prepared
+        .type_parameters
+        .iter()
+        .filter(|p| p.default.is_none())
+        .count();
+    // Over- or under-application: arity not satisfiable — PROVEN not
+    // closed (decided from the declaration's own parameter facts).
+    if arg_count < required_params || arg_count > total_params {
+        return ClosednessVerdict::ProvenOpen;
+    }
+
+    // The producer-minted closedness fact replaces the transient authored
+    // re-borrow. Absent (seeded state, enum group) or empty ⇒ undecidable.
+    let Some(fact) = prepared.key_domain_closedness.clone() else {
+        return ClosednessVerdict::Unavailable;
+    };
+    if fact.body_recipes.is_empty() {
+        return ClosednessVerdict::Unavailable;
+    }
+
+    // Binding environment: every declared type-parameter name is bound —
+    // the first `arg_count` to the caller's identity-preserving argument
+    // bindings, the rest (unfilled, defaulted) to `ClosedAbstract`
+    // pending the default verification below.
+    let mut bindings: KeyDomainBindings = KeyDomainBindings::default();
+    for (param, binding) in prepared.type_parameters.iter().zip(args.iter()) {
+        bindings.insert(param.name.as_str(), *binding);
+    }
+    for param in prepared.type_parameters.iter().skip(arg_count) {
+        bindings.insert(param.name.as_str(), KeyDomainBinding::ClosedAbstract);
+    }
+
+    // Defaults for unfilled params must close UNDER THE SAME BINDINGS: a
+    // default referencing an EARLIER type parameter (`<T, U = T>`) is
+    // closed when that parameter is bound to a closed arg and open when
+    // it is bound to an open one — the default's authored bound slot
+    // derefs + lowers under the ACCUMULATING environment, so the lowered
+    // node carries the earlier parameters' live identities. A
+    // VERIFIED-CLOSED default then RE-BINDS its parameter to the lowered
+    // default NODE, so a conditional check over a defaulted parameter
+    // (`<T, Use = true> … Use extends true ? …`) can select through the
+    // shared oracle instead of deferring into an open losing branch.
+    // Processed in declaration order so later defaults see earlier
+    // defaults' identities.
+    for param in prepared.type_parameters.iter().skip(arg_count) {
+        let Some(slot) = param.default.as_ref() else {
+            // No default for an unfilled param — guarded by the arity
+            // check above, but stay conservative.
+            return ClosednessVerdict::Unavailable;
+        };
+        if *budget == 0 {
+            return ClosednessVerdict::Unavailable;
+        }
+        *budget -= 1;
+        let Some(default_body) = deref_slot_body(ctx, slot) else {
+            // Undecidable default VALUE — bind the parameter OPEN (below)
+            // rather than refusing the whole instantiation: the openness
+            // only matters WHERE the body places the parameter.
+            bindings.insert(param.name.as_str(), KeyDomainBinding::Open);
+            continue;
+        };
+        let lowering = escape_lowering_env(dispatch, &prepared, &bindings);
+        let default_node = lower_body_under_env(dispatch, &prepared, &default_body, &lowering.env);
+        let verdict =
+            classify_lowered_node_key_domain(dispatch, default_node, lowering.bound_params, budget);
+        if verdict.is_closed() {
+            bindings.insert(
+                param.name.as_str(),
+                KeyDomainBinding::ClosedNode(default_node),
+            );
+        } else {
+            // POSITION-SENSITIVE per-argument rule: an unfilled defaulted
+            // parameter whose default does not verify closed (an open
+            // default such as `I = A[number]` over an open earlier
+            // parameter, or an undecidable one) binds OPEN — exactly like
+            // an open caller-supplied argument — and the body recipes
+            // decide where that openness lands. An open binding confined
+            // to member VALUE positions of a fixed-key body keeps the key
+            // domain CLOSED (`Pick<S<A-open>, K>` over
+            // `type S<A, I = A[number]> = { item?: Fn<I>; … }` still
+            // enumerates path-precisely); a key-reachable use still opens
+            // it through `ParamRef` / the escape walks. Refusing the whole
+            // instantiation here was the ContentSearch/DropdownMenuContent
+            // zero-member collapse: a value-only defaulted param vetoed a
+            // provably-fixed key set.
+            bindings.insert(param.name.as_str(), KeyDomainBinding::Open);
+        }
+    }
+
+    for recipe in fact.body_recipes.iter() {
+        let verdict = recipe_key_domain_closedness(dispatch, &prepared, recipe, &bindings, budget);
+        if !verdict.is_closed() {
+            return verdict;
+        }
+    }
+    ClosednessVerdict::ProvenClosed
+}
+
+/// ONE registry-owned KEY-DOMAIN closedness rule for a builtin-utility
+/// instantiation — consulted by the node-level `__builtin__`
+/// `InstantiationRef` arm of [`OpenWalk`] (the sole closedness walker,
+/// which the recipe escapes also route through), so the same semantic
+/// shape cannot flip verdict by representation route.
+///
+/// The rule is PER-UTILITY OUTPUT-KEY semantics, owned by the
+/// `BuiltinUtility` registry
+/// ([`BuiltinUtility::key_domain_argument_positions`]): a utility's
+/// produced key domain is closed iff every argument that actually
+/// PRODUCES output keys is closed. The object filters (`Pick` / `Omit`)
+/// judge the filtered source plus the key-selection argument; the
+/// mapped utilities (`Partial` / `Required` / `Readonly`) judge the
+/// source; `Record<K, V>` judges ONLY `K` — its value argument never
+/// opens the produced key domain (`Omit<Record<'a', T>, 'x'>` stays
+/// CLOSED and materialises through the filter). A VALUE-PRODUCING utility (`ReturnType`,
+/// `InstanceType`, `Awaited`, `NonNullable`, the union/extraction and
+/// string utilities, …) makes NO closed-key claim — its output derives
+/// from argument VALUE structure the key-domain argument walk never
+/// inspected, so a key-domain-closed argument vector must NOT prove the
+/// produced key domain closed (`ReturnType<() => T>` stays a carrier).
+/// An under-applied key-producing position is structurally undecidable
+/// — not closed. A non-registry name is not a builtin — not closed by
+/// this rule.
+fn builtin_utility_key_domain_is_closed(decl_name: &str, args: &[KeyDomainBinding]) -> bool {
+    use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+    let Some(utility) = BuiltinUtility::from_name(decl_name) else {
+        return false;
+    };
+    let Some(positions) = utility.key_domain_argument_positions() else {
+        return false;
+    };
+    positions
+        .iter()
+        .all(|&idx| args.get(idx).is_some_and(|binding| !binding.is_open()))
+}
+
+/// Node budget for the enumeration-domain openness walk
+/// ([`enumeration_domain_node_is_open`]). The walk is a bounded, shallow
+/// typed-IR inspection — it never reduces, substitutes, or loads new
+/// files — so this cap only guards a pathological already-interned
+/// graph; legitimate utility sources resolve in a handful of hops.
+///
+/// The budget is ALSO the walk's de-facto stack-depth ceiling (the
+/// openness recursion and the prepared-decl key-domain proofs it
+/// delegates to consume at least one budget unit per nesting level), so
+/// raising it requires a separate recursion-depth bound first: a
+/// 10_000-deep finite `KeyOf` chain overflows a 2 MiB test-thread stack
+/// near ~2048 nested walk frames. A deep-but-provably-closed real-world
+/// chain that exhausts this budget (`Unavailable` ⇒ L1 carrier-stop) is
+/// NOT silently dropped at surface demands: the shallow walker's
+/// `Pick`-carrier surface enumeration (`Frame::FlushObjectFilter`)
+/// still publishes the picked keys from the source's enumerable arms.
+const ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET: u32 = 256;
+
+/// Enumeration-domain argument index for an OBJECT-FILTER builtin utility
+/// (`Pick` / `Omit`), if `base` names one.
+///
+/// The enumeration domain is the SOURCE type whose key space the filter
+/// walks: argument 0 (`Pick<X, K>` / `Omit<X, K>` walk `X`'s keys).
+///
+/// Returns `None` for any instantiation that is NOT a `Pick` / `Omit`
+/// object filter — including the mapped utilities (`Partial` / `Required`
+/// / `Readonly`, guarded by their `MappedType` deferred shell + L3 budget)
+/// and `Record` (an index-signature key domain, not finite enumeration).
+/// Those keep their existing reduce / terminal behaviour and are not
+/// subject to the open-domain carrier-stop.
+fn enumeration_domain_arg_index(base: &crate::semantic_query::DeclIdentity) -> Option<usize> {
+    if base.canonical_id.as_ref() != "__builtin__" {
+        return None;
+    }
+    enumeration_domain_arg_index_for_name(base.decl_name.as_ref())
+}
+
+/// Whether an UNSHADOWED `decl_name` belongs to the L1 object-filter
+/// utility family (`Pick` / `Omit`).
+///
+/// The SINGLE source of L1 family identity — derived from the shared
+/// `BuiltinUtility` registry through
+/// [`enumeration_domain_arg_index_for_name`], so the lowering entrance
+/// (`lower.rs`) and the openness predicate can never diverge on family
+/// membership (a one-place edit when the family ever changes). Callers
+/// must have ALREADY established the name is unshadowed builtin scope
+/// (shadowed names resolve as userland declarations).
+pub(super) fn is_l1_object_filter_utility(decl_name: &str) -> bool {
+    enumeration_domain_arg_index_for_name(decl_name).is_some()
+}
+
+/// Name-keyed core of [`enumeration_domain_arg_index`] — see that
+/// function's family rationale.
+fn enumeration_domain_arg_index_for_name(decl_name: &str) -> Option<usize> {
+    use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+    // Utility identity is decided by the shared `BuiltinUtility` registry,
+    // NOT a local name string match — a single source of truth for which
+    // names are builtin utilities (the registry also owns arity / intrinsic
+    // metadata).
+    //
+    // The L1 carrier-stop is scoped to the OBJECT-FILTER utilities `Pick` /
+    // `Omit` ONLY. These two materialise their argument-0 source surface
+    // (`object_filter_source_surface`) and so degenerate into full
+    // cross-file generic expansion when that source is an open instantiation
+    // (the `ChatMessages.vue` `Pick<PropsBase<T>, …>` hang). Their
+    // enumeration domain is always argument 0 (`Pick<X, K>` / `Omit<X, K>`
+    // walk `X`'s keys).
+    //
+    // `Partial` / `Required` / `Readonly` are NOT in the L1 family: they
+    // lower to a `MappedType` (`build.rs`), which already fails closed —
+    // an unavailable source/keyspace yields a deferred `Mapped` shell and
+    // the L3 budget covers `MappedType` / `Instantiate` / `Conditional`. A
+    // second L1 carrier-stop on them would be redundant.
+    //
+    // `Record` is NOT in the L1 family either: its domain is argument 0
+    // (the KEYS), and `Record<string, V>` / `Record<number, V>` are
+    // infinite key domains (index signatures), not a finite enumeration —
+    // an open-domain carrier-stop on Record's key argument is a category
+    // error. Record correctly falls back to a deferred mapped carrier; if
+    // Record gains first-class support later, primitive key domains become
+    // `IndexSignature` surfaces, not CLOSED finite enumeration.
+    //
+    // The union/extraction/function/promise/string utilities (`Extract`,
+    // `Exclude`, `ReturnType`, `Awaited`, `Uppercase`, …) are likewise NOT
+    // key-enumerating object filters and keep their existing reduce /
+    // terminal behaviour.
+    match BuiltinUtility::from_name(decl_name)? {
+        BuiltinUtility::Pick | BuiltinUtility::Omit => Some(0),
+        _ => None,
+    }
+}
+
+/// Shallow-By-Default carrier-stop predicate (L1).
+///
+/// Under `Published(Navigate)`, an object-filter utility (`Pick` / `Omit`)
+/// must NOT materialise an enumeration domain whose key space is OPEN or
+/// undecidable — doing so degenerates into full cross-file generic
+/// expansion of an unbound source (the `ChatMessages.vue`
+/// `Pick<PropsBase<T>, …>` hang). Returns `true` when the utility's
+/// enumeration domain (argument 0) is open or cannot be proven finite;
+/// the reducer then keeps the `InstantiationRef` as a shallow carrier
+/// (`Pick<…>` published verbatim). A CLOSED domain (a finite object
+/// surface, a finite union/intersection of object surfaces, or a
+/// concrete instantiation reached without crossing an open node) returns
+/// `false`, so a legitimate `Pick<Foo, 'bar'>` /
+/// `Pick<PropsBase<ConcreteMsg[]>, 'icon'>` still materialises only the
+/// requested keys.
+///
+/// Pure typed-IR inspection — no reduction, no substitution, no string
+/// matching. An unrecognised utility name returns `false` (not subject
+/// to this carrier-stop), preserving userland operator-helper and
+/// nominal-generic behaviour.
+pub(super) fn utility_enumeration_domain_is_open_or_unknown(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    base: &crate::semantic_query::DeclIdentity,
+    args: &[SemanticNodeId],
+) -> bool {
+    let Some(idx) = enumeration_domain_arg_index(base) else {
+        return false;
+    };
+    let Some(&domain) = args.get(idx) else {
+        // A recognised utility whose domain argument is absent is
+        // structurally undecidable — treat the domain as open.
+        return true;
+    };
+    OpenWalk::enumeration_domain(dispatch).node_is_open(dispatch.ctx, domain)
+}
+
+/// Shallow-By-Default carrier-stop predicate (L1), MAPPED-TYPE family.
+///
+/// A mapped type `{ [K in source]: value_expr }` (with optional `as`
+/// name-remap) must NOT enumerate its key space and materialise the
+/// per-key value under a publication demand when its produced surface
+/// still depends on an unbound OUTER generic — doing so degenerates into
+/// the per-key value loop over `node_modules` (the `ChatMessagesSlots<T>`
+/// / `TableSlots<T>` storm). Returns `true` when ANY of the four mapped
+/// inputs is open:
+///
+/// - the SOURCE or the KEYSPACE key domain (enumeration-domain policy —
+///   a finite value surface does NOT open the KEY domain, so `Function` /
+///   `Object` leaves stay closed there; only an unbound key space does);
+/// - the `as`-clause NAME REMAP, evaluated under the value-body policy
+///   (the remapped keys may depend on the outer generic);
+/// - the VALUE BODY, evaluated under the value-body policy — the bound
+///   mapper binder `K` is treated as CLOSED, finite value surfaces
+///   (`Function` / `Object` / `Array` / `Tuple`) are DESCENDED so an
+///   outer generic reached through a function parameter or object member
+///   still opens the value, and a conditional value inspects BOTH
+///   branches (a conditional whose selected branch reaches the outer
+///   generic is open).
+///
+/// CLOSED (returns `false`) ⇒ a finite, outer-generic-free mapped type
+/// (`Partial`/`Required`/`Readonly`, `{ [K in keyof Closed]: Closed[K] }`,
+/// a K-only transform, a finite keyspace) which still enumerates
+/// path-precisely. Pure typed-IR inspection — no reduction, no
+/// substitution, no string matching.
+pub(crate) fn mapped_type_is_open_or_unknown(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    source: SemanticNodeId,
+    mapper: &crate::semantic_query::MapperKey,
+) -> bool {
+    if mapped_type_key_domain_is_open_or_unknown(dispatch, source, mapper) {
+        return true;
+    }
+    // VALUE BODY: does the produced value still depend on an unbound
+    // OUTER generic? The bound mapper binder `K` is closed; an intrinsic
+    // / helper over `K` (`Capitalize<K>`) or a resolution miss does NOT
+    // open it (only an outer-generic argument does).
+    OpenWalk::mapped_value_body(dispatch, mapper.parameter_node)
+        .node_is_open(dispatch.ctx, mapper.value_expr)
+}
+
+/// Lowering-entrance builtin argument openness: does `node` (a lowered
+/// builtin type argument) still depend on unsubstituted generic
+/// structure — an unbound `TypeParam` (including a mapper binder whose
+/// per-key substitution happens later at a demand point), an open
+/// operator carrier over one, an `Opaque` degradation, or an
+/// undecidable walk?
+///
+/// The carrier-mode lowering gate (`Navigate` / `Skeleton` / `Shallow`)
+/// consults this per argument: a builtin instantiation over an OPEN
+/// argument must intern the `InstantiationRef` carrier instead of
+/// executing eagerly — eager execution over carrier-shaped args bakes
+/// `Opaque(Miss)` into the produced structure (a
+/// `NonNullable<ChatSlots[K]>` conditional check with unbound `K`)
+/// and destroys the deferred structure the demand points need for
+/// per-key realization. Closed-argument builtins keep the eager
+/// execute, byte-for-byte.
+pub(crate) fn builtin_lowering_argument_is_open(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> bool {
+    OpenWalk::lowering_value_argument(dispatch).node_is_open(dispatch.ctx, node)
+}
+
+/// KEY-PRODUCTION axis of [`mapped_type_is_open_or_unknown`]: is the
+/// mapped type's produced KEY SET open or undecidable, judging ONLY the
+/// source / keyspace / `as`-remap (binder-bound KEY-DOMAIN policy) and
+/// never the value body?
+///
+/// The empty-path Shallow surface enumerator gates per-key enumeration
+/// on THIS axis alone: a mapped type with a CLOSED key domain and an
+/// open VALUE body (`{ [K in keyof ChatSlots]?: … MB<T> … }`) still
+/// enumerates its keys path-precisely — the per-key VALUES materialise
+/// under `StructuralTransit(Navigate)` and keep the open generic as a
+/// deferred carrier (shallow values). Value-body openness defers only
+/// the operator MATERIALISATION routes (the full predicate above), not
+/// the key enumeration.
+pub(crate) fn mapped_type_key_domain_is_open_or_unknown(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    source: SemanticNodeId,
+    mapper: &crate::semantic_query::MapperKey,
+) -> bool {
+    // KEY DOMAIN: is the produced KEY SPACE open or undecidable (making
+    // `keyof source` non-enumerable — the storm)? A mapped source / key
+    // space with a CLOSED key domain is always enumerable at build time —
+    // a finite object surface, a closed builtin-utility instantiation
+    // (`Omit<MenuProps, …>`), a closed conditional, a finite literal
+    // union — so it must NOT carrier-stop (`Partial`/`Required`/`Readonly`
+    // over a closed utility source still enumerate). The key-domain walk
+    // asks the key-space-finiteness question (so an unresolved carrier
+    // head / a resolution miss / a recursive ref is OPEN — the keys cannot
+    // be enumerated), does NOT descend the source's member VALUES (a
+    // member value reaching `T` does not change WHICH keys exist: `{ [K in
+    // keyof {a: Foo<T>}]: V }` still has the finite key `a`), and judges a
+    // resolved instantiation in the domain by the SAME per-argument
+    // key-domain closure rule as `Pick`/`Omit`
+    // (`prepared_instantiation_key_domain_is_closed`): an open argument
+    // confined to member VALUE positions of a fixed-key body keeps the key
+    // domain CLOSED, so `{ [K in keyof Foo<T>]: string }` over `interface
+    // Foo<T> { label?: string; items?: T }` still enumerates `label` /
+    // `items`.
+    //
+    // The three key-domain operands split BY ROLE. The SOURCE and the key
+    // SPACE are [`OpenRole::KeyDomainProof`] — they MUST PROVE finiteness (a
+    // value-producing builtin source such as `ReturnType<…>` makes no
+    // closed-key claim and stays OPEN). The `as`-REMAP is
+    // [`OpenRole::MappedNameRemap`] — a K-only transform over the bound
+    // binder (`as keyof Foo<T>` over a fixed-key `Foo`, `as Capitalize<K>`)
+    // is decidable per key and stays CLOSED, while a direct outer-generic
+    // remap (`as T`) or an open-argument instantiation stays OPEN. The role
+    // is part of every verdict identity (`memo`/`in_flight` are role-keyed),
+    // so the proof and remap walks cannot alias a verdict; the proof walk's
+    // remaining budget is threaded into the remap walk so the whole
+    // classification stays globally bounded.
+    let mut proof = OpenWalk::mapped_source_keyspace(dispatch, mapper.parameter_node);
+    if proof.node_is_open(dispatch.ctx, source) {
+        return true;
+    }
+    if proof.node_is_open(dispatch.ctx, mapper.key_space) {
+        return true;
+    }
+    if let Some(remap) = mapper.name_remap {
+        let mut remap_walk = OpenWalk::mapped_name_remap(dispatch, mapper.parameter_node);
+        remap_walk.budget = proof.budget;
+        if remap_walk.node_is_open(dispatch.ctx, remap) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The ROLE an [`OpenWalk`] plays — the SINGLE policy axis. Every other
+/// policy attribute (the [`OpenQuestion`], whether finite value surfaces
+/// are descended, how an `InstantiationRef` is judged, and whether a
+/// concrete no-open-argument instantiation is taken closed without a
+/// finiteness proof) is DERIVED from the role, so an invalid combination
+/// (e.g. the key-domain concrete-instantiation shortcut on a source that
+/// must prove finiteness) cannot be expressed.
+///
+/// The three roles are the three policies the walker actually runs:
+///
+/// - [`OpenRole::KeyDomainProof`] — the `Pick`/`Omit` enumeration domain
+///   AND the mapped SOURCE / key SPACE. It asks the key-space-finiteness
+///   question ([`OpenQuestion::KeyDomain`]) and MUST PROVE finiteness: a
+///   concrete no-open-argument instantiation is NOT taken closed by
+///   shortcut — it falls through to the builtin registry
+///   (`builtin_utility_key_domain_is_closed`) / prepared-decl proof, so a
+///   value-producing builtin (`ReturnType`, `InstanceType`, the string
+///   intrinsics, …) that makes NO closed-key claim stays OPEN. An
+///   instantiation is judged per-argument
+///   (`per_argument_key_domain = true`): an open argument confined to
+///   member VALUE positions of a fixed-key body keeps the key domain
+///   CLOSED. Finite value surfaces are closed leaves
+///   (`descend_value_surfaces = false`).
+/// - [`OpenRole::MappedNameRemap`] — the mapped `as`-clause name transform.
+///   It also asks [`OpenQuestion::KeyDomain`] and judges per-argument, but
+///   a CONCRETE no-open-argument instantiation IS taken closed without a
+///   separate finiteness proof: the produced key set is concrete at build
+///   time and the mapped key ENUMERATOR owns it, so a K-only transform over
+///   the BOUND binder `K` (`as `on${Capitalize<K>}``, `as Capitalize<K>`)
+///   is decidable per key. (The per-key remap classifier still validates
+///   the produced names downstream.) Finite value surfaces are closed
+///   leaves.
+/// - [`OpenRole::OuterGenericValue`] — the mapped VALUE body AND the
+///   lowering-entrance builtin-argument gate. It asks the NARROWER
+///   [`OpenQuestion::OuterGenericReachability`] ("does this reach an unbound
+///   OUTER generic?"), judges an instantiation open iff an ARGUMENT is open
+///   (`per_argument_key_domain = false`), and DESCENDS finite value surfaces
+///   (`descend_value_surfaces = true`) to find an outer generic nested in a
+///   member value / parameter / element.
+///
+/// The role is part of EVERY verdict identity: both `memo` and `in_flight`
+/// are keyed `(SemanticNodeId, OperandPosition, OpenRole)`, so a node
+/// reached under two different roles cannot alias one role's cached verdict
+/// (or one role's in-flight back-edge) to the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum OpenRole {
+    /// `Pick`/`Omit` enumeration domain + mapped source / key space — MUST
+    /// prove finiteness (no concrete-instantiation shortcut).
+    KeyDomainProof,
+    /// Mapped `as` name transform — K-only transforms over the bound binder
+    /// are taken closed (the concrete-instantiation shortcut applies).
+    MappedNameRemap,
+    /// Mapped value body + lowering-entrance builtin argument —
+    /// outer-generic-reachability question, value surfaces descended.
+    OuterGenericValue,
+}
+
+impl OpenRole {
+    /// The openness QUESTION this role asks (the undecidable-answer
+    /// direction). Key-domain roles ask [`OpenQuestion::KeyDomain`]; the
+    /// value role asks [`OpenQuestion::OuterGenericReachability`].
+    fn question(self) -> OpenQuestion {
+        match self {
+            OpenRole::KeyDomainProof | OpenRole::MappedNameRemap => OpenQuestion::KeyDomain,
+            OpenRole::OuterGenericValue => OpenQuestion::OuterGenericReachability,
+        }
+    }
+
+    /// Whether finite value surfaces (`Object`/`Function`/`Array`/`Tuple`)
+    /// are DESCENDED to find a nested outer generic. Only the value role
+    /// descends; the key-domain roles treat them as closed leaves (a member
+    /// value does not change WHICH keys a surface exposes).
+    fn descend_value_surfaces(self) -> bool {
+        matches!(self, OpenRole::OuterGenericValue)
+    }
+
+    /// Whether an `InstantiationRef` is judged by the per-argument
+    /// key-domain closure rule (`true` — key-domain roles) or simply
+    /// "does any argument reach the outer generic" (`false` — the value
+    /// role).
+    fn per_argument_key_domain(self) -> bool {
+        matches!(self, OpenRole::KeyDomainProof | OpenRole::MappedNameRemap)
+    }
+
+    /// Whether a CONCRETE (no-open-argument) instantiation in a per-argument
+    /// key-domain position is taken CLOSED WITHOUT a separate finiteness
+    /// proof. ONLY the `as`-remap role takes this shortcut: the produced key
+    /// set is concrete at build time and the mapped key enumerator owns it
+    /// (a `Capitalize<K>` over the bound binder is decidable per key). The
+    /// `KeyDomainProof` role must PROVE finiteness — it falls through to the
+    /// builtin registry / prepared-decl proof, which is what keeps a
+    /// value-producing builtin source (`ReturnType<…>`) OPEN.
+    fn concrete_no_open_arg_is_closed(self) -> bool {
+        matches!(self, OpenRole::MappedNameRemap)
+    }
+}
+
+/// The openness QUESTION an [`OpenWalk`] answers — the undecidable-answer
+/// direction, DERIVED from the walk's [`OpenRole`].
+///
+/// The two variants are the two undecidable-answer directions the roles
+/// need:
+///
+/// - [`OpenQuestion::KeyDomain`] — "is the KEY SPACE undecidable / not
+///   provably finite?" An undecidable node (a resolution miss, a degraded
+///   `Opaque`, an unresolved head, budget exhaustion) is OPEN, because the
+///   keys cannot be enumerated (conservative). This is the
+///   `Pick`/`Omit` enumeration domain AND the mapped source / key space /
+///   `as`-remap policy.
+/// - [`OpenQuestion::OuterGenericReachability`] — "does this reach an
+///   UNBOUND OUTER generic?" An undecidable node carries NO outer generic
+///   (a missing node, an unresolved head, a `DeclRef` whose own type
+///   parameters cannot be the mapper's outer generic), so it is CLOSED for
+///   this question. This is the [`OpenRole::OuterGenericValue`] question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenQuestion {
+    /// Key-space-finiteness question (the `KeyDomainProof` /
+    /// `MappedNameRemap` roles).
+    KeyDomain,
+    /// Outer-generic-reachability question (the `OuterGenericValue` role).
+    OuterGenericReachability,
+}
+
+impl OpenQuestion {
+    /// The question-correct answer for an UNDECIDABLE node (a resolution
+    /// miss, a degraded `Opaque`, an unresolved carrier head, or budget
+    /// exhaustion): OPEN for the key-domain question (the keys are not
+    /// provably finite), CLOSED for the outer-generic question (an
+    /// undecidable node carries no outer generic).
+    fn undecidable_is_open(self) -> bool {
+        matches!(self, OpenQuestion::KeyDomain)
+    }
+}
+
+struct OpenWalk<'a> {
+    /// The ACTIVE dispatcher (NOT a freshly-constructed one). The walk
+    /// resolves carrier heads and consults the shared branch-selection
+    /// oracle THROUGH this dispatcher so the dispatcher-local
+    /// `instantiate_active` + `carrier_normalizing` cycle-guard state is
+    /// shared — a freshly-constructed dispatch would lose that state and
+    /// diverge on recursive refs.
+    dispatch: &'a ProjectSemanticDispatch<'a>,
+    bound_params: FxHashSet<SemanticNodeId>,
+    /// Infer NAMES bound by an enclosing oracle-selected bare-infer
+    /// conditional (`X := check` — see the tri-state `Conditional` arm):
+    /// an `Infer` reference in the selected branch classifies as its
+    /// bound node. Empty outside such a branch.
+    bound_infers: FxHashMap<Arc<str>, SemanticNodeId>,
+    /// The SINGLE policy axis. The [`OpenQuestion`], value-surface descent,
+    /// per-argument key-domain judgement, and the concrete-instantiation
+    /// shortcut are all DERIVED from this role (see [`OpenRole`]) — there
+    /// are no independent policy bools to fall out of sync. The role is also
+    /// part of every verdict identity (it keys both `memo` and `in_flight`).
+    role: OpenRole,
+    position: OperandPosition,
+    budget: u32,
+    in_flight: FxHashSet<OpenMemoKey>,
+    memo: FxHashMap<OpenMemoKey, bool>,
+}
+
+/// Verdict identity for an [`OpenWalk`] node visit: the node, the operand
+/// position it was reached at, AND the walk's [`OpenRole`]. The role is
+/// load-bearing in BOTH `memo` and `in_flight`: a node reached under
+/// `KeyDomainProof` and under `MappedNameRemap` has two DIFFERENT verdict
+/// policies, so sharing a key would either alias one role's cached verdict
+/// to the other (memo) or report a cross-role revisit as a fake cycle
+/// (`in_flight`, the closed-for-revisit answer). Both maps use this key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct OpenMemoKey {
+    node: SemanticNodeId,
+    position: OperandPosition,
+    role: OpenRole,
+}
+
+impl<'a> OpenWalk<'a> {
+    /// Construct an [`OpenWalk`] for `role` with the given bound binder
+    /// (`None` for roles that bind no mapper binder), starting at
+    /// `OperandPosition::KeyDomain` with a fresh memo / in-flight set and
+    /// the full node budget.
+    fn for_role(
+        dispatch: &'a ProjectSemanticDispatch<'a>,
+        role: OpenRole,
+        bound_param: Option<SemanticNodeId>,
+    ) -> Self {
+        let mut bound_params = FxHashSet::default();
+        if let Some(binder) = bound_param {
+            bound_params.insert(binder);
+        }
+        Self {
+            dispatch,
+            bound_params,
+            bound_infers: FxHashMap::default(),
+            role,
+            position: OperandPosition::KeyDomain,
+            budget: ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET,
+            in_flight: FxHashSet::default(),
+            memo: FxHashMap::default(),
+        }
+    }
+
+    /// Enumeration-domain policy (`Pick`/`Omit` source key space):
+    /// [`OpenRole::KeyDomainProof`] with no bound mapper binder. Finite
+    /// value surfaces are closed leaves and the walk MUST prove finiteness
+    /// (no concrete-instantiation shortcut). Conditionals are tri-state
+    /// through the shared oracle (see [`OpenWalk`]).
+    fn enumeration_domain(dispatch: &'a ProjectSemanticDispatch<'a>) -> Self {
+        Self::for_role(dispatch, OpenRole::KeyDomainProof, None)
+    }
+
+    /// Mapped value-body policy ([`OpenRole::OuterGenericValue`]): the bound
+    /// mapper binder `K` is closed, finite value surfaces are descended, and
+    /// the walk asks the NARROW "reaches an unbound outer generic" question.
+    /// Conditionals are tri-state through the shared oracle. See
+    /// [`OpenWalk`].
+    fn mapped_value_body(
+        dispatch: &'a ProjectSemanticDispatch<'a>,
+        bound_param: SemanticNodeId,
+    ) -> Self {
+        Self::for_role(dispatch, OpenRole::OuterGenericValue, Some(bound_param))
+    }
+
+    /// Builtin lowering-argument policy ([`OpenRole::OuterGenericValue`]):
+    /// asks the NARROW "does this ARGUMENT still depend on unsubstituted
+    /// generic structure" question for the lowering-entrance builtin carrier
+    /// gate. No bound binders (every reachable `TypeParam` — including a
+    /// mapper binder whose substitution happens later at a demand point — is
+    /// unbound at lowering time), value surfaces are descended (the builtin
+    /// consumes the argument's VALUES), and an instantiation is open iff an
+    /// argument is open. Conditionals are tri-state through the shared
+    /// oracle.
+    fn lowering_value_argument(dispatch: &'a ProjectSemanticDispatch<'a>) -> Self {
+        Self::for_role(dispatch, OpenRole::OuterGenericValue, None)
+    }
+
+    /// Mapped SOURCE / key SPACE policy ([`OpenRole::KeyDomainProof`]): asks
+    /// the key-space-finiteness question and MUST PROVE finiteness — a
+    /// concrete no-open-argument instantiation is NOT taken closed by
+    /// shortcut, it falls through to the builtin registry / prepared-decl
+    /// proof, so a value-producing builtin source (`ReturnType<…>`,
+    /// `InstanceType<…>`, the string intrinsics) that makes no closed-key
+    /// claim stays OPEN (and `& T` opens the key domain → carrier-stop). It
+    /// does NOT descend value surfaces — a member value reaching the outer
+    /// generic does not change which KEYS the source exposes
+    /// (`{ [K in keyof {a: Foo<T>}]: string }` enumerates `{a}`). A resolved
+    /// instantiation is judged per-argument (`per_argument_key_domain`): an
+    /// open argument confined to member VALUE positions of a fixed-key body
+    /// keeps the produced key set CLOSED (`{ [K in keyof Foo<T>]: V }` with
+    /// `T` value-position-only still enumerates). The bound binder `K` is
+    /// closed. An undecidable source (unresolved carrier head, resolution
+    /// miss, recursive ref, budget exhaustion) is OPEN. Conditionals are
+    /// tri-state through the shared oracle. See [`OpenWalk`].
+    fn mapped_source_keyspace(
+        dispatch: &'a ProjectSemanticDispatch<'a>,
+        bound_param: SemanticNodeId,
+    ) -> Self {
+        Self::for_role(dispatch, OpenRole::KeyDomainProof, Some(bound_param))
+    }
+
+    /// Mapped `as`-clause NAME-REMAP policy ([`OpenRole::MappedNameRemap`]):
+    /// the remap's result IS the produced key set, judged per-argument like
+    /// the source/keyspace BUT a CONCRETE no-open-argument instantiation is
+    /// taken CLOSED without a separate finiteness proof — a K-only transform
+    /// over the BOUND binder (`as `on${Capitalize<K>}``, `as Capitalize<K>`)
+    /// is decidable per key and the enumerator owns it (the per-key remap
+    /// classifier validates the produced names downstream). A remap reaching
+    /// an outer generic directly, or an open-argument instantiation, still
+    /// opens. The bound binder `K` is closed. See [`OpenWalk`].
+    fn mapped_name_remap(
+        dispatch: &'a ProjectSemanticDispatch<'a>,
+        bound_param: SemanticNodeId,
+    ) -> Self {
+        Self::for_role(dispatch, OpenRole::MappedNameRemap, Some(bound_param))
+    }
+
+    /// A child walk with the SAME policy + remaining budget and `binder`
+    /// added to the bound set — used by the nested-`Mapped` arm so the
+    /// nested mapper's own binder is BOUND while ITS source / key space /
+    /// remap are inspected. The binder scope is local to that node, so the
+    /// child gets fresh `memo`/`in_flight` state (verdicts computed under
+    /// the extended bind set must not leak into the outer walk's memo, and
+    /// vice versa); the caller copies the child's spent budget back so the
+    /// walk stays globally bounded.
+    ///
+    /// Takes the child's [`OpenRole`] explicitly: a nested mapper's
+    /// key-production operands are re-classified per ROLE (nested source /
+    /// key space → [`OpenRole::KeyDomainProof`], nested `as`-remap →
+    /// [`OpenRole::MappedNameRemap`]), while its value body keeps the parent
+    /// value-consuming role. The fresh `memo`/`in_flight` (mandated by the
+    /// changed bound-binder environment) also re-key on the new role, so a
+    /// nested operand's verdict never aliases the parent role's.
+    fn scoped_with_bound_binder(&self, binder: SemanticNodeId, role: OpenRole) -> Self {
+        let mut bound_params = self.bound_params.clone();
+        bound_params.insert(binder);
+        Self {
+            dispatch: self.dispatch,
+            bound_params,
+            bound_infers: self.bound_infers.clone(),
+            role,
+            position: self.position,
+            budget: self.budget,
+            in_flight: FxHashSet::default(),
+            memo: FxHashMap::default(),
+        }
+    }
+
+    /// A child walk with the SAME policy + remaining budget and `name`
+    /// bound to `node` in the infer-binding environment — used by the
+    /// tri-state `Conditional` arm when the shared oracle selects TRUE
+    /// via the bare-infer pattern (`X := check`): the selected branch's
+    /// `Infer` references classify as the check node. The binding scope
+    /// is local to that branch, so the child gets fresh
+    /// `memo`/`in_flight` state (same rule as
+    /// [`Self::scoped_with_bound_binder`]); the caller copies the
+    /// child's spent budget back.
+    fn scoped_with_bound_infer(&self, name: Arc<str>, node: SemanticNodeId) -> Self {
+        let mut bound_infers = self.bound_infers.clone();
+        bound_infers.insert(name, node);
+        Self {
+            dispatch: self.dispatch,
+            bound_params: self.bound_params.clone(),
+            bound_infers,
+            role: self.role,
+            position: self.position,
+            budget: self.budget,
+            in_flight: FxHashSet::default(),
+            memo: FxHashMap::default(),
+        }
+    }
+
+    /// Bounded typed-IR walk deciding whether `node` is OPEN — i.e. it
+    /// still depends on unsubstituted generic structure or cannot be
+    /// proven a finite surface under this walk's policy.
+    ///
+    /// OPEN ⇒ reaches an unsubstituted (non-bound) `TypeParam`, an
+    /// `Opaque` (resolution miss / degraded), a conditional whose
+    /// inspected operands are open, an `IndexedAccess`/`KeyOf`/`Mapped`
+    /// over an open operand, an instantiation whose produced KEY SET
+    /// depends on an open type argument (an open arg confined to member
+    /// VALUE positions of a fixed-key body does not open the domain),
+    /// an under-applied / arity-unsatisfied / open-bodied
+    /// `InstantiationRef`, an unresolved or open-bodied `DeclRef` alias
+    /// chain, or exhausts the walk budget. CLOSED ⇒ a finite surface
+    /// proven without crossing an open node. `Infer` is a
+    /// conditional-inference binding placeholder, NOT an unbound generic.
+    fn node_is_open(
+        &mut self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        node: SemanticNodeId,
+    ) -> bool {
+        let memo_key = OpenMemoKey {
+            node,
+            position: self.position,
+            role: self.role,
+        };
+        if let Some(&verdict) = self.memo.get(&memo_key) {
+            // Completed verdict: return it VERBATIM. The hash-consed graph
+            // shares one `SemanticNodeId` per structure, and the
+            // `InstantiationRef` per-argument collect does not
+            // short-circuit — a revisited OPEN node must stay `true`
+            // (`Pick<Foo<T, T>, K>`: arg1 revisits arg0's `T`), or the
+            // per-argument vector would prove a key-positioned open param
+            // CLOSED and re-open the storm class behind the fuse. The
+            // position + role key keeps verdicts for the same node under
+            // different operand positions / policy roles independent.
+            return verdict;
+        }
+        if !self.in_flight.insert(memo_key) {
+            // IN-FLIGHT back-edge — a genuine cycle on the current walk
+            // frontier. Closed for THIS revisit only (the cycle
+            // contributes no new openness signal); never memoized, so a
+            // later completed verdict for the node wins. Defensive: the
+            // intern-only hash-consed semantic graph is a DAG today, so
+            // this back-edge cannot fire at this layer.
+            return false;
+        }
+        let verdict = self.node_openness_uncached(ctx, node);
+        self.in_flight.remove(&memo_key);
+        self.memo.insert(memo_key, verdict);
+        verdict
+    }
+
+    /// Recurse into `node` AT the given operand position, restoring the
+    /// surrounding position afterwards. Memo / in-flight keys carry the
+    /// position, so a node reached both as a key-domain operand and as a
+    /// value-sensitive operand keeps two independent verdicts.
+    fn node_is_open_at(
+        &mut self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        node: SemanticNodeId,
+        position: OperandPosition,
+    ) -> bool {
+        let surrounding = self.position;
+        self.position = position;
+        let verdict = self.node_is_open(ctx, node);
+        self.position = surrounding;
+        verdict
+    }
+
+    /// Single-node verdict compute behind [`Self::node_is_open`]'s
+    /// memoization. Never call directly — the memo/in-flight discipline
+    /// lives in the wrapper.
+    fn node_openness_uncached(
+        &mut self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        node: SemanticNodeId,
+    ) -> bool {
+        if self.budget == 0 {
+            // Walk budget exhausted. The KEY-DOMAIN question is
+            // conservatively undecidable ⇒ open; the
+            // outer-generic-reachability question asks "reaches an unbound
+            // outer generic" — not finding one within budget answers that
+            // question NO (closed), and the armed runaway fuse remains the
+            // depth backstop. Over-firing the carrier-stop on a deep
+            // CLOSED value would be the worse failure.
+            return self.role.question().undecidable_is_open();
+        }
+        self.budget -= 1;
+
+        let Some(data) = super::node_data_for(ctx, node) else {
+            // Unresolved / un-interned node: the KEY-DOMAIN question treats
+            // it as open (not provably finite); the
+            // outer-generic-reachability question treats it as closed (a
+            // missing node carries no outer generic).
+            return self.role.question().undecidable_is_open();
+        };
+        match data.as_ref() {
+            // --- type parameter: open unless BOUND for this walk ---
+            // An unsubstituted outer `TypeParam` is an unbound generic;
+            // the bound mapper binder `K` (added to `bound_params` by the
+            // value-body policy) is a closed local and does NOT open.
+            SemanticNodeData::TypeParam { .. } => !self.bound_params.contains(&node),
+
+            // A `DeclPlaceholder` is a RESOLVED-but-deferred declaration
+            // reference (canonical + name) — semantically identical to a
+            // `DeclRef` for openness, NOT a resolution miss. For the
+            // KEY-DOMAIN question its closedness is decided by the bounded
+            // prepared-decl transparent-alias-chain walk (a
+            // not-provably-closed source key space is open). For the
+            // outer-generic-reachability question a declaration reference
+            // CANNOT carry the mapper's outer generic, so it does NOT open
+            // the value.
+            SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
+                canonical_id,
+                name,
+                ..
+            }) => {
+                if matches!(self.role.question(), OpenQuestion::OuterGenericReachability) {
+                    return false;
+                }
+                // Thread the WALK's remaining budget through the prepared-decl
+                // hop (threading the WALK budget, NOT a fresh per-hop budget): a carrier
+                // source that resolves through this decl hop back into the walk
+                // (e.g. `type Self = { [K in keyof import("./self").Self]: V }`
+                // via the `ImportType` bridge) must consume ONE shared budget so
+                // the round-trip terminates bounded.
+                !prepared_decl_body_is_closed(
+                    self.dispatch,
+                    canonical_id.as_ref(),
+                    name.as_ref(),
+                    &mut self.budget,
+                )
+                .is_closed()
+            }
+            // A genuine resolution miss / degraded `Opaque` makes the KEY
+            // space undecidable (key-domain question ⇒ open) but carries no
+            // outer generic (outer-generic-reachability question ⇒ closed).
+            SemanticNodeData::Opaque(_) => self.role.question().undecidable_is_open(),
+
+            // `Infer` is a conditional-inference BINDING placeholder
+            // (`extends UIMessage<infer M, …>`), NOT an unbound generic.
+            // A name BOUND by an enclosing oracle-selected bare-infer
+            // conditional (`X := check`) classifies as its bound node —
+            // the same binding the build-side substitution applies; an
+            // unbound placeholder stays closed.
+            SemanticNodeData::Infer { name } => {
+                match self.bound_infers.get(name.as_ref()).copied() {
+                    Some(bound) => self.node_is_open(ctx, bound),
+                    None => false,
+                }
+            }
+
+            // --- operator shapes ---
+            // TRI-STATE conditional through the SHARED branch-selection
+            // oracle (the pre-relation infer-pattern cases, then the same
+            // `shallow_relation_check` → `relate_nodes` path
+            // `build_conditional` selects branches with; `any` / `error`
+            // checks defer): a SELECTED branch IS the conditional's
+            // surface — classify only it (an open losing branch is dead
+            // and must not false-OPEN the domain), with a bare-infer
+            // selection binding the branch's infer name to the CHECK
+            // node (`X := check`, mirroring the build-side
+            // substitution). A function-infer selection binds
+            // check-SIGNATURE components — widened to the Deferred
+            // treatment here (a superset of the selected branch;
+            // classifying the raw branch with unbound-closed infer
+            // placeholders would risk a false-CLOSED). A Deferred
+            // selection classifies the check/extends OPERANDS
+            // value-sensitively (branch selection depends on operand
+            // VALUES — any open instantiation argument opens them) plus
+            // BOTH branches under the surrounding position.
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                ..
+            } => {
+                let (check, extends) = (*check, *extends);
+                let (true_branch, false_branch) = (*true_branch_ref, *false_branch_ref);
+                // Consult the shared branch-selection oracle THROUGH the active
+                // dispatcher (NOT a freshly-constructed one): the active
+                // dispatcher carries the `instantiate_active` /
+                // `carrier_normalizing` cycle-guard state, so a recursive ref in
+                // the check/extends operands terminates bounded instead of
+                // diverging.
+                let (mut selection, infer) =
+                    self.dispatch.conditional_branch_selection(check, extends);
+                let mut bare_infer_binding: Option<(Arc<str>, SemanticNodeId)> = None;
+                match infer {
+                    Some(super::InferPatternSelection::BareInfer { name }) => {
+                        bare_infer_binding = Some((name, check));
+                    }
+                    Some(super::InferPatternSelection::FunctionInfer { .. }) => {
+                        selection = super::ConditionalBranchSelection::Deferred;
+                    }
+                    None => {}
+                }
+                match selection {
+                    super::ConditionalBranchSelection::True => match bare_infer_binding {
+                        Some((name, bound)) => {
+                            let mut scoped = self.scoped_with_bound_infer(name, bound);
+                            let open = scoped.node_is_open(ctx, true_branch);
+                            self.budget = scoped.budget;
+                            open
+                        }
+                        None => self.node_is_open(ctx, true_branch),
+                    },
+                    super::ConditionalBranchSelection::False => {
+                        self.node_is_open(ctx, false_branch)
+                    }
+                    super::ConditionalBranchSelection::Deferred => {
+                        self.node_is_open_at(ctx, check, OperandPosition::ValueSensitive)
+                            || self.node_is_open_at(ctx, extends, OperandPosition::ValueSensitive)
+                            || self.node_is_open(ctx, true_branch)
+                            || self.node_is_open(ctx, false_branch)
+                    }
+                }
+            }
+            // `keyof`'s value IS its base's KEY SET — the base re-enters
+            // the `KeyDomain` position even under a value-sensitive
+            // operand, matching the TypeExpr arm.
+            SemanticNodeData::KeyOf { base } => {
+                self.node_is_open_at(ctx, *base, OperandPosition::KeyDomain)
+            }
+            // An indexed access is open when EITHER the object OR the index
+            // key space is open. The OBJECT operand is VALUE-sensitive:
+            // `Wrap<T>['a']` IS the member VALUE `a` (e.g. `BigOpen<T>` —
+            // an open surface), so a per-argument-closed-but-any-arg-open
+            // object must OPEN the access. The INDEX stays a key/keyspace
+            // question; a `TypeParam`-keyed access (`T[K]` with open `K`)
+            // is just as undecidable as an open object.
+            SemanticNodeData::IndexedAccess { object, index } => {
+                self.node_is_open_at(ctx, *object, OperandPosition::ValueSensitive)
+                    || self.index_key_is_open(ctx, index)
+            }
+            // A nested mapped type splits BY ROLE per operand. Its `source`
+            // / mapper `key_space` are KEY-PRODUCTION proof operands
+            // ([`OpenRole::KeyDomainProof`]); its `as`-clause `name_remap` is
+            // the K-only transform role ([`OpenRole::MappedNameRemap`]); its
+            // VALUE body keeps the SURROUNDING role (`self.role`). All
+            // key-production operands are walked PINNED at `KeyDomain`
+            // regardless of the surrounding position (a value-sensitive
+            // parent consumes the mapped type's VALUES, but which KEYS the
+            // mapper produces is still a key-domain question:
+            // `{ [K in Keys<T>]: string }['a']` over a fixed-key `Keys<T>`
+            // must not false-OPEN). The value body is consumed exactly when
+            // the surrounding policy consumes values — a `ValueSensitive`
+            // operand position or a value-body-descending walk — so
+            // `{ [K in 'a']: T }['a']` IS the open `T` and opens. The nested
+            // mapper's OWN binder is BOUND for every inspection: a remap ``
+            // as `on${Capitalize<K>}` `` over a finite key space is a K-only
+            // transform (decidable per key under the remap role), not an open
+            // interpolant; a remap reaching an outer `T` stays open. The
+            // binder + role scope is local to each operand, hence a scoped
+            // child walk per role (shared budget threaded, fresh memo).
+            SemanticNodeData::Mapped { source, mapper } => {
+                let mut proof =
+                    self.scoped_with_bound_binder(mapper.parameter_node, OpenRole::KeyDomainProof);
+                let mut open = proof.node_is_open_at(ctx, *source, OperandPosition::KeyDomain)
+                    || proof.node_is_open_at(ctx, mapper.key_space, OperandPosition::KeyDomain);
+                self.budget = proof.budget;
+                if !open {
+                    if let Some(remap) = mapper.name_remap {
+                        let mut remap_walk = self.scoped_with_bound_binder(
+                            mapper.parameter_node,
+                            OpenRole::MappedNameRemap,
+                        );
+                        open = remap_walk.node_is_open_at(ctx, remap, OperandPosition::KeyDomain);
+                        self.budget = remap_walk.budget;
+                    }
+                }
+                if !open
+                    && (self.role.descend_value_surfaces()
+                        || self.position == OperandPosition::ValueSensitive)
+                {
+                    let mut value_walk =
+                        self.scoped_with_bound_binder(mapper.parameter_node, self.role);
+                    open = value_walk.node_is_open(ctx, mapper.value_expr);
+                    self.budget = value_walk.budget;
+                }
+                open
+            }
+            SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                expressions.iter().any(|e| self.node_is_open(ctx, *e))
+            }
+            // An instantiation's openness depends on the walk's question.
+            // The KEY-DOMAIN walks (`Pick`/`Omit` enumeration domain AND
+            // the mapped source / key space) judge per-argument: an open
+            // type argument does NOT by itself open the produced KEY SET —
+            // `Foo<T>` over a decl whose body has a FIXED set of member
+            // NAMES (T confined to member VALUE positions) keeps a CLOSED
+            // key domain, so `Omit<Foo<T>, …>` and
+            // `{ [K in keyof Foo<T>]: V }` still enumerate path-precisely.
+            // The per-argument openness vector feeds
+            // `prepared_instantiation_key_domain_is_closed` (decl exists,
+            // arity/defaults satisfiable, prepared body's KEY SET closed
+            // under those bindings — an open-bound param opens it only
+            // where the body places it in a key-reachable position).
+            // The value-body walk asks only "does an ARGUMENT reach the
+            // outer generic" — an intrinsic / helper instantiation over the
+            // BOUND binder `K` (`Capitalize<K>`, `NonNullable<X[K]>`) does
+            // NOT propagate the outer generic and is CLOSED regardless of
+            // whether its target body is provably closed; only
+            // `Foo<T>` / `Base<T>` (an outer-generic argument) opens it.
+            SemanticNodeData::InstantiationRef { base, args } => {
+                // Non-short-circuiting per-argument collect — the memo in
+                // `node_is_open` keeps a hash-consed repeated open node
+                // truthful on revisit. Closed arguments keep their NODE
+                // identity (the binding the conditional branch-selection
+                // oracle resolves bound-parameter operands through).
+                let arg_bindings: Vec<KeyDomainBinding> = args
+                    .iter()
+                    .map(|a| {
+                        if self.node_is_open(ctx, *a) {
+                            KeyDomainBinding::Open
+                        } else {
+                            KeyDomainBinding::ClosedNode(*a)
+                        }
+                    })
+                    .collect();
+                let any_open = arg_bindings.iter().any(|binding| binding.is_open());
+                if self.position == OperandPosition::ValueSensitive {
+                    // A VALUE-SENSITIVE operand position (conditional
+                    // check/extends, indexed-access object): the
+                    // enclosing operator consumes this instantiation's
+                    // VALUES, so the per-argument key-domain rule does
+                    // not apply — ANY open argument opens it.
+                    if any_open {
+                        return true;
+                    }
+                    if matches!(self.role.question(), OpenQuestion::OuterGenericReachability) {
+                        // The outer-generic-reachability question asks only
+                        // "does an argument reach the outer generic" — an
+                        // unresolvable base carries none (the DeclRef
+                        // rule), so all-closed args stay closed.
+                        return false;
+                    }
+                    // KEY-DOMAIN question: all-closed arguments are a
+                    // CONCRETE surface only when the base actually
+                    // resolves (prepared decl / registry builtin) —
+                    // mirroring the TypeExpr arm's
+                    // `name_resolution`/registry gate; an unresolvable
+                    // base is undecidable ⇒ open.
+                    return !instantiation_base_is_resolvable(ctx, base, &mut self.budget);
+                }
+                if !self.role.per_argument_key_domain() {
+                    // The outer-generic-reachability question asks only
+                    // "does an ARGUMENT reach the outer generic".
+                    return any_open;
+                }
+                if self.role.concrete_no_open_arg_is_closed() && !any_open {
+                    // `as`-REMAP role ([`OpenRole::MappedNameRemap`]) with NO
+                    // outer generic reaching the instantiation: the produced
+                    // key set is concrete at build time — the mapped key
+                    // ENUMERATOR (or the deferred `Mapped` shell on plain
+                    // unavailability) owns it; no carrier-stop. A
+                    // `Capitalize<K>` / `MixedVis[K]` remap over the BOUND
+                    // binder `K` is decidable per key. The source / key-space
+                    // ([`OpenRole::KeyDomainProof`]) and `Pick`/`Omit`
+                    // enumeration-domain roles do NOT take this shortcut — they
+                    // must PROVE finiteness below (fall through to the builtin
+                    // registry / prepared-decl proof), because a value-producing
+                    // builtin source (`ReturnType<…>`) makes NO closed-key claim
+                    // and `& T` opens the key domain: short-cutting it CLOSED
+                    // would leak the closed-arm keys (the false-closed defect).
+                    return false;
+                }
+                if base.canonical_id.as_ref() == "__builtin__" {
+                    // A `__builtin__` base has NO prepared decl, so the
+                    // prepared-decl key-domain check below could never
+                    // prove it closed. Judged by the ONE registry-owned
+                    // rule (`builtin_utility_key_domain_is_closed`,
+                    // shared verbatim with the TypeExpr route so the
+                    // verdict is route-independent): per-utility
+                    // OUTPUT-KEY semantics — only the arguments that
+                    // actually produce output keys are judged
+                    // (`Record`'s open value arg keeps the domain
+                    // CLOSED; a value-producing utility makes no
+                    // closed-key claim) — and a nested closed carrier
+                    // (`Pick<Pick<{…}, 'a' | 'b'>, 'a'>` or
+                    // `Pick<Partial<{…}>, 'a'>`) must NOT be judged
+                    // OPEN.
+                    return !builtin_utility_key_domain_is_closed(
+                        base.decl_name.as_ref(),
+                        &arg_bindings,
+                    );
+                }
+                !prepared_instantiation_key_domain_is_closed(
+                    self.dispatch,
+                    base,
+                    &arg_bindings,
+                    &mut self.budget,
+                )
+                .is_closed()
+            }
+
+            // --- carriers we can follow one transparent hop ---
+            SemanticNodeData::Alias(target) => self.node_is_open(ctx, *target),
+            SemanticNodeData::DeclRef { identity } => {
+                // For the outer-generic-reachability question a declaration
+                // reference cannot carry the mapper's outer generic
+                // (declarations have their own type parameters), so a bare
+                // `DeclRef` is CLOSED — an outer generic reaches the value
+                // only as an instantiation ARGUMENT (`Foo<T>`), handled by
+                // `InstantiationRef`. For the KEY-DOMAIN question a resolved
+                // declaration whose BOUNDED fact-native evaluation proves a
+                // finite key domain (`prepared_decl_body_is_closed` — the
+                // recipe fact under an empty binding environment) is CLOSED;
+                // anything else (a free type parameter, an unresolved name,
+                // a cycle refusal, or budget exhaustion) is open.
+                if matches!(self.role.question(), OpenQuestion::OuterGenericReachability) {
+                    return false;
+                }
+                // Thread the WALK's remaining budget through the prepared-decl
+                // hop (threading the WALK budget, NOT a fresh per-hop budget): a
+                // zero-arg `DeclRef` carrier source that resolves back into the
+                // walk through this hop (the `ImportType` bridge round-trip) must
+                // consume ONE shared budget so the recursion terminates bounded.
+                !prepared_decl_body_is_closed(
+                    self.dispatch,
+                    identity.canonical_id.as_ref(),
+                    identity.decl_name.as_ref(),
+                    &mut self.budget,
+                )
+                .is_closed()
+            }
+
+            // --- finite value surfaces ---
+            // Under the key-domain policies these are closed leaves
+            // (their NAMED members' presence makes the KEY space
+            // enumerable) — EXCEPT an index signature's KEY type, which is
+            // key-domain reachable in every policy: a key over an unbound
+            // generic / undecidable structure leaves the produced key set
+            // open even though the named-member set is fixed, while a
+            // concrete key (`[k: string]`) is the bounded Record-class
+            // signature surface and stays closed. The mapped value-body
+            // policy — and ANY walk standing at a `ValueSensitive`
+            // operand (the enclosing operator consumes these surfaces'
+            // VALUES) — DESCENDS the value surfaces to find an unbound
+            // generic nested in a member value / function parameter /
+            // element type.
+            SemanticNodeData::Object(view) => {
+                if view
+                    .index_signatures
+                    .iter()
+                    .any(|s| self.node_is_open(ctx, s.key_type))
+                {
+                    return true;
+                }
+                (self.role.descend_value_surfaces()
+                    || self.position == OperandPosition::ValueSensitive)
+                    && (view.members.iter().any(|m| self.node_is_open(ctx, m.value))
+                        || view
+                            .call_signatures
+                            .iter()
+                            .any(|s| self.node_is_open(ctx, *s))
+                        || view
+                            .construct_signatures
+                            .iter()
+                            .any(|s| self.node_is_open(ctx, *s))
+                        || view
+                            .index_signatures
+                            .iter()
+                            .any(|s| self.node_is_open(ctx, s.value_type)))
+            }
+            SemanticNodeData::Function {
+                params,
+                return_type,
+                ..
+            } => {
+                (self.role.descend_value_surfaces()
+                    || self.position == OperandPosition::ValueSensitive)
+                    && (params.iter().any(|p| self.node_is_open(ctx, p.ty))
+                        || self.node_is_open(ctx, *return_type))
+            }
+            SemanticNodeData::Array { element, .. } => {
+                (self.role.descend_value_surfaces()
+                    || self.position == OperandPosition::ValueSensitive)
+                    && self.node_is_open(ctx, *element)
+            }
+            // A tuple's index KEY domain is fixed by its arity — EXCEPT
+            // a `rest` element (`[string, ...T]`), whose arity
+            // contribution depends on the rest TYPE: rest elements are
+            // judged at `KeyDomain` in every position (an open rest
+            // element leaves the index set undecidable ⇒ open), while
+            // non-rest elements stay undescended closed leaves at
+            // `KeyDomain`. No tuple-arity algebra: a rest element whose
+            // type closes at `KeyDomain` conservatively keeps the
+            // domain closed. Matches the TypeExpr `Tuple` arm.
+            SemanticNodeData::Tuple { elements, .. } => {
+                if elements.iter().any(|e| {
+                    e.rest && self.node_is_open_at(ctx, e.value, OperandPosition::KeyDomain)
+                }) {
+                    return true;
+                }
+                (self.role.descend_value_surfaces()
+                    || self.position == OperandPosition::ValueSensitive)
+                    && elements.iter().any(|e| self.node_is_open(ctx, e.value))
+            }
+            SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_) => false,
+
+            // --- composites: open iff any arm is open ---
+            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                arms.iter().any(|a| self.node_is_open(ctx, *a))
+            }
+            SemanticNodeData::MergedDecl { contributors } => {
+                contributors.iter().any(|a| self.node_is_open(ctx, *a))
+            }
+
+            // --- unresolved / fidelity carriers ---
+            // A constructor type delegates to its inner function signature
+            // (which carries the value-surface descent rule).
+            SemanticNodeData::ConstructorType { signature } => self.node_is_open(ctx, *signature),
+            // A `typeof X` value-rooted lookup is NOT a resolvable
+            // type-position declaration head for this purpose (its root is a
+            // VALUE namespace, not a type declaration whose key domain we can
+            // classify): OPEN if any applied type argument reaches the outer
+            // generic — scanned through the shared carrier-arg accessor so the
+            // outer-generic-reachability question does NOT false-close `typeof
+            // make<T>` over an open `T`. With NO open argument the carrier
+            // itself holds no outer generic, so it stays undecidable (open for
+            // the key-domain question, closed for the outer-generic question).
+            SemanticNodeData::TypeOf(_) => {
+                data.carrier_type_args()
+                    .iter()
+                    .any(|a| self.node_is_open(ctx, *a))
+                    || self.role.question().undecidable_is_open()
+            }
+            // A `BareRef` / `ImportType` carrier names an UNRESOLVED type-position
+            // reference head (`Foo` / `Foo<Arg>` / `import("m").G<Arg>`). The
+            // closed-vs-open decision must consult the UNDERLYING declaration's
+            // key domain, not just the carrier's applied type arguments:
+            //
+            //   1. FAST CHECK (policy-scoped) — if any applied type argument is
+            //      open AND this walk's policy treats an open argument as
+            //      opening, the carrier is OPEN without resolving
+            //      (`BareRef<Foo<OpenArg>>` stays open). This holds for the
+            //      outer-generic-reachability and the value-sensitive policies
+            //      (any open argument opens). It does NOT hold for the
+            //      per-argument KEY-DOMAIN policy at a key-domain position: there
+            //      an open argument CONFINED to member VALUE positions of a
+            //      fixed-key body keeps the key domain CLOSED
+            //      (`prepared_instantiation_key_domain_is_closed`). Short-cutting
+            //      OPEN on the open arg would re-introduce the silent-slot-loss
+            //      (`{ [K in keyof Foo<T>]: V }` with `T` value-position-only),
+            //      so that case SKIPS the fast check and resolves — the resolved
+            //      `InstantiationRef` arm then applies the per-argument rule.
+            //   2. RESOLVE the head through the ONE shared dispatch
+            //      (`resolve_carrier_subject_node` → `resolve_bare_ref_head` /
+            //      `resolve_import_type_head`) under a non-publication
+            //      `StructuralTransit` context — NOT a second resolver, NOT a
+            //      walker-local resolver, no string heuristics. The resolution
+            //      re-enters the SAME dispatcher (`self.dispatch`) so its
+            //      `instantiate_active` + `carrier_normalizing` cycle-guard state
+            //      is shared (a recursive ref terminates bounded).
+            //   3. If the head RESOLVED to a different node (a `DeclPlaceholder` /
+            //      `DeclRef` / `InstantiationRef` / `Object` / …), RECURSE at the
+            //      same position — the resolved arm (`prepared_decl_body_is_closed`
+            //      / `prepared_instantiation_key_domain_is_closed`) then decides
+            //      closedness CORRECTLY (a fixed-key `Foo<T>` with `T`
+            //      value-position-only stays CLOSED and enumerates; a genuinely
+            //      open declaration stays OPEN).
+            //   4. If the head did NOT resolve (miss / recursive-ref-guarded /
+            //      not head-resolvable), fall back to the question-correct
+            //      undecidable answer — OPEN for the key-domain question (the keys
+            //      cannot be enumerated), CLOSED for the outer-generic question (no
+            //      outer generic). This preserves the L1 carrier-stop on every
+            //      undecidable case (including an unresolvable carrier WITH an
+            //      open arg under the per-argument policy: it falls here and the
+            //      key-domain question answers OPEN).
+            SemanticNodeData::ImportType(_) | SemanticNodeData::BareRef(_) => {
+                // Own the carrier args so the `data` borrow can be released
+                // before the `&mut self` recursion / the dispatch re-entry.
+                let carrier_args: Vec<SemanticNodeId> = data.carrier_type_args().to_vec();
+                drop(data);
+                // The per-argument KEY-DOMAIN policy (mapped source / key space,
+                // `Pick`/`Omit` enumeration domain) at a key-domain position is
+                // the ONE policy where an open argument does not by itself open
+                // the produced key set — it must resolve and apply the
+                // per-argument closure rule. Every other policy/position treats
+                // any open argument as opening, so the fast check is sound.
+                let any_open_arg_opens = !(self.role.per_argument_key_domain()
+                    && self.position == OperandPosition::KeyDomain);
+                if any_open_arg_opens && carrier_args.iter().any(|a| self.node_is_open(ctx, *a)) {
+                    return true;
+                }
+                let resolved = self.dispatch.resolve_carrier_subject_node(
+                    node,
+                    ProjectionReductionContext::structural_transit(),
+                );
+                if resolved != node {
+                    return self.node_is_open_at(ctx, resolved, self.position);
+                }
+                self.role.question().undecidable_is_open()
+            }
+            // An unresolved raw-fallback carrier holds no type arguments and no
+            // outer generic (closed for the outer-generic question) but is
+            // undecidable for the key-domain question.
+            SemanticNodeData::RawFallback { .. } => self.role.question().undecidable_is_open(),
+            // A synthetic slot-binding is a concrete shallow terminal.
+            SemanticNodeData::SyntheticBinding { .. } => false,
+        }
+    }
+
+    /// Whether an [`IndexKey`](crate::semantic_query::IndexKey) index
+    /// operand is OPEN. Literal string / number keys are concrete
+    /// (closed); a `TypeNode` key is open iff its referenced node is open
+    /// under the same bounded walk — always AT the `KeyDomain` position
+    /// (the index is a key/keyspace question even when the enclosing
+    /// access sits in a value-sensitive operand).
+    fn index_key_is_open(
+        &mut self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        index: &crate::semantic_query::IndexKey,
+    ) -> bool {
+        use crate::semantic_query::IndexKey;
+        match index {
+            IndexKey::String(_) | IndexKey::Number(_) => false,
+            IndexKey::TypeNode(node) => {
+                self.node_is_open_at(ctx, *node, OperandPosition::KeyDomain)
+            }
+        }
+    }
+}
+
+/// Whether an `InstantiationRef` BASE resolves to a known declaration —
+/// the node-route mirror of the TypeExpr arm's
+/// `name_resolution`/registry gate, consulted by the enumeration-domain
+/// walk at a `ValueSensitive` operand with all-closed arguments: an
+/// unresolvable base is an undecidable surface, not a concrete one.
+/// `__builtin__` bases resolve through the `BuiltinUtility` registry;
+/// file bases through the prepared-decl cache, with ONE barrel
+/// re-export hop (deeper re-export chains stay conservatively
+/// unresolvable ⇒ OPEN, the safe direction). The consult is rooted on
+/// the active fact tracer — the verdict depends on the consulted files'
+/// content.
+fn instantiation_base_is_resolvable(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    base: &crate::semantic_query::DeclIdentity,
+    budget: &mut u32,
+) -> bool {
+    if base.canonical_id.as_ref() == "__builtin__" {
+        return verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+            base.decl_name.as_ref(),
+        )
+        .is_some();
+    }
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    observe_closedness_walk_consult(ctx, base.canonical_id.as_ref());
+    if ctx
+        .prepared_type_decl(base.canonical_id.as_ref(), base.decl_name.as_ref())
+        .is_some()
+    {
+        return true;
+    }
+    if let Some((src_canonical, src_name)) = ctx.resolve_named_type_export_target_shallow(
+        base.canonical_id.as_ref(),
+        base.decl_name.as_ref(),
+    ) {
+        if src_canonical.as_str() != base.canonical_id.as_ref()
+            || src_name.as_str() != base.decl_name.as_ref()
+        {
+            observe_closedness_walk_consult(ctx, src_canonical.as_str());
+            return ctx
+                .prepared_type_decl(src_canonical.as_str(), src_name.as_str())
+                .is_some();
+        }
+    }
+    false
+}
+
+// =====================================================================
+// Node-domain raised-shape decision surface (owner-local).
+//
+// The classifiers + equality primitives below are the graph-native decision
+// surface the Kind-B callers use: they read the TRUE bottom-up
+// `RaisedShapeFacts` / interned `RaisedShapeKey` computed by the shared
+// [`shape_engine`] (the `RaisedShapeAlg` fold), WITHOUT materialising a
+// `TypeExpr`. The materialization (`MaterializeTypeExprAlg`) and the
+// node-domain facts/key share ONE traversal ([`shape_engine::fold_node`]), so
+// they CANNOT drift — anti-drift is structural. The parity tests
+// (`super::raised_shape_tests`) prove `bottom_up_classifier(node) ≡
+// legacy_TypeExpr_predicate ∘ materialize_for_test(node)`; the materialization
+// is pinned independently by the raise / materialization suite.
+// =====================================================================
+
+/// Combined facts + node-vs-`TypeExpr` equality of ONE node fold. Re-exported so
+/// the Kind-B sink adapters read both the route-gate facts AND the no-op/changed
+/// decision from a single projection.
+pub(crate) use shape_engine::NodeShapeEq;
+/// The publication-scoring facts of a raised shape (`symbolic_carriers` /
+/// `generic_detail` / `structural_top_level` / `exact_unknown_root`). Re-exported
+/// so `crate::meta_resolve::scoring`'s comparison formula reads the SAME facts the
+/// node front and the `&TypeExpr` front both produce.
+pub(crate) use shape_engine::PublicationScore;
+/// The NODE-BOUND raised-shape facts witness (its `RaisedShapeFacts` — the inner
+/// facts type, kept PRIVATE to the shape engine — PAIRED with the `SemanticNodeId`
+/// they were computed for). Re-exported so the Kind-B sink adapters and the
+/// `route_admission` mint helpers read the facts and the bound node from ONE sealed
+/// value — the sole cross-module admission input. Cross-module readers use the
+/// witness's `pub(crate)` passthrough getters, never the inner `RaisedShapeFacts`
+/// type directly.
+pub(crate) use shape_engine::RaisedNodeShapeFacts;
+
+/// The [`PublicationScore`] of `node` — folded through the publication algebra
+/// over the shared [`shape_engine`] traversal, WITHOUT materialising a
+/// `TypeExpr`. `None` when the whole raise is `None`. DISPATCH-taking primary —
+/// the publication finaliser scores both candidate carriers' nodes through this.
+#[must_use]
+pub(crate) fn project_node_publication_score_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<PublicationScore> {
+    shape_engine::project_node_publication_score(dispatch, node)
+}
+
+/// The [`PublicationScore`] of an existing `&TypeExpr` — the TypeExpr front of the
+/// SHARED publication formula. Reproduces the historical
+/// `count_*_in_expr`/`type_expr_has_structural_top_level`/`matches!(_, Unknown)`
+/// semantics EXACTLY, so `compare_type_expr_improvement`'s existing callers see
+/// byte-identical verdicts.
+#[must_use]
+#[cfg(test)]
+pub(crate) fn type_expr_publication_score(expr: &TypeExpr) -> PublicationScore {
+    shape_engine::type_expr_publication_score(expr)
+}
+
+// The node-domain decision API is exposed in two signature forms:
+//
+// - DISPATCH-taking (`*_with_dispatch`) — the PRIMARY form. A caller that
+//   already holds a `&ProjectSemanticDispatch` (the sink adapters, the dispatch
+//   internals) passes it so NO redundant `ProjectSemanticDispatch::new` runs.
+// - CTX-taking — a thin convenience that builds ONE dispatch and delegates to
+//   the primary. Used at true boundaries (a caller holding only a
+//   `&dyn ResolverContext`) and by the parity suite.
+
+/// `true` when `node` can be shell-raised to a `TypeExpr` at all
+/// (`raise(node).is_some()`). DISPATCH-taking primary.
+#[must_use]
+pub(crate) fn node_can_shell_raise_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> bool {
+    shape_engine::project_node_facts(dispatch, node).is_some_and(|facts| facts.can_shell_raise())
+}
+
+/// `true` when `node` can be shell-raised to a `TypeExpr` at all
+/// (`raise(node).is_some()`), capturing the `?`-propagation `None` positions.
+//
+// CTX-taking convenience over `node_can_shell_raise_with_dispatch`. Production
+// callers already hold a dispatch and use the `_with_dispatch` primary, so this
+// boundary form is exercised by the parity suite; it stays defined in both
+// builds as the named ctx-taking member of the decision API.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "ctx-taking boundary convenience; production callers use the _with_dispatch \
+                  primary; exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn node_can_shell_raise(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    node_can_shell_raise_with_dispatch(&ProjectSemanticDispatch::new(ctx), node)
+}
+
+/// Node-domain equivalent of `type_expr_contains_semantic_miss(raise(node))`. A
+/// whole-raise `None` counts as a miss (`true`) — matching how the consuming
+/// Kind-B sites treat a `None` raise (unusable / fall back).
+//
+// Named single-fact member of the node-domain decision API. The Kind-B sink
+// adapters read both facts together through `node_raised_shape_facts_with_dispatch`
+// (one projection), so this single-fact accessor has no production caller; the
+// parity suite exercises it as the equivalence proof.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "single-fact member of the node-domain decision API; the sink adapters read \
+                  both facts via node_raised_shape_facts_with_dispatch; exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn node_contains_semantic_miss_or_unraisable(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    match shape_engine::project_node_facts(&dispatch, node) {
+        Some(facts) => !facts.materialized(),
+        None => true,
+    }
+}
+
+/// Node-domain equivalent of `type_expr_is_expanded_surface(raise(node))`. A
+/// whole-raise `None` is `false` (no surface to be open).
+//
+// Named single-fact member of the node-domain decision API (see
+// `node_contains_semantic_miss_or_unraisable`): the sink adapters read both
+// facts via `node_raised_shape_facts_with_dispatch`, so this single-fact
+// accessor has no production caller; the parity suite exercises it as the
+// equivalence proof.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "single-fact member of the node-domain decision API; the sink adapters read \
+                  both facts via node_raised_shape_facts_with_dispatch; exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn node_is_expanded_surface_legacy_equivalent(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    match shape_engine::project_node_facts(&dispatch, node) {
+        Some(facts) => facts.expanded_surface(),
+        None => false,
+    }
+}
+
+/// The node-bound [`RaisedNodeShapeFacts`] witness of `node` (its facts — the
+/// materialized-miss + expanded-surface gate the Kind-B route helpers apply —
+/// PAIRED with `node`). `None` when the whole raise is `None`. DISPATCH-taking
+/// primary. Folds through the FACTS-ONLY [`shape_engine`] algebra — no structural
+/// key interned. A mint site passes the witness straight to a `route_admission`
+/// `admit_*` helper, which binds the carrier to `witness.node()`.
+#[must_use]
+pub(crate) fn node_raised_shape_facts_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<RaisedNodeShapeFacts> {
+    shape_engine::project_node_facts(dispatch, node)
+}
+
+/// Node-domain equivalent of `type_expr_root_is_unmaterialized_sentinel(raise(node))`:
+/// whether `node`'s OWN raised ROOT term is an unmaterialised sentinel. A whole-
+/// raise `None` is `false` (the materialiser's `<raise miss after reduction>`
+/// fallback is not a recognised sentinel, so the `TypeExpr` recogniser also
+/// answers `false` there). DISPATCH-taking primary — the cache-admission gate
+/// reads this off the reduced-output carrier node instead of materialising it.
+#[must_use]
+pub(crate) fn node_root_is_unmaterialized_sentinel_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> bool {
+    shape_engine::project_node_root_sentinel(dispatch, node).unwrap_or(false)
+}
+
+/// Node-domain gate for the macro-output expansion sink: `true` when `node`'s
+/// whole raise MISSES (an absent / unraisable node) OR its raised ROOT term is
+/// an unmaterialised sentinel — the two no-faithful-output cases the sink maps
+/// to its `None` arm, mirroring the shell-raise oracle's `None`. Distinct from
+/// [`node_root_is_unmaterialized_sentinel_with_dispatch`], whose whole-raise
+/// `None` arm deliberately answers `false` for the cache-admission gate.
+#[must_use]
+pub(crate) fn node_raise_misses_or_root_sentinel_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> bool {
+    shape_engine::project_node_root_sentinel(dispatch, node).unwrap_or(true)
+}
+
+/// Node-domain equivalent of `type_expr_root_is_published_operator(raise(node))`:
+/// whether `node`'s NORMALIZED raised root is a published surface operator
+/// (`Ref` / `KeyOf` / `IndexedAccess` / `Conditional` / `TypeOf`, or a `Mapped`
+/// whose value root is NOT `semanticMiss`). Reads the post-normalized raised root
+/// off the ROOT-ONLY projection (the source it normalizes through) — so it
+/// answers IDENTICALLY to the `TypeExpr` predicate on the raised value, including
+/// for shapes the raw-node walk mis-classifies (e.g. an `Intersection([{}, op])`
+/// the root-only projection collapses to its operator arm). A whole-raise `None`
+/// is `false`.
+#[must_use]
+pub(crate) fn node_root_is_published_operator_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> bool {
+    shape_engine::project_node_root_is_published_operator(dispatch, node).unwrap_or(false)
+}
+
+/// Node-domain equivalent of `type_expr_contains_semantic_miss(raise(node))`:
+/// whether `node`'s raised shape carries a semantic miss ANYWHERE in its tree
+/// (`!RaisedShapeFacts.materialized`). `None` when the whole raise is `None`,
+/// letting the caller distinguish "no miss" (`Some(false)`) from "unraisable"
+/// (`None`) — DISTINCT from the root-only
+/// [`node_root_is_unmaterialized_sentinel_with_dispatch`] and from the
+/// None→`true`-collapsing [`node_contains_semantic_miss_or_unraisable`].
+/// DISPATCH-taking primary — a publication carrier path reads this off the
+/// reduced-output carrier node instead of materialising it to a `TypeExpr` and
+/// running a raised-string walk.
+//
+// Production consumer: the publication reducer's input-side no-poison gate
+// (`meta_resolve::projectors::output_sink::reduce_field_type_expr_with_mode`),
+// which seals the INPUT as the published carrier only when the input is
+// CONFIDENTLY miss-free (`Some(false)`). The parity suite additionally
+// exercises it as the node-vs-`TypeExpr` equivalence proof.
+#[must_use]
+pub(crate) fn node_contains_semantic_miss_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<bool> {
+    shape_engine::project_node_contains_semantic_miss(dispatch, node)
+}
+
+/// CTX-taking convenience over `node_raised_shape_facts_with_dispatch`.
+/// Production gates hold a dispatch and use the `_with_dispatch` primary; this
+/// boundary form is exercised by the parity suite as the FACTS-ONLY-algebra
+/// projection in the facts-only-vs-full-fold equivalence proof.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "ctx-taking boundary convenience over the facts-only projection; production \
+                  gates use the _with_dispatch primary; exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn node_raised_shape_facts(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> Option<RaisedNodeShapeFacts> {
+    node_raised_shape_facts_with_dispatch(&ProjectSemanticDispatch::new(ctx), node)
+}
+
+/// Combined `RaisedShapeFacts` + node-vs-`TypeExpr` equality of `node` in ONE
+/// fold: the route-gate facts AND the no-op/changed decision (`eq_to_expr`) from
+/// a single key-bearing fold (the input `expr` is interned into the SAME
+/// interner). A site needing both reads this instead of folding the node twice.
+/// DISPATCH-taking primary. `None` when the whole raise is `None`.
+#[must_use]
+pub(crate) fn node_raised_shape_for_eq_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    expr: &TypeExpr,
+) -> Option<NodeShapeEq> {
+    shape_engine::project_node_shape_for_eq(dispatch, node, expr)
+}
+
+/// CTX-taking convenience over `node_raised_shape_for_eq_with_dispatch`.
+/// Production no-op/changed gates already hold a dispatch and use the
+/// `_with_dispatch` primary; this boundary form is exercised by the parity suite
+/// (the facts-only-vs-full-fold equivalence proof: the `facts` it returns —
+/// computed by the KEY-bearing algebra — must equal `node_raised_shape_facts`,
+/// computed by the FACTS-ONLY algebra).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "ctx-taking boundary convenience; production gates use the _with_dispatch \
+                  primary; exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn node_raised_shape_for_eq(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+    expr: &TypeExpr,
+) -> Option<NodeShapeEq> {
+    node_raised_shape_for_eq_with_dispatch(&ProjectSemanticDispatch::new(ctx), node, expr)
+}
+
+/// Raised-shape equality between two nodes: `Some(true)`/`Some(false)` when
+/// BOTH nodes raise to `Some`, `None` when EITHER raise is `None`.
+///
+/// Compares the interned [`shape_engine::RaisedShapeKey`] — NOT the node id:
+/// carriers drop identity on raise (different `DeclRef`/`BareRef`/`TypeParam`
+/// nodes can raise to equal shapes and vice-versa), so the raised-shape key is
+/// the comparison subject.
+//
+// Node-vs-node member of the node-domain decision API: the query-engine
+// admitted-node compare (`route_projection_nodes_eq`) reads successive
+// admitted route nodes through this form. The parity suite exercises it as the
+// equivalence proof against `raise(a) == raise(b)`.
+#[must_use]
+pub(crate) fn raised_shape_eq_nodes(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    a: SemanticNodeId,
+    b: SemanticNodeId,
+) -> Option<bool> {
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    shape_engine::raised_shape_eq_nodes(&dispatch, a, b)
+}
+
+/// Raised-shape equality between a node and a `TypeExpr`: `Some(bool)` when the
+/// node raises to `Some`, `None` when the raise is `None`. The input `TypeExpr`
+/// is folded into the SAME interned key space (no node materialisation).
+//
+// Production no-op/changed gates read both facts AND equality from one fold via
+// `node_raised_shape_for_eq_with_dispatch`, so this standalone node-vs-`TypeExpr`
+// form is exercised by the parity suite (the equivalence proof: it must equal
+// `raise(node) == Some(expr)`).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "production gates use node_raised_shape_for_eq_with_dispatch (facts + equality \
+                  in one fold); the standalone equality form is exercised by the parity suite"
+    )
+)]
+#[must_use]
+pub(crate) fn raised_shape_eq_node_type_expr(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+    expr: &TypeExpr,
+) -> Option<bool> {
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    shape_engine::raised_shape_eq_node_type_expr(&dispatch, node, expr)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::semantic_query::{
+        IndexKey, PrimitiveKind as SemanticPrimitiveKind, SemanticNodeData,
+    };
+    use crate::VerterHost;
+    use verter_type_expr::TypeExpr;
+
+    use super::ProjectSemanticDispatch;
+
+    #[test]
+    fn raise_node_to_type_expr_preserves_number_index_key_values() {
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let object = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::Unknown));
+        let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object,
+            index: IndexKey::Number(
+                crate::semantic_query::CanonicalIndexInt::from_canonical_i64(7).expect("canonical"),
+            ),
+        });
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let expr = dispatch
+            .raise_node_to_type_expr(indexed)
+            .expect("indexed-access semantic node should serialize");
+
+        let TypeExpr::IndexedAccess { index, .. } = &expr else {
+            panic!("expected IndexedAccess expr, got {expr:?}");
+        };
+        assert_eq!(
+            **index,
+            TypeExpr::number_literal(7.0),
+            "numeric index keys should serialize as number literals",
+        );
+    }
+
+    /// An intersection whose EVERY arm is vacuous (`{} & {}`) must fall
+    /// back to the representable empty object `{}` — never publish a
+    /// zero-arm `TypeExpr::Intersection([])`.
+    #[test]
+    fn raise_all_vacuous_intersection_falls_back_to_empty_object() {
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let empty_a = graph.intern_node(SemanticNodeData::Object(
+            crate::project_semantic_dispatch::walk::empty_surface_view(),
+        ));
+        let intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+            vec![empty_a, empty_a].into_boxed_slice(),
+        )));
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let expr = dispatch
+            .raise_node_to_type_expr(intersection)
+            .expect("intersection must raise");
+
+        match &expr {
+            TypeExpr::Object(object) => {
+                assert!(
+                    object.properties.is_empty(),
+                    "all-vacuous intersection must raise as the EMPTY object"
+                );
+            }
+            TypeExpr::Intersection(arms) => {
+                panic!("zero/filtered-arm Intersection must not publish (got {arms:?})")
+            }
+            other => panic!("expected empty Object, got {other:?}"),
+        }
+    }
+
+    /// The node-domain root-sentinel fact
+    /// (`node_root_is_unmaterialized_sentinel_with_dispatch`) is ROOT-only and
+    /// agrees with `type_expr_root_is_unmaterialized_sentinel(raise(node))` — it
+    /// is NOT the whole-surface `!materialized` AND. The discriminator is an
+    /// `Array` whose ELEMENT (not root) is a miss sentinel: the root-sentinel
+    /// fact is `false` (the root is the Array) and the TypeExpr oracle agrees,
+    /// yet `facts.materialized` is `false` (the element miss makes the AND false)
+    /// — so the fact cannot be the whole-surface miss check.
+    #[test]
+    fn node_root_sentinel_is_root_only_not_whole_surface_miss() {
+        use super::{
+            node_raised_shape_facts_with_dispatch,
+            node_root_is_unmaterialized_sentinel_with_dispatch,
+        };
+        use crate::resolver_core::type_expr_root_is_unmaterialized_sentinel;
+        use crate::semantic_query::QueryError;
+
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+        let string = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
+        let array_of_miss = graph.intern_node(SemanticNodeData::Array {
+            element: miss,
+            readonly: false,
+        });
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let oracle = |node| {
+            type_expr_root_is_unmaterialized_sentinel(
+                &dispatch
+                    .raise_node_to_type_expr(node)
+                    .expect("node must raise"),
+            )
+        };
+
+        // (1) Root IS a miss sentinel → both the node-domain fact and the
+        // TypeExpr oracle say true.
+        assert!(node_root_is_unmaterialized_sentinel_with_dispatch(
+            &dispatch, miss
+        ));
+        assert!(
+            oracle(miss),
+            "TypeExpr oracle agrees the Miss root is a sentinel"
+        );
+
+        // (2) Root is a plain primitive → both false.
+        assert!(!node_root_is_unmaterialized_sentinel_with_dispatch(
+            &dispatch, string
+        ));
+        assert!(!oracle(string));
+
+        // (3) DISCRIMINATOR: root is an `Array` (not a sentinel) whose ELEMENT is
+        // the miss. Root-sentinel is false, the TypeExpr oracle agrees, yet the
+        // whole-surface `materialized` AND is false — proving the node-domain
+        // fact is ROOT-only, not `!materialized`.
+        assert!(
+            !node_root_is_unmaterialized_sentinel_with_dispatch(&dispatch, array_of_miss),
+            "an Array whose ELEMENT (not root) is a sentinel is NOT root-unmaterialized"
+        );
+        assert!(
+            !oracle(array_of_miss),
+            "TypeExpr oracle agrees the Array root is not a sentinel"
+        );
+        let facts = node_raised_shape_facts_with_dispatch(&dispatch, array_of_miss).expect("facts");
+        assert!(
+            !facts.materialized(),
+            "the Array DOES carry an unmaterialised element, so root-sentinel=false is \
+             genuinely ROOT-only — not merely the absence of any sentinel"
+        );
+    }
+
+    /// DIFFERENTIAL EQUIVALENCE + DISCRIMINATION for the whole-tree semantic-miss
+    /// node fact (`node_contains_semantic_miss_with_dispatch`): it equals
+    /// `type_expr_contains_semantic_miss(raise(node))` field-for-field, AND it is
+    /// the WHOLE-TREE `!materialized` question, NOT the root-only sentinel. The
+    /// discriminator is an `Array` whose ELEMENT is a miss: whole-tree miss is
+    /// `true` (the element miss propagates) while root-sentinel is `false` (the
+    /// root is the Array) — proving the two facts answer different questions.
+    #[test]
+    fn node_contains_semantic_miss_is_whole_tree_and_equals_type_expr_oracle() {
+        use super::{
+            node_contains_semantic_miss_with_dispatch,
+            node_root_is_unmaterialized_sentinel_with_dispatch,
+        };
+        use crate::resolver_core::type_expr_contains_semantic_miss;
+        use crate::semantic_query::QueryError;
+
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+        let string = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
+        let array_of_miss = graph.intern_node(SemanticNodeData::Array {
+            element: miss,
+            readonly: false,
+        });
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let oracle = |node| {
+            type_expr_contains_semantic_miss(
+                &dispatch
+                    .raise_node_to_type_expr(node)
+                    .expect("node must raise"),
+            )
+        };
+
+        // DIFFERENTIAL: the node fact equals the TypeExpr predicate on raise(node)
+        // for every shape (miss root, clean primitive, array-of-miss).
+        for node in [miss, string, array_of_miss] {
+            assert_eq!(
+                node_contains_semantic_miss_with_dispatch(&dispatch, node),
+                Some(oracle(node)),
+                "node-domain whole-tree miss must equal type_expr_contains_semantic_miss(raise(node))"
+            );
+        }
+
+        // DISCRIMINATOR: array-of-miss is whole-tree miss TRUE but root-sentinel
+        // FALSE — the node fact is `!materialized`, NOT the root-only sentinel.
+        assert_eq!(
+            node_contains_semantic_miss_with_dispatch(&dispatch, array_of_miss),
+            Some(true)
+        );
+        assert!(
+            !node_root_is_unmaterialized_sentinel_with_dispatch(&dispatch, array_of_miss),
+            "array-of-miss carries a whole-tree miss but its ROOT is not a sentinel — \
+             root-sentinel and whole-tree-miss are distinct facts"
+        );
+        // A clean primitive carries no miss.
+        assert_eq!(
+            node_contains_semantic_miss_with_dispatch(&dispatch, string),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn raise_node_to_type_expr_round_trips_primitive() {
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let node = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let expr = dispatch
+            .raise_node_to_type_expr(node)
+            .expect("primitive must raise");
+
+        assert!(
+            matches!(expr, TypeExpr::Primitive(_)),
+            "primitive should round-trip, got {expr:?}"
+        );
+    }
+
+    /// FAIL-FIRST: preserves a deferred operator over a free
+    /// `TypeParameter`. `KeyOf(TypeParameter)` survives `raise_and_reduce`
+    /// because dispatch returns the deferred operator over the free
+    /// parameter unchanged (deferred-form policy); a reducer that eagerly
+    /// collapsed it would drop the operator and FAIL this test.
+    #[test]
+    fn raise_and_reduce_preserves_open_keyof_over_type_parameter() {
+        use crate::semantic_query::{DeclIdentity, HashValue, ProjectionMode};
+
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let identity = DeclIdentity {
+            canonical_id: Arc::from("/test.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("T"),
+        };
+        let type_param = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: identity,
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+        let keyof = graph.intern_node(SemanticNodeData::KeyOf { base: type_param });
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+            keyof,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        );
+
+        assert!(
+            matches!(materialized, TypeExpr::KeyOf(_)),
+            "open keyof over type parameter must survive raise_and_reduce, got {:?}",
+            materialized
+        );
+    }
+
+    /// FAIL-FIRST: the iterative reducer terminates
+    /// even when the visited set is the only termination signal. The visited
+    /// set short-circuits the cycle and returns the alias body; a reducer
+    /// without that guard would loop on the cycle and FAIL to terminate.
+    #[test]
+    fn raise_and_reduce_terminates_on_alias_cycle_via_visited_set() {
+        use crate::semantic_query::ProjectionMode;
+
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let primitive =
+            graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
+        let alias = graph.intern_node(SemanticNodeData::Alias(primitive));
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+            alias,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        );
+
+        assert!(
+            matches!(materialized, TypeExpr::Primitive(_)),
+            "alias to primitive must reduce to that primitive, got {:?}",
+            materialized
+        );
+    }
+
+    /// FAIL-FIRST: hard-stop for `TemplateLiteral` —
+    /// no dispatch variant exists, so the reducer must convert to
+    /// `Unknown { raw: "<unresolved template literal type>" }`.
+    #[test]
+    fn raise_and_reduce_template_literal_becomes_unknown_hard_stop() {
+        use crate::semantic_query::ProjectionMode;
+
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
+            quasis: Arc::from(vec![Arc::from("prefix-")].into_boxed_slice()),
+            expressions: Arc::from(
+                Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+            ),
+        });
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+            template,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        );
+
+        match &materialized {
+            TypeExpr::Unknown { raw } => {
+                assert!(
+                    raw.contains("template literal"),
+                    "template literal hard-stop should mention the operator, got {raw:?}"
+                );
+            }
+            other => panic!("expected Unknown hard-stop, got {other:?}"),
+        }
+    }
+
+    /// FAIL-FIRST: Navigate-mode keeps a `DeclRef`
+    /// terminal — a freshly-interned `DeclRef` raises to a bare
+    /// `Ref { name }` with empty type arguments; a Navigate-mode reducer
+    /// that eagerly expanded the carrier would lose the terminal `Ref` and
+    /// FAIL this test.
+    #[test]
+    fn raise_and_reduce_navigate_mode_decl_ref_raises_to_bare_ref() {
+        use crate::semantic_query::{DeclIdentity, HashValue, ProjectionMode};
+
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let identity = DeclIdentity {
+            canonical_id: Arc::from("/some-unresolved.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Unresolved"),
+        };
+        let decl_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: identity.clone(),
+        });
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
+            decl_ref,
+            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
+        );
+
+        match &materialized {
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                assert_eq!(name.as_ref(), "Unresolved");
+                assert!(
+                    type_arguments.is_empty(),
+                    "navigate-mode DeclRef must raise without type arguments"
+                );
+            }
+            // DeclRef in Navigate dispatches ResolveDecl → if dispatch
+            // produces an Opaque(Miss) (no real prepared decl), the
+            // reducer accepts it and the raise yields Unknown. Both
+            // outcomes prove the lazy carrier was visited; the test
+            // discriminates on the absence of `graphNode` text.
+            TypeExpr::Unknown { raw } => {
+                assert!(
+                    !raw.starts_with("graphNode"),
+                    "raise must not emit graphNode placeholder, got {raw:?}"
+                );
+            }
+            other => panic!("expected Ref{{name=Unresolved}} or Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raise_node_to_type_expr_round_trips_indexed_access_string_key() {
+        // Discriminator: IndexedAccess with a String index key must
+        // raise to TypeExpr::IndexedAccess { index: TypeExpr::Literal(...) }
+        // — proves the helper `index_key_to_type_expr` follows the same
+        // structural conversion as numeric keys without introducing the
+        // `_inner` recursive call (cycle invariant for strings: there is
+        // no node to recurse into).
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let object = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::Unknown));
+        let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object,
+            index: IndexKey::String(Arc::from("key")),
+        });
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let expr = dispatch
+            .raise_node_to_type_expr(indexed)
+            .expect("indexed-access semantic node should serialize");
+
+        let TypeExpr::IndexedAccess { index, .. } = &expr else {
+            panic!("expected IndexedAccess expr, got {expr:?}");
+        };
+        assert_eq!(
+            **index,
+            TypeExpr::string_literal("key"),
+            "string index keys should serialize as string literals",
+        );
+    }
+
+    /// L1 carrier-stop predicate (Shallow-By-Default). An
+    /// enumeration-domain utility (`Pick`/`Omit`/…) whose source
+    /// argument is an OPEN generic instantiation (`PropsBase<T>` with
+    /// `T` an unsubstituted type parameter) is open ⇒ the reducer keeps
+    /// it a shallow carrier. A CLOSED source (concrete instantiation, or
+    /// a finite object surface) is NOT open ⇒ it still materialises.
+    /// Discriminating: an over-broad "builtin utility == carrier" L1
+    /// would return `true` for the closed cases too and fail this test.
+    #[test]
+    fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
+        use crate::semantic_query::{
+            DeclIdentity, HashValue, SemanticNodeData, SurfaceView, TupleElement,
+        };
+
+        let host = VerterHost::new_standalone(Default::default());
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let builtin_pick = DeclIdentity {
+            canonical_id: Arc::from("__builtin__"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Pick"),
+        };
+        // Keyspace argument — never inspected by the openness walk
+        // (only argument 0, the enumeration domain, matters).
+        let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
+
+        // OPEN: PropsBase<T> with T an unsubstituted type parameter.
+        let tparam = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("T"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+        let props_base_open = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("/types.ts"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from("PropsBase"),
+            },
+            args: Arc::from(vec![tparam].into_boxed_slice()),
+        });
+        assert!(
+            super::utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &builtin_pick,
+                &[props_base_open, keys],
+            ),
+            "Pick<PropsBase<T>, …> over an unbound generic must be OPEN"
+        );
+
+        let concrete_elem =
+            graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::Unknown));
+        let concrete_array = graph.intern_node(SemanticNodeData::Array {
+            element: concrete_elem,
+            readonly: false,
+        });
+
+        // OPEN: PropsBase<UIMessage[]> — a NON-EMPTY all-concrete arg list
+        // is NOT sufficient on its own. An instantiation closes only when
+        // its target declaration EXISTS with satisfiable arity/defaults and
+        // a body that closes under the bindings. Here no `PropsBase` decl is
+        // seeded in this pure-unit host, so the target is UNRESOLVABLE ⇒
+        // undecidable ⇒ OPEN — even with concrete args. The
+        // resolvable-closed path (a real generic decl that materialises
+        // path-precisely) is exercised end-to-end by the integration
+        // fixtures in `component_meta_pick_omit_tests`.
+        let props_base_concrete_unresolved =
+            graph.intern_node(SemanticNodeData::InstantiationRef {
+                base: DeclIdentity {
+                    canonical_id: Arc::from("/types.ts"),
+                    whole_hash: HashValue::default(),
+                    decl_name: Arc::from("PropsBase"),
+                },
+                args: Arc::from(vec![concrete_array].into_boxed_slice()),
+            });
+        assert!(
+            super::utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &builtin_pick,
+                &[props_base_concrete_unresolved, keys],
+            ),
+            "Pick<PropsBase<UIMessage[]>, …> with concrete args but an UNRESOLVABLE target must \
+             be OPEN — an instantiation is closed only when its target decl is resolvable with \
+             a body that closes under the bindings"
+        );
+
+        // OPEN: a bare / under-applied generic alias — `InstantiationRef`
+        // with EMPTY args — over a target whose prepared body is
+        // unresolvable (no decl seeded) is undecidable ⇒ OPEN.
+        let bare_alias_unresolved = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("/types.ts"),
+                whole_hash: HashValue::default(),
+                decl_name: Arc::from("SlotProps"),
+            },
+            args: Arc::from(Vec::new().into_boxed_slice()),
+        });
+        assert!(
+            super::utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &builtin_pick,
+                &[bare_alias_unresolved, keys],
+            ),
+            "Pick<SlotProps, …> with EMPTY args over an unresolvable target must be OPEN \
+             (no arg binds the body's free params)"
+        );
+
+        // CLOSED: a finite object surface domain.
+        let closed_object = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }));
+        assert!(
+            !super::utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &builtin_pick,
+                &[closed_object, keys],
+            ),
+            "Pick<{{ … }}, …> over a finite object surface must be CLOSED"
+        );
+
+        // A NON-utility instantiation is never subject to this
+        // carrier-stop, even with an open source argument.
+        let not_a_utility = DeclIdentity {
+            canonical_id: Arc::from("/types.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Lookup"),
+        };
+        assert!(
+            !super::utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &not_a_utility,
+                &[props_base_open, keys],
+            ),
+            "a non-enumeration-utility instantiation is not subject to L1 carrier-stop"
+        );
+
+        // Tuple domains are finite surfaces (concrete numeric/length key
+        // space) — keep them closed.
+        let tuple = graph.intern_node(SemanticNodeData::Tuple {
+            elements: Arc::from(
+                vec![TupleElement {
+                    label: None,
+                    value: concrete_elem,
+                    optional: false,
+                    rest: false,
+                }]
+                .into_boxed_slice(),
+            ),
+            readonly: false,
+        });
+        assert!(
+            !super::utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &builtin_pick,
+                &[tuple, keys]
+            ),
+            "a concrete tuple domain must be CLOSED"
+        );
+    }
+
+    /// Keyspace-inspection invariant: the openness walk must inspect the
+    /// KEYSPACE of an `IndexedAccess` / `Mapped` domain, not only the
+    /// object / source. A domain `Source[OpenKey]` or
+    /// `{ [K in OpenKeySpace]: V }` with a CONCRETE object but an OPEN key
+    /// space is OPEN — an object/source-only inspection would wrongly
+    /// judge it CLOSED and materialise an undecidable key set.
+    #[test]
+    fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
+        use crate::semantic_query::{
+            DeclIdentity, HashValue, IndexKey, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
+            SemanticNodeData, SurfaceView,
+        };
+
+        let host = VerterHost::new_standalone(Default::default());
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let builtin_pick = DeclIdentity {
+            canonical_id: Arc::from("__builtin__"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Pick"),
+        };
+        let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
+
+        // CONCRETE object, OPEN type-param key.
+        let concrete_object = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }));
+        let open_key = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("K"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("K"),
+        });
+
+        // IndexedAccess { object: concrete, index: TypeNode(open K) }.
+        let indexed_open_key = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: concrete_object,
+            index: IndexKey::TypeNode(open_key),
+        });
+        assert!(
+            super::utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &builtin_pick,
+                &[indexed_open_key, keys],
+            ),
+            "IndexedAccess with a concrete object but an OPEN type-param index key must be OPEN \
+             (keyspace must be inspected, not just the object)"
+        );
+
+        // A literal-string index key over the same concrete object is CLOSED.
+        let indexed_closed_key = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: concrete_object,
+            index: IndexKey::String(Arc::from("a")),
+        });
+        assert!(
+            !super::utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &builtin_pick,
+                &[indexed_closed_key, keys],
+            ),
+            "IndexedAccess with a concrete object and a literal-string index key must be CLOSED"
+        );
+
+        // Mapped { source: concrete, mapper.key_space: open OUTER T }. The
+        // mapper's own binder is a DISTINCT node — it is BOUND inside the
+        // mapper walk and must not be conflated with the open outer
+        // parameter that makes the key space undecidable.
+        let binder = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("MapBinder"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("MapBinder"),
+        });
+        let mapped_open_keyspace = graph.intern_node(SemanticNodeData::Mapped {
+            source: concrete_object,
+            mapper: MapperKey {
+                parameter_node: binder,
+                key_space: open_key,
+                value_expr: concrete_object,
+                optionality: OptionalityMod::Keep,
+                readonly: ReadonlyMod::Keep,
+                name_remap: None,
+                kind: MapperKind::Computed,
+            },
+        });
+        assert!(
+            super::utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &builtin_pick,
+                &[mapped_open_keyspace, keys],
+            ),
+            "Mapped with a concrete source but an OPEN mapper key space must be OPEN \
+             (the produced key set is undecidable; key_space must be inspected, not just source)"
+        );
+    }
+
+    /// MappedTemplate key-remap coverage with the mapper binder BOUND
+    /// (the binder is bound in EVERY walk — keyspace, value, remap):
+    ///
+    /// - a remap interpolating an OPEN OUTER parameter (`` `on${T}` ``)
+    ///   over concrete source/key_space is OPEN — the produced (remapped)
+    ///   key set depends on the open interpolant;
+    /// - a remap interpolating ONLY the mapper's OWN binder
+    ///   (`` `on${K}` `` over a finite key space) is a K-only transform —
+    ///   CLOSED, decidable per key once `K` is bound;
+    /// - a CONCRETE remap (no interpolant) is CLOSED.
+    ///
+    /// Discriminating: a remap walk that did NOT bind the binder would
+    /// judge the K-only remap open (over-fire); one that bound the outer
+    /// parameter too would judge the outer-interpolant remap closed
+    /// (under-fire).
+    #[test]
+    fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
+        use crate::semantic_query::{
+            DeclIdentity, HashValue, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
+            SemanticNodeData, SemanticNodeId, SurfaceView,
+        };
+
+        let host = VerterHost::new_standalone(Default::default());
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let builtin_pick = DeclIdentity {
+            canonical_id: Arc::from("__builtin__"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Pick"),
+        };
+        let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
+
+        let concrete_object = graph.intern_node(SemanticNodeData::Object(SurfaceView {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }));
+        let concrete_key =
+            graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
+        // The mapper's OWN binder `K` (bound) vs the open OUTER `T`.
+        let binder_k = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("K"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("K"),
+        });
+        let outer_t = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("T"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+
+        let make_mapped = |remap: SemanticNodeId| {
+            graph.intern_node(SemanticNodeData::Mapped {
+                source: concrete_object,
+                mapper: MapperKey {
+                    parameter_node: binder_k,
+                    key_space: concrete_key,
+                    value_expr: concrete_object,
+                    optionality: OptionalityMod::Keep,
+                    readonly: ReadonlyMod::Keep,
+                    name_remap: Some(remap),
+                    kind: MapperKind::Computed,
+                },
+            })
+        };
+        let template = |interpolant: SemanticNodeId| {
+            graph.intern_node(SemanticNodeData::TemplateLiteral {
+                quasis: Arc::from(
+                    vec![Arc::<str>::from("on"), Arc::<str>::from("")].into_boxed_slice(),
+                ),
+                expressions: Arc::from(vec![interpolant].into_boxed_slice()),
+            })
+        };
+
+        // OPEN: `` as `on${T}` `` — the remapped key set depends on the
+        // open OUTER interpolant.
+        assert!(
+            super::utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &builtin_pick,
+                &[make_mapped(template(outer_t)), keys],
+            ),
+            "Mapped with concrete source + key_space but an `as`-clause name-remap \
+             interpolating an open OUTER parameter must be OPEN"
+        );
+
+        // CLOSED: `` as `on${K}` `` — interpolates ONLY the mapper's own
+        // BOUND binder over a finite key space (a K-only transform).
+        assert!(
+            !super::utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &builtin_pick,
+                &[make_mapped(template(binder_k)), keys],
+            ),
+            "Mapped whose `as`-clause name-remap interpolates ONLY the mapper's own bound \
+             binder over a finite key space must stay CLOSED (the binder is bound in every \
+             walk; a K-only remap is decidable per key)"
+        );
+
+        // CLOSED control: a CONCRETE name-remap (no interpolant).
+        let closed_remap = graph.intern_node(SemanticNodeData::TemplateLiteral {
+            quasis: Arc::from(vec![Arc::<str>::from("on")].into_boxed_slice()),
+            expressions: Arc::from(Vec::new().into_boxed_slice()),
+        });
+        assert!(
+            !super::utility_enumeration_domain_is_open_or_unknown(
+                &dispatch,
+                &builtin_pick,
+                &[make_mapped(closed_remap), keys],
+            ),
+            "Mapped with concrete source/key_space and a CONCRETE name-remap must stay CLOSED \
+             (the name_remap arm must not over-fire)"
+        );
+    }
+}

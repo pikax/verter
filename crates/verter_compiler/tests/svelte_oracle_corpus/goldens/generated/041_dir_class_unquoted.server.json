@@ -1,0 +1,37 @@
+{
+  "slug": "generated/041_dir_class_unquoted.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_41_dir_class_unquoted",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr_class"
+  ],
+  "helperSet": [
+    "attr_class"
+  ],
+  "helperCounts": {
+    "attr_class": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

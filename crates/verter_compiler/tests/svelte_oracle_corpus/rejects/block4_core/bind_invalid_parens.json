@@ -1,0 +1,4 @@
+{
+  "rule": "BindInvalidParens",
+  "official_code": "bind_invalid_parens"
+}

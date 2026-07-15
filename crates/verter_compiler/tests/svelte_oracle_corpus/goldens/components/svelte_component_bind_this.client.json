@@ -1,0 +1,56 @@
+{
+  "slug": "components/svelte_component_bind_this.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_component_bind_this",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "component",
+    "bind_this",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_this",
+    "comment",
+    "component",
+    "first_child"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "component": 1,
+    "bind_this": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_component_bind_this($$anchor, $$props) {let inst; var fragment = $.comment(); var node = $.first_child(fragment); $.component(node, () => $$props.comp, ($$anchor, $$component) => {$.bind_this($$component($$anchor, {}), ($$value) => inst = $$value, () => inst);}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

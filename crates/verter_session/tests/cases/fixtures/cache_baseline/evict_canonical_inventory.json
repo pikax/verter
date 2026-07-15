@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "note": "PINNED-HISTORICAL baseline captured at captured_at_sha. Rows name databases as they existed AT THAT SHA — e.g. route_owned_shallow and eval_env_cache_db have since been DELETED from the live tree. Do not edit rows to match the current tree; the consuming tests compare against this historical observation, not the live inventory.",
+  "captured_at_sha": "ccc0522309091c532d6fba756da392598eab059c",
+  "stage_0_commit_sha_pending": true,
+  "function": "project_type_store::ProjectTypeStore::evict_canonical",
+  "observation_method": "instrumented runtime upsert + source-body inspection",
+  "upsert_trigger": {
+    "canonical": "/workspace/stage0/observed.ts",
+    "content_hash_before": "h0",
+    "content_hash_after": "h1",
+    "trigger_kind": "source_content_change"
+  },
+  "databases_drained": [
+    {"field": "analysis", "method": "invalidate_canonical"},
+    {"field": "app_config_no_override_proof", "method": "invalidate_canonical"},
+    {"field": "component_meta_results", "method": "invalidate_owner"},
+    {"field": "declaration_lookup_db", "method": "invalidate_canonical"},
+    {"field": "imported_registry_db", "method": "invalidate_canonical"},
+    {"field": "indexed", "method": "remove"},
+    {"field": "materialize_structure_db", "method": "invalidate_for_canonical"},
+    {"field": "shape_cache_db", "method": "invalidate_canonical"},
+    {"field": "member_display_facts", "method": "invalidate_canonical"},
+    {"field": "member_semantic_facts", "method": "invalidate_canonical"},
+    {"field": "owner_collection_db", "method": "invalidate_canonical"},
+    {"field": "owner_import_surfaces", "method": "remove"},
+    {"field": "ref_cycle_db", "method": "invalidate_for_canonical"},
+    {"field": "resolvability_db", "method": "invalidate_canonical"},
+    {"field": "resolved_type_cache_db", "method": "evict_canonical"},
+    {"field": "route_owned_shallow", "method": "remove"},
+    {"field": "semantic_db", "method": "lock().invalidate"},
+    {"field": "semantic_graph", "method": "invalidate_canonical"},
+    {"field": "semantic_graph", "method": "invalidate_resolved_named_types_for_canonical"}
+  ],
+  "databases_explicitly_excluded": [
+    {"field": "compile_cache_db", "reason": "D48 split: routed through evict_for_source_content_change at host-upsert layer, not the project-global graph cascade"},
+    {"field": "derived_raw_cache_db", "reason": "D48 split: routed through evict_for_source_content_change at host-upsert layer"},
+    {"field": "dependency_cache_db", "reason": "D48 split: routed through evict_for_source_content_change at host-upsert layer"},
+    {"field": "type_resolution_context_db", "reason": "Not drained by evict_canonical on the audited base SHA"},
+    {"field": "eval_env_cache_db", "reason": "Cleared at host-upsert layer via host.eval_env_cache().clear(); not drained from project_type_store::evict_canonical"},
+    {"field": "imported_roots", "reason": "Not drained by evict_canonical on the audited base SHA"},
+    {"field": "routes", "reason": "Not drained by evict_canonical on the audited base SHA (route_owned_shallow IS drained)"},
+    {"field": "intrinsic_registry", "reason": "Project-global immutable registry; not per-canonical"},
+    {"field": "counters", "reason": "Telemetry only; not per-canonical"},
+    {"field": "project_generation", "reason": "Versioning scalar, not a DB"}
+  ],
+  "co_evicted_outside_project_type_store": [
+    {"path": "host.resolver.runtime.evict_canonical", "called_from": "host_upsert.rs::upsert byte-identical fast path and source-change path", "kind": "router-state"},
+    {"path": "host.resolved_type_cache().clear()", "called_from": "host_upsert.rs::upsert byte-identical fast path", "kind": "host-level cache (cleared whole-store)"},
+    {"path": "host.eval_env_cache().clear()", "called_from": "host_upsert.rs::upsert byte-identical fast path", "kind": "host-level cache (cleared whole-store)"},
+    {"path": "host.semantic_invalidate", "called_from": "host_upsert.rs::upsert byte-identical fast path", "kind": "fact-based invalidation handle"},
+    {"path": "host.ws().record_parsed_edges", "called_from": "host_upsert.rs::upsert byte-identical fast path", "kind": "workspace-edge map (clears exact_resolved/lazy_resolved/semantic_transitive)"},
+    {"path": "host.bump_store_view_epoch", "called_from": "host_upsert.rs::upsert byte-identical fast path", "kind": "store-view epoch counter"},
+    {"path": "compile_cache.compile_slots.clear", "called_from": "host_upsert.rs::upsert byte-identical fast path", "kind": "per-canonical compile slots"},
+    {"path": "derived_raw_cache.cached_resolved_meta.clear / .cached_meta_payload = None / .cached_fallthrough = None / .import_routes.clear", "called_from": "host_upsert.rs::upsert byte-identical fast path", "kind": "per-canonical derived-raw state"},
+    {"path": "dependency_cache.aliases / .dependencies / .generation", "called_from": "host_upsert.rs::upsert byte-identical fast path", "kind": "per-canonical dependency state"}
+  ],
+  "notes": [
+    "This inventory is produced by a Stage-0 characterisation test that (a) constructs a host, (b) runs evict_canonical on a representative canonical, and (c) cross-validates against the source body of project_type_store::ProjectTypeStore::evict_canonical at the captured SHA. Drift in either direction fails the test.",
+    "Sorted alphabetically by (field, method) under `databases_drained` so the file is order-stable.",
+    "Stage 1+ tests (`tests/cache_reuse_invariants.rs`, `tests/no_eager_invalidation.rs`) read this file to assert that byte-identical upserts no longer touch any DB on this list (per R1, R2, R3).",
+    "Stage 7 deletes evict_canonical's public surface. At that point this fixture's `databases_drained` list MUST be inspected and trimmed by hand to remaining internal drains, if any; the post-Stage-7 inventory is the Stage 7 audit deliverable, not Stage 0."
+  ]
+}

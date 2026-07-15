@@ -1,6 +1,6 @@
 //! # verter_wasm — WebAssembly bindings for Verter
 //!
-//! `wasm-bindgen` binding layer that exposes [`verter_host::VerterHost`] to
+//! `wasm-bindgen` binding layer that exposes [`verter_session::VerterHost`] to
 //! the browser. Used by the Verter playground.
 //!
 //! ## API parity
@@ -19,11 +19,78 @@
 
 use std::panic::AssertUnwindSafe;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use verter_ffi::convert::*;
 use verter_ffi::types::*;
-use verter_host as host;
+use verter_protocol::types::{FfiComponentMeta, FfiComponentMetaResolution};
+use verter_session as host;
+use verter_session::component_meta_audit::{
+    assertions::RequestAuditRecordAssertions, RequestAuditRecord,
+};
 use wasm_bindgen::prelude::*;
+
+mod audit;
+mod typeinfo;
+use audit::{
+    audit_record_list_to_json_string, audit_record_to_json_string, kind_matches_wasm,
+    parse_bundler_kind_wasm, parse_compile_target_wasm, parse_request_id_str_wasm,
+    stored_audit_record_to_json_string, AuditRecordFilterWasm, BundlerBatchSummaryArgsWasm,
+    WorkspaceOpArgWasm,
+};
+
+/// WASM audit bundle — mirror of the NAPI binding's bundle shape.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmAuditBundle {
+    analysis: FfiComponentMeta,
+    resolution: FfiComponentMetaResolution,
+    record: RequestAuditRecord,
+}
+
+/// Minimal decoder for `whyLoadedFromAuditJson` / `whyInstantiatedFromAuditJson`
+/// — only `record` round-trips through the walker path. `analysis`
+/// and `resolution` fields in the JSON are silently ignored by
+/// serde's default unknown-field handling.
+#[derive(Deserialize)]
+struct WasmAuditBundleForWalker {
+    record: RequestAuditRecord,
+}
+
+/// Parse a 32-char lowercase hex string into `Hash16`. WASM-error
+/// variant of the NAPI helper with the same name.
+fn parse_hash16_hex_wasm(hex: &str) -> Result<host::Hash16, JsValue> {
+    if hex.len() != 32 {
+        return Err(JsValue::from_str(&format!(
+            "args_fingerprint_hex must be 32 hex chars (16 bytes), got {} chars",
+            hex.len()
+        )));
+    }
+    let mut out = [0u8; 16];
+    for (i, byte_out) in out.iter_mut().enumerate() {
+        let hi = hex
+            .as_bytes()
+            .get(i * 2)
+            .and_then(|c| (*c as char).to_digit(16))
+            .ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "args_fingerprint_hex[{idx}] not a hex digit",
+                    idx = i * 2
+                ))
+            })?;
+        let lo = hex
+            .as_bytes()
+            .get(i * 2 + 1)
+            .and_then(|c| (*c as char).to_digit(16))
+            .ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "args_fingerprint_hex[{idx}] not a hex digit",
+                    idx = i * 2 + 1
+                ))
+            })?;
+        *byte_out = ((hi << 4) | lo) as u8;
+    }
+    Ok(out)
+}
 
 // Re-imports for code actions and diagnostics
 use verter_actions::{ActionContext, ActionEngine};
@@ -97,22 +164,22 @@ fn host_err(err: host::HostError) -> JsValue {
 
 fn ffi_module_reference_syntax_from_str(
     syntax: &str,
-) -> Result<verter_analysis::ModuleReferenceSyntax, JsValue> {
+) -> Result<verter_semantic::analysis::ModuleReferenceSyntax, JsValue> {
     match syntax {
-        "staticImport" => Ok(verter_analysis::ModuleReferenceSyntax::StaticImport),
-        "exportFrom" => Ok(verter_analysis::ModuleReferenceSyntax::ExportFrom),
-        "dynamicImport" => Ok(verter_analysis::ModuleReferenceSyntax::DynamicImport),
-        "requireCall" => Ok(verter_analysis::ModuleReferenceSyntax::RequireCall),
+        "staticImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::StaticImport),
+        "exportFrom" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom),
+        "dynamicImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport),
+        "requireCall" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::RequireCall),
         other => Err(ffi_err(format!("unknown module reference syntax: {other}"))),
     }
 }
 
 fn ffi_module_reference_semantics_from_str(
     semantics: &str,
-) -> Result<verter_analysis::ModuleReferenceSemantics, JsValue> {
+) -> Result<verter_semantic::analysis::ModuleReferenceSemantics, JsValue> {
     match semantics {
-        "import" => Ok(verter_analysis::ModuleReferenceSemantics::Import),
-        "require" => Ok(verter_analysis::ModuleReferenceSemantics::Require),
+        "import" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Import),
+        "require" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Require),
         other => Err(ffi_err(format!(
             "unknown module reference semantics: {other}"
         ))),
@@ -121,11 +188,13 @@ fn ffi_module_reference_semantics_from_str(
 
 fn ffi_module_reference_analyzability_from_str(
     analyzability: &str,
-) -> Result<verter_analysis::ModuleReferenceAnalyzability, JsValue> {
+) -> Result<verter_semantic::analysis::ModuleReferenceAnalyzability, JsValue> {
     match analyzability {
-        "exact" => Ok(verter_analysis::ModuleReferenceAnalyzability::Exact),
-        "finiteSet" => Ok(verter_analysis::ModuleReferenceAnalyzability::FiniteSet),
-        "unknownDynamic" => Ok(verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic),
+        "exact" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::Exact),
+        "finiteSet" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet),
+        "unknownDynamic" => {
+            Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic)
+        }
         other => Err(ffi_err(format!(
             "unknown module reference analyzability: {other}"
         ))),
@@ -134,8 +203,8 @@ fn ffi_module_reference_analyzability_from_str(
 
 fn ffi_module_reference_to_analysis(
     input: FfiModuleReference,
-) -> Result<verter_analysis::AnalyzedModuleReference, JsValue> {
-    Ok(verter_analysis::AnalyzedModuleReference {
+) -> Result<verter_semantic::analysis::AnalyzedModuleReference, JsValue> {
+    Ok(verter_semantic::analysis::AnalyzedModuleReference {
         syntax: ffi_module_reference_syntax_from_str(&input.syntax)?,
         semantics: ffi_module_reference_semantics_from_str(&input.semantics)?,
         is_type_only: input.is_type_only,
@@ -161,6 +230,7 @@ fn default_known_dependency_extensions() -> Vec<String> {
         ".cts".to_string(),
         ".cjs".to_string(),
         ".vue".to_string(),
+        ".svelte".to_string(),
     ]
 }
 
@@ -183,7 +253,32 @@ fn default_known_dependency_extensions() -> Vec<String> {
 /// Verter playground.
 #[wasm_bindgen(js_name = VerterHost)]
 pub struct WasmVerterHost {
-    inner: host::VerterHost,
+    inner: std::sync::Arc<host::VerterHost>,
+}
+
+impl WasmVerterHost {
+    /// The JsValue-free core of [`Self::get_public_api`]: parses the
+    /// optional mode string through the shared FFI seam
+    /// (`ffi_public_api_mode_to_host` — the same allow-list the NAPI
+    /// binding uses) and routes it into the host's
+    /// `get_public_api_with_mode`. Split out so host-target unit tests
+    /// exercise the export's mode plumbing without a WASM runtime.
+    fn public_api_with_mode(
+        &self,
+        canonical_id: &str,
+        mode: Option<&str>,
+    ) -> Result<Option<FfiIdeResponse>, FfiConversionError> {
+        let mode = ffi_public_api_mode_to_host(mode)?;
+        Ok(self
+            .inner
+            .get_public_api_with_mode(canonical_id, mode, None)
+            .map(|r| FfiIdeResponse {
+                code: r.code.to_string(),
+                source_map: r.source_map.map(|s| s.to_string()),
+                is_jsx: false,
+                destructured_block: None,
+            }))
+    }
 }
 
 #[wasm_bindgen(js_class = VerterHost)]
@@ -204,9 +299,9 @@ impl WasmVerterHost {
             parse_wasm_input::<FfiHostConfig>(config)?
         };
         Ok(Self {
-            inner: host::VerterHost::new_standalone(
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
                 ffi_config_to_host(ffi_config).map_err(ffi_err)?,
-            ),
+            )),
         })
     }
 
@@ -383,21 +478,58 @@ impl WasmVerterHost {
         }))
     }
 
+    /// Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
+    ///
+    /// The explicit IDE-ensure path: it compiles the carrier's IDE surface
+    /// (never requesting the runtime `Main` node), so a Main-less carrier
+    /// (Svelte) populates its `CachedTsx` and a subsequent [`get_ide`](Self::get_ide)
+    /// succeeds. `getIde` itself stays a pure cached read.
+    ///
+    /// The caller profile is OPTIONAL and is normalized to an IDE/TSX-bearing
+    /// target INTERNALLY, so a default / bundler profile (no TSX bit) still
+    /// produces the IDE surface. Returns `true` whenever the carrier HAS an IDE
+    /// surface — regardless of the caller's runtime target — and `false` ONLY
+    /// for a genuine no-IDE-surface file (a non-carrier / plain script). A real
+    /// failure (missing source / compile error) throws.
+    #[wasm_bindgen(js_name = ensureIdeCompiled)]
+    pub fn ensure_ide_compiled(
+        &self,
+        canonical_id: &str,
+        profile: JsValue,
+    ) -> Result<bool, JsValue> {
+        let ffi_profile: Option<FfiCompileProfile> = if profile.is_undefined() || profile.is_null()
+        {
+            None
+        } else {
+            Some(parse_wasm_input(profile)?)
+        };
+        let host_profile = ffi_profile_to_host(ffi_profile).map_err(ffi_err)?;
+        catch_panic(|| self.inner.ensure_ide_compiled(canonical_id, &host_profile))?
+            .map_err(host_err)
+    }
+
     /// Retrieve TSC declaration output for a file.
     ///
     /// Generates a minimal TypeScript declaration file for a Vue SFC.
     /// Unlike `getIde`, this does NOT require a prior compilation pass.
     ///
+    /// `mode` selects the served surface: `"public"` (default when absent /
+    /// `undefined`) — the application-facing instance shape; `"testing"` —
+    /// the Vue Test Utils-like debug surface exposing `<script setup>`
+    /// bindings; `"declaration"` — the declaration-only (`.d.<ext>.ts`)
+    /// public surface (a valid `.d.ts` with no runtime/value code). An
+    /// unknown mode string throws.
+    ///
     /// Returns `{ code: string, sourceMap?: string, isJsx: boolean }` or `null`.
     #[wasm_bindgen(js_name = getPublicApi)]
-    pub fn get_public_api(&self, canonical_id: &str) -> Result<JsValue, JsValue> {
-        let result = catch_panic(|| self.inner.get_public_api(canonical_id))?;
-        to_wasm_value(&result.map(|r| FfiIdeResponse {
-            code: r.code.to_string(),
-            source_map: r.source_map.map(|s| s.to_string()),
-            is_jsx: false,
-            destructured_block: None,
-        }))
+    pub fn get_public_api(
+        &self,
+        canonical_id: &str,
+        mode: Option<String>,
+    ) -> Result<JsValue, JsValue> {
+        let result = catch_panic(|| self.public_api_with_mode(canonical_id, mode.as_deref()))?
+            .map_err(ffi_err)?;
+        to_wasm_value(&result)
     }
 
     /// Runs cross-file analysis and returns prop constness optimizations.
@@ -459,7 +591,7 @@ impl WasmVerterHost {
             .map(ffi_module_reference_to_analysis)
             .collect::<Result<Vec<_>, _>>()?;
         let specifiers =
-            verter_analysis::project_resolver::collect_resolvable_module_reference_specifiers(
+            verter_semantic::analysis::project_resolver::collect_resolvable_module_reference_specifiers(
                 &module_references,
             );
         to_wasm_value(&specifiers)
@@ -486,7 +618,7 @@ impl WasmVerterHost {
             parse_wasm_input::<Vec<String>>(extensions)?
         };
         let resolved =
-            verter_analysis::project_resolver::resolve_known_module_reference_dependencies(
+            verter_semantic::analysis::project_resolver::resolve_known_module_reference_dependencies(
                 owner_id,
                 &module_references,
                 &known_ids,
@@ -654,6 +786,372 @@ impl WasmVerterHost {
 
         to_wasm_value(&results)
     }
+
+    // =========================================================================
+    // Typed audit entry-points (mirrors the NAPI surface)
+    // =========================================================================
+
+    /// Run a single type-resolution query through the shared dispatch
+    /// and return the produced `RequestAuditRecord` as a JSON string.
+    /// Resolves `decl_name` in the top-level scope of `canonical_id`.
+    /// Returns `null` when audit is disabled.
+    #[wasm_bindgen(js_name = "resolveTypeWithAudit")]
+    pub fn resolve_type_with_audit(
+        &self,
+        canonical_id: &str,
+        decl_name: &str,
+    ) -> Result<JsValue, JsValue> {
+        use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+        let host = std::sync::Arc::clone(&self.inner);
+        let canonical_id_owned = canonical_id.to_string();
+        let decl_name_owned = decl_name.to_string();
+        catch_panic(AssertUnwindSafe(move || {
+            let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                scope: ScopeId {
+                    canonical_id: std::sync::Arc::<str>::from(canonical_id_owned.as_str()),
+                    local_scope: None,
+                },
+                name: std::sync::Arc::<str>::from(decl_name_owned.as_str()),
+            });
+            let record = host
+                .resolve_type_with_audit(key, &canonical_id_owned)
+                .audit()
+                .clone();
+            stored_audit_record_to_json_string(&record)
+        }))?
+    }
+
+    /// Compile `canonical_id` for the requested codegen target and
+    /// return the produced `RequestAuditRecord` as a JSON string.
+    /// Accepted target names: `BUNDLER`, `IDE`, `ANALYSIS`, `META`,
+    /// `TSX`, `TSC`. Returns `null` when audit is disabled.
+    #[wasm_bindgen(js_name = "compileWithAudit")]
+    pub fn compile_with_audit(&self, canonical_id: &str, target: &str) -> Result<JsValue, JsValue> {
+        let target_value = parse_compile_target_wasm(target)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        let canonical_id_owned = canonical_id.to_string();
+        catch_panic(AssertUnwindSafe(move || {
+            let record = host
+                .compile_with_audit(&canonical_id_owned, target_value)
+                .audit()
+                .clone();
+            stored_audit_record_to_json_string(&record)
+        }))?
+    }
+
+    /// Materialise the `AnalysisReady` artifact for `canonical_id`
+    /// under audit and return the produced `RequestAuditRecord` as a
+    /// JSON string. Returns `null` when audit is disabled or the
+    /// canonical does not exist.
+    ///
+    /// WASM-only stub: the underlying
+    /// `VerterHost::analyze_with_audit` requires the scheduler-backed
+    /// `IndexedReady` materialisation path which is not built for the
+    /// `wasm32` target. Calling this throws on WASM; consumers should
+    /// drive the analysis through the native `@verter/native` package.
+    #[wasm_bindgen(js_name = "analyzeWithAudit")]
+    pub fn analyze_with_audit(&self, _canonical_id: &str) -> Result<JsValue, JsValue> {
+        Err(JsValue::from_str(
+            "analyzeWithAudit is unavailable in WASM (scheduler-backed analysis not built for wasm32); \
+             use @verter/native for audited analysis requests",
+        ))
+    }
+
+    /// Drive a workspace operation under audit and return the
+    /// produced `RequestAuditRecord` as a JSON string. The `op_json`
+    /// argument is shaped as `{ "type": "AuditResolve", "specifier",
+    /// "from" }` / `{ "type": "DepGraphTraverse", "root" }` / `{
+    /// "type": "ResolverWalk", "specifier" }`.
+    #[wasm_bindgen(js_name = "auditWorkspaceOp")]
+    pub fn audit_workspace_op(&self, op_json: &str) -> Result<JsValue, JsValue> {
+        let arg: WorkspaceOpArgWasm = serde_json::from_str(op_json)
+            .map_err(|e| JsValue::from_str(&format!("invalid workspace op shape: {e}")))?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let workspace_op: verter_audit::WorkspaceOp = arg.into();
+            let record = host.audit_workspace_op(workspace_op);
+            audit_record_to_json_string(&record)
+        }))?
+    }
+
+    /// Drain the most-recent `RequestAuditRecord` from the host's
+    /// audit store. Returns `null` when the store is empty. The
+    /// returned record is removed from the store.
+    #[wasm_bindgen(js_name = "getLastAuditRecord")]
+    pub fn get_last_audit_record(&self) -> Result<JsValue, JsValue> {
+        use verter_audit::batch::AuditRecordSource;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let store = host.host_audit_runtime().audit_records_store();
+            let mut latest_id: Option<u64> = None;
+            let mut latest_at: Option<verter_audit::instant::Instant> = None;
+            store.for_each_record(&mut |inserted_at, record| {
+                let is_newer = match latest_at {
+                    None => true,
+                    Some(prev) => inserted_at > prev,
+                };
+                if is_newer {
+                    latest_at = Some(inserted_at);
+                    latest_id = Some(record.request_id);
+                }
+            });
+            let Some(id) = latest_id else {
+                return Ok(JsValue::NULL);
+            };
+            match store.take(id) {
+                Some(rec) => audit_record_to_json_string(&rec),
+                None => Ok(JsValue::NULL),
+            }
+        }))?
+    }
+
+    /// Non-destructive filtered query over the host's audit store.
+    /// Returns a JSON-string array of matching records. The
+    /// `filter_json` argument carries `{ kind?, sinceRequestId?,
+    /// limit? }` (any combination — independent narrowing).
+    #[wasm_bindgen(js_name = "getAuditRecords")]
+    pub fn get_audit_records(&self, filter_json: JsValue) -> Result<JsValue, JsValue> {
+        use verter_audit::batch::AuditRecordSource;
+        let filter: AuditRecordFilterWasm = if filter_json.is_undefined() || filter_json.is_null() {
+            AuditRecordFilterWasm::default()
+        } else {
+            parse_wasm_input(filter_json)?
+        };
+        let kind_filter = filter.kind;
+        let since = match filter.since_request_id.as_deref() {
+            Some(s) => Some(parse_request_id_str_wasm(s)?),
+            None => None,
+        };
+        let limit = filter.limit.map(|n| n as usize);
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let store = host.host_audit_runtime().audit_records_store();
+            let mut collected: Vec<verter_audit::RequestAuditRecord> = Vec::new();
+            store.for_each_record(&mut |_inserted_at, record| {
+                if let Some(filter_kind) = kind_filter.as_deref() {
+                    if !kind_matches_wasm(filter_kind, &record.kind) {
+                        return;
+                    }
+                }
+                if let Some(since_id) = since {
+                    if record.request_id <= since_id {
+                        return;
+                    }
+                }
+                collected.push(record.clone());
+            });
+            if let Some(n) = limit {
+                collected.truncate(n);
+            }
+            audit_record_list_to_json_string(&collected)
+        }))?
+    }
+
+    /// Run the bundler-batch aggregator over the host's audit store
+    /// and return the produced `BundlerBatchPayload` as a JSON
+    /// string. The `args_json` argument carries `{ kind?,
+    /// sinceRequestId? }` (defaults: `Vite`, no-watermark).
+    #[wasm_bindgen(js_name = "getBundlerBatchSummary")]
+    pub fn get_bundler_batch_summary(&self, args_json: JsValue) -> Result<JsValue, JsValue> {
+        use verter_audit::batch::{AuditRecordSource, BatchAuditAggregator};
+        let args: BundlerBatchSummaryArgsWasm = if args_json.is_undefined() || args_json.is_null() {
+            BundlerBatchSummaryArgsWasm::default()
+        } else {
+            parse_wasm_input(args_json)?
+        };
+        let kind = parse_bundler_kind_wasm(args.kind.as_deref());
+        let since_id = match args.since_request_id.as_deref() {
+            Some(s) => Some(parse_request_id_str_wasm(s)?),
+            None => None,
+        };
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let store = host.host_audit_runtime().audit_records_store();
+            let since_instant: Option<verter_audit::instant::Instant> = match since_id {
+                None => None,
+                Some(target_id) => {
+                    let mut best: Option<verter_audit::instant::Instant> = None;
+                    store.for_each_record(&mut |inserted_at, record| {
+                        if record.request_id <= target_id {
+                            best = match best {
+                                None => Some(inserted_at),
+                                Some(prev) if inserted_at > prev => Some(inserted_at),
+                                Some(prev) => Some(prev),
+                            };
+                        }
+                    });
+                    best
+                }
+            };
+            let aggregator = BatchAuditAggregator::new(store.as_ref(), kind);
+            let payload = aggregator.summarize(since_instant);
+            serde_json::to_string(&payload)
+                .map(|s| JsValue::from_str(&s))
+                .map_err(|e| {
+                    JsValue::from_str(&format!("bundler batch summary serialization error: {e}"))
+                })
+        }))?
+    }
+
+    // =========================================================================
+    // Typeinfo entry-points (typeinfo public host substrate) — WASM
+    //
+    // Mirror the NAPI surface (`NapiVerterHost::list_symbols`,
+    // `resolveSymbolWithAudit`, `evaluateTypeExpressionWithAudit`).
+    // The encoding shape is JSON strings rather than `Buffer` blobs to
+    // match the existing WASM convention; the wire schema is identical.
+    // =========================================================================
+
+    /// Return the top-level symbol inventory for `canonical_id` as a
+    /// JSON string carrying a `Vec<FfiSymbolEntry>`.
+    #[wasm_bindgen(js_name = "listSymbols")]
+    pub fn list_symbols(&self, canonical_id: &str) -> Result<String, JsValue> {
+        let host = std::sync::Arc::clone(&self.inner);
+        let canonical_id_owned = canonical_id.to_string();
+        catch_panic(AssertUnwindSafe(move || {
+            let entries = host.list_file_symbols(&canonical_id_owned);
+            let ffi: Vec<verter_protocol::typeinfo::FfiSymbolEntry> = entries
+                .into_iter()
+                .map(verter_ffi::convert::host_to_ffi_symbol_entry)
+                .collect();
+            crate::typeinfo::encode_symbol_list(&ffi)
+        }))?
+    }
+
+    /// Resolve `name` in `canonical_id`'s scope. Returns a JSON string
+    /// carrying `{ typeExpr, auditRecord }` per the typeinfo contract.
+    ///
+    /// `type_args_json` is an optional JSON string carrying an array of
+    /// `TypeExpr` values. `mode` is one of the projection-mode tags or
+    /// `null` for the host default.
+    #[wasm_bindgen(js_name = "resolveSymbolWithAudit")]
+    pub fn resolve_symbol_with_audit(
+        &self,
+        canonical_id: &str,
+        name: &str,
+        type_args_json: Option<String>,
+        mode: Option<String>,
+    ) -> Result<JsValue, JsValue> {
+        let exprs = crate::typeinfo::decode_type_expr_list(type_args_json)?;
+        let resolve_mode = crate::typeinfo::parse_resolve_mode(mode)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        let canonical_id_owned = canonical_id.to_string();
+        let name_owned = name.to_string();
+        catch_panic(AssertUnwindSafe(move || {
+            let arc_args: Vec<std::sync::Arc<verter_type_expr::TypeExpr>> =
+                exprs.into_iter().map(std::sync::Arc::new).collect();
+            // Wire-boundary resolution: the symbolic `TypeExpr` payloads
+            // lower to semantic-graph node ids INSIDE the audited request,
+            // under the SAME store view the resolution runs against (the
+            // transient symbolic IR stops at this boundary). A lowering miss
+            // surfaces as a `null` typeExpr WITH its audit record.
+            let (outcome, record) = host
+                .resolve_named_symbol_wire_with_audit(
+                    &canonical_id_owned,
+                    &name_owned,
+                    &arc_args,
+                    resolve_mode,
+                )
+                .into_parts();
+            let (resolved, error) = crate::typeinfo::split_resolve_outcome(outcome);
+            // Bytes facade: `verter_session` wire-encodes the `TypeExpr` to
+            // UTF-8 JSON internally (through the sealed output capability);
+            // the WASM adapter only decodes the bytes to a `String`.
+            let type_expr_json = match resolved {
+                Some(node_id) => host
+                    .project_node_to_type_expr_json_bytes(node_id)
+                    .map(|bytes| {
+                        String::from_utf8(bytes).map_err(|e| {
+                            JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))
+                        })
+                    })
+                    .transpose()?,
+                None => None,
+            };
+            let audit_json = crate::typeinfo::encode_stored_audit_record(&record)?;
+            let result = crate::typeinfo::WasmTypeInfoResolveResult {
+                type_expr: type_expr_json,
+                audit_record: audit_json,
+                error,
+            };
+            to_wasm_value(&result)
+        }))?
+    }
+
+    /// Evaluate a synthetic type expression in a file scope. Returns
+    /// `{ typeExpr, auditRecord }` per the typeinfo contract.
+    ///
+    /// `request_json` is a JSON string carrying a
+    /// `verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest`.
+    #[wasm_bindgen(js_name = "evaluateTypeExpressionWithAudit")]
+    pub fn evaluate_type_expression_with_audit(
+        &self,
+        request_json: &str,
+    ) -> Result<JsValue, JsValue> {
+        let req = crate::typeinfo::decode_evaluate_request(request_json)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let (outcome, record) = host.evaluate_type_expression_with_audit(req).into_parts();
+            let (resolved, error) = crate::typeinfo::split_resolve_outcome(outcome);
+            // Bytes facade: `verter_session` wire-encodes the `TypeExpr` to
+            // UTF-8 JSON internally (through the sealed output capability);
+            // the WASM adapter only decodes the bytes to a `String`.
+            let type_expr_json = match resolved {
+                Some(node_id) => host
+                    .project_node_to_type_expr_json_bytes(node_id)
+                    .map(|bytes| {
+                        String::from_utf8(bytes).map_err(|e| {
+                            JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))
+                        })
+                    })
+                    .transpose()?,
+                None => None,
+            };
+            let audit_json = crate::typeinfo::encode_stored_audit_record(&record)?;
+            let result = crate::typeinfo::WasmTypeInfoResolveResult {
+                type_expr: type_expr_json,
+                audit_record: audit_json,
+                error,
+            };
+            to_wasm_value(&result)
+        }))?
+    }
+
+    /// Resolve a component's framework surfaces, returning the wire
+    /// `TypeInfoGraphResponse` (as protobuf bytes) plus the per-request
+    /// audit record. Mirrors the NAPI `resolveFrameworkSurfaceWithAudit`.
+    ///
+    /// `request` is the protobuf-encoded
+    /// `verter_protocol::typeinfo::graph::TypeInfoGraphRequest` envelope
+    /// carrying the `GRAPH_OPERATION_FRAMEWORK_SURFACES` operation. The
+    /// host runs the envelope validator FIRST, so a malformed envelope
+    /// returns the typed wire `error` arm BEFORE any registry lookup or
+    /// semantic dispatch.
+    ///
+    /// Returns `{ response, auditRecord }` — `response` is the
+    /// protobuf-encoded `TypeInfoGraphResponse` byte array (always
+    /// present); `auditRecord` is the JSON `RequestAuditRecord` or `null`.
+    #[wasm_bindgen(js_name = "resolveFrameworkSurfaceWithAudit")]
+    pub fn resolve_framework_surface_with_audit(&self, request: &[u8]) -> Result<JsValue, JsValue> {
+        let envelope = crate::typeinfo::decode_type_info_graph_request(request)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            let (outcome, record) = host
+                .resolve_framework_surface_with_audit(envelope)
+                .into_parts();
+            let response = match outcome {
+                Ok(response) => response,
+                Err(error) => crate::typeinfo::framework_error_response(error),
+            };
+            let response_bytes = crate::typeinfo::encode_type_info_graph_response(&response);
+            let audit_json = crate::typeinfo::encode_stored_audit_record(&record)?;
+            let result = crate::typeinfo::WasmFrameworkSurfaceResult {
+                response: response_bytes,
+                audit_record: audit_json,
+            };
+            to_wasm_value(&result)
+        }))?
+    }
 }
 
 // =============================================================================
@@ -663,17 +1161,19 @@ impl WasmVerterHost {
 /// Build a `ScriptAnalysisSnapshot` from a `FileAnalysisSnapshot`.
 ///
 /// Extracts all script-related fields, preserving `vue_api_calls` and
-/// `dom_query_calls` from the snapshot (fixes Phase 2 zeroed-fields bug).
+/// `dom_query_calls` from the snapshot (fixes zeroed-fields bug).
 fn build_script_snapshot(
     snapshot: &host::FileAnalysisSnapshot,
-) -> verter_analysis::types::ScriptAnalysisSnapshot {
-    verter_analysis::types::ScriptAnalysisSnapshot {
+) -> verter_semantic::analysis::types::ScriptAnalysisSnapshot {
+    verter_semantic::analysis::types::ScriptAnalysisSnapshot {
         imports: snapshot.imports.clone(),
         module_references: snapshot.module_references.to_vec(),
         bindings: snapshot.bindings.clone(),
         macros: snapshot.macros.to_vec(),
         macro_type_deps: snapshot.macro_type_deps.to_vec(),
-        flags: verter_analysis::types::AnalysisFlags::from_bits_truncate(snapshot.script_flags),
+        flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+            snapshot.script_flags,
+        ),
         exported_functions: Vec::new(),
         vue_api_calls: snapshot.vue_api_calls.to_vec(),
         dom_query_calls: snapshot.dom_query_calls.to_vec(),
@@ -739,9 +1239,11 @@ fn build_document_symbols_from_analysis(
 
         for binding in &snapshot.bindings {
             let kind = match binding.kind {
-                verter_analysis::AnalyzedBindingKind::Function
-                | verter_analysis::AnalyzedBindingKind::AsyncFunction => symbol_kind::FUNCTION,
-                verter_analysis::AnalyzedBindingKind::Class => symbol_kind::CLASS,
+                verter_semantic::analysis::AnalyzedBindingKind::Function
+                | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+                    symbol_kind::FUNCTION
+                }
+                verter_semantic::analysis::AnalyzedBindingKind::Class => symbol_kind::CLASS,
                 _ => symbol_kind::VARIABLE,
             };
             children.push(FfiDocumentSymbol {
@@ -887,7 +1389,7 @@ fn build_selector_match_results(
             // Use pre-parsed structure if available, otherwise parse
             let parsed = match &selector.structure {
                 Some(s) => s.clone(),
-                None => match verter_analysis::style::parse_selector(&selector.text) {
+                None => match verter_semantic::analysis::style::parse_selector(&selector.text) {
                     Some(s) => s,
                     None => continue,
                 },
@@ -895,7 +1397,7 @@ fn build_selector_match_results(
 
             let mut matches = Vec::new();
             for (idx, element) in template.elements.iter().enumerate() {
-                let result = verter_analysis::selector_match::match_selector(
+                let result = verter_semantic::analysis::selector_match::match_selector(
                     &parsed,
                     idx,
                     &template.elements,
@@ -905,13 +1407,15 @@ fn build_selector_match_results(
                     span_start: byte_offset_to_utf16_safe(source, element.span.start),
                     span_end: byte_offset_to_utf16_safe(source, element.span.end),
                     result: match result {
-                        verter_analysis::selector_match::MatchResult::Matches => {
+                        verter_semantic::analysis::selector_match::MatchResult::Matches => {
                             "match".to_string()
                         }
-                        verter_analysis::selector_match::MatchResult::MaybeMatches => {
+                        verter_semantic::analysis::selector_match::MatchResult::MaybeMatches => {
                             "maybe".to_string()
                         }
-                        verter_analysis::selector_match::MatchResult::NoMatch => "no".to_string(),
+                        verter_semantic::analysis::selector_match::MatchResult::NoMatch => {
+                            "no".to_string()
+                        }
                     },
                 });
             }
@@ -930,7 +1434,148 @@ fn build_selector_match_results(
 
 #[cfg(test)]
 mod tests {
-    use super::lint_diagnostics_to_utf16;
+    use super::{default_known_dependency_extensions, lint_diagnostics_to_utf16};
+    use super::{host, FfiConversionError, WasmVerterHost};
+
+    #[test]
+    fn default_dependency_resolution_extensions_include_svelte_carriers_once() {
+        let extensions = default_known_dependency_extensions();
+        assert_eq!(
+            extensions
+                .iter()
+                .filter(|ext| ext.as_str() == ".svelte")
+                .count(),
+            1
+        );
+    }
+
+    /// A WASM host preloaded with a Vue SFC whose props type lives in a
+    /// sibling `.ts` file — the same fixture shape the verter_session
+    /// public-API mode pins use, exercised here through the WASM binding's
+    /// JsValue-free plumbing core.
+    fn public_api_mode_fixture_host() -> WasmVerterHost {
+        let wasm_host = WasmVerterHost {
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
+                host::HostConfig::default(),
+            )),
+        };
+        let _ = wasm_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/Cap.vue".to_string(),
+                source: std::sync::Arc::from(
+                    "<script setup lang=\"ts\">\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n</script>\n<template><div>{{ count }}</div></template>",
+                ),
+                file_language: host::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert Cap.vue");
+        let _ = wasm_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/cap-types.ts".to_string(),
+                source: std::sync::Arc::from(
+                    "export interface CapProps { label: string; n: number }\n",
+                ),
+                file_language: host::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert cap-types.ts");
+        wasm_host
+    }
+
+    /// The `getPublicApi` WASM export's mode plumbing routes
+    /// `"declaration"` to `PublicApiMode::Declaration` (the
+    /// declaration-only `.d.<ext>.ts` surface), keeps `"public"` /
+    /// absent on the runtime-instance surface, and rejects an unknown
+    /// mode with a typed error. Runs on the host target through
+    /// [`WasmVerterHost::public_api_with_mode`] — the JsValue-free core
+    /// the `#[wasm_bindgen]` export delegates to. DISCRIMINATING: the
+    /// pre-change export took no mode argument and hardcoded Public, so
+    /// this test does not compile against the old binding.
+    #[test]
+    fn public_api_mode_plumbing_routes_declaration_distinct_from_public() {
+        let wasm_host = public_api_mode_fixture_host();
+
+        let decl = wasm_host
+            .public_api_with_mode("/src/Cap.vue", Some("declaration"))
+            .expect("the WASM plumbing must accept mode 'declaration'")
+            .expect("declaration-mode output for a Vue SFC");
+        let public = wasm_host
+            .public_api_with_mode("/src/Cap.vue", Some("public"))
+            .expect("mode 'public' stays accepted")
+            .expect("public-mode output for a Vue SFC");
+        let absent = wasm_host
+            .public_api_with_mode("/src/Cap.vue", None)
+            .expect("absent mode stays accepted")
+            .expect("default-mode output for a Vue SFC");
+
+        // Declaration-specific shape: a valid `.d.ts` — declares the
+        // component value, carries NO runtime/value code.
+        assert!(
+            decl.code.contains("declare const Cap"),
+            "declaration output declares the component value, got:\n{}",
+            decl.code
+        );
+        assert!(
+            decl.code.contains("export default Cap"),
+            "declaration output default-exports the component, got:\n{}",
+            decl.code
+        );
+        assert!(
+            !decl.code.contains("const __comp"),
+            "declaration output must not carry the runtime __comp const, got:\n{}",
+            decl.code
+        );
+        assert!(
+            !decl.code.contains("defineComponent("),
+            "declaration output must not call defineComponent, got:\n{}",
+            decl.code
+        );
+        // Control: the public surface DOES carry the runtime const, so the
+        // negative assertions above discriminate mode routing (plumbing
+        // that silently served Public for "declaration" fails here).
+        assert!(
+            public.code.contains("const __comp = defineComponent"),
+            "public output keeps the runtime __comp const (control), got:\n{}",
+            public.code
+        );
+        assert_ne!(
+            decl.code, public.code,
+            "declaration-mode output must differ from public-mode output"
+        );
+        // Backward compat: the modeless call (existing zero-mode JS
+        // callers -> `undefined` -> `None`) still serves Public.
+        assert_eq!(
+            absent.code, public.code,
+            "absent mode must serve the Public surface (backward-compatible)"
+        );
+
+        // An unknown mode is a typed rejection, never a silent default.
+        let err = match wasm_host.public_api_with_mode("/src/Cap.vue", Some("bogus")) {
+            Err(e) => e,
+            Ok(_) => panic!("an unknown mode must be rejected, not silently defaulted"),
+        };
+        assert!(
+            matches!(err, FfiConversionError::InvalidPublicApiMode(ref s) if s == "bogus"),
+            "an unknown mode must produce InvalidPublicApiMode, got {err:?}"
+        );
+    }
+
+    /// Compile-time pin: the `#[wasm_bindgen]` `getPublicApi` export
+    /// itself carries the OPTIONAL mode argument (the generated JS glue
+    /// gets `mode?: string`, and an absent JS arg arrives as `None`).
+    /// Fails to compile against the old one-argument export.
+    #[test]
+    fn wasm_get_public_api_export_accepts_optional_mode_argument() {
+        let _pin: fn(
+            &WasmVerterHost,
+            &str,
+            Option<String>,
+        ) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> = WasmVerterHost::get_public_api;
+    }
 
     #[test]
     fn lint_utf16_conversion_uses_shared_ffi_helper() {
@@ -1070,6 +1715,146 @@ impl WasmMetaSession {
                 Some(snapshot) => to_wasm_value(&snapshot),
                 None => Ok(JsValue::NULL),
             }
+        }))?
+    }
+
+    /// Synchronous audit bundle — returns
+    /// `{ analysis: FfiComponentMeta, resolution: FfiComponentMetaResolution,
+    ///   record: RequestAuditRecord } | null` as a JS object. Host must
+    /// have `audit_enabled` + `footprint_capture` set; otherwise throws.
+    ///
+    /// NOT a Promise. Consumer-side Promise ergonomics (if desired)
+    /// live in `packages/wasm/audit.ts`.
+    #[wasm_bindgen(js_name = "getComponentMetaWithAudit")]
+    pub fn get_component_meta_with_audit(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<JsValue, JsValue> {
+        let session = self.session()?;
+        catch_panic(AssertUnwindSafe(|| {
+            let (outcome, record) = session
+                .get_component_meta_with_audit(canonical_or_alias)
+                .into_parts();
+            let Some(output) = outcome.map_err(ffi_err)? else {
+                return Ok(JsValue::NULL);
+            };
+            let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
+            let Some(ffi_resolution) = ffi.resolution.clone() else {
+                return Err(ffi_err(
+                    "audited component-meta output carries no resolution sidecar",
+                ));
+            };
+            let bundle = WasmAuditBundle {
+                analysis: ffi,
+                resolution: ffi_resolution,
+                record,
+            };
+            to_wasm_value(&bundle)
+        }))?
+    }
+
+    /// Component metadata as a JS object (FFI projection), or `null`
+    /// when the canonical does not resolve.
+    ///
+    /// This lane runs WITHOUT a type-resolution seed: the payload's typed
+    /// `resolutionStatus` field reports
+    /// `{ kind: "unavailable", reason: "resolutionProviderAbsent" }` so the
+    /// un-overlaid registry is never mistaken for an exact resolved
+    /// surface. The type-resolution-seeded payload is
+    /// `getComponentMetaWithAudit` (`resolutionStatus.kind == "resolved"`).
+    #[wasm_bindgen(js_name = "getComponentMeta")]
+    pub fn get_component_meta(&self, canonical_or_alias: &str) -> Result<JsValue, JsValue> {
+        let session = self.session()?;
+        catch_panic(AssertUnwindSafe(|| {
+            let Some(output) = session
+                .get_component_meta_output(canonical_or_alias)
+                .map_err(ffi_err)?
+            else {
+                return Ok(JsValue::NULL);
+            };
+            let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
+            to_wasm_value(&ffi)
+        }))?
+    }
+
+    /// Batch surface for `getComponentMeta`: compute metadata for
+    /// `canonicalsOrAliases` under one shared overlay view. The host batch
+    /// coordinator runs the N queries inline/sequentially on wasm (no
+    /// coordinator pool) and accounts the submission once per non-empty
+    /// batch (skipped for an empty batch). Returns one
+    /// slot per input in input order as a JS array; each slot is the FFI
+    /// projection of the
+    /// analysis, or `null` EXCLUSIVELY for a genuinely missing canonical.
+    ///
+    /// Throws on project-level shutdown AND on a real per-id failure (a
+    /// budget overrun or a fail-closed output-materialization failure) —
+    /// batch failure semantics match the scalar `getComponentMeta` throw
+    /// (scalar ≡ batch); a real failure is never collapsed onto the
+    /// missing `null` sentinel.
+    #[wasm_bindgen(js_name = "getComponentMetaBatch")]
+    pub fn get_component_meta_batch(
+        &self,
+        canonicals_or_aliases: Vec<String>,
+    ) -> Result<JsValue, JsValue> {
+        let session = self.session()?;
+        catch_panic(AssertUnwindSafe(|| {
+            let results = session
+                .get_component_meta_output_batch(&canonicals_or_aliases)
+                .map_err(ffi_err)?;
+            let ffi_results: Vec<Option<FfiComponentMeta>> = results
+                .into_iter()
+                .map(|slot| slot.map(verter_ffi::convert::component_meta_output_to_ffi))
+                .collect();
+            to_wasm_value(&ffi_results)
+        }))?
+    }
+
+    /// Run the Rust walker against a committed audit record (JSON
+    /// string from a prior `getComponentMetaWithAudit` round-trip
+    /// through `JSON.stringify`) rooted at `canonical_id`. Returns
+    /// the `ProvenanceChain` encoded as JSON string. Single walker
+    /// implementation; TS helpers format the JSON via pure rendering.
+    #[wasm_bindgen(js_name = "whyLoadedFromAuditJson")]
+    pub fn why_loaded_from_audit_json(
+        &self,
+        audit_json: &str,
+        canonical_id: &str,
+    ) -> Result<String, JsValue> {
+        catch_panic(AssertUnwindSafe(|| {
+            let bundle: WasmAuditBundleForWalker =
+                serde_json::from_str(audit_json).map_err(|e| {
+                    JsValue::from_str(&format!("audit_json is not a valid AuditBundle: {e}"))
+                })?;
+            let chain = bundle.record.why_loaded(canonical_id);
+            serde_json::to_string(&chain)
+                .map_err(|e| JsValue::from_str(&format!("chain serialization error: {e}")))
+        }))?
+    }
+
+    /// Run the Rust walker rooted at the instantiation keyed by
+    /// `(decl_canonical_id, decl_symbol_name, args_fingerprint_hex)`.
+    /// `args_fingerprint_hex` is the 32-char lowercase hex rendering
+    /// of the 16-byte `Hash16`.
+    #[wasm_bindgen(js_name = "whyInstantiatedFromAuditJson")]
+    pub fn why_instantiated_from_audit_json(
+        &self,
+        audit_json: &str,
+        decl_canonical_id: &str,
+        decl_symbol_name: &str,
+        args_fingerprint_hex: &str,
+    ) -> Result<String, JsValue> {
+        catch_panic(AssertUnwindSafe(|| {
+            let bundle: WasmAuditBundleForWalker =
+                serde_json::from_str(audit_json).map_err(|e| {
+                    JsValue::from_str(&format!("audit_json is not a valid AuditBundle: {e}"))
+                })?;
+            let fingerprint = parse_hash16_hex_wasm(args_fingerprint_hex)?;
+            let chain =
+                bundle
+                    .record
+                    .why_instantiated(decl_canonical_id, decl_symbol_name, fingerprint);
+            serde_json::to_string(&chain)
+                .map_err(|e| JsValue::from_str(&format!("chain serialization error: {e}")))
         }))?
     }
 

@@ -8,7 +8,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::Severity;
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::{TemplateElement, VForDirective};
+use verter_semantic::analysis::template::{TemplateElement, VForDirective};
 
 pub struct VForDelimiterStyle;
 

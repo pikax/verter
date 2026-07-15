@@ -1,0 +1,39 @@
+{
+  "slug": "attr-mixent-lit-attr-uq-slot-ext-glob-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_mixent_lit_attr_uq_slot_ext_glob_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot"
+  ],
+  "helperSet": [
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t[data-x=\"bb\"] {\n\t\tcolor: red;\n\t}\n"
+  }
+}

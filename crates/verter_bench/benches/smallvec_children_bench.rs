@@ -13,11 +13,11 @@ use std::hint::black_box;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
-use verter_core::ast::types::{AstNodeKind, TemplateAst};
-use verter_core::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
-use verter_core::parser::Syntax as NewSyntax;
-use verter_core::tokenizer::byte::tokenize;
-use verter_core::types::NodeId;
+use verter_compiler::ast::types::{AstNodeKind, TemplateAst};
+use verter_compiler::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
+use verter_compiler::parser::Syntax as NewSyntax;
+use verter_compiler::tokenizer::byte::tokenize;
+use verter_compiler::types::NodeId;
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -1,0 +1,18 @@
+error[E0277]: the trait bound `Span: NoStoredSpanWitness` is not satisfied
+  --> tests/cases/compile-fail/no_storedspan_direct_span_field.rs:12:10
+   |
+12 | #[derive(verter_no_storedspan::NoStoredSpan)]
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `NoStoredSpanWitness` is not implemented for `Span`
+   |
+   = help: the following other types implement trait `NoStoredSpanWitness`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A,)
+             Arc<T>
+             Bad
+             Box<T>
+             HashMap<K, V, S>
+           and $N others
+   = help: see issue #48214
+   = note: this error originates in the derive macro `verter_no_storedspan::NoStoredSpan` (in Nightly builds, run with -Z macro-backtrace for more info)

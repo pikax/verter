@@ -1,0 +1,1324 @@
+//! Unit tests for the AST-backed client expression emitter.
+//!
+//! These pin the scope-aware read/write/compound-assign/update rewrites and the
+//! proxy distinction directly at the expression-emitter surface, INDEPENDENT of
+//! the full module assembly. Each test is discriminating: it asserts both the
+//! rewritten form AND a negative (the wrong rewrite is absent).
+
+use oxc_allocator::Allocator;
+
+use crate::svelte::runtime::expr::{
+    BindTargetFact, BindTargetKind, BindingInfo, BindingRuntimeKind, BindingTable, BindingUseSet,
+    ScopeGraph, ScopeId, StateClassification, StateLowering, StateRuneKind,
+};
+use crate::svelte::runtime::expr_emit::{
+    props_shape, state_decl_shape, PropsShape, StateDeclShape,
+};
+use crate::svelte::runtime::expr_rewrite::{rewrite_expression, RewriteRole};
+
+/// Build a one-binding table + scope graph declaring `name` with `kind` (and a
+/// `$state` classification for the signal/proxy kinds) at the root scope.
+fn single_binding(name: &str, kind: BindingRuntimeKind) -> (BindingTable, ScopeGraph, ScopeId) {
+    let (mut scopes, root) = ScopeGraph::with_root();
+    let mut bindings = BindingTable::new();
+    let state = match kind {
+        BindingRuntimeKind::StateSignal { .. } => Some(StateClassification {
+            declared: StateRuneKind::State,
+            proxiable: false,
+            uses: BindingUseSet {
+                reassigned: true,
+                deep_mutated: false,
+            },
+            lowering: StateLowering::StateSignal,
+        }),
+        BindingRuntimeKind::BareProxy => Some(StateClassification {
+            declared: StateRuneKind::State,
+            proxiable: true,
+            uses: BindingUseSet {
+                reassigned: false,
+                deep_mutated: true,
+            },
+            lowering: StateLowering::BareProxy,
+        }),
+        BindingRuntimeKind::StateProxy => Some(StateClassification {
+            declared: StateRuneKind::State,
+            proxiable: true,
+            uses: BindingUseSet {
+                reassigned: true,
+                deep_mutated: false,
+            },
+            lowering: StateLowering::StateProxy,
+        }),
+        _ => None,
+    };
+    let id = bindings.push(BindingInfo {
+        name: name.to_string(),
+        scope: root,
+        kind,
+        state,
+    });
+    scopes.declare(root, name, id);
+    (bindings, scopes, root)
+}
+
+/// Rewrite `expr` against a single root-scope binding of `name`/`kind`. The
+/// rewriter is fallible; these tests exercise SUPPORTED forms, so the helper
+/// unwraps (a refusal in a supported-form test is a genuine failure).
+fn rewrite_with(expr: &str, name: &str, kind: BindingRuntimeKind) -> String {
+    let (bindings, scopes, root) = single_binding(name, kind);
+    rewrite_expression(expr, root, &bindings, &scopes, RewriteRole::Value)
+        .expect("supported expression rewrite")
+        .text
+}
+
+#[test]
+fn state_signal_read_becomes_get() {
+    let out = rewrite_with(
+        "count",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "$.get(count)");
+}
+
+#[test]
+fn state_signal_compound_assign_becomes_set_get() {
+    // `count += 1` → `$.set(count, $.get(count) + 1)`. DISCRIMINATING against a
+    // rewriter that leaves the compound assign untouched.
+    let out = rewrite_with(
+        "count += 1",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "$.set(count, $.get(count) + 1)");
+    assert!(
+        !out.contains("count += 1"),
+        "the bare compound assign must be gone"
+    );
+}
+
+#[test]
+fn state_signal_increment_becomes_update() {
+    let out = rewrite_with(
+        "count++",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "$.update(count)");
+}
+
+#[test]
+fn state_signal_decrement_becomes_update_minus_one() {
+    let out = rewrite_with(
+        "count--",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "$.update(count, -1)");
+}
+
+#[test]
+fn state_signal_plain_reassign_becomes_set() {
+    let out = rewrite_with(
+        "count = 5",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "$.set(count, 5)");
+}
+
+#[test]
+fn bare_proxy_read_stays_plain_never_get() {
+    // A bare `$.proxy` read is PLAIN access — NEVER `$.get(o)`. DISCRIMINATING
+    // against a proxy-blind rewriter that wraps every state read in `$.get`.
+    let out = rewrite_with("o.a", "o", BindingRuntimeKind::BareProxy);
+    assert_eq!(out, "o.a");
+    assert!(
+        !out.contains("$.get(o)"),
+        "a bare proxy must NOT read via $.get"
+    );
+}
+
+#[test]
+fn bare_proxy_member_increment_stays_plain() {
+    // `o.a++` → plain `o.a++` (a deep mutation of the proxy, never `$.set`).
+    let out = rewrite_with("o.a++", "o", BindingRuntimeKind::BareProxy);
+    assert_eq!(out, "o.a++");
+    assert!(
+        !out.contains("$.set"),
+        "a bare-proxy member mutation must NOT be $.set"
+    );
+    assert!(
+        !out.contains("$.update"),
+        "a bare-proxy member mutation must NOT be $.update"
+    );
+}
+
+#[test]
+fn bare_proxy_method_call_stays_plain() {
+    let out = rewrite_with("o.push(1)", "o", BindingRuntimeKind::BareProxy);
+    assert_eq!(out, "o.push(1)");
+    assert!(!out.contains("$.get(o)"));
+}
+
+#[test]
+fn state_proxy_member_read_is_get_then_member() {
+    // A reassigned object `$state` (StateProxy) reads as `$.get(o).a`.
+    let out = rewrite_with("o.a", "o", BindingRuntimeKind::StateProxy);
+    assert_eq!(out, "$.get(o).a");
+}
+
+#[test]
+fn state_proxy_reassign_carries_trailing_true() {
+    // `o = { a: 2 }` for a StateProxy → `$.set(o, { a: 2 }, true)`.
+    let out = rewrite_with("o = { a: 2 }", "o", BindingRuntimeKind::StateProxy);
+    assert_eq!(out, "$.set(o, { a: 2 }, true)");
+    assert!(
+        out.ends_with(", true)"),
+        "a StateProxy reassign carries the trailing true"
+    );
+}
+
+#[test]
+fn arrow_param_shadows_signal() {
+    // `(count) => count + 1` — the arrow PARAM `count` shadows the signal, so the
+    // body read is NOT rewritten. DISCRIMINATING against a scope-blind rewriter.
+    let out = rewrite_with(
+        "(count) => count + 1",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "(count) => count + 1");
+    assert!(
+        !out.contains("$.get(count)"),
+        "the shadowing arrow param must NOT be rewritten"
+    );
+}
+
+#[test]
+fn nested_block_let_shadows_signal() {
+    // `() => { let count = 0; count += 1; }` — the inner `let count` shadows the
+    // signal, so the inner write is NOT `$.set(count, ...)`.
+    let out = rewrite_with(
+        "() => { let count = 0; count += 1; }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("count += 1"),
+        "the shadowed local write stays plain, got: {out}"
+    );
+    assert!(
+        !out.contains("$.set(count"),
+        "a shadowed local must NOT become $.set, got: {out}"
+    );
+}
+
+#[test]
+fn outer_signal_read_inside_arrow_is_rewritten() {
+    // `() => count + 1` — `count` is the OUTER signal (no shadow), so it IS
+    // rewritten inside the arrow body.
+    let out = rewrite_with(
+        "() => count + 1",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "() => $.get(count) + 1");
+}
+
+#[test]
+fn free_identifier_is_untouched() {
+    // A name with no binding row is free — emitted verbatim.
+    let alloc = Allocator::default();
+    let _ = alloc;
+    let out = rewrite_with(
+        "other",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "other");
+}
+
+#[test]
+fn props_shape_no_default_basic_destructure_is_supported() {
+    // A basic destructure (identifier / alias / string keys) is supported, with
+    // or without defaults.
+    assert_eq!(
+        props_shape("let { name, count } = $props();"),
+        PropsShape::BasicDestructure
+    );
+    assert_eq!(
+        props_shape("let { foo: bar, \"data-x\": x } = $props();"),
+        PropsShape::BasicDestructure
+    );
+}
+
+#[test]
+fn props_shape_defaults_are_basic() {
+    // A `$props()` member DEFAULT — constant-literal or referencing — is part of
+    // the BASIC destructure (the shared `$.prop` prop-source path), no longer a
+    // demoted shape. A NESTED-destructure default stays advanced.
+    assert_eq!(
+        props_shape("let { name = 'world', count = 0 } = $props();"),
+        PropsShape::BasicDestructure
+    );
+    assert_eq!(
+        props_shape("let { a = 1 } = $props();"),
+        PropsShape::BasicDestructure
+    );
+    assert_eq!(
+        props_shape("let { a: { b } = {} } = $props();"),
+        PropsShape::Advanced {
+            rune: "$props() nested destructure"
+        }
+    );
+}
+
+#[test]
+fn props_shape_rest_is_basic_capture() {
+    // A `{ …, ...rest }` rest element is now a BASIC shape — the `$.rest_props`
+    // capture path (was the deleted `$props() rest` advanced refusal). Its named
+    // siblings still validate; the rest binding lowers through the destructure path.
+    assert_eq!(
+        props_shape("let { name, ...rest } = $props();"),
+        PropsShape::BasicDestructure
+    );
+}
+
+#[test]
+fn props_shape_whole_object_is_basic_capture() {
+    // A whole-object identifier binding (`let p = $props()`) is now a BASIC shape —
+    // the prefix-only `$.rest_props` capture (was the deleted `$props() whole-object`
+    // advanced refusal).
+    assert_eq!(
+        props_shape("let p = $props();"),
+        PropsShape::BasicDestructure
+    );
+}
+
+#[test]
+fn props_shape_bindable_default_is_basic() {
+    // A `$bindable(...)` default is the BINDABLE prop-source form — part of the
+    // basic destructure (the `$bindable` call's own form/position validity is
+    // owned by the rune scan, not the shape gate).
+    assert_eq!(
+        props_shape("let { value = $bindable(0) } = $props();"),
+        PropsShape::BasicDestructure
+    );
+}
+
+#[test]
+fn ts_cast_is_stripped_from_a_rewritten_expression() {
+    // A TS `as` cast inside an expression is DROPPED (the §F strip), leaving the
+    // rewritten runtime expression. `count as number` → `$.get(count)`.
+    let out = rewrite_with(
+        "count as number",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "$.get(count)");
+    assert!(
+        !out.contains("as number"),
+        "the TS cast must be stripped:\n{out}"
+    );
+}
+
+#[test]
+fn ts_non_null_is_stripped() {
+    let out = rewrite_with(
+        "count!",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "$.get(count)");
+    assert!(
+        !out.contains('!'),
+        "the TS non-null assertion must be stripped:\n{out}"
+    );
+}
+
+#[test]
+fn signal_read_inside_ternary_is_rewritten_in_both_arms() {
+    // THE keystone F1 regression: `count > 0 ? count : 0` must rewrite the signal
+    // read in BOTH the condition and the consequent. Verified against svelte@5.56.3:
+    // `$.get(count) > 0 ? $.get(count) : 0`. RED against the verbatim `_ =>` arm
+    // (which emitted raw `count > 0 ? count : 0`).
+    let out = rewrite_with(
+        "count > 0 ? count : 0",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "$.get(count) > 0 ? $.get(count) : 0");
+    // NEGATIVE: no unrewritten bare `count` token remains.
+    assert!(
+        !out.contains("> 0 ? count"),
+        "the ternary consequent read must be rewritten, not raw `count`:\n{out}"
+    );
+}
+
+#[test]
+fn signal_read_inside_template_literal_is_rewritten() {
+    // `` `v=${count}` `` → `` `v=${$.get(count)}` ``. RED against the verbatim arm
+    // (a TemplateLiteral fell through to raw source). The `?? ''` is text-node-only
+    // (mixed-run), NOT applied to a user-authored template literal expression.
+    let out = rewrite_with(
+        "`v=${count}`",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "`v=${$.get(count)}`");
+    assert!(
+        !out.contains("${count}"),
+        "raw `${{count}}` must be gone:\n{out}"
+    );
+    assert!(
+        !out.contains("?? ''"),
+        "no text-node `?? ''` in a user template literal:\n{out}"
+    );
+}
+
+#[test]
+fn signal_read_inside_logical_is_rewritten() {
+    // `a && count` → the signal read is rewritten; the non-signal `a` is untouched.
+    // Verified against svelte@5.56.3.
+    let out = rewrite_with(
+        "a && count",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "a && $.get(count)");
+}
+
+#[test]
+fn signal_read_inside_array_and_object_literals_is_rewritten() {
+    // `[count]` → `[$.get(count)]`; `({ x: count })` → `({ x: $.get(count) })`.
+    // RED against the verbatim arm (Array/Object literals fell through).
+    let arr = rewrite_with(
+        "[count]",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(arr, "[$.get(count)]");
+    let obj = rewrite_with(
+        "({ x: count })",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(obj, "({ x: $.get(count) })");
+}
+
+#[test]
+fn signal_read_inside_unary_and_paren_and_conditional_chain_is_rewritten() {
+    // A nested mix: `!(count > 0) ? -count : count + 1`. Every read rewrites.
+    let out = rewrite_with(
+        "!(count > 0) ? -count : count + 1",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(
+        out,
+        "!($.get(count) > 0) ? -$.get(count) : $.get(count) + 1"
+    );
+}
+
+#[test]
+fn prefix_increment_in_value_position_becomes_update_pre() {
+    // `++count` used in VALUE position (a call arg) → `$.update_pre(count)`.
+    // Verified against svelte@5.56.3 (`f(++count)` → `f($.update_pre(count))`).
+    // RED against the prefix-blind rewriter (which emitted `$.update(count)`).
+    let out = rewrite_with(
+        "f(++count)",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "f($.update_pre(count))");
+    assert!(
+        !out.contains("$.update(count)"),
+        "a prefix update in value position must be $.update_pre, not $.update:\n{out}"
+    );
+}
+
+#[test]
+fn prefix_decrement_in_value_position_becomes_update_pre_minus_one() {
+    let out = rewrite_with(
+        "f(--count)",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "f($.update_pre(count, -1))");
+}
+
+#[test]
+fn postfix_increment_stays_update() {
+    // `f(count++)` → `f($.update(count))` (postfix is plain `$.update`). Verified
+    // against svelte@5.56.3.
+    let out = rewrite_with(
+        "f(count++)",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert_eq!(out, "f($.update(count))");
+    assert!(
+        !out.contains("update_pre"),
+        "a postfix update must NOT be update_pre:\n{out}"
+    );
+}
+
+#[test]
+fn ts_cast_inside_a_ternary_arm_is_stripped() {
+    // A nontrivial F3 case INSIDE a recursive position: `(count as number) > 0 ?
+    // count : 0`. The cast is stripped AND the reads rewritten.
+    let out = rewrite_with(
+        "(count as number) > 0 ? count : 0",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        !out.contains("as number"),
+        "TS cast must be stripped:\n{out}"
+    );
+    assert_eq!(out, "($.get(count)) > 0 ? $.get(count) : 0");
+}
+
+#[test]
+fn classify_bind_target_is_structural() {
+    // The bind-target lvalue shape is classified STRUCTURALLY from the parsed node (the
+    // shared `BindTargetFact`, computed once per expression), not a `source.contains('.')`
+    // text scan.
+    let alloc = Allocator::default();
+    let kind = |s: &str| BindTargetFact::from_source(&alloc, s).kind;
+    // A bare identifier → reassignment.
+    assert_eq!(kind("name"), Some(BindTargetKind::Identifier));
+    // A member target → deep mutation.
+    assert_eq!(kind("o.x"), Some(BindTargetKind::Member));
+    // A computed member → deep mutation.
+    assert_eq!(kind("arr[i]"), Some(BindTargetKind::Member));
+    // A parenthesised / non-null-asserted identifier still classifies as the bare
+    // identifier (the text heuristic would have no `.` here, but the structural
+    // path unwraps to the lvalue core).
+    assert_eq!(kind("(name)"), Some(BindTargetKind::Identifier));
+    assert_eq!(kind("name!"), Some(BindTargetKind::Identifier));
+    // A NON-LVALUE (a call / a binary expression) is rejected — the old
+    // `contains('.')` heuristic would have mis-classified `f().x` as a member
+    // target; the structural path returns the member core, but a bare call /
+    // literal is `None`.
+    assert_eq!(kind("f()"), None);
+    assert_eq!(kind("a + b"), None);
+    assert_eq!(kind("42"), None);
+}
+
+#[test]
+fn bind_target_lvalue_ts_detection_is_structural_anywhere() {
+    // The TS-in-lvalue fact is STRUCTURAL (the shared `BindTargetFact`) and catches — ANYWHERE
+    // in the would-be lvalue spine (the spine TOP, a member-OBJECT chain link, OR a
+    // computed-INDEX expression) — a node whose TSX parse diverges from a plain-MJS parse: a
+    // TS-ONLY operator (`!` / `as` / `satisfies` / `<T>` / a bare `f<T>` instantiation) OR a
+    // call / new / tagged-template carrying TS type arguments (`g<a,b>(c)`). A clean lvalue is
+    // NOT flagged; a SEQUENCE (function-pair) is excluded (its TS rejection is owned by the
+    // plain-JS function-pair lane).
+    //
+    // TYPE-ARGUMENT boundary (oracle-verified svelte@5.56.3): a node carrying TS type arguments
+    // IS flagged (fail-closed) — both a BARE instantiation (`f<T>` / `arr[g<T>]`, an OXC
+    // `TSInstantiationExpression` with no trailing call) AND a CALL / new / tagged-template that
+    // carries type arguments (`arr[g<a,b>(c)]`, an OXC `CallExpression` with `type_arguments`).
+    // Official PARSE-REJECTS the bare instantiation (`js_parse_error`) and parses the call form
+    // as the plain-JS relational/comma `arr[(g < a, b > c)]` — so Verter's TSX-strip lane would
+    // otherwise DELETE the type arguments and emit the DIVERGENT index `arr[g(c)]` (a behavioral
+    // divergence). Failing both closed is never-wrong; the exact relational emit is owned by the
+    // shared plain-MJS template-expression authority (D-26), not this lvalue fail-close scan.
+    let alloc = Allocator::default();
+    let lvalue_ts = |s: &str| BindTargetFact::from_source(&alloc, s).lvalue_contains_ts;
+    // ── TS anywhere (true) ──
+    // Root wrappers (the postfix non-null + the `as` / `satisfies` operators; the prefix
+    // `<T>x` assertion is JSX in TSX mode, handled at the integration boundary).
+    assert!(lvalue_ts("name!"));
+    assert!(lvalue_ts("(name!)"));
+    assert!(lvalue_ts("name as string"));
+    assert!(lvalue_ts("name satisfies string"));
+    assert!(lvalue_ts("o.x!"));
+    assert!(lvalue_ts("((o.x as T))"));
+    // NON-ROOT TS: a member-OBJECT non-null, a computed-INDEX cast, a computed-INDEX
+    // non-null — all caught by the spine walk (the F1 fix vs the prior top-node-only gate).
+    assert!(lvalue_ts("o!.x"));
+    assert!(lvalue_ts("a[x as T]"));
+    assert!(lvalue_ts("a[i!]"));
+    // A BARE instantiation (`f<T>` root, `arr[g<T>]` index — OXC `TSInstantiationExpression`,
+    // no trailing call) IS flagged: official svelte@5.56.3 REJECTS both (`js_parse_error`),
+    // so the structural fail-close agrees with official (it does NOT over-refuse here).
+    assert!(
+        lvalue_ts("f<T>"),
+        "a bare `f<T>` instantiation root is flagged (official rejects it: js_parse_error)"
+    );
+    assert!(
+        lvalue_ts("arr[g<T>]"),
+        "a bare `g<T>` instantiation index is flagged (official rejects it: js_parse_error)"
+    );
+    // A CALL / new / tagged-template carrying TS type arguments — `arr[g<a,b>(c)]` (computed
+    // index) / `f<a,b>(c)` (root), each an OXC `CallExpression` with `type_arguments` — IS
+    // flagged: the TSX-strip lane would otherwise DELETE the type arguments and emit a DIVERGENT
+    // index (`arr[g(c)]`), whereas official parses the plain-JS relational form. Failing closed
+    // is never-wrong (the exact relational emit stays D-26).
+    assert!(
+        lvalue_ts("arr[g<a,b>(c)]"),
+        "a type-argument call-index must be flagged (the TSX-strip lane would emit a divergent index)"
+    );
+    assert!(
+        lvalue_ts("f<a,b>(c)"),
+        "a type-argument call root must be flagged (the TSX-strip lane would emit a divergent index)"
+    );
+    // A TS-only node embedded in a SUB-expression of the index — a typed arrow / function-expr
+    // param, or a typed local inside an IIFE body — is also flagged: the surrounding JS is
+    // valid, so the TSX-strip lane would DELETE the annotation and emit a divergent setter,
+    // whereas official parses it as plain JS and rejects the TS. The wholesale scan closes this
+    // class by construction (any TS / non-ECMAScript node), not per-form enumeration.
+    assert!(
+        lvalue_ts("arr[((x: number) => x)(0)]"),
+        "a typed arrow param inside the index must be flagged (the strip lane would delete `: number`)"
+    );
+    assert!(
+        lvalue_ts("arr[(function(y: number){ return y; })(0)]"),
+        "a typed function-expr param inside the index must be flagged"
+    );
+    assert!(
+        lvalue_ts("arr[(() => { const k: number = 0; return k; })()]"),
+        "a typed local inside an IIFE-body index must be flagged"
+    );
+    // ── NOT TS anywhere (false) — clean lvalues ──
+    assert!(!lvalue_ts("name"));
+    assert!(!lvalue_ts("(name)"));
+    assert!(!lvalue_ts("o.x"));
+    assert!(!lvalue_ts("arr[i]"));
+    assert!(!lvalue_ts("obj.a.b"));
+    // A plain CALL index WITHOUT type arguments (`f(c)` — an OXC `CallExpression` with no
+    // `type_arguments`) is plain JS and stays UNflagged: only the type-argument class fails
+    // closed, never all calls.
+    assert!(
+        !lvalue_ts("arr[f(c)]"),
+        "a plain `f(c)` call-index (no type arguments) must NOT be flagged TS (no over-refusal)"
+    );
+    // A plain (untyped) IIFE index has NO TS node and stays UNflagged — the wholesale scan is
+    // precise (valid JS sub-expressions are never over-refused).
+    assert!(
+        !lvalue_ts("arr[(() => 0)()]"),
+        "a plain untyped IIFE index must NOT be flagged TS (no over-refusal)"
+    );
+    // A SEQUENCE (function-pair) target is NOT an lvalue spine — excluded even if an element
+    // carries TS (the plain-JS function-pair lane owns that rejection).
+    assert!(!lvalue_ts("get, set"));
+}
+
+#[test]
+fn bind_target_fact_carries_the_consolidated_bundle() {
+    // F3: the SINGLE `BindTargetFact` carries EVERY datum the bind consumers previously
+    // re-derived with a per-consumer reparse — kind, sequence presence, TS-wrapper
+    // validity, root identifier, and the plain-JS function-pair slices — from ONE parse.
+    let alloc = Allocator::default();
+
+    // A member target: kind=Member, root="o", not a sequence, no function pair.
+    let member = BindTargetFact::from_source(&alloc, "o.x.y");
+    assert_eq!(member.kind, Some(BindTargetKind::Member));
+    assert_eq!(member.root_ident.as_deref(), Some("o"));
+    assert!(!member.is_sequence);
+    assert!(member.function_pair.is_none());
+
+    // A two-element function-pair: kind=FunctionPair, is_sequence, the two element slices.
+    let pair = BindTargetFact::from_source(&alloc, "get, set");
+    assert_eq!(pair.kind, Some(BindTargetKind::FunctionPair));
+    assert!(pair.is_sequence);
+    assert_eq!(
+        pair.function_pair,
+        Some(("get".to_string(), "set".to_string()))
+    );
+
+    // A 3-element sequence: is_sequence=true (the F1 identifier/member-only policy signal)
+    // but kind=None and NO valid two-element function pair.
+    let triple = BindTargetFact::from_source(&alloc, "a, b, c");
+    assert!(triple.is_sequence);
+    assert_eq!(triple.kind, None);
+    assert!(triple.function_pair.is_none());
+
+    // A non-lvalue: every field empty/false.
+    let non_lvalue = BindTargetFact::from_source(&alloc, "f()");
+    assert_eq!(non_lvalue.kind, None);
+    assert!(!non_lvalue.is_sequence);
+    assert!(non_lvalue.root_ident.is_none());
+    assert!(non_lvalue.function_pair.is_none());
+}
+
+#[test]
+fn bind_target_keypath_matches_official_extract_all_identifiers() {
+    // Finding A (R4): `target_keypath` mirrors svelte's
+    // `extract_all_identifiers_from_expression` keypath — the `bind:group` accumulator
+    // grouping identity. Pinned, structural (NEVER raw-source): a bare identifier and a
+    // static-member chain serialize their dotted names; a DIRECT identifier/literal computed
+    // index is bracketed (`[i]` / `["x"]` / `[0]`); a NON-TRIVIAL index (`i+j`, `f()`, `b.c`)
+    // surfaces its inner identifiers as plain VALUE-position names, so it is OPERATOR- and
+    // WHITESPACE-insensitive.
+    let alloc = Allocator::default();
+    let keypath = |s: &str| BindTargetFact::from_source(&alloc, s).target_keypath;
+
+    assert_eq!(keypath("v").as_deref(), Some("v"));
+    assert_eq!(keypath("o.x.y").as_deref(), Some("o.x.y"));
+    assert_eq!(keypath("a[i]").as_deref(), Some("a.[i]"));
+    assert_eq!(keypath("a[0]").as_deref(), Some("a.[0]"));
+    // `a.x` (static) and `a["x"]` (computed string) stay DISTINCT — the distinction
+    // official preserves.
+    assert_eq!(keypath("a.x").as_deref(), Some("a.x"));
+    assert_eq!(keypath("a[\"x\"]").as_deref(), Some("a.[\"x\"]"));
+    assert_ne!(keypath("a.x"), keypath("a[\"x\"]"));
+    // OPERATOR- and WHITESPACE-insensitive: `g[i+j]`, `g[i + j]`, `g[i*j]` collapse to ONE
+    // key (the operator is not an identifier, so it never enters the keypath).
+    assert_eq!(keypath("g[i+j]").as_deref(), Some("g.i.j"));
+    assert_eq!(keypath("g[i + j]").as_deref(), Some("g.i.j"));
+    assert_eq!(keypath("g[i*j]").as_deref(), Some("g.i.j"));
+    assert_eq!(keypath("g[i+j]"), keypath("g[i*j]"));
+    // A parenthesized index keys the same as the bare index (parens are transparent).
+    assert_eq!(keypath("a[(i)]").as_deref(), Some("a.[i]"));
+    // A computed call index surfaces the callee identifier in value position.
+    assert_eq!(keypath("g[f()]").as_deref(), Some("g.f"));
+    // NEGATIVE: the keypath is NOT the old per-index serialization (`a[i]`, never `a.i`-less)
+    // and NEVER the raw source spelling.
+    assert_ne!(keypath("g[i+j]").as_deref(), Some("g[i+j]"));
+}
+
+#[test]
+fn signal_write_inside_switch_statement_is_rewritten() {
+    // R3 (exhaustive statement traversal): a signal write inside a `switch`
+    // statement's case body must be rewritten — the prior hand-enumerated walk
+    // bailed on `SwitchStatement` and left the write RAW. Verified against
+    // svelte@5.56.3 (a handler `switch (x) { case 1: count++ }` rewrites `count++`
+    // to `$.update(count)`).
+    let out = rewrite_with(
+        "() => { switch (k) { case 1: count++; break; default: count = 0; } }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("$.update(count)"),
+        "the switch-case signal update must be rewritten:\n{out}"
+    );
+    assert!(
+        out.contains("$.set(count, 0)"),
+        "the switch-default signal reassign must be rewritten:\n{out}"
+    );
+    // NEGATIVE: no raw unrewritten write survives.
+    assert!(
+        !out.contains("count++"),
+        "no raw `count++` may survive the switch traversal:\n{out}"
+    );
+    assert!(
+        !out.contains("count = 0"),
+        "no raw `count = 0` may survive the switch traversal:\n{out}"
+    );
+}
+
+#[test]
+fn signal_write_inside_try_catch_finally_is_rewritten() {
+    // R3: a signal write inside `try` / `catch` / `finally` bodies is rewritten.
+    // The prior walk bailed on `TryStatement` entirely.
+    let out = rewrite_with(
+        "() => { try { count++; } catch (e) { count = 1; } finally { count += 2; } }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(out.contains("$.update(count)"), "try body:\n{out}");
+    assert!(out.contains("$.set(count, 1)"), "catch body:\n{out}");
+    assert!(
+        out.contains("$.set(count, $.get(count) + 2)"),
+        "finally body:\n{out}"
+    );
+    assert!(!out.contains("count++"), "no raw try write:\n{out}");
+}
+
+#[test]
+fn signal_write_inside_for_of_and_for_in_is_rewritten() {
+    // R3: a signal write inside `for-of` / `for-in` bodies is rewritten; a `for-of`
+    // LEFT binding of the SAME name shadows the signal (its write stays plain).
+    let out = rewrite_with(
+        "() => { for (const x of list) { count += x; } }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("$.set(count, $.get(count) + x)"),
+        "for-of body signal write:\n{out}"
+    );
+    // A `for-of` LEFT binding named `count` shadows the signal.
+    let shadowed = rewrite_with(
+        "() => { for (const count of list) { count = 5; } }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        shadowed.contains("count = 5"),
+        "a shadowing for-of binding stays plain:\n{shadowed}"
+    );
+    assert!(
+        !shadowed.contains("$.set(count"),
+        "a shadowing for-of binding must NOT become $.set:\n{shadowed}"
+    );
+}
+
+#[test]
+fn signal_write_inside_do_while_and_throw_is_rewritten() {
+    // R3: `do { count++ } while (cond)` and `throw f(count)` are traversed.
+    let out = rewrite_with(
+        "() => { do { count++; } while (count < 10); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(out.contains("$.update(count)"), "do-while body:\n{out}");
+    assert!(
+        out.contains("$.get(count) < 10"),
+        "do-while test read:\n{out}"
+    );
+    let thrown = rewrite_with(
+        "() => { throw count; }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        thrown.contains("throw $.get(count)"),
+        "throw argument read:\n{thrown}"
+    );
+}
+
+#[test]
+fn signal_read_inside_for_init_and_default_param_is_rewritten() {
+    // R3: a signal read in a `for`-loop INIT and in a default-parameter expression
+    // is rewritten (the prior walk skipped both).
+    let for_init = rewrite_with(
+        "() => { for (let i = count; i > 0; i--) {} }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        for_init.contains("let i = $.get(count)"),
+        "for-init read:\n{for_init}"
+    );
+    // A default param reads the outer signal.
+    let default_param = rewrite_with(
+        "() => { const g = (a = count) => a; return g(); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        default_param.contains("$.get(count)"),
+        "default-param read:\n{default_param}"
+    );
+}
+
+#[test]
+fn signal_read_inside_labeled_and_class_body_is_rewritten() {
+    // R3: a labeled statement body and a class method body are traversed.
+    let labeled = rewrite_with(
+        "() => { outer: for (;;) { count++; break outer; } }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        labeled.contains("$.update(count)"),
+        "labeled-statement body:\n{labeled}"
+    );
+    let class_body = rewrite_with(
+        "() => { class C { m() { return count; } } return C; }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        class_body.contains("$.get(count)"),
+        "class method body read:\n{class_body}"
+    );
+}
+
+// Script completion retains canonical statement identity and composes TypeScript
+// erasure with reactive edits through `CodeTransform`. Component-level coverage for
+// those carriers lives in `svelte_client_fail_matrix.rs`,
+// `svelte_instance_script_boundary.rs`, and the oracle-backed topology matrix. The
+// expression-level proxy-follow behavior remains covered below.
+
+#[test]
+fn logical_assign_to_object_state_proxies() {
+    // R9: `o ||= {b:2}` / `o ??= {}` / `o &&= {}` on object state carry the trailing
+    // `, true` (the official `is_non_coercive_operator` set extends beyond `=`).
+    // Verified against svelte@5.56.3 (`$.set(o, $.get(o) || { b: 2 }, true)`).
+    let or_assign = rewrite_with("o ||= { b: 2 }", "o", BindingRuntimeKind::StateProxy);
+    assert!(
+        or_assign.contains("$.set(o, $.get(o) || { b: 2 }, true)"),
+        "`||=` to object state must proxy:\n{or_assign}"
+    );
+    let nullish = rewrite_with("o ??= { b: 2 }", "o", BindingRuntimeKind::StateProxy);
+    assert!(
+        nullish.contains("$.set(o, $.get(o) ?? { b: 2 }, true)"),
+        "`??=` to object state must proxy:\n{nullish}"
+    );
+    let and_assign = rewrite_with("o &&= { b: 2 }", "o", BindingRuntimeKind::StateProxy);
+    assert!(
+        and_assign.contains("$.set(o, $.get(o) && { b: 2 }, true)"),
+        "`&&=` to object state must proxy:\n{and_assign}"
+    );
+    // NEGATIVE: a COERCIVE compound (`+=`) never proxies.
+    let plus = rewrite_with("o += 1", "o", BindingRuntimeKind::StateProxy);
+    assert!(
+        !plus.contains(", true)"),
+        "a coercive `+=` must NOT proxy:\n{plus}"
+    );
+}
+
+#[test]
+fn destructured_state_object_classifies_as_advanced() {
+    // R1: a destructured `let { a } = $state({a:1})` is classified ADVANCED (5g) —
+    // NOT a basic supported state declarator (which would route into
+    // `lower_state_declarator` and panic). The full fail-closed is asserted at the
+    // `compile_client` integration level; here we pin the shape gate.
+    assert!(
+        matches!(
+            state_decl_shape("let { a } = $state({ a: 1 });"),
+            StateDeclShape::Advanced { .. }
+        ),
+        "a destructured object `$state` is advanced (fail-closed)"
+    );
+    assert!(
+        matches!(
+            state_decl_shape("let [x] = $state([1]);"),
+            StateDeclShape::Advanced { .. }
+        ),
+        "a destructured array `$state` is advanced (fail-closed)"
+    );
+    // NEGATIVE: a plain identifier `$state` is still a basic supported declarator.
+    assert!(
+        matches!(
+            state_decl_shape("let c = $state(0);"),
+            StateDeclShape::Identifier
+        ),
+        "a plain identifier `$state` stays basic-supported"
+    );
+}
+
+#[test]
+fn state_init_unshadowed_undefined_is_a_primitive_literal() {
+    // `$state(undefined)` with NO local `undefined` shadow is the void-0 primitive
+    // form — supported. (And the no-arg `$state()` is also the undefined primitive.)
+    assert!(
+        matches!(
+            state_decl_shape("let x = $state(undefined);"),
+            StateDeclShape::Identifier
+        ),
+        "unshadowed $state(undefined) is the primitive void-0 form"
+    );
+    assert!(
+        matches!(
+            state_decl_shape("let x = $state();"),
+            StateDeclShape::Identifier
+        ),
+        "no-arg $state() is the primitive void-0 form"
+    );
+}
+
+#[test]
+fn state_init_reactive_shadowed_undefined_conservative_failclose_discriminates_subcases() {
+    // The reactive-rune `undefined` shadow gate is CONSERVATIVE (fallback path): it fails
+    // the WHOLE class closed because it is PRE-LOWERING and INSTANCE-ONLY and cannot tell
+    // the demoted subcase from the live one (a template-handler reassignment — invisible
+    // here — promotes the shadow to a live signal). This test DISCRIMINATES the three
+    // subcases and honestly labels the one that is a known conservative OVER-refusal. All
+    // dispositions oracle-verified against `svelte@5.56.3`.
+
+    // (1) LIVE-signal shadow (reassigned as a whole IN THE INSTANCE SCRIPT → `$.state(…)`,
+    //     read via `$.get`): official emits `let x = $.state($.proxy($.get(undefined)))`
+    //     — GENUINELY UNSUPPORTABLE (Verter's `expr_is_proxiable` hardcodes `undefined`
+    //     non-proxiable). Fail-closed is CORRECT here.
+    assert!(
+        matches!(
+            state_decl_shape(
+                "let undefined = $state(0); undefined = 1; let x = $state(undefined);"
+            ),
+            StateDeclShape::Advanced {
+                rune: "$state() shadowed undefined init"
+            }
+        ),
+        "a LIVE ($state, reassigned) `undefined` shadow is genuinely unsupportable → advanced"
+    );
+    // A `$derived` shadow is ALWAYS a live signal (a derived is always `$.derived(…)`,
+    // read via `$.get`), so its fail-close is also PRECISE (not an over-refusal).
+    assert!(
+        matches!(
+            state_decl_shape(
+                "let z = $state(0); let undefined = $derived(z); let x = $state(undefined);"
+            ),
+            StateDeclShape::Advanced {
+                rune: "$state() shadowed undefined init"
+            }
+        ),
+        "a $state over a `$derived` (always-signal) `undefined` shadow is advanced (fail-closed)"
+    );
+
+    // (2) DEMOTED shadow (never reassigned → lowers to plain `let undefined = 0`, read
+    //     BARE): official ACTUALLY emits the SUPPORTED `let x = $.state(undefined)`. Verter
+    //     still refuses it — a KNOWN CONSERVATIVE OVER-REFUSAL (the gate cannot prove the
+    //     shadow stays demoted without the whole-component lowering; a template-handler
+    //     reassignment would promote it). Tracked as [debt] + a TODO(follow-up) at the
+    //     gate. Fail-closed-safe.
+    assert!(
+        matches!(
+            state_decl_shape("let undefined = $state(0); let x = $state(undefined);"),
+            StateDeclShape::Advanced {
+                rune: "$state() shadowed undefined init"
+            }
+        ),
+        "a DEMOTED ($state, never-reassigned) `undefined` shadow is a KNOWN conservative \
+         over-refusal (official supports it as `$.state(undefined)`)"
+    );
+
+    // (3) DISCRIMINATING POSITIVE: a PLAIN-local `undefined` shadow (`let undefined = 5`)
+    //     is NOT a rune at all — it reads plain and lowers to `$.state(undefined)` matching
+    //     official, so it is SUPPORTED (never fail-closed). This separates the reactive
+    //     class (over-broad refusal) from the plain class (supported).
+    assert!(
+        matches!(
+            state_decl_shape("let undefined = 5; let x = $state(undefined);"),
+            StateDeclShape::Identifier
+        ),
+        "a $state over a PLAIN-local `undefined` shadow is supported (not fail-closed)"
+    );
+}
+
+#[test]
+fn state_init_spread_argument_fails_closed() {
+    // F2: `$state(...x)` / `$state.raw(...x)` is the official `rune_invalid_spread`
+    // compile error. A single spread arg is `arguments.len() == 1` with no
+    // `as_expression`, so it slips past the arity and init-shape gates and would emit
+    // `void 0`. It MUST fail closed instead.
+    assert!(
+        matches!(
+            state_decl_shape("let a = [1]; let x = $state(...a);"),
+            StateDeclShape::Advanced {
+                rune: "$state() spread argument"
+            }
+        ),
+        "$state(...x) fails closed as a spread argument (F2)"
+    );
+    assert!(
+        matches!(
+            state_decl_shape("let a = [1]; let x = $state.raw(...a);"),
+            StateDeclShape::Advanced {
+                rune: "$state() spread argument"
+            }
+        ),
+        "$state.raw(...x) fails closed as a spread argument (F2)"
+    );
+    // NEGATIVE: a plain single-expression arg is still supported (not mistaken for a
+    // spread).
+    assert!(
+        matches!(
+            state_decl_shape("let x = $state(0);"),
+            StateDeclShape::Identifier
+        ),
+        "a plain single-arg $state stays supported"
+    );
+}
+
+#[test]
+fn state_init_nan_and_infinity_are_supported_proxiable_inits() {
+    // INVERTED: NaN / Infinity are bare global identifier references — official wraps
+    // them in `$.proxy(…)` (the deep-reactive form). Since the declarator emitter now
+    // lowers a proxiable init, they are SUPPORTED (`StateDeclShape::Identifier`), NOT
+    // failed closed. (The `$.state($.proxy(NaN))` emission is asserted at the
+    // integration level.)
+    assert!(matches!(
+        state_decl_shape("let x = $state(NaN);"),
+        StateDeclShape::Identifier
+    ));
+    assert!(matches!(
+        state_decl_shape("let x = $state(Infinity);"),
+        StateDeclShape::Identifier
+    ));
+    // NEGATIVE: a REACTIVE-rune `undefined` shadow still fails closed under the
+    // CONSERVATIVE gate (the whole class is refused because this pre-lowering /
+    // instance-only gate cannot prove the shadow stays demoted vs. becomes a live signal).
+    // The demoted-vs-live discrimination + the known over-refusal are characterized in
+    // `state_init_reactive_shadowed_undefined_conservative_failclose_discriminates_subcases`.
+    assert!(matches!(
+        state_decl_shape("let undefined = $state(0); let x = $state(undefined);"),
+        StateDeclShape::Advanced {
+            rune: "$state() shadowed undefined init"
+        }
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// The effect-family callee rewrites (`$effect` / `$effect.pre` / `$effect.root`
+// / `$effect.tracking`) at the shared expression-rewriter surface. Every accept
+// pins the REWRITTEN callee plus a negative (the raw rune callee is gone / the
+// wrong helper is absent); every refusal pins the typed fail-closed surface.
+// ---------------------------------------------------------------------------
+
+/// Rewrite `expr` against a single root-scope binding, returning the fallible
+/// result (the effect-family refusal tests assert the typed `Err` surface).
+fn rewrite_result_with(
+    expr: &str,
+    name: &str,
+    kind: BindingRuntimeKind,
+) -> Result<String, crate::svelte::runtime::UnsupportedSvelteRuntimeSurface> {
+    let (bindings, scopes, root) = single_binding(name, kind);
+    rewrite_expression(expr, root, &bindings, &scopes, RewriteRole::Value).map(|r| r.text)
+}
+
+#[test]
+fn effect_callee_rewrites_to_user_effect() {
+    let out = rewrite_with(
+        "() => { $effect(() => { count; }); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("$.user_effect(() => {"),
+        "the `$effect` callee rewrites to `$.user_effect`: {out}"
+    );
+    assert!(
+        out.contains("$.get(count)"),
+        "the effect body's signal read rewrites: {out}"
+    );
+    assert!(!out.contains("$effect"), "no raw `$effect` survives: {out}");
+}
+
+#[test]
+fn effect_pre_callee_rewrites_to_user_pre_effect_not_user_effect() {
+    // The PRE helper-rename discriminator: `$effect.pre` must lower to
+    // `$.user_pre_effect`, NEVER to `$.user_effect` (a re-label bug would pass a
+    // naive "some effect helper appears" check).
+    let out = rewrite_with(
+        "() => { $effect.pre(() => count); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("$.user_pre_effect(() => $.get(count))"),
+        "`$effect.pre` rewrites to `$.user_pre_effect`: {out}"
+    );
+    assert!(
+        !out.contains("$.user_effect"),
+        "`$effect.pre` must NOT lower to the plain `$.user_effect`: {out}"
+    );
+    assert!(!out.contains("$effect"), "no raw rune survives: {out}");
+}
+
+#[test]
+fn effect_root_rewrites_recursively_with_cleanup_verbatim() {
+    // `$effect.root` is an EXPRESSION (result assignable); a nested `$effect` /
+    // `$effect.pre` inside its callback lowers through the IDENTICAL callee
+    // rewrite (no separate root-recursion gate), and the `return () => {};`
+    // cleanup flows through verbatim.
+    let out = rewrite_with(
+        "() => { const stop = $effect.root(() => { $effect(() => count); $effect.pre(() => count); return () => {}; }); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("const stop = $.effect_root(() => {"),
+        "the root call is an assignable expression: {out}"
+    );
+    assert!(
+        out.contains("$.user_effect(() => $.get(count))"),
+        "the nested `$effect` rewrites inside the root body: {out}"
+    );
+    assert!(
+        out.contains("$.user_pre_effect(() => $.get(count))"),
+        "the nested `$effect.pre` rewrites inside the root body: {out}"
+    );
+    assert!(
+        out.contains("return () => {};"),
+        "the cleanup return flows through verbatim: {out}"
+    );
+    assert!(!out.contains("$effect"), "no raw rune survives: {out}");
+}
+
+#[test]
+fn effect_tracking_zero_arg_rewrites() {
+    let out = rewrite_with(
+        "() => { $effect(() => { console.log($effect.tracking(), count); }); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("console.log($.effect_tracking(), $.get(count))"),
+        "`$effect.tracking()` rewrites inside the effect body: {out}"
+    );
+    assert!(!out.contains("$effect"), "no raw rune survives: {out}");
+}
+
+#[test]
+fn effect_rewrite_reaches_nested_fn_and_iife_bodies() {
+    // The callee rewrite is DEPTH-independent (scope-recursive): a
+    // statement-position `$effect` inside a nested function declaration and
+    // inside an IIFE block body both rewrite (the statement-only rule gates
+    // POSITION, not nesting depth).
+    let out = rewrite_with(
+        "() => { function make() { $effect(() => count); } (() => { $effect.pre(() => count); })(); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("function make() { $.user_effect(() => $.get(count)); }"),
+        "the nested-fn `$effect` rewrites: {out}"
+    );
+    assert!(
+        out.contains("(() => { $.user_pre_effect(() => $.get(count)); })()"),
+        "the IIFE `$effect.pre` rewrites: {out}"
+    );
+    assert!(!out.contains("$effect"), "no raw rune survives: {out}");
+}
+
+#[test]
+fn effect_async_await_fails_closed_through_await_gate() {
+    // The await gate protects every effect-family carrier: an `await` inside the
+    // effect callback is the 5j experimental-async surface.
+    for expr in [
+        "() => { $effect(async () => { await count; }); }",
+        "() => { $effect.pre(async () => { await count; }); }",
+        "() => { $effect.root(() => { $effect(async () => { await count; }); }); }",
+    ] {
+        let err = rewrite_result_with(
+            expr,
+            "count",
+            BindingRuntimeKind::StateSignal { raw: false },
+        )
+        .expect_err("an awaiting effect body must fail closed");
+        assert!(
+            matches!(
+                err,
+                crate::svelte::runtime::UnsupportedSvelteRuntimeSurface::ExperimentalAsync {
+                    surface: "await",
+                    ..
+                }
+            ),
+            "wrong refusal surface for `{expr}`: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn effect_async_no_await_passes_through_as_official_parity() {
+    // Oracle-verified (svelte@5.56.3): `$effect(async () => { c; })` with NO
+    // `await` ACCEPTS as `$.user_effect(async () => { $.get(c); })` — the await
+    // gate only fires on `await`, so the async-no-await passthrough is parity.
+    let out = rewrite_with(
+        "() => { $effect(async () => { count; }); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("$.user_effect(async () => {"),
+        "the async-no-await effect lowers: {out}"
+    );
+    assert!(!out.contains("$effect"), "no raw rune survives: {out}");
+}
+
+#[test]
+fn effect_non_call_and_malformed_forms_fail_closed_at_rewriter() {
+    // The rewriter is the BACKSTOP behind the rune scan: an unshadowed `$effect`
+    // reference it did not consume through a well-formed family rewrite must
+    // fail closed (never a raw rune emission), mirroring the `$inspect` refusal.
+    let cases: &[(&str, &str)] = &[
+        ("() => { foo($effect); }", "$effect"),
+        ("() => { const f = $effect.pre; }", "$effect"),
+        ("() => { $effect(); }", "$effect"),
+        ("() => { $effect(count, count); }", "$effect"),
+        ("() => { $effect(...count); }", "$effect"),
+        ("() => { $effect.tracking(count); }", "$effect.tracking"),
+        ("() => { $effect.root(); }", "$effect.root"),
+        ("() => { $effect.foo(); }", "$effect"),
+    ];
+    for (expr, label) in cases {
+        let err = rewrite_result_with(
+            expr,
+            "count",
+            BindingRuntimeKind::StateSignal { raw: false },
+        )
+        .expect_err("a non-call / malformed effect form must fail closed");
+        assert!(
+            matches!(
+                &err,
+                crate::svelte::runtime::UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. }
+                    if *rune == *label
+            ),
+            "wrong refusal for `{expr}` (want AdvancedRune {label}): {err:?}"
+        );
+    }
+}
+
+#[test]
+fn shadowed_effect_local_is_not_rewritten_and_not_refused() {
+    // A local binding named `$effect` shadows the rune: its calls / member calls
+    // are ordinary locals — neither rewritten nor refused.
+    let out = rewrite_with(
+        "($effect) => { $effect(1); $effect.pre(count); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("$effect(1)") && out.contains("$effect.pre($.get(count))"),
+        "shadowed `$effect` calls stay plain local calls: {out}"
+    );
+    assert!(
+        !out.contains("$.user_effect") && !out.contains("$.user_pre_effect"),
+        "no helper rewrite fires under a shadowing local: {out}"
+    );
+}
+
+#[test]
+fn rest_delete_target_delocalizes_as_a_read() {
+    // FIX-2 control (oracle svelte@5.56.3): a `delete rest.x` argument is a
+    // reference READ — NOT an assignment/update lvalue — so it de-localizes to
+    // `delete $$props.x`. This proves the write-verbatim gate is SCOPED to the
+    // assignment/update lvalue surface (it never records a `delete` argument as a
+    // write target). Exercised at the rewriter directly (a `delete` event handler
+    // is a separate NonDelegatedEvent surface). An EXCLUDED key stays verbatim.
+    use crate::svelte::runtime::expr::BindingTable;
+    use crate::svelte::runtime::expr_rewrite::{
+        rewrite_expression_with_props, PropRead, PropReads,
+    };
+    use std::sync::Arc;
+
+    let (scopes, root) = ScopeGraph::with_root();
+    let bindings = BindingTable::new();
+    let mut prop_reads = PropReads::default();
+    let excludes: rustc_hash::FxHashSet<String> = ["$$slots", "$$events", "$$legacy", "a"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    prop_reads.insert(
+        "rest".to_string(),
+        PropRead::RestBinding {
+            excludes: Arc::new(excludes),
+        },
+    );
+    let deloc = rewrite_expression_with_props(
+        "delete rest.x",
+        root,
+        &bindings,
+        &scopes,
+        &prop_reads,
+        RewriteRole::Value,
+    )
+    .expect("delete of a rest member is a supported rewrite")
+    .text;
+    assert_eq!(deloc, "delete $$props.x");
+    // NEGATIVE: never left verbatim.
+    assert!(
+        !deloc.contains("rest.x"),
+        "the delete arg must de-localize: {deloc}"
+    );
+    // An EXCLUDED member stays verbatim even under `delete` (the rest proxy owns it).
+    let excl = rewrite_expression_with_props(
+        "delete rest.a",
+        root,
+        &bindings,
+        &scopes,
+        &prop_reads,
+        RewriteRole::Value,
+    )
+    .expect("delete of an excluded rest member is supported")
+    .text;
+    assert_eq!(excl, "delete rest.a");
+}

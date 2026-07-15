@@ -1,0 +1,46 @@
+{
+  "slug": "attr-dyn-eschex-cls-q-comp-ext-plain-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_dyn_eschex_cls_q_comp_ext_plain_n",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr_class"
+  ],
+  "helperSet": [
+    "attr_class"
+  ],
+  "helperCounts": {
+    "attr_class": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) [data-x=\"\\7a z\"] {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

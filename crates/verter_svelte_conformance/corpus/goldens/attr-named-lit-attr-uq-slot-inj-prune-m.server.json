@@ -1,0 +1,39 @@
+{
+  "slug": "attr-named-lit-attr-uq-slot-inj-prune-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_named_lit_attr_uq_slot_inj_prune_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot"
+  ],
+  "helperSet": [
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

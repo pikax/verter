@@ -1,7 +1,7 @@
 use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
-use verter_analysis::template::*;
-use verter_host::FileAnalysisSnapshot;
+use verter_semantic::analysis::template::*;
+use verter_session::FileAnalysisSnapshot;
 use verter_span::Span;
 
 // =============================================================================
@@ -194,8 +194,8 @@ fn test_style_block_vbind() {
     let blocks = scan_sfc_blocks(source);
 
     let analysis = FileAnalysisSnapshot {
-        styles: (vec![verter_analysis::StyleBlockAnalysis {
-            v_binds: vec![verter_analysis::style::AnalyzedVBind {
+        styles: (vec![verter_semantic::analysis::StyleBlockAnalysis {
+            v_binds: vec![verter_semantic::analysis::style::AnalyzedVBind {
                 expression: "color".to_string(),
                 quoted: false,
                 start: 68,
@@ -409,6 +409,69 @@ fn test_event_modifier_context() {
         }
         other => panic!("expected EventModifier, got: {:?}", other),
     }
+}
+
+#[test]
+fn event_handler_value_member_access_is_expression_not_modifier() {
+    // G3: in `@click="handle($event.)"` the `.` after `$event` is MEMBER ACCESS in
+    // the handler value, NOT an event-modifier separator. The modifier scan is
+    // clipped at the `=` value assignment, so a value-position `.` routes to
+    // expression/member completion (answered by the type provider), never to the
+    // EventModifier completions. The sibling `test_event_modifier_context` only pins
+    // the modifier-position case; this pins the value-position case it must NOT be.
+    let source = r#"<template><button @click="handle($event.)"></button></template>"#;
+    let blocks = scan_sfc_blocks(source);
+
+    let at = source.find("@click").unwrap() as u32;
+    let click = source.find("click").unwrap() as u32;
+    let value = "handle($event.)";
+    let expr_start = source.find(value).unwrap() as u32;
+    let expr_end = expr_start + value.len() as u32; // position of the closing `"`
+    let dir_span_end = expr_end + 1; // include the closing quote
+    let button_start = source.find("<button").unwrap() as u32;
+    let tag_close = button_start + source[button_start as usize..].find('>').unwrap() as u32 + 1;
+
+    let mut template = empty_template();
+    let mut el = make_element(
+        "button",
+        (button_start, source.len() as u32),
+        tag_close,
+        tag_close,
+    );
+    el.directives.push(TemplateDirective {
+        name: "on".into(),
+        raw_name: "@click".into(),
+        argument: Some("click".into()),
+        modifiers: vec![],
+        expression: Some(value.into()),
+        span: Span::new(at, dir_span_end),
+        name_end: click, // end of `@click` name token (= start of the `click` arg)
+        arg_span: Some(Span::new(click, click + 5)),
+        expression_span: Some(Span::new(expr_start, expr_end)),
+        modifier_spans: vec![],
+    });
+    template.elements.push(el);
+    let analysis = analysis_with_template(template);
+
+    // Cursor right after `$event.` — the member-access dot inside the handler value.
+    let cursor = (source.find("$event.").unwrap() + "$event.".len()) as u32;
+    let ctx = classify_cursor_context(cursor, source, &blocks, Some(&analysis));
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::Expression { .. })
+        ),
+        "value-position `.` must be a template Expression (member) context, got: {:?}",
+        ctx
+    );
+    assert!(
+        !matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::EventModifier { .. })
+        ),
+        "value-position `.` must NOT be classified as an EventModifier, got: {:?}",
+        ctx
+    );
 }
 
 #[test]

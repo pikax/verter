@@ -1,0 +1,39 @@
+{
+  "slug": "univ-dyn-lit-cls-q-blk-ext-comb-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "univ_dyn_lit_cls_q_blk_ext_comb_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr_class"
+  ],
+  "helperSet": [
+    "attr_class"
+  ],
+  "helperCounts": {
+    "attr_class": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-99ytpp",
+    "code": "\n\t.wrap.svelte-<scoped> :where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

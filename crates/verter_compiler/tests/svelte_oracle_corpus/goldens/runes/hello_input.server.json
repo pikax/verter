@@ -1,0 +1,42 @@
+{
+  "slug": "runes/hello_input.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "hello_input",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "escape",
+    "attr",
+    "escape"
+  ],
+  "helperSet": [
+    "attr",
+    "escape"
+  ],
+  "helperCounts": {
+    "escape": 2,
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

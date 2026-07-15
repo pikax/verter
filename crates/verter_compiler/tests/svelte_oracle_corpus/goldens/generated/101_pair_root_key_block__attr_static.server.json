@@ -1,0 +1,31 @@
+{
+  "slug": "generated/101_pair_root_key_block__attr_static.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_01_pair_root_key_block__attr_static",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

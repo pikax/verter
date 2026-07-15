@@ -1,0 +1,42 @@
+{
+  "slug": "id-dyn-eschex-id-uq-dynel-ext-comb-u",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dyn_eschex_id_uq_dynel_ext_comb_u",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "element",
+    "attr"
+  ],
+  "helperSet": [
+    "attr",
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1,
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-ojqt8q",
+    "code": "\n\t.wrap.svelte-<scoped> #a\\26 b:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

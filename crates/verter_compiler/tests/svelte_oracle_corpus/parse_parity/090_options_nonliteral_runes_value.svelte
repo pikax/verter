@@ -1,0 +1,3 @@
+<svelte:options runes={foo} />
+<script>let c = $state(0);</script>
+<button onclick={() => c++}>{c}</button>

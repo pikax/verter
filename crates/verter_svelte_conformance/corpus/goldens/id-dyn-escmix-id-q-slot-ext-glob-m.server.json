@@ -1,0 +1,42 @@
+{
+  "slug": "id-dyn-escmix-id-q-slot-ext-glob-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dyn_escmix_id_q_slot_ext_glob_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot",
+    "attr"
+  ],
+  "helperSet": [
+    "attr",
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1,
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t#a\\26 b\\&c {\n\t\tcolor: red;\n\t}\n"
+  }
+}

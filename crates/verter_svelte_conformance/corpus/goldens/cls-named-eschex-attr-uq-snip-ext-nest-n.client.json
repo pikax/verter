@@ -1,0 +1,57 @@
+{
+  "slug": "cls-named-eschex-attr-uq-snip-ext-nest-n",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_named_eschex_attr_uq_snip_ext_nest_n",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "append",
+    "from_html"
+  ],
+  "helperSet": [
+    "append",
+    "from_html"
+  ],
+  "helperCounts": {
+    "append": 1,
+    "from_html": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div data-x=\"a&amp;b\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; const subject = ($$anchor) => {var div = root(); $.append($$anchor, div);}; var root = $.from_html(`<div data-x=\"a&amp;b\">x</div>`); export default function cls_named_eschex_attr_uq_snip_ext_nest_n($$anchor) {subject($$anchor);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) .\\7a z {\n\t\tcolor: red;\n\n\t\t&:hover {\n\t\t\tcolor: blue;\n\t\t}\n\t}*/\n"
+  }
+}

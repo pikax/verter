@@ -1,7 +1,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::types::{ScriptAnalysisSnapshot, VueApiClassification};
+use verter_semantic::analysis::types::{ScriptAnalysisSnapshot, VueApiClassification};
 
 /// Detects client-only lifecycle hooks (`onMounted`, `onUpdated`, `onActivated`, etc.)
 /// at top-level setup scope. These never fire during SSR.
@@ -63,7 +63,7 @@ impl LintRule for NoClientOnlyLifecycleInSetup {
 mod tests {
     use super::*;
     use crate::test_support::{run_script_rule, run_script_rule_ssr};
-    use verter_analysis::types::VueApiCallSite;
+    use verter_semantic::analysis::types::VueApiCallSite;
     use verter_span::Span;
 
     fn call(api: VueApiClassification, start: u32, end: u32) -> VueApiCallSite {

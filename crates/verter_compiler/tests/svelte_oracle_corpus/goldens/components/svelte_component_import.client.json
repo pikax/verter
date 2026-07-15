@@ -1,0 +1,60 @@
+{
+  "slug": "components/svelte_component_import.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_component_import",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "component",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "component",
+    "first_child"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "component": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; export default function svelte_component_import($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); $.component(node, () => Child, ($$anchor, $$component) => {$$component($$anchor, {get label() {return $$props.label;}});}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

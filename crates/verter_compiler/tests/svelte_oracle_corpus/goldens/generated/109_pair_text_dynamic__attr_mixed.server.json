@@ -1,0 +1,43 @@
+{
+  "slug": "generated/109_pair_text_dynamic__attr_mixed.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_09_pair_text_dynamic__attr_mixed",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr_class",
+    "stringify",
+    "escape"
+  ],
+  "helperSet": [
+    "attr_class",
+    "escape",
+    "stringify"
+  ],
+  "helperCounts": {
+    "attr_class": 1,
+    "stringify": 1,
+    "escape": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

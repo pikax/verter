@@ -1,0 +1,106 @@
+{
+  "slug": "generated/023_text_dynamic_in_if_block.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "_23_text_dynamic_in_if_block",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append",
+    "if",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "comment",
+    "first_child",
+    "from_html",
+    "if",
+    "reset",
+    "set_text",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 1,
+    "first_child": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 2,
+    "if": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  },
+  "events": [],
+  "nonStaticProperties": [],
+  "attrParts": [],
+  "directiveExprs": [],
+  "decodedText": [],
+  "nodePaths": {
+    "regions": [
+      {
+        "paths": [
+          {
+            "base": "fragment",
+            "steps": [
+              "child"
+            ]
+          }
+        ]
+      },
+      {
+        "paths": [
+          {
+            "base": "fragment",
+            "steps": [
+              "first_child"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "dynamicSlots": {
+    "text": 1,
+    "block": 1
+  }
+}

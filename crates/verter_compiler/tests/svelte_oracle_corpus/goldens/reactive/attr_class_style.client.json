@@ -1,0 +1,64 @@
+{
+  "slug": "reactive/attr_class_style.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_class_style",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "set_attribute",
+    "set_class",
+    "template_effect",
+    "set_style",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "set_attribute",
+    "set_class",
+    "set_style",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "set_attribute": 1,
+    "set_class": 1,
+    "template_effect": 1,
+    "set_style": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>dynamic attrs</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>dynamic attrs</div>`); export default function attr_class_style($$anchor) {let active = false; let color = 'red'; let id = 'main'; var div = root(); $.set_attribute(div, 'id', id); $.set_class(div, 1, '', null, {}, {active}); let styles; $.template_effect(() => styles = $.set_style(div, '', styles, {color})); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

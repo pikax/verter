@@ -1,0 +1,32 @@
+{
+  "slug": "css/entity_uppercase_x_not_decoded.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "entity_uppercase_x_not_decoded",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) .b {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

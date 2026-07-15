@@ -1,0 +1,25 @@
+{
+  "component_name": "C",
+  "props": [
+    {
+      "name": "disabled",
+      "type_signature": "boolean",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    }
+  ],
+  "events": [],
+  "slots": [],
+  "models": [],
+  "exposed": [],
+  "fallthrough": {
+    "inherit_attrs": false,
+    "surface_signature": "{}"
+  },
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": true
+  }
+}

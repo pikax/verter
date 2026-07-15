@@ -1,4 +1,4 @@
-// Go-to-definition: span-based navigation from verter_host analysis.
+// Go-to-definition: span-based navigation from verter_session analysis.
 //
 // Supports navigation from:
 // - Template bindings → script declarations
@@ -9,9 +9,9 @@
 // - DOM query selector strings → matching template elements (with CSS rule fallback)
 
 use tower_lsp_server::ls_types::*;
-use verter_analysis::types::{DomQueryCallSite, DomQueryKind};
-use verter_analysis::{match_selector, MatchResult};
-use verter_host::FileAnalysisSnapshot;
+use verter_semantic::analysis::types::{DomQueryCallSite, DomQueryKind};
+use verter_semantic::analysis::{match_selector, MatchResult};
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
@@ -80,7 +80,7 @@ pub fn definition_at_position(
                         }
                         // Default import of .vue file: the local name won't match script
                         // bindings, so retry with "default" which handles Vue SFC exports.
-                        if canonical_id.ends_with(".vue") {
+                        if crate::server::is_default_export_component_carrier(canonical_id) {
                             if let Some(result) = try_precise_cross_file(
                                 canonical_id,
                                 "default",
@@ -101,7 +101,7 @@ pub fn definition_at_position(
                         ) {
                             return Some(result);
                         }
-                        if resolved.ends_with(".vue") {
+                        if crate::server::is_default_export_component_carrier(&resolved) {
                             if let Some(result) = try_precise_cross_file(
                                 &resolved,
                                 "default",
@@ -125,9 +125,9 @@ pub fn definition_at_position(
         if in_template {
             // Navigate $props → defineProps, $emit → defineEmits, $slots → defineSlots
             let macro_kind = match word.as_str() {
-                "$props" => Some(verter_analysis::AnalyzedMacroKind::DefineProps),
-                "$emit" => Some(verter_analysis::AnalyzedMacroKind::DefineEmits),
-                "$slots" => Some(verter_analysis::AnalyzedMacroKind::DefineSlots),
+                "$props" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineProps),
+                "$emit" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineEmits),
+                "$slots" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineSlots),
                 _ => None,
             };
             if let Some(kind) = macro_kind {
@@ -251,7 +251,7 @@ pub fn definition_at_position(
                                         ) {
                                             return Some(result);
                                         }
-                                        if cid.ends_with(".vue") {
+                                        if crate::server::is_default_export_component_carrier(cid) {
                                             if let Some(result) = try_precise_cross_file(
                                                 cid,
                                                 "default",
@@ -273,7 +273,9 @@ pub fn definition_at_position(
                                         ) {
                                             return Some(result);
                                         }
-                                        if resolved.ends_with(".vue") {
+                                        if crate::server::is_default_export_component_carrier(
+                                            &resolved,
+                                        ) {
                                             if let Some(result) = try_precise_cross_file(
                                                 &resolved,
                                                 "default",
@@ -341,7 +343,7 @@ pub fn definition_at_position(
                             ) {
                                 return Some(result);
                             }
-                            if canonical_id.ends_with(".vue") {
+                            if crate::server::is_default_export_component_carrier(canonical_id) {
                                 if let Some(result) = try_precise_cross_file(
                                     canonical_id,
                                     "default",
@@ -363,7 +365,7 @@ pub fn definition_at_position(
                             ) {
                                 return Some(result);
                             }
-                            if resolved.ends_with(".vue") {
+                            if crate::server::is_default_export_component_carrier(&resolved) {
                                 if let Some(result) = try_precise_cross_file(
                                     &resolved,
                                     "default",
@@ -495,7 +497,7 @@ fn css_definition_from_template(
 fn find_css_target_in_template(
     offset: usize,
     source: &str,
-    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
 ) -> Option<CssTarget> {
     for element in &template.elements {
         for attr in &element.attributes {
@@ -741,7 +743,7 @@ fn dom_query_definition(
     let template = analysis.template.as_deref()?;
     let elements = &template.elements;
 
-    // DomQueryCallSite spans are SFC-absolute (adjusted by verter_host during analysis)
+    // DomQueryCallSite spans are SFC-absolute (adjusted by verter_session during analysis)
     let call = analysis
         .dom_query_calls
         .iter()

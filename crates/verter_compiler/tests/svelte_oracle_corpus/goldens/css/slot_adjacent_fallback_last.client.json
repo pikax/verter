@@ -1,0 +1,77 @@
+{
+  "slug": "css/slot_adjacent_fallback_last.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_adjacent_fallback_last",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "child",
+    "slot",
+    "append",
+    "next",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "next",
+    "reset",
+    "slot"
+  ],
+  "helperCounts": {
+    "from_html": 2,
+    "child": 1,
+    "slot": 1,
+    "append": 2,
+    "next": 1,
+    "reset": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p class=\"last svelte-<scoped>\">x</p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<div><!><span class=\"after svelte-<scoped>\">y</span></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p class=\"last svelte-<scoped>\">x</p>`); var root_1 = $.from_html(`<div><!><span class=\"after svelte-<scoped>\">y</span></div>`); export default function slot_adjacent_fallback_last($$anchor, $$props) {var div = root_1(); var node = $.child(div); $.slot(node, $$props, 'default', {}, ($$anchor) => {var p = root(); $.append($$anchor, p);}); $.next(); $.reset(div); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-61wclp",
+    "code": "\n\t.last.svelte-<scoped> + .after:where(.svelte-<scoped>) { color: red; }\n"
+  }
+}

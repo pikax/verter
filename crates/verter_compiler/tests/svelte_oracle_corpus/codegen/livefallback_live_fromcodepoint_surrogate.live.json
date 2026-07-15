@@ -1,0 +1,9 @@
+{
+  "slug": "livefallback_live_fromcodepoint_surrogate",
+  "bucket": "live-fallback",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "reason": "lone-surrogate",
+  "officialFolds": true,
+  "officialModuleHasInterpolation": false
+}

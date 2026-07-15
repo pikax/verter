@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "archetype": "pick_literal_key",
+  "consumer_published_surface": {
+    "kind": "object",
+    "members": [
+      { "name": "a", "selected": true }
+    ]
+  },
+  "fact_dep_signature_observed_by_consumer": [
+    "Export(\"Props\", Type)",
+    "Export(\"Foo\", Type)",
+    "MemberPresence(Foo, \"a\", Type)",
+    "Member(Foo, \"a\", Type)"
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "edit Foo.b body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R14, R28: Member(Foo, \"b\") changes but consumer never observed it"
+    },
+    {
+      "edit": "add Foo.d",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R28: new MemberPresence(Foo, \"d\") emitted; existing MemberPresence(Foo, \"a\") unchanged"
+    },
+    {
+      "edit": "edit Foo.a body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: Member(Foo, \"a\") changes — consumer observed it"
+    },
+    {
+      "edit": "remove Foo.a",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: MemberPresence(Foo, \"a\") becomes registry miss"
+    },
+    {
+      "edit": "rename Foo to FooX",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R14: Export(\"Foo\", Type) + LocalDecl(\"Foo\", Type) keys change"
+    }
+  ]
+}

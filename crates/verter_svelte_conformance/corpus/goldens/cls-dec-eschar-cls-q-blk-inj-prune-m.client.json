@@ -1,0 +1,65 @@
+{
+  "slug": "cls-dec-eschar-cls-q-blk-inj-prune-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_dec_eschar_cls_q_blk_inj_prune_m",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "comment",
+    "first_child",
+    "append",
+    "if",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "comment",
+    "first_child",
+    "from_html",
+    "if"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "comment": 1,
+    "first_child": 1,
+    "append": 2,
+    "if": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"a a&amp;b svelte-<scoped>\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"a a&amp;b svelte-<scoped>\">x</div>`); const $$css = {hash: 'svelte-<scoped>', code: '.a\\\\&b.svelte-<scoped> {color:red;}'}; export default function cls_dec_eschar_cls_q_blk_inj_prune_m($$anchor) {$.append_styles($$anchor, $$css); let open = true; var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var div = root(); $.append($$anchor, div);}; $.if(node, ($$render) => {if (open) $$render(consequent);});} $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "slug": "options/namespace_svg_inline_html_wins.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "namespace_svg_inline_html_wins",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "next",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "next"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "next": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>a</div> <span>b</span>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>a</div> <span>b</span>`, 1); export default function namespace_svg_inline_html_wins($$anchor) {var fragment = root(); $.next(2); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,7 +1,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::TemplateAnalysisSnapshot;
+use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
 
 /// Warns about timer/event-listener calls (`setInterval`, `setTimeout`,
 /// `addEventListener`) detected in template expressions during SSR.
@@ -58,7 +58,7 @@ impl LintRule for NoSideEffectsInSetupForSsr {
 mod tests {
     use super::*;
     use crate::test_support::{run_template_rule, run_template_rule_ssr};
-    use verter_analysis::template::{TemplateAnalysisSnapshot, UnresolvedBinding};
+    use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, UnresolvedBinding};
     use verter_span::Span;
 
     fn unresolved(name: &str) -> UnresolvedBinding {

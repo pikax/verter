@@ -1,0 +1,32 @@
+error[E0624]: method `context` is private
+  --> tests/cases/compile-fail/instantiate_key_context_not_extractable.rs:34:42
+   |
+34 |         let _ctx: InstantiateContext = k.context();
+   |                                          ^^^^^^^ private method
+   |
+  ::: src/semantic_query.rs
+   |
+   |     pub(crate) fn context(&self) -> InstantiateContext {
+   |     -------------------------------------------------- private method defined here
+
+error[E0624]: method `body_source` is private
+  --> tests/cases/compile-fail/instantiate_key_context_not_extractable.rs:35:25
+   |
+35 |         let _source = k.body_source();
+   |                         ^^^^^^^^^^^ private method
+   |
+  ::: src/semantic_query.rs
+   |
+   |     pub(crate) fn body_source(&self) -> InstantiateBodySource {
+   |     --------------------------------------------------------- private method defined here
+
+error[E0624]: method `args` is private
+  --> tests/cases/compile-fail/instantiate_key_context_not_extractable.rs:36:23
+   |
+36 |         let _args = k.args();
+   |                       ^^^^ private method
+   |
+  ::: src/semantic_query.rs
+   |
+   |     pub(crate) fn args(&self) -> &Arc<[SemanticNodeId]> {
+   |     --------------------------------------------------- private method defined here

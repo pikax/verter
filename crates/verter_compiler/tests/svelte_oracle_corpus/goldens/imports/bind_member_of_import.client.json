@@ -1,0 +1,107 @@
+{
+  "slug": "imports/bind_member_of_import.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./m.js",
+      "kind": "named",
+      "names": [
+        "x"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_member_of_import",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "state",
+    "first_child",
+    "remove_input_defaults",
+    "sibling",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "bind_value",
+    "delegated",
+    "update",
+    "append",
+    "pop",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "bind_value",
+    "child",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "pop",
+    "push",
+    "remove_input_defaults",
+    "reset",
+    "set_text",
+    "sibling",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "state": 1,
+    "first_child": 1,
+    "remove_input_defaults": 1,
+    "sibling": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "bind_value": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "pop": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/> <button> </button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import {x} from './m.js'; var root = $.from_html(`<input/> <button> </button>`, 1); export default function bind_member_of_import($$anchor, $$props) {$.push($$props, true); let c = $.state(0); var fragment = root(); var input = $.first_child(fragment); $.remove_input_defaults(input); var button = $.sibling(input, 2); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(c))); $.bind_value(input, () => x.k, ($$value) => x.k = $$value); $.delegated('click', button, () => $.update(c)); $.append($$anchor, fragment); $.pop();} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

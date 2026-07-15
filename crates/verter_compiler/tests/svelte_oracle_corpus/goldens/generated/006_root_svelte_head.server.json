@@ -1,0 +1,36 @@
+{
+  "slug": "generated/006_root_svelte_head.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_06_root_svelte_head",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "head"
+  ],
+  "helperSet": [
+    "head"
+  ],
+  "helperCounts": {
+    "head": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

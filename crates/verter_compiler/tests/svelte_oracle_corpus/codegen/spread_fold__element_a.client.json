@@ -1,0 +1,55 @@
+{
+  "slug": "spread_fold__element_a",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "spread_fold__element_a",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "attribute_effect",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "attribute_effect": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<a></a>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<a></a>`); export default function spread_fold__element_a($$anchor) {let __rune = 0; var a = root(); $.attribute_effect(a, () => ({...props})); $.append($$anchor, a);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

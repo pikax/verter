@@ -1,0 +1,22 @@
+[package]
+name = "verter_no_typeexpr_derive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Proc-macro deriving the hidden NoTypeExpr witness field-recursively"
+publish = false
+
+# A proc-macro crate cannot also export non-proc-macro items, so the trait
+# itself lives in the sibling `verter_no_typeexpr` crate; this crate is its
+# `#[derive(NoTypeExpr)]` companion.
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }

@@ -1,0 +1,62 @@
+{
+  "slug": "optional_call__boolean__props",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "optional_call__boolean__props",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "template_effect",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "pop",
+    "push",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "template_effect": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/>`); export default function optional_call__boolean__props($$anchor, $$props) {$.push($$props, true); var input = root(); $.template_effect(($0) => input.disabled = $0, [() => $$props.p?.toString?.()]); $.append($$anchor, input); $.pop();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

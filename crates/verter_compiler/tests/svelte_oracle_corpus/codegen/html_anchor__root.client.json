@@ -1,0 +1,52 @@
+{
+  "slug": "html_anchor__root",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "html_anchor__root",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "html",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "first_child",
+    "html"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "html": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function html_anchor__root($$anchor) {let __rune = 0; var fragment = $.comment(); var node = $.first_child(fragment); $.html(node, () => h); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

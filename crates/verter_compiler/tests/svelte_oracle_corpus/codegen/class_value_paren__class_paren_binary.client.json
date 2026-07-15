@@ -1,0 +1,78 @@
+{
+  "slug": "class_value_paren__class_paren_binary",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "class_value_paren__class_paren_binary",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "template_effect",
+    "set_class",
+    "get",
+    "get",
+    "delegated",
+    "update",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "from_html",
+    "get",
+    "set_class",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "template_effect": 1,
+    "set_class": 1,
+    "get": 2,
+    "delegated": 1,
+    "update": 2,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function class_value_paren__class_paren_binary($$anchor) {let a = $.state(0); let b = $.state(0); var div = root(); $.template_effect(() => $.set_class(div, 1, $.get(a) + $.get(b))); $.delegated('click', div, () => {$.update(a); $.update(b);}); $.append($$anchor, div);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

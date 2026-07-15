@@ -5,7 +5,7 @@
 //!
 //! ## Why a separate crate?
 //!
-//! The [`verter_host`] types cannot be directly serialized to JavaScript because
+//! The [`verter_session`] types cannot be directly serialized to JavaScript because
 //! they use Rust enums with associated data (`VirtualNodeKind::Style { index }`),
 //! `Arc<str>` fields, `usize` indices, and Rust enum variants as strings. This
 //! crate provides the flat, serde-compatible FFI types and the conversion
@@ -18,9 +18,10 @@
 //!   its own `#[napi(object)]` structs via zero-copy `From` impls.
 //!
 //! - **`convert`** — Framework-agnostic conversion functions between FFI types
-//!   and [`verter_host`] types. Errors use [`convert::FfiConversionError`] —
+//!   and [`verter_session`] types. Errors use [`convert::FfiConversionError`] —
 //!   each consumer converts via the `Display` impl to its native error type.
 
 pub mod convert;
-pub mod graph;
-pub mod types;
+
+pub use verter_protocol::graph;
+pub use verter_protocol::types;

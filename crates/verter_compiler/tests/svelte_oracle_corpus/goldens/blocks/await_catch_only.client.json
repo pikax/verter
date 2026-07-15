@@ -1,0 +1,63 @@
+{
+  "slug": "blocks/await_catch_only.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "await_catch_only",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "await",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "await",
+    "comment",
+    "first_child",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 1,
+    "first_child": 1,
+    "await": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p>failed</p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p>failed</p>`); export default function await_catch_only($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); $.await(node, () => $$props.promise, ($$anchor) => {}, void 0, ($$anchor, error) => {var p = root(); $.append($$anchor, p);}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

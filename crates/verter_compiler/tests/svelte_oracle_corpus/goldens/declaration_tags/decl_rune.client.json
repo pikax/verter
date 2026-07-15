@@ -1,0 +1,95 @@
+{
+  "slug": "declaration_tags/decl_rune.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "decl_rune",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "each",
+    "index",
+    "state",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "comment",
+    "delegate",
+    "delegated",
+    "each",
+    "first_child",
+    "from_html",
+    "get",
+    "index",
+    "reset",
+    "set_text",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 1,
+    "first_child": 1,
+    "each": 1,
+    "index": 1,
+    "state": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 2,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button> </button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function decl_rune($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); $.each(node, 17, () => $$props.items, $.index, ($$anchor, item) => {let local = $.state(0); var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(local))); $.delegated('click', button, () => $.update(local)); $.append($$anchor, button);}); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "slug": "attr-dyn-lit-attr-uq-snip-ext-plain-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_dyn_lit_attr_uq_snip_ext_plain_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr"
+  ],
+  "helperSet": [
+    "attr"
+  ],
+  "helperCounts": {
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-cs8zse",
+    "code": "\n\t[data-x=\"b\"].svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

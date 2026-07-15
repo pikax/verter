@@ -1,0 +1,88 @@
+{
+  "slug": "matrix/typescript_prop_lvalues.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "typescript_prop_lvalues",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "prop",
+    "proxy",
+    "prop",
+    "prop",
+    "first_child",
+    "sibling",
+    "sibling",
+    "sibling",
+    "delegated",
+    "event",
+    "event",
+    "event",
+    "append",
+    "pop",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "event",
+    "first_child",
+    "from_html",
+    "pop",
+    "prop",
+    "proxy",
+    "push",
+    "sibling"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "prop": 3,
+    "proxy": 1,
+    "first_child": 1,
+    "sibling": 3,
+    "delegated": 1,
+    "event": 3,
+    "append": 1,
+    "pop": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button>nonnull</button> <button>asserted</button> <button>computed</button> <button>plain</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button>nonnull</button> <button>asserted</button> <button>computed</button> <button>plain</button>`, 1); export default function typescript_prop_lvalues($$anchor, $$props) {$.push($$props, true); let model = $.prop($$props, 'model', 31, () => $.proxy({value: 0, nested: {count: 0}})), plain = $.prop($$props, 'plain', 23, () => ({value: 0})), key = $.prop($$props, 'key', 3, 'value'); var fragment = root(); var button = $.first_child(fragment); var button_1 = $.sibling(button, 2); var button_2 = $.sibling(button_1, 2); var button_3 = $.sibling(button_2, 2); $.delegated('click', button, () => model(model().value++, true)); $.event('focus', button_1, () => model(model().nested.count = 1, true)); $.event('mouseenter', button_2, () => model(model()[key()] += 1, true)); $.event('mouseleave', button_3, () => plain().value++); $.append($$anchor, fragment); $.pop();} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

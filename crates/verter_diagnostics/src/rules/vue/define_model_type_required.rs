@@ -1,4 +1,4 @@
-//! Rule: define-model-type-required
+﻿//! Rule: define-model-type-required
 //!
 //! When `defineModel()` is called without a type parameter, report a warning.
 //! Type parameters improve type safety for v-model bindings.
@@ -24,7 +24,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
+use verter_semantic::analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
 
 pub struct DefineModelTypeRequired;
 
@@ -70,7 +70,7 @@ impl LintRule for DefineModelTypeRequired {
 mod tests {
     use super::*;
 
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
@@ -94,6 +94,8 @@ mod tests {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(20, 34),
             }],
             is_typescript: true,
@@ -133,6 +135,8 @@ mod tests {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(20, 42),
             }],
             is_typescript: true,
@@ -163,6 +167,8 @@ mod tests {
                     expose_fields: vec![],
                     default_values: Vec::new(),
                     resolved_local_types: Vec::new(),
+                    parsed_type_argument: None,
+                    parsed_type_argument_scope: None,
                     span: Span::new(20, 42),
                 },
                 AnalyzedMacro {
@@ -179,6 +185,8 @@ mod tests {
                     expose_fields: vec![],
                     default_values: Vec::new(),
                     resolved_local_types: Vec::new(),
+                    parsed_type_argument: None,
+                    parsed_type_argument_scope: None,
                     span: Span::new(50, 72),
                 },
             ],
@@ -210,6 +218,8 @@ mod tests {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(20, 40),
             }],
             is_typescript: true,
@@ -243,6 +253,8 @@ mod tests {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(20, 34),
             }],
             is_typescript: false,

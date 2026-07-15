@@ -1,0 +1,139 @@
+<script lang="ts">
+import type { PopoverRootProps, HoverCardRootProps, PopoverRootEmits, PopoverContentProps, PopoverContentEmits, PopoverArrowProps, HoverCardTriggerProps } from 'reka-ui'
+import type { VNode } from 'vue'
+import type { AppConfig } from '@nuxt/schema'
+import theme from '#build/ui/popover'
+import type { EmitsToProps } from '../types/utils'
+import type { ComponentConfig } from '../types/tv'
+
+type Popover = ComponentConfig<typeof theme, AppConfig, 'popover'>
+type PopoverMode = 'click' | 'hover'
+
+export interface PopoverProps<M extends PopoverMode = PopoverMode> extends PopoverRootProps, Pick<HoverCardRootProps, 'openDelay' | 'closeDelay'> {
+  /**
+   * The display mode of the popover.
+   * @defaultValue 'click'
+   */
+  mode?: M
+  /**
+   * The content of the popover.
+   * @defaultValue { side: 'bottom', sideOffset: 8, collisionPadding: 8 }
+   */
+  content?: Omit<PopoverContentProps, 'as' | 'asChild' | 'forceMount'> & Partial<EmitsToProps<PopoverContentEmits>>
+  /**
+   * Display an arrow alongside the popover.
+   * `{ rounded: true }`{lang="ts-type"}
+   * @defaultValue false
+   */
+  arrow?: boolean | Omit<PopoverArrowProps, 'as' | 'asChild'>
+  /**
+   * Render the popover in a portal.
+   * @defaultValue true
+   */
+  portal?: boolean | string | HTMLElement
+  /**
+   * The reference (or anchor) element that is being referred to for positioning.
+   *
+   * If not provided will use the current component as anchor.
+   */
+  reference?: HoverCardTriggerProps['reference']
+  /**
+   * When `false`, the popover will not close when clicking outside or pressing escape.
+   * @defaultValue true
+   */
+  dismissible?: boolean
+  class?: any
+  ui?: Popover['slots']
+}
+
+export interface PopoverEmits extends PopoverRootEmits {
+  'close:prevent': []
+}
+
+type SlotProps<M extends PopoverMode = PopoverMode> = [M] extends ['hover'] ? { close: undefined } : { close: () => void }
+
+export interface PopoverSlots<M extends PopoverMode = PopoverMode> {
+  default?(props: { open: boolean }): VNode[]
+  content?(props: SlotProps<M>): VNode[]
+  anchor?(props: SlotProps<M>): VNode[]
+}
+</script>
+
+<script setup lang="ts" generic="M extends PopoverMode">
+import { computed, toRef } from 'vue'
+import { defu } from 'defu'
+import { useForwardPropsEmits } from 'reka-ui'
+import { Popover, HoverCard } from 'reka-ui/namespaced'
+import { reactivePick } from '@vueuse/core'
+import { useAppConfig } from '#imports'
+import { useComponentUI } from '../composables/useComponentUI'
+import { FieldGroupReset } from '../composables/useFieldGroup'
+import { usePortal } from '../composables/usePortal'
+import { pointerDownOutside } from '../utils/overlay'
+import { tv } from '../utils/tv'
+
+const props = withDefaults(defineProps<PopoverProps<M>>(), {
+  portal: true,
+  mode: 'click' as never,
+  openDelay: 0,
+  closeDelay: 0,
+  dismissible: true
+})
+const emits = defineEmits<PopoverEmits>()
+const slots = defineSlots<PopoverSlots<M>>()
+
+const appConfig = useAppConfig() as Popover['AppConfig']
+const uiProp = useComponentUI('popover', props)
+
+const pick = props.mode === 'hover' ? reactivePick(props, 'defaultOpen', 'open', 'openDelay', 'closeDelay') : reactivePick(props, 'defaultOpen', 'open', 'modal')
+const rootProps = useForwardPropsEmits(pick, emits)
+const portalProps = usePortal(toRef(() => props.portal))
+const contentProps = toRef(() => defu(props.content, { side: 'bottom', sideOffset: 8, collisionPadding: 8 }) as PopoverContentProps)
+const contentEvents = computed(() => {
+  if (!props.dismissible) {
+    const events = ['interactOutside', 'escapeKeyDown']
+
+    return events.reduce((acc, curr) => {
+      acc[curr] = (e: Event) => {
+        e.preventDefault()
+        emits('close:prevent')
+      }
+      return acc
+    }, {} as Record<typeof events[number], (e: Event) => void>)
+  }
+
+  return {
+    pointerDownOutside
+  }
+})
+const arrowProps = toRef(() => defu(props.arrow, { rounded: true }) as PopoverArrowProps)
+
+// eslint-disable-next-line vue/no-dupe-keys
+const ui = computed(() => tv({ extend: tv(theme), ...(appConfig.ui?.popover || {}) })({
+  side: contentProps.value.side
+}))
+
+const Component = computed(() => props.mode === 'hover' ? HoverCard : Popover)
+</script>
+
+<template>
+  <Component.Root v-slot="{ open, close }: { open: boolean, close?: () => void }" v-bind="rootProps">
+    <Component.Trigger v-if="!!slots.default || !!reference" as-child :reference="reference" :class="props.class">
+      <slot :open="open" />
+    </Component.Trigger>
+
+    <Component.Anchor v-if="'Anchor' in Component && !!slots.anchor" as-child>
+      <slot name="anchor" v-bind="((close ? { close } : {}) as SlotProps<M>)" />
+    </Component.Anchor>
+
+    <Component.Portal v-bind="portalProps">
+      <FieldGroupReset>
+        <Component.Content v-bind="contentProps" data-slot="content" :class="ui.content({ class: [!slots.default && props.class, uiProp?.content] })" v-on="contentEvents">
+          <slot name="content" v-bind="((close ? { close } : {}) as SlotProps<M>)" />
+
+          <Component.Arrow v-if="!!arrow" v-bind="arrowProps" data-slot="arrow" :class="ui.arrow({ class: uiProp?.arrow })" />
+        </Component.Content>
+      </FieldGroupReset>
+    </Component.Portal>
+  </Component.Root>
+</template>

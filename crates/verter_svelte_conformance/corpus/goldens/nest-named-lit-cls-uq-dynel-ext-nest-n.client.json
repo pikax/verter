@@ -1,0 +1,59 @@
+{
+  "slug": "nest-named-lit-cls-uq-dynel-ext-nest-n",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "nest_named_lit_cls_uq_dynel_ext_nest_n",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "element",
+    "set_class",
+    "text",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "element",
+    "first_child",
+    "set_class",
+    "text"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "element": 1,
+    "set_class": 1,
+    "text": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function nest_named_lit_cls_uq_dynel_ext_nest_n($$anchor) {let tag = 'div'; var fragment = $.comment(); var node = $.first_child(fragment); $.element(node, () => tag, false, ($$element, $$anchor) => {$.set_class($$element, 0, 'a©b'); var text = $.text('x'); $.append($$anchor, text);}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (empty) .zz {\n\t\t& {\n\t\t\tcolor: red;\n\t\t}\n\t}*/\n"
+  }
+}

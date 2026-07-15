@@ -1,0 +1,52 @@
+{
+  "slug": "components/slot_prop_component_in_slotted_fragment.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "./Inner.svelte",
+      "kind": "default",
+      "names": [
+        "default:Inner"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_prop_component_in_slotted_fragment",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; import Inner from './Inner.svelte'; export default function slot_prop_component_in_slotted_fragment($$anchor, $$props) {Child($$anchor, {$$slots: {head: ($$anchor, $$slotProps) => {Inner($$anchor, {slot: 'x', get label() {return $$props.x;}});}}});}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

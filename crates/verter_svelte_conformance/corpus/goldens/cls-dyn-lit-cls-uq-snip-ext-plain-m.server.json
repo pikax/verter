@@ -1,0 +1,42 @@
+{
+  "slug": "cls-dyn-lit-cls-uq-snip-ext-plain-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_dyn_lit_cls_uq_snip_ext_plain_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr_class",
+    "clsx"
+  ],
+  "helperSet": [
+    "attr_class",
+    "clsx"
+  ],
+  "helperCounts": {
+    "attr_class": 1,
+    "clsx": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-18gfu0a",
+    "code": "\n\t.b.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

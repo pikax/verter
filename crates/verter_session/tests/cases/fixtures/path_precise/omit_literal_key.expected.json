@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "archetype": "omit_literal_key",
+  "consumer_published_surface": {
+    "kind": "object",
+    "members": [
+      { "name": "b", "included": true },
+      { "name": "c", "included": true }
+    ]
+  },
+  "fact_dep_signature_observed_by_consumer": [
+    "Export(\"Props\", Type)",
+    "Export(\"Foo\", Type)",
+    "MemberShape(Foo, Type)",
+    "MemberPresence(Foo, \"a\", Type)",
+    "MemberPresence(Foo, \"b\", Type)",
+    "MemberPresence(Foo, \"c\", Type)",
+    "Member(Foo, \"b\", Type)",
+    "Member(Foo, \"c\", Type)"
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "edit Foo.a body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R14: Member(Foo, \"a\") changes but Omit drops it; MemberPresence(Foo, \"a\") header unchanged"
+    },
+    {
+      "edit": "edit Foo.b body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: Member(Foo, \"b\") observed by Omit consumer"
+    },
+    {
+      "edit": "add Foo.d",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: new MemberPresence(Foo, \"d\") changes the whole MemberShape — Omit surface grows"
+    },
+    {
+      "edit": "remove Foo.a",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: MemberShape changes; though Omit excluded \"a\", the surface no longer needs to mention it"
+    }
+  ]
+}

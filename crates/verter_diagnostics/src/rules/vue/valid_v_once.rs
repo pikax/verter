@@ -7,7 +7,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::{TemplateDirective, TemplateElement};
+use verter_semantic::analysis::template::{TemplateDirective, TemplateElement};
 
 pub struct ValidVOnce;
 
@@ -73,7 +73,7 @@ impl LintRule for ValidVOnce {
 mod tests {
     use super::*;
 
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn run(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

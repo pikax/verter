@@ -1,0 +1,32 @@
+{
+  "slug": "css/keyframes_animation.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "keyframes_animation",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-6sam9w",
+    "code": "\n\t@keyframes svelte-<scoped>-spin {\n\t\tfrom {\n\t\t\topacity: 0;\n\t\t}\n\t\tto {\n\t\t\topacity: 1;\n\t\t}\n\t}\n\n\t@keyframes fade {\n\t\tfrom {\n\t\t\topacity: 0;\n\t\t}\n\t}\n\n\t.spinner.svelte-<scoped> {\n\t\tanimation: svelte-<scoped>-spin 1s linear infinite;\n\t\tanimation-name: svelte-<scoped>-spin;\n\t}\n"
+  }
+}

@@ -1,4 +1,4 @@
-//! Rule: define-macros-order
+﻿//! Rule: define-macros-order
 //!
 //! Enforces consistent ordering of Vue compiler macros in `<script setup>`.
 //! `defineProps` should appear before `defineEmits`, and both before other macros.
@@ -10,7 +10,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
+use verter_semantic::analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
 
 pub struct DefineMacrosOrder;
 
@@ -67,7 +67,7 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_script(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
@@ -94,6 +94,8 @@ mod tests {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(start, end),
         }
     }

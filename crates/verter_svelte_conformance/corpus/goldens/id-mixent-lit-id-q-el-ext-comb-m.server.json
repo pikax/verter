@@ -1,0 +1,32 @@
+{
+  "slug": "id-mixent-lit-id-q-el-ext-comb-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "id_mixent_lit_id_q_el_ext_comb_m",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-1s4o4zd",
+    "code": "\n\t.wrap.svelte-<scoped> #bb:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

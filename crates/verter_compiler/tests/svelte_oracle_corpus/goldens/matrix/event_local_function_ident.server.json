@@ -1,0 +1,38 @@
+{
+  "slug": "matrix/event_local_function_ident.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "event_local_function_ident",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "escape"
+  ],
+  "helperSet": [
+    "escape"
+  ],
+  "helperCounts": {
+    "escape": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

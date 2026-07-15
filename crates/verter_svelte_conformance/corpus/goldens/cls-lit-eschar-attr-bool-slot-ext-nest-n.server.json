@@ -1,0 +1,39 @@
+{
+  "slug": "cls-lit-eschar-attr-bool-slot-ext-nest-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_lit_eschar_attr_bool_slot_ext_nest_n",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot"
+  ],
+  "helperSet": [
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) .\\zz {\n\t\tcolor: red;\n\n\t\t&:hover {\n\t\t\tcolor: blue;\n\t\t}\n\t}*/\n"
+  }
+}

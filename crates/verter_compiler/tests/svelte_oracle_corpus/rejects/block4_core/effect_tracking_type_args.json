@@ -1,0 +1,4 @@
+{
+  "rule": "ScriptBodyParse",
+  "official_code": "js_parse_error"
+}

@@ -1,0 +1,39 @@
+{
+  "slug": "attr-dyn-eschex-id-uq-snip-ext-plain-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_dyn_eschex_id_uq_snip_ext_plain_n",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr"
+  ],
+  "helperSet": [
+    "attr"
+  ],
+  "helperCounts": {
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) [data-x=\"\\7a z\"] {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

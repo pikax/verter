@@ -11,10 +11,11 @@
 //! still holds**. When a limitation is fixed (the broken condition becomes false), the canary
 //! **panics** — signaling the fix should be promoted to a real `assert!`.
 //!
-//! - **`rename_single_project_tsgo`**: Cross-file prop rename (`foo="literal"` → "fooRenamed")
-//!   returns edits in 1 file (only App.vue) instead of 2 files (App.vue + MyComp.vue).
-//!   tsserver correctly propagates the rename to the child component's `defineProps` type.
-//!   TSGO does not yet support cross-file rename propagation for Vue prop attributes.
+//! Cross-file Vue-prop rename reaches parity on BOTH providers: tsgo's native rename does not
+//! enumerate the child component's synthesized `{carrier}.ts` `defineProps` surface, so Verter
+//! synthesizes that child-declaration leg provider-agnostically and maps it back onto the child
+//! `.vue` through the generation-pinned snapshot. The `rename_*` lanes therefore assert ≥2-file
+//! edits for both providers (no rename canary remains).
 //!
 //! ## Fixture-specific notes
 //!
@@ -28,10 +29,18 @@
 //!   (`packages/app`, `packages/shared`). Cross-package go-to-def works via the root
 //!   tsconfig's `references` field, but multi-root features are not fully exercised.
 
+mod carrier_dx_tests;
+mod code_action;
 mod completion;
+mod completion_detail;
 mod definition;
+mod diagnostics;
 mod document_symbols;
+mod external_ts_baseline;
 mod hover;
+mod import_matrix;
 mod multi_fixture;
 mod references;
 mod rename;
+mod request_surface;
+mod signature_help;

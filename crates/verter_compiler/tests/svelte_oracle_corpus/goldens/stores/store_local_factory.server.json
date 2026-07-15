@@ -1,0 +1,44 @@
+{
+  "slug": "stores/store_local_factory.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "store_local_factory",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "escape",
+    "store_get",
+    "unsubscribe_stores"
+  ],
+  "helperSet": [
+    "escape",
+    "store_get",
+    "unsubscribe_stores"
+  ],
+  "helperCounts": {
+    "escape": 1,
+    "store_get": 1,
+    "unsubscribe_stores": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

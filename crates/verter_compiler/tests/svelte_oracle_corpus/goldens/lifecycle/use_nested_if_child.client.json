@@ -1,0 +1,97 @@
+{
+  "slug": "lifecycle/use_nested_if_child.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "use_nested_if_child",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "state",
+    "child",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "if",
+    "get",
+    "reset",
+    "action",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "action",
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "from_html",
+    "get",
+    "if",
+    "reset",
+    "set_text",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 2,
+    "state": 1,
+    "child": 2,
+    "reset": 2,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 2,
+    "append": 2,
+    "if": 1,
+    "action": 1,
+    "delegated": 1,
+    "update": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<span> </span>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<div><!></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<span> </span>`); var root_1 = $.from_html(`<div><!></div>`); export default function use_nested_if_child($$anchor) {let c = $.state(0); var div = root_1(); var node = $.child(div); {var consequent = ($$anchor) => {var span = root(); var text = $.child(span, true); $.reset(span); $.template_effect(() => $.set_text(text, $.get(c))); $.append($$anchor, span);}; $.if(node, ($$render) => {if ($.get(c)) $$render(consequent);});} $.reset(div); $.action(div, ($$node) => foo?.($$node)); $.delegated('click', div, () => $.update(c)); $.append($$anchor, div);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

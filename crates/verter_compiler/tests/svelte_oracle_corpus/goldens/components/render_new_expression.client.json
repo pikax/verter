@@ -1,0 +1,59 @@
+{
+  "slug": "components/render_new_expression.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "render_new_expression",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "push",
+    "comment",
+    "first_child",
+    "snippet",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "first_child",
+    "pop",
+    "push",
+    "snippet"
+  ],
+  "helperCounts": {
+    "push": 1,
+    "comment": 1,
+    "first_child": 1,
+    "snippet": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function render_new_expression($$anchor, $$props) {$.push($$props, true); let __r = 0; var fragment = $.comment(); var node = $.first_child(fragment); $.snippet(node, () => new Date()); $.append($$anchor, fragment); $.pop();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "slug": "type-spread-lit-cls-q-slot-ext-plain-n",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "type_spread_lit_cls_q_slot_ext_plain_n",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "slot",
+    "attribute_effect",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "comment",
+    "first_child",
+    "from_html",
+    "slot"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 1,
+    "first_child": 1,
+    "slot": 1,
+    "attribute_effect": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); export default function type_spread_lit_cls_q_slot_ext_plain_n($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); $.slot(node, $$props, 'default', {}, ($$anchor) => {var div = root(); $.attribute_effect(div, () => ({...$$props.rest})); $.append($$anchor, div);}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) p {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

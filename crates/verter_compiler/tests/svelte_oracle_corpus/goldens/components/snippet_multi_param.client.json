@@ -1,0 +1,84 @@
+{
+  "slug": "components/snippet_multi_param.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "snippet_multi_param",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "noop",
+    "noop",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append",
+    "from_html",
+    "from_html",
+    "first_child",
+    "sibling",
+    "template_effect",
+    "set_text",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "first_child",
+    "from_html",
+    "noop",
+    "reset",
+    "set_text",
+    "sibling",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "noop": 2,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 2,
+    "set_text": 2,
+    "append": 2,
+    "from_html": 2,
+    "first_child": 1,
+    "sibling": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<span> </span>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<!> ",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; const pair = ($$anchor, a = $.noop, b = $.noop) => {var span = root(); var text = $.child(span); $.reset(span); $.template_effect(() => $.set_text(text, `${a() ?? ''} ${b() ?? ''}`)); $.append($$anchor, span);}; var root = $.from_html(`<span> </span>`); var root_1 = $.from_html(`<!> `, 1); export default function snippet_multi_param($$anchor, $$props) {var fragment = root_1(); var node = $.first_child(fragment); pair(node, () => 1, () => 2); var text_1 = $.sibling(node); $.template_effect(() => $.set_text(text_1, ` ${$$props.p ?? ''}`)); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

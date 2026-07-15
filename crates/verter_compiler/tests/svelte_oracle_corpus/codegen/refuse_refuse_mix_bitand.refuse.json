@@ -1,0 +1,8 @@
+{
+  "slug": "refuse_refuse_mix_bitand",
+  "bucket": "refuse",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "officialRejected": true,
+  "officialErrorSummary": "Cannot mix BigInt and other types, use explicit conversions"
+}

@@ -5,7 +5,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, DiagnosticTag, Severity};
 use crate::rules::{FileContext, LintRule, RuleCategory};
-use verter_analysis::{match_selector, MatchResult};
+use verter_semantic::analysis::{match_selector, MatchResult};
 
 pub struct UnusedCssSelector;
 
@@ -90,8 +90,10 @@ mod tests {
 
     use crate::rules::FileContext;
 
-    use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
-    use verter_analysis::{style, ElementNamespace, StyleBlockAnalysis, TemplateAttribute};
+    use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
+    use verter_semantic::analysis::{
+        style, ElementNamespace, StyleBlockAnalysis, TemplateAttribute,
+    };
     use verter_span::Span;
 
     fn make_element(tag: &str, classes: &[&str], id: Option<&str>) -> TemplateElement {

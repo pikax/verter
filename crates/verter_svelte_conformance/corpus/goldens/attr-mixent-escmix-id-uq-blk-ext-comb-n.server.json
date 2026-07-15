@@ -1,0 +1,32 @@
+{
+  "slug": "attr-mixent-escmix-id-uq-blk-ext-comb-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_mixent_escmix_id_uq_blk_ext_comb_n",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) .wrap [data-x=\"\\7a \\z\"] {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

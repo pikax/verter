@@ -1,0 +1,38 @@
+{
+  "slug": "type-lit-lit-id-uq-dynel-ext-plain-u",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "type_lit_lit_id_uq_dynel_ext_plain_u",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "element"
+  ],
+  "helperSet": [
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-o7qekl",
+    "code": "\n\tdiv.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

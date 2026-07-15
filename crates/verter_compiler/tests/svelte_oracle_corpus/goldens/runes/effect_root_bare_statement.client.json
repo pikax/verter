@@ -1,0 +1,85 @@
+{
+  "slug": "runes/effect_root_bare_statement.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "effect_root_bare_statement",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "effect_root",
+    "get",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "effect_root",
+    "from_html",
+    "get",
+    "reset",
+    "set_text",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "effect_root": 1,
+    "get": 2,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button> </button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function effect_root_bare_statement($$anchor) {let x = $.state(0); $.effect_root(() => {console.log($.get(x)); return () => {};}); var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(x))); $.delegated('click', button, () => $.update(x)); $.append($$anchor, button);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(clippy::large_enum_variant)]
 //! Benchmark: inline `ElementNode` vs `Box<ElementNode>` in the AST arena.
 //!
 //! Measures both AST construction and DFS traversal for a realistic template

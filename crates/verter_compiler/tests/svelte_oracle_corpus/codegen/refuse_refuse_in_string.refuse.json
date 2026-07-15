@@ -1,0 +1,8 @@
+{
+  "slug": "refuse_refuse_in_string",
+  "bucket": "refuse",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "officialRejected": true,
+  "officialErrorSummary": "Cannot use 'in' operator to search for 'x' in abc"
+}

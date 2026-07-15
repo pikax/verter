@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(clippy::match_like_matches_macro)]
 //! Matrix Comparator for Verter vs Vue output.
 //!
 //! Reads a capture_manifest.json, pairs Vue vs Verter modules by (mode, module_key),
@@ -442,7 +444,7 @@ fn main() {
                                 ssr_flag, prod_flag
                             ),
                             suspected_files: vec![
-                                "crates/verter_core/src/codegen/vue/template/element.rs"
+                                "crates/verter_compiler/src/codegen/vue/template/element.rs"
                                     .into(),
                             ],
                         });
@@ -474,10 +476,8 @@ fn main() {
                                 vue_e.source_vue_path, side
                             ),
                             suspected_files: if side == "verter" {
-                                vec![
-                                    "crates/verter_core/src/codegen/vue/template/element.rs"
-                                        .into(),
-                                ]
+                                vec!["crates/verter_compiler/src/codegen/vue/template/element.rs"
+                                    .into()]
                             } else {
                                 vec![]
                             },

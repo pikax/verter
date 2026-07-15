@@ -13,9 +13,9 @@ hotpath = ["dep:hotpath", "hotpath/hotpath"]
 
 [dependencies]
 verter_span = { path = "../verter_span" }
-hotpath = { version = "0.13", optional = true }
-verter_analysis = { path = "../verter_analysis" }
-verter_vfs = { path = "../verter_vfs" }
+hotpath = { version = "0.16", optional = true }
+verter_semantic = { path = "../verter_semantic" }
+verter_workspace = { path = "../verter_workspace" }
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true

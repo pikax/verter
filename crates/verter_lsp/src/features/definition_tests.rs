@@ -1,7 +1,7 @@
-use super::*;
+﻿use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
-use verter_analysis::types::ImportBindingKind;
-use verter_analysis::*;
+use verter_semantic::analysis::types::ImportBindingKind;
+use verter_semantic::analysis::*;
 
 fn make_analysis(
     bindings: Vec<AnalyzedBinding>,
@@ -338,6 +338,8 @@ fn test_go_to_macro_binding_from_template() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(macro_start, macro_end),
         }],
     );
@@ -486,7 +488,7 @@ fn test_go_to_component_definition_from_template() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
 
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
@@ -516,6 +518,8 @@ fn test_go_to_component_definition_from_template() {
                     has_dynamic_class: false,
                     dynamic_classes: vec![],
                     v_models: vec![],
+                    bindings: vec![],
+                    events: vec![],
                     span: verter_span::Span::new(0, 0),
                 }],
                 ..Default::default()
@@ -603,8 +607,8 @@ fn test_css_nav_template_class_to_style() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
 
     // Find the offsets for the style block content
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
@@ -705,8 +709,8 @@ fn test_css_nav_multi_class_attr() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (style_content_start, _) = style_block.content_range();
@@ -803,8 +807,8 @@ fn test_css_nav_template_id_to_style() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (style_content_start, _) = style_block.content_range();
@@ -891,8 +895,8 @@ fn test_css_nav_dynamic_class_skipped() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (scs, _) = style_block.content_range();
@@ -980,8 +984,8 @@ fn test_css_nav_style_to_template() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (style_content_start, _) = style_block.content_range();
@@ -1331,9 +1335,9 @@ fn test_path_alias_resolution_on_import_string() {
 
 #[test]
 fn test_dom_query_selector_navigates_to_element() {
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
+    use verter_semantic::analysis::types::*;
 
     let source = "<template>\n  <button class=\"btn\">Click</button>\n</template>\n\n<script setup>\ndocument.querySelector('.btn')\n</script>\n";
     let blocks = scan_sfc_blocks(source);
@@ -1439,9 +1443,9 @@ fn test_dom_query_selector_navigates_to_element() {
 
 #[test]
 fn test_dom_query_selector_no_match() {
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
+    use verter_semantic::analysis::types::*;
 
     let source = "<template>\n  <div>hello</div>\n</template>\n\n<script setup>\ndocument.querySelector('.missing')\n</script>\n";
     let blocks = scan_sfc_blocks(source);
@@ -1449,7 +1453,7 @@ fn test_dom_query_selector_no_match() {
 
     let parsed = parse_selector(".missing").unwrap();
 
-    // Use SFC-absolute offsets (spans are adjusted by verter_host during analysis)
+    // Use SFC-absolute offsets (spans are adjusted by verter_session during analysis)
     let qs_str_start = source.find("'.missing'").unwrap();
     let arg_start = qs_str_start + 1;
     let arg_end = arg_start + ".missing".len();
@@ -1519,9 +1523,9 @@ fn test_dom_query_selector_no_match() {
 
 #[test]
 fn test_dom_query_selector_falls_back_to_css() {
-    use verter_analysis::style::*;
-    use verter_analysis::template::*;
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::style::*;
+    use verter_semantic::analysis::template::*;
+    use verter_semantic::analysis::types::*;
 
     // Template has no .btn element, but style has .btn rule
     let source = "<template>\n  <div>hello</div>\n</template>\n\n<script setup>\ndocument.querySelector('.btn')\n</script>\n\n<style>\n.btn { color: red; }\n</style>\n";
@@ -1534,7 +1538,7 @@ fn test_dom_query_selector_falls_back_to_css() {
 
     let parsed = parse_selector(".btn").unwrap();
 
-    // Use SFC-absolute offsets (spans are adjusted by verter_host during analysis)
+    // Use SFC-absolute offsets (spans are adjusted by verter_session during analysis)
     let qs_str_start = source.find("'.btn'").unwrap();
     let arg_start = qs_str_start + 1;
     let arg_end = arg_start + ".btn".len();
@@ -1631,7 +1635,7 @@ fn test_path_alias_resolution_on_component_tag() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
 
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
@@ -1661,6 +1665,8 @@ fn test_path_alias_resolution_on_component_tag() {
                     has_dynamic_class: false,
                     dynamic_classes: vec![],
                     v_models: vec![],
+                    bindings: vec![],
+                    events: vec![],
                     span: verter_span::Span::new(0, 0),
                 }],
                 ..Default::default()
@@ -1818,7 +1824,7 @@ fn test_go_to_definition_event_handler_click() {
                     content_end: 0,
                     ..Default::default()
                 }],
-                event_handlers: vec![verter_analysis::template::TemplateEventHandler {
+                event_handlers: vec![verter_semantic::analysis::template::TemplateEventHandler {
                     event_name: "click".into(),
                     handler_binding: Some("handleClick".into()),
                     is_inline: false,
@@ -1935,7 +1941,7 @@ fn test_go_to_definition_inline_event_no_binding() {
                     content_end: 0,
                     ..Default::default()
                 }],
-                event_handlers: vec![verter_analysis::template::TemplateEventHandler {
+                event_handlers: vec![verter_semantic::analysis::template::TemplateEventHandler {
                     event_name: "click".into(),
                     handler_binding: None, // inline expression, no binding
                     is_inline: true,
@@ -1972,7 +1978,7 @@ fn test_go_to_definition_inline_event_no_binding() {
 
 #[test]
 fn test_go_to_definition_component_event_name_defers_to_server() {
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
 
     let source = "<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n\n<script setup>\nfunction handleCustom() {}\n</script>\n";
     let blocks = scan_sfc_blocks(source);
@@ -2089,6 +2095,8 @@ fn test_go_to_definition_dollar_props() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(define_offset as u32, (define_offset + 30) as u32),
         }])
         .into(),
@@ -2153,6 +2161,8 @@ fn test_go_to_definition_dollar_emit() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(define_offset as u32, (define_offset + 22) as u32),
         }])
         .into(),
@@ -2267,6 +2277,9 @@ fn definition_prop_field_type_based() {
                 tags: vec![],
                 resolution_source: TypeResolutionSource::Rust,
                 resolution_error: None,
+                payload: None,
+                type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             }],
             emit_fields: vec![],
             slot_fields: vec![],
@@ -2274,6 +2287,8 @@ fn definition_prop_field_type_based() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(
                 define_props_offset as u32,
                 (define_props_offset + 45) as u32,
@@ -2348,6 +2363,9 @@ fn definition_prop_field_runtime() {
                 tags: vec![],
                 resolution_source: TypeResolutionSource::Rust,
                 resolution_error: None,
+                payload: None,
+                type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             }],
             emit_fields: vec![],
             slot_fields: vec![],
@@ -2355,6 +2373,8 @@ fn definition_prop_field_runtime() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(
                 define_props_offset as u32,
                 (define_props_offset + 28) as u32,
@@ -2435,6 +2455,9 @@ fn definition_binding_takes_precedence_over_prop_field() {
                 tags: vec![],
                 resolution_source: TypeResolutionSource::Rust,
                 resolution_error: None,
+                payload: None,
+                type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             }],
             emit_fields: vec![],
             slot_fields: vec![],
@@ -2442,6 +2465,8 @@ fn definition_binding_takes_precedence_over_prop_field() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(90, 140),
         }],
     );
@@ -2554,7 +2579,7 @@ fn test_vue_default_import_retries_with_default_binding() {
 
 /// @ai-generated - Named import from non-.vue file still returns None without resolver
 #[test]
-fn test_named_import_non_vue_no_default_fallback() {
+fn test_named_import_non_carrier_no_default_fallback() {
     let source = "<script setup>\nimport { helper } from './utils'\n</script>\n";
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
@@ -2604,7 +2629,7 @@ fn test_component_tag_default_fallback() {
     let blocks = scan_sfc_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
 
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
@@ -2634,6 +2659,8 @@ fn test_component_tag_default_fallback() {
                     has_dynamic_class: false,
                     dynamic_classes: vec![],
                     v_models: vec![],
+                    bindings: vec![],
+                    events: vec![],
                     span: verter_span::Span::new(0, 0),
                 }],
                 ..Default::default()

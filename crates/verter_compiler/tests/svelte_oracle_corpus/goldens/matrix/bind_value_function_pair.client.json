@@ -1,0 +1,67 @@
+{
+  "slug": "matrix/bind_value_function_pair.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_value_function_pair",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "remove_input_defaults",
+    "bind_value",
+    "get",
+    "set",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_value",
+    "from_html",
+    "get",
+    "remove_input_defaults",
+    "set",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "remove_input_defaults": 1,
+    "bind_value": 1,
+    "get": 1,
+    "set": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/>`); export default function bind_value_function_pair($$anchor) {let value = $.state(\"\"); var input = root(); $.remove_input_defaults(input); $.bind_value(input, () => $.get(value), (next) => $.set(value, next, true)); $.append($$anchor, input);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

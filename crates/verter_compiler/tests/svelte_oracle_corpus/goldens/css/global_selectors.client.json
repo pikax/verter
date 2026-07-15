@@ -1,0 +1,57 @@
+{
+  "slug": "css/global_selectors.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "global_selectors",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"card svelte-<scoped>\"><span class=\"x\">a</span></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"card svelte-<scoped>\"><span class=\"x\">a</span></div>`); export default function global_selectors($$anchor) {var div = root(); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-863rb6",
+    "code": "\n\t.card.svelte-<scoped> {\n\t\tcolor: blue;\n\t}\n\n\t.x {\n\t\tcolor: green;\n\t}\n\n\t/* :global {*/\n\t\t.y {\n\t\t\tcolor: red;\n\t\t}\n\t/*}*/\n"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "slug": "cls-hex-eschar-cls-q-blk-ext-nest-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_hex_eschar_cls_q_blk_ext_nest_m",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "append",
+    "if",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "first_child",
+    "from_html",
+    "if"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 1,
+    "first_child": 1,
+    "append": 2,
+    "if": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"a a&amp;b svelte-<scoped>\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"a a&amp;b svelte-<scoped>\">x</div>`); export default function cls_hex_eschar_cls_q_blk_ext_nest_m($$anchor) {let open = true; var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var div = root(); $.append($$anchor, div);}; $.if(node, ($$render) => {if (open) $$render(consequent);});} $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-y9wazd",
+    "code": "\n\t.a\\&b.svelte-<scoped> {\n\t\tcolor: red;\n\n\t\t&:hover {\n\t\t\tcolor: blue;\n\t\t}\n\t}\n"
+  }
+}

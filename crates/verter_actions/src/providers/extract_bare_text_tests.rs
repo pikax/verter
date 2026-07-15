@@ -1,8 +1,8 @@
-use super::*;
+﻿use super::*;
 use crate::provider::ActionContext;
-use verter_analysis::template::*;
-use verter_analysis::types::*;
 use verter_diagnostics::{DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity};
+use verter_semantic::analysis::template::*;
+use verter_semantic::analysis::types::*;
 
 fn make_diag(start: u32, end: u32) -> LintDiagnostic {
     LintDiagnostic {
@@ -993,6 +993,9 @@ fn make_macro(
                 tags: vec![],
                 resolution_source: TypeResolutionSource::Rust,
                 resolution_error: None,
+                payload: None,
+                type_expr_scope: None,
+                declared_in_macro_type_arg: false,
             })
             .collect(),
         emit_fields: vec![],
@@ -1001,6 +1004,8 @@ fn make_macro(
         default_values: Vec::new(),
         expose_fields: vec![],
         resolved_local_types: Vec::new(),
+        parsed_type_argument: None,
+        parsed_type_argument_scope: None,
         span,
     }
 }
@@ -1029,6 +1034,7 @@ fn make_props_binding(name: &str, kind: AnalyzedBindingKind) -> AnalyzedBinding 
             callee: "defineProps".to_string(),
             callee_import_source: None,
             vue_api: Some(VueApiClassification::DefineProps),
+            async_component_source: None,
         }),
         span: Span::new(0, 0),
         used_in_script: false,

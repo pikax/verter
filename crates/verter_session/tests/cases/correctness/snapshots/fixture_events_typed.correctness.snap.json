@@ -1,0 +1,18 @@
+{
+  "component_name": "C",
+  "props": [],
+  "events": [
+    {
+      "name": "click",
+      "params_signature": "[evt: string]"
+    }
+  ],
+  "slots": [],
+  "models": [],
+  "exposed": [],
+  "fallthrough": null,
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}

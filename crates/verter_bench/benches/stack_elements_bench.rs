@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(clippy::type_complexity)]
 //! Benchmark: Vec<StackElement> vs u32 depth counter for element nesting tracking.
 //!
 //! Measures the overhead of maintaining a full element stack (push/pop/peek with

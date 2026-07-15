@@ -1,0 +1,64 @@
+{
+  "slug": "lifecycle/transition_legacy_event_order.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "transition_legacy_event_order",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "transition",
+    "event",
+    "update",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "event",
+    "from_html",
+    "state",
+    "transition",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "transition": 1,
+    "event": 1,
+    "update": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); export default function transition_legacy_event_order($$anchor) {let c = $.state(0); var div = root(); $.transition(3, div, () => fade); $.event('click', div, () => $.update(c)); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

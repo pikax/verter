@@ -1,0 +1,92 @@
+{
+  "slug": "runes/effect_pre_toplevel.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "effect_pre_toplevel",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "state",
+    "user_pre_effect",
+    "get",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "pop",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "from_html",
+    "get",
+    "pop",
+    "push",
+    "reset",
+    "set_text",
+    "state",
+    "template_effect",
+    "update",
+    "user_pre_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "state": 1,
+    "user_pre_effect": 1,
+    "get": 2,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "pop": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button> </button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function effect_pre_toplevel($$anchor, $$props) {$.push($$props, true); let c = $.state(0); $.user_pre_effect(() => {console.log($.get(c));}); var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(c))); $.delegated('click', button, () => $.update(c)); $.append($$anchor, button); $.pop();} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

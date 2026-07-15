@@ -1,0 +1,70 @@
+{
+  "slug": "lifecycle/transition_parent_legacy_event_child.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "transition_parent_legacy_event_child",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "child",
+    "reset",
+    "event",
+    "update",
+    "transition",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "event",
+    "from_html",
+    "reset",
+    "state",
+    "transition",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "child": 1,
+    "reset": 1,
+    "event": 1,
+    "update": 1,
+    "transition": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div><span>x</span></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div><span>x</span></div>`); export default function transition_parent_legacy_event_child($$anchor) {let c = $.state(0); var div = root(); var span = $.child(div); $.reset(div); $.event('click', span, () => $.update(c)); $.transition(3, div, () => fade); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

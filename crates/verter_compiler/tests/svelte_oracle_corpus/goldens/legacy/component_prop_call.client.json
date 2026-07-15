@@ -1,0 +1,77 @@
+{
+  "slug": "legacy/component_prop_call.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "component_prop_call",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "push",
+    "prop",
+    "init",
+    "derived_safe_equal",
+    "deep_read_state",
+    "untrack",
+    "get",
+    "pop"
+  ],
+  "helperSet": [
+    "deep_read_state",
+    "derived_safe_equal",
+    "get",
+    "init",
+    "pop",
+    "prop",
+    "push",
+    "untrack"
+  ],
+  "helperCounts": {
+    "push": 1,
+    "prop": 1,
+    "init": 1,
+    "derived_safe_equal": 1,
+    "deep_read_state": 1,
+    "untrack": 1,
+    "get": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; export default function component_prop_call($$anchor, $$props) {$.push($$props, false); let obj = $.prop($$props, 'obj', 8); $.init(); {let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))); Child($$anchor, {get foo() {return $.get($0);}});} $.pop();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

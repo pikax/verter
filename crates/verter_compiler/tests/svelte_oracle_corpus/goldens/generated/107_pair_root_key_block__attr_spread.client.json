@@ -1,0 +1,87 @@
+{
+  "slug": "generated/107_pair_root_key_block__attr_spread.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "_07_pair_root_key_block__attr_spread",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "key",
+    "attribute_effect",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "comment",
+    "first_child",
+    "from_html",
+    "key"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 1,
+    "first_child": 1,
+    "key": 1,
+    "attribute_effect": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p>hi</p>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  },
+  "events": [],
+  "nonStaticProperties": [],
+  "attrParts": [],
+  "directiveExprs": [],
+  "decodedText": [],
+  "nodePaths": {
+    "regions": [
+      {
+        "paths": [
+          {
+            "base": "fragment",
+            "steps": [
+              "first_child"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "dynamicSlots": {
+    "spread": 1,
+    "block": 1
+  }
+}

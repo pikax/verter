@@ -1,0 +1,88 @@
+{
+  "slug": "attributes/reactive_multi_directive.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "reactive_multi_directive",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "first_child",
+    "sibling",
+    "template_effect",
+    "set_class",
+    "get",
+    "set_style",
+    "get",
+    "delegated",
+    "set",
+    "get",
+    "set",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "set",
+    "set_class",
+    "set_style",
+    "sibling",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "first_child": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_class": 1,
+    "get": 3,
+    "set_style": 1,
+    "delegated": 1,
+    "set": 2,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div> <button>go</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div> <button>go</button>`, 1); export default function reactive_multi_directive($$anchor) {let x = $.state(false); let c = $.state('red'); var fragment = root(); var div = $.first_child(fragment); let classes; let styles; var button = $.sibling(div, 2); $.template_effect(() => {classes = $.set_class(div, 1, '', null, classes, {a: $.get(x)}); styles = $.set_style(div, '', styles, {color: $.get(c)});}); $.delegated('click', button, () => {$.set(x, !$.get(x)); $.set(c, 'blue');}); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

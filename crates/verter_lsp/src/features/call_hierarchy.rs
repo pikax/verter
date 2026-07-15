@@ -1,7 +1,7 @@
 // Call hierarchy: Vue-specific component and composable hierarchy.
 
 use tower_lsp_server::ls_types::*;
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
@@ -29,9 +29,11 @@ pub fn prepare_call_hierarchy(
             let start = line_index.offset_to_position(binding.span.start)?;
             let end = line_index.offset_to_position(binding.span.end)?;
             let kind = match &binding.kind {
-                verter_analysis::AnalyzedBindingKind::Function
-                | verter_analysis::AnalyzedBindingKind::AsyncFunction => SymbolKind::FUNCTION,
-                verter_analysis::AnalyzedBindingKind::Class => SymbolKind::CLASS,
+                verter_semantic::analysis::AnalyzedBindingKind::Function
+                | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+                    SymbolKind::FUNCTION
+                }
+                verter_semantic::analysis::AnalyzedBindingKind::Class => SymbolKind::CLASS,
                 _ => SymbolKind::VARIABLE,
             };
 
@@ -218,7 +220,7 @@ pub fn outgoing_calls(
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
-    use verter_analysis::*;
+    use verter_semantic::analysis::*;
 
     #[test]
     fn test_prepare_on_binding() {
@@ -270,6 +272,8 @@ mod tests {
                         has_dynamic_class: false,
                         dynamic_classes: vec![],
                         v_models: vec![],
+                        bindings: vec![],
+                        events: vec![],
                         span: verter_span::Span::new(60, 67),
                     }],
                     ..Default::default()

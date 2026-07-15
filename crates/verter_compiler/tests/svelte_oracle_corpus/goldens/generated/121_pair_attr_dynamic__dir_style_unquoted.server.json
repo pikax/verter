@@ -1,0 +1,40 @@
+{
+  "slug": "generated/121_pair_attr_dynamic__dir_style_unquoted.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_21_pair_attr_dynamic__dir_style_unquoted",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "attr_style"
+  ],
+  "helperSet": [
+    "attr",
+    "attr_style"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "attr_style": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

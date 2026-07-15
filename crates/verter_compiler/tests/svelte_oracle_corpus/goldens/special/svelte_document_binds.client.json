@@ -1,0 +1,69 @@
+{
+  "slug": "special/svelte_document_binds.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_document_binds",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "state",
+    "state",
+    "state",
+    "state",
+    "event",
+    "document",
+    "update",
+    "bind_active_element",
+    "set",
+    "bind_property",
+    "document",
+    "set",
+    "bind_property",
+    "document",
+    "set"
+  ],
+  "helperSet": [
+    "bind_active_element",
+    "bind_property",
+    "document",
+    "event",
+    "set",
+    "state",
+    "update"
+  ],
+  "helperCounts": {
+    "state": 4,
+    "event": 1,
+    "document": 3,
+    "update": 1,
+    "bind_active_element": 1,
+    "set": 3,
+    "bind_property": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_document_binds($$anchor) {let n = $.state(0); let ae = $.state(0); let fe = $.state(0); let vs = $.state(0); $.event('visibilitychange', $.document, () => $.update(n)); $.bind_active_element(($$value) => $.set(ae, $$value, true)); $.bind_property('fullscreenElement', 'fullscreenchange', $.document, ($$value) => $.set(fe, $$value, true)); $.bind_property('visibilityState', 'visibilitychange', $.document, ($$value) => $.set(vs, $$value, true));}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

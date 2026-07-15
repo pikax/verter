@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(clippy::cloned_ref_to_slice_refs)]
 //! Self-contained component-meta hotpath profiler.
 //!
 //! Generates a synthetic Vue project with local node_modules packages that
@@ -28,9 +30,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use verter_analysis::AnalyzedMacroKind;
-use verter_host::{FileAnalysisSnapshot, HostConfig, VerterHost};
-use verter_vfs::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
+use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_session::{FileAnalysisSnapshot, HostConfig, VerterHost};
+use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BootstrapMode {
@@ -421,13 +423,13 @@ fn make_host(project_root: &Path) -> io::Result<VerterHost> {
     ws.set_project_graph(graph_result.graph);
     let host = VerterHost::new(
         HostConfig {
-            analysis_level: verter_host::AnalysisLevel::Full,
+            analysis_level: verter_session::AnalysisLevel::Full,
             ..HostConfig::default()
         },
         Arc::new(ws),
     );
     host.configure_projects(vec![
-        verter_analysis::project_resolver::IdeProjectConfig::new(
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
             project_root_id.clone(),
             project_root_id,
             Some(tsconfig_id),
@@ -497,7 +499,7 @@ fn collect_snapshot_counts(snapshot: &FileAnalysisSnapshot) -> SnapshotCounts {
 }
 
 fn collect_evaluated_counts(
-    evaluated: &verter_analysis::type_expand::ExpandedComponentTypes,
+    evaluated: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
 ) -> EvaluatedCounts {
     let mut prop_names = BTreeSet::new();
     for field in &evaluated.props {
@@ -522,7 +524,8 @@ fn run_component_meta_request(
 
     let (resolve_imported_elapsed, resolved_imported_types) = if include_resolve_imported {
         let resolve_started = Instant::now();
-        let resolved = host.resolve_component_meta(target_id, verter_host::ResolverMode::Expanded);
+        let resolved =
+            host.resolve_component_meta(target_id, verter_session::ProjectionMode::Expanded);
         let resolved_count = resolved
             .map(|state| state.resolved_macros.len())
             .unwrap_or(0);

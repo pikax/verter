@@ -6,7 +6,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::TemplateAnalysisSnapshot;
+use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
 
 pub struct NoMutatingProps;
 
@@ -119,7 +119,7 @@ impl LintRule for NoMutatingProps {
 mod tests {
     use super::*;
 
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn run(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

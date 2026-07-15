@@ -1,0 +1,82 @@
+{
+  "slug": "generated/086_pair_root_mathml__attr_spread.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "_86_pair_root_mathml__attr_spread",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_mathml",
+    "child",
+    "attribute_effect",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "child",
+    "from_mathml",
+    "reset"
+  ],
+  "helperCounts": {
+    "from_mathml": 1,
+    "child": 1,
+    "attribute_effect": 1,
+    "reset": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_mathml",
+      "html": "<math><mrow>x</mrow></math>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  },
+  "events": [],
+  "nonStaticProperties": [],
+  "attrParts": [],
+  "directiveExprs": [],
+  "decodedText": [],
+  "nodePaths": {
+    "regions": [
+      {
+        "paths": [
+          {
+            "base": "fragment",
+            "steps": [
+              "child"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "dynamicSlots": {
+    "spread": 1
+  }
+}

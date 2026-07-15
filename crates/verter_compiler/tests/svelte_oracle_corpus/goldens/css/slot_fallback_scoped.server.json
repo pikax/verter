@@ -1,0 +1,39 @@
+{
+  "slug": "css/slot_fallback_scoped.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_fallback_scoped",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot"
+  ],
+  "helperSet": [
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-1og8gv8",
+    "code": "\n\t.fb.svelte-<scoped> { color: red; }\n\t/* (unused) .absent { color: blue; }*/\n"
+  }
+}

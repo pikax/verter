@@ -1,0 +1,39 @@
+{
+  "slug": "type-lit-lit-attr-bool-comp-ext-comb-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "type_lit_lit_attr_bool_comp_ext_comb_m",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-19z09s9",
+    "code": "\n\t.wrap.svelte-<scoped> div:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

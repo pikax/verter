@@ -1,0 +1,32 @@
+{
+  "slug": "css/combinators_attributes.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "combinators_attributes",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-7783d9",
+    "code": "\n\t.list.svelte-<scoped> > li[data-kind=\"a\" i]:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n\n\tp[title^=\"no\"].svelte-<scoped> {\n\t\tcolor: blue;\n\t}\n"
+  }
+}

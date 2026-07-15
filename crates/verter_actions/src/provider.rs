@@ -1,9 +1,9 @@
 //! Action provider trait and context.
 
-use verter_analysis::template::TemplateAnalysisSnapshot;
-use verter_analysis::types::ScriptAnalysisSnapshot;
-use verter_analysis::StyleBlockAnalysis;
 use verter_diagnostics::{DiagnosticSet, LintDiagnostic};
+use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_semantic::analysis::StyleBlockAnalysis;
 
 use crate::types::CodeAction;
 

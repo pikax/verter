@@ -1,31 +1,81 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "xtask"]
 resolver = "2"
 
 [workspace.package]
 version = "0.0.1-beta.1"
 edition = "2021"
+# Floor pinned by transitive deps in `[workspace.dependencies]`:
+# `oxc_*` 0.126 requires rustc 1.92. `rust-toolchain.toml` selects
+# the stable channel, which is currently 1.92.
+rust-version = "1.92"
 license = "MIT"
 authors = ["pikax"]
 repository = "https://github.com/pikax/verter"
 homepage = "https://verterjs.dev/"
 
 [workspace.dependencies]
-oxc_allocator = "0.117.0"
-oxc_ast = "0.117.0"
-oxc_parser = "0.117.0"
-oxc_span = "0.117.0"
-rustc-hash = "2.1"
+blake3 = "1.5"
+oxc_allocator = "0.126.0"
+oxc_ast = "0.126.0"
+oxc_ast_visit = "0.126.0"
+oxc_parser = "0.126.0"
+oxc_semantic = "0.126.0"
+oxc_span = "0.126.0"
+oxc_syntax = "0.126.0"
+rayon = "1.12"
+rustc-hash = "2.1.2"
 self_cell = "1.2.2"
-serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
-sha2 = "0.10"
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+serde_json = "1.0.150"
+serial_test = "3"
+sha2 = "0.11"
+syn = { version = "2.0", features = ["full", "visit"] }
+quote = "1.0"
+proc-macro2 = "1.0"
 lightningcss = { version = "1.0.0-alpha.71", features = ["visitor"] }
+verter_macro_dto = { path = "crates/verter_macro_dto" }
+verter_no_typeexpr = { path = "crates/verter_no_typeexpr" }
+verter_no_typeexpr_derive = { path = "crates/verter_no_typeexpr_derive" }
+verter_no_storedspan = { path = "crates/verter_no_storedspan" }
+verter_no_storedspan_derive = { path = "crates/verter_no_storedspan_derive" }
+verter_session_query = { path = "crates/verter_session_query" }
+verter_type_expr = { path = "crates/verter_type_expr" }
+verter_type_expr_oxc = { path = "crates/verter_type_expr_oxc" }
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 
+# Debuggable release profile. Same optimisation level as release but
+# with line-table debug info so LLDB can resolve frames in attached
+# stacks. Use via:
+#   cargo build --profile=release-dbg --example audit_real_component_meta -p verter_bench
+# Output lands in target/release-dbg/. Used by the `tools/debug/`
+# helpers when the bench needs to be inspected with a debugger
+# attaching to a running process. Keeps the regular `release` profile
+# small and frame-pointer-omitted for production benchmarks.
+[profile.release-dbg]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
+
 [profile.dev]
 opt-level = 0
+# Dev/test builds emit minimal debug info. `line-tables-only` keeps
+# panic/backtrace file:line (test failures stay debuggable) while dropping
+# the variable/type debug info that can dominate compile + link time.
+# Measured: large win on Windows/MSVC (recompiling the verter_session rlib
+# ~76s -> ~5s; rlib 433MB -> 72MB; test-binary relink ~4s -> ~2s — MSVC PDB
+# generation is the bottleneck there) and ~neutral on Linux (DWARF is
+# cheaper). Kept because it is free on Linux/macOS and keeps backtraces.
+# For an interactive debugger that needs locals, override per run with
+# `CARGO_PROFILE_DEV_DEBUG=2 cargo ...`.
+debug = "line-tables-only"
+
+# Strip debug info from non-workspace dependencies entirely. Our own crates
+# keep `line-tables-only` (above) for backtraces; third-party deps do not need
+# even line tables, which shrinks dependency rlibs and cuts link input size.
+[profile.dev.package."*"]
+debug = false

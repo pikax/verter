@@ -1,0 +1,6 @@
+{
+  "disposition": "rejected",
+  "official_code": "attribute_duplicate",
+  "core": false,
+  "axis": "dup_timing"
+}

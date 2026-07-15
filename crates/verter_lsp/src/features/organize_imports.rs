@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use tower_lsp_server::ls_types::*;
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 
@@ -42,8 +42,10 @@ pub fn organize_imports_actions(
     //    If a binding's initializer references an import, that import is used.
     for binding in &analysis.bindings {
         // Bindings that use an imported value as initializer
-        if let Some(verter_analysis::BindingInitializer::FunctionCall { ref callee, .. }) =
-            binding.initializer
+        if let Some(verter_semantic::analysis::BindingInitializer::FunctionCall {
+            ref callee,
+            ..
+        }) = binding.initializer
         {
             used_names.insert(callee);
         }
@@ -243,9 +245,9 @@ pub fn organize_imports_actions(
 mod tests {
     use super::*;
     use crate::documents::line_index::LineIndex;
-    use verter_analysis::types::ImportBindingKind;
-    use verter_analysis::types::VueApiCallSite;
-    use verter_analysis::*;
+    use verter_semantic::analysis::types::ImportBindingKind;
+    use verter_semantic::analysis::types::VueApiCallSite;
+    use verter_semantic::analysis::*;
 
     fn make_analysis(
         imports: Vec<AnalyzedImport>,

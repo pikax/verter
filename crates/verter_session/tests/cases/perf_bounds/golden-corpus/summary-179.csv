@@ -1,0 +1,24 @@
+# Tier 0 Step 0.1 corpus snapshot (D115 column slot reserved).
+# partial: 17 of 179 fixtures completed in 10-min hard timeout.
+# Per orchestrator directive: timeout = exit code 124 = continue with partial data.
+# Pass coverage: fresh-cold=present, cold-seq=absent.
+# Reason: fresh-cold pass alone exceeded the budget; cold-seq did not start.
+# bridge_max_depth_observed column reserved (D115). Bridge BFS ships in Tier 1B.
+pass,target,error,elapsed_ms,total_ms,capture_inputs_ms,store_read_ms,direct_import_proof_ms,imported_root_proof_ms,solver_ms,materialize_ms,serialize_ms,vfs_reads,vfs_disk,vfs_snapshot,vfs_overlay,vfs_missing,indexed_ready_builds,instantiations,projections,materializations,substitutions,alias_resolutions,conditional_decisions,cold_builds,warm_hits,joined_waits,inflight_aborted_retries,store_view_hits,store_view_misses,imported_dependency_entries,imported_dependency_kb,prepared_type_decls,prepared_value_decls,rss_delta_kb,derivation_nodes,derivation_edges,edges_truncated,has_orphan_edges,bridge_max_depth_observed
+fresh-cold,Accordion,,571.363,571.363,6.623,6.578,0.020,79.314,188.605,373.655,0.000,124,0,0,0,0,9,79,113,0,217,0,24,218,134,0,0,0,1,9,1188,1424,1149,0,237,474,0,false,0
+fresh-cold,Alert,,817.850,817.850,3.230,3.193,0.015,125.436,55.774,747.008,0.000,297,0,0,0,0,16,87,237,0,164,0,6,415,244,0,0,0,1,16,309,358,240,0,276,544,0,false,0
+fresh-cold,App,,224.372,224.372,3.236,3.211,0.013,91.782,92.074,127.340,0.000,39,0,0,0,0,5,15,2,0,21,0,0,29,5,0,0,0,1,5,200,1242,1052,0,32,41,0,false,0
+fresh-cold,AuthForm,,1388.031,1388.031,4.091,4.008,0.025,209.954,126.263,1254.153,0.000,325,0,0,0,0,31,195,233,0,427,0,70,732,662,0,0,0,1,31,548,1657,1373,0,501,972,0,false,0
+fresh-cold,Avatar,,265.172,265.172,3.845,3.813,0.014,80.444,39.779,219.428,0.000,108,0,0,0,0,7,39,82,0,89,0,4,117,31,0,0,0,1,7,34,235,114,0,133,239,0,false,0
+fresh-cold,AvatarGroup,,222.783,222.783,2.787,2.763,0.010,53.888,16.123,202.073,0.000,98,0,0,0,0,5,47,62,0,104,0,4,127,61,0,0,0,1,5,196,323,189,0,148,247,0,false,0
+fresh-cold,Badge,,288.245,288.245,2.969,2.938,0.015,73.241,31.192,252.322,0.000,116,0,0,0,0,12,56,138,0,110,0,4,226,69,0,0,0,1,12,243,341,215,0,193,337,0,false,0
+fresh-cold,Banner,,793.156,793.156,3.386,3.345,0.015,134.117,51.487,723.738,0.000,305,0,0,0,0,17,113,151,0,157,0,7,365,177,0,0,0,1,17,472,520,277,0,280,471,0,false,0
+fresh-cold,BlogPost,,796.724,796.724,3.482,3.438,0.015,131.983,52.366,725.548,0.000,299,0,0,0,0,16,107,199,0,156,0,7,340,249,0,0,0,1,16,450,604,294,0,277,516,0,false,0
+fresh-cold,BlogPosts,,741.710,741.710,3.717,3.694,0.012,86.308,52.062,683.690,0.000,286,0,0,0,0,15,106,191,0,186,0,10,357,212,0,0,0,1,15,443,508,257,0,332,569,0,false,0
+fresh-cold,Breadcrumb,,338.270,338.270,3.362,3.318,0.018,67.864,62.675,262.039,0.000,115,0,0,0,0,9,83,137,0,228,0,27,231,137,0,0,0,1,9,227,360,198,0,257,518,0,false,0
+fresh-cold,Button,,299.419,299.419,4.087,4.044,0.017,54.716,53.911,238.996,0.000,115,0,0,0,0,9,49,174,0,108,0,4,253,105,0,0,0,1,9,270,594,268,0,192,364,0,false,0
+fresh-cold,Calendar,,920.833,920.833,8.005,7.943,0.021,196.252,213.348,695.114,0.000,153,0,0,0,0,12,96,215,0,152,0,26,321,473,0,0,0,1,12,307,1444,1223,0,277,518,0,false,0
+fresh-cold,Card,,236.607,236.607,3.210,3.191,0.008,50.147,13.231,218.196,0.000,95,0,0,0,0,5,47,101,0,104,0,4,139,97,0,0,0,1,5,195,323,185,0,154,290,0,false,0
+fresh-cold,Carousel,,726.860,726.860,16.230,16.139,0.032,150.930,135.851,571.124,0.000,195,0,0,0,0,19,126,175,0,152,0,4,273,95,0,0,0,1,19,282,437,265,0,312,496,0,false,0
+fresh-cold,ChangelogVersion,,887.834,887.834,6.711,6.617,0.036,152.687,64.168,810.962,0.000,299,0,0,0,0,16,107,207,0,156,0,7,328,190,0,0,0,1,16,447,604,292,0,273,527,0,false,0
+fresh-cold,ChangelogVersions,,1046.758,1046.758,7.174,7.137,0.017,268.843,196.051,840.689,0.000,340,0,0,0,0,15,110,232,0,187,0,10,336,182,0,0,0,1,15,443,756,535,0,316,609,0,false,0

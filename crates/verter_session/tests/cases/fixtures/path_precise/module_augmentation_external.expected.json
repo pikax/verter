@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "archetype": "module_augmentation_external",
+  "augmentation_target_kind": "ExternalSpecifier",
+  "augmentation_target_payload": "vue",
+  "augmented_member": { "name": "foo", "type": "number" },
+  "consumer_query": "keyof ComponentOptions",
+  "fact_dep_signature_observed_by_consumer": [
+    "Export(\"ComponentOptions\", Type)",
+    "MemberShape(ComponentOptions, Type)",
+    "ModuleAugmentationIndexShape(target=ExternalSpecifier(\"vue\"))",
+    "EffectiveExportSet(specifier=\"vue\")"
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "edit module_augmentation_external.ts (the augmenter)",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R29: augmenter is in the AugmenterSet for ExternalSpecifier(\"vue\"); fingerprint changes"
+    },
+    {
+      "edit": "add an unrelated augmenter for 'pinia'",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R29: ModuleAugmentationIndexShape for ExternalSpecifier(\"vue\") is unchanged"
+    }
+  ]
+}

@@ -1,2 +1,23 @@
+[alias]
+xtask = "run --package xtask --"
+
 [target.wasm32-unknown-unknown]
-rustflags = ["--cfg", "getrandom_wasm_js"]
+# getrandom 0.3.4+ accepts the `getrandom_backend="wasm_js"` cfg form
+# for selecting the wasm32-unknown-unknown random backend. The
+# previous `getrandom_wasm_js` cfg was specific to a much older
+# getrandom 0.3 release. Lightningcss → ahash → getrandom 0.3
+# requires this for wasm builds.
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
+
+# NOTE: `TS_RS_EXPORT_DIR` is deliberately NOT set here. The audit DTOs
+# carry `#[ts(export_to = "audit.generated.ts")]` (no `export` keyword),
+# so a normal `cargo test` does NOT auto-write any tracked file. The
+# committed `packages/types/audit.generated.ts` is the single source of
+# truth, regenerated explicitly only via
+# `crates/verter_session/tests/g_misc1/ts_bindings.rs` under
+# `VERTER_UPDATE_TS_BINDINGS=1` (which writes into a tempdir then
+# atomic-renames over the tracked file). Re-adding a global
+# `TS_RS_EXPORT_DIR = packages/types` here would resurrect the
+# concurrent-truncation bug that tore the bindings file during
+# `cargo test --workspace`; the guard test
+# `audit_types_have_no_ts_export_auto_export` enforces this.

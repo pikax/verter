@@ -134,6 +134,43 @@ real_provider_test!(
         let text = hover.unwrap();
         assert!(text.contains("inputVal"), "hover should mention inputVal, got: {text}");
 
+        // --- named v-model ARG: v-model:show on the `show` arg must resolve the
+        // child component's `show` model prop type (boolean) via the mapped
+        // prop-name codegen. Pre-fix the arg had no source→TSX mapping → no hover. ---
+        //
+        // LOAD-BEARING: the source-owned `v_model_hover` ALWAYS emits "show"
+        // regardless of whether the codegen `InsertMapped` is live, so a bare
+        // `contains("show")` would pass even if the mapped prop-name piece were
+        // reverted. The mapping is what lets the TypeProvider resolve the child's
+        // `$props['show']` (`defineModel<boolean>("show")` in ModelNamed.vue);
+        // `merge_hover(Some, Some)` then appends TSGO's type block, so when the
+        // mapping is live the hover text MUST contain the resolved `boolean` type.
+        // Assert BOTH: the prop name AND the resolved child type — `boolean` proves
+        // the load-bearing mapping, not just the source-owned name.
+        let delta = "v-model:".len();
+        let pos = session.find_position(&uri, r#"v-model:show="showFlag""#, delta);
+        let hover = session.hover_text(&uri, pos).await;
+        assert!(hover.is_some(), "hover on v-model:show arg should return a result");
+        let text = hover.unwrap();
+        assert!(
+            text.contains("show"),
+            "hover on v-model:show arg should mention the `show` model prop, got: {text}"
+        );
+        assert!(
+            text.contains("boolean"),
+            "hover on v-model:show arg MUST resolve the child `defineModel<boolean>(\"show\")` \
+             type via the mapped prop-name codegen (proves the InsertMapped mapping is live, \
+             not just the source-owned name), got: {text}"
+        );
+
+        // --- named v-model VALUE: the bound `showFlag` still hovers (regression). ---
+        let delta = "v-model:show=\"".len();
+        let pos = session.find_position(&uri, r#"v-model:show="showFlag""#, delta);
+        let hover = session.hover_text(&uri, pos).await;
+        assert!(hover.is_some(), "hover on v-model:show value should return a result");
+        let text = hover.unwrap();
+        assert!(text.contains("showFlag"), "hover should mention showFlag, got: {text}");
+
         // --- destructured v-for: {{ name }} in (user, idx) context ---
         let pos = session.find_position(&uri, "{{ name }}", 3);
         let hover = session.hover_text(&uri, pos).await;

@@ -1,0 +1,22 @@
+error[E0277]: the trait bound `SemanticNodeId: verter_session::locator_identity::R6KeySafe` is not satisfied
+  --> tests/cases/compile-fail/r6_key_nested_forbidden_dimension.rs:14:26
+   |
+14 |     assert_r6_key_safe::<Option<SemanticNodeId>>();
+   |                          ^^^^^^^^^^^^^^^^^^^^^^ the trait `verter_session::locator_identity::R6KeySafe` is not implemented for `SemanticNodeId`
+   |
+   = help: the following other types implement trait `verter_session::locator_identity::R6KeySafe`:
+             Arc<T>
+             ParseEnvHash
+             ResolvedDeclSlotIdentity
+             SemanticSymbolSpace
+             SlotEnvIdentity
+             Vec<T>
+             [T]
+             bool
+           and $N others
+   = note: required for `std::option::Option<SemanticNodeId>` to implement `verter_session::locator_identity::R6KeySafe`
+note: required by a bound in `assert_r6_key_safe`
+  --> src/locator_identity.rs
+   |
+   | pub fn assert_r6_key_safe<T: R6KeySafe>() {}
+   |                              ^^^^^^^^^ required by this bound in `assert_r6_key_safe`

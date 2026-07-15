@@ -1,0 +1,60 @@
+{
+  "slug": "nest-named-lit-id-q-snip-inj-glob-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "nest_named_lit_id_q_snip_inj_glob_m",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "append",
+    "from_html",
+    "append_styles"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "from_html"
+  ],
+  "helperCounts": {
+    "append": 1,
+    "from_html": 1,
+    "append_styles": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div id=\"a©b\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; const subject = ($$anchor) => {var div = root(); $.append($$anchor, div);}; var root = $.from_html(`<div id=\"a©b\">x</div>`); const $$css = {hash: 'svelte-<scoped>', code: '& {color:red;}'}; export default function nest_named_lit_id_q_snip_inj_glob_m($$anchor) {$.append_styles($$anchor, $$css); subject($$anchor);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

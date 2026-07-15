@@ -1,0 +1,75 @@
+{
+  "slug": "memo_deps__class_dir_object_call",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "memo_deps__class_dir_object_call",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "template_effect",
+    "set_class",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "from_html",
+    "get",
+    "set_class",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "template_effect": 1,
+    "set_class": 1,
+    "get": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function memo_deps__class_dir_object_call($$anchor) {let x = $.state(0); var div = root(); let classes; $.template_effect(($0) => classes = $.set_class(div, 1, '', null, classes, $0), [() => ({on: Boolean($.get(x))})]); $.delegated('click', div, () => $.update(x)); $.append($$anchor, div);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

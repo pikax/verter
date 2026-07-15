@@ -1,0 +1,46 @@
+{
+  "slug": "cls-dyn-lit-attr-q-comp-ext-plain-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_dyn_lit_attr_q_comp_ext_plain_n",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr"
+  ],
+  "helperSet": [
+    "attr"
+  ],
+  "helperCounts": {
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) .zz {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

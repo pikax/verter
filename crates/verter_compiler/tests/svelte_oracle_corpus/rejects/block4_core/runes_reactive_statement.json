@@ -1,0 +1,4 @@
+{
+  "rule": "LegacyReactiveStatementInvalid",
+  "official_code": "legacy_reactive_statement_invalid"
+}

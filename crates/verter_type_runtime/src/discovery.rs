@@ -257,6 +257,28 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_ts_major_version_parses_7_rc() {
+        // TypeScript 7 native-preview / release-candidate installs report a
+        // `7.0.1-rc`-style version; the major must parse to Some(7) so auto-mode
+        // provider selection routes them to the tsgo external engine. Uses an
+        // isolated temp dir so parallel test runs never collide on a fixed path.
+        let tmp = tempfile::tempdir().unwrap();
+        let lib_dir = tmp.path().join("lib");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+
+        let tsserver_path = lib_dir.join("tsserver.js");
+        std::fs::write(&tsserver_path, "// tsserver").unwrap();
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{ "name": "typescript", "version": "7.0.1-rc" }"#,
+        )
+        .unwrap();
+
+        let result = detect_ts_major_version(&tsserver_path);
+        assert_eq!(result, Some(7));
+    }
+
+    #[test]
     fn test_detect_ts_major_version_returns_none_for_missing() {
         let result = detect_ts_major_version(Path::new("/nonexistent/lib/tsserver.js"));
         assert_eq!(result, None);

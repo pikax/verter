@@ -1,0 +1,75 @@
+{
+  "slug": "runes/props_rest_member_optional.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "props_rest_member_optional",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "rest_props",
+    "first_child",
+    "sibling",
+    "template_effect",
+    "set_attribute",
+    "set_attribute",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "first_child",
+    "from_html",
+    "pop",
+    "push",
+    "rest_props",
+    "set_attribute",
+    "sibling",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "rest_props": 1,
+    "first_child": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_attribute": 2,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div> <div></div>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var rest_excludes = new Set(['$$slots', '$$events', '$$legacy', 'a']); var root = $.from_html(`<div></div> <div></div>`, 1); export default function props_rest_member_optional($$anchor, $$props) {$.push($$props, true); let rest = $.rest_props($$props, rest_excludes); var fragment = root(); var div = $.first_child(fragment); var div_1 = $.sibling(div, 2); $.template_effect(() => {$.set_attribute(div, 'title', $$props?.x); $.set_attribute(div_1, 'id', $$props?.x.y);}); $.append($$anchor, fragment); $.pop();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,7 +1,17 @@
 # Nextest configuration
 # https://nexte.st/docs/configuration/
 
+[profile.default]
+# Hang protection. A test flagged slow after `period` is TERMINATED after
+# `terminate-after` periods, so a wedged subprocess (e.g. a deadlocked
+# tsgo/tsserver child) is killed and reported as a timeout instead of stalling
+# the whole `--workspace` run indefinitely. Every test in this workspace
+# completes in seconds; 60s × 3 = 180s is far past any legitimate test, so a
+# trip is always a genuine hang, never a slow-but-valid test.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
 [profile.ci]
+slow-timeout = { period = "60s", terminate-after = 3 }
 # Produce JUnit XML for dorny/test-reporter in CI
 [profile.ci.junit]
 path = "junit.xml"

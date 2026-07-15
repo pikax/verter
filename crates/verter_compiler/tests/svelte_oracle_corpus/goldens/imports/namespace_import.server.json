@@ -1,0 +1,47 @@
+{
+  "slug": "imports/namespace_import.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./m.js",
+      "kind": "namespace",
+      "names": [
+        "NS"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "namespace_import",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "escape",
+    "escape"
+  ],
+  "helperSet": [
+    "escape"
+  ],
+  "helperCounts": {
+    "escape": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

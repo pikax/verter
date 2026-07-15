@@ -1,0 +1,37 @@
+{
+  "slug": "generated/077_pair_root_svg__attr_shorthand.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_77_pair_root_svg__attr_shorthand",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr"
+  ],
+  "helperSet": [
+    "attr"
+  ],
+  "helperCounts": {
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

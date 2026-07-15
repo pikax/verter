@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
-use verter_core::utils::oxc::{
+use verter_parser::utils::oxc::{
     extract_bindings_from_expression, extract_slot_bindings, extract_vfor_bindings,
     vue::{parse_vfor, parse_vslot},
     BindingContext,

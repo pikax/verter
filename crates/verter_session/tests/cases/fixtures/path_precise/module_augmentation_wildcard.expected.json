@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "archetype": "module_augmentation_wildcard",
+  "augmentation_target_kind": "WildcardAmbient",
+  "augmentation_target_payload": "*.css",
+  "default_export_shape": {
+    "kind": "indexed_object",
+    "value_type": "string"
+  },
+  "match_semantics": "Any specifier matching the glob `*.css` resolves through this declaration when no explicit module declaration overrides it.",
+  "fact_dep_signature_observed_by_consumer": [
+    "ModuleAugmentationIndexShape(target=WildcardAmbient(\"*.css\"))"
+  ]
+}

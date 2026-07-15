@@ -1,0 +1,28 @@
+[package]
+name = "xtask"
+version = "0.0.1-beta.1"
+edition = "2021"
+rust-version = "1.92"
+publish = false
+
+[[bin]]
+name = "block0-substrate-audit"
+path = "src/bin/block0_substrate_audit.rs"
+
+[[bin]]
+name = "block0-naive-a2-enumeration"
+path = "src/bin/block0_naive_a2_enumeration.rs"
+
+[[bin]]
+name = "cutover-state"
+path = "src/bin/cutover_state.rs"
+
+[[bin]]
+name = "check-four-mode-terminology"
+path = "src/bin/check_four_mode_terminology.rs"
+
+[dependencies]
+regex = "1.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.1"

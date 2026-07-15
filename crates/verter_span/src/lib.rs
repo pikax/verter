@@ -15,6 +15,28 @@
 //! 2. Inter-crate stored types prefer [`Span`]. [`RelativeSpan`] is for intra-crate processing.
 //! 3. [`RelativeSpan`] is 8 bytes, same as [`Span`]. The base offset lives in context.
 
+pub mod path;
+pub use path::{
+    canonicalize_path, canonicalize_path_cow, fs_is_case_insensitive, fs_paths_equal, is_under_dir,
+    longest_project_root, CanonicalPath, InjectedPathKey,
+};
+
+pub mod uri;
+pub use uri::{
+    file_uri_to_path, normalize_file_uri_for_cache, path_to_file_uri_string, percent_decode,
+};
+
+pub mod tsgo_offset;
+pub use tsgo_offset::{utf16_offset_to_byte, utf16_offset_to_line_col};
+
+pub mod utf16_line_index;
+pub use utf16_line_index::{LineCol, OffsetError, Utf16LineIndex};
+
+pub mod diag_source;
+pub use diag_source::{
+    DiagnosticContentSource, DiagnosticSourceCache, OverlayThenFallback, SourceFile,
+};
+
 // ======================== Span (SFC-absolute) ========================
 
 /// SFC-absolute byte offset span. `[start, end)` half-open.
@@ -69,6 +91,25 @@ impl Span {
         RelativeSpan {
             start: self.start.saturating_sub(base),
             end: self.end.saturating_sub(base),
+        }
+    }
+
+    /// Rebase the span by a signed byte `delta`, saturating each endpoint at the
+    /// `u32` bounds.
+    ///
+    /// Used to translate spans produced against one buffer into another buffer's
+    /// coordinates (e.g. a type lowered from a synthetic wrapper string rebased
+    /// into its real source file). `delta` is signed because the target offset
+    /// may be lower than the source buffer's; endpoints clamp to `[0, u32::MAX]`
+    /// rather than wrapping.
+    #[inline]
+    #[must_use]
+    pub fn shifted(&self, delta: i64) -> Span {
+        let apply =
+            |value: u32| -> u32 { (i64::from(value) + delta).clamp(0, i64::from(u32::MAX)) as u32 };
+        Span {
+            start: apply(self.start),
+            end: apply(self.end),
         }
     }
 }
@@ -261,6 +302,123 @@ pub mod serde_helpers {
     }
 }
 
+// ======================== Typed LSP / generated-TSX coordinate wrappers ========================
+//
+// Intra-process boundary types for the LSP `PositionMapper` and the cross-file
+// navigation stack. They carry NO serde (they never cross a serialization
+// boundary — `Span` is the only serde span type, rule 1 above).
+//
+// The point of these newtypes is the SAME rule that governs the span types:
+// there is no `From` between a source-side type and a generated-side type, so a
+// generated-TSX coordinate can never be silently stored where a real-`.vue`
+// source coordinate is expected (and vice versa). In particular there is no
+// `From<GeneratedByteRange> for SourceByteRange`. Likewise `LspPosition`
+// (negotiated-encoding `.vue` position) and `TsPosition` (generated-TSX
+// position) are distinct, so a TSX position can never be passed where a Vue LSP
+// position is expected.
+//
+// Conversions provided are only the total, lossless ones WITHIN a single
+// coordinate space (e.g. building a range from two same-space offsets). There
+// is deliberately no byte<->utf16 conversion here: that requires the source
+// text and belongs to the `LineIndex`, not to a plain newtype.
+
+/// Byte offset into the original `.vue` source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceByteOffset(pub u32);
+
+/// Byte offset into the generated TSX output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GeneratedByteOffset(pub u32);
+
+/// Length (in bytes) of a generated-TSX content region (the `content_offset` domain).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GeneratedByteLen(pub u32);
+
+/// UTF-16 code-unit offset into the original `.vue` source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceUtf16Offset(pub u32);
+
+/// UTF-16 code-unit offset into the generated TSX output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GeneratedUtf16Offset(pub u32);
+
+/// Byte range `[start, end)` in the original `.vue` source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceByteRange {
+    pub start: SourceByteOffset,
+    pub end: SourceByteOffset,
+}
+
+impl SourceByteRange {
+    #[inline]
+    pub const fn new(start: SourceByteOffset, end: SourceByteOffset) -> Self {
+        Self { start, end }
+    }
+
+    #[inline]
+    pub fn len(&self) -> u32 {
+        self.end.0.saturating_sub(self.start.0)
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.start.0 >= self.end.0
+    }
+}
+
+/// Byte range `[start, end)` in the generated TSX output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GeneratedByteRange {
+    pub start: GeneratedByteOffset,
+    pub end: GeneratedByteOffset,
+}
+
+impl GeneratedByteRange {
+    #[inline]
+    pub const fn new(start: GeneratedByteOffset, end: GeneratedByteOffset) -> Self {
+        Self { start, end }
+    }
+
+    #[inline]
+    pub fn len(&self) -> u32 {
+        self.end.0.saturating_sub(self.start.0)
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.start.0 >= self.end.0
+    }
+}
+
+/// A 0-based position in the original `.vue` source, in the LSP-negotiated encoding
+/// (UTF-16 columns in the default Verter configuration). The Vue side of the mapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LspPosition {
+    pub line: u32,
+    pub character: u32,
+}
+
+impl LspPosition {
+    #[inline]
+    pub const fn new(line: u32, character: u32) -> Self {
+        Self { line, character }
+    }
+}
+
+/// A 0-based position in the generated TSX output. The TSX side of the mapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TsPosition {
+    pub line: u32,
+    pub character: u32,
+}
+
+impl TsPosition {
+    #[inline]
+    pub const fn new(line: u32, character: u32) -> Self {
+        Self { line, character }
+    }
+}
+
 // ======================== Tests ========================
 
 #[cfg(test)]
@@ -416,4 +574,55 @@ mod tests {
         assert_eq!(std::mem::size_of::<PartialGeneratedSpan>(), 8);
         assert_eq!(std::mem::size_of::<GeneratedSpan>(), 16);
     }
+
+    #[test]
+    fn typed_coord_sizes_are_minimal() {
+        // Newtype offsets are zero-cost wrappers over u32.
+        assert_eq!(std::mem::size_of::<SourceByteOffset>(), 4);
+        assert_eq!(std::mem::size_of::<GeneratedByteOffset>(), 4);
+        assert_eq!(std::mem::size_of::<GeneratedByteLen>(), 4);
+        assert_eq!(std::mem::size_of::<SourceUtf16Offset>(), 4);
+        assert_eq!(std::mem::size_of::<GeneratedUtf16Offset>(), 4);
+        assert_eq!(std::mem::size_of::<SourceByteRange>(), 8);
+        assert_eq!(std::mem::size_of::<GeneratedByteRange>(), 8);
+        assert_eq!(std::mem::size_of::<LspPosition>(), 8);
+        assert_eq!(std::mem::size_of::<TsPosition>(), 8);
+    }
+
+    #[test]
+    fn typed_ranges_len_and_empty() {
+        let s = SourceByteRange::new(SourceByteOffset(10), SourceByteOffset(20));
+        assert_eq!(s.len(), 10);
+        assert!(!s.is_empty());
+        assert!(SourceByteRange::new(SourceByteOffset(5), SourceByteOffset(5)).is_empty());
+
+        let g = GeneratedByteRange::new(GeneratedByteOffset(3), GeneratedByteOffset(9));
+        assert_eq!(g.len(), 6);
+        assert!(!g.is_empty());
+        assert!(GeneratedByteRange::new(GeneratedByteOffset(7), GeneratedByteOffset(7)).is_empty());
+    }
+
+    #[test]
+    fn typed_positions_are_distinct_and_constructed() {
+        // LspPosition (Vue side) and TsPosition (TSX side) are deliberately
+        // distinct types so a TSX coordinate cannot be passed where a Vue LSP
+        // coordinate is expected. They only share field shape, not identity.
+        let vue = LspPosition::new(3, 14);
+        assert_eq!(vue.line, 3);
+        assert_eq!(vue.character, 14);
+
+        let tsx = TsPosition::new(0, 7);
+        assert_eq!(tsx.line, 0);
+        assert_eq!(tsx.character, 7);
+    }
+
+    // Type safety: these should NOT compile (no cross-space `From`):
+    //
+    // fn _compile_fail_generated_range_to_source(g: GeneratedByteRange) -> SourceByteRange {
+    //     g.into() // ERROR: no From<GeneratedByteRange> for SourceByteRange
+    // }
+    //
+    // fn _compile_fail_ts_pos_as_lsp_pos(t: TsPosition) -> LspPosition {
+    //     t.into() // ERROR: no From<TsPosition> for LspPosition
+    // }
 }

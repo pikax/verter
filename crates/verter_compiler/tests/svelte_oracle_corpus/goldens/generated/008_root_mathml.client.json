@@ -1,0 +1,64 @@
+{
+  "slug": "generated/008_root_mathml.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "_08_root_mathml",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_mathml",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_mathml"
+  ],
+  "helperCounts": {
+    "from_mathml": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_mathml",
+      "html": "<math><mrow>hello</mrow></math>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  },
+  "events": [],
+  "nonStaticProperties": [],
+  "attrParts": [],
+  "directiveExprs": [],
+  "decodedText": [],
+  "nodePaths": {
+    "regions": []
+  },
+  "dynamicSlots": {}
+}

@@ -1,0 +1,37 @@
+{
+  "slug": "generated/061_event_nondelegated_focus_on_svelte_element.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_61_event_nondelegated_focus_on_svelte_element",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "element"
+  ],
+  "helperSet": [
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

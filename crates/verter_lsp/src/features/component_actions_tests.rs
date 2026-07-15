@@ -1,13 +1,13 @@
-use super::*;
+﻿use super::*;
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
-use verter_analysis::template::{
+use verter_semantic::analysis::template::{
     AnalyzedPropDefinition, PropValueConstness, TemplateAnalysisSnapshot, TemplateComponentUsage,
     TemplateComponentVModel, TemplatePropUsage,
 };
-use verter_analysis::types::AnalyzedMacro;
-use verter_analysis::types::ImportBindingKind;
-use verter_host::FileAnalysisSnapshot;
+use verter_semantic::analysis::types::AnalyzedMacro;
+use verter_semantic::analysis::types::ImportBindingKind;
+use verter_session::FileAnalysisSnapshot;
 
 fn make_parent_analysis(components: Vec<TemplateComponentUsage>) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
@@ -38,6 +38,8 @@ fn make_component(
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }
 }
@@ -110,6 +112,8 @@ fn add_prop_to_type_based_define_props() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 56),
         }])
         .into(),
@@ -169,7 +173,7 @@ fn add_prop_generates_define_props_when_missing() {
     let child_source =
         "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst x = ref(0)\n</script>";
     let child_analysis = FileAnalysisSnapshot {
-        imports: vec![verter_analysis::AnalyzedImport {
+        imports: vec![verter_semantic::analysis::AnalyzedImport {
             source: "vue".into(),
             is_type_only: false,
             bindings: vec![],
@@ -248,6 +252,8 @@ fn no_action_for_runtime_based_define_props() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(15, 35),
         }])
         .into(),
@@ -285,6 +291,8 @@ fn make_component_with_vmodels(
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vmodels,
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }
 }
@@ -303,7 +311,7 @@ fn add_define_model_to_child() {
 
     let child_source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\n</script>";
     let child_analysis = FileAnalysisSnapshot {
-        imports: vec![verter_analysis::AnalyzedImport {
+        imports: vec![verter_semantic::analysis::AnalyzedImport {
             source: "vue".into(),
             is_type_only: false,
             bindings: vec![],
@@ -420,8 +428,8 @@ fn no_vmodel_action_without_script_setup() {
 
 fn make_parent_with_bindings_and_components(
     components: Vec<TemplateComponentUsage>,
-    bindings: Vec<verter_analysis::AnalyzedBinding>,
-    imports: Vec<verter_analysis::AnalyzedImport>,
+    bindings: Vec<verter_semantic::analysis::AnalyzedBinding>,
+    imports: Vec<verter_semantic::analysis::AnalyzedImport>,
 ) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
         template: Some(
@@ -437,12 +445,12 @@ fn make_parent_with_bindings_and_components(
     }
 }
 
-fn make_binding(name: &str) -> verter_analysis::AnalyzedBinding {
-    verter_analysis::AnalyzedBinding {
+fn make_binding(name: &str) -> verter_semantic::analysis::AnalyzedBinding {
+    verter_semantic::analysis::AnalyzedBinding {
         name: name.to_string(),
-        kind: verter_analysis::types::AnalyzedBindingKind::Const,
+        kind: verter_semantic::analysis::types::AnalyzedBindingKind::Const,
         is_reactive: false,
-        reactivity_kind: verter_analysis::types::ReactivityKind::None,
+        reactivity_kind: verter_semantic::analysis::types::ReactivityKind::None,
         type_annotation: None,
         initializer: None,
         span: verter_span::Span::new(0, 0),
@@ -662,10 +670,10 @@ fn suggest_matching_props_from_imports() {
     let parent = make_parent_with_bindings_and_components(
         vec![make_component("Child", "./Child.vue", vec![])],
         vec![], // no local bindings
-        vec![verter_analysis::AnalyzedImport {
+        vec![verter_semantic::analysis::AnalyzedImport {
             source: "./data".into(),
             is_type_only: false,
-            bindings: vec![verter_analysis::types::AnalyzedImportBinding {
+            bindings: vec![verter_semantic::analysis::types::AnalyzedImportBinding {
                 name: "title".into(),
                 kind: ImportBindingKind::Named,
                 imported_name: None,
@@ -696,10 +704,10 @@ fn suggest_matching_props_type_only_import_excluded() {
     let parent = make_parent_with_bindings_and_components(
         vec![make_component("Child", "./Child.vue", vec![])],
         vec![],
-        vec![verter_analysis::AnalyzedImport {
+        vec![verter_semantic::analysis::AnalyzedImport {
             source: "./types".into(),
             is_type_only: true,
-            bindings: vec![verter_analysis::types::AnalyzedImportBinding {
+            bindings: vec![verter_semantic::analysis::types::AnalyzedImportBinding {
                 name: "title".into(),
                 kind: ImportBindingKind::Named,
                 imported_name: None,

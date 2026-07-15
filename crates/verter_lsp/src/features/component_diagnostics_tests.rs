@@ -1,10 +1,10 @@
-use super::*;
-use verter_analysis::template::{
+﻿use super::*;
+use verter_semantic::analysis::template::{
     AnalyzedPropDefinition, PropValueConstness, TemplateAnalysisSnapshot, TemplateComponentUsage,
     TemplateComponentVModel, TemplatePropUsage,
 };
-use verter_analysis::types::AnalyzedMacro;
-use verter_analysis::types::VueApiCallSite;
+use verter_semantic::analysis::types::AnalyzedMacro;
+use verter_semantic::analysis::types::VueApiCallSite;
 
 /// Helper to build a parent analysis with component usages.
 fn make_parent_analysis(components: Vec<TemplateComponentUsage>) -> FileAnalysisSnapshot {
@@ -76,6 +76,8 @@ fn make_component(
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }
 }
@@ -232,6 +234,8 @@ fn v_bind_spread_skips_component() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
     let child = make_child_with_props(&[]);
@@ -257,6 +261,8 @@ fn dynamic_component_skipped() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
 
@@ -334,6 +340,8 @@ fn no_import_source_skipped() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
 
@@ -485,6 +493,8 @@ fn make_component_with_vmodels(
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vmodels,
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }
 }
@@ -507,6 +517,8 @@ fn make_child_with_models(model_names: &[Option<&str>]) -> FileAnalysisSnapshot 
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 30),
             })
             .collect::<Vec<_>>()
@@ -635,6 +647,8 @@ fn dynamic_component_vmodel_skipped() {
             binding_name: "title".to_string(),
             span: verter_span::Span::new(10, 30),
         }],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
 
@@ -647,7 +661,7 @@ fn dynamic_component_vmodel_skipped() {
 
 // ── data-*/aria-* fallthrough tests ─────────────────────────────
 
-use verter_analysis::template::TemplateElement;
+use verter_semantic::analysis::template::TemplateElement;
 
 /// Helper to build a child analysis with props and a given number of root elements.
 fn make_child_with_roots(prop_names: &[&str], root_count: usize) -> FileAnalysisSnapshot {
@@ -698,6 +712,8 @@ fn data_attr_not_flagged_on_non_fragment_component() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
 
@@ -724,6 +740,8 @@ fn data_attr_flagged_on_fragment_component() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
 
@@ -754,6 +772,8 @@ fn aria_attr_not_flagged_on_non_fragment_component() {
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }]);
 
@@ -773,7 +793,7 @@ fn aria_attr_not_flagged_on_non_fragment_component() {
 
 /// Helper: child with DefineProps macro prop_fields, NO template.prop_definitions.
 fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
-    use verter_analysis::types::{AnalyzedPropField, TypeResolutionSource};
+    use verter_semantic::analysis::types::{AnalyzedPropField, TypeResolutionSource};
 
     FileAnalysisSnapshot {
         macros: vec![AnalyzedMacro {
@@ -794,6 +814,9 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
                     tags: vec![],
                     resolution_source: TypeResolutionSource::Rust,
                     resolution_error: None,
+                    payload: None,
+                    type_expr_scope: None,
+                    declared_in_macro_type_arg: false,
                 })
                 .collect(),
             emit_fields: vec![],
@@ -802,6 +825,8 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 30),
         }]
         .into(),
@@ -854,7 +879,7 @@ fn macro_fallback_unknown_prop_flagged() {
 #[test]
 fn macro_fallback_with_defaults_pattern() {
     // withDefaults wraps defineProps — the inner DefineProps macro has the real props
-    use verter_analysis::types::{AnalyzedPropField, TypeResolutionSource};
+    use verter_semantic::analysis::types::{AnalyzedPropField, TypeResolutionSource};
 
     let child = FileAnalysisSnapshot {
         macros: vec![
@@ -872,6 +897,8 @@ fn macro_fallback_with_defaults_pattern() {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 50),
             },
             AnalyzedMacro {
@@ -891,6 +918,9 @@ fn macro_fallback_with_defaults_pattern() {
                         tags: vec![],
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        payload: None,
+                        type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     },
                     AnalyzedPropField {
                         name: "count".to_string(),
@@ -901,6 +931,9 @@ fn macro_fallback_with_defaults_pattern() {
                         tags: vec![],
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        payload: None,
+                        type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     },
                 ],
                 emit_fields: vec![],
@@ -909,6 +942,8 @@ fn macro_fallback_with_defaults_pattern() {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(10, 40),
             },
         ]
@@ -984,6 +1019,8 @@ fn make_component_with_slots(
         has_dynamic_class: false,
         dynamic_classes: vec![],
         v_models: vec![],
+        bindings: vec![],
+        events: vec![],
         span: verter_span::Span::new(0, 50),
     }
 }
@@ -1001,20 +1038,26 @@ fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSn
             emit_fields: vec![],
             slot_fields: slot_names
                 .iter()
-                .map(|(name, required)| verter_analysis::AnalyzedSlotField {
-                    name: name.to_string(),
-                    is_required: *required,
-                    span: verter_span::Span::new(0, 10),
-                    bindings: vec![],
-                    description: None,
-                    tags: vec![],
-                    return_type: None,
-                })
+                .map(
+                    |(name, required)| verter_semantic::analysis::AnalyzedSlotField {
+                        name: name.to_string(),
+                        is_required: *required,
+                        span: verter_span::Span::new(0, 10),
+                        bindings: vec![],
+                        description: None,
+                        tags: vec![],
+                        return_type: None,
+                        payload: None,
+                        return_expr_scope: None,
+                    },
+                )
                 .collect(),
             default_keys: vec![],
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(0, 30),
         }]
         .into(),

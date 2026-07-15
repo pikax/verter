@@ -1,0 +1,39 @@
+{
+  "slug": "type-spread-lit-id-q-blk-ext-glob-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "type_spread_lit_id_q_blk_ext_glob_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes"
+  ],
+  "helperCounts": {
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\tdiv {\n\t\tcolor: red;\n\t}\n"
+  }
+}

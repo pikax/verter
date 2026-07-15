@@ -1,0 +1,22 @@
+[package]
+name = "verter_svelte_conformance"
+version.workspace = true
+edition = "2021"
+publish = false
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Deterministic constrained mixed-strength covering-array engine for Svelte compiled-output conformance suites"
+
+[lib]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+
+[dev-dependencies]
+oxc_allocator = { workspace = true }
+syn = { workspace = true }
+tempfile = "3.27"
+verter_compiler = { path = "../verter_compiler", features = ["conformance-trace"] }

@@ -15,12 +15,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use verter_analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
 use verter_diagnostics::{LintConfig, Linter};
-use verter_host::{
+use verter_semantic::analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
+use verter_session::{
     CompileProfile, CompileTarget, FileAnalysisSnapshot, HostConfig, UpsertRequest, VerterHost,
 };
-use verter_vfs::{
+use verter_workspace::{
     FilesystemOptions, FilesystemWorkspace, MemoryOptions, MemoryWorkspace, ProjectGraph,
     ViteConfigOptions,
 };
@@ -192,7 +192,7 @@ fn run_pipeline(host: &VerterHost, count: usize, dir: &Path) {
             canonical_id: Some(id.clone()),
             input_id: id.clone(),
             source: Arc::from(content.as_str()),
-            file_kind: verter_host::FileKind::VueSfc,
+            file_language: verter_session::FileLanguage::vue(),
             aliases: Vec::new(),
         };
         let _ = host.upsert(req);

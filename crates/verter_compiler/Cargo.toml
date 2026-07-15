@@ -1,0 +1,91 @@
+[package]
+name = "verter_compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vue 3 SFC compiler — codegen, lowering, IDE output, style processing, source maps"
+repository.workspace = true
+documentation = "https://github.com/pikax/verter"
+homepage.workspace = true
+authors.workspace = true
+keywords = ["vue", "compiler", "sfc", "typescript", "codegen"]
+categories = ["compilers", "template-engine"]
+
+[features]
+bench = []
+dhat-heap = []
+# Gates the Svelte reference-drift / live-compiler harness
+# (`tests/cases/svelte_oracle_harness.rs`), including the live golden-vs-pinned-compiler
+# `--check` drift gate. EXCLUDED from the default canonical run
+# (`cargo nextest run --workspace` + `cargo test -p verter_session --tests`) so
+# the default suite never shells `node` / invokes the live svelte compiler — it
+# keeps the HERMETIC committed-golden structural guard in
+# `tests/cases/svelte_goldens_in_sync.rs`. Run the live oracle with
+# `cargo test -p verter_compiler --features svelte-oracle --test main svelte_oracle_harness`.
+svelte-oracle = []
+# Opt-in Svelte conformance-observability side channel (the typed observations
+# the Svelte conformance corpus tooling consumes): a thread-local trace captured
+# at the parse/lowering producer boundaries — static-attribute quoting + HTML
+# entity source representation (lexical provenance the semantic IR erases) —
+# plus the CSS matcher's tri-state `MatchCertainty` facts (per-selector
+# certainty, used/scoped selector spans, scoped element identities), returned by
+# `svelte::runtime::conformance_trace::capture` /
+# `compile_client_with_conformance_trace`. ZERO cost when off: the module, its
+# producer hooks, and every trace collection site are compiled out, and the
+# production IR structs carry no trace state under either setting.
+conformance-trace = []
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+
+[dependencies]
+verter_audit = { path = "../verter_audit" }
+verter_language = { path = "../verter_language" }
+verter_macro_dto = { workspace = true }
+verter_parser = { path = "../verter_parser" }
+verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
+hotpath = { version = "0.16", optional = true }
+bitflags = "2.11"
+memchr = "2.8.0"
+# Arbitrary-precision integers for the Svelte client const-fold evaluator's BigInt
+# values (a faithful port of official `scope.evaluate`, where `NUMBER` includes
+# BigInt). Already a transitive dep via `oxc_ecmascript`; pinned directly here so
+# the fold evaluator can name the type.
+num-bigint = "0.4"
+# IEEE-754 half-precision for the const-fold evaluator's `Math.f16round` global —
+# an EXACT round-to-nearest-even f64→f16→f64 round-trip matching JS. Already a
+# transitive dev-dep via criterion; pinned directly so the fold matches official.
+half = "2"
+rustc-hash = { workspace = true }
+smallvec = "1.15"
+lazy_static = "1.5.0"
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_ast_visit = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_semantic = { workspace = true }
+oxc_span = { workspace = true }
+oxc_syntax = { workspace = true }
+oxc_diagnostics = "0.126.0"
+bumpalo = { version = "3.20.3", features = ["collections"] }
+serde = { workspace = true }
+serde_repr = "0.1.20"
+serde_json = { workspace = true }
+allocator-api2 = "0.4.0"
+oxc_sourcemap = "7.0.0"
+base64 = "0.22.1"
+sha2 = { workspace = true }
+hex = "0.4.3"
+lightningcss = { workspace = true }
+phf = { version = "0.13.1", features = ["macros"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1"
+
+[dev-dependencies]
+dhat = "0.3.3"
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+tempfile = "3.27"
+serde = { workspace = true }
+serde_json = { workspace = true }

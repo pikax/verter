@@ -1,0 +1,39 @@
+{
+  "slug": "id-dyn-eschar-id-uq-snip-ext-comb-u",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dyn_eschar_id_uq_snip_ext_comb_u",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr"
+  ],
+  "helperSet": [
+    "attr"
+  ],
+  "helperCounts": {
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-17fnvty",
+    "code": "\n\t.wrap.svelte-<scoped> #a\\&b:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

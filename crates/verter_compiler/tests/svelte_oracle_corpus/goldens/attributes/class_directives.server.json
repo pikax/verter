@@ -1,0 +1,42 @@
+{
+  "slug": "attributes/class_directives.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "class_directives",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr_class",
+    "attr_class",
+    "clsx"
+  ],
+  "helperSet": [
+    "attr_class",
+    "clsx"
+  ],
+  "helperCounts": {
+    "attr_class": 2,
+    "clsx": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

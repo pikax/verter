@@ -1,0 +1,63 @@
+{
+  "slug": "stores/store_compound.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "store_compound",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "update_store",
+    "update_store",
+    "update_store_pre",
+    "store_set",
+    "store_get",
+    "escape",
+    "store_get",
+    "unsubscribe_stores"
+  ],
+  "helperSet": [
+    "escape",
+    "store_get",
+    "store_set",
+    "unsubscribe_stores",
+    "update_store",
+    "update_store_pre"
+  ],
+  "helperCounts": {
+    "update_store": 2,
+    "update_store_pre": 1,
+    "store_set": 1,
+    "store_get": 2,
+    "escape": 1,
+    "unsubscribe_stores": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

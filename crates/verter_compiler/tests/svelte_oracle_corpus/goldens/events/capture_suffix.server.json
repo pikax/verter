@@ -1,0 +1,38 @@
+{
+  "slug": "events/capture_suffix.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "capture_suffix",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "escape"
+  ],
+  "helperSet": [
+    "escape"
+  ],
+  "helperCounts": {
+    "escape": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

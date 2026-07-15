@@ -1,0 +1,38 @@
+{
+  "generatorVersion": "1.1.0",
+  "seed": 6221077,
+  "config": {
+    "fileCount": 15000,
+    "moduleCount": 600,
+    "importsPerFile": 8,
+    "compositeModuleCount": 40
+  },
+  "topology": {
+    "projects": [
+      "kernel (composite)",
+      "app (references kernel)"
+    ],
+    "projectReferences": "root solution tsconfig references kernel + app; app references kernel",
+    "aliasLayer": {
+      "baseUrl": "app/.",
+      "paths": [
+        "@kernel/*",
+        "@app/*"
+      ]
+    },
+    "libFloor": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "typesFloor": "explicit empty `types: []` (no ambient @types beyond lib)"
+  },
+  "counts": {
+    "sfc": 15000,
+    "types": 600,
+    "tsconfig": 3,
+    "totalFiles": 15603,
+    "totalBytes": 38826506
+  },
+  "contentHash": "sha256:de3b13510a79bb96070d3ba27ee49dc8a27dbb200377393b579d5cf939e4f0e2"
+}

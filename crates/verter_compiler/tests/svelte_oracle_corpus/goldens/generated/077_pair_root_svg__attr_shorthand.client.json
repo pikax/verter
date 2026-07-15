@@ -1,0 +1,93 @@
+{
+  "slug": "generated/077_pair_root_svg__attr_shorthand.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "_77_pair_root_svg__attr_shorthand",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_svg",
+    "child",
+    "reset",
+    "template_effect",
+    "set_value",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_svg",
+    "reset",
+    "set_value",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_svg": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_value": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_svg",
+      "html": "<svg><rect></rect></svg>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  },
+  "events": [],
+  "nonStaticProperties": [],
+  "attrParts": [
+    {
+      "helper": "set_value",
+      "attr": "value",
+      "chunks": [
+        "expr"
+      ]
+    }
+  ],
+  "directiveExprs": [],
+  "decodedText": [],
+  "nodePaths": {
+    "regions": [
+      {
+        "paths": [
+          {
+            "base": "fragment",
+            "steps": [
+              "child"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "dynamicSlots": {
+    "value": 1
+  }
+}

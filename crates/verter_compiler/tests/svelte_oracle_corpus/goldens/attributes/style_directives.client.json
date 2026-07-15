@@ -1,0 +1,88 @@
+{
+  "slug": "attributes/style_directives.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "style_directives",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "first_child",
+    "sibling",
+    "template_effect",
+    "set_style",
+    "get",
+    "set_style",
+    "get",
+    "get",
+    "delegated",
+    "set",
+    "delegated",
+    "set",
+    "get",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "set",
+    "set_style",
+    "sibling",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "first_child": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_style": 2,
+    "get": 4,
+    "delegated": 2,
+    "set": 2,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button></button> <button></button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button></button> <button></button>`, 1); export default function style_directives($$anchor) {let color = $.state('red'); let x = $.state('1'); var fragment = root(); var button = $.first_child(fragment); let styles; var button_1 = $.sibling(button, 2); let styles_1; $.template_effect(() => {styles = $.set_style(button, 'font-weight:bold', styles, {color: $.get(color)}); styles_1 = $.set_style(button_1, 'display:block', styles_1, [{'--x': $.get(x)}, {color: $.get(color)}]);}); $.delegated('click', button, () => $.set(color, 'blue')); $.delegated('click', button_1, () => $.set(x, $.get(x) + '1')); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

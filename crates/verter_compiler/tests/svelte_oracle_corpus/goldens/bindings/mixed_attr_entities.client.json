@@ -1,0 +1,67 @@
+{
+  "slug": "bindings/mixed_attr_entities.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "mixed_attr_entities",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "first_child",
+    "set_attribute",
+    "sibling",
+    "set_attribute",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "first_child",
+    "from_html",
+    "set_attribute",
+    "sibling"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "first_child": 1,
+    "set_attribute": 2,
+    "sibling": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>entity mixed</div> <div>amp</div>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>entity mixed</div> <div>amp</div>`, 1); export default function mixed_attr_entities($$anchor) {let x = 1; var fragment = root(); var div = $.first_child(fragment); $.set_attribute(div, 'title', '© 1 &bogus;'); var div_1 = $.sibling(div, 2); $.set_attribute(div_1, 'data-label', 'a & b 1'); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

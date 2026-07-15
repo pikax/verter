@@ -1,0 +1,73 @@
+{
+  "slug": "css/slot_adjacent_empty_between.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_adjacent_empty_between",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "sibling",
+    "child",
+    "slot",
+    "next",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "next",
+    "reset",
+    "sibling",
+    "slot"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "sibling": 1,
+    "child": 1,
+    "slot": 1,
+    "next": 1,
+    "reset": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div><span class=\"a svelte-<scoped>\">a</span><!><span class=\"b svelte-<scoped>\">b</span></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div><span class=\"a svelte-<scoped>\">a</span><!><span class=\"b svelte-<scoped>\">b</span></div>`); export default function slot_adjacent_empty_between($$anchor, $$props) {var div = root(); var node = $.sibling($.child(div)); $.slot(node, $$props, 'default', {}, null); $.next(); $.reset(div); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-1utcwa",
+    "code": "\n\t.a.svelte-<scoped> + .b:where(.svelte-<scoped>) { color: red; }\n\t/* (unused) .zz + .b { color: blue; }*/\n"
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "slug": "components/slot_prop_component_in_block.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Inner.svelte",
+      "kind": "default",
+      "names": [
+        "default:Inner"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_prop_component_in_block",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "if",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "first_child",
+    "if"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "if": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Inner from './Inner.svelte'; export default function slot_prop_component_in_block($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {Inner($$anchor, {slot: 'c'});}; $.if(node, ($$render) => {if ($$props.show) $$render(consequent);});} $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

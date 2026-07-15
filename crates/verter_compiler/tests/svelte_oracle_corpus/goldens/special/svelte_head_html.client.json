@@ -1,0 +1,67 @@
+{
+  "slug": "special/svelte_head_html.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_head_html",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "head",
+    "effect",
+    "document",
+    "html",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "document",
+    "effect",
+    "from_html",
+    "head",
+    "html",
+    "reset"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "head": 1,
+    "effect": 1,
+    "document": 1,
+    "html": 1,
+    "reset": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function svelte_head_html($$anchor) {let title = 'page'; let markup = '<b>bold</b>'; var div = root(); $.head('1tufvvq', ($$anchor) => {$.effect(() => {$.document.title = 'page';});}); $.html(div, () => markup, true); $.reset(div); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

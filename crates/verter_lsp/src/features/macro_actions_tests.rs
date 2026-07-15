@@ -1,10 +1,12 @@
-use super::*;
-use verter_analysis::template::{AnalyzedEmitDefinition, DefinedSlot, TemplateAnalysisSnapshot};
-use verter_analysis::types::{
+﻿use super::*;
+use verter_semantic::analysis::template::{
+    AnalyzedEmitDefinition, DefinedSlot, TemplateAnalysisSnapshot,
+};
+use verter_semantic::analysis::types::{
     AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedMacro, AnalyzedMacroKind,
     ReactivityKind,
 };
-use verter_analysis::AnalyzedImport;
+use verter_semantic::analysis::AnalyzedImport;
 
 fn make_analysis_with_slots(
     slots: Vec<DefinedSlot>,
@@ -153,6 +155,8 @@ fn b1_no_action_when_define_slots_exists() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 42),
         }],
     );
@@ -281,6 +285,8 @@ fn b2_no_action_when_all_emits_declared() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 72),
         }],
     );
@@ -338,6 +344,8 @@ fn b4_add_missing_emit_to_existing_type_based() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 72),
         }],
     );
@@ -411,6 +419,8 @@ fn b4_add_missing_emit_to_runtime_array() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 57),
         }],
     );
@@ -667,7 +677,7 @@ fn no_actions_with_empty_template() {
     );
 }
 
-// ── Type resolution tests (Phase 2-3) ───────────────────────────────
+// ── Type resolution tests ───────────────────────────────
 
 fn make_binding(name: &str, type_annotation: Option<&str>) -> AnalyzedBinding {
     AnalyzedBinding {
@@ -863,6 +873,8 @@ fn b3_detects_missing_slot() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 68),
         }],
     );
@@ -944,6 +956,8 @@ fn b3_no_action_when_all_present() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 92),
         }],
     );
@@ -996,6 +1010,8 @@ fn b5_missing_prop_detected() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 80),
         }],
     );
@@ -1051,6 +1067,8 @@ fn b5_no_action_when_props_match() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(24, 80),
         }],
     );
@@ -1177,6 +1195,8 @@ fn cursor_on_define_slots_macro_shows_augmentation_actions() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: verter_span::Span::new(macro_start, macro_end),
         }],
     );

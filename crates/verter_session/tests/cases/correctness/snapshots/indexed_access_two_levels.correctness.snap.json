@@ -1,0 +1,22 @@
+{
+  "component_name": "C",
+  "props": [
+    {
+      "name": "size",
+      "type_signature": "\"sm\" | \"md\" | \"lg\"",
+      "required": true,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    }
+  ],
+  "events": [],
+  "slots": [],
+  "models": [],
+  "exposed": [],
+  "fallthrough": null,
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}

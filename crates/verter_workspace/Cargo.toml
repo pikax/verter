@@ -1,0 +1,42 @@
+[package]
+name = "verter_workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Workspace layer for Verter — file access, resolution, project ownership"
+publish = false
+
+[features]
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+
+[dependencies]
+arc-swap = "1.9"
+dashmap = "6.2"
+rustc-hash = { workspace = true }
+hotpath = { version = "0.16", optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+glob = "0.3.3"
+parking_lot = "0.12.5"
+smallvec = "1.15"
+thiserror = "2.0"
+verter_audit = { path = "../verter_audit" }
+verter_language = { path = "../verter_language" }
+verter_scheduler = { path = "../verter_scheduler" }
+verter_span = { path = "../verter_span" }
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+oxc_allocator = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_span = { workspace = true }
+tracing = "0.1.44"
+walkdir = "2.5"
+verter_tsgo_api = { path = "../verter_tsgo_api" }
+
+[dev-dependencies]
+tempfile = "3.27"

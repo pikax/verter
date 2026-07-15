@@ -1,0 +1,55 @@
+{
+  "slug": "tmpl_logical_or_multi__attr__demoted",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "tmpl_logical_or_multi__attr__demoted",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "set_attribute",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "set_attribute"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "set_attribute": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function tmpl_logical_or_multi__attr__demoted($$anchor) {let d = 0; var div = root(); $.set_attribute(div, 'id', 'a 1 b 1 c'); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

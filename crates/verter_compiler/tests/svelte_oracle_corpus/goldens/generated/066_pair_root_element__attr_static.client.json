@@ -1,0 +1,64 @@
+{
+  "slug": "generated/066_pair_root_element__attr_static.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "_66_pair_root_element__attr_static",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"box\">hi</div>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  },
+  "events": [],
+  "nonStaticProperties": [],
+  "attrParts": [],
+  "directiveExprs": [],
+  "decodedText": [],
+  "nodePaths": {
+    "regions": []
+  },
+  "dynamicSlots": {}
+}

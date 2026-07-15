@@ -1,0 +1,79 @@
+{
+  "slug": "matrix/bind_value_member.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_value_member",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "proxy",
+    "first_child",
+    "remove_input_defaults",
+    "sibling",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "bind_value",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_value",
+    "child",
+    "first_child",
+    "from_html",
+    "proxy",
+    "remove_input_defaults",
+    "reset",
+    "set_text",
+    "sibling",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "proxy": 1,
+    "first_child": 1,
+    "remove_input_defaults": 1,
+    "sibling": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "bind_value": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/> <p> </p>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/> <p> </p>`, 1); export default function bind_value_member($$anchor) {let form = $.proxy({name: \"\"}); var fragment = root(); var input = $.first_child(fragment); $.remove_input_defaults(input); var p = $.sibling(input, 2); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, form.name)); $.bind_value(input, () => form.name, ($$value) => form.name = $$value); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

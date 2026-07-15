@@ -10,31 +10,33 @@ description = "Rust LSP server for Verter — Language Server Protocol implement
 publish = false
 
 [features]
-hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_host/hotpath", "verter_diagnostics/hotpath"]
+hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_session/hotpath", "verter_diagnostics/hotpath"]
 
 [dependencies]
-verter_host = { path = "../verter_host", features = ["host_metrics", "scheduler"] }
-hotpath = { version = "0.13", optional = true }
+verter_session = { path = "../verter_session", features = ["session_metrics"] }
+hotpath = { version = "0.16", optional = true }
+verter_audit = { path = "../verter_audit" }
 verter_scheduler = { path = "../verter_scheduler" }
-verter_vfs = { path = "../verter_vfs" }
-verter_analysis = { path = "../verter_analysis" }
+verter_workspace = { path = "../verter_workspace" }
+verter_semantic = { path = "../verter_semantic" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
 verter_span = { path = "../verter_span" }
 verter_type_runtime = { path = "../verter_type_runtime" }
-verter_mcp = { path = "../verter_mcp" }
+verter_ffi = { path = "../verter_ffi" }
+verter_protocol = { path = "../verter_protocol" }
+verter_tsgo_api = { path = "../verter_tsgo_api" }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
-oxc_sourcemap = "6.0.2"
+oxc_sourcemap = "7.0.0"
+blake3 = { workspace = true }
 tower-lsp-server = "0.23"
-rmcp = { version = "1", features = ["server", "macros", "transport-streamable-http-server"] }
-axum = "0.8"
-schemars = "1"
+schemars = "1.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { version = "1", features = [
+tokio = { version = "1.52", features = [
   "rt",
   "rt-multi-thread",
   "macros",
@@ -46,17 +48,43 @@ tokio = { version = "1", features = [
   "net",
   "signal",
 ] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-dashmap = "6"
-glob = "0.3"
-parking_lot = "0.12"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+dashmap = "6.2"
+glob = "0.3.3"
+lru = "0.18"
+parking_lot = "0.12.5"
+# Atomic temp-then-rename for the on-disk carrier-snapshot store (the §2.2
+# content-addressed blobs + atomic manifest swap). `NamedTempFile::persist`
+# atomically replaces an existing target on every platform (ReplaceFile/
+# MoveFileEx on Windows, rename(2) on Unix) — the cross-platform atomic-replace
+# the published manifest swap requires. Also a dev-dependency (below) for the
+# existing test seams; promoted to a runtime dep here for the store.
+tempfile = "3.27"
 
 [[bin]]
 name = "verter-lsp"
 path = "src/main.rs"
 
 [dev-dependencies]
-futures-util = "0.3"
-paste = "1"
-tempfile = "3.26.0"
+futures-util = "0.3.32"
+# The wire-equivalence integration test byte-compares the ACTUAL NAPI
+# protocol encoding of the LSP route's envelope.
+verter_protocol = { path = "../verter_protocol" }
+paste = "1.0.15"
+tempfile = "3.27"
+# Activates only test seams used by this crate's tests: cache-admission force
+# controls (`test-support`) and project-binding constructors (`test-util`).
+# The ordinary dependency already enables `session_metrics`; keeping the full
+# union here makes feature intent explicit without creating a duplicate key.
+verter_session = { path = "../verter_session", features = ["session_metrics", "test-support", "test-util"] }
+# Used by `tests/editor_liveness_guards.rs` to AST-parse the LSP provider-sync
+# source so the delegated-stale-close detector is robust against multiline call
+# spans, bare-local stale sets, and aliased delegation (a line-based scan is
+# trivially evadable). Mirrors `verter_session`'s syn-based architecture guards.
+syn = { version = "2.0", features = ["full", "visit", "parsing"] }
+# Used by `tests/stdio_launch_smoke.rs` to build the verter-lsp launch argv and
+# initializationOptions through the SHARED editor-client launch contract, so the
+# stdio handshake smoke also pins that contract (the same source the Lapce/Zed
+# clients consume).
+verter-editor-client = { path = "../verter-editor-client" }

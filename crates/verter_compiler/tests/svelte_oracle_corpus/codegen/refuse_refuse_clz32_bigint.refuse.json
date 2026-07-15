@@ -1,0 +1,8 @@
+{
+  "slug": "refuse_refuse_clz32_bigint",
+  "bucket": "refuse",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "officialRejected": true,
+  "officialErrorSummary": "Cannot convert a BigInt value to a number"
+}

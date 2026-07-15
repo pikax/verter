@@ -1,0 +1,85 @@
+{
+  "slug": "matrix/derived_object_literal.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "derived_object_literal",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "derived",
+    "get",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "derived",
+    "from_html",
+    "get",
+    "reset",
+    "set_text",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "derived": 1,
+    "get": 2,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button> </button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function derived_object_literal($$anchor) {let count = $.state(0); let box = $.derived(() => ({value: $.get(count)})); var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(box).value)); $.delegated('click', button, () => $.update(count)); $.append($$anchor, button);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

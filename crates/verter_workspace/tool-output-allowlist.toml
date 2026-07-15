@@ -1,0 +1,89 @@
+# Tool / output `std::fs::` allowlist (consumed by
+# `architecture_guards::foundations_guards::no_std_fs_in_semantic_session_paths`).
+#
+# Entries here are paths whose `std::fs::` calls are NOT semantic source
+# or config reads (those flow through `verter_workspace::WorkspaceAccess`
+# / `IntrinsicLibraryAccess`). Each entry sits in one of the categories
+# below.
+#
+# Adding a new entry requires a one-line `rationale` field naming the
+# reason the file legitimately writes/reads non-semantic data.
+#
+# When a `source-read` callsite is migrated to `WorkspaceAccess` the
+# corresponding `path` here MUST be deleted in the same change.
+
+[[entries]]
+path = "crates/verter_lsp/src/background_init.rs"
+rationale = "writes Verter-generated `@verter/types` stub files into `node_modules` (tool setup, not semantic input) and reads them back via marker detection; tests use temp-dir fixtures"
+
+[[entries]]
+path = "crates/verter_lsp/src/svelte_assets.rs"
+rationale = "materializes the Verter-owned `@verter/svelte-jsx` shim into the host data directory (tool setup for TSGO/inferred-project resolution, not semantic input); reads it back via byte-compare; never the user workspace"
+
+[[entries]]
+path = "crates/verter_lsp/src/external_ts/carrier_publish_store.rs"
+rationale = "materializes the Verter-owned carrier-snapshot store (content-addressed blobs + atomic manifest) into a per-host temp directory for the tsserver plugin to read synchronously (tool output mirroring the in-memory ProviderSurfaceStore, not semantic input); never the user workspace"
+
+[[entries]]
+path = "crates/verter_lsp/src/config.rs"
+rationale = "test fixtures (`#[cfg(test)]` blocks set up tmp directories for `discover_lint_config` tests)"
+
+[[entries]]
+path = "crates/verter_lsp/src/test_harness.rs"
+rationale = "test harness — sets up scratch worktrees for LSP integration tests"
+
+[[entries]]
+path = "crates/verter_lsp/src/test_utils.rs"
+rationale = "test utilities — temp workspace creation for LSP unit tests"
+
+[[entries]]
+path = "crates/verter_lsp/src/real_provider_tests/rename.rs"
+rationale = "real-provider rename integration tests (`#[cfg(test)] mod real_provider_tests`) — the `read_file` helper reads on-disk fixture content for a CLOSED file to assert the on-disk-vs-LSP-edit contract; same test-fixture-read category as `test_harness.rs`/`test_utils.rs`, never workspace/semantic state"
+
+[[entries]]
+path = "crates/verter_mcp/src/baseline.rs"
+rationale = "MCP baseline output — writes JSON snapshots for regression diffing, not semantic state"
+
+[[entries]]
+path = "crates/verter_lsp/src/audit_harness.rs"
+rationale = "LSP audit telemetry — `VERTER_LSP_AUDIT_TRACE_OUT` JSON-lines drainer (tool output, not semantic state)"
+
+[[entries]]
+path = "crates/verter_session/src/component_meta_audit/mod.rs"
+rationale = "audit telemetry — `/proc/self/statm` resource sample + audit JSON dump file output"
+
+[[entries]]
+path = "crates/verter_type_runtime/src/discovery.rs"
+rationale = "TypeScript SDK install discovery for the type-runtime tool layer (tsserver/tsgo binary lookup)"
+
+[[entries]]
+path = "crates/verter_type_runtime/src/provider_adapter.rs"
+rationale = "type-runtime tool-cache and shim file management (separate from semantic state)"
+
+[[entries]]
+path = "crates/verter_type_runtime/src/trace.rs"
+rationale = "trace artifact writer for tsserver/tsgo IPC debugging"
+
+[[entries]]
+path = "crates/verter_type_runtime/src/tsgo/ipc.rs"
+rationale = "tsgo subprocess IPC — pnpm virtual store walk + scratch-dir setup for the tsgo runtime"
+
+[[entries]]
+path = "crates/verter_type_runtime/src/tsserver/ipc.rs"
+rationale = "tsserver subprocess IPC — pnpm virtual store walk + scratch-dir setup for the tsserver runtime"
+
+[[entries]]
+path = "crates/verter_session/src/typeinfo/oracle_core/driver.rs"
+rationale = "TS7 oracle harness consumption driver (#[cfg(test)] in oracle_core) — loads checked-in snapshot TEST FIXTURES + re-enumerates the vendored env corpus via runtime std::fs::read, the mechanism the locked design (docs/arch/u0-oracle-harness-design.md §Q1) mandates and the snapshot_loading_is_runtime_fs guard pins. Not semantic/VFS state."
+
+[[entries]]
+path = "crates/verter_session/src/typeinfo/oracle_core/gen.rs"
+rationale = "TS7 oracle harness snapshot GENERATOR (#[cfg(feature = \"oracle-gen\")], excluded from the default gate). Seeds a hermetic temp tsgo sandbox + WRITES the checked-in snapshot TEST FIXTURES + enumerates/copies the vendored env corpus via std::fs — the build/test-time generation step the locked design (docs/arch/u0-oracle-harness-design.md §2, §4) mandates. External-tool scaffolding (tsgo cannot read Verter's in-memory VFS), not semantic/VFS state — the same category as the consumption driver + tsgo IPC scratch-dir entries."
+
+[[entries]]
+path = "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_gen_spike.rs"
+rationale = "TS7 oracle harness §4 GENERATION SPIKE (#[cfg(all(test, feature = \"oracle-gen\"))], excluded from the default gate). Writes a tsconfig + fixture into a temp dir for the EXTERNAL tsgo subprocess to read off real disk (tsgo cannot read Verter's in-memory VFS), then re-validates the design's BLOCKING tsgo assumptions. External-tool scaffolding, not semantic/VFS state — the same category as the tsserver/tsgo IPC scratch-dir entries above."
+
+[[entries]]
+path = "crates/verter_compiler/src/svelte_oracle.rs"
+rationale = "Svelte conformance-oracle comparison engine (#[cfg(feature = \"svelte-oracle\")], excluded from the default gate). load_golden / load_all_goldens read the committed golden JSON TEST FIXTURES off disk for the conformance consumers to diff a normalized candidate against — in-repo test corpus, no VerterHost/WorkspaceAccess context, never workspace/semantic state. Same category as the TS7 oracle harness fixture readers."

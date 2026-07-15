@@ -1,0 +1,60 @@
+{
+  "slug": "regression/boolean_attributes.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "boolean_attributes",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "next",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "next"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "next": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input disabled=\"\"/> <button disabled=\"\" hidden=\"\">x</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input disabled=\"\"/> <button disabled=\"\" hidden=\"\">x</button>`, 1); export default function boolean_attributes($$anchor) {var fragment = root(); $.next(2); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

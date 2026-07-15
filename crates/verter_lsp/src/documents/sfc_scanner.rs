@@ -31,33 +31,160 @@ impl SfcBlock {
         (self.open_tag_end, self.close_tag_start)
     }
 
-    /// Whether this is a `<script setup>` block.
+    /// Look up an attribute of this block's opening tag by EXACT name.
+    ///
+    /// Returns `None` when the attribute is absent, `Some(None)` for a present boolean attribute,
+    /// and `Some(Some(value))` for a present valued attribute. Backed by the single
+    /// [`scan_attr_region`] tokenizer, so a name like `notsetup` / `data-setup` / `mylang` is a
+    /// distinct attribute and never satisfies a query for `setup` / `lang` (no substring sniffing).
+    fn attr(&self, name: &str) -> Option<Option<&str>> {
+        scan_attr_region(&self.attrs_raw)
+            .into_iter()
+            .find(|ra| self.attrs_raw[ra.name_start..ra.name_end] == *name)
+            .map(|ra| {
+                ra.value_start
+                    .zip(ra.value_end)
+                    .map(|(vs, ve)| &self.attrs_raw[vs..ve])
+            })
+    }
+
+    /// Whether this is a `<script setup>` block (exact boolean `setup` attribute on a `script`).
     pub fn is_setup(&self) -> bool {
-        self.tag_name == "script" && self.attrs_raw.contains("setup")
+        self.tag_name == "script" && self.attr("setup").is_some()
     }
 
-    /// Extract the `lang` attribute value, if present.
+    /// The typed `lang` attribute value, if present.
     pub fn lang(&self) -> Option<&str> {
-        extract_attr_value(&self.attrs_raw, "lang")
+        self.attr("lang").flatten()
     }
 
-    /// Whether this block has the `scoped` attribute.
+    /// Whether this block has the exact `scoped` attribute.
     pub fn is_scoped(&self) -> bool {
-        self.attrs_raw.contains("scoped")
+        self.attr("scoped").is_some()
     }
 
-    /// Whether this block has the `module` attribute.
+    /// Whether this block has the exact `module` attribute.
     pub fn is_module(&self) -> bool {
-        self.attrs_raw.contains("module")
+        self.attr("module").is_some()
     }
 
-    /// Extract the `attrs` or `attributes` attribute value, if present.
+    /// The `attrs` / `attributes` attribute value, if present (long form `attributes` preferred).
     pub fn attrs(&self) -> Option<&str> {
-        // Try `attrs` first (short form), then `attributes` (long form).
-        // Use `attributes` first to avoid matching the `attrs` prefix of `attributes`.
-        extract_attr_value(&self.attrs_raw, "attributes")
-            .or_else(|| extract_attr_value(&self.attrs_raw, "attrs"))
+        self.attr("attributes")
+            .flatten()
+            .or_else(|| self.attr("attrs").flatten())
     }
+}
+
+/// One attribute parsed from an opening-tag attribute region. All offsets are RELATIVE to the
+/// first byte of the region passed to [`scan_attr_region`].
+#[derive(Debug, Clone, Copy)]
+struct RawAttr {
+    name_start: usize,
+    name_end: usize,
+    value_start: Option<usize>,
+    value_end: Option<usize>,
+}
+
+/// The single SFC opening-tag attribute tokenizer.
+///
+/// `region` is the attribute text of an opening tag — everything AFTER the tag name. It may end
+/// at a `>` / `/>` (the full `<tag …>` region minus the tag name, as [`parse_opening_tag`] passes)
+/// or simply run to the end of the string ([`SfcBlock::attrs_raw`], which already excludes the
+/// `>`). Attributes are matched by exact name boundaries (whitespace / `=` / `>` / `/` delimited),
+/// so a name like `notsetup`, `data-setup`, or `mylang` is a single distinct attribute. Both
+/// [`parse_opening_tag`] (which rebases the offsets to document-absolute) and [`SfcBlock`]'s typed
+/// accessors read from this one tokenizer — there is no second substring-based attribute reader.
+fn scan_attr_region(region: &str) -> Vec<RawAttr> {
+    let bytes = region.as_bytes();
+    let len = bytes.len();
+    let mut attrs = Vec::new();
+    let mut i = 0;
+
+    while i < len && bytes[i] != b'>' {
+        // Skip whitespace before the next attribute.
+        while i < len && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= len || bytes[i] == b'>' || bytes[i] == b'/' {
+            break;
+        }
+
+        // Read the attribute name.
+        let name_start = i;
+        while i < len
+            && !bytes[i].is_ascii_whitespace()
+            && bytes[i] != b'='
+            && bytes[i] != b'>'
+            && bytes[i] != b'/'
+        {
+            i += 1;
+        }
+        let name_end = i;
+        if name_start == name_end {
+            i += 1;
+            continue;
+        }
+
+        // Skip whitespace between the name and a possible '='.
+        while i < len && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+
+        if i < len && bytes[i] == b'=' {
+            i += 1;
+            // Skip whitespace after '='.
+            while i < len && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+
+            if i < len && (bytes[i] == b'"' || bytes[i] == b'\'') {
+                let quote = bytes[i];
+                i += 1;
+                let val_start = i;
+                while i < len && bytes[i] != quote {
+                    i += 1;
+                }
+                let val_end = i;
+                if i < len {
+                    i += 1; // skip the closing quote
+                }
+                attrs.push(RawAttr {
+                    name_start,
+                    name_end,
+                    value_start: Some(val_start),
+                    value_end: Some(val_end),
+                });
+            } else {
+                // Unquoted value.
+                let val_start = i;
+                while i < len
+                    && !bytes[i].is_ascii_whitespace()
+                    && bytes[i] != b'>'
+                    && bytes[i] != b'/'
+                {
+                    i += 1;
+                }
+                let val_end = i;
+                attrs.push(RawAttr {
+                    name_start,
+                    name_end,
+                    value_start: Some(val_start),
+                    value_end: Some(val_end),
+                });
+            }
+        } else {
+            // Boolean attribute (no value).
+            attrs.push(RawAttr {
+                name_start,
+                name_end,
+                value_start: None,
+                value_end: None,
+            });
+        }
+    }
+
+    attrs
 }
 
 // ── Cursor Context ──────────────────────────────────────────────────────────
@@ -141,99 +268,23 @@ pub fn parse_opening_tag(source: &str, block: &SfcBlock) -> OpeningTagContext {
     let tag_name_end = i;
     let tag_name = region[tag_name_start..tag_name_end].to_string();
 
-    // Parse attributes
-    let mut attrs = Vec::new();
-    while i < bytes.len() && bytes[i] != b'>' {
-        // Skip whitespace
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= bytes.len() || bytes[i] == b'>' || bytes[i] == b'/' {
-            break;
-        }
-
-        // Read attribute name
-        let attr_name_start = i;
-        while i < bytes.len()
-            && !bytes[i].is_ascii_whitespace()
-            && bytes[i] != b'='
-            && bytes[i] != b'>'
-            && bytes[i] != b'/'
-        {
-            i += 1;
-        }
-        let attr_name_end = i;
-        if attr_name_start == attr_name_end {
-            i += 1;
-            continue;
-        }
-        let attr_name = region[attr_name_start..attr_name_end].to_string();
-
-        // Skip whitespace
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-
-        // Check for '='
-        if i < bytes.len() && bytes[i] == b'=' {
-            i += 1;
-            // Skip whitespace after '='
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-
-            // Read value
-            if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
-                let quote = bytes[i];
-                i += 1;
-                let val_start = i;
-                while i < bytes.len() && bytes[i] != quote {
-                    i += 1;
-                }
-                let val_end = i;
-                if i < bytes.len() {
-                    i += 1; // skip closing quote
-                }
-                attrs.push(ParsedAttr {
-                    name: attr_name,
-                    value: Some(region[val_start..val_end].to_string()),
-                    name_start: (start + attr_name_start) as u32,
-                    name_end: (start + attr_name_end) as u32,
-                    value_start: Some((start + val_start) as u32),
-                    value_end: Some((start + val_end) as u32),
-                });
-            } else {
-                // Unquoted value
-                let val_start = i;
-                while i < bytes.len()
-                    && !bytes[i].is_ascii_whitespace()
-                    && bytes[i] != b'>'
-                    && bytes[i] != b'/'
-                {
-                    i += 1;
-                }
-                let val_end = i;
-                attrs.push(ParsedAttr {
-                    name: attr_name,
-                    value: Some(region[val_start..val_end].to_string()),
-                    name_start: (start + attr_name_start) as u32,
-                    name_end: (start + attr_name_end) as u32,
-                    value_start: Some((start + val_start) as u32),
-                    value_end: Some((start + val_end) as u32),
-                });
-            }
-        } else {
-            // Boolean attribute (no value)
-            attrs.push(ParsedAttr {
-                name: attr_name,
-                value: None,
-                name_start: (start + attr_name_start) as u32,
-                name_end: (start + attr_name_end) as u32,
-                value_start: None,
-                value_end: None,
-            });
-        }
-    }
+    // Parse the attribute region (everything after the tag name) with the shared tokenizer,
+    // rebasing its region-relative offsets to document-absolute ones.
+    let attrs_base = start + tag_name_end;
+    let attrs = scan_attr_region(&region[tag_name_end..])
+        .into_iter()
+        .map(|ra| ParsedAttr {
+            name: region[tag_name_end + ra.name_start..tag_name_end + ra.name_end].to_string(),
+            value: ra
+                .value_start
+                .zip(ra.value_end)
+                .map(|(vs, ve)| region[tag_name_end + vs..tag_name_end + ve].to_string()),
+            name_start: (attrs_base + ra.name_start) as u32,
+            name_end: (attrs_base + ra.name_end) as u32,
+            value_start: ra.value_start.map(|vs| (attrs_base + vs) as u32),
+            value_end: ra.value_end.map(|ve| (attrs_base + ve) as u32),
+        })
+        .collect();
 
     OpeningTagContext {
         tag_name,
@@ -288,13 +339,22 @@ pub fn scan_sfc_blocks(source: &str) -> Vec<SfcBlock> {
         if i == name_start {
             continue; // empty tag name
         }
-        let tag_name = &source[name_start..i];
+        let raw_tag_name = &source[name_start..i];
 
         // Only match known top-level SFC tags and custom blocks
         // Skip DOCTYPE, html, head, body, etc.
-        if !is_sfc_tag(tag_name) {
+        if !is_sfc_tag(raw_tag_name) {
             continue;
         }
+
+        // Normalize the built-in SFC tags (`script` / `template` / `style`) to
+        // their canonical lowercase form so a case-variant `<SCRIPT>` stores
+        // `tag_name == "script"` and downstream lowercase matches (the
+        // auto-close markup-region gate) recognize it. Custom blocks keep their
+        // authored spelling.
+        let tag_name: String = canonical_builtin_sfc_tag(raw_tag_name)
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| raw_tag_name.to_string());
 
         // Read attributes until '>' or '/>'
         let attrs_start = i;
@@ -329,24 +389,47 @@ pub fn scan_sfc_blocks(source: &str) -> Vec<SfcBlock> {
             continue; // self-closing blocks have no content
         }
 
-        // Find the matching closing tag
+        // Find the matching closing tag. The pattern carries the canonical
+        // lowercase tag name; [`find_close_tag`] matches case-insensitively, so
+        // a `</SCRIPT>` still resolves.
         let close_pattern = format!("</{tag_name}");
-        if let Some(close_start) = find_close_tag(source, i, &close_pattern) {
-            let close_end = match source[close_start..].find('>') {
-                Some(offset) => close_start + offset + 1,
-                None => continue,
-            };
+        match find_close_tag(source, i, &close_pattern) {
+            Some(close_start) => {
+                let close_end = match source[close_start..].find('>') {
+                    Some(offset) => close_start + offset + 1,
+                    None => continue,
+                };
 
-            blocks.push(SfcBlock {
-                tag_name: tag_name.to_string(),
-                open_tag_start: tag_start as u32,
-                open_tag_end,
-                close_tag_start: close_start as u32,
-                close_tag_end: close_end as u32,
-                attrs_raw,
-            });
+                blocks.push(SfcBlock {
+                    tag_name,
+                    open_tag_start: tag_start as u32,
+                    open_tag_end,
+                    close_tag_start: close_start as u32,
+                    close_tag_end: close_end as u32,
+                    attrs_raw,
+                });
 
-            i = close_end;
+                i = close_end;
+            }
+            None => {
+                // No closing tag yet (the user is mid-typing the block). The
+                // block must STILL establish a region from its open tag to EOF
+                // so its content classifies as inside-block (non-markup), not
+                // RootLevel — otherwise a generic `Box<Foo>` typed before the
+                // closing tag exists is misread as root markup. The close-tag
+                // positions collapse to the source end (an empty, open-ended
+                // close span). Everything after the open tag is inside this
+                // block, so scanning stops.
+                blocks.push(SfcBlock {
+                    tag_name,
+                    open_tag_start: tag_start as u32,
+                    open_tag_end,
+                    close_tag_start: len as u32,
+                    close_tag_end: len as u32,
+                    attrs_raw,
+                });
+                break;
+            }
         }
     }
 
@@ -354,8 +437,28 @@ pub fn scan_sfc_blocks(source: &str) -> Vec<SfcBlock> {
 }
 
 /// Check if a tag name is an SFC top-level block.
+///
+/// The built-in `script` / `template` / `style` tags are matched
+/// CASE-INSENSITIVELY (HTML tag names are case-insensitive, and
+/// [`find_close_tag`] already matches the closing tag with
+/// `eq_ignore_ascii_case`), so `<SCRIPT>` / `<Style>` classify as their
+/// canonical block, not as a custom block.
 fn is_sfc_tag(name: &str) -> bool {
-    matches!(name, "script" | "template" | "style") || is_custom_block_tag(name)
+    is_builtin_sfc_tag(name) || is_custom_block_tag(name)
+}
+
+/// Whether `name` is one of the built-in SFC block tags (`script` / `template`
+/// / `style`), case-insensitively. Returns the canonical lowercase form so the
+/// stored [`SfcBlock::tag_name`] is normalized and downstream lowercase matches
+/// (e.g. the auto-close markup-region gate) recognize a case-variant tag.
+fn canonical_builtin_sfc_tag(name: &str) -> Option<&'static str> {
+    ["script", "template", "style"]
+        .into_iter()
+        .find(|canonical| name.eq_ignore_ascii_case(canonical))
+}
+
+fn is_builtin_sfc_tag(name: &str) -> bool {
+    canonical_builtin_sfc_tag(name).is_some()
 }
 
 /// Check if a tag name could be a custom block.
@@ -370,7 +473,15 @@ fn is_custom_block_tag(name: &str) -> bool {
     !is_standard_html_tag(name)
 }
 
+/// Whether `name` is a standard HTML element, case-insensitively (HTML tag
+/// names are case-insensitive). The match table is lowercase, so the input is
+/// folded to lowercase first — `<DIV>` / `<Br>` are still standard elements and
+/// never misclassified as custom SFC blocks.
 fn is_standard_html_tag(name: &str) -> bool {
+    is_standard_html_tag_lower(&name.to_ascii_lowercase())
+}
+
+fn is_standard_html_tag_lower(name: &str) -> bool {
     matches!(
         name,
         "html"
@@ -501,26 +612,6 @@ fn find_bytes(bytes: &[u8], start: usize, pattern: &[u8]) -> Option<usize> {
     (start..=bytes.len() - pat_len).find(|&i| &bytes[i..i + pat_len] == pattern)
 }
 
-/// Extract a quoted attribute value from a raw attributes string.
-fn extract_attr_value<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
-    let pattern = format!("{name}=");
-    let idx = attrs.find(&pattern)?;
-    let rest = &attrs[idx + pattern.len()..];
-    let rest = rest.trim_start();
-
-    if let Some(stripped) = rest.strip_prefix('"') {
-        let end = stripped.find('"')?;
-        Some(&stripped[..end])
-    } else if let Some(stripped) = rest.strip_prefix('\'') {
-        let end = stripped.find('\'')?;
-        Some(&stripped[..end])
-    } else {
-        // Unquoted: take until whitespace or end
-        let end = rest.find(|c: char| c.is_ascii_whitespace() || c == '>');
-        Some(&rest[..end.unwrap_or(rest.len())])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +639,57 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].is_setup());
         assert_eq!(blocks[0].lang(), Some("ts"));
+    }
+
+    #[test]
+    fn is_setup_requires_exact_setup_attribute_not_substring() {
+        // `notsetup` and `data-setup` both CONTAIN the substring "setup" but are NOT the boolean
+        // `setup` attribute. Classification must be by exact attribute name, never substring.
+        for attrs in ["notsetup", "data-setup", "setupx", "data-setup=\"false\""] {
+            let source = format!("<script {attrs} lang=\"ts\">\nconst x = 1;\n</script>");
+            let blocks = scan_sfc_blocks(&source);
+            assert!(
+                !blocks[0].is_setup(),
+                "`{attrs}` must NOT be treated as <script setup>"
+            );
+        }
+        // A real boolean `setup` attribute IS setup, in any position.
+        for attrs in ["setup", "lang=\"ts\" setup", "setup lang=\"ts\""] {
+            let source = format!("<script {attrs}>\nconst x = 1;\n</script>");
+            let blocks = scan_sfc_blocks(&source);
+            assert!(blocks[0].is_setup(), "`{attrs}` is a real <script setup>");
+        }
+    }
+
+    #[test]
+    fn lang_reads_exact_attribute_name_not_substring() {
+        // `mylang` CONTAINS "lang" but is not the `lang` attribute.
+        let source = "<script setup mylang=\"x\">\n</script>";
+        let blocks = scan_sfc_blocks(source);
+        assert_eq!(
+            blocks[0].lang(),
+            None,
+            "`mylang` must not satisfy a `lang` query"
+        );
+
+        // The real `lang` attribute resolves to its typed value.
+        let source = "<script setup lang=\"tsx\">\n</script>";
+        let blocks = scan_sfc_blocks(source);
+        assert_eq!(blocks[0].lang(), Some("tsx"));
+    }
+
+    #[test]
+    fn scoped_and_module_require_exact_attribute_names() {
+        // `data-scoped` / `unscoped` / `modulexyz` contain the substrings but are not the attrs.
+        let source = "<style data-scoped modulexyz>\n.a{}\n</style>";
+        let blocks = scan_sfc_blocks(source);
+        assert!(!blocks[0].is_scoped(), "`data-scoped` is not `scoped`");
+        assert!(!blocks[0].is_module(), "`modulexyz` is not `module`");
+
+        let source = "<style scoped module>\n.a{}\n</style>";
+        let blocks = scan_sfc_blocks(source);
+        assert!(blocks[0].is_scoped());
+        assert!(blocks[0].is_module());
     }
 
     #[test]
@@ -662,25 +804,6 @@ mod tests {
         assert!(!blocks[0].is_setup());
         assert_eq!(blocks[1].tag_name, "script");
         assert!(blocks[1].is_setup());
-    }
-
-    // ========================================================================
-    // Attribute extraction
-    // ========================================================================
-
-    #[test]
-    fn test_extract_attr_value_double_quotes() {
-        assert_eq!(extract_attr_value(" lang=\"ts\" setup", "lang"), Some("ts"));
-    }
-
-    #[test]
-    fn test_extract_attr_value_single_quotes() {
-        assert_eq!(extract_attr_value(" lang='scss'", "lang"), Some("scss"));
-    }
-
-    #[test]
-    fn test_extract_attr_value_missing() {
-        assert_eq!(extract_attr_value(" setup", "lang"), None);
     }
 
     // ========================================================================
@@ -927,5 +1050,118 @@ const x = 1;
         assert_eq!(ctx.attrs[0].value, Some("scss".to_string()));
         assert_eq!(ctx.attrs[1].name, "scoped");
         assert_eq!(ctx.attrs[1].value, None);
+    }
+
+    // ========================================================================
+    // Case-insensitive SFC tag classification (F4)
+    //
+    // HTML tag names are case-insensitive, so `<SCRIPT>` / `<Script>` /
+    // `<STYLE>` / `<Template>` are the SAME block tags as their lowercase
+    // forms. `find_close_tag` already matches the closing tag with
+    // `eq_ignore_ascii_case`, so the OPEN-tag classifier must agree, otherwise
+    // a case-variant `<SCRIPT>` produces no block and its content (e.g. a TS
+    // generic `Box<Foo>`) leaks into RootLevel markup classification.
+    // ========================================================================
+
+    #[test]
+    fn case_variant_script_tag_is_recognized_as_script_block() {
+        // `<SCRIPT>` (uppercase) must classify as a `script` block with a
+        // NORMALIZED lowercase `tag_name`, so downstream lowercase matches
+        // (the Svelte markup-region gate's `matches!(tag, "script" | "style")`)
+        // still recognize it. Pre-fix, a lowercase-only matcher mis-routes
+        // `<SCRIPT>` into a CUSTOM block whose `tag_name` stays `"SCRIPT"`.
+        let source = "<SCRIPT lang=\"ts\">\nconst x: Box<Foo> = mk();\n</SCRIPT>\n<div></div>";
+        let blocks = scan_sfc_blocks(source);
+        let script = blocks
+            .iter()
+            .find(|b| b.tag_name.eq_ignore_ascii_case("script"))
+            .expect("<SCRIPT> must be recognized as a script block");
+        assert_eq!(
+            script.tag_name, "script",
+            "a case-variant <SCRIPT> must normalize its tag_name to lowercase `script`, got `{}`",
+            script.tag_name
+        );
+        let (cs, ce) = script.content_range();
+        assert!(
+            (cs as usize..ce as usize).contains(&(source.find("Box<Foo>").unwrap())),
+            "the script block's content must enclose the `Box<Foo>` generic",
+        );
+    }
+
+    #[test]
+    fn case_variant_style_and_template_tags_are_recognized() {
+        let source = "<Template>\n<div></div>\n</Template>\n<STYLE>\n.a{}\n</STYLE>";
+        let blocks = scan_sfc_blocks(source);
+        let template = blocks
+            .iter()
+            .find(|b| b.tag_name.eq_ignore_ascii_case("template"))
+            .expect("<Template> must be recognized as a template block");
+        assert_eq!(
+            template.tag_name, "template",
+            "<Template> must normalize its tag_name to lowercase `template`"
+        );
+        let style = blocks
+            .iter()
+            .find(|b| b.tag_name.eq_ignore_ascii_case("style"))
+            .expect("<STYLE> must be recognized as a style block");
+        assert_eq!(
+            style.tag_name, "style",
+            "<STYLE> must normalize its tag_name to lowercase `style`"
+        );
+    }
+
+    // ========================================================================
+    // Unclosed SFC block establishes an open-ended non-markup region (F5)
+    //
+    // While the user is mid-typing a `<script>` / `<style>` block there is no
+    // closing tag yet. The block must STILL span from its open tag to EOF so
+    // its content classifies as inside-block (non-markup) content rather than
+    // RootLevel — otherwise a generic `Box<Foo>` typed before `</script>`
+    // exists is misread as root markup and auto-closed.
+    // ========================================================================
+
+    #[test]
+    fn unclosed_script_block_spans_to_eof() {
+        let source = "<script lang=\"ts\">\nconst x: Box<Foo> = mk();";
+        let blocks = scan_sfc_blocks(source);
+        assert_eq!(
+            blocks.len(),
+            1,
+            "the unclosed <script> must still be a block"
+        );
+        let b = &blocks[0];
+        assert_eq!(b.tag_name, "script");
+        // The block spans to EOF: close tag positions sit at the source end.
+        assert_eq!(b.close_tag_start as usize, source.len());
+        assert_eq!(b.close_tag_end as usize, source.len());
+        // The generic is inside the block's content, so the cursor right after
+        // `Box<Foo` classifies as BlockContent, NOT RootLevel.
+        let off = source.find("Box<Foo").unwrap() as u32 + "Box<Foo".len() as u32;
+        assert_eq!(
+            classify_cursor(off, &blocks),
+            SfcCursorContext::BlockContent { block_index: 0 },
+            "an offset inside the unclosed script must classify as BlockContent"
+        );
+    }
+
+    #[test]
+    fn unclosed_style_block_spans_to_eof() {
+        let source = "<div></div>\n<style>\n.a > .b { color: red";
+        let blocks = scan_sfc_blocks(source);
+        let style = blocks
+            .iter()
+            .position(|b| b.tag_name == "style")
+            .expect("unclosed <style> must still be a block");
+        assert_eq!(
+            blocks[style].close_tag_end as usize,
+            source.len(),
+            "the unclosed style block must span to EOF"
+        );
+        let off = source.find(".a >").unwrap() as u32 + ".a >".len() as u32;
+        assert_eq!(
+            classify_cursor(off, &blocks),
+            SfcCursorContext::BlockContent { block_index: style },
+            "an offset inside the unclosed style must classify as BlockContent"
+        );
     }
 }

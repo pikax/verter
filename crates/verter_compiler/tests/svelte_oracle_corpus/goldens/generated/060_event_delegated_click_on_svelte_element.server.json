@@ -1,0 +1,37 @@
+{
+  "slug": "generated/060_event_delegated_click_on_svelte_element.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_60_event_delegated_click_on_svelte_element",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "element"
+  ],
+  "helperSet": [
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

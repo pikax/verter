@@ -1,0 +1,4 @@
+{
+  "rule": "ReactiveDeclarationCycle",
+  "official_code": "reactive_declaration_cycle"
+}

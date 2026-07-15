@@ -1,0 +1,59 @@
+{
+  "slug": "type-dec-lit-id-uq-dynel-ext-plain-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "type_dec_lit_id_uq_dynel_ext_plain_u",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "element",
+    "attribute_effect",
+    "text",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "comment",
+    "element",
+    "first_child",
+    "text"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "element": 1,
+    "attribute_effect": 1,
+    "text": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function type_dec_lit_id_uq_dynel_ext_plain_u($$anchor) {let tag = 'div'; var fragment = $.comment(); var node = $.first_child(fragment); $.element(node, () => tag, false, ($$element, $$anchor) => {$.attribute_effect($$element, () => ({id: 'b', class: ''}), void 0, void 0, void 0, 'svelte-<scoped>'); var text = $.text('x'); $.append($$anchor, text);}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-5wubw0",
+    "code": "\n\tdiv.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

@@ -1,0 +1,90 @@
+{
+  "slug": "runtime/breadth_spread_html.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "breadth_spread_html",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "first_child",
+    "attribute_effect",
+    "get",
+    "html",
+    "get",
+    "reset",
+    "sibling",
+    "sibling",
+    "delegated",
+    "set",
+    "get",
+    "delegated",
+    "set",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "html",
+    "reset",
+    "set",
+    "sibling",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "first_child": 1,
+    "attribute_effect": 1,
+    "get": 3,
+    "html": 1,
+    "reset": 1,
+    "sibling": 2,
+    "delegated": 2,
+    "set": 2,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div> <button>title</button> <button>html</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div> <button>title</button> <button>html</button>`, 1); export default function breadth_spread_html($$anchor) {let title = $.state('a'); let html = $.state('<strong>one</strong>'); var fragment = root(); var div = $.first_child(fragment); $.attribute_effect(div, () => ({...{title: $.get(title)}})); $.html(div, () => $.get(html), true); $.reset(div); var button = $.sibling(div, 2); var button_1 = $.sibling(button, 2); $.delegated('click', button, () => $.set(title, $.get(title) + '!')); $.delegated('click', button_1, () => $.set(html, '<em>two</em>')); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

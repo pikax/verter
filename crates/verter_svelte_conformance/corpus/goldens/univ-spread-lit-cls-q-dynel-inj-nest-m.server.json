@@ -1,0 +1,42 @@
+{
+  "slug": "univ-spread-lit-cls-q-dynel-inj-nest-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "univ_spread_lit_cls_q_dynel_inj_nest_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "element",
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes",
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1,
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

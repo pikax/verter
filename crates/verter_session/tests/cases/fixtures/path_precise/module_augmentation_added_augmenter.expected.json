@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "archetype": "module_augmentation_added_augmenter",
+  "test_phases": [
+    {
+      "phase": "initial_load",
+      "files_loaded": ["module_augmentation_added_augmenter.ts"],
+      "augmenter_set": ["module_augmentation_added_augmenter.ts"],
+      "augmenter_set_fingerprint": "hash([primary])",
+      "consumer_surface_members": ["primaryField"]
+    },
+    {
+      "phase": "after_adding_secondary",
+      "files_loaded": [
+        "module_augmentation_added_augmenter.ts",
+        "module_augmentation_added_augmenter_secondary.ts"
+      ],
+      "augmenter_set": [
+        "module_augmentation_added_augmenter.ts",
+        "module_augmentation_added_augmenter_secondary.ts"
+      ],
+      "augmenter_set_fingerprint": "hash([primary, secondary])",
+      "consumer_surface_members": ["primaryField", "secondaryField"]
+    }
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "load secondary augmenter file into FileArtifactStore",
+      "stage_0_today_invalidates_consumer": "approximated via workspace-edge cascade",
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R29 + G1: ModuleAugmentationIndexShape(ExternalSpecifier(\"vue\")) fingerprint changes"
+    }
+  ]
+}

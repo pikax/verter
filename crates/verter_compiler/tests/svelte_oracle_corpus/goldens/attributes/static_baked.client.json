@@ -1,0 +1,87 @@
+{
+  "slug": "attributes/static_baked.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "static_baked",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "first_child",
+    "child",
+    "reset",
+    "sibling",
+    "template_effect",
+    "set_text",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "reset",
+    "set_text",
+    "sibling",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "first_child": 1,
+    "child": 1,
+    "reset": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button id=\"x\" disabled=\"\" class=\"base\" type=\"submit\"> </button> <button>bump</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button id=\"x\" disabled=\"\" class=\"base\" type=\"submit\"> </button> <button>bump</button>`, 1); export default function static_baked($$anchor) {let c = $.state(0); var fragment = root(); var button = $.first_child(fragment); var text = $.child(button, true); $.reset(button); var button_1 = $.sibling(button, 2); $.template_effect(() => $.set_text(text, $.get(c))); $.delegated('click', button_1, () => $.update(c)); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

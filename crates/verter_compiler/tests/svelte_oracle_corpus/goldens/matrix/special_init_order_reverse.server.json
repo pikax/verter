@@ -1,0 +1,42 @@
+{
+  "slug": "matrix/special_init_order_reverse.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "special_init_order_reverse",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "head",
+    "escape",
+    "escape"
+  ],
+  "helperSet": [
+    "escape",
+    "head"
+  ],
+  "helperCounts": {
+    "head": 1,
+    "escape": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

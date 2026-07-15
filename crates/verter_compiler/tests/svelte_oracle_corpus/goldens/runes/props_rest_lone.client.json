@@ -1,0 +1,59 @@
+{
+  "slug": "runes/props_rest_lone.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "props_rest_lone",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "rest_props",
+    "attribute_effect",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "from_html",
+    "rest_props"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "rest_props": 1,
+    "attribute_effect": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var rest_excludes = new Set(['$$slots', '$$events', '$$legacy']); var root = $.from_html(`<div></div>`); export default function props_rest_lone($$anchor, $$props) {let rest = $.rest_props($$props, rest_excludes); var div = root(); $.attribute_effect(div, () => ({...rest})); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

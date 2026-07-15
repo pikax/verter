@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 use walkdir::WalkDir;
 
-use verter_core::compile::{compile, CodegenOptions, VerterCompileOptions};
+use verter_compiler::compile::{compile, CodegenOptions, VerterCompileOptions};
 
 // ── File discovery ──────────────────────────────────────────────────
 
@@ -336,7 +336,7 @@ fn main() {
             sample_files: files.into_iter().take(3).collect(),
         })
         .collect();
-    error_groups.sort_by(|a, b| b.count.cmp(&a.count));
+    error_groups.sort_by_key(|g| std::cmp::Reverse(g.count));
 
     // ── Per-project breakdown ───────────────────────────────────────
     let mut per_project: Vec<ProjectSummary> = Vec::new();

@@ -1,7 +1,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::types::{ScriptAnalysisSnapshot, VueApiClassification};
+use verter_semantic::analysis::types::{ScriptAnalysisSnapshot, VueApiClassification};
 
 /// Suggests adding `onServerPrefetch` when `onMounted` contains an async callback
 /// (likely data fetching) but no `onServerPrefetch` companion is present.
@@ -54,7 +54,7 @@ impl LintRule for PreferServerPrefetch {
 mod tests {
     use super::*;
     use crate::test_support::{run_script_rule, run_script_rule_ssr};
-    use verter_analysis::types::VueApiCallSite;
+    use verter_semantic::analysis::types::VueApiCallSite;
     use verter_span::Span;
 
     fn call(api: VueApiClassification, is_async: bool) -> VueApiCallSite {

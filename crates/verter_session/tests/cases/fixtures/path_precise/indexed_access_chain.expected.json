@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "archetype": "indexed_access_chain",
+  "consumer_published_surface": {
+    "kind": "object",
+    "members": [
+      { "name": "value", "from_path": ["Foo", "a", "b"] },
+      { "name": "label", "from_path": ["Foo", "a", "b"] }
+    ]
+  },
+  "fact_dep_signature_observed_by_consumer": [
+    "Export(\"Selected\", Type)",
+    "Export(\"Foo\", Type)",
+    "MemberPresence(Foo, \"a\", Type)",
+    "Member(Foo, \"a\", Type)",
+    "MemberPresence(\"Foo.a\", \"b\", Type)",
+    "Member(\"Foo.a\", \"b\", Type)"
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "edit Foo.a.b.value type",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R14: Member(Foo.a, \"b\") body changes"
+    },
+    {
+      "edit": "edit Foo.a.c body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R14: sibling hop never observed by consumer; Foo.a's intermediate Member fingerprint navigates only into \"b\""
+    },
+    {
+      "edit": "edit Foo.b body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R14: top-level sibling of the navigated path"
+    },
+    {
+      "edit": "add Foo.a.d",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R28: new MemberPresence under Foo.a; consumer observed only Foo.a.b's path"
+    }
+  ]
+}

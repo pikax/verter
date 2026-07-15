@@ -1,0 +1,38 @@
+{
+  "slug": "id-dec-eschex-cls-q-dynel-ext-prune-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dec_eschex_cls_q_dynel_ext_prune_n",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "element"
+  ],
+  "helperSet": [
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) #\\7a z {\n\t\tcolor: red;\n\t}*/\n\n\t/* (unused) .unused-prune {\n\t\tcolor: blue;\n\t}*/\n"
+  }
+}

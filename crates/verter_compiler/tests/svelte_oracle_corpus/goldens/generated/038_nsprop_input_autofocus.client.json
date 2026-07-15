@@ -1,0 +1,75 @@
+{
+  "slug": "generated/038_nsprop_input_autofocus.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "_38_nsprop_input_autofocus",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "autofocus",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "autofocus",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "autofocus": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  },
+  "events": [],
+  "nonStaticProperties": [
+    {
+      "name": "autofocus",
+      "kind": "autofocus",
+      "value": [
+        "boolean"
+      ]
+    }
+  ],
+  "attrParts": [],
+  "directiveExprs": [],
+  "decodedText": [],
+  "nodePaths": {
+    "regions": []
+  },
+  "dynamicSlots": {}
+}

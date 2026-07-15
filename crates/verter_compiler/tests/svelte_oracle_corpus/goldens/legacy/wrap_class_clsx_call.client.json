@@ -1,0 +1,95 @@
+{
+  "slug": "legacy/wrap_class_clsx_call.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "wrap_class_clsx_call",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "prop",
+    "init",
+    "first_child",
+    "sibling",
+    "template_effect",
+    "set_class",
+    "set_class",
+    "clsx",
+    "deep_read_state",
+    "untrack",
+    "clsx",
+    "deep_read_state",
+    "untrack",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "clsx",
+    "deep_read_state",
+    "first_child",
+    "from_html",
+    "init",
+    "pop",
+    "prop",
+    "push",
+    "set_class",
+    "sibling",
+    "template_effect",
+    "untrack"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "prop": 1,
+    "init": 1,
+    "first_child": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_class": 2,
+    "clsx": 2,
+    "deep_read_state": 2,
+    "untrack": 2,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div> <span></span>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div> <span></span>`, 1); export default function wrap_class_clsx_call($$anchor, $$props) {$.push($$props, false); let obj = $.prop($$props, 'obj', 8); $.init(); var fragment = root(); var div = $.first_child(fragment); var span = $.sibling(div, 2); $.template_effect(($0) => {$.set_class(div, 1, $0); $.set_class(span, 1, $.clsx(($.deep_read_state(obj()), $.untrack(() => obj().x))));}, [() => $.clsx(($.deep_read_state(obj()), $.untrack(() => obj().m())))]); $.append($$anchor, fragment); $.pop();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

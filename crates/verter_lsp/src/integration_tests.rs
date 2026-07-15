@@ -1,10 +1,11 @@
-/// @ai-generated — Phase 4 integration tests for verter_lsp.
+/// @ai-generated — integration tests for verter_lsp.
 ///
-/// These tests use the full pipeline: DocumentRegistry (backed by verter_host) →
+/// These tests use the full pipeline: DocumentRegistry (backed by verter_session) →
 /// LSP feature functions → verify results. They test real Vue SFC content end-to-end.
 use std::sync::Arc;
 use tower_lsp_server::ls_types::*;
-use verter_host::{HostConfig, VerterHost};
+use verter_session::{HostConfig, VerterHost};
+use verter_span::{LspPosition, TsPosition};
 
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::documents::DocumentRegistry;
@@ -729,8 +730,9 @@ const msg = 'hello'
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
-    let mapper = doc.position_mapper.as_ref().expect("mapper should exist");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("mapper should exist");
     let tsx = registry.get_ide(&uri).expect("tsx should exist");
 
     // Find "msg" in the original source (script block)
@@ -740,13 +742,13 @@ const msg = 'hello'
     let msg_col = (msg_offset - msg_line_start) as u32;
 
     // Map Vue position → TSX position
-    let tsx_pos = mapper.vue_to_tsx(msg_line, msg_col);
+    let tsx_pos = mapper.carrier_to_tsx(LspPosition::new(msg_line, msg_col));
     assert!(
         tsx_pos.is_some(),
         "Should map Vue position (line {msg_line}, col {msg_col}) to TSX"
     );
 
-    let tsx_pos = tsx_pos.unwrap();
+    let tsx_pos = tsx_pos.unwrap().pos;
     // Verify the TSX position is reasonable (not out of bounds)
     let tsx_lines: Vec<&str> = tsx.code.lines().collect();
     assert!(
@@ -757,13 +759,13 @@ const msg = 'hello'
     );
 
     // Map TSX position back → Vue position
-    let vue_pos = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.column);
-    assert!(vue_pos.is_some(), "Should map TSX position back to Vue");
+    let carrier_pos = mapper.tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character));
+    assert!(carrier_pos.is_some(), "Should map TSX position back to Vue");
 
-    let vue_pos = vue_pos.unwrap();
+    let carrier_pos = carrier_pos.unwrap().pos;
     // The roundtrip should land on the same line
     assert_eq!(
-        vue_pos.line, msg_line,
+        carrier_pos.line, msg_line,
         "Roundtrip should return to the same Vue line"
     );
 }
@@ -786,10 +788,8 @@ const count = 0
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
-    let mapper = doc
-        .position_mapper
-        .as_ref()
+    let mapper = registry
+        .get_position_mapper(&uri)
         .expect("mapper should exist after compilation");
     let tsx = registry.get_ide(&uri).expect("tsx should exist");
 
@@ -809,8 +809,9 @@ const count = 0
 
     // Forward map: start of "count" in Vue
     let tsx_start = mapper
-        .vue_to_tsx(template_count_line, template_count_col)
-        .expect("Start of 'count' in template should map to TSX");
+        .carrier_to_tsx(LspPosition::new(template_count_line, template_count_col))
+        .expect("Start of 'count' in template should map to TSX")
+        .pos;
 
     // Verify: the character at the mapped TSX position should be 'c' (start of "count")
     assert!(
@@ -821,16 +822,16 @@ const count = 0
     );
     let tsx_line_chars: Vec<char> = tsx_lines[tsx_start.line as usize].chars().collect();
     assert!(
-        (tsx_start.column as usize) < tsx_line_chars.len(),
+        (tsx_start.character as usize) < tsx_line_chars.len(),
         "TSX column {} out of bounds for line '{}' (len: {})",
-        tsx_start.column,
+        tsx_start.character,
         tsx_lines[tsx_start.line as usize],
         tsx_line_chars.len()
     );
     assert_eq!(
-        tsx_line_chars[tsx_start.column as usize], 'c',
+        tsx_line_chars[tsx_start.character as usize], 'c',
         "TSX position should point to 'c' of 'count', got '{}' in line '{}'",
-        tsx_line_chars[tsx_start.column as usize], tsx_lines[tsx_start.line as usize]
+        tsx_line_chars[tsx_start.character as usize], tsx_lines[tsx_start.line as usize]
     );
 
     // Forward map + character verify for each character of "count" (c=0, o=1, u=2, n=3, t=4)
@@ -838,21 +839,22 @@ const count = 0
     for (i, expected_char) in expected_chars.iter().enumerate() {
         let vue_col = template_count_col + i as u32;
         let tsx_pos = mapper
-            .vue_to_tsx(template_count_line, vue_col)
+            .carrier_to_tsx(LspPosition::new(template_count_line, vue_col))
             .unwrap_or_else(|| {
                 panic!(
-                    "vue_to_tsx failed for 'count'[{i}] at Vue ({}, {vue_col})",
+                    "carrier_to_tsx failed for 'count'[{i}] at Vue ({}, {vue_col})",
                     template_count_line
                 )
-            });
+            })
+            .pos;
 
         let actual_char = tsx_lines[tsx_pos.line as usize]
             .chars()
-            .nth(tsx_pos.column as usize)
+            .nth(tsx_pos.character as usize)
             .unwrap_or_else(|| {
                 panic!(
                     "TSX position ({}, {}) out of bounds for 'count'[{i}]",
-                    tsx_pos.line, tsx_pos.column
+                    tsx_pos.line, tsx_pos.character
                 )
             });
         assert_eq!(
@@ -861,39 +863,42 @@ const count = 0
             "'count'[{i}]: expected '{}' at TSX ({}, {}), got '{}' in line '{}'",
             expected_char,
             tsx_pos.line,
-            tsx_pos.column,
+            tsx_pos.character,
             actual_char,
             tsx_lines[tsx_pos.line as usize]
         );
 
         // Reverse: TSX → Vue should return the same Vue column
-        let vue_roundtrip = mapper
-            .tsx_to_vue(tsx_pos.line, tsx_pos.column)
+        let carrier_roundtrip = mapper
+            .tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character))
             .unwrap_or_else(|| {
                 panic!(
-                    "tsx_to_vue failed for TSX ({}, {})",
-                    tsx_pos.line, tsx_pos.column
+                    "tsx_to_carrier failed for TSX ({}, {})",
+                    tsx_pos.line, tsx_pos.character
                 )
-            });
+            })
+            .pos;
         assert_eq!(
-            vue_roundtrip.line, template_count_line,
+            carrier_roundtrip.line, template_count_line,
             "'count'[{i}] roundtrip: line mismatch"
         );
         assert_eq!(
-            vue_roundtrip.column, vue_col,
+            carrier_roundtrip.character, vue_col,
             "'count'[{i}] roundtrip: column mismatch (expected Vue col {vue_col}, got {})",
-            vue_roundtrip.column
+            carrier_roundtrip.character
         );
     }
 
     // Verify: the prefix region (positions before 'c' in TSX) maps to unmapped or different location
-    if tsx_start.column > 0 {
-        let prefix_pos = mapper.tsx_to_vue(tsx_start.line, tsx_start.column - 1);
+    if tsx_start.character > 0 {
+        let prefix_pos =
+            mapper.tsx_to_carrier(TsPosition::new(tsx_start.line, tsx_start.character - 1));
         // Inside the prepended prefix: should either be None (unmapped) or map to a
         // different Vue position (not the same as "count")
-        if let Some(pos) = prefix_pos {
+        if let Some(m) = prefix_pos {
+            let pos = m.pos;
             assert!(
-                pos.line != template_count_line || pos.column != template_count_col,
+                pos.line != template_count_line || pos.character != template_count_col,
                 "Position inside prefix should NOT map back to 'count' start"
             );
         }
@@ -904,7 +909,7 @@ const count = 0
 /// @ai-generated — Verifies that script block positions roundtrip with exact column accuracy.
 ///
 /// Script blocks are not prepended — they map 1:1. This confirms the column adjustment
-/// in tsx_to_vue works correctly for the identity mapping case.
+/// in tsx_to_carrier works correctly for the identity mapping case.
 #[test]
 fn integration_source_map_script_roundtrip_exact_column() {
     let source = r#"<script setup>
@@ -917,8 +922,9 @@ const count = 42
 </template>
 "#;
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
-    let mapper = doc.position_mapper.as_ref().expect("mapper should exist");
+    let mapper = registry
+        .get_position_mapper(&uri)
+        .expect("mapper should exist");
     let tsx = registry.get_ide(&uri).expect("tsx should exist");
     let tsx_code = tsx.code.as_ref();
     let tsx_lines: Vec<&str> = tsx_code.lines().collect();
@@ -933,27 +939,32 @@ const count = 42
     let expected_chars = ['m', 'e', 's', 's', 'a', 'g', 'e'];
     for (i, expected_char) in expected_chars.iter().enumerate() {
         let vue_col = msg_col + i as u32;
-        let tsx_pos = mapper.vue_to_tsx(msg_line, vue_col).unwrap_or_else(|| {
-            panic!("vue_to_tsx failed for 'message'[{i}] at ({msg_line}, {vue_col})")
-        });
+        let tsx_pos = mapper
+            .carrier_to_tsx(LspPosition::new(msg_line, vue_col))
+            .unwrap_or_else(|| {
+                panic!("carrier_to_tsx failed for 'message'[{i}] at ({msg_line}, {vue_col})")
+            })
+            .pos;
 
         // Character at TSX position should match
         if let Some(tsx_line) = tsx_lines.get(tsx_pos.line as usize) {
-            if let Some(actual) = tsx_line.chars().nth(tsx_pos.column as usize) {
+            if let Some(actual) = tsx_line.chars().nth(tsx_pos.character as usize) {
                 assert_eq!(
                     actual, *expected_char,
                     "'message'[{i}]: expected '{}' got '{}' at TSX ({}, {})",
-                    expected_char, actual, tsx_pos.line, tsx_pos.column
+                    expected_char, actual, tsx_pos.line, tsx_pos.character
                 );
             }
         }
 
         // Roundtrip
-        let vue_roundtrip = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.column);
-        if let Some(pos) = vue_roundtrip {
+        let carrier_roundtrip =
+            mapper.tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character));
+        if let Some(m) = carrier_roundtrip {
+            let pos = m.pos;
             assert_eq!(pos.line, msg_line, "'message'[{i}] roundtrip line mismatch");
             assert_eq!(
-                pos.column, vue_col,
+                pos.character, vue_col,
                 "'message'[{i}] roundtrip column mismatch"
             );
         }
@@ -972,10 +983,8 @@ fn integration_utf16_source_map_with_multibyte_chars() {
     // 'é' in "café" is 2 bytes UTF-8, 1 UTF-16 code unit
     let source = "<script setup>\nconst café = 'latte'\n</script>\n\n<template>\n  <div>{{ café }}</div>\n</template>\n";
     let (registry, uri) = open_vue_file(source);
-    let doc = registry.get(&uri).unwrap();
-    let mapper = doc
-        .position_mapper
-        .as_ref()
+    let mapper = registry
+        .get_position_mapper(&uri)
         .expect("mapper should exist for SFC with non-ASCII chars");
     let tsx = registry.get_ide(&uri).expect("tsx should exist");
     let tsx_code = tsx.code.as_ref();
@@ -993,7 +1002,10 @@ fn integration_utf16_source_map_with_multibyte_chars() {
     let template_cafe_col_utf16 = line_prefix.encode_utf16().count() as u32;
 
     // Forward map: "café" in Vue should map to a valid TSX position
-    let tsx_pos = mapper.vue_to_tsx(template_cafe_line, template_cafe_col_utf16);
+    let tsx_pos = mapper.carrier_to_tsx(LspPosition::new(
+        template_cafe_line,
+        template_cafe_col_utf16,
+    ));
     assert!(
         tsx_pos.is_some(),
         "Start of 'café' at Vue ({}, {}) should map to TSX. Source line: '{}'",
@@ -1005,7 +1017,7 @@ fn integration_utf16_source_map_with_multibyte_chars() {
                 .map(|p| template_cafe_line_start + p)
                 .unwrap_or(source.len())]
     );
-    let tsx_pos = tsx_pos.unwrap();
+    let tsx_pos = tsx_pos.unwrap().pos;
 
     // The TSX should contain "café" and the character at the mapped position should be 'c'
     let tsx_lines: Vec<&str> = tsx_code.lines().collect();
@@ -1014,7 +1026,7 @@ fn integration_utf16_source_map_with_multibyte_chars() {
         let mut utf16_count = 0u32;
         let mut char_at_col = None;
         for ch in tsx_line.chars() {
-            if utf16_count == tsx_pos.column {
+            if utf16_count == tsx_pos.character {
                 char_at_col = Some(ch);
                 break;
             }
@@ -1025,7 +1037,7 @@ fn integration_utf16_source_map_with_multibyte_chars() {
             Some('c'),
             "TSX position ({}, {}) should point to 'c' of 'café', got {:?} in line '{}'",
             tsx_pos.line,
-            tsx_pos.column,
+            tsx_pos.character,
             char_at_col,
             tsx_line
         );
@@ -1036,13 +1048,16 @@ fn integration_utf16_source_map_with_multibyte_chars() {
     let expected_chars = ['c', 'a', 'f', 'é'];
     for (i, expected_char) in expected_chars.iter().enumerate() {
         let vue_col = template_cafe_col_utf16 + i as u32;
-        if let Some(tsx_mapped) = mapper.vue_to_tsx(template_cafe_line, vue_col) {
+        if let Some(tsx_mapped) = mapper
+            .carrier_to_tsx(LspPosition::new(template_cafe_line, vue_col))
+            .map(|m| m.pos)
+        {
             // Verify character at TSX position
             if let Some(tsx_line) = tsx_lines.get(tsx_mapped.line as usize) {
                 let mut utf16_count = 0u32;
                 let mut actual_char = None;
                 for ch in tsx_line.chars() {
-                    if utf16_count == tsx_mapped.column {
+                    if utf16_count == tsx_mapped.character {
                         actual_char = Some(ch);
                         break;
                     }
@@ -1054,19 +1069,22 @@ fn integration_utf16_source_map_with_multibyte_chars() {
                     "café[{i}]: expected '{}' at TSX ({}, {}), got {:?}",
                     expected_char,
                     tsx_mapped.line,
-                    tsx_mapped.column,
+                    tsx_mapped.character,
                     actual_char
                 );
             }
 
             // Roundtrip: TSX -> Vue
-            if let Some(vue_roundtrip) = mapper.tsx_to_vue(tsx_mapped.line, tsx_mapped.column) {
+            if let Some(carrier_roundtrip) = mapper
+                .tsx_to_carrier(TsPosition::new(tsx_mapped.line, tsx_mapped.character))
+                .map(|m| m.pos)
+            {
                 assert_eq!(
-                    vue_roundtrip.line, template_cafe_line,
+                    carrier_roundtrip.line, template_cafe_line,
                     "café[{i}] roundtrip line mismatch"
                 );
                 assert_eq!(
-                    vue_roundtrip.column, vue_col,
+                    carrier_roundtrip.character, vue_col,
                     "café[{i}] roundtrip column mismatch"
                 );
             }
@@ -1086,8 +1104,7 @@ fn integration_utf16_surrogate_pair_position_accuracy() {
     let (registry, uri) = open_vue_file(source);
 
     // Just verify compilation doesn't panic and we get a mapper
-    let doc = registry.get(&uri).unwrap();
-    let mapper = doc.position_mapper.as_ref();
+    let mapper = registry.get_position_mapper(&uri);
 
     // If mapper exists, verify the script binding position roundtrips
     if let Some(mapper) = mapper {
@@ -1096,13 +1113,18 @@ fn integration_utf16_surrogate_pair_position_accuracy() {
         let script_line = 1u32;
         let msg_utf16_col = 8u32; // "const " (6) + 😀 (2)
 
-        if let Some(tsx_pos) = mapper.vue_to_tsx(script_line, msg_utf16_col) {
-            let vue_roundtrip = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.column);
-            if let Some(pos) = vue_roundtrip {
+        if let Some(tsx_pos) = mapper
+            .carrier_to_tsx(LspPosition::new(script_line, msg_utf16_col))
+            .map(|m| m.pos)
+        {
+            let carrier_roundtrip =
+                mapper.tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character));
+            if let Some(m) = carrier_roundtrip {
+                let pos = m.pos;
                 assert_eq!(pos.line, script_line, "😀msg roundtrip: line should match");
                 // Column should be exact or on the same line
                 assert_eq!(
-                    pos.column, msg_utf16_col,
+                    pos.character, msg_utf16_col,
                     "😀msg roundtrip: column should match (UTF-16)"
                 );
             }
@@ -1369,8 +1391,8 @@ const c = 3
 
     // Mappers should be independent — mapping line 1 in each file should give different results
     // (because the script blocks have different content and line counts)
-    let a_tsx = mapper_a.unwrap().vue_to_tsx(1, 0);
-    let b_tsx = mapper_b.unwrap().vue_to_tsx(1, 0);
+    let a_tsx = mapper_a.unwrap().carrier_to_tsx(LspPosition::new(1, 0));
+    let b_tsx = mapper_b.unwrap().carrier_to_tsx(LspPosition::new(1, 0));
     // Both should produce some mapping (not None)
     assert!(
         a_tsx.is_some() || b_tsx.is_some(),
@@ -1495,10 +1517,10 @@ const count = 0
     );
 }
 
-/// @ai-generated — vue_position_to_tsx_offset_validated should succeed for template bindings.
+/// @ai-generated — carrier_position_to_tsx_offset_validated should succeed for template bindings.
 ///
 /// Bug #20: When hovering on a template expression like `{{ count }}`, the LSP
-/// falls back to Verter binding info because vue_position_to_tsx_offset_validated
+/// falls back to Verter binding info because carrier_position_to_tsx_offset_validated
 /// returns None for template positions, preventing TSGO from being queried.
 #[test]
 fn validated_tsx_offset_works_for_template_binding() {
@@ -1528,7 +1550,7 @@ const count = 0
     };
 
     // The unvalidated mapping should work
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset(
         &position,
         &doc.line_index,
         &mapper,
@@ -1536,13 +1558,13 @@ const count = 0
     );
     assert!(
         tsx_offset.is_some(),
-        "vue_position_to_tsx_offset should map template binding 'count' to TSX offset.\n\
+        "carrier_position_to_tsx_offset should map template binding 'count' to TSX offset.\n\
          TSX code:\n{}",
         tsx.code
     );
 
     // The VALIDATED mapping must also work — this is the bug (#20)
-    let validated = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let validated = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1550,7 +1572,7 @@ const count = 0
     );
     assert!(
         validated.is_some(),
-        "vue_position_to_tsx_offset_validated should succeed for template binding 'count'.\n\
+        "carrier_position_to_tsx_offset_validated should succeed for template binding 'count'.\n\
          Unvalidated offset: {:?}\n\
          Vue position: {}:{}\n\
          TSX code:\n{}",
@@ -1602,7 +1624,7 @@ const msg = 'hello'
         character: (template_msg - line_start) as u32,
     };
 
-    let validated = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let validated = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1648,7 +1670,7 @@ function handleClick() {}
         character: (template_hc - line_start) as u32,
     };
 
-    let validated = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let validated = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1692,7 +1714,7 @@ const nested = reactive({ deep: { value: 'hello', count: 1 } })
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1752,7 +1774,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1833,7 +1855,7 @@ const users: User[] = [{ name: 'Alice', email: 'a@b.com', age: 30 }]
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1888,7 +1910,7 @@ fn validated_tsx_offset_keeps_fixture_vfor_member_access_on_template_occurrence(
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -1948,7 +1970,7 @@ const outerLabel = 'outer'
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2000,7 +2022,7 @@ const outerLabel = 'outer'
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2061,7 +2083,7 @@ const outerLabel = 'outer'
         character: (source_offset - line_start) as u32,
     };
 
-    let tsx_offset = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2074,9 +2096,10 @@ const outerLabel = 'outer'
         for delta in 0..=12 {
             let candidate = slot_idx as u32 + delta;
             if let Some(tsx_pos) = tsx_li.offset_to_position(candidate) {
-                let vue_pos = mapper.tsx_to_vue(tsx_pos.line, tsx_pos.character);
+                let carrier_pos =
+                    mapper.tsx_to_carrier(TsPosition::new(tsx_pos.line, tsx_pos.character));
                 eprintln!(
-                    "candidate offset={candidate} tsx={}:{} vue={vue_pos:?} text={:?}",
+                    "candidate offset={candidate} tsx={}:{} vue={carrier_pos:?} text={:?}",
                     tsx_pos.line,
                     tsx_pos.character,
                     &tsx.code[candidate as usize..tsx.code.len().min(candidate as usize + 6)]
@@ -2124,7 +2147,7 @@ const show = true
         character: (template_show - line_start) as u32,
     };
 
-    let validated = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let validated = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2173,7 +2196,7 @@ const items = [1, 2, 3]
         character: (items_in_vfor - line_start) as u32,
     };
 
-    let validated = crate::tsgo::merge::vue_position_to_tsx_offset_validated(
+    let validated = crate::type_provider::merge::carrier_position_to_tsx_offset_validated(
         &position,
         &doc.line_index,
         &mapper,
@@ -2451,25 +2474,25 @@ fn virtual_files_response_serializes_all_fields() {
 /// The handler now skips `.vue` URIs — they are synced via TSX compilation.
 #[test]
 fn on_did_change_skips_vue_files() {
-    let vue_uris = [
+    let carrier_uris = [
         "file:///d:/dev/project/src/App.vue",
         "file:///home/user/project/Component.vue",
         "file:///c:/Users/dev/src/views/Home.vue",
     ];
-    for uri in &vue_uris {
+    for uri in &carrier_uris {
         assert!(
             uri.ends_with(".vue"),
             "Test setup: URI should end with .vue: {uri}"
         );
     }
 
-    let non_vue_uris = [
+    let non_carrier_uris = [
         "file:///d:/dev/project/src/utils.ts",
         "file:///home/user/project/types.d.ts",
         "file:///c:/Users/dev/src/index.js",
         "file:///d:/dev/project/src/App.vue.tsx", // TSX version should NOT be skipped
     ];
-    for uri in &non_vue_uris {
+    for uri in &non_carrier_uris {
         assert!(
             !uri.ends_with(".vue"),
             "Test setup: URI should NOT end with .vue: {uri}"
@@ -2536,10 +2559,10 @@ const msg = 'hello'
     let tsx_after = registry.get_ide(&uri);
     assert!(tsx_after.is_some(), "TSX should exist after did_change");
 
-    // Verify position mapper exists
+    // Verify the provider projection exists
     assert!(
-        doc.position_mapper.is_some(),
-        "position mapper should exist after did_change"
+        doc.projection.is_some(),
+        "provider projection should exist after did_change"
     );
 }
 
@@ -2782,7 +2805,7 @@ const value{i} = {i}
 /// continuously read TSX and analysis. No operation should deadlock or panic.
 #[test]
 fn multithread_interleaved_writes_and_reads() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     let source = r#"<script setup lang="ts">
@@ -2806,16 +2829,26 @@ const count = 0
     });
 
     let done = Arc::new(AtomicBool::new(false));
+    let start_reads = Arc::new(AtomicBool::new(false));
+    let readers_started = Arc::new(AtomicUsize::new(0));
 
     // Reader thread 1: continuously read TSX until writes are done
     let reg_r1 = Arc::clone(&registry);
     let uri_r1 = uri.clone();
     let done_r1 = Arc::clone(&done);
+    let start_reads_r1 = Arc::clone(&start_reads);
+    let readers_started_r1 = Arc::clone(&readers_started);
     let reader1 = std::thread::spawn(move || {
         let mut read_count = 0u32;
-        while !done_r1.load(Ordering::Relaxed) {
+        while !start_reads_r1.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        while !done_r1.load(Ordering::Acquire) {
             let _ = reg_r1.get_ide(&uri_r1);
             read_count += 1;
+            if read_count == 1 {
+                readers_started_r1.fetch_add(1, Ordering::Release);
+            }
         }
         read_count
     });
@@ -2824,14 +2857,27 @@ const count = 0
     let reg_r2 = Arc::clone(&registry);
     let uri_r2 = uri.clone();
     let done_r2 = Arc::clone(&done);
+    let start_reads_r2 = Arc::clone(&start_reads);
+    let readers_started_r2 = Arc::clone(&readers_started);
     let reader2 = std::thread::spawn(move || {
         let mut read_count = 0u32;
-        while !done_r2.load(Ordering::Relaxed) {
+        while !start_reads_r2.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        while !done_r2.load(Ordering::Acquire) {
             let _ = reg_r2.get_analysis(&uri_r2);
             read_count += 1;
+            if read_count == 1 {
+                readers_started_r2.fetch_add(1, Ordering::Release);
+            }
         }
         read_count
     });
+
+    start_reads.store(true, Ordering::Release);
+    while readers_started.load(Ordering::Acquire) < 2 {
+        std::thread::yield_now();
+    }
 
     // Writer: 20 sequential edits while readers are running
     for i in 2..=21 {
@@ -2857,7 +2903,7 @@ const count = {i}
     }
 
     // Signal readers to stop
-    done.store(true, Ordering::Relaxed);
+    done.store(true, Ordering::Release);
 
     let reads1 = reader1.join().expect("reader1 panicked");
     let reads2 = reader2.join().expect("reader2 panicked");
@@ -2995,17 +3041,25 @@ const stress{i} = 'init'
         });
     }
 
-    let done = Arc::new(AtomicBool::new(false));
-    let mut handles = Vec::new();
+    // Each writer performs a FIXED number of edits then exits. This
+    // bounds the stress workload deterministically (file_count *
+    // EDITS_PER_WRITER edits interleaved with the readers) instead of
+    // running for a fixed 500ms wall-clock window whose actual work
+    // count varied with machine speed. A real deadlock still surfaces:
+    // a stuck writer never finishes and trips the 10s join watchdog.
+    const EDITS_PER_WRITER: i32 = 50;
 
-    // Spawn writer threads: each edits its assigned file in a loop
+    let done = Arc::new(AtomicBool::new(false));
+    let mut writer_handles = Vec::new();
+    let mut reader_handles = Vec::new();
+
+    // Spawn writer threads: each edits its assigned file EDITS_PER_WRITER
+    // times, then exits.
     for (i, uri) in uris.iter().enumerate() {
         let reg = Arc::clone(&registry);
         let uri = uri.clone();
-        let done = Arc::clone(&done);
-        handles.push(std::thread::spawn(move || {
-            let mut version = 2i32;
-            while !done.load(Ordering::Relaxed) {
+        writer_handles.push(std::thread::spawn(move || {
+            for version in 2..(2 + EDITS_PER_WRITER) {
                 let source = format!(
                     r#"<script setup lang="ts">
 const stress{i} = 'v{version}'
@@ -3022,17 +3076,17 @@ const stress{i} = 'v{version}'
                         text: source,
                     }],
                 );
-                version += 1;
             }
         }));
     }
 
     // Spawn reader threads: continuously read TSX/analysis from all files
+    // until the writers have finished.
     for _ in 0..4 {
         let reg = Arc::clone(&registry);
         let uris = uris.clone();
         let done = Arc::clone(&done);
-        handles.push(std::thread::spawn(move || {
+        reader_handles.push(std::thread::spawn(move || {
             while !done.load(Ordering::Relaxed) {
                 for uri in &uris {
                     let _ = reg.get_ide(uri);
@@ -3043,21 +3097,45 @@ const stress{i} = 'v{version}'
         }));
     }
 
-    // Let the stress test run for 500ms
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    done.store(true, Ordering::Relaxed);
-
-    // All threads must join without deadlock — 10s hard timeout per thread
-    for (i, handle) in handles.into_iter().enumerate() {
-        // Use a watchdog: if join doesn't return in 10s, it's a deadlock
-        let watchdog = std::thread::spawn(move || {
-            handle
-                .join()
-                .unwrap_or_else(|_| panic!("thread {i} panicked"));
+    // Join the writers first (they self-terminate after their fixed edit
+    // count), then signal readers to stop. All threads must join without
+    // deadlock — a 10s hard watchdog per thread turns any deadlock into a
+    // loud panic rather than a silent hang.
+    //
+    // The join itself runs on a separate thread that reports the join
+    // outcome through a rendezvous channel; the main side blocks on
+    // `recv_timeout(10s)`. A genuinely deadlocked thread never produces an
+    // outcome, so the `recv_timeout` elapses and we PANIC with the
+    // deadlock message — the watchdog therefore surfaces a hang as a loud
+    // failure within ~10s instead of blocking the suite forever (the old
+    // `watchdog.join()` was itself unbounded and would hang on a real
+    // deadlock, so the assertion below it was never reached).
+    let join_with_watchdog = |handle: std::thread::JoinHandle<()>, idx: usize| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<std::thread::Result<()>>(1);
+        std::thread::spawn(move || {
+            // `send` fails only if the receiver was dropped (the main side
+            // already panicked on timeout); ignore that so this joiner
+            // thread does not itself panic on a benign disconnect.
+            let _ = tx.send(handle.join());
         });
-        // If this times out, there's a deadlock in the host locking
-        let result = watchdog.join();
-        assert!(result.is_ok(), "thread {i} deadlocked or panicked");
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => panic!("thread {idx} panicked"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("thread {idx} deadlocked (join did not complete within 10s)")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("thread {idx} watchdog channel disconnected before reporting")
+            }
+        }
+    };
+
+    for (i, handle) in writer_handles.into_iter().enumerate() {
+        join_with_watchdog(handle, i);
+    }
+    done.store(true, Ordering::Relaxed);
+    for (i, handle) in reader_handles.into_iter().enumerate() {
+        join_with_watchdog(handle, i);
     }
 
     // Verify all files are in a consistent state
@@ -3265,10 +3343,10 @@ fn verter_types_stub_covers_tsx_imports() {
 #[tokio::test]
 async fn integration_hover_merge_with_mock_type_provider() {
     use crate::documents::line_index::LineIndex;
-    use crate::tsgo::merge;
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::protocol::HoverInfo;
-    use crate::tsgo::traits::TypeProvider;
+    use crate::type_provider::merge;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::protocol::HoverInfo;
+    use crate::type_provider::traits::TypeProvider;
 
     let source = r#"<script setup lang="ts">
 const count = 42
@@ -3324,8 +3402,12 @@ const count = 42
     let tsx_li = LineIndex::new(&tsx_response.code, registry.encoding());
 
     // Step 3: map Vue position → TSX offset
-    let tsx_offset =
-        merge::vue_position_to_tsx_offset_validated(&position, &doc.line_index, &mapper, &tsx_li);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &doc.line_index,
+        &mapper,
+        &tsx_li,
+    );
     assert!(
         tsx_offset.is_some(),
         "position mapping must succeed for a script binding used in template"
@@ -3356,6 +3438,7 @@ const count = 42
         &tsx_li,
         &doc.line_index,
         None,
+        None,
     );
 
     // Positive: merged result contains TSGO type signature
@@ -3373,7 +3456,7 @@ const count = 42
     assert!(
         calls
             .iter()
-            .any(|c| matches!(c, crate::tsgo::mock::MockCall::GetHover { .. })),
+            .any(|c| matches!(c, crate::type_provider::mock::MockCall::GetHover { .. })),
         "mock get_hover must have been called"
     );
 }
@@ -3510,14 +3593,14 @@ const msg = 'hello'
 /// resolves to runtime-dom.d.ts, VS Code opens then immediately closes it.
 /// The did_close guard (get_ide().is_some()) must prevent close_tsx.
 #[test]
-fn close_non_vue_file_does_not_affect_vue_ide_state() {
+fn close_non_carrier_file_does_not_affect_vue_ide_state() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
     // Open a Vue file
-    let vue_uri: Uri = "file:///test/App.vue".parse().unwrap();
+    let carrier_uri: Uri = "file:///test/App.vue".parse().unwrap();
     let vue_item = TextDocumentItem {
-        uri: vue_uri.clone(),
+        uri: carrier_uri.clone(),
         language_id: "vue".to_string(),
         version: 1,
         text: r#"<script setup lang="ts">
@@ -3529,7 +3612,7 @@ const msg = 'hello'
     };
     registry.did_open(&vue_item);
     assert!(
-        registry.get_ide(&vue_uri).is_some(),
+        registry.get_ide(&carrier_uri).is_some(),
         "Vue file should have IDE output"
     );
 
@@ -3552,7 +3635,7 @@ const msg = 'hello'
 
     // Vue file's IDE output must still be intact after closing the .d.ts file
     assert!(
-        registry.get_ide(&vue_uri).is_some(),
+        registry.get_ide(&carrier_uri).is_some(),
         "Vue IDE output must survive non-Vue file close"
     );
 }
@@ -3562,8 +3645,8 @@ const msg = 'hello'
 /// Simulates debounced provider sync: 5 rapid changes → only the latest syncs.
 #[tokio::test]
 async fn debounced_sync_only_syncs_latest() {
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::project_sync::ProjectSync;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::project_sync::ProjectSync;
     use crate::ProjectSyncMode;
     use dashmap::{DashMap, DashSet};
 
@@ -3575,6 +3658,7 @@ async fn debounced_sync_only_syncs_latest() {
     let tsx_path = "C:/project/src/App.vue.tsx".to_string();
 
     // Simulate 5 rapid "changes" — each increments gen and spawns a debounced task
+    let mut handles = Vec::new();
     for i in 0..5u64 {
         needs_sync.insert(canonical_id.clone());
         let gen = {
@@ -3588,18 +3672,30 @@ async fn debounced_sync_only_syncs_latest() {
         let cid = canonical_id.clone();
         let path = tsx_path.clone();
         let content = format!("version {i}");
-        tokio::spawn(async move {
+        handles.push(tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if gen_map.get(&cid).map(|v| *v) != Some(gen) {
                 return; // Stale
             }
             let _ = sync_clone.sync_tsx(&path, &content).await;
             needs_clone.remove(&cid);
-        });
+        }));
     }
 
-    // Wait for debounce to complete
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Deterministically wait for every debounced task to run to
+    // completion (its debounce delay + the supersession check + any
+    // sync), then assert on the settled call set. Joining the spawned
+    // tasks replaces a fixed 300ms "hope they're done" sleep — under
+    // load a task could outlast the window and the call count would race.
+    // Each join is bounded by a 10s timeout: a stuck debounce task PANICS
+    // loudly instead of hanging the test (the join was previously
+    // unbounded).
+    for h in handles {
+        tokio::time::timeout(std::time::Duration::from_secs(10), h)
+            .await
+            .expect("debounced task did not complete within 10s (stuck)")
+            .expect("debounced task joined");
+    }
 
     let calls = mock.file_sync_calls();
     assert_eq!(
@@ -3609,7 +3705,7 @@ async fn debounced_sync_only_syncs_latest() {
         calls.len()
     );
     match &calls[0] {
-        crate::tsgo::mock::MockCall::UpdateFile { content, .. } => {
+        crate::type_provider::mock::MockCall::UpdateFile { content, .. } => {
             assert_eq!(content, "version 4", "should sync the last version");
         }
         other => panic!("expected UpdateFile, got {:?}", other),
@@ -3623,8 +3719,8 @@ async fn debounced_sync_only_syncs_latest() {
 /// When a debounced task is superseded by a newer generation, it should not sync.
 #[tokio::test]
 async fn debounced_sync_skipped_when_superseded() {
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::project_sync::ProjectSync;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::project_sync::ProjectSync;
     use crate::ProjectSyncMode;
     use dashmap::{DashMap, DashSet};
 
@@ -3638,13 +3734,17 @@ async fn debounced_sync_skipped_when_superseded() {
     // Spawn debounced task with gen=1
     needs_sync.insert(canonical_id.clone());
     sync_gen.insert(canonical_id.clone(), 1);
-    {
+    // Immediately bump gen to 2 (simulating another keystroke) BEFORE
+    // the task's debounce delay elapses, so the gen=1 task observes the
+    // supersession and skips its sync. The bump happens before the
+    // spawn yields, guaranteeing the ordering deterministically.
+    let handle = {
         let sync_clone = sync.clone();
         let needs_clone = Arc::clone(&needs_sync);
         let gen_map = Arc::clone(&sync_gen);
         let cid = canonical_id.clone();
         let path = tsx_path.clone();
-        tokio::spawn(async move {
+        let h = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if gen_map.get(&cid).map(|v| *v) != Some(1) {
                 return; // Stale
@@ -3652,13 +3752,19 @@ async fn debounced_sync_skipped_when_superseded() {
             let _ = sync_clone.sync_tsx(&path, "stale").await;
             needs_clone.remove(&cid);
         });
-    }
+        sync_gen.insert(canonical_id.clone(), 2);
+        h
+    };
 
-    // Immediately bump gen to 2 (simulating another keystroke), but don't spawn a task
-    sync_gen.insert(canonical_id.clone(), 2);
-
-    // Wait for debounce window to pass
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Deterministically wait for the superseded task to run to
+    // completion, then assert no sync fired. Joining the task replaces a
+    // fixed 300ms sleep that could race the task under load. The join is
+    // bounded by a 10s timeout so a stuck task PANICS loudly instead of
+    // hanging the test (the join was previously unbounded).
+    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+        .await
+        .expect("debounced task did not complete within 10s (stuck)")
+        .expect("debounced task joined");
 
     let calls = mock.file_sync_calls();
     assert!(
@@ -3675,8 +3781,8 @@ async fn debounced_sync_skipped_when_superseded() {
 /// ensure_provider_synced: when the file is dirty, it should trigger an immediate sync.
 #[tokio::test]
 async fn ensure_provider_synced_triggers_sync_when_dirty() {
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::project_sync::ProjectSync;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::project_sync::ProjectSync;
     use crate::ProjectSyncMode;
     use dashmap::DashSet;
 
@@ -3705,8 +3811,8 @@ async fn ensure_provider_synced_triggers_sync_when_dirty() {
 /// ensure_provider_synced: when the file is clean, no sync should happen.
 #[tokio::test]
 async fn ensure_provider_synced_noop_when_clean() {
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::project_sync::ProjectSync;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::project_sync::ProjectSync;
     use crate::ProjectSyncMode;
     use dashmap::DashSet;
 
@@ -3728,8 +3834,8 @@ async fn ensure_provider_synced_noop_when_clean() {
 /// and the debounced tasks should be skipped (already flushed).
 #[tokio::test]
 async fn rapid_changes_then_completion_triggers_one_sync() {
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::project_sync::ProjectSync;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::project_sync::ProjectSync;
     use crate::ProjectSyncMode;
     use dashmap::{DashMap, DashSet};
 
@@ -3741,6 +3847,7 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
     let tsx_path = "C:/project/src/App.vue.tsx".to_string();
 
     // Simulate 5 rapid changes (each marks dirty + increments gen + spawns debounced task)
+    let mut handles = Vec::new();
     for i in 0..5u64 {
         needs_sync.insert(canonical_id.clone());
         let gen = {
@@ -3754,24 +3861,34 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
         let cid = canonical_id.clone();
         let path = tsx_path.clone();
         let content = format!("version {i}");
-        tokio::spawn(async move {
+        handles.push(tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if gen_map.get(&cid).map(|v| *v) != Some(gen) {
                 return;
             }
             let _ = sync_clone.sync_tsx(&path, &content).await;
             needs_clone.remove(&cid);
-        });
+        }));
     }
 
     // Immediately after the 5th change, simulate the completion flush
-    // (ensure_provider_synced equivalent)
+    // (ensure_provider_synced equivalent). This runs before any
+    // debounced task's delay elapses, so it is the first sync call.
     if needs_sync.remove(&canonical_id).is_some() {
         let _ = sync.sync_tsx(&tsx_path, "latest for completion").await;
     }
 
-    // Wait for debounce tasks to resolve (they should all be skipped since dirty flag is cleared)
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Deterministically wait for every debounced task to resolve, then
+    // assert on the settled call set. Joining the tasks replaces a fixed
+    // 300ms sleep that could race the tasks under load. Each join is
+    // bounded by a 10s timeout so a stuck task PANICS loudly instead of
+    // hanging the test (the join was previously unbounded).
+    for h in handles {
+        tokio::time::timeout(std::time::Duration::from_secs(10), h)
+            .await
+            .expect("debounced task did not complete within 10s (stuck)")
+            .expect("debounced task joined");
+    }
 
     let calls = mock.file_sync_calls();
     // The flush sync + possibly the last debounced task that sees gen=5
@@ -3779,7 +3896,7 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
     // (it checks gen, not needs_sync). But we want to verify the flush happened.
     let update_calls: Vec<_> = calls
         .iter()
-        .filter(|c| matches!(c, crate::tsgo::mock::MockCall::UpdateFile { .. }))
+        .filter(|c| matches!(c, crate::type_provider::mock::MockCall::UpdateFile { .. }))
         .collect();
 
     // The flush should be the first call
@@ -3790,7 +3907,7 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
 
     // First call should be the flush content
     match &update_calls[0] {
-        crate::tsgo::mock::MockCall::UpdateFile { content, .. } => {
+        crate::type_provider::mock::MockCall::UpdateFile { content, .. } => {
             assert_eq!(
                 content, "latest for completion",
                 "first sync should be from the completion flush"
@@ -3803,8 +3920,8 @@ async fn rapid_changes_then_completion_triggers_one_sync() {
 /// Pull diagnostics should NOT force a provider sync (avoids per-keystroke sync).
 #[tokio::test]
 async fn diagnostic_pull_does_not_force_sync() {
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::traits::TypeProvider;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::traits::TypeProvider;
     use dashmap::DashSet;
 
     let mock = MockTypeProvider::new();
@@ -3944,7 +4061,7 @@ fn consecutive_failure_counter_tracks_correctly() {
 #[test]
 fn rwlock_contention_starves_runtime() {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -3972,9 +4089,15 @@ fn rwlock_contention_starves_runtime() {
         });
     }
 
-    // Wait until both worker threads are blocked on the lock.
+    // Wait (bounded) until both worker threads are blocked on the lock.
+    // Panics on a real stall instead of spinning forever.
+    let block_deadline = Instant::now() + Duration::from_secs(10);
     while started.load(Ordering::SeqCst) < 2 {
-        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            Instant::now() < block_deadline,
+            "timed out waiting for both worker tasks to reach the blocking lock"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
     // Both workers have reached lock.lock() and are now blocked.
 
@@ -3985,9 +4108,14 @@ fn rwlock_contention_starves_runtime() {
         canary_flag.store(true, Ordering::SeqCst);
     });
 
-    // Give the canary plenty of time to run (500ms).
-    // If a worker thread were free, it would run in microseconds.
-    std::thread::sleep(Duration::from_millis(500));
+    // Negative-evidence window: the test thread holds `guard`, so BOTH
+    // worker tasks are permanently parked on `lock.lock()` and no worker
+    // can pick up the canary. The canary therefore cannot run for as
+    // long as the guard is held — this is a deterministic outcome, not a
+    // timing gamble. A short bounded window gives the runtime a fair
+    // scheduling opportunity to (fail to) run the canary before we
+    // assert.
+    std::thread::sleep(Duration::from_millis(100));
 
     // ASSERT: canary did NOT run — all worker threads are blocked → runtime starved.
     assert!(
@@ -3998,14 +4126,19 @@ fn rwlock_contention_starves_runtime() {
          handlers → all workers blocked → server completely unresponsive."
     );
 
-    // Cleanup: release the lock → workers unblock → canary runs → runtime recovers.
+    // Cleanup: release the lock → workers unblock → canary runs → runtime
+    // recovers. Poll for the canary deterministically instead of sleeping
+    // a fixed window; panic on a real hang.
     drop(guard);
-    std::thread::sleep(Duration::from_millis(200));
-
-    assert!(
-        canary_ran.load(Ordering::SeqCst),
-        "canary should run after the blocking lock is released"
-    );
+    let recover_deadline = Instant::now() + Duration::from_secs(10);
+    while !canary_ran.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < recover_deadline,
+            "canary should run after the blocking lock is released, but it \
+             never did within the recovery window"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// Proves the fix: serializing `did_change` handlers with `tokio::sync::Mutex`
@@ -4021,7 +4154,7 @@ fn rwlock_contention_starves_runtime() {
 #[test]
 fn serialized_handlers_prevent_runtime_starvation() {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -4051,9 +4184,15 @@ fn serialized_handlers_prevent_runtime_starvation() {
         });
     }
 
-    // Wait for exactly 1 task to reach the blocking lock (the other is yielded).
+    // Wait (bounded) for exactly 1 task to reach the blocking lock (the
+    // other is yielded). Panics on a real stall instead of spinning.
+    let start_deadline = Instant::now() + Duration::from_secs(10);
     while started.load(Ordering::SeqCst) < 1 {
-        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            Instant::now() < start_deadline,
+            "timed out waiting for the first task to reach the blocking lock"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
     // Task 1: blocked on lock (worker 1 blocked)
     // Task 2: awaiting tokio_mutex (worker 2 FREE — yielded back to scheduler)
@@ -4064,15 +4203,19 @@ fn serialized_handlers_prevent_runtime_starvation() {
         canary_flag.store(true, Ordering::SeqCst);
     });
 
-    std::thread::sleep(Duration::from_millis(500));
-
-    // ASSERT: canary DID run — worker 2 is free because tokio::sync::Mutex yields.
-    assert!(
-        canary_ran.load(Ordering::SeqCst),
-        "FIX VERIFIED: canary task ran because tokio::sync::Mutex serialization \
-         ensures only 1 worker thread is blocked at a time, leaving the other \
-         free for canary tasks (completions, timers, heartbeats)."
-    );
+    // ASSERT: canary DID run — worker 2 is free because tokio::sync::Mutex
+    // yields. Poll for the canary deterministically (panic on a real
+    // hang) instead of sleeping a fixed window and hoping.
+    let canary_deadline = Instant::now() + Duration::from_secs(10);
+    while !canary_ran.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < canary_deadline,
+            "FIX VERIFIED expectation FAILED: canary task should have run \
+             because tokio::sync::Mutex serialization keeps one worker thread \
+             free, but it never ran within the window."
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 
     drop(guard);
 }
@@ -4231,7 +4374,7 @@ function reset() {{ count.value = 0 }}
 #[test]
 fn runtime_liveness_under_blocking_host_operations() {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -4287,9 +4430,15 @@ const msg = ref('hello')
         });
     }
 
-    // Wait until both worker threads are blocked
+    // Wait (bounded) until both worker threads are blocked. Panics on a
+    // real stall instead of spinning forever.
+    let block_deadline = Instant::now() + Duration::from_secs(10);
     while started.load(Ordering::SeqCst) < 2 {
-        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            Instant::now() < block_deadline,
+            "timed out waiting for both worker tasks to block on the gate"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
 
     // Canary: a timer task that should fire if any worker thread is available.
@@ -4301,8 +4450,13 @@ const msg = ref('hello')
         canary_flag.store(true, Ordering::SeqCst);
     });
 
-    // Give the canary time to run (if a worker were free, it'd run in µs).
-    std::thread::sleep(Duration::from_millis(500));
+    // Negative-evidence window: the test thread holds `gate_guard`, so
+    // both worker tasks are permanently parked on `gate.lock()` and no
+    // worker can run the canary. The canary cannot fire while the guard
+    // is held — a deterministic outcome, not a timing gamble. A short
+    // bounded window gives the runtime a fair scheduling opportunity to
+    // (fail to) run the canary before we assert.
+    std::thread::sleep(Duration::from_millis(100));
 
     // ASSERT: canary did NOT run — runtime is starved.
     // This proves that blocking host operations without block_in_place() is unsafe.
@@ -4313,14 +4467,18 @@ const msg = ref('hello')
          without block_in_place() causes runtime starvation"
     );
 
-    // Cleanup: release gate → workers unblock → canary runs
+    // Cleanup: release gate → workers unblock → canary runs. Poll for the
+    // canary deterministically (panic on a real hang) instead of sleeping.
     drop(gate_guard);
-    std::thread::sleep(Duration::from_millis(200));
-
-    assert!(
-        canary_ran.load(Ordering::SeqCst),
-        "canary should run after the blocking gate is released"
-    );
+    let recover_deadline = Instant::now() + Duration::from_secs(10);
+    while !canary_ran.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < recover_deadline,
+            "canary should run after the blocking gate is released, but it \
+             never did within the recovery window"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// Prove the fix: wrapping blocking host operations in `block_in_place()` prevents
@@ -4332,7 +4490,7 @@ const msg = ref('hello')
 #[test]
 fn block_in_place_prevents_runtime_starvation() {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -4383,12 +4541,16 @@ const msg = ref('hello')
         });
     }
 
-    // Wait until both tasks have started (and called block_in_place)
+    // Wait (bounded) until both tasks have started (and called
+    // block_in_place). Panics on a real stall instead of spinning.
+    let start_deadline = Instant::now() + Duration::from_secs(10);
     while started.load(Ordering::SeqCst) < 2 {
-        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            Instant::now() < start_deadline,
+            "timed out waiting for both tasks to start and call block_in_place"
+        );
+        std::thread::sleep(Duration::from_millis(1));
     }
-    // Give block_in_place time to spawn replacement workers
-    std::thread::sleep(Duration::from_millis(100));
 
     // Canary: should run because block_in_place() freed up worker threads.
     let canary_ran = Arc::new(AtomicBool::new(false));
@@ -4397,14 +4559,20 @@ const msg = ref('hello')
         canary_flag.store(true, Ordering::SeqCst);
     });
 
-    std::thread::sleep(Duration::from_millis(500));
-
-    // ASSERT: canary DID run — block_in_place() prevented starvation.
-    assert!(
-        canary_ran.load(Ordering::SeqCst),
-        "canary SHOULD run because block_in_place() allows tokio to spawn \
-         replacement workers while the original threads are blocked"
-    );
+    // ASSERT: canary DID run — block_in_place() prevented starvation. Poll
+    // for the canary deterministically: this also subsumes the wait for
+    // tokio to provision a replacement worker. Panics on a real hang
+    // instead of sleeping a fixed window and hoping.
+    let canary_deadline = Instant::now() + Duration::from_secs(10);
+    while !canary_ran.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < canary_deadline,
+            "canary SHOULD run because block_in_place() allows tokio to spawn \
+             replacement workers while the original threads are blocked, but it \
+             never ran within the window."
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 
     // Cleanup
     drop(gate_guard);
@@ -4427,9 +4595,9 @@ const msg = ref('hello')
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn integration_concurrent_completion_and_did_change_no_deadlock() {
     use crate::documents::line_index::LineIndex;
-    use crate::tsgo::merge;
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::traits::TypeProvider;
+    use crate::type_provider::merge;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::traits::TypeProvider;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let source = r#"<script setup lang="ts">
@@ -4453,7 +4621,7 @@ const msg = "hello"
         .get_position_mapper(&uri)
         .expect("position mapper should exist");
     let tsx_li = LineIndex::new(&tsx_response.code, registry.encoding());
-    let vue_li = registry.get(&uri).unwrap().line_index.clone();
+    let carrier_li = registry.get(&uri).unwrap().line_index.clone();
     // At this point, all DashMap guards are dropped.
 
     // Map a position in the template
@@ -4463,22 +4631,28 @@ const msg = "hello"
         character: position.character + 3, // 'm' in msg
     };
     let tsx_offset =
-        merge::vue_position_to_tsx_offset_validated(&position, &vue_li, &mapper, &tsx_li);
+        merge::carrier_position_to_tsx_offset_validated(&position, &carrier_li, &mapper, &tsx_li);
     assert!(tsx_offset.is_some(), "position mapping must succeed");
 
     // Configure mock to return completions at this offset
     mock.set_completions(
         "test",
         tsx_offset.unwrap(),
-        vec![crate::tsgo::protocol::Completion {
+        vec![crate::type_provider::protocol::Completion {
             label: "msg".to_string(),
             kind: None,
             detail: Some("const msg: string".to_string()),
             documentation: None,
             edit_range_start: None,
             edit_range_end: None,
+            text_edit_new_text: None,
             insert_text: None,
             sort_text: None,
+            insert_text_format: None,
+            commit_characters: None,
+            filter_text: None,
+            preselect: None,
+            label_details: None,
             data: None,
         }],
     );
@@ -4486,36 +4660,126 @@ const msg = "hello"
     let completion_done = Arc::new(AtomicBool::new(false));
     let change_done = Arc::new(AtomicBool::new(false));
 
-    // Task A: simulates a handler that extracted context, then awaits a type provider call
+    // To PROVE task B's write overlaps task A's *actual* await window the
+    // test DRIVER itself hand-polls A's future to `Poll::Pending` and ASSERTS
+    // that return BEFORE it ever runs B's `did_change`. The driver observing
+    // `Poll::Pending` from A is the proof A is suspended in the await: A's
+    // future cannot return `Pending` without having reached, and parked at,
+    // the suspension point. No READY is signalled from inside the future's own
+    // poll — that earlier design let B (on the multi-thread runtime) observe
+    // READY and write while A's poll was still in flight, i.e. before A had
+    // actually returned `Pending`.
+    //
+    // `PollGate` is the suspension point A awaits:
+    //   * first `poll`  → stores the polling task's waker, returns
+    //                     `Poll::Pending` (A parks here — exactly the point a
+    //                     guard leaked across `.await` would deadlock).
+    //   * `release()`   → flips `released`, wakes the stored waker.
+    //   * later `poll`  → returns `Poll::Ready(())` once `released` is set.
+    struct GateState {
+        released: bool,
+        waker: Option<std::task::Waker>,
+    }
+    #[derive(Clone)]
+    struct PollGate {
+        state: Arc<std::sync::Mutex<GateState>>,
+    }
+    impl PollGate {
+        fn new() -> Self {
+            Self {
+                state: Arc::new(std::sync::Mutex::new(GateState {
+                    released: false,
+                    waker: None,
+                })),
+            }
+        }
+        /// Wake A out of its parked await. Called by the driver *after* it has
+        /// observed A's `Poll::Pending` and performed the overlapping
+        /// `did_change` write.
+        fn release(&self) {
+            let waker = {
+                let mut st = self.state.lock().unwrap();
+                st.released = true;
+                st.waker.take()
+            };
+            if let Some(w) = waker {
+                w.wake();
+            }
+        }
+    }
+    impl std::future::Future for PollGate {
+        type Output = ();
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            let mut st = self.state.lock().unwrap();
+            if st.released {
+                return std::task::Poll::Ready(());
+            }
+            // First poll: A parks here. Record the waker so `release()` can
+            // resume A. Returning `Pending` is what the driver observes as the
+            // proof that A is suspended at this await.
+            st.waker = Some(cx.waker().clone());
+            std::task::Poll::Pending
+        }
+    }
+
+    let gate = PollGate::new();
+
+    // Future A: simulates a handler that extracted context synchronously
+    // (mirrors `type_provider_context`), then awaits a type provider call.
+    // The DRIVER hand-polls this future — it is NOT spawned — so the driver
+    // can observe its `Poll::Pending` directly.
     let reg_a = Arc::clone(&registry);
     let uri_a = uri.clone();
     let mock_a = mock.clone();
     let comp_flag = Arc::clone(&completion_done);
-    let task_a = tokio::spawn(async move {
-        // Extract context synchronously (mirrors type_provider_context pattern)
+    let gate_a = gate.clone();
+    let mut a_fut = Box::pin(async move {
+        // Extract context synchronously (mirrors type_provider_context pattern).
         let _tsx_resp = reg_a.get_ide(&uri_a).unwrap();
         let _mapper = reg_a.get_position_mapper(&uri_a).unwrap();
         let _vue_li = reg_a.get(&uri_a).unwrap().line_index.clone();
-        // Guards dropped here ^
+        // Guards dropped here ^.
 
-        // Simulate slow type provider call (the await point where deadlock happened)
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Suspend at the await window where the deadlock historically
+        // happened. This `.await` returns `Poll::Pending` on its first poll,
+        // which is exactly what the driver observes below as the proof that A
+        // is parked at this await — the precise point where a guard leaked
+        // across it would block B's write and deadlock. A stays parked until
+        // the overlapping write completes and `release()` is called.
+        gate_a.await;
 
-        // Use mock type provider (would deadlock if guards were still held)
+        // Use mock type provider (would deadlock if guards were still held).
         let result = mock_a.get_completions("test", 0, None).await;
         assert!(result.is_ok(), "mock completion should succeed");
         comp_flag.store(true, Ordering::SeqCst);
     });
 
-    // Task B: simulates did_change writing to the same document
+    // PROOF: the driver polls A once, with the driver task's real waker, and
+    // ASSERTS `Poll::Pending`. A's future cannot return `Pending` without
+    // having reached and parked at the `gate_a.await` suspension point above,
+    // so this observation deterministically proves A is suspended in the
+    // provider await BEFORE any `did_change` write runs.
+    let first_poll = futures_util::poll!(&mut a_fut);
+    assert!(
+        first_poll.is_pending(),
+        "task A must return Poll::Pending (parked in its provider await) before B writes"
+    );
+
+    // Both the overlapping write and A's completion must finish within 2
+    // seconds — a timeout here indicates the historical deadlock (A's read
+    // guard leaked across the await would block this write, and A could then
+    // never resume).
     let reg_b = Arc::clone(&registry);
     let uri_b = uri.clone();
     let change_flag = Arc::clone(&change_done);
-    let task_b = tokio::spawn(async move {
-        // Small delay to ensure task A has started
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Simulate did_change: update the document (needs write lock)
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        // Simulate did_change: update the document (needs the write lock).
+        // This runs strictly AFTER the driver observed A's `Poll::Pending`, so
+        // it executes while A is provably suspended in its await — a
+        // guaranteed overlap, not a timed guess.
         let new_source = r#"<script setup lang="ts">
 const msg = "world"
 </script>
@@ -4526,12 +4790,11 @@ const msg = "world"
 "#;
         let _ = reg_b.did_change(&uri_b, 2, new_source);
         change_flag.store(true, Ordering::SeqCst);
-    });
 
-    // Both tasks must complete within 2 seconds — timeout indicates deadlock
-    let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        let _ = task_a.await;
-        let _ = task_b.await;
+        // Release A from its await now that the overlapping write completed,
+        // then drive A to completion.
+        gate.release();
+        a_fut.await;
     })
     .await;
 
@@ -4922,10 +5185,10 @@ import MyComp from './MyComp.vue'
 #[tokio::test]
 async fn integration_hover_slot_merge_preserves_verter_info() {
     use crate::documents::line_index::LineIndex;
-    use crate::tsgo::merge;
-    use crate::tsgo::mock::MockTypeProvider;
-    use crate::tsgo::protocol::HoverInfo;
-    use crate::tsgo::traits::TypeProvider;
+    use crate::type_provider::merge;
+    use crate::type_provider::mock::MockTypeProvider;
+    use crate::type_provider::protocol::HoverInfo;
+    use crate::type_provider::traits::TypeProvider;
 
     let source = r#"<script setup lang="ts">
 </script>
@@ -4963,7 +5226,7 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
     let tsx_li = LineIndex::new(&tsx_response.code, registry.encoding());
 
     let tsx_offset =
-        merge::vue_position_to_tsx_offset_validated(&pos, &doc.line_index, &mapper, &tsx_li);
+        merge::carrier_position_to_tsx_offset_validated(&pos, &doc.line_index, &mapper, &tsx_li);
     assert!(tsx_offset.is_some(), "slot tag should map to TSX");
     let tsx_offset = tsx_offset.unwrap();
 
@@ -4988,6 +5251,7 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
         &tsx_li,
         &doc.line_index,
         None,
+        None,
     );
     assert!(merged.is_some(), "merged hover should exist");
     let text = match &merged.unwrap().contents {
@@ -5011,7 +5275,7 @@ fn dep_did_open_preserves_vue_ide_context() {
     let registry = DocumentRegistry::new(host);
 
     // 1. Open a Vue file that imports from a .ts dependency
-    let vue_source = r#"<script setup lang="ts">
+    let carrier_source = r#"<script setup lang="ts">
 import { greet } from './utils'
 const msg = greet('world')
 </script>
@@ -5020,17 +5284,17 @@ const msg = greet('world')
   <div>{{ msg }}</div>
 </template>
 "#;
-    let vue_uri: Uri = "file:///test/App.vue".parse().unwrap();
+    let carrier_uri: Uri = "file:///test/App.vue".parse().unwrap();
     let vue_item = TextDocumentItem {
-        uri: vue_uri.clone(),
+        uri: carrier_uri.clone(),
         language_id: "vue".to_string(),
         version: 1,
-        text: vue_source.to_string(),
+        text: carrier_source.to_string(),
     };
     registry.did_open(&vue_item);
 
     // Verify IDE output exists after initial open
-    let ide_before = registry.get_ide(&vue_uri);
+    let ide_before = registry.get_ide(&carrier_uri);
     assert!(
         ide_before.is_some(),
         "IDE output should exist after opening Vue file"
@@ -5055,7 +5319,7 @@ const msg = greet('world')
     registry.did_open(&ts_item);
 
     // 3. Verify IDE output is still available for the Vue file
-    let ide_after = registry.get_ide(&vue_uri);
+    let ide_after = registry.get_ide(&carrier_uri);
     assert!(
         ide_after.is_some(),
         "IDE output should still exist after dependency did_open (lazy recompilation)"
@@ -5066,7 +5330,7 @@ const msg = greet('world')
     );
 
     // 4. Position mapper should also be available
-    let mapper = registry.get_position_mapper(&vue_uri);
+    let mapper = registry.get_position_mapper(&carrier_uri);
     assert!(
         mapper.is_some(),
         "Position mapper should be rebuilt after lazy recompilation"
@@ -5081,7 +5345,7 @@ fn dep_peek_open_close_preserves_ide() {
     let registry = DocumentRegistry::new(host);
 
     // 1. Open a Vue file
-    let vue_source = r#"<script setup lang="ts">
+    let carrier_source = r#"<script setup lang="ts">
 import { count } from './state'
 </script>
 
@@ -5089,17 +5353,17 @@ import { count } from './state'
   <span>{{ count }}</span>
 </template>
 "#;
-    let vue_uri: Uri = "file:///test/Counter.vue".parse().unwrap();
+    let carrier_uri: Uri = "file:///test/Counter.vue".parse().unwrap();
     let vue_item = TextDocumentItem {
-        uri: vue_uri.clone(),
+        uri: carrier_uri.clone(),
         language_id: "vue".to_string(),
         version: 1,
-        text: vue_source.to_string(),
+        text: carrier_source.to_string(),
     };
     registry.did_open(&vue_item);
 
     // Verify IDE output
-    let ide_initial = registry.get_ide(&vue_uri);
+    let ide_initial = registry.get_ide(&carrier_uri);
     assert!(ide_initial.is_some(), "Initial IDE output should exist");
 
     // 2. Open the .ts dependency (peek definition)
@@ -5114,7 +5378,7 @@ import { count } from './state'
     registry.did_open(&ts_item);
 
     // 3. IDE output still available after dep open
-    let ide_after_open = registry.get_ide(&vue_uri);
+    let ide_after_open = registry.get_ide(&carrier_uri);
     assert!(
         ide_after_open.is_some(),
         "IDE output should exist after dependency open"
@@ -5128,7 +5392,7 @@ import { count } from './state'
     registry.did_close(&ts_uri);
 
     // 5. IDE output still available after dep close
-    let ide_after_close = registry.get_ide(&vue_uri);
+    let ide_after_close = registry.get_ide(&carrier_uri);
     assert!(
         ide_after_close.is_some(),
         "IDE output should exist after dependency close"
@@ -5148,7 +5412,7 @@ fn v_for_member_access_position_mapping() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let registry = DocumentRegistry::new(host);
 
-    let vue_source = r#"<script setup lang="ts">
+    let carrier_source = r#"<script setup lang="ts">
 interface Action { label: string; disabled: boolean }
 const actions: Action[] = [{ label: 'ok', disabled: false }]
 </script>
@@ -5157,17 +5421,17 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
   <button v-for="action in actions" :disabled="action.disabled">{{ action.label }}</button>
 </template>
 "#;
-    let vue_uri: Uri = "file:///test/VForTest.vue".parse().unwrap();
+    let carrier_uri: Uri = "file:///test/VForTest.vue".parse().unwrap();
     let vue_item = TextDocumentItem {
-        uri: vue_uri.clone(),
+        uri: carrier_uri.clone(),
         language_id: "vue".to_string(),
         version: 1,
-        text: vue_source.to_string(),
+        text: carrier_source.to_string(),
     };
     registry.did_open(&vue_item);
 
     // Get IDE output
-    let ide = registry.get_ide(&vue_uri);
+    let ide = registry.get_ide(&carrier_uri);
     assert!(ide.is_some(), "IDE output should exist");
     let ide = ide.unwrap();
     let tsx = &ide.code;
@@ -5185,18 +5449,18 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     );
 
     // Get position mapper
-    let mapper = registry.get_position_mapper(&vue_uri);
+    let mapper = registry.get_position_mapper(&carrier_uri);
     assert!(mapper.is_some(), "Position mapper should exist");
     let mapper = mapper.unwrap();
 
     // Find "action.disabled" in Vue source
-    let vue_action_disabled = vue_source.find("action.disabled").unwrap();
+    let vue_action_disabled = carrier_source.find("action.disabled").unwrap();
     let vue_dot = vue_action_disabled + "action".len();
 
     // Convert byte offset to line/col (0-based)
     let mut vue_line = 0u32;
     let mut vue_col = 0u32;
-    for (i, &b) in vue_source.as_bytes().iter().enumerate() {
+    for (i, &b) in carrier_source.as_bytes().iter().enumerate() {
         if i == vue_dot {
             break;
         }
@@ -5210,7 +5474,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     eprintln!("Vue '.' position: line={}, col={}", vue_line, vue_col);
 
     // Map Vue position to TSX position
-    let tsx_pos = mapper.vue_to_tsx(vue_line, vue_col);
+    let tsx_pos = mapper.carrier_to_tsx(LspPosition::new(vue_line, vue_col));
     assert!(
         tsx_pos.is_some(),
         "Vue position (line={}, col={}) should map to TSX. \
@@ -5218,10 +5482,10 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         vue_line,
         vue_col
     );
-    let tsx_pos = tsx_pos.unwrap();
+    let tsx_pos = tsx_pos.unwrap().pos;
     eprintln!(
         "TSX mapped position: line={}, col={}",
-        tsx_pos.line, tsx_pos.column
+        tsx_pos.line, tsx_pos.character
     );
 
     // Find the TSX byte offset of the mapped position
@@ -5229,7 +5493,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     let mut current_line = 0u32;
     for (i, &b) in tsx.as_bytes().iter().enumerate() {
         if current_line == tsx_pos.line {
-            tsx_offset = i as u32 + tsx_pos.column;
+            tsx_offset = i as u32 + tsx_pos.character;
             break;
         }
         if b == b'\n' {
@@ -5250,9 +5514,188 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
         vue_line,
         vue_col,
         tsx_pos.line,
-        tsx_pos.column,
+        tsx_pos.character,
         tsx_offset,
         tsx_char,
         tsx
+    );
+}
+
+/// Workspace-symbol search includes `.svelte` components.
+/// DISCRIMINATING: under the pre-change `!file_language.is_vue()` gate the
+/// Svelte file was skipped and contributed zero symbols; a plain `.ts` is NOT
+/// a carrier and is also excluded here.
+#[test]
+fn workspace_symbols_includes_svelte_components() {
+    use crate::features::workspace_symbol::workspace_symbols;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/SvelteWidget.svelte".to_string()),
+        input_id: "/workspace/src/SvelteWidget.svelte".to_string(),
+        source: "<script>let widgetCount = 1;</script>".into(),
+        file_language: verter_session::FileLanguage::svelte(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+    // A plain .ts is NOT a carrier — workspace_symbols only scans carriers.
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/plain.ts".to_string()),
+        input_id: "/workspace/src/plain.ts".to_string(),
+        source: "export const plainOnly = 1;".into(),
+        file_language: verter_session::FileLanguage::script_ts(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+
+    let symbols = workspace_symbols(&host, "widget");
+    assert!(
+        symbols
+            .iter()
+            .any(|s| s.location.uri.as_str().ends_with("SvelteWidget.svelte")),
+        "workspace symbols must include the .svelte component's symbols, got: {:?}",
+        symbols.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+    );
+
+    // Discrimination: a plain .ts file's symbols are never scanned by this
+    // carrier-only search.
+    let plain = workspace_symbols(&host, "plainOnly");
+    assert!(
+        !plain
+            .iter()
+            .any(|s| s.location.uri.as_str().ends_with("plain.ts")),
+        "a non-carrier .ts file must not contribute workspace symbols"
+    );
+}
+
+/// A `.svelte` carrier dropped into a template produces a component
+/// tag + import insertion. DISCRIMINATING: the pre-change
+/// `!dropped_uri.ends_with(".vue")` gate returned `None` for a `.svelte`
+/// drop; a plain `.ts` drop still returns `None`.
+#[test]
+fn document_drop_edit_accepts_svelte_carrier() {
+    use crate::documents::line_index::LineIndex;
+    use crate::features::document_drop_edit::document_drop_edit;
+
+    let source = "<template>\n  <div></div>\n</template>\n<script setup>\n</script>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let target_uri: Uri = "file:///project/src/App.vue".parse().unwrap();
+    let drop_pos = Position {
+        line: 1,
+        character: 7,
+    };
+
+    let edit = document_drop_edit(
+        "file:///project/src/MyButton.svelte",
+        &drop_pos,
+        source,
+        &blocks,
+        &line_index,
+        &target_uri,
+        None,
+    );
+    let edit = edit.expect("a .svelte carrier drop must produce a WorkspaceEdit");
+    let texts: Vec<String> = edit
+        .changes
+        .as_ref()
+        .and_then(|c| c.values().next())
+        .map(|edits| edits.iter().map(|e| e.new_text.clone()).collect())
+        .unwrap_or_default();
+    let joined = texts.join("\n");
+    assert!(
+        joined.contains("<MyButton />"),
+        "the drop must insert the carrier component tag, got: {joined:?}"
+    );
+    assert!(
+        joined.contains("import MyButton from") && joined.contains("MyButton.svelte"),
+        "the drop must insert the carrier import, got: {joined:?}"
+    );
+
+    // Discrimination: a non-carrier .ts drop returns None.
+    let none = document_drop_edit(
+        "file:///project/src/util.ts",
+        &drop_pos,
+        source,
+        &blocks,
+        &line_index,
+        &target_uri,
+        None,
+    );
+    assert!(none.is_none(), "a non-carrier .ts drop must return None");
+}
+
+/// A default import of a `.svelte` child retries export resolution
+/// with `"default"` (the carrier's default export IS the component).
+/// DISCRIMINATING: the pre-change `canonical_id.ends_with(".vue")` gate did
+/// not retry for a `.svelte` import, so the default-export location was never
+/// returned.
+#[test]
+fn definition_retries_default_export_for_svelte_carrier() {
+    use crate::documents::line_index::LineIndex;
+
+    let source = "<script setup>\nimport Child from './Child.svelte'\n</script>\n<template><Child /></template>\n";
+    let blocks = scan_sfc_blocks(source);
+    let line_index = LineIndex::new_utf16(source);
+    let (registry, uri) = open_vue_file(source);
+    let analysis = registry.get_analysis(&uri).expect("analysis");
+
+    // Place the cursor on the `Child` import binding.
+    let child_offset = source.find("Child").unwrap() as u32;
+    let position = line_index.offset_to_position(child_offset).unwrap();
+
+    let child_canonical = "/test/Child.svelte";
+    // resolve_path maps the import specifier to the .svelte child canonical.
+    let resolve_path = |spec: &str| -> Option<String> {
+        if spec == "./Child.svelte" {
+            Some(child_canonical.to_string())
+        } else {
+            None
+        }
+    };
+    // resolve_export_location returns a location ONLY for the "default" export
+    // of the .svelte child — never for the local binding name "Child". This is
+    // exactly the SFC default-export shape the carrier retry handles.
+    let default_loc_uri: Uri = format!("file://{child_canonical}").parse().unwrap();
+    let resolve_export_location = |canonical: &str, name: &str| -> Option<Location> {
+        if canonical == child_canonical && name == "default" {
+            Some(Location {
+                uri: default_loc_uri.clone(),
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                },
+            })
+        } else {
+            None
+        }
+    };
+
+    let result = definition_at_position(
+        &position,
+        source,
+        &blocks,
+        Some(&analysis),
+        &line_index,
+        Some(&resolve_path),
+        Some(&resolve_export_location),
+    );
+
+    let result = result.expect("definition must resolve the .svelte default export via retry");
+    let landed_uri = match result {
+        GotoDefinitionResponse::Scalar(loc) => loc.uri,
+        GotoDefinitionResponse::Array(locs) => locs.into_iter().next().expect("a location").uri,
+        GotoDefinitionResponse::Link(links) => links.into_iter().next().expect("a link").target_uri,
+    };
+    assert!(
+        landed_uri.as_str().ends_with("Child.svelte"),
+        "definition must land on the .svelte child via the default-export retry, got {}",
+        landed_uri.as_str()
     );
 }

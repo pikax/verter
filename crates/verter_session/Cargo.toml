@@ -1,0 +1,280 @@
+[package]
+name = "verter_session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Top-level session API for Verter — compilation, caching, dependency tracking, multi-file orchestration"
+publish = false
+
+[features]
+default = []
+session_metrics = []
+# Opt-in test-support seam for items the SEPARATE integration-test binary
+# (`tests/cases/**`) must see but a normal `cargo build` / `pnpm run build:lsp`
+# / `pnpm dev-extension` (debug or release) must NOT compile. The integration
+# binary links `verter_session` as a NON-test dependency, so a `#[cfg(test)]`
+# item on the lib is invisible to it; `#[cfg(debug_assertions)]` would make the
+# item present in EVERY ordinary debug build (a production-reachable hole). This
+# feature threads the needle: it is NOT in `default`, so production builds
+# (incl. plain `cargo build`) do NOT enable it, yet the `[dev-dependencies]`
+# self-edge below (`verter_session = { path = ".", features = ["test-support"] }`)
+# turns it ON for `verter_session`'s OWN test / example / bench targets — the
+# integration binary among them. So an item gated
+# `#[cfg(any(test, feature = "test-support"))]` is reachable from genuine test
+# code in BOTH the unit (`#[cfg(test)]`) and the integration build, and is a
+# COMPILE-ABSENT item in every production profile. The OutputProjector carrier
+# `_for_test` accessors (and the `ShapeCacheDb` synthetic-carrier proof helpers
+# that call them) use this gate so the reverse-materialization fence holds in
+# every build profile, not release-only. Production-unreachability is asserted
+# by `tests/cases/g_misc1/test_support_feature_off_in_default_build.rs`.
+test-support = []
+# Exposes test-only constructors (e.g. `ProjectBinding::new_for_test`) for
+# downstream crates' tests. Enabled ONLY via a downstream `[dev-dependencies]`
+# entry — never in a production build, so it cannot weaken a witness discipline.
+test-util = []
+# Opt-in: the TS7 oracle harness GENERATION side (the §4 generation spike + the
+# snapshot generator), which drives the pinned tsgo via `verter_type_runtime`.
+# `docs/arch/u0-oracle-harness-design.md` §3 invariant 1: tsgo is GENERATION-ONLY
+# and lives behind this feature, NEVER in the default resolver/production build.
+# The default gate (`cargo nextest run --workspace`, `cargo test -p verter_session`)
+# does NOT enable it, so tsgo stays out of the default dependency closure — pinned
+# by `oracle_tsgo_forbidden.rs::tsgo_not_reachable_from_resolver`. Activated via
+# `cargo test -p verter_session --features oracle-gen` (the spike).
+# `dep:blake3` is also activated here: `oracle_core` computes `snapshot_id` /
+# `env_corpus_id` via BLAKE3, and the generator compiles `oracle_core` in
+# NON-test mode (where the `[dev-dependencies]` blake3 is absent). It stays out
+# of the default/production closure — `default` does not list it.
+oracle-gen = ["dep:verter_type_runtime", "dep:tokio", "dep:blake3", "dep:tempfile"]
+# Opt-in: enables tests that read from `.integration-tests/repos/...`
+# alongside the workspace. The default `cargo test --workspace --tests`
+# run MUST stay hermetic — it does NOT enable this feature. Tests that
+# need a live third-party clone (e.g., property-based corpus parity vs.
+# the upstream nuxt-ui submodule) must gate themselves behind
+# `#[cfg(feature = "external-corpus")]`.
+external-corpus = []
+# Opt-in: enables the trybuild compile-fail SEAL fixtures
+# (`tests/cases/g_compile/compile_fail.rs` — workspace-accessor visibility,
+# the NoTypeExpr / NoStoredSpan marker seals, the sealed carrier/recursive-self
+# proof traits, etc). trybuild spawns a full `cargo build` of a fixture crate
+# linking `verter_session` (~100s), so each fixture is `#[ignore]`d unless this
+# feature is on. Run LOCALLY with `cargo nextest run -p verter_session
+# --features compile-fail` (or `cargo test`). It is NOT wired into the default
+# gate (`node scripts/gate.mjs`) or any CI workflow — the seals it asserts are
+# also enforced structurally by the normal build, so a broken seal fails the
+# ordinary compile.
+compile-fail = []
+# Phase 11b diagnosis benchmark: enables the corpus-driven
+# `repo_first_pass_diagnosis_corpus` integration test that the vitest
+# at `packages/benchmark/src/repo-first-pass.spec.ts` invokes via
+# `cargo test --features diagnosis-bench --test repo_first_pass_diagnosis_corpus`.
+# Default `cargo test --workspace --tests` run does NOT enable this
+# feature — corpus drift is detected by the harness before
+# the work begins.
+diagnosis-bench = ["external-corpus"]
+hotpath = [
+  "dep:hotpath",
+  "hotpath/hotpath",
+  "verter_compiler/hotpath",
+  "verter_semantic/hotpath",
+  "verter_scheduler/hotpath",
+  "verter_workspace/hotpath",
+]
+
+[dependencies]
+verter_audit = { path = "../verter_audit" }
+verter_language = { path = "../verter_language" }
+verter_compiler = { path = "../verter_compiler" }
+verter_parser = { path = "../verter_parser" }
+verter_protocol = { path = "../verter_protocol" }
+prost = "0.14.3"
+verter_semantic = { path = "../verter_semantic" }
+# The query-owned host port (inversion of control): the query boundary crate
+# defines the demand trait + neutral DTOs; this crate implements them in
+# `src/query_host_port.rs`. The dependency points host -> query only.
+verter_session_query = { workspace = true }
+verter_no_typeexpr = { workspace = true }
+verter_no_storedspan = { workspace = true }
+verter_type_expr = { workspace = true }
+verter_type_expr_oxc = { workspace = true }
+verter_span = { path = "../verter_span" }
+verter_workspace = { path = "../verter_workspace" }
+verter_scheduler = { path = "../verter_scheduler" }
+# tsgo LSP driver — OPTIONAL, activated ONLY by the `oracle-gen` feature (the
+# generation spike + snapshot generator). NEVER on the default build closure
+# (tsgo is GENERATION-ONLY, design §3 inv 1). Pinned by
+# `oracle_tsgo_forbidden.rs::tsgo_not_reachable_from_resolver`.
+verter_type_runtime = { path = "../verter_type_runtime", optional = true }
+# BLAKE3 for the oracle harness `snapshot_id` / `env_corpus_id` digests. OPTIONAL
+# + activated ONLY by `oracle-gen` (so the generator's non-test `oracle_core`
+# build resolves it); in `#[cfg(test)]` builds the `[dev-dependencies]` entry
+# below provides it. NEVER on the default/production closure (`default` omits it).
+blake3 = { workspace = true, optional = true }
+# Temp sandbox dirs for the `oracle-gen` generator's hermetic tsgo drive. OPTIONAL
+# + activated ONLY by `oracle-gen`; in `#[cfg(test)]` builds the
+# `[dev-dependencies]` entry below provides it. NEVER on the default closure.
+tempfile = { version = "3.27", optional = true }
+# Async runtime for the `oracle-gen` spike's `#[tokio::test]` tsgo driver. OPTIONAL
+# (only the `oracle-gen` feature activates it) so it stays off the default closure.
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "io-util", "process", "sync"], optional = true }
+bitflags = "2.11"
+dashmap = "6.2"
+hotpath = { version = "0.16", optional = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
+rustc-hash = { workspace = true }
+self_cell = { workspace = true }
+smallvec = "1.15"
+uuid = { version = "1.23", features = ["v4"] }
+sha2 = { workspace = true }
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+serde = { workspace = true }
+tracing = "0.1.44"
+serde_json = { workspace = true }
+sourcemap = "9.3"
+thiserror = "2.0"
+arc-swap = "1.9"
+parking_lot = "0.12.5"
+indexmap = "2.14"
+similar = "3"
+# ts-rs is a REGULAR dependency (not dev) so derives compile into production
+# builds — the audit record types export their TS equivalents via a normal
+# #[test], not a feature gate. Binary-size overhead (~50KB on WASM worst
+# case) is documented in plan §1.4.
+ts-rs = "12"
+# Phase 10a — compile-time `assert_obj_safe!(ResolverContext)` lives in
+# the production `src/resolver_core/resolver_context.rs` module so the
+# dyn-compatibility check fails the build at any future trait edit that
+# would forfeit dyn-safety. Therefore `static_assertions` is a REGULAR
+# dependency, not a dev-dependency. Zero-cost: the macro expands to
+# trait-object construction inside an inert const, so no runtime code is
+# emitted.
+static_assertions = "1.1.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1"
+# uuid 1.22 split RNG into explicit features. On wasm32-unknown-unknown
+# the `js` feature routes through wasm-bindgen + WebCrypto.
+uuid = { version = "1.23", features = ["js"] }
+
+# Windows process-RSS reporting in `component_meta_audit::current_process_rss`.
+# Requires `K32GetProcessMemoryInfo` (kernel32.dll, exposed by
+# `Win32_System_ProcessStatus`) and `GetCurrentProcess` (kernel32.dll,
+# exposed by `Win32_System_Threading`). Workspace already pulls in
+# `windows-sys = 0.61` via transitive deps, so we pin the same major to
+# avoid a second copy in the dependency graph.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+] }
+
+# Phase 9b — Rayon-backed batch compile (`host_compile.rs`) is native-only.
+# WASM continues to use the single-file `upsert` + `get_virtual_file` path.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = { workspace = true }
+# uuid 1.22 split RNG into explicit features. Native targets use
+# `rng-getrandom` for v4 generation.
+uuid = { version = "1.23", features = ["rng-getrandom"] }
+
+[dev-dependencies]
+# Oracle harness snapshot-identity hashing (test-only — the harness lives under
+# `#[cfg(test)] mod typeinfo_tests`, so blake3 stays out of the production /
+# resolver dependency closure, preserving `tsgo_not_reachable_from_resolver`).
+blake3 = { workspace = true }
+# `#[oracle_row]` attribute proc-macro for lifted TS7 oracle rows (test-only,
+# §Q4). Dev-dependency keeps it out of the production / resolver dep closure.
+verter_session_oracle_macro = { path = "../verter_session_oracle_macro" }
+criterion = { version = "0.8.2", features = ["html_reports"] }
+toml = "1.1"
+# Activates the `test-support` feature on `verter_scheduler` for
+# `cargo test --package verter_session` (and example/bench) builds only.
+# The regular dependency above does NOT enable the feature, so
+# `cargo build --release --package verter_session` still compiles
+# verter_scheduler without `host_cpu_pool_token`, `HostCpuPool::pool_id`,
+# `HostCpuPool::build_count`, or the per-pool identity TLS. Cargo
+# unifies feature requirements per-target — for tests/examples/benches
+# the union includes `test-support`; for production it does not.
+verter_scheduler = { path = "../verter_scheduler", features = ["test-support"] }
+# Self-edge that activates `verter_session`'s OWN `test-support` feature for its
+# test / example / bench targets ONLY (the integration binary `tests/cases/**`
+# among them). Cargo unifies feature requirements per-target: for the test
+# targets the union includes `test-support` (so the integration binary sees the
+# carrier `_for_test` accessors + the `ShapeCacheDb` synthetic-carrier proof
+# helpers), while a production `cargo build` / `cargo build --release` of any
+# dependent does NOT enable it (it is absent from `default` and is not requested
+# by any non-dev edge). This is the same idiom as the `verter_scheduler`
+# `test-support` edge above; it is what lets the reverse-materialization fence
+# be compiler-enforced in EVERY build profile rather than release-only.
+verter_session = { path = ".", features = ["test-support"] }
+verter_type_expr = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
+tempfile = "3.27"
+walkdir = "2.5"
+regex = "1.12"
+# Named per-resource serialization for integration tests that contend a
+# process-global resource. Two groups: `fact_counter_provenance` (the
+# fact-counter provenance discriminators) and `parse_fact_injection` (the
+# parse-fact injection slot). `#[serial(<group>)]` coordinates the
+# annotated tests across the shared test process so a single-binary layout
+# keeps the deltas stable; finer than one global lock.
+serial_test = { workspace = true }
+# Phase 6b sub-plan §6b.D2b — T11 compile-fail trybuild target verifies
+# that `VerterHost::workspace()` is gated behind `pub(crate)` and is not
+# callable from external compilation units.
+trybuild = "1.0"
+tracing-test = "0.2.6"
+# Phase 8 — `no_off_store_host_caches` static guard parses
+# `crates/verter_session/src/lib.rs` via syn::parse_file to enumerate
+# `VerterHost` fields and assert each cache-shaped field is either
+# allow-listed (with phase-report citation) or lives on `ProjectTypeStore`.
+# Phase 10a — `no_concrete_verter_host_in_seal_scope` static guard parses
+# every file under the resolver-tier seal scope via `syn::Visit`,
+# requiring the `visit` and `parsing` features in addition to the
+# original `full`+`extra-traits` set.
+syn = { version = "2.0", features = ["full", "extra-traits", "visit", "parsing"] }
+# Route-mutator guard macro-body scan: walks proc_macro2 TokenTrees of
+# macro invocations for marker IDENTS (syn::visit does not descend into
+# macro token streams; ident-token matching keeps log-string mentions
+# from false-flagging).
+proc-macro2 = "1.0"
+quote = "1.0.45"
+
+# Generator for the SemanticQueryKeySpec table artifact (sole writer of
+# `src/semantic_query/query_key_spec_table.txt`). Run via the pnpm script
+# `gen:query-key-spec`; the diff-test only re-renders + compares.
+[[bin]]
+name = "gen-query-key-spec"
+path = "src/bin/gen_query_key_spec.rs"
+
+# The TS7 oracle harness snapshot GENERATOR. `required-features` gates it behind
+# `oracle-gen` so a default `cargo build` / `cargo clippy --workspace` SKIPS it
+# entirely — the default closure stays tsgo-free (design §3 inv 1). Run via
+# `cargo run -p verter_session --features oracle-gen --bin oracle_gen`.
+[[bin]]
+name = "oracle_gen"
+path = "src/bin/oracle_gen.rs"
+required-features = ["oracle-gen"]
+
+# Deterministic, tsgo-FREE v2->v3 snapshot schema upgrade (§Q4). Run with
+# `cargo run -p verter_session --features oracle-gen --bin oracle_upgrade`.
+# `required-features` keeps it out of the default tsgo-free build.
+[[bin]]
+name = "oracle_upgrade"
+path = "src/bin/oracle_upgrade.rs"
+required-features = ["oracle-gen"]
+
+[[bench]]
+name = "host_bench"
+harness = false
+
+[[bench]]
+name = "projection_safety_bench"
+harness = false

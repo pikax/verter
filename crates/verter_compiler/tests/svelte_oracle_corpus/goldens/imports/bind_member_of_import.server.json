@@ -1,0 +1,49 @@
+{
+  "slug": "imports/bind_member_of_import.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./m.js",
+      "kind": "named",
+      "names": [
+        "x"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_member_of_import",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "escape"
+  ],
+  "helperSet": [
+    "attr",
+    "escape"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "escape": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

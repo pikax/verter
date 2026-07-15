@@ -1,5 +1,6 @@
 pub mod line_index;
 pub mod position_map;
+pub mod provider_projection;
 pub mod sfc_scanner;
 
 use std::sync::Arc;
@@ -8,8 +9,8 @@ use parking_lot::RwLock;
 
 use dashmap::DashMap;
 use tower_lsp_server::ls_types::*;
-use verter_host::{
-    CompileProfile, FileKind, HostUpdateResult, IdeResponse, StyleOverrideEntry,
+use verter_session::{
+    CompileProfile, FileLanguage, HostUpdateResult, IdeResponse, StyleOverrideEntry,
     StyleOverrideRequest, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 
@@ -18,8 +19,11 @@ use crate::uri::{file_uri_to_path, percent_decode};
 
 use line_index::LineIndex;
 use position_map::PositionMapper;
+use provider_projection::{
+    DocumentProviderProjection, ProviderPositionMapper, SelfFileProviderMapper,
+};
 
-/// Manages open documents and their relationship to verter_host.
+/// Manages open documents and their relationship to verter_session.
 pub struct DocumentRegistry {
     pub(crate) host: Arc<VerterHost>,
     /// Map from document URI to document state.
@@ -33,11 +37,19 @@ pub struct DocumentRegistry {
     /// Negotiated position encoding from the client (LSP 3.17).
     /// Set once during `initialize()`, before any documents are opened.
     encoding: RwLock<PositionEncodingKind>,
+    /// The authoritative, generation-stamped store of provider surfaces synced
+    /// to the type provider. Owned here — the single shared document/host facade
+    /// reached by the server, the sync coordinator, AND the background-drain free
+    /// functions (which already receive `&DocumentRegistry`) — so EVERY sync/close
+    /// path records/forgets a generation through one owner. A cross-file rename
+    /// captures the current snapshot set under a fence and maps a returned offset
+    /// only against the exact generation it captured.
+    provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore,
 }
 
 /// Tracked state for an open document.
 pub struct DocumentState {
-    /// The canonical ID used with verter_host.
+    /// The canonical ID used with verter_session.
     pub canonical_id: String,
     /// Current document version (from LSP client).
     pub version: i32,
@@ -45,8 +57,15 @@ pub struct DocumentState {
     pub source: Arc<str>,
     /// Precomputed line index for byte-offset ↔ LSP Position conversion.
     pub line_index: LineIndex,
-    /// Cached position mapper (rebuilt on each document change).
-    pub position_mapper: Option<PositionMapper>,
+    /// The document's provider projection (rebuilt on each document change):
+    /// the source↔provider position mapper plus the discriminant of which
+    /// provider buffer this document projects into (`CarrierIde` for a Vue /
+    /// Svelte carrier, `SelfFile` for a `.svelte.ts` / `.svelte.js` rune
+    /// module). `None` for a plain script / virtual file (no provider
+    /// projection). The `provider_path` is NOT stored here — it is DERIVED from
+    /// the committed provider-sync state (carrier IDE path) or IS the canonical
+    /// id (self-file).
+    pub projection: Option<DocumentProviderProjection>,
     /// Language ID (e.g., "vue", "typescript").
     pub language_id: String,
     /// For virtual files (`verter-virtual://`): the source .vue file URI.
@@ -62,17 +81,47 @@ impl DocumentRegistry {
             documents: DashMap::new(),
             tsx_profile: Arc::new(RwLock::new(CompileProfile {
                 source_map: true,
-                target: verter_host::CompileTarget::IDE | verter_host::CompileTarget::TEMPLATE_DATA,
+                target: verter_session::CompileTarget::IDE
+                    | verter_session::CompileTarget::TEMPLATE_DATA,
                 ..CompileProfile::default()
             })),
             encoding: RwLock::new(PositionEncodingKind::UTF16),
+            provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore::new(),
         }
+    }
+
+    /// The generation-stamped provider-surface store (the authority behind
+    /// fail-closed cross-file rename mapping).
+    pub fn provider_surfaces(&self) -> &crate::provider_surface_store::ProviderSurfaceStore {
+        &self.provider_surfaces
     }
 
     /// Set the negotiated position encoding. Called once during `initialize()`,
     /// before any documents are opened.
     pub fn set_encoding(&self, encoding: PositionEncodingKind) {
         *self.encoding.write() = encoding;
+    }
+
+    /// Build the self-file provider projection for a rune module (`.svelte.ts`
+    /// / `.svelte.js`): the prelude line count (from the shared rune prelude)
+    /// plus the import-specifier rewrite segments.
+    ///
+    /// `replacements` are the `(byte_start, byte_end, replacement)` import-
+    /// specifier rewrites computed against `source` (the resolver-backed
+    /// `compute_specifier_replacements`). They may be EMPTY before resolver
+    /// ownership is ready — the prelude offset alone is a correct uniform line
+    /// shift for every position; the rewrite column shifts refine import lines
+    /// once the resolver lands.
+    fn build_self_file_projection(
+        file_language: &FileLanguage,
+        source: &str,
+        replacements: &[(usize, usize, String)],
+        line_index: &LineIndex,
+    ) -> Option<DocumentProviderProjection> {
+        let built = verter_session::framework::rune_module_provider_content(file_language, source)?;
+        let mapper =
+            SelfFileProviderMapper::new(built.prelude_line_count, replacements, line_index);
+        Some(DocumentProviderProjection::SelfFile { mapper })
     }
 
     /// Enable embedding ambient `declare module "@verter/types"` in generated TSX.
@@ -84,6 +133,24 @@ impl DocumentRegistry {
     /// Get the negotiated encoding.
     pub fn encoding(&self) -> PositionEncodingKind {
         self.encoding.read().clone()
+    }
+
+    /// Resolve the [`FileLanguage`] row for an editor document.
+    ///
+    /// The client's `language_id` is authoritative for a framework CARRIER
+    /// (an in-memory carrier document may not carry its `.vue` / `.svelte`
+    /// path); every other document classifies by canonical path through the
+    /// host's language classifier — the same authority the workspace-scan
+    /// ingress uses, so one file resolves one `FileLanguage` row regardless of
+    /// which ingress loaded it. The carrier mapping is REGISTRY-driven
+    /// (`carrier_for_editor_language_id`), not a hardcoded `== "vue"` branch:
+    /// any registered carrier (`vue`, `svelte`, …) resolves to its framework
+    /// row here and the host upsert parses it through the registered carrier —
+    /// never silently as a plain script.
+    fn document_file_language(&self, language_id: &str, canonical_id: &str) -> FileLanguage {
+        verter_session::LanguageRegistry::global()
+            .carrier_for_editor_language_id(language_id)
+            .unwrap_or_else(|| self.host.language_classifier().classify(canonical_id))
     }
 
     /// Handle a document being opened in the editor.
@@ -98,7 +165,7 @@ impl DocumentRegistry {
                 version: params.version,
                 line_index: LineIndex::new(&source, self.encoding()),
                 source,
-                position_mapper: None,
+                projection: None,
                 language_id: params.language_id.clone(),
                 virtual_source_uri: Some(source_uri),
             };
@@ -109,46 +176,56 @@ impl DocumentRegistry {
         let canonical_id = uri_to_canonical_id(&params.uri);
         let source: Arc<str> = Arc::from(params.text.as_str());
 
-        let file_kind = if params.language_id == "vue" {
-            FileKind::VueSfc
-        } else {
-            FileKind::NonSfc
-        };
+        let file_language = self.document_file_language(&params.language_id, &canonical_id);
+        // Every framework CARRIER (Vue OR Svelte) projects an IDE TSX file +
+        // source map — the compile + position-mapper paths are carrier-general.
+        let is_carrier = file_language.is_framework_carrier();
 
         let result = self.host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id.clone(),
             source: source.clone(),
-            file_kind,
+            file_language: file_language.clone(),
             aliases: vec![],
         });
 
-        // Trigger compilation to populate TSX cache (upsert only parses).
-        // ensure_compiled() compiles lazily and caches TSX + source map.
-        if file_kind == FileKind::VueSfc {
+        // Trigger compilation to populate the TSX cache (upsert only parses).
+        // IDE-sync: drive the IDE/TSX surface, NOT the runtime `Main` node — a
+        // Main-less carrier (Svelte) projects only `CachedTsx`, so
+        // `ensure_ide_compiled` populates it where `ensure_compiled` (which
+        // demands `Main`) would not. `get_ide` below then reads the source map.
+        if is_carrier {
             let _ = self
                 .host
-                .ensure_compiled(&canonical_id, &self.tsx_profile.read());
+                .ensure_ide_compiled(&canonical_id, &self.tsx_profile.read());
         }
 
-        // Build position mapper from TSX source map.
+        let line_index = LineIndex::new(&source, self.encoding());
+
+        // Build the document's provider projection.
         // Always build on did_open — even if the host reports `changed: false`
         // (e.g., because scan_workspace already loaded the same content), we still
         // need the mapper for hover/definition/diagnostics.
-        let position_mapper = if file_kind == FileKind::VueSfc {
+        //  - CARRIER (`.vue` / `.svelte`): the IDE TSX source-map projection.
+        //  - SELF-FILE rune module (`.svelte.ts` / `.svelte.js`): the line-only
+        //    rewrite-aware projection (prelude-offset-only at did_open; the
+        //    server refines it with resolver-backed rewrite segments once
+        //    ownership is ready).
+        let projection = if is_carrier {
             self.host
                 .get_ide(&canonical_id, &self.tsx_profile.read())
                 .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok())
+                .map(DocumentProviderProjection::carrier_ide)
         } else {
-            None
+            Self::build_self_file_projection(&file_language, &source, &[], &line_index)
         };
 
         let state = DocumentState {
             canonical_id,
             version: params.version,
-            line_index: LineIndex::new(&source, self.encoding()),
+            line_index,
             source,
-            position_mapper,
+            projection,
             language_id: params.language_id.clone(),
             virtual_source_uri: None,
         };
@@ -183,24 +260,23 @@ impl DocumentRegistry {
         let canonical_id = uri_to_canonical_id(uri);
         let source: Arc<str> = Arc::from(text);
 
-        let file_kind = self
+        let stored_language_id = self
             .documents
             .get(&uri_str)
-            .map(|d| {
-                if d.language_id == "vue" {
-                    FileKind::VueSfc
-                } else {
-                    FileKind::NonSfc
-                }
-            })
-            .unwrap_or(FileKind::NonSfc);
+            .map(|d| d.language_id.clone())
+            .unwrap_or_default();
+        let file_language = self.document_file_language(&stored_language_id, &canonical_id);
+        // Carrier-general: every framework carrier (Vue OR Svelte) re-compiles
+        // its IDE TSX on change.
+        let is_carrier = file_language.is_framework_carrier();
+        let file_language_for_projection = file_language.clone();
 
         let upsert_start = std::time::Instant::now();
         let result = self.host.upsert(UpsertRequest {
             canonical_id: Some(canonical_id.clone()),
             input_id: canonical_id.clone(),
             source: source.clone(),
-            file_kind,
+            file_language,
             aliases: vec![],
         });
         tracing::info!(
@@ -209,18 +285,21 @@ impl DocumentRegistry {
             std::thread::current().id()
         );
 
-        // Update VFS overlay with latest buffer content.
+        // Update VFS overlay with latest buffer content. sub-plan
+        // §6b.D2b — route through `host.notify_upsert` so the route-only
+        // shallow cache is evicted alongside the workspace overlay write.
         #[cfg(not(target_arch = "wasm32"))]
-        self.host
-            .workspace()
-            .notify_upsert(&canonical_id, source.clone());
+        self.host.notify_upsert(&canonical_id, source.clone());
 
-        // Trigger re-compilation for Vue SFCs
-        if file_kind == FileKind::VueSfc {
+        // Trigger re-compilation for framework carriers (Vue / Svelte SFCs).
+        // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
+        // Main-less carrier (Svelte) re-populates its `CachedTsx`; `get_ide`
+        // below rebuilds the position mapper from the fresh source map.
+        if is_carrier {
             let compile_start = std::time::Instant::now();
             let _ = self
                 .host
-                .ensure_compiled(&canonical_id, &self.tsx_profile.read());
+                .ensure_ide_compiled(&canonical_id, &self.tsx_profile.read());
             tracing::info!(
                 "DocumentRegistry::did_change ENSURE_COMPILED_DONE elapsed={:?} thread={:?}",
                 compile_start.elapsed(),
@@ -228,33 +307,47 @@ impl DocumentRegistry {
             );
         }
 
-        // Rebuild position mapper.
+        let new_line_index = LineIndex::new(&source, self.encoding());
+
+        // Rebuild the document's provider projection.
         // When compilation fails (e.g., temporarily invalid SFC during typing),
-        // preserve the old mapper so position-dependent features keep working.
-        let position_mapper = match &result {
-            Ok(update) if update.changed => {
-                let new_mapper = self
-                    .host
-                    .get_ide(&canonical_id, &self.tsx_profile.read())
-                    .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok());
-                // Keep old mapper if new compilation failed (Bug 3 fix)
-                new_mapper.or_else(|| {
-                    self.documents
-                        .get(&uri_str)
-                        .and_then(|d| d.position_mapper.clone())
-                })
-            }
-            _ => self
-                .documents
+        // preserve the old projection so position-dependent features keep working.
+        let rebuild_carrier = |this: &Self| -> Option<DocumentProviderProjection> {
+            this.host
+                .get_ide(&canonical_id, &this.tsx_profile.read())
+                .and_then(|tsx| PositionMapper::from_json(&tsx.source_map?).ok())
+                .map(DocumentProviderProjection::carrier_ide)
+        };
+        let prior_projection = || {
+            self.documents
                 .get(&uri_str)
-                .and_then(|d| d.position_mapper.clone()),
+                .and_then(|d| d.projection.clone())
+        };
+        let projection = if is_carrier {
+            match &result {
+                Ok(update) if update.changed => {
+                    // Keep old projection if new compilation failed (Bug 3 fix).
+                    rebuild_carrier(self).or_else(prior_projection)
+                }
+                _ => prior_projection(),
+            }
+        } else {
+            // Self-file rune module (or plain script → `None`). The prelude
+            // offset is content-independent; rebuild it whole-line (rewrite
+            // segments get refined by the server once the resolver is ready).
+            Self::build_self_file_projection(
+                &file_language_for_projection,
+                &source,
+                &[],
+                &new_line_index,
+            )
         };
 
         if let Some(mut entry) = self.documents.get_mut(&uri_str) {
             entry.version = version;
-            entry.line_index = LineIndex::new(&source, self.encoding());
+            entry.line_index = new_line_index;
             entry.source = source;
-            entry.position_mapper = position_mapper;
+            entry.projection = projection;
         }
 
         result.unwrap_or_else(|e| {
@@ -318,7 +411,10 @@ impl DocumentRegistry {
     pub fn did_close(&self, uri: &Uri) {
         // Clear the VFS overlay so resolution falls back to snapshot/disk.
         let canonical_id = uri_to_canonical_id(uri);
-        self.host.workspace().notify_close(&canonical_id);
+        // route through `host.notify_close`
+        // so the route-only shallow cache is evicted alongside the
+        // workspace overlay clear.
+        self.host.notify_close(&canonical_id);
 
         self.documents.remove(uri.as_str());
     }
@@ -328,9 +424,22 @@ impl DocumentRegistry {
         self.documents.get(uri.as_str())
     }
 
-    /// Get the position mapper for a document.
-    pub fn get_position_mapper(&self, uri: &Uri) -> Option<PositionMapper> {
-        self.documents.get(uri.as_str())?.position_mapper.clone()
+    /// Get the document's provider projection (the source↔provider mapper +
+    /// the projection discriminant).
+    pub fn get_projection(&self, uri: &Uri) -> Option<DocumentProviderProjection> {
+        self.documents.get(uri.as_str())?.projection.clone()
+    }
+
+    /// Get the unified source↔provider position mapper for a document, ready
+    /// for the feature layer (projection-agnostic).
+    pub fn get_position_mapper(&self, uri: &Uri) -> Option<ProviderPositionMapper> {
+        Some(
+            self.documents
+                .get(uri.as_str())?
+                .projection
+                .as_ref()?
+                .mapper(),
+        )
     }
 
     /// Get the canonical ID for a document URI.
@@ -370,16 +479,17 @@ impl DocumentRegistry {
             // may not have been built, but the workspace scanner later compiles
             // the file and caches TSX in the host).
             if let Some(entry) = self.documents.get(uri.as_str()) {
-                if entry.position_mapper.is_none() {
+                if entry.projection.is_none() {
                     drop(entry);
                     if let Some(mut entry) = self.documents.get_mut(uri.as_str()) {
-                        if entry.position_mapper.is_none() {
+                        if entry.projection.is_none() {
                             if let Some(mapper) = resp
                                 .source_map
                                 .as_ref()
                                 .and_then(|sm| PositionMapper::from_json(sm).ok())
                             {
-                                entry.position_mapper = Some(mapper);
+                                entry.projection =
+                                    Some(DocumentProviderProjection::carrier_ide(mapper));
                             }
                         }
                     }
@@ -389,17 +499,32 @@ impl DocumentRegistry {
         }
 
         // Slow path: compile_slots were cleared (e.g., dependency invalidation).
-        // Lazily recompile to restore IDE output.
-        let is_vue = self
+        // Lazily recompile to restore IDE output. Carrier-general (Vue / Svelte).
+        let is_carrier = self
             .documents
             .get(uri.as_str())
-            .map(|d| d.language_id == "vue")
+            .map(|d| {
+                self.document_file_language(&d.language_id, &canonical_id)
+                    .is_framework_carrier()
+            })
             .unwrap_or(false);
-        if !is_vue {
+        if !is_carrier {
             return None;
         }
 
-        self.host.ensure_compiled(&canonical_id, &profile).ok()?;
+        // IDE-sync: drive the IDE/TSX surface, NOT the runtime `Main` node. A
+        // Main-less carrier (Svelte) has a `CachedTsx` but no `Main`, so
+        // `ensure_compiled` (which demands `Main`) would return
+        // `MissingVirtualNode` and abort here even though the IDE TSX exists.
+        // `ensure_ide_compiled` resolves through the `Ide` demand; `Ok(false)`
+        // (a genuine no-IDE surface) skips, `Ok(true)` proceeds to `get_ide`.
+        if !self
+            .host
+            .ensure_ide_compiled(&canonical_id, &profile)
+            .ok()?
+        {
+            return None;
+        }
         let resp = self.host.get_ide(&canonical_id, &profile)?;
 
         // Rebuild position mapper since TSX output was regenerated
@@ -409,7 +534,7 @@ impl DocumentRegistry {
                 .as_ref()
                 .and_then(|sm| PositionMapper::from_json(sm).ok())
             {
-                entry.position_mapper = Some(mapper);
+                entry.projection = Some(DocumentProviderProjection::carrier_ide(mapper));
             }
         }
 
@@ -422,26 +547,72 @@ impl DocumentRegistry {
     /// that may have changed the TSX output. Without this, hover would query correct
     /// TSX with stale position offsets.
     pub fn recompile_and_refresh_mapper(&self, uri: &Uri) -> Option<IdeResponse> {
-        let is_vue = self
+        let canonical_id = self.get_canonical_id(uri)?;
+        // Carrier-general (Vue / Svelte) — every carrier projects an IDE TSX.
+        let is_carrier = self
             .documents
             .get(uri.as_str())
-            .map(|d| d.language_id == "vue")
+            .map(|d| {
+                self.document_file_language(&d.language_id, &canonical_id)
+                    .is_framework_carrier()
+            })
             .unwrap_or(false);
-        if !is_vue {
+        if !is_carrier {
             return None;
         }
-        let canonical_id = self.get_canonical_id(uri)?;
         let profile = self.tsx_profile.read().clone();
-        self.host.ensure_compiled(&canonical_id, &profile).ok()?;
+        // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
+        // Main-less carrier (Svelte) refreshes its mapper. `Ok(false)` (no IDE
+        // surface) returns None; `Ok(true)` proceeds to `get_ide`.
+        if !self
+            .host
+            .ensure_ide_compiled(&canonical_id, &profile)
+            .ok()?
+        {
+            return None;
+        }
         let resp = self.host.get_ide(&canonical_id, &profile)?;
         // Always rebuild mapper from fresh source map
         if let Some(mut entry) = self.documents.get_mut(uri.as_str()) {
-            entry.position_mapper = resp
+            entry.projection = resp
                 .source_map
                 .as_ref()
-                .and_then(|sm| PositionMapper::from_json(sm).ok());
+                .and_then(|sm| PositionMapper::from_json(sm).ok())
+                .map(DocumentProviderProjection::carrier_ide);
         }
         Some(resp)
+    }
+
+    /// Refine an OPEN rune module's self-file projection with resolver-backed
+    /// import-specifier rewrite segments.
+    ///
+    /// At did_open / did_change the projection carries the prelude offset with
+    /// NO rewrite segments (the resolver may not be ready). Once the server has
+    /// a published resolver it computes the rewrite replacements and calls this
+    /// to refine the rewrite-aware column mapping. A no-op when the document is
+    /// not a `SelfFile` projection (e.g. a carrier or plain script).
+    pub fn refresh_self_file_rewrites(
+        &self,
+        uri: &Uri,
+        file_language: &FileLanguage,
+        replacements: &[(usize, usize, String)],
+    ) {
+        let Some(mut entry) = self.documents.get_mut(uri.as_str()) else {
+            return;
+        };
+        if !matches!(
+            entry.projection,
+            Some(DocumentProviderProjection::SelfFile { .. })
+        ) {
+            return;
+        }
+        let source = entry.source.clone();
+        let line_index = entry.line_index.clone();
+        if let Some(projection) =
+            Self::build_self_file_projection(file_language, &source, replacements, &line_index)
+        {
+            entry.projection = Some(projection);
+        }
     }
 
     /// Check if a document's IDE output is JavaScript (JSX) rather than TypeScript (TSX).
@@ -450,13 +621,13 @@ impl DocumentRegistry {
     }
 
     /// Get the analysis snapshot for a document.
-    pub fn get_analysis(&self, uri: &Uri) -> Option<verter_host::FileAnalysisSnapshot> {
+    pub fn get_analysis(&self, uri: &Uri) -> Option<verter_session::FileAnalysisSnapshot> {
         let canonical_id = self.get_canonical_id(uri)?;
         self.host.get_analysis(&canonical_id)
     }
 
     /// Get the diagnostics for a document.
-    pub fn get_diagnostics(&self, uri: &Uri) -> Option<verter_host::DiagnosticsSnapshot> {
+    pub fn get_diagnostics(&self, uri: &Uri) -> Option<verter_session::DiagnosticsSnapshot> {
         let canonical_id = self.get_canonical_id(uri)?;
         self.host
             .get_diagnostics(&canonical_id, &self.tsx_profile.read())
@@ -585,7 +756,7 @@ impl DocumentRegistry {
         self.documents.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// Get the underlying verter_host reference.
+    /// Get the underlying verter_session reference.
     pub fn host(&self) -> &VerterHost {
         &self.host
     }
@@ -671,12 +842,18 @@ pub fn uri_to_canonical_id(uri: &Uri) -> String {
     uri_to_canonical_id_from_str(uri.as_str())
 }
 
-/// Convert a `file://` URI string to a canonical filesystem path.
+/// Convert a `file://` URI string to a canonical filesystem path ID.
 ///
-/// Handles percent-encoded characters (e.g., `%3A` → `:` on Windows),
-/// normalises separators to `/`, and restores the leading `/` on Unix.
+/// Handles percent-encoded characters (e.g., `%3A` → `:` on Windows) and
+/// restores the leading `/` on Unix, then routes the result through the single
+/// canonical-path owner (`verter_span::path`) so the produced ID is byte-equal
+/// to every other producer (type providers, VFS ingestion, scheduler). On
+/// Windows this lowercases the drive letter (`C:/…` → `c:/…`) — URI-derived IDs
+/// previously stayed uppercase and split file identity against the owner-
+/// normalized IDs the VFS keys on. On Unix it is a no-op (paths already
+/// canonical).
 pub fn uri_to_canonical_id_from_str(s: &str) -> String {
-    file_uri_to_path(s)
+    verter_span::path::canonicalize_path(&file_uri_to_path(s))
 }
 /// Parse a `verter-virtual://` URI and extract the source .vue file URI.
 ///
@@ -692,6 +869,7 @@ fn parse_virtual_uri(uri: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(unused_must_use)]
 mod tests {
     use super::*;
 
@@ -704,9 +882,16 @@ mod tests {
 
     #[test]
     fn test_uri_to_canonical_id_windows_file_uri() {
+        // The canonical-ID owner lowercases the Windows drive letter so a
+        // URI-derived ID is byte-equal to every other producer (type providers,
+        // VFS ingestion) — otherwise `did_open` would key the VFS under
+        // `C:/...` while lookups resolve `c:/...`, splitting file identity.
+        // Pre-fix this returned the uppercase `C:/...`; this assertion is
+        // discriminating.
         let uri: Uri = "file:///C:/Users/dev/project/App.vue".parse().unwrap();
         let id = uri_to_canonical_id(&uri);
-        assert_eq!(id, "C:/Users/dev/project/App.vue");
+        assert_eq!(id, "c:/Users/dev/project/App.vue");
+        assert_ne!(id, "C:/Users/dev/project/App.vue");
     }
 
     #[test]
@@ -727,15 +912,15 @@ mod tests {
     /// VS Code sometimes sends `file:///d%3A/path` instead of `file:///d:/path`.
     #[test]
     fn test_uri_to_canonical_id_windows_encoded_drive() {
-        let id = uri_to_canonical_id_from_str("file:///d%3A/dev/personal/verter/examples");
-        assert_eq!(id, "d:/dev/personal/verter/examples");
+        let id = uri_to_canonical_id_from_str("file:///d%3A/dev/example/examples");
+        assert_eq!(id, "d:/dev/example/examples");
     }
 
     /// @ai-generated — Windows path with lowercase drive and normal colon
     #[test]
     fn test_uri_to_canonical_id_windows_lowercase_drive() {
-        let id = uri_to_canonical_id_from_str("file:///d:/dev/personal/verter");
-        assert_eq!(id, "d:/dev/personal/verter");
+        let id = uri_to_canonical_id_from_str("file:///d:/dev/example");
+        assert_eq!(id, "d:/dev/example");
     }
 
     /// @ai-generated — Verify the from_str variant matches the Uri variant
@@ -763,8 +948,8 @@ mod tests {
 
     #[test]
     fn open_uris_returns_open_documents() {
-        let host = Arc::new(verter_host::VerterHost::new_standalone(
-            verter_host::HostConfig::default(),
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
         ));
         let registry = DocumentRegistry::new(host);
 
@@ -819,8 +1004,8 @@ mod tests {
     /// position mapper when the host already has cached TSX output.
     #[test]
     fn position_mapper_lazily_rebuilt_on_fast_path() {
-        let host = Arc::new(verter_host::VerterHost::new_standalone(
-            verter_host::HostConfig::default(),
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
         ));
         let registry = DocumentRegistry::new(host);
         let uri: Uri = "file:///home/user/App.vue".parse().unwrap();
@@ -839,9 +1024,9 @@ mod tests {
             "mapper should be built during did_open"
         );
 
-        // Simulate the startup race: clear the mapper to None
+        // Simulate the startup race: clear the projection to None
         if let Some(mut entry) = registry.documents.get_mut(uri.as_str()) {
-            entry.position_mapper = None;
+            entry.projection = None;
         }
         assert!(
             registry.get_position_mapper(&uri).is_none(),
@@ -859,11 +1044,395 @@ mod tests {
         );
     }
 
+    /// A `.svelte` framework carrier opened in the editor routes through the
+    /// language classifier to the REGISTERED Svelte carrier: the upsert
+    /// succeeds and the host holds a Svelte carrier source snapshot — it is NOT
+    /// silently misparsed as a plain TypeScript script, and NOT rejected as a
+    /// known-but-unsupported file.
+    #[test]
+    fn did_open_svelte_parses_through_the_registered_carrier() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///home/user/App.svelte".parse().unwrap();
+
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "svelte".to_string(),
+            version: 1,
+            text:
+                "<script lang=\"ts\">let { x }: { x: number } = $props();</script>\n<div>{x}</div>"
+                    .to_string(),
+        });
+
+        // The editor document stays tracked…
+        assert!(
+            registry.open_uris().contains(&uri.as_str().to_string()),
+            "the opened document must stay tracked in the registry"
+        );
+        // …AND the host holds a Svelte carrier source snapshot: the registered
+        // carrier parses it (positive routing), never a misparsed script.
+        assert!(
+            registry
+                .host()
+                .get_source("/home/user/App.svelte")
+                .is_some(),
+            "the registered Svelte carrier must parse the .svelte document"
+        );
+    }
+
+    /// End-to-end: a Main-less `.svelte` carrier's IDE TSX reaches the
+    /// LSP IDE-sync path. `DocumentRegistry::get_ide`'s SLOW path (compile slots
+    /// cleared) drove `host.ensure_compiled(canonical, profile).ok()?` before
+    /// the migration — which DEMANDS `VirtualNodeKind::Main`. A Svelte carrier
+    /// projects ONLY an IDE `CachedTsx` (no runtime `Main`), so the old
+    /// `ensure_compiled` returned `MissingVirtualNode` → `.ok()?` short-circuited
+    /// to `None` and the Svelte IDE surface NEVER reached the LSP, even though
+    /// the TSX existed. After the migration to `ensure_ide_compiled` (which
+    /// resolves through the `Ide` demand, never `Main`), the slow path restores
+    /// the IDE TSX.
+    ///
+    /// DISCRIMINATING: this FAILS against the pre-migration `ensure_compiled`-
+    /// gated slow path (it returns `None` for the Main-less carrier) and PASSES
+    /// after the migration. A Vue file would not discriminate — Vue has a `Main`
+    /// node, so its old gate succeeded; only a Main-less carrier exposes the bug.
+    #[test]
+    fn main_less_svelte_ide_tsx_reaches_lsp_get_ide_slow_path() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(Arc::clone(&host));
+        let uri: Uri = "file:///home/user/Counter.svelte".parse().unwrap();
+        let canonical = "/home/user/Counter.svelte";
+
+        // Open a Main-less Svelte carrier (no runtime Main; IDE TSX only).
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "svelte".to_string(),
+            version: 1,
+            text: "<script lang=\"ts\">let count = 0;</script>\n<button onclick={() => count++}>{count}</button>\n".to_string(),
+        });
+
+        // Force `get_ide`'s SLOW path: clear the compile slots so the host's
+        // fast-path `get_ide` peek misses and the registry must recompile. This
+        // is exactly the dependency-invalidation scenario the slow path exists
+        // for — and the one that gated on `ensure_compiled` before the fix.
+        registry.host().invalidate_compile_slots(canonical);
+        assert!(
+            registry
+                .host()
+                .get_ide(canonical, &registry.tsx_profile.read())
+                .is_none(),
+            "precondition: the fast-path peek must miss after invalidating the compile slots, \
+             so `get_ide` takes the slow recompile path under test"
+        );
+
+        // The slow path now drives `ensure_ide_compiled` (Ide demand), so the
+        // Main-less Svelte carrier's IDE TSX reaches the LSP.
+        let ide = registry.get_ide(&uri);
+        assert!(
+            ide.is_some(),
+            "the Main-less Svelte carrier's IDE TSX must reach the LSP `get_ide` slow path — \
+             pre-migration this returned None because `ensure_compiled` demanded a runtime Main \
+             the Svelte carrier never produces"
+        );
+        let ide = ide.unwrap();
+        // Svelte-specific IDE output (the @verter/svelte-jsx pragma) — NOT Vue
+        // TSX. This confirms the carrier-correct surface reached the LSP.
+        assert!(
+            ide.code.contains("@jsxImportSource @verter/svelte-jsx"),
+            "the LSP must receive the Svelte-specific IDE TSX, got:\n{}",
+            ide.code
+        );
+        assert!(
+            !ide.code.contains("_sfc_main"),
+            "the LSP must NOT receive Vue SFC TSX residue for a .svelte carrier"
+        );
+    }
+
+    /// Plain-script documents keep parsing exactly as before: the
+    /// classifier resolves the script row for the canonical path and
+    /// the upsert succeeds.
+    #[test]
+    fn did_open_script_document_still_parses() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///home/user/util.ts".parse().unwrap();
+
+        registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "typescript".to_string(),
+            version: 1,
+            text: "export const x = 1;".to_string(),
+        });
+
+        assert!(
+            registry.host().get_source("/home/user/util.ts").is_some(),
+            "a plain script document must parse through the script path"
+        );
+    }
+
+    /// The editor ingress and the workspace-scan ingress resolve the
+    /// SAME `FileLanguage` row for the same path: both route through the
+    /// host's language classifier. `language_id == "vue"` stays
+    /// authoritative for the Vue carrier (an in-memory Vue document may
+    /// not carry a `.vue` path).
+    #[test]
+    fn document_language_agrees_with_host_classifier() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(Arc::clone(&host));
+
+        assert_eq!(
+            registry.document_file_language("vue", "/x/App.vue"),
+            FileLanguage::vue()
+        );
+        for path in ["/x/a.ts", "/x/a.js", "/x/a.svelte", "/x/notes.md"] {
+            assert_eq!(
+                registry.document_file_language("plaintext", path),
+                host.language_classifier().classify(path),
+                "editor ingress must agree with the scan ingress for {path}"
+            );
+        }
+        // The classifier (not a hard-coded TypeScript fallback) decides:
+        // a `.js` path resolves the JS script row.
+        assert_eq!(
+            registry.document_file_language("javascript", "/x/a.js"),
+            FileLanguage::script(verter_session::ScriptSourceType::js())
+        );
+        // A `.svelte` path resolves its framework carrier row — never
+        // the Vue row, never a plain script.
+        let svelte = registry.document_file_language("svelte", "/x/a.svelte");
+        assert!(svelte.is_framework_carrier());
+        assert!(!svelte.is_vue());
+        assert_ne!(svelte, FileLanguage::script_ts());
+    }
+
+    #[test]
+    fn did_open_svelte_builds_an_ide_position_mapper() {
+        // The carrier-general compile gate (is_framework_carrier, not is_vue)
+        // must reach the Svelte IDE projection on did_open — the source map
+        // yields a position mapper. A `.svelte` file with the Vue-only gate
+        // would build NO mapper (the bug this pins).
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(Arc::clone(&host));
+
+        let item = TextDocumentItem {
+            uri: "file:///x/Comp.svelte".parse().expect("uri"),
+            language_id: "svelte".to_string(),
+            version: 1,
+            text: "<script lang=\"ts\">let count = 0;</script>\n<div>{count}</div>".to_string(),
+        };
+        let _ = registry.did_open(&item);
+
+        let state = registry
+            .documents
+            .get("file:///x/Comp.svelte")
+            .expect("the .svelte document is registered");
+        assert!(
+            matches!(
+                state.projection,
+                Some(DocumentProviderProjection::CarrierIde { .. })
+            ),
+            "did_open on a .svelte carrier must build an IDE (carrier) projection \
+             (the carrier-general compile gate reaches the Svelte projection)"
+        );
+    }
+
+    /// The hot read path hands out a SHARED source-map mapper: two
+    /// `get_position_mapper` results for the SAME carrier document must point at
+    /// ONE `PositionMapper` allocation, not two deep copies of its
+    /// `OwnedSourceMap` + precomputed lookup tables.
+    ///
+    /// Discriminating: with the mapper owned behind a `Box`, `.mapper()`
+    /// deep-clones the whole `PositionMapper` pointee on every call, so the two
+    /// results point at DISTINCT allocations and the address comparison FAILS.
+    /// With the mapper owned behind an `Arc`, `.mapper()` clones the handle and
+    /// both results share ONE allocation, so the comparison PASSES.
+    #[test]
+    fn get_position_mapper_shares_one_allocation() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///x/Comp.svelte".parse().expect("uri");
+
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "svelte".to_string(),
+            version: 1,
+            text: "<script lang=\"ts\">let count = 0;</script>\n<div>{count}</div>".to_string(),
+        });
+
+        // Two independent reads of the unified mapper for the same document.
+        let first = registry
+            .get_position_mapper(&uri)
+            .expect("a .svelte carrier must expose a source-map mapper");
+        let second = registry
+            .get_position_mapper(&uri)
+            .expect("a .svelte carrier must expose a source-map mapper");
+
+        // Both reads project the same carrier into its IDE TSX, so both are the
+        // SourceMap arm. Compare the address of the underlying `PositionMapper`
+        // pointee: a shared handle yields one allocation, a per-call deep clone
+        // yields two.
+        let (ProviderPositionMapper::SourceMap(a), ProviderPositionMapper::SourceMap(b)) =
+            (&first, &second)
+        else {
+            panic!("a .svelte carrier mapper must be the SourceMap projection");
+        };
+        assert!(
+            std::ptr::eq(a.as_ref(), b.as_ref()),
+            "two get_position_mapper reads must share ONE PositionMapper allocation \
+             (the read path hands out a cheap handle clone, not a deep copy of the \
+             source map + lookup tables)"
+        );
+    }
+
+    /// A document EDIT REBUILDS the position-mapper `Arc` rather than mutating
+    /// the existing pointee: after `did_change` recompiles a carrier whose TSX
+    /// changed, `get_position_mapper` hands out an `Arc` that is a FRESH
+    /// allocation — NOT `Arc::ptr_eq` to the pre-edit handle.
+    ///
+    /// This is the companion to the read-path share test: within one document
+    /// version the `Arc` is shared (cheap handle clones), but ACROSS an edit the
+    /// projection is REPLACED whole (`rebuild_carrier` wraps a fresh
+    /// `PositionMapper` in a new `Arc::new`, then overwrites `entry.projection`).
+    ///
+    /// Discriminating: the pre-edit and post-edit handles are captured and
+    /// compared by allocation address. If a future refactor mutated the mapper
+    /// in place behind the SAME `Arc` (e.g. `Arc::get_mut` to overwrite the
+    /// source map + lookup tables) instead of installing a fresh `Arc`, the two
+    /// handles would alias and `Arc::ptr_eq` would be TRUE — failing this
+    /// assertion. The edit changes the `<script>` body so the recompiled TSX
+    /// genuinely differs (`update.changed`), forcing the rebuild branch rather
+    /// than the keep-prior-projection fallback.
+    #[test]
+    fn did_change_installs_a_fresh_position_mapper_arc() {
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(host);
+        let uri: Uri = "file:///x/Comp.svelte".parse().expect("uri");
+
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "svelte".to_string(),
+            version: 1,
+            text: "<script lang=\"ts\">let count = 0;</script>\n<div>{count}</div>".to_string(),
+        });
+
+        // Capture the pre-edit mapper handle's allocation.
+        let before = registry
+            .get_position_mapper(&uri)
+            .expect("a .svelte carrier must expose a source-map mapper before the edit");
+        let ProviderPositionMapper::SourceMap(before_arc) = &before else {
+            panic!("a .svelte carrier mapper must be the SourceMap projection");
+        };
+
+        // Edit the document: change the script body so the recompiled IDE TSX
+        // genuinely differs (drives `update.changed` → the rebuild branch).
+        let _ = registry.did_change(
+            &uri,
+            2,
+            "<script lang=\"ts\">let total = 100; let extra = 1;</script>\n<div>{total}</div>",
+        );
+
+        // The post-edit read must hand out a DIFFERENT allocation: the rebuild
+        // installed a fresh `Arc`, it did not mutate the old pointee in place.
+        let after = registry
+            .get_position_mapper(&uri)
+            .expect("a .svelte carrier must expose a source-map mapper after the edit");
+        let ProviderPositionMapper::SourceMap(after_arc) = &after else {
+            panic!("a .svelte carrier mapper must remain the SourceMap projection");
+        };
+
+        assert!(
+            !std::ptr::eq(before_arc.as_ref(), after_arc.as_ref()),
+            "a doc edit must REPLACE the position-mapper Arc with a fresh \
+             allocation (rebuild installs a new Arc; it must not mutate the \
+             pre-edit pointee in place)"
+        );
+    }
+
+    /// A `.svelte.ts` rune module is NOT a carrier; did_open must build a
+    /// SELF-FILE projection whose mapper offsets the user-source line by the
+    /// rune prelude line count. Without the offset wiring, a source position
+    /// would map to the same provider line (off by `prelude_line_count`) — the
+    /// discriminating assertion.
+    #[test]
+    fn did_open_rune_module_builds_self_file_projection_with_prelude_offset() {
+        use provider_projection::DocumentProviderProjection;
+        use verter_span::{LspPosition, TsPosition};
+
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ));
+        let registry = DocumentRegistry::new(Arc::clone(&host));
+
+        let uri: Uri = "file:///x/store.svelte.ts".parse().expect("uri");
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "typescript".to_string(),
+            version: 1,
+            text: "export const s = $state(0);\n".to_string(),
+        });
+
+        let projection = registry
+            .get_projection(&uri)
+            .expect("a .svelte.ts rune module must build a provider projection");
+        let mapper = match &projection {
+            DocumentProviderProjection::SelfFile { mapper } => mapper.clone(),
+            DocumentProviderProjection::CarrierIde { .. } => {
+                panic!("a .svelte.ts rune module is NOT a carrier — must be a SelfFile projection")
+            }
+        };
+        let prelude = mapper.prelude_line_count();
+        assert!(
+            prelude > 0,
+            "the rune prelude must occupy at least one line (the offset to wire)"
+        );
+
+        // Source line 0 maps to provider line `prelude` — NOT line 0.
+        let prov = registry
+            .get_position_mapper(&uri)
+            .expect("unified mapper")
+            .carrier_to_tsx(LspPosition::new(0, 13))
+            .expect("source maps to provider");
+        assert_eq!(
+            prov.pos,
+            TsPosition::new(prelude, 13),
+            "the source line must shift DOWN by the prelude line count (off-by-prelude if unwired)"
+        );
+        // The provider position maps back to source line 0.
+        let back = registry
+            .get_position_mapper(&uri)
+            .expect("unified mapper")
+            .tsx_to_carrier(TsPosition::new(prelude, 13))
+            .expect("provider maps back");
+        assert_eq!(back.pos, LspPosition::new(0, 13));
+        // A provider position inside the prelude region drops (never clamps).
+        assert!(
+            registry
+                .get_position_mapper(&uri)
+                .expect("unified mapper")
+                .tsx_to_carrier(TsPosition::new(0, 0))
+                .is_none(),
+            "a provider position in the prelude region must drop, not surface a fake source line"
+        );
+    }
+
     /// get_ide() fast path should not overwrite an existing position mapper.
     #[test]
     fn position_mapper_not_overwritten_when_present() {
-        let host = Arc::new(verter_host::VerterHost::new_standalone(
-            verter_host::HostConfig::default(),
+        let host = Arc::new(verter_session::VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
         ));
         let registry = DocumentRegistry::new(host);
         let uri: Uri = "file:///home/user/App.vue".parse().unwrap();

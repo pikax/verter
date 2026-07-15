@@ -1,0 +1,83 @@
+{
+  "slug": "generated/027_text_hex_entity_in_if_block.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "_27_text_hex_entity_in_if_block",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "append",
+    "if",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "first_child",
+    "from_html",
+    "if"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 1,
+    "first_child": 1,
+    "append": 2,
+    "if": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p>&#x41;</p>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  },
+  "events": [],
+  "nonStaticProperties": [],
+  "attrParts": [],
+  "directiveExprs": [],
+  "decodedText": [],
+  "nodePaths": {
+    "regions": [
+      {
+        "paths": [
+          {
+            "base": "fragment",
+            "steps": [
+              "first_child"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "dynamicSlots": {
+    "block": 1
+  }
+}

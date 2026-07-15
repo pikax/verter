@@ -1,0 +1,40 @@
+{
+  "slug": "generated/100_pair_root_each_block__attr_spread.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_00_pair_root_each_block__attr_spread",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "ensure_array_like",
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes",
+    "ensure_array_like"
+  ],
+  "helperCounts": {
+    "ensure_array_like": 1,
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

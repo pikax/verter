@@ -1,0 +1,38 @@
+{
+  "slug": "attr-dec-lit-attr-uq-dynel-ext-plain-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_dec_lit_attr_uq_dynel_ext_plain_m",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "element"
+  ],
+  "helperSet": [
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-1s348hd",
+    "code": "\n\t[data-x=\"b\"].svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

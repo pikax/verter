@@ -1,0 +1,57 @@
+{
+  "slug": "css/nbsp_nth_child.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "nbsp_nth_child",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<ul><li class=\"svelte-<scoped>\">a</li> <li class=\"svelte-<scoped>\">b</li></ul>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<ul><li class=\"svelte-<scoped>\">a</li> <li class=\"svelte-<scoped>\">b</li></ul>`); export default function nbsp_nth_child($$anchor) {var ul = root(); $.append($$anchor, ul);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-1ec60xn",
+    "code": "\n\tli.svelte-<scoped>:nth-child(2n + 1) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "slug": "options/custom_element_render_host_member.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "custom_element_render_host_member",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "push",
+    "comment",
+    "first_child",
+    "snippet",
+    "append",
+    "pop",
+    "create_custom_element"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "create_custom_element",
+    "first_child",
+    "pop",
+    "push",
+    "snippet"
+  ],
+  "helperCounts": {
+    "push": 1,
+    "comment": 1,
+    "first_child": 1,
+    "snippet": 1,
+    "append": 1,
+    "pop": 1,
+    "create_custom_element": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function custom_element_render_host_member($$anchor, $$props) {$.push($$props, true); var fragment = $.comment(); var node = $.first_child(fragment); $.snippet(node, () => $$props.$$host.snip); $.append($$anchor, fragment); $.pop();} customElements.define('x-rhm', $.create_custom_element(custom_element_render_host_member, {}, [], [], {mode: 'open'}));",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

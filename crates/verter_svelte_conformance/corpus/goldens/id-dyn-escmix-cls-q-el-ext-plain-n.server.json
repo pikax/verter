@@ -1,0 +1,39 @@
+{
+  "slug": "id-dyn-escmix-cls-q-el-ext-plain-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dyn_escmix_cls_q_el_ext_plain_n",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr_class"
+  ],
+  "helperSet": [
+    "attr_class"
+  ],
+  "helperCounts": {
+    "attr_class": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) #\\7a \\z {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

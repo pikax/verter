@@ -1,8 +1,8 @@
 // Macro code actions: generate/augment defineSlots and defineEmits from template usage.
 
 use tower_lsp_server::ls_types::*;
-use verter_analysis::types::{AnalysisFlags, AnalyzedBinding, AnalyzedMacroKind};
-use verter_host::FileAnalysisSnapshot;
+use verter_semantic::analysis::types::{AnalysisFlags, AnalyzedBinding, AnalyzedMacroKind};
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
@@ -39,7 +39,7 @@ fn resolve_binding_type(ctx: Option<&SlotTypeContext<'_>>, expression: &str) -> 
 
 /// Build the slot member text for a single slot in the defineSlots type literal.
 fn build_slot_member(
-    slot: &verter_analysis::template::DefinedSlot,
+    slot: &verter_semantic::analysis::template::DefinedSlot,
     type_ctx: Option<&SlotTypeContext<'_>>,
 ) -> String {
     let mut member = String::new();
@@ -214,7 +214,7 @@ fn generate_define_slots_action(
     source: &str,
     analysis: &FileAnalysisSnapshot,
     setup_block: &SfcBlock,
-    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
     line_index: &LineIndex,
     type_ctx: &SlotTypeContext<'_>,
 ) -> Option<CodeActionOrCommand> {
@@ -279,7 +279,7 @@ fn generate_define_emits_action(
 fn add_missing_slots_action(
     source: &str,
     analysis: &FileAnalysisSnapshot,
-    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
     line_index: &LineIndex,
     type_ctx: &SlotTypeContext<'_>,
 ) -> Option<CodeActionOrCommand> {
@@ -349,7 +349,7 @@ fn find_type_literal_close(macro_text: &str) -> Option<usize> {
 fn prop_mismatch_actions(
     source: &str,
     analysis: &FileAnalysisSnapshot,
-    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
     line_index: &LineIndex,
     type_ctx: &SlotTypeContext<'_>,
 ) -> Vec<CodeActionOrCommand> {
@@ -483,7 +483,7 @@ fn find_slot_props_close(macro_text: &str, slot_name: &str) -> Option<usize> {
 fn add_missing_emits_action(
     _source: &str,
     analysis: &FileAnalysisSnapshot,
-    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Option<CodeActionOrCommand> {
     // Find the defineEmits macro

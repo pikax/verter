@@ -11,9 +11,9 @@ use rmcp::schemars;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 
-use verter_analysis::types::{AnalysisFlags, AnalyzedMacroKind, VueApiClassification};
 use verter_diagnostics::{Linter, Severity};
-use verter_host::VerterHost;
+use verter_semantic::analysis::types::{AnalysisFlags, AnalyzedMacroKind, VueApiClassification};
+use verter_session::VerterHost;
 
 use crate::config::McpServerConfig;
 use crate::helpers::{
@@ -200,15 +200,17 @@ pub struct VerterMcpServer {
     pub project_root: Option<PathBuf>,
     #[allow(dead_code)]
     pub config: McpServerConfig,
+    // Used implicitly by rmcp's `#[tool_router]` / `#[tool_handler]` macros.
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
 // ── Helper: build ScriptAnalysisSnapshot from host FileAnalysisSnapshot ──
 
 fn build_script_snapshot(
-    analysis: &verter_host::FileAnalysisSnapshot,
-) -> verter_analysis::types::ScriptAnalysisSnapshot {
-    verter_analysis::types::ScriptAnalysisSnapshot {
+    analysis: &verter_session::FileAnalysisSnapshot,
+) -> verter_semantic::analysis::types::ScriptAnalysisSnapshot {
+    verter_semantic::analysis::types::ScriptAnalysisSnapshot {
         imports: analysis.imports.clone(),
         module_references: analysis.module_references.to_vec(),
         bindings: analysis.bindings.clone(),
@@ -257,6 +259,32 @@ fn populate_evidence(diags: &mut [verter_diagnostics::LintDiagnostic], source: O
     }
 }
 
+/// Lift a tool's inner `Result<CallToolResult, ErrorData>` into the
+/// `audit_mcp_tool_call` closure contract:
+/// `Result<McpToolSuccess<CallToolResult>, ErrorData>`.
+///
+/// The success arm measures `result_size_bytes` (sum of every text
+/// content fragment's byte length); the error arm flows through
+/// unchanged — the audit wrapper folds it into the payload's error
+/// string via `Debug`. This keeps each tool handler from threading
+/// sizing logic by hand and guarantees no nested `Result` inside the
+/// carrier's `Ok` arm.
+fn mcp_tool_success(
+    result: Result<CallToolResult, ErrorData>,
+) -> Result<verter_session::host_mcp_audit::McpToolSuccess<CallToolResult>, ErrorData> {
+    let call = result?;
+    let mut bytes: u32 = 0;
+    for content in call.content.iter() {
+        if let Some(text) = content.as_text() {
+            bytes = bytes.saturating_add(text.text.len() as u32);
+        }
+    }
+    Ok(verter_session::host_mcp_audit::McpToolSuccess {
+        value: call,
+        result_size_bytes: bytes,
+    })
+}
+
 // ── Tool implementations ───────────────────────────────────────────
 
 #[tool_router]
@@ -289,11 +317,13 @@ impl VerterMcpServer {
         Parameters(params): Parameters<ScanProjectParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let root = std::path::Path::new(&params.root);
+        let root_canonical = root.to_string_lossy().replace('\\', "/");
         let result =
             scanner::scan_directory(root, &self.host, params.include_deps.unwrap_or(false));
 
         // Auto-discover project lint config
-        let resolved = verter_diagnostics::discover_lint_config(root);
+        let workspace = self.host.workspace_read();
+        let resolved = verter_diagnostics::discover_lint_config(&*workspace, &root_canonical);
         let config_info = serde_json::json!({
             "explicitly_configured": resolved.explicitly_configured,
             "preset": format!("{:?}", resolved.config.preset),
@@ -302,7 +332,8 @@ impl VerterMcpServer {
         });
 
         // Detect routing framework after scanning
-        let route_framework = verter_analysis::detect_routing_framework(root);
+        let route_framework =
+            verter_semantic::analysis::detect_routing_framework(&*workspace, &root_canonical);
         let route_info = serde_json::json!({
             "framework": route_framework,
         });
@@ -325,23 +356,23 @@ impl VerterMcpServer {
         Parameters(params): Parameters<UpsertFileParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let canonical = self.resolve(&params.path);
-        let source = match params.source {
-            Some(s) => s,
-            None => std::fs::read_to_string(&canonical)
-                .map_err(|e| mcp_err(format!("Cannot read {}: {}", canonical, e)))?,
+        let source: Arc<str> = match params.source {
+            Some(s) => Arc::from(s.as_str()),
+            None => {
+                let workspace = self.host.workspace_read();
+                workspace
+                    .read_file(&canonical)
+                    .ok_or_else(|| mcp_err(format!("Cannot read {} via workspace", canonical)))?
+            }
         };
-        let file_kind = if canonical.ends_with(".vue") {
-            verter_host::FileKind::VueSfc
-        } else {
-            verter_host::FileKind::NonSfc
-        };
+        let file_language = self.host.language_classifier().classify(&canonical);
         let result = self
             .host
-            .upsert(verter_host::UpsertRequest {
+            .upsert(verter_session::UpsertRequest {
                 canonical_id: Some(canonical.clone()),
                 input_id: canonical.clone(),
-                source: Arc::from(source.as_str()),
-                file_kind,
+                source,
+                file_language,
                 aliases: vec![],
             })
             .map_err(|e| mcp_err(e.to_string()))?;
@@ -379,82 +410,149 @@ impl VerterMcpServer {
     #[tool(
         description = "Get the full analysis snapshot for a Vue file. Includes imports, bindings, macros, template usage, style analysis."
     )]
-    async fn analyze_file(
+    pub async fn analyze_file(
         &self,
         Parameters(params): Parameters<AnalyzeFileParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let canonical = self.resolve(&params.path);
-        ensure_template_analysis(&self.host, &canonical)?;
-        let analysis = self
-            .host
-            .get_analysis(&canonical)
-            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
-        let json = serde_json::to_string_pretty(&analysis).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        let args_size = (params.path.len() as u32).saturating_add(
+            params
+                .sections
+                .as_ref()
+                .map_or(0, |s| s.iter().map(|x| x.len() as u32).sum::<u32>()),
+        );
+        self.host
+            .audit_mcp_tool_call("analyze_file", &canonical, args_size, |host| {
+                let result: Result<CallToolResult, ErrorData> = (|| {
+                    ensure_template_analysis(host, &canonical)?;
+                    let analysis = host
+                        .get_analysis(&canonical)
+                        .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+                    let json = serde_json::to_string_pretty(&analysis)
+                        .map_err(|e| mcp_err(e.to_string()))?;
+                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                })();
+                mcp_tool_success(result)
+            })
+            .into_result()
     }
 
     #[tool(
         description = "Get the public API surface of a Vue component: props, emits, slots, models, expose."
     )]
-    async fn get_component_api(
+    pub async fn get_component_api(
         &self,
         Parameters(params): Parameters<FilePathParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let canonical = self.resolve(&params.path);
-        ensure_template_analysis(&self.host, &canonical)?;
-        let analysis = self
-            .host
-            .get_analysis(&canonical)
-            .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
+        let args_size = params.path.len() as u32;
+        self.host
+            .audit_mcp_tool_call("get_component_api", &canonical, args_size, |host| {
+                let result: Result<CallToolResult, ErrorData> = (|| {
+                    ensure_template_analysis(host, &canonical)?;
+                    let analysis = host
+                        .get_analysis(&canonical)
+                        .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
 
-        let mut api = serde_json::json!({
-            "props": [],
-            "emits": [],
-            "slots": [],
-            "models": [],
-            "expose": [],
-        });
+                    let mut api = serde_json::json!({
+                        "props": [],
+                        "emits": [],
+                        "slots": [],
+                        "models": [],
+                        "expose": [],
+                    });
 
-        for m in analysis.macros.iter() {
-            match m.kind {
-                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
-                    api["props"] = serde_json::to_value(m).unwrap_or_default();
-                }
-                AnalyzedMacroKind::DefineEmits => {
-                    api["emits"] = serde_json::to_value(m).unwrap_or_default();
-                }
-                AnalyzedMacroKind::DefineModel => {
-                    if let Some(models) = api["models"].as_array_mut() {
-                        models.push(serde_json::to_value(m).unwrap_or_default());
+                    for m in analysis.macros.iter() {
+                        match m.kind {
+                            AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
+                                api["props"] = serde_json::to_value(m).unwrap_or_default();
+                            }
+                            AnalyzedMacroKind::DefineEmits => {
+                                api["emits"] = serde_json::to_value(m).unwrap_or_default();
+                            }
+                            AnalyzedMacroKind::DefineModel => {
+                                if let Some(models) = api["models"].as_array_mut() {
+                                    models.push(serde_json::to_value(m).unwrap_or_default());
+                                }
+                            }
+                            AnalyzedMacroKind::DefineSlots => {
+                                api["slots"] = serde_json::to_value(m).unwrap_or_default();
+                            }
+                            AnalyzedMacroKind::DefineExpose => {
+                                api["expose"] = serde_json::to_value(m).unwrap_or_default();
+                            }
+                            _ => {}
+                        }
                     }
-                }
-                AnalyzedMacroKind::DefineSlots => {
-                    api["slots"] = serde_json::to_value(m).unwrap_or_default();
-                }
-                AnalyzedMacroKind::DefineExpose => {
-                    api["expose"] = serde_json::to_value(m).unwrap_or_default();
-                }
-                _ => {}
-            }
-        }
 
-        if let Some(tpl) = &analysis.template {
-            if !tpl.defined_slots.is_empty() {
-                api["template_slots"] =
-                    serde_json::to_value(&tpl.defined_slots).unwrap_or_default();
-            }
-            if !tpl.prop_definitions.is_empty() {
-                api["runtime_props"] =
-                    serde_json::to_value(&tpl.prop_definitions).unwrap_or_default();
-            }
-            if !tpl.emit_definitions.is_empty() {
-                api["runtime_emits"] =
-                    serde_json::to_value(&tpl.emit_definitions).unwrap_or_default();
-            }
-        }
+                    if let Some(tpl) = &analysis.template {
+                        if !tpl.defined_slots.is_empty() {
+                            api["template_slots"] =
+                                serde_json::to_value(&tpl.defined_slots).unwrap_or_default();
+                        }
+                        if !tpl.prop_definitions.is_empty() {
+                            api["runtime_props"] =
+                                serde_json::to_value(&tpl.prop_definitions).unwrap_or_default();
+                        }
+                        if !tpl.emit_definitions.is_empty() {
+                            api["runtime_emits"] =
+                                serde_json::to_value(&tpl.emit_definitions).unwrap_or_default();
+                        }
+                    }
 
-        let json = serde_json::to_string_pretty(&api).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+                    let json =
+                        serde_json::to_string_pretty(&api).map_err(|e| mcp_err(e.to_string()))?;
+                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                })();
+                mcp_tool_success(result)
+            })
+            .into_result()
+    }
+
+    #[tool(
+        description = "Resolve a component's framework surfaces (props, emits, slots, options, expose, model) through the framework-surface executor. Returns per-kind support status and members. Routes through the host's single validation-first executor — no second resolver."
+    )]
+    pub async fn get_framework_surface(
+        &self,
+        Parameters(params): Parameters<FilePathParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let canonical = self.resolve(&params.path);
+        let args_size = params.path.len() as u32;
+        self.host
+            .audit_mcp_tool_call("get_framework_surface", &canonical, args_size, |host| {
+                let result: Result<CallToolResult, ErrorData> = (|| {
+                    ensure_loaded(host, &canonical)?;
+                    let file_language = host.language_classifier().classify(&canonical);
+                    let adapter_id = file_language.adapter_id().ok_or_else(|| {
+                        mcp_err(format!(
+                            "{canonical} is not a framework component file (no adapter)"
+                        ))
+                    })?;
+                    let request = crate::tools::framework_surface::build_request(
+                        &canonical,
+                        adapter_id.as_str(),
+                    );
+                    let (outcome, _record) = host
+                        .resolve_framework_surface_with_audit(request)
+                        .into_parts();
+                    let response = match outcome {
+                        Ok(response) => response,
+                        Err(error) => verter_protocol::typeinfo::graph::TypeInfoGraphResponse {
+                            kind: Some(
+                                verter_protocol::verter::v1::type_info_graph_response::Kind::Error(
+                                    error,
+                                ),
+                            ),
+                        },
+                    };
+                    let projected = crate::tools::framework_surface::project_response(&response);
+                    let json = serde_json::to_string_pretty(&projected)
+                        .map_err(|e| mcp_err(e.to_string()))?;
+                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                })();
+                mcp_tool_success(result)
+            })
+            .into_result()
     }
 
     #[tool(
@@ -552,7 +650,7 @@ impl VerterMcpServer {
             .template
             .ok_or_else(|| mcp_err("No template analysis available"))?;
 
-        let parsed = match verter_analysis::parse_selector(&params.selector) {
+        let parsed = match verter_semantic::analysis::parse_selector(&params.selector) {
             Some(s) => s,
             None => {
                 return Ok(CallToolResult::success(vec![Content::text(
@@ -563,7 +661,7 @@ impl VerterMcpServer {
 
         let mut results = Vec::new();
         for (idx, el) in tpl.elements.iter().enumerate() {
-            let result = verter_analysis::match_selector(&parsed, idx, &tpl.elements);
+            let result = verter_semantic::analysis::match_selector(&parsed, idx, &tpl.elements);
             results.push(serde_json::json!({
                 "element": el.tag,
                 "index": idx,
@@ -592,7 +690,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -779,7 +877,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -835,7 +933,7 @@ impl VerterMcpServer {
         }
 
         let response = serde_json::json!({
-            "files_checked": files.iter().filter(|(_, k)| *k == verter_host::FileKind::VueSfc).count(),
+            "files_checked": files.iter().filter(|(_, k)| k.is_framework_carrier()).count(),
             "summary": {
                 "errors": total_errors,
                 "warnings": total_warnings,
@@ -915,66 +1013,74 @@ impl VerterMcpServer {
     #[tool(
         description = "Compile a Vue SFC to JavaScript/CSS. Returns compiled code per virtual node (main, script, template, styles)."
     )]
-    async fn compile_file(
+    pub async fn compile_file(
         &self,
         Parameters(params): Parameters<CompileFileParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let canonical = self.resolve(&params.path);
-        ensure_loaded(&self.host, &canonical)?;
-
-        let profile = verter_host::CompileProfile {
+        let args_size = params.path.len() as u32;
+        let profile = verter_session::CompileProfile {
             is_production: params.production.unwrap_or(false),
             source_map: params.source_map.unwrap_or(false),
             force_vapor: params.vapor.unwrap_or(false),
             ..Default::default()
         };
 
-        let mut outputs = serde_json::Map::new();
-        for node_kind in [
-            verter_host::VirtualNodeKind::Main,
-            verter_host::VirtualNodeKind::Script,
-            verter_host::VirtualNodeKind::Template,
-        ] {
-            if let Ok(resp) = self.host.get_virtual_file(verter_host::VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(canonical.clone()),
-                node_kind: Some(node_kind.clone()),
-                compile_profile: profile.clone(),
-            }) {
-                outputs.insert(
-                    format!("{:?}", node_kind),
-                    serde_json::json!({
-                        "code": resp.code.as_ref(),
-                        "lang": resp.lang,
-                        "stale": resp.stale,
-                    }),
-                );
-            }
-        }
+        self.host
+            .audit_mcp_tool_call("compile_file", &canonical, args_size, |host| {
+                let result: Result<CallToolResult, ErrorData> = (|| {
+                    ensure_loaded(host, &canonical)?;
 
-        for i in 0..4 {
-            let node_kind = verter_host::VirtualNodeKind::Style { index: i };
-            if let Ok(resp) = self.host.get_virtual_file(verter_host::VirtualQuery {
-                raw_id: None,
-                canonical_id: Some(canonical.clone()),
-                node_kind: Some(node_kind),
-                compile_profile: profile.clone(),
-            }) {
-                outputs.insert(
-                    format!("Style_{}", i),
-                    serde_json::json!({
-                        "code": resp.code.as_ref(),
-                        "lang": resp.lang,
-                    }),
-                );
-            } else {
-                break;
-            }
-        }
+                    let mut outputs = serde_json::Map::new();
+                    for node_kind in [
+                        verter_session::VirtualNodeKind::Main,
+                        verter_session::VirtualNodeKind::Script,
+                        verter_session::VirtualNodeKind::Template,
+                    ] {
+                        if let Ok(resp) = host.get_virtual_file(verter_session::VirtualQuery {
+                            raw_id: None,
+                            canonical_id: Some(canonical.clone()),
+                            node_kind: Some(node_kind.clone()),
+                            compile_profile: profile.clone(),
+                        }) {
+                            outputs.insert(
+                                format!("{:?}", node_kind),
+                                serde_json::json!({
+                                    "code": resp.code.as_ref(),
+                                    "lang": resp.lang,
+                                    "stale": resp.stale,
+                                }),
+                            );
+                        }
+                    }
 
-        let json = serde_json::to_string_pretty(&serde_json::Value::Object(outputs))
-            .map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+                    for i in 0..4 {
+                        let node_kind = verter_session::VirtualNodeKind::Style { index: i };
+                        if let Ok(resp) = host.get_virtual_file(verter_session::VirtualQuery {
+                            raw_id: None,
+                            canonical_id: Some(canonical.clone()),
+                            node_kind: Some(node_kind),
+                            compile_profile: profile.clone(),
+                        }) {
+                            outputs.insert(
+                                format!("Style_{}", i),
+                                serde_json::json!({
+                                    "code": resp.code.as_ref(),
+                                    "lang": resp.lang,
+                                }),
+                            );
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let json = serde_json::to_string_pretty(&serde_json::Value::Object(outputs))
+                        .map_err(|e| mcp_err(e.to_string()))?;
+                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                })();
+                mcp_tool_success(result)
+            })
+            .into_result()
     }
 
     #[tool(
@@ -989,8 +1095,8 @@ impl VerterMcpServer {
 
         let strict_slots = params.strict_slots.unwrap_or(self.config.strict_slots);
 
-        let profile = verter_host::CompileProfile {
-            target: verter_host::CompileTarget::IDE,
+        let profile = verter_session::CompileProfile {
+            target: verter_session::CompileTarget::IDE,
             strict_slots,
             ..Default::default()
         };
@@ -1025,7 +1131,7 @@ impl VerterMcpServer {
         let root_resolved = params.root.as_ref().map(|r| self.resolve(r));
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_framework_carrier())
             .filter(|(id, _)| {
                 root_resolved
                     .as_ref()
@@ -1070,7 +1176,7 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let vue_files: HashSet<String> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -1135,7 +1241,7 @@ impl VerterMcpServer {
         let mut injects: HashMap<String, Vec<String>> = HashMap::new();
 
         for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
+            if !kind.is_vue() {
                 continue;
             }
             let _ = ensure_loaded(&self.host, id);
@@ -1206,7 +1312,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -1251,7 +1357,7 @@ impl VerterMcpServer {
 
         // Check prop usage against definitions
         for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
+            if !kind.is_framework_carrier() {
                 continue;
             }
             if let Some(path) = &params.path {
@@ -1435,16 +1541,18 @@ impl VerterMcpServer {
                 // These are almost always consumed by the framework or other bindings
                 if matches!(
                     &binding.initializer,
-                    Some(verter_analysis::types::BindingInitializer::FunctionCall {
-                        vue_api: Some(_),
-                        ..
-                    })
+                    Some(
+                        verter_semantic::analysis::types::BindingInitializer::FunctionCall {
+                            vue_api: Some(_),
+                            ..
+                        }
+                    )
                 ) {
                     continue;
                 }
                 // Skip bindings initialized by external composable calls (useSomething())
                 // These often have side effects or are consumed by other composables
-                if let Some(verter_analysis::types::BindingInitializer::FunctionCall {
+                if let Some(verter_semantic::analysis::types::BindingInitializer::FunctionCall {
                     callee,
                     ..
                 }) = &binding.initializer
@@ -1495,9 +1603,9 @@ impl VerterMcpServer {
     )]
     async fn get_project_stats(&self) -> Result<CallToolResult, ErrorData> {
         let files = self.host.list_files();
-        let vue_files: Vec<_> = files
+        let component_files: Vec<_> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_framework_carrier())
             .collect();
 
         let mut quality_scores: Vec<(String, u32)> = Vec::new();
@@ -1513,7 +1621,7 @@ impl VerterMcpServer {
         let mut total_elements = 0usize;
         let mut total_bindings = 0usize;
 
-        let ids: Vec<&str> = vue_files.iter().map(|(id, _)| id.as_str()).collect();
+        let ids: Vec<&str> = component_files.iter().map(|(id, _)| id.as_str()).collect();
         let analyses = batch_analysis_with_template(&self.host, &ids);
         for (canonical, analysis) in &analyses {
             let source = self.host.get_source(canonical);
@@ -1569,7 +1677,7 @@ impl VerterMcpServer {
             total_bindings += analysis.bindings.len();
         }
 
-        quality_scores.sort_by(|a, b| a.1.cmp(&b.1));
+        quality_scores.sort_by_key(|score| score.1);
         let avg_score = if quality_scores.is_empty() {
             0
         } else {
@@ -1582,8 +1690,10 @@ impl VerterMcpServer {
         let response = serde_json::json!({
             "overview": {
                 "total_files": files.len(),
-                "vue_files": vue_files.len(),
-                "script_deps": files.iter().filter(|(_, k)| *k == verter_host::FileKind::NonSfc).count(),
+                "componentFiles": component_files.len(),
+                // deprecated alias: kept for back-compat
+                "vue_files": component_files.len(),
+                "script_deps": files.iter().filter(|(_, k)| !k.is_framework_carrier()).count(),
             },
             "component_stats": {
                 "avg_quality_score": avg_score,
@@ -1937,7 +2047,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2013,7 +2123,7 @@ impl VerterMcpServer {
         let mut targets: Vec<serde_json::Value> = Vec::new();
 
         for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
+            if !kind.is_vue() {
                 continue;
             }
             if let Some(path) = &params.path {
@@ -2307,13 +2417,13 @@ impl VerterMcpServer {
         &self,
         Parameters(params): Parameters<ApiNameParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let classification = verter_analysis::classify_vue_api(&params.name);
+        let classification = verter_semantic::analysis::classify_vue_api(&params.name);
         let response = serde_json::json!({
             "api_name": params.name,
             "classification": format!("{:?}", classification),
-            "is_lifecycle": verter_analysis::is_lifecycle_api(classification),
-            "is_reactivity": verter_analysis::is_reactivity_api(classification),
-            "is_watcher": verter_analysis::is_watcher_api(classification),
+            "is_lifecycle": verter_semantic::analysis::is_lifecycle_api(classification),
+            "is_reactivity": verter_semantic::analysis::is_reactivity_api(classification),
+            "is_watcher": verter_semantic::analysis::is_watcher_api(classification),
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -2349,7 +2459,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2416,7 +2526,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2468,7 +2578,7 @@ impl VerterMcpServer {
 
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
@@ -2550,7 +2660,7 @@ impl VerterMcpServer {
                 }
             }
 
-            if !found_test && file.ends_with(".vue") {
+            if !found_test && verter_workspace::path_is_carrier(file) {
                 untested.push(file.clone());
             }
         }
@@ -2601,7 +2711,7 @@ impl VerterMcpServer {
 
         let snapshot = self.build_route_snapshot(root);
         let canonical = self.resolve(&params.path);
-        let flat = verter_analysis::flatten_routes(&snapshot.routes);
+        let flat = verter_semantic::analysis::flatten_routes(&snapshot.routes);
         let matching: Vec<_> = flat
             .into_iter()
             .filter(|r| {
@@ -2702,7 +2812,7 @@ impl VerterMcpServer {
             .map(|(id, _)| id)
             .collect();
 
-        let report = verter_analysis::analyze_route_health(&snapshot, &existing_files);
+        let report = verter_semantic::analysis::analyze_route_health(&snapshot, &existing_files);
         let json = serde_json::to_string_pretty(&report).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -2712,27 +2822,35 @@ impl VerterMcpServer {
     fn build_route_snapshot(
         &self,
         project_root: &std::path::Path,
-    ) -> verter_analysis::RouteAnalysisSnapshot {
+    ) -> verter_semantic::analysis::RouteAnalysisSnapshot {
         // Collect template component usages from all loaded Vue files
         let files = self.host.list_files();
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_framework_carrier())
             .map(|(id, _)| id.as_str())
             .collect();
 
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
-        let template_components: Vec<(String, Vec<verter_analysis::TemplateComponentUsage>)> =
-            analyses
-                .iter()
-                .filter_map(|(id, a)| {
-                    a.template
-                        .as_ref()
-                        .map(|t| (id.clone(), t.components.clone()))
-                })
-                .collect();
+        let template_components: Vec<(
+            String,
+            Vec<verter_semantic::analysis::TemplateComponentUsage>,
+        )> = analyses
+            .iter()
+            .filter_map(|(id, a)| {
+                a.template
+                    .as_ref()
+                    .map(|t| (id.clone(), t.components.clone()))
+            })
+            .collect();
 
-        verter_analysis::build_route_analysis(project_root, &template_components)
+        let workspace = self.host.workspace_read();
+        let project_root_str = project_root.to_string_lossy().replace('\\', "/");
+        verter_semantic::analysis::build_route_analysis(
+            &*workspace,
+            &project_root_str,
+            &template_components,
+        )
     }
 
     // ── Store Analysis Tools ──────────────────────────────────────────
@@ -2750,7 +2868,7 @@ impl VerterMcpServer {
         let filter_id = params.path.as_ref().map(|p| self.resolve(p));
 
         for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
+            if !kind.is_vue() {
                 continue;
             }
             if let Some(ref filter) = filter_id {
@@ -2819,7 +2937,7 @@ impl VerterMcpServer {
         let mut used_callees: HashSet<String> = HashSet::new();
 
         for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
+            if !kind.is_vue() {
                 continue;
             }
             let _ = ensure_loaded(&self.host, id);
@@ -2885,7 +3003,7 @@ impl VerterMcpServer {
         let mut consumer_files: Vec<serde_json::Value> = Vec::new();
 
         for (id, kind) in &files {
-            if *kind != verter_host::FileKind::VueSfc {
+            if !kind.is_vue() {
                 continue;
             }
             let _ = ensure_loaded(&self.host, id);
@@ -2998,7 +3116,7 @@ impl VerterMcpServer {
         let files = self.host.list_files();
         let vue_ids: Vec<&str> = files
             .iter()
-            .filter(|(_, k)| *k == verter_host::FileKind::VueSfc)
+            .filter(|(_, k)| k.is_vue())
             .map(|(id, _)| id.as_str())
             .collect();
 
@@ -3084,7 +3202,7 @@ const CLIENT_ONLY_HOOKS: &[VueApiClassification] = &[
 ];
 
 /// Compute SSR readiness score (0-100) for a component.
-fn compute_ssr_readiness(analysis: &verter_host::FileAnalysisSnapshot) -> serde_json::Value {
+fn compute_ssr_readiness(analysis: &verter_session::FileAnalysisSnapshot) -> serde_json::Value {
     let mut score: i32 = 100;
     let mut issues = Vec::new();
 
@@ -3170,7 +3288,7 @@ fn compute_ssr_readiness(analysis: &verter_host::FileAnalysisSnapshot) -> serde_
 }
 
 /// Build an ordered migration plan for SSR safety.
-fn build_ssr_migration_plan(analysis: &verter_host::FileAnalysisSnapshot) -> serde_json::Value {
+fn build_ssr_migration_plan(analysis: &verter_session::FileAnalysisSnapshot) -> serde_json::Value {
     let mut steps = Vec::new();
     let mut priority = 1u32;
 
@@ -3336,16 +3454,16 @@ impl ServerHandler for VerterMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_analysis::types::TypeResolutionSource;
-    use verter_host::{HostConfig, UpsertRequest};
+    use verter_semantic::analysis::types::TypeResolutionSource;
+    use verter_session::{HostConfig, UpsertRequest};
 
     fn make_host() -> Arc<VerterHost> {
         Arc::new(VerterHost::new_standalone(HostConfig::default()))
     }
 
     fn make_host_with_workspace(roots: Vec<String>) -> Arc<VerterHost> {
-        let workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
-            verter_vfs::FilesystemOptions {
+        let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions {
                 roots,
                 eager_preload: false,
             },
@@ -3358,15 +3476,15 @@ mod tests {
             canonical_id: Some(id.to_string()),
             input_id: id.to_string(),
             source: Arc::from(src),
-            file_kind: verter_host::FileKind::VueSfc,
+            file_language: verter_session::FileLanguage::vue(),
             aliases: vec![],
         });
     }
 
     fn compile_analysis(host: &VerterHost, id: &str) {
-        let profile = verter_host::CompileProfile {
-            target: verter_host::CompileTarget::ANALYSIS,
-            ..verter_host::CompileProfile::default()
+        let profile = verter_session::CompileProfile {
+            target: verter_session::CompileTarget::ANALYSIS,
+            ..verter_session::CompileProfile::default()
         };
         let _ = host.ensure_compiled(id, &profile);
     }
@@ -3528,9 +3646,9 @@ const count = ref(0)
     #[test]
     fn scoring_uses_prop_fields_not_type_references() {
         // Construct a script snapshot with many type_references but few prop_fields
-        let script = verter_analysis::types::ScriptAnalysisSnapshot {
+        let script = verter_semantic::analysis::types::ScriptAnalysisSnapshot {
             module_references: Vec::new(),
-            macros: vec![verter_analysis::types::AnalyzedMacro {
+            macros: vec![verter_semantic::analysis::types::AnalyzedMacro {
                 kind: AnalyzedMacroKind::DefineProps,
                 is_type_based: true,
                 type_references: vec![
@@ -3552,7 +3670,7 @@ const count = ref(0)
                 has_inherit_attrs_false: false,
                 prop_fields: vec![
                     // Only 3 actual props — should NOT be penalized
-                    verter_analysis::types::AnalyzedPropField {
+                    verter_semantic::analysis::types::AnalyzedPropField {
                         name: "a".into(),
                         is_optional: false,
                         span: verter_span::Span::new(0, 1),
@@ -3561,8 +3679,11 @@ const count = ref(0)
                         tags: vec![],
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        payload: None,
+                        type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     },
-                    verter_analysis::types::AnalyzedPropField {
+                    verter_semantic::analysis::types::AnalyzedPropField {
                         name: "b".into(),
                         is_optional: false,
                         span: verter_span::Span::new(2, 3),
@@ -3571,8 +3692,11 @@ const count = ref(0)
                         tags: vec![],
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        payload: None,
+                        type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     },
-                    verter_analysis::types::AnalyzedPropField {
+                    verter_semantic::analysis::types::AnalyzedPropField {
                         name: "c".into(),
                         is_optional: false,
                         span: verter_span::Span::new(4, 5),
@@ -3581,6 +3705,9 @@ const count = ref(0)
                         tags: vec![],
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        payload: None,
+                        type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     },
                 ],
                 emit_fields: vec![],
@@ -3589,12 +3716,14 @@ const count = ref(0)
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 100),
             }],
             bindings: vec![],
             imports: vec![],
             macro_type_deps: vec![],
-            flags: verter_analysis::types::AnalysisFlags::empty(),
+            flags: verter_semantic::analysis::types::AnalysisFlags::empty(),
             exported_functions: vec![],
             vue_api_calls: vec![],
             dom_query_calls: vec![],
@@ -3737,7 +3866,7 @@ import { RouterLink, RouterView } from 'vue-router'
         // The snapshot should detect framework as Unknown (no package.json)
         assert_eq!(
             snapshot.framework,
-            verter_analysis::RoutingFramework::Unknown
+            verter_semantic::analysis::RoutingFramework::Unknown
         );
         // There should be no routes extracted (no router config file at /test)
         assert!(
@@ -3754,20 +3883,20 @@ import { RouterLink, RouterView } from 'vue-router'
         // Unit test for detect_routing_framework_from_json
         let vue_router = r#"{"dependencies": {"vue": "^3", "vue-router": "^4"}}"#;
         assert_eq!(
-            verter_analysis::detect_routing_framework_from_json(vue_router),
-            verter_analysis::RoutingFramework::VueRouter
+            verter_semantic::analysis::detect_routing_framework_from_json(vue_router),
+            verter_semantic::analysis::RoutingFramework::VueRouter
         );
 
         let nuxt = r#"{"dependencies": {"nuxt": "^3"}}"#;
         assert_eq!(
-            verter_analysis::detect_routing_framework_from_json(nuxt),
-            verter_analysis::RoutingFramework::NuxtPages
+            verter_semantic::analysis::detect_routing_framework_from_json(nuxt),
+            verter_semantic::analysis::RoutingFramework::NuxtPages
         );
 
         let empty = r#"{"dependencies": {"vue": "^3"}}"#;
         assert_eq!(
-            verter_analysis::detect_routing_framework_from_json(empty),
-            verter_analysis::RoutingFramework::Unknown
+            verter_semantic::analysis::detect_routing_framework_from_json(empty),
+            verter_semantic::analysis::RoutingFramework::Unknown
         );
     }
     // ── SSR readiness scoring ──
@@ -3854,22 +3983,40 @@ const msg = ref('hello')
         );
 
         // Verify the host has a workspace reference (non-standalone uses Arc<dyn WorkspaceAccess>)
-        let ws = host.workspace();
-        // owner_for_file returns None because no project graph was set
+        // With no project graph, the file has no configured owner and no fallback owner.
         assert!(
-            ws.owner_for_file("/test-project/Comp.vue").is_none(),
+            no_owner_for(&host, "/test-project/Comp.vue"),
             "default FilesystemWorkspace has empty project graph"
         );
     }
 
-    #[test]
-    fn host_with_filesystem_workspace_owner_for_file() {
-        let host = make_host_with_workspace(vec!["/my-project".to_string()]);
-        let ws = host.workspace();
+    /// Whether the workspace resolves NEITHER a configured owner NOR a single
+    /// fallback owner for `canonical` (the replacement for the retired
+    /// `WorkspaceRead::owner_for_file` smoke check).
+    fn no_owner_for(host: &verter_session::VerterHost, canonical: &str) -> bool {
+        use verter_workspace::workspace_snapshot::ConfiguredOwnerResolution;
+        match host.workspace_read().published_root() {
+            Some(root) => {
+                matches!(
+                    root.snapshot
+                        .configured_owner_resolution_for_file(canonical),
+                    ConfiguredOwnerResolution::None
+                ) && root
+                    .snapshot
+                    .single_fallback_owner_for_file(canonical)
+                    .is_none()
+            }
+            None => true,
+        }
+    }
 
-        // Before setting a project graph, owner_for_file returns None
+    #[test]
+    fn host_with_filesystem_workspace_no_owner_without_graph() {
+        let host = make_host_with_workspace(vec!["/my-project".to_string()]);
+
+        // Before setting a project graph, no configured or fallback owner resolves.
         assert!(
-            ws.owner_for_file("/my-project/src/App.vue").is_none(),
+            no_owner_for(&host, "/my-project/src/App.vue"),
             "default workspace has no project graph, so no owner"
         );
     }

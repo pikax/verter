@@ -1,0 +1,42 @@
+{
+  "slug": "special/svelte_head_title_call_mixed.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_head_title_call_mixed",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "head",
+    "escape",
+    "escape"
+  ],
+  "helperSet": [
+    "escape",
+    "head"
+  ],
+  "helperCounts": {
+    "head": 1,
+    "escape": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,9 +1,10 @@
+#![allow(dead_code)]
 //! Compilation pipeline profiler.
 //!
 //! Runs the compilation pipeline on real-world Vue projects from verter-test-repos,
 //! with hotpath instrumentation to identify bottlenecks.
 //!
-//! Two modes:
+//! Operating modes:
 //!   - **AST-only** (default): tokenize → AST → OXC expression parsing
 //!   - **Full compile** (`VERTER_PROFILE_FULL=1`): full SFC → JS/CSS pipeline
 //!
@@ -25,11 +26,11 @@ use std::path::PathBuf;
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 
-use verter_core::compile::{compile, CodegenOptions, VerterCompileOptions};
-use verter_core::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
-use verter_core::parser::Syntax as NewSyntax;
-use verter_core::template::oxc::parse_template_expressions;
-use verter_core::tokenizer::byte::tokenize;
+use verter_compiler::compile::{compile, CodegenOptions, VerterCompileOptions};
+use verter_compiler::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
+use verter_compiler::parser::Syntax as NewSyntax;
+use verter_compiler::template::oxc::parse_template_expressions;
+use verter_compiler::tokenizer::byte::tokenize;
 
 struct VueFile {
     path: String,
@@ -107,7 +108,7 @@ fn run_pipeline(source: &str) {
 
     if let Some(ast) = &ast {
         let alloc = Allocator::default();
-        let result = parse_template_expressions(ast, source, &alloc, SourceType::tsx());
+        let result = parse_template_expressions(ast, source, &alloc, SourceType::tsx(), false);
         std::hint::black_box(result);
     }
 

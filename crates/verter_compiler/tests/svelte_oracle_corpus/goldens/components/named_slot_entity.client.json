@@ -1,0 +1,72 @@
+{
+  "slug": "components/named_slot_entity.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "named_slot_entity",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "reset",
+    "set_text",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<span slot=\"foo&amp;bar\"> </span>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; var root = $.from_html(`<span slot=\"foo&amp;bar\"> </span>`); export default function named_slot_entity($$anchor, $$props) {Child($$anchor, {$$slots: {'foo&bar': ($$anchor, $$slotProps) => {var span = root(); var text = $.child(span, true); $.reset(span); $.template_effect(() => $.set_text(text, $$props.x)); $.append($$anchor, span);}}});}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

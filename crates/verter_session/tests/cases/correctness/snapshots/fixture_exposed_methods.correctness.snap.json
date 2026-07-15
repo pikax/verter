@@ -1,0 +1,22 @@
+{
+  "component_name": "C",
+  "props": [],
+  "events": [],
+  "slots": [],
+  "models": [],
+  "exposed": [
+    {
+      "name": "focus",
+      "type_signature": "() => void"
+    },
+    {
+      "name": "reset",
+      "type_signature": "() => void"
+    }
+  ],
+  "fallthrough": null,
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}

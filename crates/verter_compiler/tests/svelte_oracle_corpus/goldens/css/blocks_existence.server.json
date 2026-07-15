@@ -1,0 +1,42 @@
+{
+  "slug": "css/blocks_existence.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "blocks_existence",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "ensure_array_like",
+    "escape"
+  ],
+  "helperSet": [
+    "ensure_array_like",
+    "escape"
+  ],
+  "helperCounts": {
+    "ensure_array_like": 1,
+    "escape": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-19ozxcl",
+    "code": "\n\t.note.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n\n\t.row.svelte-<scoped> {\n\t\tcolor: blue;\n\t}\n\n\t/* (unused) .gone {\n\t\tcolor: green;\n\t}*/\n"
+  }
+}

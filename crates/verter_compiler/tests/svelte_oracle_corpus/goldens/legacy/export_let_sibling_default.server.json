@@ -1,0 +1,47 @@
+{
+  "slug": "legacy/export_let_sibling_default.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "export_let_sibling_default",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "fallback",
+    "fallback",
+    "escape",
+    "escape",
+    "bind_props"
+  ],
+  "helperSet": [
+    "bind_props",
+    "escape",
+    "fallback"
+  ],
+  "helperCounts": {
+    "fallback": 2,
+    "escape": 2,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

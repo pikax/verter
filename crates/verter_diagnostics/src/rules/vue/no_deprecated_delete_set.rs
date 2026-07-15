@@ -8,7 +8,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, DiagnosticTag, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::types::ScriptAnalysisSnapshot;
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
 
 pub struct NoDeprecatedDeleteSet;
 
@@ -55,7 +55,7 @@ impl LintRule for NoDeprecatedDeleteSet {
 mod tests {
     use super::*;
 
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

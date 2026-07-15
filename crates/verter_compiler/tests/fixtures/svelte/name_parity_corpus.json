@@ -1,0 +1,728 @@
+{
+  "svelte_oracle_version": "5.56.3",
+  "total": 80,
+  "compile": 72,
+  "reject": 7,
+  "crash": 1,
+  "rows": [
+    {
+      "axis": "const_type_annotation",
+      "source": "const y: OnlyType = realX;",
+      "requested_name": "y",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "y_1"
+      }
+    },
+    {
+      "axis": "const_type_annotation",
+      "source": "const y: OnlyType = realX;",
+      "requested_name": "realX",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "realX_1"
+      }
+    },
+    {
+      "axis": "const_type_annotation",
+      "source": "const y: OnlyType = realX;",
+      "requested_name": "OnlyType",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "OnlyType"
+      }
+    },
+    {
+      "axis": "const_type_annotation",
+      "source": "const y: OnlyType = realX;",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "import_default",
+      "source": "import Foo from \"m\";",
+      "requested_name": "Foo",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Foo_1"
+      }
+    },
+    {
+      "axis": "import_default",
+      "source": "import Foo from \"m\";",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "import_type_named",
+      "source": "import type { Bar } from \"m\";",
+      "requested_name": "Bar",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Bar"
+      }
+    },
+    {
+      "axis": "import_type_named",
+      "source": "import type { Bar } from \"m\";",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "export_const",
+      "source": "export const EN = 1;",
+      "requested_name": "EN",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "EN_1"
+      }
+    },
+    {
+      "axis": "export_const",
+      "source": "export const EN = 1;",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "export_type_alias",
+      "source": "export type ENT = string;",
+      "requested_name": "ENT",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "ENT"
+      }
+    },
+    {
+      "axis": "export_type_alias",
+      "source": "export type ENT = string;",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "export_star_as_ns",
+      "source": "export * as ns from \"m\";",
+      "requested_name": "ns",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "ns_1"
+      }
+    },
+    {
+      "axis": "export_star_as_ns",
+      "source": "export * as ns from \"m\";",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "export_type_star",
+      "source": "export type * from \"m\";",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "interface_decl",
+      "source": "interface Iface { n: number }",
+      "requested_name": "Iface",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Iface"
+      }
+    },
+    {
+      "axis": "interface_decl",
+      "source": "interface Iface { n: number }",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "type_alias",
+      "source": "type Alias = number;",
+      "requested_name": "Alias",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Alias"
+      }
+    },
+    {
+      "axis": "type_alias",
+      "source": "type Alias = number;",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "namespace_type_only",
+      "source": "namespace TypeNs { export type T = number; }",
+      "requested_name": "TypeNs",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "TypeNs"
+      }
+    },
+    {
+      "axis": "namespace_type_only",
+      "source": "namespace TypeNs { export type T = number; }",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "namespace_value",
+      "source": "namespace ValueNs { export const V = 1; }",
+      "requested_name": "ValueNs",
+      "outcome": {
+        "kind": "reject",
+        "code": "typescript_invalid_feature"
+      }
+    },
+    {
+      "axis": "function_lone_overload",
+      "source": "function loneOverload(a: number): void;",
+      "requested_name": "loneOverload",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "loneOverload"
+      }
+    },
+    {
+      "axis": "function_lone_overload",
+      "source": "function loneOverload(a: number): void;",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "const_value",
+      "source": "const cv = 1;",
+      "requested_name": "cv",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "cv_1"
+      }
+    },
+    {
+      "axis": "const_value",
+      "source": "const cv = 1;",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "declare_const",
+      "source": "declare const dcv: number;",
+      "requested_name": "dcv",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "dcv"
+      }
+    },
+    {
+      "axis": "declare_const",
+      "source": "declare const dcv: number;",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "class_decl",
+      "source": "class Cls {}",
+      "requested_name": "Cls",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Cls_1"
+      }
+    },
+    {
+      "axis": "class_decl",
+      "source": "class Cls {}",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "declare_class",
+      "source": "declare class DCls {}",
+      "requested_name": "DCls",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "DCls"
+      }
+    },
+    {
+      "axis": "declare_class",
+      "source": "declare class DCls {}",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "enum_declare_ambient",
+      "source": "declare enum AmbientE { A }",
+      "requested_name": "AmbientE",
+      "outcome": {
+        "kind": "reject",
+        "code": "typescript_invalid_feature"
+      }
+    },
+    {
+      "axis": "enum_plain",
+      "source": "enum PlainE { A }",
+      "requested_name": "PlainE",
+      "outcome": {
+        "kind": "reject",
+        "code": "typescript_invalid_feature"
+      }
+    },
+    {
+      "axis": "as_expression",
+      "source": "const av = inner as Ty;",
+      "requested_name": "av",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "av_1"
+      }
+    },
+    {
+      "axis": "as_expression",
+      "source": "const av = inner as Ty;",
+      "requested_name": "inner",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "inner_1"
+      }
+    },
+    {
+      "axis": "as_expression",
+      "source": "const av = inner as Ty;",
+      "requested_name": "Ty",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Ty"
+      }
+    },
+    {
+      "axis": "as_expression",
+      "source": "const av = inner as Ty;",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "satisfies_expression",
+      "source": "const sv = other satisfies Ty;",
+      "requested_name": "sv",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "sv_1"
+      }
+    },
+    {
+      "axis": "satisfies_expression",
+      "source": "const sv = other satisfies Ty;",
+      "requested_name": "other",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "other_1"
+      }
+    },
+    {
+      "axis": "satisfies_expression",
+      "source": "const sv = other satisfies Ty;",
+      "requested_name": "Ty",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Ty"
+      }
+    },
+    {
+      "axis": "satisfies_expression",
+      "source": "const sv = other satisfies Ty;",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "non_null_expression",
+      "source": "const nn = thing!;",
+      "requested_name": "nn",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "nn_1"
+      }
+    },
+    {
+      "axis": "non_null_expression",
+      "source": "const nn = thing!;",
+      "requested_name": "thing",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "thing_1"
+      }
+    },
+    {
+      "axis": "non_null_expression",
+      "source": "const nn = thing!;",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "instantiation_expression",
+      "source": "const iv = generic<Ty>;",
+      "requested_name": "iv",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "iv_1"
+      }
+    },
+    {
+      "axis": "instantiation_expression",
+      "source": "const iv = generic<Ty>;",
+      "requested_name": "generic",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "generic_1"
+      }
+    },
+    {
+      "axis": "instantiation_expression",
+      "source": "const iv = generic<Ty>;",
+      "requested_name": "Ty",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Ty"
+      }
+    },
+    {
+      "axis": "instantiation_expression",
+      "source": "const iv = generic<Ty>;",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "type_assertion_angle",
+      "source": "const ta = <Foo>realX;",
+      "requested_name": "ta",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "ta_1"
+      }
+    },
+    {
+      "axis": "type_assertion_angle",
+      "source": "const ta = <Foo>realX;",
+      "requested_name": "realX",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "realX_1"
+      }
+    },
+    {
+      "axis": "type_assertion_angle",
+      "source": "const ta = <Foo>realX;",
+      "requested_name": "Foo",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Foo"
+      }
+    },
+    {
+      "axis": "type_assertion_angle",
+      "source": "const ta = <Foo>realX;",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "class_expression",
+      "source": "const ce = class NamedCe {};",
+      "requested_name": "ce",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "ce_1"
+      }
+    },
+    {
+      "axis": "class_expression",
+      "source": "const ce = class NamedCe {};",
+      "requested_name": "NamedCe",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "NamedCe_1"
+      }
+    },
+    {
+      "axis": "class_expression",
+      "source": "const ce = class NamedCe {};",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "class_declare_field",
+      "source": "class DF { declare [DK]: number; }",
+      "requested_name": "DF",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "DF_1"
+      }
+    },
+    {
+      "axis": "class_declare_field",
+      "source": "class DF { declare [DK]: number; }",
+      "requested_name": "DK",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "DK"
+      }
+    },
+    {
+      "axis": "class_declare_field",
+      "source": "class DF { declare [DK]: number; }",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "class_computed_field",
+      "source": "class KP { [K] = 1; }",
+      "requested_name": "KP",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "KP_1"
+      }
+    },
+    {
+      "axis": "class_computed_field",
+      "source": "class KP { [K] = 1; }",
+      "requested_name": "K",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "K_1"
+      }
+    },
+    {
+      "axis": "class_computed_field",
+      "source": "class KP { [K] = 1; }",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "abstract_method",
+      "source": "abstract class AM { abstract m(P: number): void; }",
+      "requested_name": "AM",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "AM_1"
+      }
+    },
+    {
+      "axis": "abstract_method",
+      "source": "abstract class AM { abstract m(P: number): void; }",
+      "requested_name": "P",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "P"
+      }
+    },
+    {
+      "axis": "abstract_method",
+      "source": "abstract class AM { abstract m(P: number): void; }",
+      "requested_name": "m",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "m"
+      }
+    },
+    {
+      "axis": "abstract_method",
+      "source": "abstract class AM { abstract m(P: number): void; }",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "class_accessor_field",
+      "source": "class AP { accessor [P] = 1; }",
+      "requested_name": "AP",
+      "outcome": {
+        "kind": "reject",
+        "code": "typescript_invalid_feature"
+      }
+    },
+    {
+      "axis": "class_param_property",
+      "source": "class PP { constructor(public X: number) {} }",
+      "requested_name": "PP",
+      "outcome": {
+        "kind": "reject",
+        "code": "typescript_invalid_feature"
+      }
+    },
+    {
+      "axis": "class_index_signature",
+      "source": "class C { [k: string]: number }",
+      "requested_name": "C",
+      "outcome": {
+        "kind": "crash"
+      }
+    },
+    {
+      "axis": "decorator",
+      "source": "@dec class Foo {}",
+      "requested_name": "Foo",
+      "outcome": {
+        "kind": "reject",
+        "code": "typescript_invalid_feature"
+      }
+    },
+    {
+      "axis": "export_default_class",
+      "source": "export default class Named {}",
+      "requested_name": "Named",
+      "outcome": {
+        "kind": "reject",
+        "code": "module_illegal_default_export"
+      }
+    },
+    {
+      "axis": "function_expression_this",
+      "source": "const fe = function inner(this: ThisT, a) { return a; };",
+      "requested_name": "fe",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "fe_1"
+      }
+    },
+    {
+      "axis": "function_expression_this",
+      "source": "const fe = function inner(this: ThisT, a) { return a; };",
+      "requested_name": "inner",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "inner_1"
+      }
+    },
+    {
+      "axis": "function_expression_this",
+      "source": "const fe = function inner(this: ThisT, a) { return a; };",
+      "requested_name": "a",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "a_1"
+      }
+    },
+    {
+      "axis": "function_expression_this",
+      "source": "const fe = function inner(this: ThisT, a) { return a; };",
+      "requested_name": "ThisT",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "ThisT"
+      }
+    },
+    {
+      "axis": "function_expression_this",
+      "source": "const fe = function inner(this: ThisT, a) { return a; };",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    },
+    {
+      "axis": "function_declaration_this",
+      "source": "function fd(this: ThisT, b) { return b; }",
+      "requested_name": "fd",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "fd_1"
+      }
+    },
+    {
+      "axis": "function_declaration_this",
+      "source": "function fd(this: ThisT, b) { return b; }",
+      "requested_name": "b",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "b_1"
+      }
+    },
+    {
+      "axis": "function_declaration_this",
+      "source": "function fd(this: ThisT, b) { return b; }",
+      "requested_name": "ThisT",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "ThisT"
+      }
+    },
+    {
+      "axis": "function_declaration_this",
+      "source": "function fd(this: ThisT, b) { return b; }",
+      "requested_name": "Zz9Unrelated",
+      "outcome": {
+        "kind": "compile",
+        "emitted_name": "Zz9Unrelated"
+      }
+    }
+  ]
+}

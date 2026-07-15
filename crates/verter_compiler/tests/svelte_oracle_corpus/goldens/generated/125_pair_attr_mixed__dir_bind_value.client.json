@@ -1,0 +1,99 @@
+{
+  "slug": "generated/125_pair_attr_mixed__dir_bind_value.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "_25_pair_attr_mixed__dir_bind_value",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "remove_input_defaults",
+    "template_effect",
+    "set_class",
+    "bind_value",
+    "get",
+    "set",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_value",
+    "from_html",
+    "get",
+    "remove_input_defaults",
+    "set",
+    "set_class",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "remove_input_defaults": 1,
+    "template_effect": 1,
+    "set_class": 1,
+    "bind_value": 1,
+    "get": 1,
+    "set": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/>",
+      "flag": null
+    }
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  },
+  "events": [],
+  "nonStaticProperties": [],
+  "attrParts": [
+    {
+      "helper": "set_class",
+      "attr": "class",
+      "chunks": [
+        "literal",
+        "expr",
+        "literal"
+      ]
+    }
+  ],
+  "directiveExprs": [
+    {
+      "kind": "bind",
+      "shape": "expr"
+    }
+  ],
+  "decodedText": [],
+  "nodePaths": {
+    "regions": []
+  },
+  "dynamicSlots": {
+    "class": 1,
+    "bind": 1
+  }
+}

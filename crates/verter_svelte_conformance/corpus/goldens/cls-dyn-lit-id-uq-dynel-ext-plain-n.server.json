@@ -1,0 +1,42 @@
+{
+  "slug": "cls-dyn-lit-id-uq-dynel-ext-plain-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_dyn_lit_id_uq_dynel_ext_plain_n",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "element",
+    "attr"
+  ],
+  "helperSet": [
+    "attr",
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1,
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) .zz {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

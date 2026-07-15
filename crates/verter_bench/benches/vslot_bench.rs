@@ -9,7 +9,7 @@ use serde::Deserialize;
 use std::fs;
 use std::hint::black_box;
 use std::path::Path;
-use verter_core::utils::oxc::vue::parse_vslot;
+use verter_parser::utils::oxc::vue::parse_vslot;
 
 /// Common v-slot expression patterns for benchmarking.
 const COMMON_VSLOT_EXPRESSIONS: &[&str] = &[

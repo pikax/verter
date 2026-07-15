@@ -1,0 +1,101 @@
+{
+  "slug": "legacy/wrap_if_elseif_call.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "wrap_if_elseif_call",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "push",
+    "prop",
+    "init",
+    "comment",
+    "first_child",
+    "append",
+    "append",
+    "derived",
+    "deep_read_state",
+    "untrack",
+    "if",
+    "deep_read_state",
+    "untrack",
+    "get",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "deep_read_state",
+    "derived",
+    "first_child",
+    "from_html",
+    "get",
+    "if",
+    "init",
+    "pop",
+    "prop",
+    "push",
+    "untrack"
+  ],
+  "helperCounts": {
+    "from_html": 2,
+    "push": 1,
+    "prop": 1,
+    "init": 1,
+    "comment": 1,
+    "first_child": 1,
+    "append": 3,
+    "derived": 1,
+    "deep_read_state": 2,
+    "untrack": 2,
+    "if": 1,
+    "get": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p>a</p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<p>b</p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p>a</p>`); var root_1 = $.from_html(`<p>b</p>`); export default function wrap_if_elseif_call($$anchor, $$props) {$.push($$props, false); let obj = $.prop($$props, 'obj', 8); $.init(); var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var p = root(); $.append($$anchor, p);}; var consequent_1 = ($$anchor) => {var p_1 = root_1(); $.append($$anchor, p_1);}; var d = $.derived(() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))); $.if(node, ($$render) => {if (($.deep_read_state(obj()), $.untrack(() => obj().x))) $$render(consequent); else if ($.get(d)) $$render(consequent_1, 1);});} $.append($$anchor, fragment); $.pop();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,7 +1,7 @@
 // Workspace symbols: aggregate symbols across all indexed Vue files.
 
 use tower_lsp_server::ls_types::*;
-use verter_host::VerterHost;
+use verter_session::VerterHost;
 
 /// Search for workspace symbols matching a query string.
 ///
@@ -15,8 +15,8 @@ pub fn workspace_symbols(host: &VerterHost, query: &str) -> Vec<SymbolInformatio
     let file_list = host.list_files();
     let mut symbols = Vec::new();
 
-    for (canonical_id, file_kind) in &file_list {
-        if *file_kind != verter_host::FileKind::VueSfc {
+    for (canonical_id, file_language) in &file_list {
+        if !file_language.is_framework_carrier() {
             continue;
         }
 
@@ -127,8 +127,8 @@ pub fn workspace_symbols(host: &VerterHost, query: &str) -> Vec<SymbolInformatio
 }
 
 /// Convert AnalyzedBindingKind to LSP SymbolKind.
-fn binding_to_symbol_kind(kind: &verter_analysis::AnalyzedBindingKind) -> SymbolKind {
-    use verter_analysis::AnalyzedBindingKind;
+fn binding_to_symbol_kind(kind: &verter_semantic::analysis::AnalyzedBindingKind) -> SymbolKind {
+    use verter_semantic::analysis::AnalyzedBindingKind;
     match kind {
         AnalyzedBindingKind::Const | AnalyzedBindingKind::Let | AnalyzedBindingKind::Var => {
             SymbolKind::VARIABLE

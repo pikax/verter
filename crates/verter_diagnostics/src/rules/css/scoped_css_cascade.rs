@@ -112,8 +112,8 @@ mod tests {
 
     use crate::rules::FileContext;
 
-    use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateComponentUsage};
-    use verter_analysis::{style, StyleBlockAnalysis};
+    use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateComponentUsage};
+    use verter_semantic::analysis::{style, StyleBlockAnalysis};
     use verter_span::Span;
 
     fn build_style(css_content: &str, scoped: bool, content_offset: u32) -> StyleBlockAnalysis {
@@ -166,6 +166,8 @@ mod tests {
                 has_dynamic_class: false,
                 dynamic_classes: vec![],
                 v_models: vec![],
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(10, 20),
             }],
             ..Default::default()
@@ -203,6 +205,8 @@ mod tests {
                 has_dynamic_class: false,
                 dynamic_classes: vec![],
                 v_models: vec![],
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(10, 20),
             }],
             ..Default::default()
@@ -239,6 +243,8 @@ mod tests {
                 has_dynamic_class: false,
                 dynamic_classes: vec![],
                 v_models: vec![],
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(10, 20),
             }],
             ..Default::default()
@@ -272,6 +278,8 @@ mod tests {
                 has_dynamic_class: true,
                 dynamic_classes: vec!["foo".into()],
                 v_models: vec![],
+                bindings: vec![],
+                events: vec![],
                 span: Span::new(10, 20),
             }],
             ..Default::default()

@@ -1,0 +1,42 @@
+{
+  "slug": "type-dyn-lit-attr-q-slot-inj-nest-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "type_dyn_lit_attr_q_slot_inj_nest_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot",
+    "attr"
+  ],
+  "helperSet": [
+    "attr",
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1,
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

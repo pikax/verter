@@ -139,8 +139,8 @@ impl ActionProvider for VBindShorthand {
 mod tests {
     use super::*;
     use crate::provider::ActionContext;
-    use verter_analysis::template::*;
     use verter_diagnostics::{DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity};
+    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn make_diag(source: &str, directive: &str) -> LintDiagnostic {

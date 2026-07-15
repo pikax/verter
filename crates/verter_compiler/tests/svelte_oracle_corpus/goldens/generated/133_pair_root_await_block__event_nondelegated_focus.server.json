@@ -1,0 +1,37 @@
+{
+  "slug": "generated/133_pair_root_await_block__event_nondelegated_focus.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_33_pair_root_await_block__event_nondelegated_focus",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "await"
+  ],
+  "helperSet": [
+    "await"
+  ],
+  "helperCounts": {
+    "await": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}
