@@ -1487,6 +1487,7 @@ pub(super) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
 /// trivial pass — their satisfaction is decided purely by
 /// `validate_with_self_roots`). Used by the warm-hit gate
 /// (`cached_satisfies(entry.satisfied_projection, requested_point_for_key(key))`).
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn requested_point_for_key(key: &SemanticQueryKey) -> MaterializedPoint {
     let (_, slot) = family_and_slot(key);
     let path = requested_path_for_key(key);

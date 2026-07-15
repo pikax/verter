@@ -413,3 +413,112 @@ mod canary_absolutize_already_absolute_zero_alloc {
         );
     }
 }
+
+mod canary_signature_fingerprint_zero_alloc {
+    //! Allocation canary for `compute_signature_fingerprint` over the
+    //! per-domain / source-env / project-generation `FactVersionRef`
+    //! variants.
+    //!
+    //! The fingerprint feeds each variant's typed `Hash` impl into the
+    //! two seeded hashers directly — a pure stack computation with NO
+    //! heap allocation. The pre-fix implementation serialised the
+    //! `Parse` / `ResolveImports` / `RouteSurface` / `FileSourceEnv` /
+    //! `ProjectGeneration` variants through `format!("{f:?}")` — one
+    //! `String` allocation (plus growth reallocations) per fact per
+    //! call — so this canary reads a multi-thousand delta there and
+    //! zero here.
+
+    use std::hint::black_box;
+    use std::sync::atomic::Ordering;
+
+    use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
+    use verter_session::resolver_core::{
+        compute_signature_fingerprint_for_tests, DerivedFactKind, FactVersionRef, ParseFactRef,
+        ResolveImportsFactRef, RouteSurfaceFactRef,
+    };
+
+    use super::{alloc_serial_guard, ALLOC_COUNTER};
+
+    /// One fact per externally-constructible `FactVersionRef` variant
+    /// so the measured loop covers the fingerprint fold — in particular
+    /// four of the five arms that used to route through
+    /// `format!("{f:?}")`. `FileSourceEnv` is absent by design: its
+    /// `ParseEnvHash` field is sealed to in-crate construction (an R6
+    /// content-free-dimension rail this canary must not weaken); it
+    /// folds through the same typed-Hash arm as every variant below,
+    /// and its field-level fingerprint discrimination is pinned by the
+    /// in-crate `file_source_env_fact_rail_tests` suite.
+    fn all_variant_facts() -> Vec<FactVersionRef> {
+        vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: "/w/owner.vue".to_string(),
+                hash: [1u8; 16],
+            },
+            FactVersionRef::DerivedFactHash {
+                canonical_id: "/w/dep.ts".to_string(),
+                kind: DerivedFactKind::Route,
+                hash: [2u8; 16],
+            },
+            FactVersionRef::Parse(ParseFactRef {
+                canonical_id: "/w/parse.ts".to_string(),
+                key: FactKey::Export {
+                    name: "Foo".into(),
+                    space: SymbolSpace::Type,
+                },
+                lane: FactLane::Semantic,
+                expected_hash: [3u8; 16],
+            }),
+            FactVersionRef::ResolveImports(ResolveImportsFactRef {
+                canonical_id: "/w/imports.ts".to_string(),
+                key: FactKey::Export {
+                    name: "Bar".into(),
+                    space: SymbolSpace::Type,
+                },
+                lane: FactLane::Semantic,
+                expected_hash: [4u8; 16],
+            }),
+            FactVersionRef::RouteSurface(RouteSurfaceFactRef {
+                canonical_id: "/w/route.ts".to_string(),
+                key: FactKey::Export {
+                    name: "Baz".into(),
+                    space: SymbolSpace::Type,
+                },
+                lane: FactLane::Semantic,
+                expected_hash: [5u8; 16],
+            }),
+            FactVersionRef::ProjectGeneration { generation: 7 },
+        ]
+    }
+
+    #[test]
+    fn fingerprint_over_every_variant_allocates_nothing() {
+        // Serialise against the sibling measurement tests — all advance
+        // the same process-global counter.
+        let _serial = alloc_serial_guard();
+
+        // Setup phase — fact construction allocates and is NOT counted.
+        let facts = all_variant_facts();
+
+        // Warm any lazy init, then measure the fingerprint fold alone.
+        for _ in 0..64 {
+            let _ = black_box(compute_signature_fingerprint_for_tests(&facts));
+        }
+        let baseline = ALLOC_COUNTER.load(Ordering::Relaxed);
+        const ITERATIONS: usize = 1_000;
+        for _ in 0..ITERATIONS {
+            let fp = compute_signature_fingerprint_for_tests(&facts);
+            black_box(fp);
+        }
+        let after = ALLOC_COUNTER.load(Ordering::Relaxed);
+        let delta = after - baseline;
+        assert_eq!(
+            delta,
+            0,
+            "fingerprinting a {}-fact signature must be allocation-free \
+             (typed Hash fold) — a fold that serialises variants through \
+             format!() reports ≥ 5 allocations per call here; observed \
+             {delta} over {ITERATIONS} iterations",
+            facts.len(),
+        );
+    }
+}

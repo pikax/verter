@@ -36,8 +36,12 @@ impl SemanticGraphStore {
     /// tests reach the same body via the same shim function.
     #[doc(hidden)]
     pub fn test_trigger_inflight_abort_impl(&self, key: &SemanticQueryKey) -> bool {
+        // The in-flight table is keyed by the prepared token; prepare a
+        // probe token from the bare key (token equality IS key
+        // equality, so this addresses exactly the live entry).
+        let probe = PreparedKeyHandle::prepare(key.clone());
         let mut table = self.inflight.lock();
-        let Some(inflight) = table.remove(key) else {
+        let Some(inflight) = table.remove(&probe) else {
             return false;
         };
         drop(table);
@@ -75,8 +79,9 @@ impl SemanticGraphStore {
     #[doc(hidden)]
     #[must_use]
     pub fn test_inflight_strong_count(&self, key: &SemanticQueryKey) -> usize {
+        let probe = PreparedKeyHandle::prepare(key.clone());
         let table = self.inflight.lock();
-        table.get(key).map_or(0, Arc::strong_count)
+        table.get(&probe).map_or(0, Arc::strong_count)
     }
 
     /// Test-only observability accessor: the number of cooperative

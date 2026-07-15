@@ -1,9 +1,10 @@
 //! In-flight admission — per-entry Mutex + Condvar pair.
 //!
-//! Cold builds register an `InflightEntry` keyed by the full
-//! [`SemanticQueryKey`]; joiners block on the entry's `Condvar` until the
-//! winner publishes. RAII guards keep the recursion stack and the
-//! in-flight table consistent across panics and early returns.
+//! Cold builds register an `InflightEntry` keyed by the prepared query
+//! token ([`PreparedKeyHandle`] — full-key equality behind one `Arc`);
+//! joiners block on the entry's `Condvar` until the winner publishes.
+//! RAII guards keep the recursion stack and the in-flight table
+//! consistent across panics and early returns.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -11,11 +12,10 @@ use std::sync::Arc;
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 
-use crate::semantic_query::{
-    DepSignature, QueryError, QueryResult, SemanticNodeId, SemanticQueryKey,
-};
+use crate::semantic_query::{DepSignature, QueryError, QueryResult, SemanticNodeId};
 
 use super::empty_signature;
+use super::prepared::PreparedKeyHandle;
 
 /// In-flight admission state for one cold build.
 ///
@@ -117,36 +117,43 @@ impl InflightEntry {
 }
 
 thread_local! {
-    /// Per-thread set of query keys currently being executed. Used to
-    /// detect same-path recursion so callers return a sentinel instead of
-    /// self-awaiting.
-    pub(super) static IN_FLIGHT_ON_THIS_THREAD: RefCell<Vec<SemanticQueryKey>> =
+    /// Per-thread stack of prepared query tokens currently being
+    /// executed. Used to detect same-path recursion so callers return a
+    /// sentinel instead of self-awaiting. Frames are `Arc` handles —
+    /// pushing costs one refcount bump, and membership probes
+    /// fast-reject on the token's cached key hash before full-key
+    /// equality.
+    pub(super) static IN_FLIGHT_ON_THIS_THREAD: RefCell<Vec<PreparedKeyHandle>> =
         const { RefCell::new(Vec::new()) };
 }
 
-/// RAII guard that pops a key off [`IN_FLIGHT_ON_THIS_THREAD`] when dropped.
+/// RAII guard that pops a frame off [`IN_FLIGHT_ON_THIS_THREAD`] when dropped.
 ///
 /// Ensures the recursion stack stays consistent even if the cold build
-/// panics — otherwise a caught panic or unwind could leave a key on the
+/// panics — otherwise a caught panic or unwind could leave a frame on the
 /// stack and future unrelated queries for that key from the same thread
 /// would be misclassified as same-path recursion.
 pub(super) struct RecursionStackGuard {
-    key: Option<SemanticQueryKey>,
+    handle: Option<PreparedKeyHandle>,
 }
 
 impl RecursionStackGuard {
-    pub(super) fn push(key: SemanticQueryKey) -> Self {
-        IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow_mut().push(key.clone()));
-        Self { key: Some(key) }
+    pub(super) fn push(handle: PreparedKeyHandle) -> Self {
+        IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow_mut().push(handle.clone()));
+        Self {
+            handle: Some(handle),
+        }
     }
 }
 
 impl Drop for RecursionStackGuard {
     fn drop(&mut self) {
-        if let Some(key) = self.key.take() {
+        if let Some(handle) = self.handle.take() {
             IN_FLIGHT_ON_THIS_THREAD.with(|slot| {
                 let mut v = slot.borrow_mut();
-                if let Some(pos) = v.iter().rposition(|k| k == &key) {
+                // Pop the exact frame this guard pushed — pointer
+                // identity, no key comparison.
+                if let Some(pos) = v.iter().rposition(|k| k.same_instance(&handle)) {
                     v.remove(pos);
                 }
             });
@@ -165,16 +172,16 @@ impl Drop for RecursionStackGuard {
 /// callers start a new build.
 pub(super) struct InflightPanicGuard<'a> {
     inflight: Arc<InflightEntry>,
-    inflight_table: &'a Mutex<FxHashMap<SemanticQueryKey, Arc<InflightEntry>>>,
-    key: SemanticQueryKey,
+    inflight_table: &'a Mutex<FxHashMap<PreparedKeyHandle, Arc<InflightEntry>>>,
+    key: PreparedKeyHandle,
     finished: bool,
 }
 
 impl<'a> InflightPanicGuard<'a> {
     pub(super) fn new(
         inflight: Arc<InflightEntry>,
-        inflight_table: &'a Mutex<FxHashMap<SemanticQueryKey, Arc<InflightEntry>>>,
-        key: SemanticQueryKey,
+        inflight_table: &'a Mutex<FxHashMap<PreparedKeyHandle, Arc<InflightEntry>>>,
+        key: PreparedKeyHandle,
     ) -> Self {
         Self {
             inflight,

@@ -1321,7 +1321,7 @@ pub const CANDIDATE_CAP: usize = 4;
 pub const FACT_SIGNATURE_CAP: usize = 1024;
 
 fn compute_signature_fingerprint(facts: &[FactVersionRef]) -> [u8; 16] {
-    use std::hash::{BuildHasher, Hasher};
+    use std::hash::{BuildHasher, Hash, Hasher};
     // Two FxHasher passes seeded with distinct salts to produce 16
     // bytes of fingerprint without pulling a heavier hash crate.
     let salt_lo = rustc_hash::FxBuildHasher;
@@ -1332,49 +1332,16 @@ fn compute_signature_fingerprint(facts: &[FactVersionRef]) -> [u8; 16] {
     h_lo.write_u64(0xA5A5_A5A5_5A5A_5A5A);
     h_hi.write_u64(0x9E37_79B9_7F4A_7C15);
     for f in facts {
-        match f {
-            FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                h_lo.write(canonical_id.as_bytes());
-                h_lo.write(hash);
-                h_hi.write(canonical_id.as_bytes());
-                h_hi.write(hash);
-            }
-            FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind,
-                hash,
-            } => {
-                h_lo.write(canonical_id.as_bytes());
-                h_lo.write_u8(match kind {
-                    DerivedFactKind::Route => 1,
-                    DerivedFactKind::ImportRoute => 2,
-                    DerivedFactKind::DirectSource => 3,
-                });
-                h_lo.write(hash);
-                h_hi.write(canonical_id.as_bytes());
-                h_hi.write_u8(match kind {
-                    DerivedFactKind::Route => 1,
-                    DerivedFactKind::ImportRoute => 2,
-                    DerivedFactKind::DirectSource => 3,
-                });
-                h_hi.write(hash);
-            }
-            FactVersionRef::Parse(_)
-            | FactVersionRef::ResolveImports(_)
-            | FactVersionRef::RouteSurface(_)
-            | FactVersionRef::FileSourceEnv { .. }
-            | FactVersionRef::ProjectGeneration { .. } => {
-                // Per-domain refs, the contributor source-env ref, and
-                // the project-generation ref serialise to their Debug
-                // form; the fingerprint is approximate but stable. The
-                // derived `Debug` prints every field, so a change to
-                // any source-env identity field changes the
-                // fingerprint.
-                let s = format!("{f:?}");
-                h_lo.write(s.as_bytes());
-                h_hi.write(s.as_bytes());
-            }
-        }
+        // Feed each fact's derived typed `Hash` impl into both seeded
+        // hashers directly — allocation-free, and covering every field
+        // of every variant (the derive walks discriminant + payload,
+        // so a change to any identity field changes the fingerprint).
+        // The fingerprint is an in-memory per-store accelerator only;
+        // exact fact validation stays authoritative, so the fold may
+        // change value across versions without any persistence or
+        // cross-process compatibility concern.
+        f.hash(&mut h_lo);
+        f.hash(&mut h_hi);
     }
     let lo = h_lo.finish();
     let hi = h_hi.finish();
@@ -1382,6 +1349,19 @@ fn compute_signature_fingerprint(facts: &[FactVersionRef]) -> [u8; 16] {
     out[..8].copy_from_slice(&lo.to_le_bytes());
     out[8..].copy_from_slice(&hi.to_le_bytes());
     out
+}
+
+/// **Test-only.** Public wrapper over the private
+/// [`compute_signature_fingerprint`] so the allocation-canary
+/// integration binary (which compiles without `cfg(test)`) can measure
+/// the fingerprint path directly. Exposed under
+/// `cfg(any(test, feature = "test-support"))` following the
+/// `test_flight_strong_count` precedent.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn compute_signature_fingerprint_for_tests(facts: &[FactVersionRef]) -> [u8; 16] {
+    compute_signature_fingerprint(facts)
 }
 
 impl<K, V> ValidatedFactCache<K, V>
@@ -4841,6 +4821,196 @@ mod file_source_env_fact_rail_tests {
             forward_sig.len(),
             2,
             "two DISTINCT source-env facts must both survive dedup"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fact_signature_fingerprint_pins {
+    //! Fingerprint-fold invariance pins.
+    //!
+    //! The fingerprint is an in-memory per-store accelerator only —
+    //! exact fact validation stays authoritative — but the fold must
+    //! remain deterministic (same facts ⇒ same fingerprint) and
+    //! discriminating (a payload or variant change ⇒ a different
+    //! fingerprint, probabilistically). These pins hold for any fold
+    //! implementation; they lock the contract, not the byte values.
+
+    use super::*;
+    use crate::file_artifact_store::FileArtifactKey;
+    use crate::locator_identity::ParseEnvHash;
+    use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
+
+    fn export_key(name: &str) -> FactKey {
+        FactKey::Export {
+            name: name.into(),
+            space: SymbolSpace::Type,
+        }
+    }
+
+    /// One fact per `FactVersionRef` variant. Built fresh per call so
+    /// equality below proves value determinism, not shared allocation.
+    fn every_variant() -> Vec<FactVersionRef> {
+        vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: "/w/owner.vue".to_string(),
+                hash: [1u8; 16],
+            },
+            FactVersionRef::DerivedFactHash {
+                canonical_id: "/w/dep.ts".to_string(),
+                kind: DerivedFactKind::Route,
+                hash: [2u8; 16],
+            },
+            FactVersionRef::Parse(ParseFactRef {
+                canonical_id: "/w/parse.ts".to_string(),
+                key: export_key("Foo"),
+                lane: FactLane::Semantic,
+                expected_hash: [3u8; 16],
+            }),
+            FactVersionRef::ResolveImports(ResolveImportsFactRef {
+                canonical_id: "/w/imports.ts".to_string(),
+                key: export_key("Bar"),
+                lane: FactLane::Semantic,
+                expected_hash: [4u8; 16],
+            }),
+            FactVersionRef::RouteSurface(RouteSurfaceFactRef {
+                canonical_id: "/w/route.ts".to_string(),
+                key: export_key("Baz"),
+                lane: FactLane::Semantic,
+                expected_hash: [5u8; 16],
+            }),
+            FactVersionRef::FileSourceEnv {
+                canonical_id: "/w/env.ts".to_string(),
+                parse_env_hash: ParseEnvHash::from_env_hash([6u8; 16]),
+                parser_version: 2,
+                file_language_id: FileArtifactKey::derived_file_language_id("/w/env.ts"),
+            },
+            FactVersionRef::ProjectGeneration { generation: 7 },
+        ]
+    }
+
+    #[test]
+    fn same_facts_same_fingerprint_across_every_variant() {
+        let a = every_variant();
+        let b = every_variant();
+        assert_eq!(
+            compute_signature_fingerprint(&a),
+            compute_signature_fingerprint(&b),
+            "independently-built equal fact lists must fingerprint identically"
+        );
+    }
+
+    /// Each variant, mutated on one payload dimension, changes the
+    /// fingerprint of a signature containing it (probabilistic pin —
+    /// a 128-bit fingerprint collision on these fixtures would be a
+    /// fold bug, not chance).
+    #[test]
+    fn each_variant_discriminates_on_a_payload_change() {
+        let base = every_variant();
+        let base_fp = compute_signature_fingerprint(&base);
+
+        let mutations: Vec<(usize, FactVersionRef)> = vec![
+            (
+                0,
+                FactVersionRef::FileWholeHash {
+                    canonical_id: "/w/owner.vue".to_string(),
+                    hash: [11u8; 16],
+                },
+            ),
+            (
+                1,
+                FactVersionRef::DerivedFactHash {
+                    canonical_id: "/w/dep.ts".to_string(),
+                    kind: DerivedFactKind::ImportRoute,
+                    hash: [2u8; 16],
+                },
+            ),
+            (
+                2,
+                FactVersionRef::Parse(ParseFactRef {
+                    canonical_id: "/w/parse.ts".to_string(),
+                    key: export_key("FooPrime"),
+                    lane: FactLane::Semantic,
+                    expected_hash: [3u8; 16],
+                }),
+            ),
+            (
+                3,
+                FactVersionRef::ResolveImports(ResolveImportsFactRef {
+                    canonical_id: "/w/imports-prime.ts".to_string(),
+                    key: export_key("Bar"),
+                    lane: FactLane::Semantic,
+                    expected_hash: [4u8; 16],
+                }),
+            ),
+            (
+                4,
+                FactVersionRef::RouteSurface(RouteSurfaceFactRef {
+                    canonical_id: "/w/route.ts".to_string(),
+                    key: export_key("Baz"),
+                    lane: FactLane::Display,
+                    expected_hash: [5u8; 16],
+                }),
+            ),
+            (
+                5,
+                FactVersionRef::FileSourceEnv {
+                    canonical_id: "/w/env.ts".to_string(),
+                    parse_env_hash: ParseEnvHash::from_env_hash([66u8; 16]),
+                    parser_version: 2,
+                    file_language_id: FileArtifactKey::derived_file_language_id("/w/env.ts"),
+                },
+            ),
+            (6, FactVersionRef::ProjectGeneration { generation: 8 }),
+        ];
+        assert_eq!(
+            mutations.len(),
+            base.len(),
+            "one mutation per variant in the fixture list"
+        );
+        for (index, mutated) in mutations {
+            let mut facts = every_variant();
+            facts[index] = mutated;
+            assert_ne!(
+                compute_signature_fingerprint(&facts),
+                base_fp,
+                "mutating fixture fact #{index} must change the fingerprint"
+            );
+        }
+    }
+
+    /// Domain variants carrying byte-identical payloads must not
+    /// collide: the variant identity itself feeds the fold, so a
+    /// Parse-domain observation can never impersonate a
+    /// ResolveImports- or RouteSurface-domain observation.
+    #[test]
+    fn distinct_variants_with_identical_payloads_discriminate() {
+        let parse = FactVersionRef::Parse(ParseFactRef {
+            canonical_id: "/w/same.ts".to_string(),
+            key: export_key("Same"),
+            lane: FactLane::Semantic,
+            expected_hash: [9u8; 16],
+        });
+        let imports = FactVersionRef::ResolveImports(ResolveImportsFactRef {
+            canonical_id: "/w/same.ts".to_string(),
+            key: export_key("Same"),
+            lane: FactLane::Semantic,
+            expected_hash: [9u8; 16],
+        });
+        let route = FactVersionRef::RouteSurface(RouteSurfaceFactRef {
+            canonical_id: "/w/same.ts".to_string(),
+            key: export_key("Same"),
+            lane: FactLane::Semantic,
+            expected_hash: [9u8; 16],
+        });
+        let fp_parse = compute_signature_fingerprint(std::slice::from_ref(&parse));
+        let fp_imports = compute_signature_fingerprint(std::slice::from_ref(&imports));
+        let fp_route = compute_signature_fingerprint(std::slice::from_ref(&route));
+        assert_ne!(fp_parse, fp_imports, "Parse vs ResolveImports must differ");
+        assert_ne!(fp_parse, fp_route, "Parse vs RouteSurface must differ");
+        assert_ne!(
+            fp_imports, fp_route,
+            "ResolveImports vs RouteSurface must differ"
         );
     }
 }
