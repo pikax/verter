@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use parking_lot::RwLock;
@@ -113,6 +113,13 @@ pub(crate) struct Engine {
     /// not stall reverse queries on the hot path.
     pub(crate) default_resolve_extensions: ArcSwap<Vec<String>>,
 
+    /// Cached workspace-default env-hash array — see
+    /// [`workspace_default_env_hash_array_for_engine`]. `None` until the
+    /// first read; validated by pointer identity against
+    /// [`Self::default_resolve_extensions`], so an extension republish
+    /// invalidates it implicitly.
+    workspace_default_env_hashes: ArcSwapOption<WorkspaceDefaultEnvHashes>,
+
     /// Per-canonical content-transition ledger: canonical id → the
     /// `content_generation` recorded at its most recent content
     /// transition (overlay write/clear, snapshot inject/remove, disk
@@ -168,6 +175,7 @@ impl Engine {
             published_state: ArcSwapOption::new(None),
             ambient_libs: ArcSwap::from_pointee(AmbientLibsByProject::default()),
             default_resolve_extensions: ArcSwap::from_pointee(initial_extensions),
+            workspace_default_env_hashes: ArcSwapOption::new(None),
             content_transitions: RwLock::new(FxHashMap::default()),
             subtree_transitions: RwLock::new(FxHashMap::default()),
         };
@@ -1275,8 +1283,49 @@ fn ide_project_config_from_ownership(project: &OwnershipProject) -> IdeProjectCo
 /// project. Composed from the engine's resolve-extension list mixed with
 /// a stable "no project" identity so the default is non-zero and changes
 /// when the workspace-level extension list changes.
+///
+/// The array is a pure function of `default_resolve_extensions` (every
+/// other input is a workspace constant), and session callers read it on
+/// EVERY store-view build (`host_view_env_hashes` plus the no-owner
+/// fallback of `host_view_env_hashes_for`), so the engine caches the
+/// derived array in [`Engine::workspace_default_env_hashes`]. Validity is
+/// pointer identity against the live extensions `Arc`: the ONLY mutation
+/// point, [`Engine::set_default_resolve_extensions`], swaps that `Arc`,
+/// which invalidates the cache implicitly — no separate hook, no window
+/// where a reader can pair the new extension list with stale hashes (a
+/// read always returns hashes derived from the extensions `Arc` it loaded
+/// at entry, exactly the uncached semantics).
 pub(crate) fn workspace_default_env_hash_array_for_engine(engine: &Engine) -> ProjectEnvHashArray {
     let extensions = engine.default_resolve_extensions.load_full();
+    if let Some(cached) = engine.workspace_default_env_hashes.load_full() {
+        if Arc::ptr_eq(&cached.extensions, &extensions) {
+            return cached.hashes;
+        }
+    }
+    let hashes = compute_workspace_default_env_hash_array(&extensions);
+    engine
+        .workspace_default_env_hashes
+        .store(Some(Arc::new(WorkspaceDefaultEnvHashes {
+            extensions,
+            hashes,
+        })));
+    hashes
+}
+
+/// Cached workspace-default env-hash array plus the exact extensions
+/// `Arc` it was derived from. Concurrent racers may transiently store an
+/// entry for a superseded extensions `Arc` (last-wins); the next read's
+/// pointer check self-heals with one recompute — returned values are
+/// always consistent with the reader's own loaded extension list.
+struct WorkspaceDefaultEnvHashes {
+    extensions: Arc<Vec<String>>,
+    hashes: ProjectEnvHashArray,
+}
+
+/// Uncached derivation of the workspace-default env-hash array from a
+/// merged extension list. Single compute site backing the cached read
+/// path above (and the cache-parity tests).
+fn compute_workspace_default_env_hash_array(extensions: &[String]) -> ProjectEnvHashArray {
     let extensions_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
     let export_conditions = workspace_default_export_conditions();
     let inputs = EnvHashInputs {
@@ -1303,11 +1352,21 @@ pub(crate) fn workspace_default_env_hash_array_for_engine(engine: &Engine) -> Pr
 /// project. See [`workspace_default_env_hash_array_for_engine`] for the
 /// rationale on producing a deterministic non-zero default that depends
 /// on workspace configuration rather than collapsing to all-zero.
+///
+/// The value is a process-wide constant (an empty `IdeProjectConfig` has
+/// no engine-dependent input), computed once via `OnceLock` — session
+/// callers read it on every store-view build (`host_view_project_identity`).
 pub(crate) fn workspace_default_project_identity_hash_for_engine(_engine: &Engine) -> Hash16 {
     // Default project identity carries an empty (workspace_root, root,
     // tsconfig) tuple — distinguishes "no owning project" from any
     // published project (which always has a non-empty workspace_root /
     // root) without colliding across workspaces.
-    let config = IdeProjectConfig::new(String::new(), String::new(), None);
-    config.project_identity()
+    static DEFAULT_PROJECT_IDENTITY: OnceLock<Hash16> = OnceLock::new();
+    *DEFAULT_PROJECT_IDENTITY.get_or_init(|| {
+        IdeProjectConfig::new(String::new(), String::new(), None).project_identity()
+    })
 }
+
+#[cfg(test)]
+#[path = "engine_tests.rs"]
+mod tests;
