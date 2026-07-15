@@ -5945,14 +5945,19 @@ defineProps<TableProps<T>>()
 /// storm is reproduced and gated by the external-corpus gate (the real
 /// oracle).
 ///
-/// **Discriminating.** Pre-change the structural heritage `Pick<MessageProps<T>,
-/// 'icon' | 'avatar'>` MATERIALISES the open generic source, flattening
-/// `icon`/`avatar` into the published surface. Post-change it carrier-stops:
-/// those open-domain members do NOT flatten, the own `caption` still publishes,
-/// and no published field carries a budget sentinel. The `icon`/`avatar`-absent
-/// + no-sentinel assertions FAIL pre-change and PASS post-change.
+/// **Discriminating.** The open-domain source is NEVER whole-materialised:
+/// the un-picked `side` member must NOT flatten into the published surface
+/// (whole-source flattening — the storm class — would publish it), and no
+/// published field carries a budget sentinel. `Pick`'s OUTPUT keys are the
+/// CLOSED key-selection `K` even over the open source, so the SURFACE
+/// demand (a heritage arm IS the published props surface) enumerates
+/// exactly the picked `icon`/`avatar` from the source's ENUMERABLE object
+/// arm (values shallow; the open `& T` arm contributes nothing) — dropping
+/// them was the nuxt-ui ContentSearch/DropdownMenuContent zero-member
+/// collapse. VALUE-position publication of an open Pick stays a shallow
+/// carrier (`chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier`).
 #[test]
-fn get_component_meta_chat_messages_shaped_open_pick_intersection_carrier_stops() {
+fn get_component_meta_chat_messages_shaped_open_pick_heritage_enumerates_picked_keys_only() {
     use crate::resolver_core::component_meta_query_engine::type_expr_is_budget_exceeded_sentinel;
 
     let project = make_project();
@@ -5995,16 +6000,24 @@ defineProps<ChatProps<T>>()
         "the enclosing decl's own `caption` prop must publish, got: {prop_names:?}"
     );
 
-    // The open `Pick<MessageProps<T>, 'icon' | 'avatar'>` heritage
-    // carrier-stops: its picked members do NOT flatten into the surface
-    // (shallow-by-default over an OPEN intersection-widened enumeration
-    // domain — the `& T` arm makes the key set depend on the unbound `T`).
-    // Materialising the open generic source is the ChatMessages.vue storm
-    // class this prevents.
+    // `Pick`'s OUTPUT keys are its CLOSED key-selection even over the OPEN
+    // source (`& T` widens the SOURCE's key domain, not the Pick's output
+    // set), so the surface-position heritage enumerates exactly the picked
+    // members from the source's enumerable object arm.
     assert!(
-        !prop_names.contains(&"icon") && !prop_names.contains(&"avatar"),
-        "the OPEN `Pick<MessageProps<T>, …>` heritage must carrier-stop — its picked members must \
-         NOT flatten into the published surface, got: {prop_names:?}"
+        prop_names.contains(&"icon") && prop_names.contains(&"avatar"),
+        "the `Pick<MessageProps<T>, 'icon' | 'avatar'>` heritage must publish its picked \
+         members from the source's enumerable arm, got: {prop_names:?}"
+    );
+
+    // The un-picked `side` member must NOT flatten — whole-source
+    // materialisation of the open generic source (the ChatMessages.vue
+    // storm class) would publish it; the filtered surface-position
+    // enumeration must not.
+    assert!(
+        !prop_names.contains(&"side"),
+        "the un-picked `side` member must NOT flatten into the published surface — the OPEN \
+         source must never whole-materialise, got: {prop_names:?}"
     );
 
     // No published field may carry a budget-tripped partial sentinel.

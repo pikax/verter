@@ -1689,3 +1689,429 @@ fn genuine_runaway_budget_trip_still_refused_warm_admission() {
          admission gate to admit partials would make this a hit"
     );
 }
+
+// ===========================================================================
+// Pick over an INSTANTIATED generic source (regression: nuxt-ui
+// ContentSearch §3.1 / DropdownMenuContent §3.2).
+//
+// `Pick<P<Args>, K>` — an object-filter utility whose SOURCE is a generic
+// INSTANTIATION (an `InstantiationRef`, not a bare `DeclRef`) — must
+// materialise the requested keys path-precisely whenever the enumeration
+// domain is CLOSED per L1 (fixed-key source body; open args confined to
+// member VALUE positions keep the key domain CLOSED). The corpus bug
+// dropped ALL members (heritage position, concrete args) or exactly the
+// generic-value-dependent members (slots position, open arg).
+// ===========================================================================
+
+/// Direct-macro variant: `type Q = Pick<P<string>, 'a'|'b'>` published
+/// through `defineProps<Q>()`.
+const PICK_INST_GENERIC_DIRECT_VUE: &str = r#"<script lang="ts">
+interface P<T> {
+  a: T
+  b: string
+  c: number
+}
+type Q = Pick<P<string>, 'a' | 'b'>
+</script>
+
+<script setup lang="ts">
+defineProps<Q>()
+</script>
+
+<template><div /></template>
+"#;
+
+/// Heritage variant: `interface Props extends Pick<P<string>, 'a'|'b'>`.
+const PICK_INST_GENERIC_HERITAGE_VUE: &str = r#"<script lang="ts">
+interface P<T> {
+  a: T
+  b: string
+  c: number
+}
+interface Props extends Pick<P<string>, 'a' | 'b'> {
+  own?: boolean
+}
+</script>
+
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+
+<template><div /></template>
+"#;
+
+/// Heritage variant under an OPEN generic wrapper instantiated with the
+/// SFC's own `generic="T"` param (the ContentSearch shape: the macro
+/// payload is `Props<T-open>`, the Pick source args are CONCRETE).
+const PICK_INST_GENERIC_OPEN_WRAPPER_VUE: &str = r#"<script lang="ts">
+interface P<T> {
+  a: T
+  b: string
+  c: number
+}
+interface Props<T extends string = string> extends Pick<P<string>, 'a' | 'b'> {
+  own?: T
+}
+</script>
+
+<script setup lang="ts" generic="T extends string">
+defineProps<Props<T>>()
+</script>
+
+<template><div /></template>
+"#;
+
+/// Slots variant (the DropdownMenuContent shape): `Pick<S<A>, keys>`
+/// where `A` is bound to the SFC's OPEN generic and the picked member
+/// VALUES reference the source's defaulted second param `I = A[number]`.
+const PICK_INST_GENERIC_SLOTS_VUE: &str = r#"<script lang="ts">
+type SlotFn<T> = (props: { item: T, index: number }) => any[]
+
+type S9<A extends string[] = string[], I = A[number]> = {
+  'item'?: SlotFn<I>
+  'item-label'?: (props: { item: I, active: boolean }) => any[]
+  'empty'?: (props: { searchTerm: string }) => any[]
+  'content-top'?: (props: { sub: boolean }) => any[]
+}
+
+type CSlots<A extends string[] = string[]> = Pick<S9<A>, 'item' | 'item-label' | 'empty' | 'content-top'> & {
+  default?(props?: {}): any[]
+}
+</script>
+
+<script setup lang="ts" generic="T extends string[]">
+defineSlots<CSlots<T>>()
+</script>
+
+<template><div /></template>
+"#;
+
+fn pick_inst_generic_prop_names(vue: &str) -> Vec<String> {
+    let project = build_hermetic_project_with_workspace_graph(&[(
+        "/workspace/src/components/PickInst.vue",
+        vue,
+    )]);
+    let session = project.open_session_batch().expect("session");
+    let meta = session
+        .get_component_meta("/workspace/src/components/PickInst.vue")
+        .expect("session result")
+        .expect("component must resolve");
+    meta.props.iter().map(|p| p.name.to_string()).collect()
+}
+
+#[test]
+fn pick_over_instantiated_generic_direct_macro_materializes_members() {
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+
+    let project = build_hermetic_project_with_workspace_graph(&[(
+        "/workspace/src/components/PickInst.vue",
+        PICK_INST_GENERIC_DIRECT_VUE,
+    )]);
+    let session = project.open_session_batch().expect("session");
+    let meta = session
+        .get_component_meta("/workspace/src/components/PickInst.vue")
+        .expect("session result")
+        .expect("component must resolve");
+    let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        names.contains(&"a") && names.contains(&"b"),
+        "Pick<P<string>,'a'|'b'> via defineProps<Q>() must publish `a` and `b`, got {names:?}"
+    );
+    assert!(
+        !names.contains(&"c"),
+        "Pick<P<string>,'a'|'b'> must NOT publish `c`, got {names:?}"
+    );
+    // Substitution correctness: `a: T` under `P<string>` must publish as
+    // `string` — the instantiated meaning, not the raw parameter or a miss.
+    let a = meta
+        .props
+        .iter()
+        .find(|p| p.name == "a")
+        .expect("`a` prop present");
+    let a_type = crate::test_only::semantic_source_probe::demand_type_expr(
+        project.host(),
+        "/workspace/src/components/PickInst.vue",
+        a.type_source
+            .present()
+            .expect("`a` must publish a typed source"),
+    )
+    .expect("`a`'s published source must demand-materialize");
+    assert!(
+        matches!(&a_type, TypeExpr::Primitive(PrimitiveName::String)),
+        "`a` must substitute to `string` through Pick<P<string>,…>, got {a_type:?}"
+    );
+}
+
+#[test]
+fn pick_over_instantiated_generic_heritage_materializes_members() {
+    let names = pick_inst_generic_prop_names(PICK_INST_GENERIC_HERITAGE_VUE);
+    assert!(
+        names.iter().any(|n| n == "a")
+            && names.iter().any(|n| n == "b")
+            && names.iter().any(|n| n == "own"),
+        "interface Props extends Pick<P<string>,'a'|'b'> must publish `a`, `b`, `own`, got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "c"),
+        "heritage Pick<P<string>,'a'|'b'> must NOT publish `c`, got {names:?}"
+    );
+}
+
+#[test]
+fn pick_over_instantiated_generic_open_wrapper_heritage_materializes_members() {
+    let names = pick_inst_generic_prop_names(PICK_INST_GENERIC_OPEN_WRAPPER_VUE);
+    assert!(
+        names.iter().any(|n| n == "a")
+            && names.iter().any(|n| n == "b")
+            && names.iter().any(|n| n == "own"),
+        "Props<T-open> extends Pick<P<string>,'a'|'b'> must publish `a`, `b`, `own`, got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "c"),
+        "open-wrapper heritage Pick must NOT publish `c`, got {names:?}"
+    );
+}
+
+#[test]
+fn pick_over_instantiated_generic_slots_keeps_generic_value_dependent_keys() {
+    let project = build_hermetic_project_with_workspace_graph(&[(
+        "/workspace/src/components/PickInstSlots.vue",
+        PICK_INST_GENERIC_SLOTS_VUE,
+    )]);
+    let session = project.open_session_batch().expect("session");
+    let meta = session
+        .get_component_meta("/workspace/src/components/PickInstSlots.vue")
+        .expect("session result")
+        .expect("component must resolve");
+    let names: Vec<&str> = meta.slots.iter().map(|s| s.name.as_str()).collect();
+    for expected in ["item", "item-label", "empty", "content-top", "default"] {
+        assert!(
+            names.contains(&expected),
+            "Pick<S9<A-open>, keys> slots must include `{expected}` (generic-value-dependent keys \
+             must publish shallow, not drop), got {names:?}"
+        );
+    }
+}
+
+/// ContentSearch-shaped cross-file heritage fixture: the Pick source is a
+/// generic interface DECLARED IN ANOTHER `.vue` FILE (re-exported through
+/// a barrel), itself carrying Pick heritage over a `node_modules` type,
+/// instantiated with NESTED concrete instantiation args, consumed from an
+/// OPEN generic wrapper macro payload.
+const PICK_INST_XFILE_REKA_DTS: &str = r#"
+export type AcceptableValue = string | number | Record<string, any>
+export interface PrimitiveProps {
+  asChild?: boolean
+}
+export interface ListboxRootProps<T = AcceptableValue> extends PrimitiveProps {
+  modelValue?: T | T[]
+  multiple?: boolean
+  disabled?: boolean
+  highlightOnHover?: boolean
+  by?: string | ((a: T, b: T) => boolean)
+}
+"#;
+
+const PICK_INST_XFILE_COMPOSABLES_TS: &str = r#"
+export interface UseComponentIconsProps {
+  loading?: boolean
+  loadingIcon?: string
+}
+"#;
+
+const PICK_INST_XFILE_COMMAND_PALETTE_VUE: &str = r#"<script lang="ts">
+import type { ListboxRootProps } from 'reka-ui'
+import type { UseComponentIconsProps } from '../composables'
+
+export interface CommandPaletteItem {
+  label?: string
+  suffix?: string
+}
+
+export interface CommandPaletteGroup<T extends CommandPaletteItem = CommandPaletteItem> {
+  id: string
+  label?: string
+  items?: T[]
+}
+
+export interface CommandPaletteProps<G extends CommandPaletteGroup<T> = CommandPaletteGroup<any>, T extends CommandPaletteItem = CommandPaletteItem> extends Pick<ListboxRootProps, 'multiple' | 'disabled' | 'highlightOnHover'>, Pick<UseComponentIconsProps, 'loading' | 'loadingIcon'> {
+  icon?: string
+  placeholder?: string
+  groups?: G[]
+}
+</script>
+
+<script setup lang="ts" generic="G extends CommandPaletteGroup<T> = CommandPaletteGroup<any>, T extends CommandPaletteItem = CommandPaletteItem">
+defineProps<CommandPaletteProps<G, T>>()
+</script>
+
+<template><div /></template>
+"#;
+
+const PICK_INST_XFILE_TYPES_TS: &str = r#"
+export * from './components/CommandPalette.vue'
+"#;
+
+const PICK_INST_XFILE_CONTENT_SEARCH_VUE: &str = r#"<script lang="ts">
+import type { CommandPaletteProps, CommandPaletteGroup, CommandPaletteItem } from '../types'
+
+export interface ContentSearchItem extends CommandPaletteItem {
+  level?: number
+}
+
+export interface ContentSearchProps<T extends string = string> extends Pick<CommandPaletteProps<CommandPaletteGroup<ContentSearchItem>, ContentSearchItem>, 'icon' | 'placeholder' | 'groups' | 'disabled' | 'highlightOnHover' | 'loading'> {
+  own?: T
+}
+</script>
+
+<script setup lang="ts" generic="T extends string">
+defineProps<ContentSearchProps<T>>()
+</script>
+
+<template><div /></template>
+"#;
+
+#[test]
+fn pick_over_instantiated_generic_cross_file_heritage_materializes_members() {
+    let project = build_hermetic_project_with_workspace_graph(&[
+        (
+            "/workspace/node_modules/reka-ui/package.json",
+            r#"{ "name": "reka-ui", "types": "./index.d.ts" }"#,
+        ),
+        (
+            "/workspace/node_modules/reka-ui/index.d.ts",
+            PICK_INST_XFILE_REKA_DTS,
+        ),
+        (
+            "/workspace/src/composables.ts",
+            PICK_INST_XFILE_COMPOSABLES_TS,
+        ),
+        (
+            "/workspace/src/components/CommandPalette.vue",
+            PICK_INST_XFILE_COMMAND_PALETTE_VUE,
+        ),
+        ("/workspace/src/types.ts", PICK_INST_XFILE_TYPES_TS),
+        (
+            "/workspace/src/components/ContentSearch.vue",
+            PICK_INST_XFILE_CONTENT_SEARCH_VUE,
+        ),
+    ]);
+    let session = project.open_session_batch().expect("session");
+    let meta = session
+        .get_component_meta("/workspace/src/components/ContentSearch.vue")
+        .expect("session result")
+        .expect("component must resolve");
+    let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    for expected in [
+        "icon",
+        "placeholder",
+        "groups",
+        "disabled",
+        "highlightOnHover",
+        "loading",
+        "own",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "cross-file heritage Pick<CommandPaletteProps<…>, keys> must publish `{expected}`, \
+             got {names:?}"
+        );
+    }
+}
+
+/// GENUINELY-open-source variant (the DropdownMenuContent corpus shape):
+/// the Pick source is an intersection whose object arm has FIXED keys but
+/// whose mapped arm's key production depends on the open generic
+/// (`DynamicSlots`-like), so the SOURCE's full key domain is genuinely
+/// OPEN and the L1 carrier-stop correctly refuses whole-source
+/// materialisation. The Pick's OUTPUT-KEY selection (arg 1) is a CLOSED
+/// literal union, so a SURFACE-position demand (the macro slots surface)
+/// must still enumerate the picked keys path-precisely from the source's
+/// enumerable arms — dropping them was the corpus §3.2 bug.
+const PICK_OPEN_SOURCE_SLOTS_VUE: &str = r#"<script lang="ts">
+type SlotFn<T> = (props: { item: T, index: number }) => any[]
+
+type DynamicSlots<T, S extends string> = {
+  [K in keyof T as K extends string ? `${K}-${S}` : never]?: (props: T[K]) => any[]
+}
+
+type S9<A extends string[] = string[], I = A[number]> = {
+  'item'?: SlotFn<I>
+  'item-label'?: (props: { item: I, active: boolean }) => any[]
+  'empty'?: (props: { searchTerm: string }) => any[]
+  'content-top'?: (props: { sub: boolean }) => any[]
+} & DynamicSlots<I, 'x'>
+
+type CSlots<A extends string[] = string[]> = Pick<S9<A>, 'item' | 'item-label' | 'empty' | 'content-top'> & {
+  default?(props?: {}): any[]
+}
+</script>
+
+<script setup lang="ts" generic="T extends string[]">
+defineSlots<CSlots<T>>()
+</script>
+
+<template><div /></template>
+"#;
+
+/// Heritage variant of the genuinely-open-source case: the props
+/// interface extends a Pick whose source key domain is open (open mapped
+/// arm) while the picked keys live on the closed object arm.
+const PICK_OPEN_SOURCE_HERITAGE_VUE: &str = r#"<script lang="ts">
+type Expand<T> = {
+  [K in keyof T as K extends string ? `x-${K}` : never]?: T[K]
+}
+
+type W<T> = {
+  a: T
+  b: string
+  c: number
+} & Expand<T>
+
+interface Props<T extends object = object> extends Pick<W<T>, 'a' | 'b'> {
+  own?: boolean
+}
+</script>
+
+<script setup lang="ts" generic="T extends object">
+defineProps<Props<T>>()
+</script>
+
+<template><div /></template>
+"#;
+
+#[test]
+fn pick_over_genuinely_open_source_slots_still_enumerates_picked_keys() {
+    let project = build_hermetic_project_with_workspace_graph(&[(
+        "/workspace/src/components/PickOpenSlots.vue",
+        PICK_OPEN_SOURCE_SLOTS_VUE,
+    )]);
+    let session = project.open_session_batch().expect("session");
+    let meta = session
+        .get_component_meta("/workspace/src/components/PickOpenSlots.vue")
+        .expect("session result")
+        .expect("component must resolve");
+    let names: Vec<&str> = meta.slots.iter().map(|s| s.name.as_str()).collect();
+    for expected in ["item", "item-label", "empty", "content-top", "default"] {
+        assert!(
+            names.contains(&expected),
+            "Pick<S9<A-open> & open-mapped, closed-keys> slots must still enumerate `{expected}` \
+             from the source's enumerable arms, got {names:?}"
+        );
+    }
+}
+
+#[test]
+fn pick_over_genuinely_open_source_heritage_still_enumerates_picked_keys() {
+    let names = pick_inst_generic_prop_names(PICK_OPEN_SOURCE_HERITAGE_VUE);
+    for expected in ["a", "b", "own"] {
+        assert!(
+            names.iter().any(|n| n == expected),
+            "Props<T> extends Pick<open-mapped-source, 'a'|'b'> must publish `{expected}`, got {names:?}"
+        );
+    }
+    assert!(
+        !names.iter().any(|n| n == "c"),
+        "heritage Pick over open source must NOT publish unpicked `c`, got {names:?}"
+    );
+}

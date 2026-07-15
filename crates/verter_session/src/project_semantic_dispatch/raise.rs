@@ -2775,19 +2775,38 @@ fn prepared_instantiation_key_domain_is_closed_unguarded(
         }
         *budget -= 1;
         let Some(default_body) = deref_slot_body(ctx, slot) else {
-            return ClosednessVerdict::Unavailable;
+            // Undecidable default VALUE — bind the parameter OPEN (below)
+            // rather than refusing the whole instantiation: the openness
+            // only matters WHERE the body places the parameter.
+            bindings.insert(param.name.as_str(), KeyDomainBinding::Open);
+            continue;
         };
         let lowering = escape_lowering_env(dispatch, &prepared, &bindings);
         let default_node = lower_body_under_env(dispatch, &prepared, &default_body, &lowering.env);
         let verdict =
             classify_lowered_node_key_domain(dispatch, default_node, lowering.bound_params, budget);
-        if !verdict.is_closed() {
-            return verdict;
+        if verdict.is_closed() {
+            bindings.insert(
+                param.name.as_str(),
+                KeyDomainBinding::ClosedNode(default_node),
+            );
+        } else {
+            // POSITION-SENSITIVE per-argument rule: an unfilled defaulted
+            // parameter whose default does not verify closed (an open
+            // default such as `I = A[number]` over an open earlier
+            // parameter, or an undecidable one) binds OPEN — exactly like
+            // an open caller-supplied argument — and the body recipes
+            // decide where that openness lands. An open binding confined
+            // to member VALUE positions of a fixed-key body keeps the key
+            // domain CLOSED (`Pick<S<A-open>, K>` over
+            // `type S<A, I = A[number]> = { item?: Fn<I>; … }` still
+            // enumerates path-precisely); a key-reachable use still opens
+            // it through `ParamRef` / the escape walks. Refusing the whole
+            // instantiation here was the ContentSearch/DropdownMenuContent
+            // zero-member collapse: a value-only defaulted param vetoed a
+            // provably-fixed key set.
+            bindings.insert(param.name.as_str(), KeyDomainBinding::Open);
         }
-        bindings.insert(
-            param.name.as_str(),
-            KeyDomainBinding::ClosedNode(default_node),
-        );
     }
 
     for recipe in fact.body_recipes.iter() {
@@ -2841,6 +2860,17 @@ fn builtin_utility_key_domain_is_closed(decl_name: &str, args: &[KeyDomainBindin
 /// typed-IR inspection — it never reduces, substitutes, or loads new
 /// files — so this cap only guards a pathological already-interned
 /// graph; legitimate utility sources resolve in a handful of hops.
+///
+/// The budget is ALSO the walk's de-facto stack-depth ceiling (the
+/// openness recursion and the prepared-decl key-domain proofs it
+/// delegates to consume at least one budget unit per nesting level), so
+/// raising it requires a separate recursion-depth bound first: a
+/// 10_000-deep finite `KeyOf` chain overflows a 2 MiB test-thread stack
+/// near ~2048 nested walk frames. A deep-but-provably-closed real-world
+/// chain that exhausts this budget (`Unavailable` ⇒ L1 carrier-stop) is
+/// NOT silently dropped at surface demands: the shallow walker's
+/// `Pick`-carrier surface enumeration (`Frame::FlushObjectFilter`)
+/// still publishes the picked keys from the source's enumerable arms.
 const ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET: u32 = 256;
 
 /// Enumeration-domain argument index for an OBJECT-FILTER builtin utility
