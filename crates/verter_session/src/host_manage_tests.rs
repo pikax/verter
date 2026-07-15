@@ -7672,7 +7672,6 @@ fn resolve_eval_dependency_canonical_memo_is_isolated_per_request_context() {
     );
 }
 
-
 #[test]
 fn current_eval_state_normalizes_extensionless_canonical_before_fallback_load() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -13087,7 +13086,6 @@ mod manifest_types_entry_routing_tests {
         assert!(is_raw_import_specifier_id("lodash"));
     }
 }
-
 
 // ── resolve_eval_dependency_canonical_with: candidate probe contract ─────────
 //

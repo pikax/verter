@@ -153,10 +153,7 @@ impl TsQueryTransport for ScriptedTsQueryTransport {
                 .mutations
                 .front()
                 .is_some_and(|m| m.command == params.command);
-            if let Some(mutation) = front_matches
-                .then(|| state.mutations.pop_front())
-                .flatten()
-            {
+            if let Some(mutation) = front_matches.then(|| state.mutations.pop_front()).flatten() {
                 let mut cache = mutation
                     .handle
                     .try_lock()

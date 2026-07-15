@@ -252,8 +252,7 @@ mod tests {
     use verter_workspace::ViteConfigTrustInfo;
     use verter_workspace::{
         CanonicalPath, CompiledGlob, FallbackMembership, MemoryOptions, MemoryWorkspace,
-        NormalizedGlob,
-        ProjectResolver,
+        NormalizedGlob, ProjectResolver,
     };
 
     fn empty_workspace() -> MemoryWorkspace {
