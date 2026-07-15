@@ -192,10 +192,42 @@ fn print_profile(
     eprintln!("  fact versions:        {}", resolved.fact_versions.len());
 }
 
+/// Dump (and reset) the env-gated decl-lowering handoff rendezvous profile.
+/// Silent when `VERTER_DECL_HANDOFF_PROFILE` is off.
+fn print_decl_handoff(label: &str) {
+    let Some(s) = verter_session::dump_decl_handoff_stats() else {
+        return;
+    };
+    let ms = |ns: u64| ns as f64 / 1e6;
+    eprintln!(
+        "[decl-handoff:{label}] acquire ops={} parses={} queue={:.3}ms service={:.3}ms response={:.3}ms | run ops={} queue={:.3}ms service={:.3}ms response={:.3}ms | rendezvous-overhead: acquire(q+r)={:.3}ms all(q+r)={:.3}ms blocked-total={:.3}ms",
+        s.acquire_ops,
+        s.acquire_parses,
+        ms(s.acquire_queue_ns),
+        ms(s.acquire_service_ns),
+        ms(s.acquire_response_ns),
+        s.run_ops,
+        ms(s.run_queue_ns),
+        ms(s.run_service_ns),
+        ms(s.run_response_ns),
+        ms(s.acquire_queue_ns + s.acquire_response_ns),
+        ms(s.acquire_queue_ns + s.acquire_response_ns + s.run_queue_ns + s.run_response_ns),
+        ms(s.acquire_queue_ns
+            + s.acquire_service_ns
+            + s.acquire_response_ns
+            + s.run_queue_ns
+            + s.run_service_ns
+            + s.run_response_ns),
+    );
+    verter_session::reset_decl_handoff_stats();
+}
+
 fn profile_one(project_root: &Path, token: &str, repeats: usize) -> io::Result<()> {
     let target_file = resolve_target_file(project_root, token)?;
     let target_id = path_to_host_id(&target_file)?;
 
+    verter_session::reset_decl_handoff_stats();
+    let component_started = Instant::now();
     let host = make_host(project_root)?;
     let bootstrap_started = Instant::now();
     let _ = host.ensure_loaded(&target_id);
@@ -221,6 +253,8 @@ fn profile_one(project_root: &Path, token: &str, repeats: usize) -> io::Result<(
         );
         eprintln!();
     }
+    eprintln!("  component wall:       {:?}", component_started.elapsed());
+    print_decl_handoff(token);
 
     Ok(())
 }

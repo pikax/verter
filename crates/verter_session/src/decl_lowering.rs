@@ -229,6 +229,180 @@ impl SnapshotShard {
     }
 }
 
+/// Env gate for the decl-lowering handoff rendezvous profile. Set to a
+/// non-empty value other than `0` to record, per rendezvous op, the
+/// three-way queue/service/response timing split into a process-global
+/// sink readable through [`dump_decl_handoff_stats`]. Off (the default)
+/// the rendezvous paths are byte-identical to the unprofiled arms — no
+/// clock reads, no payload change, no counter traffic.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const DECL_HANDOFF_PROFILE_ENV: &str = "VERTER_DECL_HANDOFF_PROFILE";
+
+/// Cumulative decl-lowering handoff rendezvous counters — one record per
+/// worker rendezvous, split into the three legs the caller's blocking
+/// `recv` covers:
+///
+/// * **queue** — caller `send` → worker dequeues and starts the job
+///   (message + wakeup latency on the worker side);
+/// * **service** — the job body itself (parse / lowering — the useful
+///   work the caller genuinely has to wait for);
+/// * **response** — worker `send` of the result → caller's `recv`
+///   returns (result message + caller wakeup latency).
+///
+/// Acquire ops ([`DeclLoweringService::acquire_lease`]) and run ops
+/// ([`DeclLoweringService::run_leased`]) aggregate separately: a cold
+/// first body demand pays one of each back-to-back, so the acquire
+/// op's queue+response legs are exactly the overhead a fused
+/// acquire+first-run handoff would reclaim.
+///
+/// Diagnostic accounting only — never a validity or scheduling signal.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub(crate) struct HandoffStats {
+    acquire_ops: std::sync::atomic::AtomicU64,
+    acquire_parses: std::sync::atomic::AtomicU64,
+    acquire_queue_ns: std::sync::atomic::AtomicU64,
+    acquire_service_ns: std::sync::atomic::AtomicU64,
+    acquire_response_ns: std::sync::atomic::AtomicU64,
+    run_ops: std::sync::atomic::AtomicU64,
+    run_queue_ns: std::sync::atomic::AtomicU64,
+    run_service_ns: std::sync::atomic::AtomicU64,
+    run_response_ns: std::sync::atomic::AtomicU64,
+}
+
+/// Cross-thread monotonic span in nanoseconds; a clock inversion (never
+/// observed in practice — `Instant` is process-wide monotonic on every
+/// supported platform) clamps to zero rather than panicking.
+#[cfg(not(target_arch = "wasm32"))]
+fn saturating_ns(from: std::time::Instant, to: std::time::Instant) -> u64 {
+    to.checked_duration_since(from)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl HandoffStats {
+    fn record_acquire(
+        &self,
+        submitted: std::time::Instant,
+        started: std::time::Instant,
+        finished: std::time::Instant,
+        received: std::time::Instant,
+        parsed_now: bool,
+    ) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.acquire_ops.fetch_add(1, Relaxed);
+        if parsed_now {
+            self.acquire_parses.fetch_add(1, Relaxed);
+        }
+        self.acquire_queue_ns
+            .fetch_add(saturating_ns(submitted, started), Relaxed);
+        self.acquire_service_ns
+            .fetch_add(saturating_ns(started, finished), Relaxed);
+        self.acquire_response_ns
+            .fetch_add(saturating_ns(finished, received), Relaxed);
+    }
+
+    fn record_run(
+        &self,
+        submitted: std::time::Instant,
+        started: std::time::Instant,
+        finished: std::time::Instant,
+        received: std::time::Instant,
+    ) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.run_ops.fetch_add(1, Relaxed);
+        self.run_queue_ns
+            .fetch_add(saturating_ns(submitted, started), Relaxed);
+        self.run_service_ns
+            .fetch_add(saturating_ns(started, finished), Relaxed);
+        self.run_response_ns
+            .fetch_add(saturating_ns(finished, received), Relaxed);
+    }
+
+    fn snapshot(&self) -> DeclHandoffSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        DeclHandoffSnapshot {
+            acquire_ops: self.acquire_ops.load(Relaxed),
+            acquire_parses: self.acquire_parses.load(Relaxed),
+            acquire_queue_ns: self.acquire_queue_ns.load(Relaxed),
+            acquire_service_ns: self.acquire_service_ns.load(Relaxed),
+            acquire_response_ns: self.acquire_response_ns.load(Relaxed),
+            run_ops: self.run_ops.load(Relaxed),
+            run_queue_ns: self.run_queue_ns.load(Relaxed),
+            run_service_ns: self.run_service_ns.load(Relaxed),
+            run_response_ns: self.run_response_ns.load(Relaxed),
+        }
+    }
+
+    fn reset(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.acquire_ops.store(0, Relaxed);
+        self.acquire_parses.store(0, Relaxed);
+        self.acquire_queue_ns.store(0, Relaxed);
+        self.acquire_service_ns.store(0, Relaxed);
+        self.acquire_response_ns.store(0, Relaxed);
+        self.run_ops.store(0, Relaxed);
+        self.run_queue_ns.store(0, Relaxed);
+        self.run_service_ns.store(0, Relaxed);
+        self.run_response_ns.store(0, Relaxed);
+    }
+}
+
+/// One cumulative snapshot of the env-gated decl-lowering handoff
+/// rendezvous profile — see [`HandoffStats`] for leg semantics.
+/// **Diagnostic accessor**, mirroring `dump_from_host_call_sites`:
+/// bench/profiling harnesses read it at pass boundaries; production
+/// code never consults it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeclHandoffSnapshot {
+    pub acquire_ops: u64,
+    pub acquire_parses: u64,
+    pub acquire_queue_ns: u64,
+    pub acquire_service_ns: u64,
+    pub acquire_response_ns: u64,
+    pub run_ops: u64,
+    pub run_queue_ns: u64,
+    pub run_service_ns: u64,
+    pub run_response_ns: u64,
+}
+
+/// The process-global profile sink: `Some` exactly when the
+/// [`DECL_HANDOFF_PROFILE_ENV`] gate was set (to a non-empty value other
+/// than `0`) at first consultation. Resolved once — services capture the
+/// resolved sink at construction, so the per-op cost when off is one
+/// `Option` check on an already-loaded field.
+#[cfg(not(target_arch = "wasm32"))]
+fn global_handoff_stats() -> Option<&'static Arc<HandoffStats>> {
+    static GLOBAL: std::sync::OnceLock<Option<Arc<HandoffStats>>> = std::sync::OnceLock::new();
+    GLOBAL
+        .get_or_init(|| {
+            let enabled = std::env::var_os(DECL_HANDOFF_PROFILE_ENV)
+                .is_some_and(|v| !v.is_empty() && v != "0");
+            enabled.then(|| Arc::new(HandoffStats::default()))
+        })
+        .as_ref()
+}
+
+/// Snapshot the global handoff rendezvous counters. `None` when the
+/// [`DECL_HANDOFF_PROFILE_ENV`] gate is off — the sink does not exist
+/// and nothing was recorded.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn dump_decl_handoff_stats() -> Option<DeclHandoffSnapshot> {
+    global_handoff_stats().map(|stats| stats.snapshot())
+}
+
+/// Zero the global handoff rendezvous counters — only useful for benches
+/// that want per-pass deltas. No-op when the gate is off.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn reset_decl_handoff_stats() {
+    if let Some(stats) = global_handoff_stats() {
+        stats.reset();
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn shard_index(key: &SnapshotKey, worker_count: usize) -> usize {
     use std::hash::{Hash, Hasher};
@@ -279,6 +453,12 @@ pub(crate) struct DeclLoweringService {
     /// `get_or_init` in [`Self::workers`].
     #[cfg(not(target_arch = "wasm32"))]
     workers: std::sync::OnceLock<Vec<std::sync::mpsc::Sender<WorkerJob>>>,
+    /// Env-gated handoff rendezvous profile sink, resolved ONCE at
+    /// construction from the global gate ([`global_handoff_stats`]).
+    /// `None` (the default) keeps both rendezvous paths byte-identical
+    /// to the unprofiled arms.
+    #[cfg(not(target_arch = "wasm32"))]
+    profile: Option<Arc<HandoffStats>>,
     // On `wasm32` the service is FIELDLESS: the retained shard lives in
     // the `WASM_DECL_LOWERING_SHARD` thread-local, never here, so the
     // service stays `Send + Sync` without any `unsafe impl`.
@@ -327,6 +507,7 @@ impl DeclLoweringService {
         Self {
             worker_count,
             workers,
+            profile: global_handoff_stats().cloned(),
         }
     }
 
@@ -345,6 +526,17 @@ impl DeclLoweringService {
     #[cfg(all(test, not(target_arch = "wasm32")))]
     fn new_single_worker() -> Self {
         Self::new_with(/* lazy = */ false, 1)
+    }
+
+    /// Test-only single-worker constructor with an INJECTED handoff
+    /// profile sink — exercises the profiled rendezvous arms without
+    /// touching the process-global env gate (which would leak across
+    /// tests sharing the process).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn new_single_worker_with_profile(sink: Arc<HandoffStats>) -> Self {
+        let mut service = Self::new_with(/* lazy = */ false, 1);
+        service.profile = Some(sink);
+        service
     }
 
     /// Spawn (once) and return the worker job channels. The first caller
@@ -387,19 +579,50 @@ impl DeclLoweringService {
             // service was constructed lazily (`batch_typecheck`).
             let workers = self.workers();
             let shard_index = shard_index(key, workers.len());
-            let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
             let key_for_job = key.clone();
             let source = Arc::clone(source);
-            let job: WorkerJob = Box::new(move |shard| {
-                let parsed_now = shard.acquire(&key_for_job, &source, source_type);
-                let _ = result_tx.send(parsed_now);
-            });
-            workers[shard_index]
-                .send(job)
-                .expect("decl-lowering worker channel must outlive the service");
-            result_rx
-                .recv()
-                .expect("decl-lowering worker must answer every acquire")
+            match self.profile.as_ref() {
+                None => {
+                    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+                    let job: WorkerJob = Box::new(move |shard| {
+                        let parsed_now = shard.acquire(&key_for_job, &source, source_type);
+                        let _ = result_tx.send(parsed_now);
+                    });
+                    workers[shard_index]
+                        .send(job)
+                        .expect("decl-lowering worker channel must outlive the service");
+                    result_rx
+                        .recv()
+                        .expect("decl-lowering worker must answer every acquire")
+                }
+                // Profiled arm (env-gated / test-injected): identical
+                // rendezvous semantics; the payload additionally carries the
+                // worker-side job-start/job-end instants so the caller can
+                // record the queue/service/response split.
+                Some(stats) => {
+                    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+                    let submitted = std::time::Instant::now();
+                    let job: WorkerJob = Box::new(move |shard| {
+                        let started = std::time::Instant::now();
+                        let parsed_now = shard.acquire(&key_for_job, &source, source_type);
+                        let _ = result_tx.send((parsed_now, started, std::time::Instant::now()));
+                    });
+                    workers[shard_index]
+                        .send(job)
+                        .expect("decl-lowering worker channel must outlive the service");
+                    let (parsed_now, started, finished) = result_rx
+                        .recv()
+                        .expect("decl-lowering worker must answer every acquire");
+                    stats.record_acquire(
+                        submitted,
+                        started,
+                        finished,
+                        std::time::Instant::now(),
+                        parsed_now,
+                    );
+                    parsed_now
+                }
+            }
         };
         #[cfg(target_arch = "wasm32")]
         let parsed_now = WASM_DECL_LOWERING_SHARD
@@ -566,23 +789,52 @@ impl DeclLoweringService {
             // set through the same single authority as every other operation.
             let workers = self.workers();
             let shard_index = shard_index(key, workers.len());
-            let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
             let key = key.clone();
-            let worker_job: WorkerJob = Box::new(move |shard| {
-                // `None` = lease miss (job does not run, nothing is parsed);
-                // `Some(catch_unwind(..))` = the retained snapshot ran the job.
-                let result = shard.snapshot_leased(&key).map(|parsed| {
-                    std::panic::catch_unwind(AssertUnwindSafe(|| job(parsed.as_deref())))
-                });
-                let _ = result_tx.send(result);
-            });
-            workers[shard_index]
-                .send(worker_job)
-                .expect("decl-lowering worker channel must outlive the service");
-            match result_rx
-                .recv()
-                .expect("decl-lowering worker must answer every job")
-            {
+            let result = match self.profile.as_ref() {
+                None => {
+                    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+                    let worker_job: WorkerJob = Box::new(move |shard| {
+                        // `None` = lease miss (job does not run, nothing is
+                        // parsed); `Some(catch_unwind(..))` = the retained
+                        // snapshot ran the job.
+                        let result = shard.snapshot_leased(&key).map(|parsed| {
+                            std::panic::catch_unwind(AssertUnwindSafe(|| job(parsed.as_deref())))
+                        });
+                        let _ = result_tx.send(result);
+                    });
+                    workers[shard_index]
+                        .send(worker_job)
+                        .expect("decl-lowering worker channel must outlive the service");
+                    result_rx
+                        .recv()
+                        .expect("decl-lowering worker must answer every job")
+                }
+                // Profiled arm (env-gated / test-injected): identical
+                // rendezvous + panic semantics; the payload additionally
+                // carries the worker-side job-start/job-end instants. A
+                // lease miss and a panicking job still record their op —
+                // the caller paid the full rendezvous either way.
+                Some(stats) => {
+                    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+                    let submitted = std::time::Instant::now();
+                    let worker_job: WorkerJob = Box::new(move |shard| {
+                        let started = std::time::Instant::now();
+                        let result = shard.snapshot_leased(&key).map(|parsed| {
+                            std::panic::catch_unwind(AssertUnwindSafe(|| job(parsed.as_deref())))
+                        });
+                        let _ = result_tx.send((result, started, std::time::Instant::now()));
+                    });
+                    workers[shard_index]
+                        .send(worker_job)
+                        .expect("decl-lowering worker channel must outlive the service");
+                    let (result, started, finished) = result_rx
+                        .recv()
+                        .expect("decl-lowering worker must answer every job");
+                    stats.record_run(submitted, started, finished, std::time::Instant::now());
+                    result
+                }
+            };
+            match result {
                 None => None,
                 Some(Ok(value)) => Some(value),
                 Some(Err(panic_payload)) => std::panic::resume_unwind(panic_payload),
@@ -1025,6 +1277,126 @@ mod tests {
         assert!(
             eager_explicit.workers_spawned(),
             "`new_with(false, …)` must spawn worker threads eagerly"
+        );
+    }
+
+    /// The handoff-stats aggregation is exact arithmetic over the four
+    /// rendezvous timestamps: queue = submit→job-start, service =
+    /// job-start→job-end, response = job-end→caller-wakeup. Synthetic
+    /// instants make the expected nanosecond sums exact.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn handoff_stats_record_exact_three_way_split() {
+        use std::time::{Duration, Instant};
+
+        let stats = HandoffStats::default();
+        let submitted = Instant::now();
+        let started = submitted + Duration::from_micros(50);
+        let finished = started + Duration::from_micros(300);
+        let received = finished + Duration::from_micros(20);
+
+        stats.record_acquire(submitted, started, finished, received, true);
+        stats.record_acquire(submitted, started, finished, received, false);
+        stats.record_run(submitted, started, finished, received);
+
+        let snap = stats.snapshot();
+        assert_eq!(snap.acquire_ops, 2);
+        assert_eq!(snap.acquire_parses, 1, "only the parsed_now acquire counts");
+        assert_eq!(snap.acquire_queue_ns, 100_000);
+        assert_eq!(snap.acquire_service_ns, 600_000);
+        assert_eq!(snap.acquire_response_ns, 40_000);
+        assert_eq!(snap.run_ops, 1);
+        assert_eq!(snap.run_queue_ns, 50_000);
+        assert_eq!(snap.run_service_ns, 300_000);
+        assert_eq!(snap.run_response_ns, 20_000);
+
+        stats.reset();
+        let cleared = stats.snapshot();
+        assert_eq!(cleared.acquire_ops, 0);
+        assert_eq!(cleared.run_ops, 0);
+        assert_eq!(cleared.acquire_queue_ns + cleared.run_service_ns, 0);
+    }
+
+    /// A profile-sink-carrying service records one acquire op per
+    /// `acquire_lease` rendezvous (parse-discriminated) and one run op per
+    /// `run_leased` rendezvous — hits, lease misses, and panicking jobs
+    /// alike (a miss/panic still pays the full rendezvous). Panic
+    /// re-raise semantics are unchanged on the profiled arm.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn profiled_service_records_acquire_and_run_rendezvous() {
+        let sink = Arc::new(HandoffStats::default());
+        let service = Arc::new(DeclLoweringService::new_single_worker_with_profile(
+            Arc::clone(&sink),
+        ));
+        let source: Arc<str> = Arc::from("type A = { a: 1 };\n");
+        let k = key("/ws/profiled.ts", 1);
+        let st = oxc_span::SourceType::ts();
+
+        let lease = service.acquire_lease(&k, &source, st);
+        assert!(lease.parsed_now);
+        let hit = service.run_leased(&k, |program| program.is_some());
+        assert_eq!(hit, Some(true));
+
+        let snap = sink.snapshot();
+        assert_eq!(snap.acquire_ops, 1);
+        assert_eq!(snap.acquire_parses, 1);
+        assert_eq!(snap.run_ops, 1);
+        assert!(
+            snap.acquire_service_ns > 0,
+            "the acquire service span covers the real parse"
+        );
+        assert!(
+            snap.run_queue_ns + snap.run_service_ns + snap.run_response_ns > 0,
+            "the run rendezvous records a non-zero three-way split"
+        );
+
+        // A second same-key lease is a rendezvous WITHOUT a parse.
+        let lease2 = service.acquire_lease(&k, &source, st);
+        assert!(!lease2.parsed_now);
+        let snap2 = sink.snapshot();
+        assert_eq!(snap2.acquire_ops, 2);
+        assert_eq!(snap2.acquire_parses, 1);
+
+        // A panicking job still re-raises on the caller AND records its op.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.run_leased(&k, |_| -> () { panic!("job bug") })
+        }));
+        assert!(panicked.is_err(), "the job panic must reach the caller");
+        assert_eq!(sink.snapshot().run_ops, 2);
+
+        // A lease-miss run is still a full rendezvous — it must count.
+        drop(lease.lease);
+        drop(lease2.lease);
+        let miss = service.run_leased(&k, |program| program.is_some());
+        assert!(miss.is_none());
+        assert_eq!(sink.snapshot().run_ops, 3);
+    }
+
+    /// With no profile sink (and the env gate off), rendezvous ops record
+    /// nothing anywhere: the global diagnostic dump stays `None`. A
+    /// regression that recorded unconditionally into the global sink
+    /// would surface a `Some` snapshot here.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unprofiled_service_records_nothing_and_global_dump_stays_none() {
+        if std::env::var_os(DECL_HANDOFF_PROFILE_ENV).is_some() {
+            // The env gate is process-global; under an externally enabled
+            // profile run this assertion is not meaningful.
+            return;
+        }
+        let service = Arc::new(DeclLoweringService::new());
+        let source: Arc<str> = Arc::from("type A = 1;\n");
+        let k = key("/ws/unprofiled.ts", 2);
+        let st = oxc_span::SourceType::ts();
+
+        let lease = service.acquire_lease(&k, &source, st);
+        let _ = service.run_leased(&k, |program| program.is_some());
+        drop(lease.lease);
+
+        assert!(
+            dump_decl_handoff_stats().is_none(),
+            "with the env gate off, no rendezvous may record into the global sink"
         );
     }
 }
