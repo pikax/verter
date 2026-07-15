@@ -628,17 +628,59 @@ fn write_summary_csv(out_dir: &Path, rows: &[PassRow]) -> io::Result<()> {
 }
 
 fn parse_targets(project_root: &Path) -> io::Result<Vec<String>> {
-    if let Ok(raw) = std::env::var("VERTER_AUDIT_TARGETS") {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect());
+    let mut targets = 'targets: {
+        if let Ok(raw) = std::env::var("VERTER_AUDIT_TARGETS") {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                break 'targets trimmed
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+        }
+        discover_all_components(project_root)?
+    };
+    // VERTER_AUDIT_LIMIT=<n> truncates the (sorted-discovery or explicit)
+    // target set to its first n entries — the `--limit=n` batch shape.
+    if let Ok(raw) = std::env::var("VERTER_AUDIT_LIMIT") {
+        if let Ok(limit) = raw.trim().parse::<usize>() {
+            if limit > 0 && targets.len() > limit {
+                targets.truncate(limit);
+            }
         }
     }
-    discover_all_components(project_root)
+    Ok(targets)
+}
+
+/// Dump (and reset) the env-gated decl-lowering handoff rendezvous profile
+/// at a pass boundary. Silent when `VERTER_DECL_HANDOFF_PROFILE` is off.
+fn print_decl_handoff(label: &str) {
+    let Some(s) = verter_session::dump_decl_handoff_stats() else {
+        return;
+    };
+    let ms = |ns: u64| ns as f64 / 1e6;
+    eprintln!(
+        "[decl-handoff:{label}] acquire ops={} parses={} queue={:.3}ms service={:.3}ms response={:.3}ms | run ops={} queue={:.3}ms service={:.3}ms response={:.3}ms | rendezvous-overhead: acquire(q+r)={:.3}ms all(q+r)={:.3}ms blocked-total={:.3}ms",
+        s.acquire_ops,
+        s.acquire_parses,
+        ms(s.acquire_queue_ns),
+        ms(s.acquire_service_ns),
+        ms(s.acquire_response_ns),
+        s.run_ops,
+        ms(s.run_queue_ns),
+        ms(s.run_service_ns),
+        ms(s.run_response_ns),
+        ms(s.acquire_queue_ns + s.acquire_response_ns),
+        ms(s.acquire_queue_ns + s.acquire_response_ns + s.run_queue_ns + s.run_response_ns),
+        ms(s.acquire_queue_ns
+            + s.acquire_service_ns
+            + s.acquire_response_ns
+            + s.run_queue_ns
+            + s.run_service_ns
+            + s.run_response_ns),
+    );
+    verter_session::reset_decl_handoff_stats();
 }
 
 fn parse_passes() -> Vec<String> {
@@ -784,6 +826,7 @@ fn main() -> io::Result<()> {
                 let started = Instant::now();
                 let rows = run_pass_fresh_cold(&project_root, &targets, "fresh-cold", &out_dir)?;
                 eprintln!("fresh-cold pass took {:?}\n", started.elapsed());
+                print_decl_handoff("fresh-cold");
                 all_rows.extend(rows);
             }
             "cold-seq" => {
@@ -792,6 +835,7 @@ fn main() -> io::Result<()> {
                 let host = build_host(&project_root)?;
                 let rows = run_pass_seq(&host, &project_root, &targets, "cold-seq", &out_dir);
                 eprintln!("cold-seq pass took {:?}\n", started.elapsed());
+                print_decl_handoff("cold-seq");
                 shared_host = Some(host);
                 all_rows.extend(rows);
             }
@@ -812,9 +856,11 @@ fn main() -> io::Result<()> {
                 // Reset AGAIN after prime so the per-pass dump excludes
                 // the silent prime work for the no-prior-host case.
                 verter_session::reset_from_host_call_sites();
+                verter_session::reset_decl_handoff_stats();
                 let started = Instant::now();
                 let rows = run_pass_seq(&host, &project_root, &targets, "warm", &out_dir);
                 eprintln!("warm pass took {:?}\n", started.elapsed());
+                print_decl_handoff("warm");
                 all_rows.extend(rows);
             }
             "warm2" => {
@@ -835,6 +881,7 @@ fn main() -> io::Result<()> {
                 let started = Instant::now();
                 let rows = run_pass_seq(&host, &project_root, &targets, "warm2", &out_dir);
                 eprintln!("warm2 pass took {:?}\n", started.elapsed());
+                print_decl_handoff("warm2");
                 all_rows.extend(rows);
             }
             other => {

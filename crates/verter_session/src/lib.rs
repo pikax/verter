@@ -404,6 +404,12 @@ pub use resolver_store::{
     dump_from_host_call_sites, reset_from_host_call_sites, reset_store_view_coherent_build_sweeps,
     store_view_coherent_build_sweeps,
 };
+// Env-gated decl-lowering handoff rendezvous profile (queue/service/
+// response split per worker rendezvous) — diagnostic accessors for the
+// bench/profiling harnesses, same pattern as `dump_from_host_call_sites`.
+// Native-only: wasm runs lowering inline with no worker rendezvous.
+#[cfg(not(target_arch = "wasm32"))]
+pub use decl_lowering::{dump_decl_handoff_stats, reset_decl_handoff_stats, DeclHandoffSnapshot};
 // The session-overlay copy-on-write counter is deliberately NOT a
 // process-global re-export: it lives per-host on
 // `VerterHost::provenance().session_overlay_cows` (`types::MetaProvenance`)
