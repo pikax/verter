@@ -65,7 +65,8 @@ cargo --version  # should be Linux rustc
 
 ```bash
 cd ~
-git clone /mnt/d/dev/personal/verter verter-ci-repro
+# <windows-checkout-root> is the WSL mount of your Windows checkout, e.g. /mnt/c/path/to/verter
+git clone <windows-checkout-root> verter-ci-repro
 cd ~/verter-ci-repro
 ```
 
@@ -89,8 +90,9 @@ git fetch origin
 git checkout -B <branch-name> origin/<branch-name>
 
 # Copy any unstaged changes from the Windows working tree
-cp /mnt/d/dev/personal/verter/crates/verter_lsp/src/server.rs crates/verter_lsp/src/server.rs
-cp /mnt/d/dev/personal/verter/crates/verter_lsp/src/tsgo/ipc.rs crates/verter_lsp/src/tsgo/ipc.rs
+# (<windows-checkout-root> is the WSL mount of your Windows checkout)
+cp <windows-checkout-root>/crates/verter_lsp/src/server.rs crates/verter_lsp/src/server.rs
+cp <windows-checkout-root>/crates/verter_lsp/src/tsgo/ipc.rs crates/verter_lsp/src/tsgo/ipc.rs
 # ... copy other changed files as needed
 ```
 

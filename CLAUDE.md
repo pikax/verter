@@ -1,407 +1,304 @@
 # Verter
 
-Verter is a Vue compiler and Language Server Protocol (LSP) implementation. It converts Vue Single File Components (SFCs) to valid TSX (leveraging TypeScript for type checking) and compiles templates to optimized render functions. Unlike Volar, Verter generates actual valid TSX code rather than virtual files.
+Verter = a Vue compiler + Language Server Protocol (LSP) implementation. Converts Vue Single File Components (SFCs) to valid TSX (TypeScript type-checks them) and compiles templates to optimized render functions. Unlike Volar, Verter generates real valid TSX, not virtual files.
 
-The project is a hybrid Rust + TypeScript monorepo: Rust crates handle template compilation (exposed via NAPI-RS native bindings and wasm-bindgen WASM) and the LSP server (`verter_lsp` binary, communicates over stdio), while TypeScript packages handle the SFC-to-TSX transformation and IDE integration.
+Hybrid Rust + TypeScript monorepo: Rust crates own carrier parsing, runtime and IDE code generation, the shared semantic session, and the LSP server (`verter_lsp` binary, stdio); TypeScript packages provide editor integration, TypeScript-provider adapters, protocol bindings, and bundler orchestration.
 
 ## Architecture
+
+Detailed module reference, key files, and implementation specifics live in domain skills: `/type-resolution`, `/type-cache-architecture`, `/component-meta`, `/compiler-codegen`, `/host-session`, `/architecture`.
 
 ### Shared Optimized Codebase (CRITICAL)
 
 Verter is one shared optimized codebase, not separate semantic implementations per consumer.
 
-- Improvements should land in the lowest reusable owner crate that can correctly serve all consumers.
-- `verter_host` and shared workspace/VFS integration are the authority for host-backed loading, invalidation, dependency tracking, and cache reuse.
-- `verter_analysis` and `verter_core` own reusable semantics and type-resolution logic.
-- `verter_ffi` owns shared boundary DTOs between native bindings and WASM bindings.
-- Consumer packages such as `@verter/component-meta`, the LSP, MCP, unplugin, and playground should consume the shared substrate rather than carrying their own semantic forks.
+- Improvements land in the lowest reusable owner crate that can correctly serve all consumers.
+- `verter_session` + shared workspace/VFS integration are the authority for host-backed loading, invalidation, dependency tracking, cache reuse.
+- `verter_semantic` + `verter_compiler` own reusable semantics, lowering, codegen.
+- `verter_session::resolver_core` owns the host-backed resolver stack + type-resolution orchestration.
+- `verter_audit` is the leaf observability substrate (depends only on `verter_span`, no back-edge; lower crates emit through `current_observer()` (TLS) without knowing whether a `HostAuditRuntime` is installed); the concrete host runtime lives in `verter_session` — full ownership inventory in `/audit-infrastructure`.
+- `verter_protocol` owns transport-facing schema DTOs; `verter_ffi` remains the thin native/WASM adapter layer.
+- Consumer packages (`@verter/component-meta`, LSP, MCP, unplugin, playground) consume the shared substrate, not their own semantic forks.
 
 Architectural consequence:
 
-- A performance or correctness fix discovered in one surface should be implemented in the shared owner layer whenever that behavior is reusable.
-- Consumer-local wrappers should stay thin and should not bypass shared parsing, analysis, resolution, or cache ownership.
+- A perf/correctness fix found in one surface is implemented in the shared owner layer whenever the behavior is reusable.
+- Consumer-local wrappers stay thin and do not bypass shared parsing, analysis, resolution, or cache ownership.
 
-### Macro Type Traversal Rule (CRITICAL)
+**Exactly one type-resolution engine.** `SemanticQueryKey` → `ProjectSemanticDispatch::execute` → `SemanticGraphStore`, five query modes (`Identity`/`Navigate`/`Shallow`/`Expanded`/`Skeleton`) — the SOLE query-time type resolver. OXC is the syntax/lowering front-end ONLY (declaration bodies lower to `TypeExpr` lazily on first semantic demand through the scheduler-retained parse snapshot — the `DeclBodyMemo` owned by `IndexedReady`); OXC must never resolve types at query time. Any second query-time resolution path — a parallel `resolve_type` engine, a per-surface walker, a re-parse-and-resolve, an OXC element/frontier resolver — is a rule violation: delete it, route through the shared resolver. Two engines diverge; divergence is the bug/hang class.
 
-When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, component-meta deep expansion, etc.), only follow the import graph reachable from the requested type's declaration graph.
+**Audit infrastructure:** Rust-first deterministic per-request observability for every audited `VerterHost` entry-point (component-meta, type-resolution, compile, analyze, workspace ops, LSP handlers, MCP tools, bundler batches). TS bindings in `packages/types/audit.generated.ts`; opt-in via `HostConfig::audit_enabled + footprint_capture`. See `/audit-infrastructure` and [`docs/audit-footprint/`](docs/audit-footprint/).
 
-- There is one shared cross-file type resolver for host-backed component-meta and analysis work. Do not add consumer-specific resolver forks.
-- That resolver has exactly two modes:
-  - `Type`: resolve the requested symbol identity and canonical source location only. Do not expand the shape.
-  - `Expanded`: resolve the same symbol through the same traversal, then materialize the expanded shape / expanded text.
-- Component-meta uses the shared resolver in `Expanded` mode for every macro-facing surface. This includes all script-setup macros and all Options API surfaces that contribute metadata, such as props, data, computed, emits, slots, and expose-like members.
-- Do not walk unrelated imports from the same file.
-- Do not treat plain imports as implicit exports.
-- Keep direct re-exports (`export { X } from`, `export * from`) as an explicit separate path.
-- Parsing a `.ts`/`.js`/declaration file for type resolution must cache discovered symbol name → canonical location mappings.
-- Re-exported names and barrel hops must also be cached once discovered. If traversal follows `export * from './foo'`, cache that result so later lookups do not rescan the same barrel chain.
+Guards: `verter_audit_no_upward_deps`, `audit_substrate_isolation`, `audit_observer_single_accessor`; single-engine cluster (registered under Macro Type Traversal Rule): `no_new_resolve_type_engine_path_production_file`, `no_new_resolved_elements_production_file`, `no_new_prepared_surface_projection_production_file`, `no_new_from_eager_meta_production_site`, `no_new_duplicate_read_surface_members_definition`.
 
-If a file imports 20 modules but the requested macro type only references `AvatarProps` and `IconProps`, external resolution must only traverse those reachable dependencies.
+### Build Philosophy (CRITICAL)
 
-**TS-first resolution priority:** TypeScript types always take priority over JavaScript files when resolving ambiguous dependency candidates. Verter is a type-strict compiler that relies on TS typing for correctness. JS files should only be used as a last resort when no TS type definition is available. When `DependencyResolution.possible_canonical_ids` contains multiple candidates, use `effective_target()` which selects the single highest-priority candidate: `.d.ts` > `.d.cts` > `.d.mts` > `.ts` > `.tsx` > `.js` > `.jsx` > `.cjs` > `.mjs`. Do not try remaining candidates if the selected one lacks the needed type — treat as not found.
+Same end-state philosophy as `binary-exploring-lamport.md`. Core rules:
+
+1. Read, parse, shallow-process, cache each canonical file once per content hash through one shared host path.
+2. Store the full shallow symbol inventory up front, then process only requested items on demand.
+3. Same-file closure stays local to the owning file.
+4. Cross-file deepening happens in one place only, one import level at a time.
+5. The builder/solver reads only from cached lookup state; it does not reopen file loading or routing.
+6. The design is demand-driven and query-scoped.
+7. The final implementation lands as one clean cutover, not a merged dual-path transition.
+8. Component-meta, LSP, MCP, and other host-backed consumers share the same file-ready/read/parse/shallow-process lifecycle.
+
+These are architecture rules, not optimization hints. On conflict, fix the owner layer or delete the legacy path rather than preserve a second read/parse/resolution flow.
+
+Guards: `no_thread_local_oxc_caches`, `no_direct_oxc_parser_calls_outside_scheduler_path`, `recursion_budget_invariant_across_module_boundary`.
+
+### Shallow File Processing Core Invariant (CRITICAL)
+
+The shallow file process is a core architectural invariant and must be preserved. When a canonical file is processed, the host stores its shallow symbol inventory once; that inventory is the authoritative index later stages query.
+
+Shallow state must classify and retain at minimum: imports; exports and reexports; type declarations; interfaces; enums; classes; variables/constants; functions/method signatures; `typeof`-relevant value declarations; local symbol dependency edges; cross-file dependency edges.
+
+Design rule: processing a file means collecting and indexing its symbols, not eagerly evaluating them; later stages look up the indexed items they need and process only those on demand; no stage rescans the raw file to rediscover symbols shallow processing already captured. Performance: very high performance comes from targeted demand after broad shallow indexing, not repeated partial reparsing.
+
+Core invariants (full architectural-target detail: `/type-resolution` → IndexedReady Target Contract + Cache Population Target Contract):
+
+- Canonical post-parse artifact = `IndexedReady`: a shallow declaration INDEX plus body locators, NOT a body store. Eagerly it carries canonical imports/exports, top-level symbol names/kinds, declaration spans, source-order contributor grouping, type-parameter names, syntactic member headers, and augmentation inventory — all safe for host-owned `Send + Sync` caches. Declaration BODIES lower only on first semantic demand through the shared lazy body service (the content-addressed `DeclBodyMemo` + scheduler-side `DeclLoweringService` retained-parse workers); publishing an artifact lowers ZERO declaration bodies. Component-meta and later analysis layers both build from it; symbol expansion populates and reuses the same shared resolver caches — no separate expansion paths.
+- Parse each live file version once; the lazy lowering service RETAINS the parse snapshot on its worker shard (keyed `(canonical, whole_hash, parse_env_hash)`) so body demands reuse it instead of re-parsing per touch. Transient OXC parse arenas stay per-file/per-version and never leak into host-owned shared caches — jobs borrow the retained AST on the worker and return owned typed IR.
+- The declaration-body **hot READ path is handle-native at the ONE migrated graph-backed site** (`lower_decl_body_to_node`): the shared `decl_body_hot_ref` accessor (`project_semantic_dispatch/mod.rs`) wraps the `SemanticGraphStore` `Instantiate` memo and hands out a `HotTypeRef` (handles minted at the dispatch boundary over the `Instantiate` query result — `build_instantiate`'s post-processed node; `lower_decl_body_with_provenance` produces the resolving-lowered body-SHAPE that `build_instantiate` post-processes into it — not a re-lowering). Handles mint ON DEMAND at that dispatch boundary and are NEVER stored in the prepared-decl bundle — the superseded bundle-stored handle mirror (`HotPrepared*`) is DELETED. The prepared declaration surface is **fact+locator NoTypeExpr end-to-end**: the lower-crate `Prepared*` DTOs carry classification FACTS plus content-free body LOCATORS (`PreparedTypeDecl.body_facts`/`member_index`/`wrapper_shape`/`projection_class`; `PreparedValueDecl.type_annotation: ValueTypeAnnotationFact` + signature/shape/enum facts), the session `PreparedDeclBundle` stores those fact DTOs, and the session builders COPY memo-owned facts (classified once at lazy lowering from the transient contributor bodies) — no re-classification, no locator deref, no eager `Instantiate` at prepare time. `DeclBodyMemo` records are facts+locators too — `LoweredTypeDecl.body` is `TypeDeclBody` (`Single(TypeBodySlot)`/`Merged` contributor SLOTS) with memo-owned classification facts, and `LoweredValueDecl` is fully narrowed (`ValueTypeAnnotationFact` + signature/shape/enum facts + the memo-owned value `body_hash`), compile-witnessed by `#[derive(verter_no_typeexpr::NoTypeExpr)]`; authored bodies are re-borrowed lease-only from the retained snapshot by the locator-deref worker on demand — all graph-free by design (`verter_semantic` cannot depend on `verter_session`), with the residual SEMANTIC reader classes (authored-shape / graph-free-DTO / graph-backed-PENDING) recorded in `docs/arch/authored-shape-graph-native-migration-deferral.md`; a hot consumer must never go `HotTypeRef → TypeExpr → semantic decision`.
+- Navigation stays narrower than expansion: walking `A['c']['full']['bar']` navigates intermediate hops and expands only the terminal requested projection unless limited normalization is required to continue.
+- Generic substitutions are semantic meaning: navigation/expansion operate on instantiated types; cache keys include the relevant substitutions/type arguments.
+- Navigators stay non-owning (choose the next hop, non-owning normalization only); reusable semantic work enters through the shared query API, not a private drill-down path. The shared semantic layer is keyed by semantic query identity and stores immutable semantic data or ids — never borrowed AST pointers or retained parser arenas.
+- Completion fence: top-level live-host results record touched dependency facts, revalidate before publish, retry at most 3 times on mid-flight changes; never warm shared caches with torn provisional results; cancelled, superseded, interrupted, budget-exceeded, or partial results are never promoted warm.
+- Waiters on in-flight work block cooperatively, never busy-spin; same-path recursion never self-awaits.
+- Cache population is path-independent (same result from different entry points → same shared entry); broader successful results may backfill only the narrower entries they actually satisfied; narrower results must not pretend broader work is cached.
+- Final payload caches hand out immutable `Arc` values; any backend preserving concurrency, size bounds, validation semantics is fine.
+
+Guards: `audit_publishes_member_edge_with_published_field_provenance_at_macro_boundaries`, `macro_impacting_constructs_fail_lowering_not_silent_skip`, `indexed_ready_publish_lowers_zero_decl_bodies`, `resolve_unrelated_symbol_lowers_only_demanded_decl`, `lazy_decl_body_singleflight_lowers_once`, `no_indexed_ready_eval_env_or_type_decl_body_storage`, `emit_parse_facts_never_hashes_decl_bodies`.
+
+**Project-global cache (final state):** `VerterHost` owns a single `ProjectTypeStore` accessed via `.project_type_store()` — the sole shared cache graph: `FileArtifactStore`, `AnalysisReadyDb`, the rehomed `RouteDb`, `OwnerImportSurfaceDb`, `ComponentMetaResultDb<ComponentMetaAnalysis>`, `MaterializeStructureDb`, `RefCycleResultDb`, `SemanticGraphStore` (which also owns the Vue macro resolution artifacts — the former `ResolvedNamedTypesDb`), `ShapeCacheDb`, and the `IntrinsicRegistry`. `IndexedReady` is the single canonical post-parse artifact (the former `ModuleFactsDb` is retired). Validated cache writes record a `ReadSetSignature.facts` fact signature (the path-precise fact-tracer observation set) — the sole cache-validity rail, revalidated against the live `StoreView` on every warm hit. The `StoreViewValidationToken` is the complete reuse/validity oracle; the singleflight LANE identity is the narrower `external_supersession_fingerprint` (reuse-oracle = full token; lane-identity = external fingerprint). See `/host-session` (store-view token dimensions, token-advance rules, lane identity, singleflight, `RequestStoreView`/`CanonicalCompletionOverlay`, handle-backed dims), `/component-meta` (`get_component_meta` final-result flow, `resolve_owner_direct_import`, `materialize_component_meta_structure`, the `ShapeCacheDb` per-member route, `reduce_field_type_expr_with_mode`), `/type-cache-architecture` (admission, `RefCycleResultDb`, retired split stores), and `/type-resolution` (`execute_cooperative` dedup, `SemanticNodeData::VueMacroElements` hot path, `IntrinsicRegistry::lookup`).
 
 ### Canonical Dependency Cache Rule (CRITICAL)
 
-Host-backed type/import resolution must treat the canonical file ID as the cache identity. The cache contract is:
+Host-backed type/import resolution treats the canonical file ID as the cache identity. Load and parse each dependency at most once per canonical ID per workspace content generation. Cache the parsed state, the shallow declaration index plus lazy declaration-body memo, symbol/export tables, and prepared declarations together. Later lookups hit cached maps — never rewalk the AST. VFS is the authority for file-change invalidation. Concurrent cold requests to the same file collapse onto one materialization path. Changes land as one clean cutover, no dual-path shims.
 
-- Load a dependency source at most once per canonical ID per workspace content generation. Parse it immediately and cache the raw source, parsed/OXC snapshot, and any reusable eval/build state right away.
-- When the host materializes an imported dependency on a cold miss, derive the AST-backed bundle from that single parse and cache it together: file snapshot, eval env, external-type analysis, symbol/export lookup tables, and any other reusable per-file analysis. Do not let later resolver stages trigger a second parse of the same canonical file just to build another artifact.
-- Cache named declarations from that parsed file by name, not just exported entrypoints. Internal named types/interfaces/aliases still matter because exported declarations in the same file may depend on them later.
-- Treat named-node discovery as local symbol lookup. Once a file is parsed for a given canonical ID/version, future lookups should hit cached symbol/export maps instead of walking the full AST again to rediscover names.
-- Treat AST ownership as single-pass work. For a given canonical ID/version, the resolver should do at most one full top-level AST walk to discover named symbols/exports, then cache those lookup entries and leave deeper expansion lazy per symbol. Do not rewalk the full file to rediscover the same symbol on later requests.
-- Imported-file analysis should expose one shallow symbol graph keyed by `(canonical_id, symbol_name)`. That graph is the authoritative source for local symbol kind/span, local import targets, direct reexports, and local export aliases. Resolver stages must consume that graph instead of maintaining parallel rediscovery paths.
-- Resolve the requested import from the cached parsed file first. If the requested name is not present, only then BFS through explicit barrel/re-export hops. Do not rescan the same file graph on the second request.
-- Keep expansion lazy. We do not need to eagerly resolve every transitive type in a file up front. Preserve named references so later requests can expand them from cache when needed.
-- Collected imported aliases stay shallow but must already be root-normalized. Store the defining file's canonical ID plus the final exported symbol name in `ImportedEvalInputs`; do not keep unresolved barrel routes once the root is known, and do not eagerly materialize a prepared declaration during collection.
-- Builder-owned shallow imported aliases should treat their stored canonical ID as the defining-file root. They may consult cached barrel/export state only when a canonical root is still unknown. Cache the prepared alias on the defining canonical file and hydrate from that file's host cache or base eval env. Do not synthesize barrel-local prepared aliases for symbols that resolve to another file.
-- Whole-file hashes are for long-lived update handling and cache validation, not for repeated warm reads. Compute/store the hash once for the current source version, then reuse it until the VFS reports a newer content generation / file version.
-- VFS is the authority for file-change invalidation. When a canonical file’s version/hash changes, host caches derived from that canonical ID must be discarded together across source snapshots, parsed state, eval envs, and resolved-type/import caches.
-- Legacy fallback paths that reparse or rewalk imported dependency files on warm requests should be removed, not preserved behind alternative code paths. Default behavior must go through the cache-aware host/VFS path.
-- Imported dependency loading, type-resolution source materialization, and dependency canonical resolution should be host-owned single entry points. Do not add request-local cache layers or alternative parser/import paths on top of the host cache for the same work.
-- Imported type root/declaration resolution and prepared imported-type alias caching should also be host-owned single entry points keyed by canonical ID plus current file version/hash. Do not rebuild the same imported symbol route or prepared alias body per request when the host cache already has it.
+Guards: `host_upsert_performs_no_reverse_dependent_eviction`, `host_upsert_reverse_dep_eviction_scanner_discriminates`, `import_route_writer_guard`.
 
-### Package Dependency Graph
+See `/type-resolution` skill for the full rule set (invalidation semantics, route caches, prepared declarations, cross-owner reuse, negative caching, the concrete performance contract).
 
-```
-verter-vscode (VS Code extension)
-├── verter-lsp (Rust LSP binary, stdio)
-│   ├── verter_host (file host + compilation)
-│   │   └── verter_scheduler (async per-file staging, feature-gated)
-│   ├── verter_scheduler (priority queue, completion handles)
-│   ├── verter_diagnostics (lint rules + DiagnosticSet)
-│   ├── verter_actions (quick fixes + refactoring)
-│   └── TypeProvider (optional: TSGO or tsserver, for TS type checking)
-├── @verter/language-shared (custom protocol types)
-├── @verter/typescript-plugin (.vue import resolution, NAPI-backed)
-└── @verter/unplugin (bundler plugin)
-    └── @verter/native
+### Cache Architecture (CRITICAL)
 
-verter-mcp (MCP server binary, stdio + HTTP)
-├── verter_host (file host + compilation)
-├── verter_analysis (static analysis snapshots)
-├── verter_diagnostics (lint rules + DiagnosticSet)
-└── verter_actions (quick fixes + refactoring)
+The fact-based cache architecture splits cache keys across five orthogonal env-hash dimensions (`parse_env_hash`, `resolve_env_hash`, `type_env_hash`, `lib_env_hash`, `project_identity`). Each cache layer keys only on the dimensions it actually depends on (R21 scoping rule — a single bundled `project_config_hash` is forbidden). `lib_env_hash` enters a key only when the value depends on lib data: `ResolvedImportFacts` does NOT include it; `RouteDb`, typed-IR resolve, `MaterializeStructureDb`, `RefCycleResultDb`, `SemanticGraphStore`, `ComponentMetaResultDb` DO.
 
-@verter/playground (Netlify-hosted)
-└── @verter/wasm (Rust template compiler, wasm-bindgen)
+Two cache families: **content-addressed artifact caches** (`FileArtifactStore`, `ResolvedImportFacts`, typed-IR resolve, `MemberSemanticFactStore`, `MemberDisplayFactStore`, `ModuleAugmentationIndex`) carry `content_hash` or `parse_stable_hash` in the key; **query-identity caches** (`RouteDb`, `MaterializeStructureDb`, `RefCycleResultDb`, `SemanticGraphStore` query nodes, `ComponentMetaResultDb`) exclude version hashes from the key — concurrent variants coexist as candidates in one slot, with version rooting on the cached value (the structural + semantic-graph caches — `MaterializeStructureDb`, `RefCycleResultDb`, `SemanticGraphStore` memo, `ShapeCacheDb` — root via `ReadSetSignature.facts` + `self_root_canonicals`; `RouteDb` via its value-side `ValidatedFactCache` fact signature; `ComponentMetaResultDb` via the owner whole-hash candidate discriminant + `ReadSetSignature.facts`). Cache keys never include `fact_dep_signature`. The `MaterializeStructureDb` subject is the content-free `MaterializationCacheKey` (a `ResolvedDeclSlotIdentity` slot + projection/policy/mode axes + `resolve_env_hash`), NOT a graph-instance `SemanticNodeId` — the per-thread recursion identity `MaterializeRuntimeKey` is a separate, non-cache key; a root-less anonymous subject keys no slot (uncached). `RefCycleResultDb` keys the content-free `RefCycleResultKey` (`ResolvedDeclSlotIdentity` slot + `resolve_env_hash` + version), NOT the versioned `DeclIdentity`.
 
-@verter/component-meta (metadata extraction)
-├── @verter/native (NAPI host, Node.js)
-└── @verter/wasm (WASM host, browser, optional)
-```
+Family-memo slots (`SemanticQueryKey::Instantiate.base` / `ResolveMacroPayload.owner`, mirrored on `FamilyKey`) are the env-bearing, content-free `ResolvedDeclSlotIdentity` (R6 — content/version hashes and the versioned `DeclIdentity` are forbidden in any derived-`Hash` query-identity key; the live whole-hash is re-sourced at value-compute time, never carried in the key). A warm hit requires TWO independent gates (§3.4): `cached_satisfies` over a RECORDED materialised `(path, point)` the candidate's compute actually produced — never the candidate's nominal slot/mode, never enum rank — AND per-candidate `ReadSetSignature.validate_with_self_roots` against the caller's live view. Backfill clones only recorded materialised points, directionally gated (the `Shallow → Navigate` clone is lattice-unsound). `validated_at_generation` is recency metadata only, never a validity oracle. See `/type-cache-architecture` for the full key/context composition (`InstantiateContext`/`MacroPayloadContext` per-key contexts, `FAMILY_SLOT_CANDIDATE_CAP = 4` candidate semantics, non-file-base rooting).
 
-### Repository Structure
+`FileArtifactStore` is the authoritative per-file storage layer, keyed by `(canonical, content_hash, parse_env_hash, parser_version, file_language_id)` — `file_language_id` is the file's `FileLanguage` row (the per-file classification dimension of artifact identity, so a framework-capability flip misses exactly the affected files' artifact slots without touching the global `parse_env_hash`). The overlay-aware `augmentation_index` (module-augmentation inverse lookup) lives on the same store. See `/type-cache-architecture` for the full key composition, `file_language_id` producer wiring, `AugmentationTargetKey`/`AugmentationPopulation` semantics, and the `parse_stable_hash` definition.
 
-```
-crates/
-  verter_core/       # Core template compiler (Rust)
-  verter_analysis/   # Static analysis: imports, exports, bindings, type resolution
-  verter_host/       # In-memory file host: caching, dependency tracking, multi-file compilation
-  verter_scheduler/  # Async per-file scheduler: Source→Analysis→Artifact stages, priority queue, blocker registry
-  verter_diagnostics/ # Vue SFC diagnostic engine: ~186 lint rules, rule trait, visitor, DiagnosticSet (depends only on verter_analysis)
-  verter_actions/    # Code actions engine: quick fixes, refactoring (depends on verter_diagnostics + verter_analysis)
-  verter_lsp/        # Rust LSP server binary (stdio, launched by VS Code extension)
-  verter_ffi/        # FFI types: shared serializable structs for NAPI/WASM boundaries
-  verter_bench/      # Benchmarks and comparison examples (Rust)
-  verter_mcp/        # MCP server binary: analysis, diagnostics, scoring for AI agents
-  verter_napi/       # Native Node.js bindings (NAPI-RS cdylib)
-  verter_wasm/       # WASM bindings (wasm-bindgen cdylib)
-packages/
-  core/              # @verter/core - SFC parser & TSX transformer
-  types/             # @verter/types - TypeScript utility types
-  native/            # @verter/native - Native binding loader + platform packages
-  wasm/              # @verter/wasm - WASM binding wrapper
-  unplugin/          # @verter/unplugin - Universal bundler plugin
-  language-shared/   # @verter/language-shared - Shared LSP protocol types
-  typescript-plugin/ # @verter/typescript-plugin - TS language service plugin
-  oxc-bindings/      # @verter/oxc-bindings - OXC parser binary helper
-  component-meta/    # @verter/component-meta - Component metadata extraction + Type IR + adapters
-  playground/        # @verter/playground - Online playground (private, Netlify-hosted)
-  vue-vscode/        # verter-vscode - VS Code extension
-  example/           # Example project
-scripts/
-  check-versions.mjs # Version check + publish order for CI
-```
+Cache runtime hard rules — three always in force: cache correctness is read-side authoritative; `ReturnOnly` (overflow, budget exhaustion, cancellation, generation supersession, incomplete self-rooting, unresolved provenance) never publishes entries, reverse-index metadata, or persistent artifacts; overlay/session results never populate base-only or persistent caches. Full 20-rule list: `/type-cache-architecture` → Cache Runtime Hard Rules.
 
-### Async File Scheduler (`verter_scheduler`)
+Guards: `cache_satisfaction_is_materialized_point_not_nominal_demand`, `cache_satisfaction_requires_path_exact_not_prefix`, `backfill_writes_only_recorded_materialized_points`, `no_off_store_host_caches`, the `r6_*` cluster, plus the four migrated-query-identity-key guards in `tests/cases/g_cache/r6_r21_query_identity_keys.rs` (`component_meta_result_key_*`, `route_name_key_*`/`barrel_surface_key_*`, `ref_cycle_result_key_*`, `materialization_cache_key_*`) — full list in `CRITICAL_RULE_GUARDS`.
 
-The scheduler provides per-file async staging with priority queuing. Files progress independently through **Source → Analysis → Artifact** stages. Cross-file blocking (macro type deps, external `src`) is declarative — the scheduler manages wakeups.
+See `/type-cache-architecture` skill for the full rule set (R1–R31, two-fact `MemberPresence`/`Member` model, multi-candidate substrate, signature-overflow contract, module augmentation completeness, heuristic-cache-semantics prevention, exact policy identity) and `docs/arch/fact-based-cache.md` for the per-field audit table + per-cache-layer key composition.
 
-**Key types** (`crates/verter_scheduler/src/`):
+### Macro Type Traversal Rule (CRITICAL)
 
-- `FileNode` (`node.rs`) — per-file: ArcSwap snapshots, AtomicU64 generation, pending requests
-- `Scheduler` (`scheduler.rs`) — DashMap of FileNodes, JobIndex, SubmissionInbox, driver thread
-- `CompletionHandle<T>` (`job.rs`) — request-scoped, resolves to Ready/Failed/Superseded/Shutdown
-- `StageExecutor` (`executor.rs`) — trait for plugging host parse/analysis/compile logic
-- `Priority` (`stage.rs`) — 4 tiers: Critical > Interactive > Background > Maintenance
-- `EdgeManager` (`edges.rs`) — ReverseIndex + BlockerRegistry (both DashMap-sharded)
-- `OverlayMap` (`overlay.rs`) — concurrent editor buffer storage (DashMap)
-- `SourceLoader` (`source_loader.rs`) — MemorySourceLoader (tests/WASM) + DiskSourceLoader (native)
-- `IoPool` (`pool.rs`) — bounded I/O thread pool, separate from rayon CPU pool
+When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, component-meta deep expansion, etc.), only follow the import graph reachable from the requested type's declaration graph. There is one shared cross-file type resolver with five query modes: `Identity`, `Navigate`, `Shallow`, `Expanded`, `Skeleton` (see `/type-resolution` → Query Mode Contract).
 
-**Snapshot model**: All stage outputs are immutable `Arc`-wrapped. Replacement is atomic via ArcSwap. Generation fencing ensures coherence: `source.gen == analysis.gen == artifact.gen == node.gen`. Stale snapshots (gen mismatch) return `None` from `current_*()` methods.
+**Macro resolution is one shared path, not a per-macro engine.** Every macro (`defineProps` / `defineEmits` / `defineOptions` / `defineSlots` / `withDefaults`) and every imported `.vue` component surface resolves through exactly TWO steps: (1) resolve ONE type via the shared typed-IR five-mode dispatch — the generic-parameter type (`define*<T>()`) OR the object-argument type (`define*({ ... })`); `withDefaults` resolves the props payload type plus the defaults-object type and merges; `.vue`-component imports resolve the synthesized `$props` / `$emit` / `$slots` / expose surface recursively through the same dispatch (the hardest case — apply EXTRA caution: it is exactly where rule violations cause the worst hangs); no macro-specific engine, no per-surface walker, no eager element resolver. (2) Normalise per kind — a thin transform, NOT a resolver (per-kind field rules: `/type-resolution` → Macro Type Traversal Rule). A macro/import that resolves through anything else, or flattens a full surface eagerly before the consumer demands it, is a rule violation — collapse it into `shared_resolve(type) + normalise`.
 
-**Host integration** (feature-gated `scheduler`): `VerterHost` holds an `Arc<Scheduler>`. During `upsert()`, the host populates both the legacy `files: Shared<FxHashMap>` and the scheduler in parallel. The `HostStageExecutor` calls real `parse_vue_snapshot`/`parse_non_sfc_snapshot` for the Source stage. Host-specific data is stored in snapshots via the `SnapshotData` trait (opaque `Arc<dyn Any>`), avoiding circular dependencies between scheduler and host.
+`Skeleton` is the BFS / generic-helper traversal mode: unbound type parameters stay `TypeParam` shells so Conditional branches do not collapse to `never`. Path projection is path-precise: intermediate hops run in `Navigate`, the terminal hop runs in the caller's mode; non-contributing intersection arms are ignored (not rewritten to `never`); open conditionals distribute the remaining path into both branches; closed conditionals reduce immediately. Do not walk unrelated imports. Do not treat plain imports as implicit exports. Cache discovered symbol mappings and barrel hops.
 
-**LSP integration**: `scheduler_integration.rs` maps LSP operations to priority tiers (Critical for hover/completion, Interactive for did_open/change, Background for workspace scan). `compile_blockers.rs` is deprecated — the scheduler's blocker model replaces imperative hydration.
+**TS-first resolution priority:** TypeScript types always take priority over JavaScript files. Use `effective_target()`: `.d.ts` > `.d.cts` > `.d.mts` > `.ts` > `.tsx` > `.js` > `.jsx` > `.cjs` > `.mjs`.
+
+**Owned resolution is bounded by `workspace_root`:** `node_modules` and package `#imports` ancestor walks stop at `IdeProjectConfig.workspace_root`.
+
+Guards: `root_conditional_still_distributes`, `no_macro_string_heuristics_in_resolver_core`, `no_text_based_macro_surface_projection_helpers`, `no_role_inference_from_name_suffix`, `no_pick_or_omit_string_prefix_check`, plus the `no_new_*` single-engine shrinking-ledger cluster — full list in `CRITICAL_RULE_GUARDS`.
+
+See `/type-resolution` skill for the full traversal rules and resolver mode details.
+
+### Declaration Merging (CRITICAL)
+
+Same-name declaration merge is produced ONLY by `verter_semantic::type_eval` ordered declaration groups: `EvalEnv` appends contributors in source/binder order (`add_type`/`add_value` push onto an ordered `TypeDeclGroup`/`ValueDeclGroup` — no last-wins `FxHashMap<String, TypeDeclInfo>`/`…ValueDeclInfo>` map, no overwrite `insert` for mergeable kinds). Same-name `interface` declarations lower to the explicit `TypeDeclBody::Merged` carrier (on the memo-owned `LoweredTypeDecl.body` read through `ShallowFileState::type_decl(name)` → `PreparedTypeDecl.merged_contributors`), interned as a distinct `SemanticNodeData::MergedDecl { contributors }` node.
+
+A merged declaration MUST reach the project-semantic reducer as that distinct carrier — a bare `TypeExpr::Intersection` / `SemanticNodeData::Intersection` is FORBIDDEN as the merged-decl representation, because the intersection reducer applies **heritage-shadow** member precedence and cannot accumulate method overload groups. The `MergedDecl` peer-merge reducer (`reduce_merged_decl_with_graph` + `merge_declaration_surfaces`): (a) same-name methods/call-signatures ACCUMULATE into one ordered overload group across contributors in source order; (b) conflicting non-method properties take deterministic first-contributor precedence (never `never`); (c) distinct members union.
+
+Functions accumulate into an ordered `Vec<FunctionSignature>` (`ValueDeclGroup::merged_signatures`), each carrying `has_implementation_body`; overload visibility is a PROJECTION-time rule (`build_typeof`): a lone signature is visible (even if bodied), a multi-signature group surfaces every bodiless overload in source order and hides the trailing implementation. Same-file merged values version-root on the owner's single `FileWholeHash` self-root under a content-free query-identity key (R6). `verter_session` MUST NOT synthesise the merge as `raw_body = TypeExpr::intersection(...)`. Cross-file ambient augmentation (`declare module`/`declare global`) reuses this same `MergedDecl` peer-merge path — see Declaration Augmentation (CRITICAL).
+
+Guards: `eval_env_type_symbols_are_grouped_not_last_wins_map`, `eval_env_add_decl_appends_not_overwrites`, `no_intersection_merge_synthesis_in_verter_session`, `merged_decl_lowers_to_distinct_carrier_not_intersection`, `declaration_merge_facts`.
+
+See `/type-resolution` skill for the carrier chain, the peer-merge reducer, and the architecture guards.
+
+### Declaration Augmentation (CRITICAL)
+
+Ambient declaration augmentation (`declare module "X" { ... }` / `declare global { ... }`) is a RETAINED, addressable scoped inventory — never fingerprint-only facts, never file-scope pollution. `EvalEnv.augmentation_scopes` / `EvalEnv.augmentation_value_scopes` key `(AugmentationScopeKind {Global, Module(specifier)}, name)` → ordered `TypeDeclGroup`/`ValueDeclGroup`, mirrored on `ShallowFileState`; inner decls NEVER enter file-scope `type_symbols`/`value_symbols`. Parse-domain `ModuleAugmentationFact`s are DERIVED from this typed inventory (`fact_emission::collect_augmentations`) — NO raw-source byte-scan.
+
+Cross-file augmentation merge is the SAME `MergedDecl` peer-merge path as same-file merging — NOT a second merge engine: `stitch_module_augmentations` finds every augmenter via `FileArtifactStore::ensure_augmentation_index_populated`, lowers each augmenter's RETAINED inner body in its own file context, and folds base ∪ augmenter contributions into ONE `SemanticNodeData::MergedDecl` carrier; augmenter order is the stable `(canonical, parse_stable_hash)` key — discovery-order-independent.
+
+Facts rail: the cold stitch observes one `FactKey::ModuleAugmentationIndexShape` fingerprint plus one `FileWholeHash` per contributing file and records `self_root_canonicals = {base} ∪ {augmenters}` — a content edit to ANY contributor misses the warm read; torn/partial routes through `ReturnOnly`. Query keys stay content-free (R6). The index is OVERLAY-AWARE (`AugmentationPopulation {Base, Session(overlay-set fingerprint)}`): overlay augmenters NEVER poison the base index and NEVER cross sessions, and there is NO base-only session assert on the augmentation-index / `EffectiveExportSet` surface — a session view is accepted under `Session` scope.
+
+Guards: `session_overlay_augmenter_isolated_from_base_index`, `session_overlay_augmentation_isolated_from_base_meta`.
+
+See `/type-resolution` skill for the stitch chain and the overlay-aware index, and `/type-cache-architecture` for the content-addressed vs query-identity augmentation key split.
 
 ### Two Template Codegen Paths (CRITICAL)
 
-The Rust compiler has **two separate template codegen paths**. Modifying one does NOT affect the other:
+The Rust compiler has two separate template codegen paths; modifying one does NOT affect the other: **VDOM/Vapor** (`template/code_gen/vdom/`) for runtime render functions, and **IDE** (`ide/template/`) for valid JSX/TSX used by LSP/TSGO type checking. The LSP uses the IDE path via `CompileTarget::IDE`.
 
-| Path           | Module                    | Purpose                                     | Output                           |
-| -------------- | ------------------------- | ------------------------------------------- | -------------------------------- |
-| **VDOM/Vapor** | `template/code_gen/vdom/` | Runtime render functions for bundler output | `_createElementVNode(...)` calls |
-| **IDE**        | `ide/template/`           | Valid JSX/TSX for LSP/TSGO type checking    | `<div prop={expr}>` JSX elements |
+Guards: `compile_audit_sourcemap`.
 
-The **LSP uses the IDE path** via `host.ensure_compiled()` with `CompileTarget::IDE`. TSGO type-checks this output. Changes to VDOM codegen do NOT affect LSP hover/completions. The IDE codegen auto-detects the script language: TS SFCs produce `.tsx` (TypeScript + JSX), while JS SFCs (no `lang` or `lang="js"`) produce `.jsx` (JavaScript + JSDoc annotations).
+See `/compiler-codegen` skill for full codegen pipeline, backends, and CompileTarget details.
 
-### Strict Slot Children Type Checking (Experimental)
+### Carrier IDE TS Surface Principle
 
-When `strict_slots: true` (VS Code: `verter.experimental.strictSlots`), the IDE template codegen emits `strictRenderSlot` calls after the JSX tree. These enforce that slot children match the parent component's `defineSlots()` type signature ([RFC #733](https://github.com/vuejs/rfcs/discussions/733)).
+North star for the IDE/LSP experience: for every carrier with an IDE projection (`.vue`, `.svelte`), the script block (`<script>`, `<script setup>`, Svelte module/instance scripts) AND the supported template/markup expressions are **ONE** generated TypeScript/JavaScript/JSX surface — interpolations (`{{ }}`, Svelte `{expr}`), directive/attribute expression values (`v-if`/`v-for`/`v-bind`/`:`/`v-on`/`@`/`v-model`/`v-slot` and dynamic args; Svelte `bind:`/`on:`/`class:`/`style:`/`use:`, `{#if}`/`{#each}`/`{#await}`/snippets, `{@render}`/`{@html}`/`{@const}`, rune calls) all lower into it. That surface is obtained through the IDE path (`CompileTarget::IDE`/`TSX`), synced to the active TypeProvider, with provider positions/ranges/edits mapped back through the document's `ProviderPositionMapper`.
 
-**Generated pattern** (inside the block scope, after JSX):
+**The bar:** for any supported mapped TS/JS expression position, every provider-backed IDE feature — diagnostics, hover, definition/type-definition, references, rename, completion/resolve, signature help, document highlights, semantic tokens, inlay hints, and generic code actions whose edits map exactly — should behave like the equivalent standalone `.ts`/`.js`/`.jsx` program, with results mapped back to the carrier source. A binding represented in BOTH script and template is discoverable and renamable from either side (rename spans script + template; find-all-references finds both). This holds for **both Vue and Svelte** over the shared LSP path.
 
-```tsx
-___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Comp{offset}>['$slots']['{slot}']>, [TabItem, {} as HTMLElementTagNameMap["input"], "" as string]);
-```
+Fail-closed boundary: unmapped synthetic helper code, framework tokens with no TS correlate, unsupported/experimental projection regions, and provider edits whose full ranges cannot be mapped must fail closed or return framework-native results — never mis-mapped. Source actions (organize-imports, fix-all, formatting) require explicit per-action support and tests; they are NOT implied by this principle. This is a **principle, not yet a `(CRITICAL)` guarded rule** — it is promoted to CRITICAL once real-provider cross-region Vue/Svelte regression tests guard it.
 
-**Child type references**: Component → constructor name, HTML element → `HTMLElementTagNameMap["tag"]`, text/interpolation → `"" as string`. Each child is a sourcemapped `InsertedMapped` chunk pointing to its template position.
+See `/compiler-codegen` → "Carrier IDE TS Surface Principle" for the full normative text (every covered expression form), and `/host-session` / `/position-encoding` for provider sync and position/range/edit mapping.
 
-**Skipped cases**: self-closing components (no children), `is_jsx` mode, `<component :is>` (deferred), whitespace-only text, comments.
+### Compiled-Output Conformance (CRITICAL)
 
-**Key files**: `ide/template/mod.rs` (`StrictSlotEntry`, `collect_strict_slot_children`, `emit_strict_slot_checks`), `ide/script.rs` (ambient `strictRenderSlot` type declarations).
+Official-framework compiler conformance is behavioral plus structural/helper-topology parity, not raw-byte identity. For Vue VDOM/Vapor, Svelte `svelte/internal/*`, SSR/client, and future runtime backends, compare emitted output by observable behavior plus parsed/token-normalized structure: imports, helper families, helper call sequence where order is semantic, memoization/reactivity/effect topology, DOM/hydration template topology, class/style/attribute normalization, prop/property routing, event delegation, and diagnostic/reject ordering.
+
+Cosmetic JS carrier formatting is not a finding: indentation, line breaks, non-semantic comments, intra-expression whitespace outside literals, and behavior-preserving redundant parentheses may differ from the official compiler. Directive, pragma, license/preserve, source-map/sourceURL, TS-directive, JSDoc, and other tool-consumed or framework-significant comments remain in contract. Generated local identifier spellings are waived only when the backend oracle implements scope-aware alpha-equivalence for private, non-observable bindings; otherwise identifiers are structural. Literal payload bytes, static HTML/CSS/SSR strings, public/exported or source-authored names, sourcemap mappings, diagnostic text/codes/order, and any framework-defined observable format remain in contract.
+
+Do not build or route production compiled-output emission through JS printers, re-printers, redundant-paren canonicalizers, or any machinery whose role includes mimicking the official compiler's cosmetic JS carrier formatting. Direct-emission helpers may emit syntax-required tokens, including required parentheses for valid JavaScript expression/statement shape, but they must be scoped to semantic/syntactic correctness and covered by behavioral/structural tests rather than official cosmetic byte parity. Emit correct code directly and make conformance oracles structural for cosmetic categories: a cosmetic-only diff passes; a behavioral or structural divergence fails.
+
+The positive structural-discriminator guard currently covers Svelte client only (Vue VDOM/Vapor and SSR/client positive oracles are tracked follow-ups); the re-printer guard is cross-backend negative coverage. See `/compiler-codegen` for the tracked guard gap.
+
+Guards: `svelte_structural_conformance_discriminates_cosmetic_from_behavioral_diffs`, `no_compiled_output_cosmetic_reprinter_path`.
 
 ### Fallthrough / Root Inheritance (CRITICAL)
 
-The shared Rust pipeline owns all fallthrough and root inheritance semantics. `verter_analysis` extracts root reachability facts only. `verter_host` owns the single inheritance resolver, recursion, conditional branch composition, generic propagation, caching, and final metadata projection.
+The shared Rust pipeline owns all fallthrough and root inheritance semantics. `verter_semantic::analysis` extracts root reachability facts only. `verter_session` owns the single inheritance resolver, recursion, conditional branch composition, generic propagation, caching, and final metadata projection.
 
-**Public contract** (on `ComponentMetaAnalysis` / `FfiComponentMeta` / `ComponentMeta`):
+Key rules: `inheritAttrs: false` → no inherited surface. Single native root → intrinsic attrs minus declared props/events. Single component root → recursive propagation. Conditional branches → exact union. Cycles → unresolved branches. `class`/`style` are never consumed.
 
-- `props` / `events` — declared component surface only (unchanged)
-- `acceptedProps` / `acceptedEvents` — computed call-site acceptance surface (declared + inherited)
-- `acceptedSurfaceCompleteness` — `Exact` or `LowerBound` (if any branch is partial/unresolved)
-- `rootReachability` — structural root classification before inheritance resolution
-- `fallthroughSurface` — branch-structured inherited surface after host resolution
+Guards: `fallthrough_recomputes_from_runtime_subnodes_after_top_level_node_clear`, `fallthrough_runtime_reuse_survives_host_cache_clear`, `fallthrough_reuses_root_follow_after_branch_union_node_clear`.
 
-**Semantic rules**:
+See `/component-meta` skill for the full semantic rules, public contract, authority chain, and key files.
 
-- `inheritAttrs: false` → no inherited surface
-- Unconditional multi-root (fragment) → no inherited surface
-- Root `v-for` → no inherited surface
-- Single native root → intrinsic attrs/listeners minus declared props/events minus consumed root bindings
-- Single component root → recursive propagation through the child's full public surface
-- Conditional single-root branches → exact union of branch surfaces
-- Cycles → terminate safely as unresolved branches, no invented members
-- Unsupported roots (`<component :is>`, `<slot>`, Vue built-ins) → unresolved branches
-- `class` and `style` are never consumed (Vue always merges them)
-- `@click` and `:onClick` normalize to the same canonical listener name (`click`)
-- Declared props/events always take precedence over inherited names
+### Component-Meta Shallow-By-Default Rule (CRITICAL)
 
-**Authority chain**: analysis extracts `RootReachability` → host resolves `FallthroughResolution` → `get_component_meta()` populates `accepted_*` and `fallthrough_surface` → FFI maps to JSON → TS consumes.
+Types and properties are ALWAYS published shallow at the projector surface UNLESS the consumer explicitly walks the path. This is the single architectural invariant the projector pipeline (`meta_resolve::projectors::reduce_published_field_types` + `reduce_field_type_expr_with_mode`) enforces.
 
-**Compat**: mapping-only. Flat Volar `props/events` stay on declared surfaces. Branch-structured inherited data is on `_verter`.
+Concrete contract:
 
-**Key files**: `verter_analysis/src/component_meta.rs` (types + root extraction), `verter_analysis/src/html_intrinsics.rs` (native intrinsic catalog), `verter_host/src/host_manage.rs` (resolver + cache), `verter_ffi/src/types.rs` + `convert.rs` (FFI), `packages/component-meta/src/types.ts` (TS types).
+- Plain alias references (`type Foo = ...`) — published prop type stays `TypeExpr::Ref { name: "Foo" }`. Consumers re-resolve `Foo` through the registry on demand. The projector does NOT eagerly inline the alias body.
+- `Pick<Foo, "bar">` — materialises ONLY the `bar` member of Foo. Other Foo properties stay shallow (path-precise). Built-in utility types (`Pick`, `Omit`, `Required`, `Partial`) behave identically to a userland implementation referencing the same keys.
+- **Carrier-preserving decl-body lowering.** Under `Shallow` (as under `Navigate` / `Skeleton`), decl-body lowering interns `DeclRef` / `InstantiationRef` carriers for member-value type references — including ALL builtin utilities — and never executes `ResolveDecl` / `Instantiate` eagerly; eager lowering-time execution is `Expanded` / `Identity` only; materialisation enters exclusively through the demand points (PathWalker hops, the shallow-surface synthesiser's carrier unwrap, closed object-filter surface reads, the relation/conditional oracle). Eager Shallow member-value lowering was the `Table.vue` storm: 94.3% of all budget charges were `Instantiate(StructuralTransit:Shallow)` recursion across the transitive TanStack decl graph.
+- **Open key domain ⇒ shallow carrier (L1) — route/mode-independent.** TWO families stay shallow carriers at EVERY entrance, in every mode, and open-OR-UNKNOWN (including traversal-budget exhaustion) preserves the carrier instead of falling through into Expanded materialisation: (1) an object-filter utility (`Pick`/`Omit`) whose enumeration domain is OPEN or undecidable (`Pick<PropsBase<T>, …>` over the SFC's open `generic="T"` stays `Pick<…>`); (2) a mapped type `{ [K in S]: V }` whose produced surface still depends on an unbound OUTER generic (a CLOSED-key/open-VALUE mapped enumerates its keys path-precisely with shallow values). Closed sources still materialise the requested keys path-precisely. A carrier-stopped `Pick` at a SURFACE-enumeration demand (heritage arm / macro props-slots surface) still publishes its CLOSED output-key selection from the source's enumerable arms via the shallow walker's `Pick`-carrier enumeration — the source is never whole-materialised and `Omit` (source-dependent-open output keys) stays a carrier; zero-member surface collapse was the nuxt-ui ContentSearch/DropdownMenuContent bug. Typed-IR only, no string matching. The carrier-stop is the PRIMARY defense for the open-generic class; the per-request projection budget (`request_budget.rs`) is an ARMED-by-default runaway fuse (`projection_op_budget == 0` ⇒ effective cap 2000) whose trip returns `BudgetExceeded` as a genuine partial — refused warm admission, the no-poison invariant. Publication demand is `Navigate`-only on the projector/registry macro surfaces: a full `get_component_meta` records ZERO `Published(Expanded)` projection contexts; `Table.vue` and `ChatMessages.vue` are COMPLETE corpus members with un-ignored green trackers (`table_resolves_complete_and_warm`, `chat_messages_resolves_complete_without_false_partial`, `chat_messages_resolves_without_timeout`). The FULL authoritative spec — entrances, owner predicates, the per-argument position-sensitive key-domain rule, the tri-state conditional oracle, per-utility output-key semantics, mapped family composition, OPEN/CLOSED definitions, memoization, invalidation, the `TypeOf` demand rails, and the four named current scoped exceptions — lives in `/type-resolution` → Open-Key-Domain Carrier-Stop (L1).
+- `Omit<Foo, "bar">` — keeps `bar` shallow (excluded from the surface) and materialises the others.
+- `Foo['a']['b']` — path-precise: only the `a` and `b` hops load; other Foo keys never enter the published surface.
+- True recursive types (`type Self = Pick<Self>`) — NOT supported. The published surface stays the bare `Ref { name: "Self" }`.
+- Imported alias names (workspace-owned OR package-backed) — stay shallow regardless of where they live.
+
+The projector pipeline is the sole post-projection authority — no eager per-field materialisation runs at publication time.
+
+Guards: `decl_body_lowering_keeps_member_value_refs_as_carriers`, `publication_routes_never_demand_expanded`, `chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier`, `closed_pick_sources_still_materialize_path_precisely`, `projection_budget_counts_instantiate_and_conditional`, `cycle_guard_roots_at_utility_source_type_argument` — full list in `CRITICAL_RULE_GUARDS`.
+
+See `/component-meta` skill for the publication-surface rules and the locked-down negative tests in `crates/verter_session/src/meta_tests.rs`, and `/type-resolution` for the authoritative L1 spec.
 
 ### Component-Meta Native Vs Compat (CRITICAL)
 
-The official/native component-meta payload is the semantic authority. `@verter/component-meta/compat` is a projection layer for `vue-component-meta` interoperability, not a second semantic pipeline.
+The native component-meta payload is the semantic authority. `@verter/component-meta/compat` is a projection layer for `vue-component-meta` interoperability, not a second semantic pipeline.
 
-- Fix missing or incorrect metadata in the shared/native owner layer first. Compat should only remap representation when the native payload is already correct enough.
-- Do not weaken native TypeScript meaning to imitate Volar formatting. Example: keep native `boolean` as `boolean`; any `true | false` expansion belongs only in compat-specific display/schema logic if we choose to support it.
-- Indexed-access members may be resolved/expanded when that improves real type fidelity. Targeted compat expansion such as `Alert['variants']['color']` → the concrete color union is acceptable; blanket ref flattening is not.
-- Compat `exposed` parity should be derived from a shared cached public-instance surface (for example a `ComponentPublicInstance` extraction owned by the host/public-instance path). Do not redefine native `exposed` to mean public-instance unless the public API is deliberately expanded.
-- Native-only extensions such as `models`, `acceptedProps`, `acceptedEvents`, `acceptedSurfaceCompleteness`, `rootReachability`, and `fallthroughSurface` are part of Verter's official API. Benchmark them separately from Volar-surface parity instead of treating them as regressions.
-- Component-meta type recovery must stay cache-owned. When changing `verter_host`, `verter_resolver`, or `packages/component-meta` type paths, rely on cached lookup/eval state and expand only on demand; do not rewalk AST/source as a fallback to recover missing types.
-- Component-meta registry publication must stay shallow. Publish only the symbols demanded by the current query path, and do not eagerly materialize unrelated owner/package helpers just to populate the registry.
-- Component-meta companion/file-target selection must stay shallow too. Choosing between runtime and declaration companions may probe cached raw source existence, but must not build export analysis, snapshots, or eval envs just to decide the target file.
-- Imported component-meta hydration must stay cache-owned too. Once shallow imported dependency state exists, later alias/registry/fallthrough resolver stages must read only from that cache-owned state and must not jump back to raw snapshot/source builders for imported files.
-- Component-meta resolvers must deepen in exactly one place per requested symbol/query path. Do not let a file-level helper widen into sibling symbols/files that are not on the active declaration route.
-- Component-meta metadata/fallthrough projection must stay query-scoped. Reuse the resolved state plus captured `HostStoreView`/session view; do not re-enter a fresh top-level meta/fallthrough query when a resolved query already exists.
-- Imported-eval collection for component-meta must stay single-path and lazy. Do not introduce eager collection modes or reparsing fallbacks from stored source text; selected imported symbols must be hydrated through the host-owned cache only.
+Core rules: Fix metadata in the native layer first. Rust owns resolution, declaration routing, graph construction. One async native request per query. JS may transform structure but must not recover meaning. JS must not become a second resolver or expander. Cache-owned type recovery only — no AST/source fallbacks.
+
+Guards: `no_napi_direct_verter_compiler_emitters`, `compat_one_napi_call_audit`.
+
+See `/component-meta` skill for the full policy, resolver rules, and cache contracts.
+
+### Typed-IR-Only Resolver Rule (CRITICAL)
+
+The native component-meta / typeinfo type resolver — analyzer → projector → registry → policy → materialiser — drives semantic decisions exclusively from the typed IR (`verter_semantic::analysis::type_expr::TypeExpr` on Rust, `TypeDescriptor` from `@verter/type-ir` on TS). Forbidden inside that pipeline:
+
+- Source slicing, regex against type text, hand-rolled type-text splitters (`split_top_level_*`, `find_top_level_char`, `extract_pick_slot_bindings`, `extract_string_literal_name`, `splitTopLevelTypeOperator`), `starts_with("Pick<")` shape sniffing, and the synthesise-then-reparse pattern (`format!(...).parse_type_annotation(...)`). Walk the typed IR instead.
+- `parse_type_annotation` anywhere except JSDoc tag-type payloads — the single explicit text exception: `{Type}` payloads inside JSDoc tags are inherently text, parsed via the dedicated JSDoc path only.
+- Parsing back raw / display strings (`Analyzed*Field.type_annotation`, `ExpandedField.raw_type`, `ResolvedLocalType.expanded`, `PropMeta.rawType`) — display-only passthroughs. The JS compat layer (`@verter/component-meta/compat`) reads `prop.type` (`TypeDescriptor`) for every semantic decision; `prop.rawType` must not feed any `looksLike*`, `extract*`, `normalize*`, `split*`, `strip*`, `prefer*`, `shouldPrefer*`, or `repairOpaque*` branch.
+- Substring path classification (`"/node_modules/"`, `"\\node_modules\\"`) — use `ResolverContext::workspace_is_package_backed(canonical_id)`. That predicate is the single structural authority for workspace-ownership classification, and it is what the live decision sites call directly (`component_meta_materialize.rs`, `framework/script_facts.rs`, `host_manage/jsdoc_resolve.rs`, `meta_resolve/graph_predicates.rs`, `meta_resolve/materialize/field_types.rs`, `meta_resolve/projectors/output_sink.rs`, `project_semantic_dispatch/raise.rs`/`walk.rs`, and others). Workspace-owned is its complement — there is no separate `workspace_is_workspace_owned` predicate.
+- Name-suffix role inference (`name.ends_with("Props")` / `"Emits"` / `"Events"` / `"Model"` / `"Slots"`). Type-role classification is structural, not nominal: a type is a prop/emit/model/slot type because a Vue SFC macro (`defineProps`, `defineEmits`, `defineModel`, `defineSlots`, `withDefaults`) consumes it — read from `AnalyzedMacro.kind` / `parsed_type_argument` / `type_references` on the analyzer snapshot.
+
+OXC is a syntax/lowering front-end only and never resolves types at query time. Macro/JSDoc producer fields still lower at their producer boundary via `lower_ts_type(ts_type, source)` (stored alongside `Analyzed*Field`, `ResolvedLocalType.type_expr`, `ProjectedMacroSurfaces.*_expr`, surviving all caches); top-level declaration bodies lower LAZILY through the scheduler-retained parse snapshot (`DeclBodyMemo` → `DeclLoweringService`) and return owned typed IR before dispatch/reducers ever see them — no raw-string reparsing, no OXC resolver path. For the hot read surface the `decl_body_hot_ref` accessor mints a `HotTypeRef` handle over the `Instantiate` query result (`build_instantiate`'s post-processed node, produced via the resolving-lowerer body-shape helper `lower_decl_body_with_provenance`); the handle is NOT a re-lowering — bodies still lower to typed IR, and `DeclBodyMemo` stays `TypeExpr`. If a new requirement appears to need text manipulation inside the resolver, fix the producer (lower the right OXC node, store the right typed field, extend `@verter/type-ir` with a missing variant) rather than reparsing or pattern-matching on text.
+
+Guards: `no_macro_string_heuristics_in_resolver_core`, `no_format_then_reparse`, `no_role_inference_from_name_suffix`, `no_node_modules_substring_outside_workspace_api`, `no_pick_or_omit_string_prefix_check`, `lazy_decl_lowering_uses_scheduler_snapshot_not_reparse`, plus the rest of the typed-IR guard cluster — full list in `CRITICAL_RULE_GUARDS`.
+
+See `/component-meta` and `/type-resolution` skills for the typed schema contract, the producer-side lowering points, and the architecture-guard list.
 
 ### CodeTransform Is the Single Source of Truth (CRITICAL)
 
-**All modifications to generated code MUST go through `CodeTransform` operations** (`overwrite`, `prepend_left`, `append_left`, `move_with_suffix`, etc.). Never apply string replacements, regex transforms, or manual splicing to the output of `build_string()` or to content that was produced by a `CodeTransform`.
+**All modifications to generated code MUST go through `CodeTransform` operations** (`overwrite`, `prepend_left`, `append_left`, `move_with_suffix`, etc.) — never string replacements, regex transforms, or manual splicing on the output of `build_string()` or content produced by a `CodeTransform`. `CodeTransform` generates source maps by tracking chunks (Original, Inserted, Moved, Overwritten); modifying the string after the transform desyncs byte offsets → LSP position mismatches (hover landing on the wrong token, go-to-definition jumping to wrong locations).
 
-Post-hoc string manipulation breaks sourcemap accuracy: the `CodeTransform` generates source maps by tracking chunks (Original, Inserted, Moved, Overwritten). If you modify the string after the transform, byte offsets in the source map no longer match the actual content. This causes position mismatches in the LSP (e.g., hover landing on the wrong token, go-to-definition jumping to wrong locations).
+**Correct:** `ct.prepend_left(pos, ".ts")` — chunk list and source map stay consistent. **Wrong:** `content.replace(".vue'", ".vue.ts'")` on the built string — the source map still reflects pre-replace byte offsets.
 
-**Correct:** Use `ct.prepend_left(pos, ".ts")` to insert text at a known position — the chunk list and source map stay consistent.
+Guards: `compile_audit_sourcemap`.
 
-**Wrong:** Call `content.replace(".vue'", ".vue.ts'")` on the built string — the source map still reflects the pre-replace byte offsets.
+### Typeinfo Wire Contract (CRITICAL)
 
-### Type Evaluator Sharing & Depth Limits
+The typeinfo graph wire surface (`crates/verter_protocol/proto/verter/v1/typeinfo.proto`, its generated Rust and TS bindings, and the audit envelope on top) is a closed contract. Four invariants:
 
-`verter_analysis::type_eval` is the shared lightweight type evaluator used by analysis, host, and resolver surfaces. Its memory and caching invariants matter across the workspace.
+1. **Closed-enum discipline.** `GraphTypeNode.kind`, `StructuredTypeExpression.kind`, `TypeInfoGraphRequest.payload`, `TypeInfoRequestError.kind` are closed `oneof` taxonomies. Adding a variant bumps `SemanticTypeGraph.schema_version`; removing one requires `reserved` directives at the enclosing message scope (proto3 forbids `reserved` inside an `oneof` block).
+2. **Wire-compat: field numbers never reused.** A retired variant's tag goes into the message's `reserved` list with its name (off-tree clients keep round-tripping the slot as an unknown field); new variants take the next free tag, never a recycled one.
+3. **Audit envelope additions are purely additive.** Every new typeinfo audit field (`structured_event`, `kind_payload`, `RequestKind::TypeInfoGraph`) lands as a new arm or a default-zero field, never a replacement.
+4. **Request validation runs before semantic execution.** `validate_type_info_graph_request` rejects malformed envelopes through a typed `TypeInfoRequestError`; the schema-version gate is closed-set (`SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS`); per-variant structured-expression validation is exhaustive over the `oneof` taxonomy.
 
-- Recursive `TypeExpr` structure is Arc-backed (`Arc<TypeExpr>`, `Arc<[TypeExpr]>`, `Arc<ObjectExpr>`, `Arc<FunctionExpr>`) so clones stay shallow.
-- `EvalEnv.type_bindings` stores `Arc<TypeExpr>`, not owned `TypeExpr`, so generic instantiation does not re-copy bound subtrees.
-- `resolved_refs` caches `Arc<TypeExpr>` values keyed by stable declaration identity plus interned type arguments. Cache-hit callers may clone the outer `TypeExpr`, but child allocations must stay shared.
-- `max_ref_depth` is a safety valve for nested `evaluate_ref` chains only. When the limit is hit, return a symbolic `TypeExpr::Ref` built from the already-interned evaluated args. Do not cache that fallback result.
-- Structural-sharing regressions should be covered in dedicated evaluator tests and the Criterion pathological-graph bench in `crates/verter_analysis/benches/type_eval_bench.rs`.
+Guards: `typeinfo_graph_taxonomy` (`crates/verter_session/tests/cases/g_block/typeinfo_graph_taxonomy.rs` — proto/TS oneof parity), `typeinfo_proto_ts_freshness` (`crates/verter_protocol/tests/cases/typeinfo_proto_ts_freshness.rs::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output` — regenerates the TS bindings via the workspace `buf` and `oxfmt` binaries and byte-compares), `request_kind_payload_parity` (`crates/verter_audit/tests/cases/request_kind_payload_parity.rs`), `typeinfo_request_validation` (`crates/verter_session/tests/cases/g_type/typeinfo_request_validation.rs` — closed-set schema-version + exhaustive structured-expression coverage), `typeinfo_wire_surface_guards`, `typeinfo_graph_contract_guards`, `typeinfo_request_contract_guards`, `typeinfo_audit_contract_guards`.
 
-### IDE Script Error Recovery
+### Cross-Platform Portability (CRITICAL)
 
-When OXC encounters parse errors during typing (e.g., `count.` mid-expression), the IDE script codegen (`ide/script.rs`) uses a **truncate-and-reparse** strategy instead of falling back to degraded file-scope output:
+The codebase MUST build, test, and materialize on macOS, Windows, AND Linux. Platform-assuming code is a defect, not a nit.
 
-1. Find the earliest error offset from OXC diagnostics.
-2. Truncate source at the last newline before that offset — the "clean prefix".
-3. Re-parse only the clean prefix (which succeeds since the broken code is removed).
-4. Use the clean prefix AST for normal codegen (import hoisting, binding extraction, macro processing). The broken tail passes through unchanged in the CodeTransform.
+Guard-enforced — `tracked_paths_are_portable` (`crates/verter_session/tests/cases/tracked_paths_are_portable.rs`) enumerates `git ls-files -z` and enforces: valid UTF-8; no NTFS-illegal characters (`< > : " | ? * \` plus control chars); no trailing dot or space; no reserved device basenames (`CON`/`PRN`/`AUX`/`NUL`/`COM1`–`COM9`/`LPT1`–`LPT9`, with or without extension, plus `CONIN$`/`CONOUT$` — the `$`-suffixed forms only); no case-insensitive path collisions (lowercase-fold approximation of NTFS/APFS folding, not the exact filesystem fold tables); ≤200-byte relative paths.
 
-A lightweight token scanner (`ide/script_recover.rs`) recovers macro binding names from the broken tail so template bindings still resolve. This means typing `count.` at the end of a script preserves hover, completions, and go-to-definition for all declarations above the cursor.
+Review-enforced (the guard does not cover these):
 
-**Fallback**: When the clean prefix is empty (error on first line) or the clean prefix itself fails to parse, the system falls back to file-scope error recovery mode (`process_tsx_script_setup_error_mode`).
+- Sanitize generated on-disk names (e.g. `blake3:<hash>` → `blake3-<hash>`) — logical identifiers are unconstrained; only the on-disk boundary is. The guard only sees tracked paths, so it catches a generated name once committed, not at generation time.
+- Build paths with `Path`/`PathBuf`/`Path::join` — never string concatenation with hardcoded `/` or `\`.
+- Byte-equality comparisons over checked-out text normalize line endings (CRLF ↔ LF) or compare as text — never raw bytes embedding EOL.
+- OS-specific binaries (`tsgo`, `.exe` suffixes) are discovered platform-aware, never via a hardcoded per-OS name.
+- Temp and cwd paths come from std abstractions, not literal paths.
 
-### TypeProvider Architecture
+Guards: `tracked_paths_are_portable`.
 
-The LSP delegates TypeScript type checking to an external **TypeProvider** process. Two backends are supported:
+### Anti-Binary-Growth Integration-Test Layout (CRITICAL)
 
-| Backend      | Binary             | Protocol                                   | Use Case                             |
-| ------------ | ------------------ | ------------------------------------------ | ------------------------------------ |
-| **TSGO**     | `tsgo` (Go binary) | LSP over stdio (Content-Length + JSON-RPC) | Fast, native TS checking (preview)   |
-| **tsserver** | `node tsserver.js` | Newline-delimited JSON over stdio          | Workspace TS version, plugin support |
+Each crate exposes AT MOST one `tests/main.rs` integration-test binary; extra cases live under `tests/cases/` and are wired through `main.rs`. A second top-level `tests/*.rs` auto-becomes its own test binary and re-balloons the gate, so it is forbidden unless EXACTLY allowlisted. The only sanctioned exceptions are genuine "needs a separate test process" cases (process-global state that must be isolated): `verter_session` `allocator_canaries` (a counting `#[global_allocator]`) and `verter_lsp` `lsp_audit_trace_out_env_var` (a process-global env mutation). The allowlist (`scripts/integration-test-layout-allowlist.json`) is the single source of truth shared by both guards, is EXACT (package + target + repo-relative `src_path`, no globs/prefixes), and is STALE-FAILING — an allowlisted target that no longer exists in `cargo metadata` (or whose `src_path` moved) FAILS the guard.
 
-**Provider selection** (`--type-provider` CLI arg / `verter.typeProvider` VS Code setting):
+Dual guard: the fast-fail CI Node check `scripts/check-integration-test-layout.mjs` (runs before the Rust gate) and the in-gate Rust mirror (`crates/verter_session/tests/cases/integration_test_layout_guard.rs`), both reading the same allowlist.
 
-- `auto` (default): if TS 5.x/6.x installed, uses tsserver; otherwise tries TSGO
-- `tsgo`: TSGO only
-- `tsserver`: tsserver only
-- `off`: no type provider (verter-only mode)
+Guards: `integration_test_layout_is_consolidated`, `layout_checker_discriminates_stray_and_stale`, `allowlist_is_the_two_known_process_isolated_targets`.
 
-Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/traits.rs`) with 14+ methods (hover, completions, diagnostics, definition, references, rename, etc.). Both are wrapped in a `ResilientTypeProvider` that detects crashes, auto-restarts (max 3 with exponential backoff), and replays the file cache.
+### Framework Adapter Substrate (CRITICAL)
 
-**tsserver kind mapping**: `parse_tsserver_completion()` in `tsserver/ipc.rs` maps tsserver's `ScriptElementKind` strings to LSP `CompletionItemKind`. This mapping MUST match VS Code's `MyCompletionItem.convertKind()` exactly. Test coverage: `test_parse_tsserver_completion_kinds_match_vscode`. Sync with VS Code source when updating TypeScript dependencies.
+Multi-framework component support is ONE shared adapter substrate, not a per-framework semantic fork. `verter_session::framework` owns the `FrameworkAdapterRegistry` (built once at `VerterHost` construction), the per-adapter `FrameworkAdapterDescriptor` (identity, supported surface kinds, carrier language, the `VirtualFileNaming` column), the facts/carrier-only `FrameworkAdapterCtx`, the `ComponentDefaultSynth` seam, and the two-pass script-fact seam. Vue is the REFERENCE adapter — re-housed as a true plan/normalize adapter (`VueFrameworkAdapter` + the relocated `vue_exec` resolution delegates), NOT a privileged hardcoded path.
 
-**Key modules** (`crates/verter_lsp/src/`):
+Closed-contract rules:
 
-- `tsgo/` — TSGO integration (LSP client, resilient wrapper, project sync)
-- `tsserver/mod.rs` — `find_tsserver()`, `find_node()`, `detect_ts_major_version()`
-- `tsserver/ipc.rs` — `TsserverTypeProvider`, newline-delimited JSON transport, position conversion
-- `tsserver/resilient.rs` — `ResilientTsserverProvider` (crash detection + auto-restart)
-- `workspace_scanner.rs` — Async background workspace scanner with priority-based file loading
+- **One audited wire entry, validation-first.** `VerterHost::resolve_framework_surface_with_audit(TypeInfoGraphRequest)` is the SOLE entry for the `GRAPH_OPERATION_FRAMEWORK_SURFACES` operation. It runs `validate_type_info_graph_request` FIRST (op/payload-arm match, schema echo, the nested framework-surface validator) — a malformed envelope returns the typed wire `error` arm BEFORE any registry lookup or semantic dispatch. A bare-inner-request entry is forbidden. The operation rides the EXISTING typeinfo graph envelope, and its current `FrameworkSurfacePayload`/embedded-`SemanticTypeGraph` shape is PROVISIONAL — an interim wire pinned today, NOT a permanent "no schema change" guarantee. The hard gate `S5.B11/B12 → U8` was landed ahead of order, so U8 still OWES the retag of `FrameworkSurfacePayload.graph` to a `TypeInfoGraphPayload` carrier, the `SemanticTypeGraph.schema_version` bump, and reserving the old field per the Typeinfo Wire Contract (CRITICAL) above; until U8 lands this wire stays pinned but is not final. Guard `framework_surface_wire_executor_validates_first`.
+- **Registry dispatch, no privileged framework branch.** The executor interns `selector.framework_adapter_id`, looks up the registry (unknown id ⇒ typed `MalformedPayload`, NO new error variant), and dispatches to the adapter. Every wire `FrameworkTag` maps to a registered adapter OR an explicit `TagDisposition` row (`DeferredVertical` / `OutOfScope`); a tag's existence is NOT a support guarantee — support is asserted only by a registered adapter and surfaced per-request via `FrameworkSurfaceKindStatus`. Guard `framework_registry_complete` (+ the `framework_surface_executor` integration suite).
+- **Closed plan/resolve/result vocabulary.** The adapter PLANS demands (`plan_surfaces` ⇒ closed 4-variant `PlannedDemand` — `MacroPayload` / `PathProjection` / `ShallowSurface` plus the Svelte arm `SvelteSurface`; no `Custom`/`Raw` arm, no source text / OXC handles / raw `SemanticQueryKey`s) and NORMALIZES resolved data (`normalize`); it holds NO resolve entry point. The executor resolves each `PlannedDemand` through the module-private `ExecutorResolveCtx` (EXHAUSTIVE match, no wildcard) THROUGH the one shared type-resolution engine — it plans, dispatches, and encodes; it is never a second resolver. Per-kind status maps DIRECTLY onto `SUPPORTED`/`PARTIAL`/`UNSUPPORTED` via the typed `ResolvedOutcome` (a supported-empty kind stays distinct from an unsupported kind). The first `SemanticTypeGraph` encoder (`graph_export`) is a pure ZERO-DISPATCH shallow projection of resolved data — named refs mint `GraphSymbolNode` + `GraphReference{symbol_id}`, structural unencodables degrade to `GraphOpaque`, never a fabricated ref and never a re-resolution.
+- **Facts/carrier-only adapter ctx.** `FrameworkAdapterCtx` exposes EXACTLY two ops — `carrier_for::<T>` (the adapter's typed parse carrier, `None` for a carrier-less adapter — never a forged token) and `script_facts_for::<T>` (resolved script facts on demand). It never resolves types, indexes a file, runs OXC, calls `ProjectSemanticDispatch`, or reads a `StoreView`. Guard `framework_adapter_ctx_closed_surface`.
+- **Two-pass script-fact seam.** The syntax-capture half (`verter_semantic::analysis::framework_facts`) captures candidates from the live OXC program — SYNTAX-ONLY (may touch OXC + `lower_ts_type`, MUST NOT resolve imports or read capability bits; guard `script_fact_capture_is_syntax_only`). The resolved-validation half (`framework/script_facts`) drives provider `validate` on demand over neutral resolved-import + capability data, content-addresses candidates, and publishes resolved facts under a fact-rail + strict-same-generation gate with `SignatureAdmission::Cacheable`-only publication (overflow ⇒ `ReturnOnly`, no warm). An EMPTY active-provider set is byte-identical zero-cost (Vue does NOT move onto the seam). The `ActiveProviderIndex` is the shared gate authority. Guard `script_fact_providers_zero_cost_on_miss`. The framework-surface result caches (`FrameworkSurfaceStore` / `FrameworkScriptCaches`) are fact-validated today but live on the framework registry rows, NOT the single `ProjectTypeStore` — they are PROVISIONAL off-store caches to be consolidated onto `ProjectTypeStore` (and given true singleflight) at U10.
+- **Parse-domain component-default synth.** `ComponentDefaultSynth` synthesises a component's default-export value symbol from PARSE-DOMAIN inputs only (macros + syntax-capture candidates); it never names the resolved-validation fact types. Registry-dispatched at the shallow-analysis injection points by the file's resolved language. Guard `component_default_synth_parse_domain_only`.
+- **Generated virtual-file naming is descriptor-owned.** The `VirtualFileNaming` column is the single authority for an adapter's IDE / API / testing-API / sidecar suffixes; the committed TS mirror (`packages/language-shared/src/virtual-file-naming.generated.ts`) is rendered from it and byte-pinned. Guard `virtual_file_naming_ts_freshness`.
+- **No re-export shim for relocated Vue resolution.** The Vue resolution bodies relocated to `framework_surface::vue_exec`; `typeinfo/adapters/vue/{public_type,surface,store}.rs` are DELETED with no re-export shim or alias under `adapters::vue`, and `VueShallowMetadataStore` / `VueMacroDtoKey` are retired. Guards `vue_relocation_no_shim` + `retired_symbols_absent_from_production_source`.
 
-**Background file sync**: During `initialized()`, the LSP spawns a `WorkspaceScanner` background task that compiles ALL workspace `.vue` files to TSX and syncs them to the type provider asynchronously. For TSGO, both `.vue.tsx` (IDE artifact) and `.vue.ts` (public API) are synced; cross-file imports resolve through `.vue.ts` (via `rewrite_vue_imports_for_tsgo`). This ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
+See the `/framework-adapters` skill for the substrate's module map, the descriptor/registry/ctx/executor contracts, the script-fact seam, and Vue as the reference adapter.
 
-**Barrel-import eager sync** (TSGO): When a Vue file imports components through a barrel (non-Vue re-export file like `components/index.ts`), the LSP eagerly syncs the barrel and its Vue dependencies to TSGO during `did_open` and `resync_aliased_imports_for_open_files`. The process: (1) discover barrels from `TemplateComponentUsage.import_source` resolving to non-Vue files, (2) scan barrel's `module_references` for `.vue` specifiers, (3) sync Vue dependencies first, (4) sync barrel file. Without this, TSGO only receives barrels from the background scanner, which may not complete before hover/completion requests.
+### Project-Bound External-TS Contract (CRITICAL)
 
-**Freeze prevention** (fast typing): Three layers prevent tokio runtime starvation during rapid typing:
+Production external-TypeScript results for carrier sources are project-bound. The result-producing backend path is `ExternalTsProjectResolver` → `CarrierRegistry` → `EngineBackend`: `EngineBackend::ensure_project` is reached only from a resolved `ProjectBinding`, and `publish_snapshot`, `query`, and `diagnostics` require the resulting `BoundProject` witness. No production external-TS result path may infer a project from a bare path, open a carrier into a config-less/inferred project, or fall back to an inferred backend. Path-shaped transport notifications may exist below this contract, but they cannot construct external-TS results or bypass `BoundProject`.
 
-1. **SyncCoordinator** (`sync_coordinator.rs`): Single long-lived task replaces spawn-per-keystroke debounce. Uses mpsc channel + 300ms deadline map to guarantee exactly one sync per file after typing stops. After syncing, computes and publishes merged (Verter lint + TS type) diagnostics via push. Holds shared `Arc<VerterHost>`, `ProjectSync`, `TypeProvider`, `cached_verter_diags`, and `PositionEncodingKind`.
-2. **Push diagnostics only**: The LSP uses push diagnostics exclusively (no pull/`diagnostic_provider`). During typing, no new diagnostics are published — VS Code automatically adjusts existing push diagnostic positions as the document changes. The SyncCoordinator publishes fresh merged diagnostics after 300ms of silence.
-3. **Hang detection** (`tsgo/ipc.rs`): `LspTransport` tracks `consecutive_failures` (AtomicU32). After 3 consecutive request timeouts, fires `crash_notify` to trigger `ResilientTypeProvider`'s existing restart machinery. Notifications use `try_send()` (non-blocking) to prevent channel backpressure.
+Ownership is TypeScript-correct. A carrier source (`.vue`, `.svelte`, or any adapter extension) is owned by a configured project only through the default include, a no-extension directory/bare-star glob, or a glob/`files` entry that explicitly covers that extension. An extension-specific `*.ts` glob does not own it. TypeScript include has no brace expansion: multi-extension coverage is separate entries, never `*.{vue,svelte}`.
 
-**Heartbeat watchdog**: The server sends `$/verter/heartbeat` every 5s from `initialized()`. The VS Code extension monitors heartbeats — if none arrive for 30s, it auto-restarts the server. This is the last-resort safety net for runtime starvation.
+`NoProject` and `Ambiguous` produce no production external-TS result; Verter-native non-external-TS features may still answer. `SyntheticScratch` is a separate, explicitly labelled scratch lane for non-cross-file features only. It never supplies configured-project semantics, batch typecheck, cross-file results, or project-cache warming.
 
-**Async workspace scanning**: During `initialized()`, the LSP spawns a `WorkspaceScanner` background task instead of scanning synchronously. The scanner walks the filesystem, compiles `.vue` files to TSX, and syncs them to the type provider in priority order:
+Generated companion names are descriptor-owned and live in the user namespace. They are collision-free against different adapter source extensions in the normal case, but not resolution-unambiguous or reserved. A real user file at the exact `{name}.vue.tsx` / `{name}.svelte.tsx` companion path, or a same-stem Svelte rune module beside a component, is a detected resolution conflict: Verter marks the source ambiguous and fails closed, never overlay-shadows a real user file and never surfaces a silently wrong edge.
 
-1. **Tier 0**: Files opened in the editor (signaled by `did_open`)
-2. **Tier 1**: Project source files covered by `tsconfig.json` — siblings of open files first, then expanding outward
-3. **Tier 2**: Remaining `.vue` files not covered by any tsconfig
+This rule becomes live for a backend only when that backend's real project-bound path lands; the inferred fallback for that backend is deleted in the same change.
 
-TSGO sync is throttled (yield every 10 files) to prevent flooding. The scanner receives priority signals from `did_open` to dynamically re-order its queue. This makes `initialized()` return in <1s instead of blocking for the full scan duration.
+Guards: `provider_op_requires_resolved_project`, `carrier_ownership_extension_rules`, `carrier_never_shadows_real_user_file`, `same_stem_svelte_component_rune_fails_closed`, `no_fallback_to_inferred_anywhere`.
 
-**Key module**: `crates/verter_lsp/src/workspace_scanner.rs` — `WorkspaceScannerHandle`, `spawn_workspace_scanner()`, priority sorting, throttled sync loop.
-
-### Ownership Lifecycle & Bootstrap Sync
-
-The VFS publishes workspace snapshots atomically via `PublishedRoot`. Each snapshot carries an `ownership_ready: bool` flag:
-
-- **Bootstrap** (`ownership_ready: false`): `Engine::new()` eagerly publishes an empty snapshot so basic relative resolution works immediately. Ownership queries return no results. Provider path transforms (`provider_id_for_source`, `provider_ide_id_for_source`) are pure — they work without ownership.
-- **Ready** (`ownership_ready: true`): After `background_init` builds the full project graph, a real snapshot is published. Ownership queries are now authoritative.
-
-**Provider sync state uses typed ownership** (`ProviderOwnerBinding`):
-
-- `Provisional` — file synced before ownership is known (bootstrap).
-- `Owned(String)` — file bound to a real project (tsconfig path or root).
-
-**Readiness-gated sync rules**:
-
-- `ensure_current_file_synced()`: During bootstrap, provisional sync is allowed. With a ready snapshot, only files with a project owner are synced — unowned files are queued in `pending_snapshot_provider_sync` for later drain.
-- `sync_imported_vue_api_lightweight()`: Same rule — provisional sync only during bootstrap.
-- `SyncCoordinator::sync_file()`: Always queues files with no owner for retry. Uses `ownership_ready` for log level (warn vs info).
-
-**Key files**: `crates/verter_vfs/src/published_state.rs` (`PublishedRoot`, `ownership_ready`), `crates/verter_lsp/src/provider_sync.rs` (`ProviderOwnerBinding`, `ProviderSyncState`), `crates/verter_lsp/src/server.rs` (`PublishedResolverSnapshot`, `ensure_current_file_synced`).
-
-### Multi-Root Workspace & Per-Project Configuration
-
-In monorepo / multi-root VS Code workspaces, different packages have different `tsconfig.json` paths aliases, `.verterrc.json` lint rules, and `vite.config` resolve aliases. The LSP stores all workspace folders (`workspace_roots: Mutex<Vec<String>>`) and builds a `ProjectRegistry` that groups per-project configuration.
-
-**Key types** (`crates/verter_lsp/src/config.rs`):
-
-- `ProjectConfig` — per-project: root path, `ResolvedLintConfig`, `Linter` instance, optional `vite_config_path` and `vite_config_deps`
-- `ProjectRegistry` — sorted by root length (longest prefix first), provides `find_project()`, `find_project_root()`, `linter_for()`
-- `RegistryBuildResult` — returned from `from_workspace_roots()`, contains `registry` + `trust_required` list
-
-**Import resolution** (single VFS authority): All LSP import resolution goes through `WorkspaceAccess::resolve_import()` via the VFS `FilesystemWorkspace`. The workspace is created in `initialize()` with an empty project graph (enabling relative/node_modules resolution immediately), then `background_init` populates the full project graph via `set_project_graph()` for alias resolution. The host's internal `project_resolver` (set via `set_internal_resolver()`) is used only for compilation — never for LSP resolution. `preferred_specifier()` provides reverse-alias lookup for auto-imports.
-
-**Tsconfig/vite config discovery** delegates to `verter_vfs::config` — all tsconfig parsing, membership, references, and `raw_paths_json` live in VFS. Fallback projects (no tsconfig) get Vite aliases via two-tier analysis in `vite_config.rs`:
-
-1. **Static analysis** (OXC): Parses `vite.config.{ts,js,mjs,cjs,mts,cts}` without executing code. Handles object/array alias forms, `defineConfig()`, template literals, `path.resolve()`, `new URL()`, `fileURLToPath()`. Returns `Complex` for configs using env vars, dynamic imports, or non-allowlisted packages.
-2. **Trusted execution** (opt-in): For complex configs, spawns Node.js with `loadConfigFromFile` if the file is in `verter.viteConfig.trustedFiles`. Includes env sanitization, 10s timeout, and last-known-good caching.
-
-The server sends `$/verter/viteConfigTrustRequired` notifications for complex configs not yet trusted, and the extension shows a trust prompt. Config file changes (detected via file watcher) trigger a full registry rebuild.
-
-**Type provider integration**: TSGO receives `workspace/didChangeWorkspaceFolders` notifications. tsserver uses per-file `projectRootPath` from the project registry. Both resilient wrappers store workspace folders for restart replay.
-
-**Lock ordering** (prevents deadlocks): `workspace_roots` (async) → `project_registry` (sync read) → release → `fallback_linter` (sync read). Never acquire `fallback_linter` while holding `project_registry`.
-
-### Style Preprocessing in Bundler Mode
-
-Style blocks with `lang="scss"`, `lang="sass"`, or `lang="less"` require preprocessing to CSS. The pipeline differs between Vite and non-Vite bundlers:
-
-**Vite mode** (Vite-owned preprocessing, matching `@vitejs/plugin-vue`):
-
-1. During main `.vue` `transform()`, the plugin parses the SFC with `compiler.parse()` and caches raw style block content in `styleBlockCache`. Style preprocessing is **skipped** in `applyPreprocessorRequests()`.
-2. `load()` returns raw style source (e.g., SCSS with `$variables`) from `styleBlockCache`.
-3. Style URLs preserve the original lang (`lang.scss`, not `lang.css`) since `meta.style_langs` is never overwritten.
-4. Vite's CSS pipeline preprocesses SCSS/SASS/Less/Stylus automatically between `load()` and `transform()`.
-5. `transform()` always runs `compiler.compileStyleAsync()` for Vue-specific post-processing: scoped CSS attribute selectors (`[data-v-...]`) and CSS `v-bind()` rewriting. This runs even for unscoped plain CSS blocks (CSS `v-bind()` still needs rewriting).
-
-**Non-Vite mode** (preprocessor fallback):
-Style preprocessing goes through `preprocessBlock()` → `preprocessStyle()` which calls Vite's `preprocessCSS()` in-process (if Vite config is available). The compiled CSS is sent to the Rust host via `applyBlockOverrides()`, and `apply_style_overrides()` updates `meta.style_langs` to `"css"`. The `transform()` hook uses Rust `processStyle()` for CSS scoping only.
-
-**Compiler resolution**: `vue/compiler-sfc` is resolved once per plugin instance from the project root in `configResolved()` via `createRequire(join(root, "package.json"))("vue/compiler-sfc")`. This is stored in the `compiler` variable and used for both SFC parsing (`compiler.parse()`) and style post-processing (`compiler.compileStyleAsync()`).
-
-**Key files**: `packages/unplugin/src/index.ts` (`styleBlockCache`, `compileStyleAsync` in transform, style load from cache), `packages/unplugin/src/core/preprocessor.ts` (non-Vite style preprocessing via `preprocessStyle()`), `crates/verter_host/src/host_upsert.rs` (`apply_style_overrides` — lang update, non-Vite only), `crates/verter_host/src/id.rs` (`render_ids` — URL generation).
-
-### Cached Directive Fields on ElementNode
-
-The parser extracts structural directives from `el.props` via `prop.take()` and caches them as dedicated fields on `ElementNode` (`ast/types.rs`):
-
-| Field         | Directive                     | In `el.props`? | Notes                                            |
-| ------------- | ----------------------------- | -------------- | ------------------------------------------------ |
-| `v_condition` | `v-if`, `v-else-if`, `v-else` | **No** (taken) | Contains `ElementNodeCondition` with kind + prop |
-| `v_for`       | `v-for`                       | **No** (taken) | Contains the full `NodeProp`                     |
-| `v_slot`      | `v-slot`, `#name`             | **No** (taken) | Contains the full `NodeProp`                     |
-| `v_once`      | `v-once`                      | **No** (taken) | Contains the full `NodeProp`                     |
-| `v_ref`       | `ref`, `:ref`                 | **No** (taken) | Contains the full `NodeProp`                     |
-
-**Consequence**: Code iterating `el.props` will **never see** these directives. Both codegen paths must handle them explicitly. The IDE module removes `v-if/v-for/v-slot/v-once` attributes (they become JSX wrappers/removals) and converts `ref` to JSX expression syntax (`ref={"name"}`).
-
-### Position Encoding (CRITICAL rules)
-
-See `/position-encoding` skill for full span type reference, encoding tables, and path normalization details.
-
-**Encoding source of truth**: The position encoding MUST come from the client capabilities negotiated during `initialize()`. The server stores it in `Arc<parking_lot::RwLock<PositionEncodingKind>>` shared with the SyncCoordinator. Default is UTF-16 (per LSP spec) until negotiated. **Rust-internal code uses UTF-8 byte offsets**; **LSP boundary code converts to negotiated encoding**; **JS/VS Code uses UTF-16**.
-
-**Line/Column Base Rules** (off-by-one bugs):
-
-- **PositionResolver is 1-based** — subtract 1 for source maps and LSP
-- **Source maps, LSP, VS Code are all 0-based**
-- **OXC/verter spans are byte offsets** — no line/column conversion needed
-
-**Serialization rule**: All data crossing serde/MCP/LSP/FFI boundaries MUST use `Span` (SFC-absolute). `RelativeSpan`/`PartialGeneratedSpan`/`GeneratedSpan` do not implement Serialize.
-
-### Path Normalization (CRITICAL rules)
-
-See `/position-encoding` skill for canonical ID format and boundary tables.
-
-1. **Receive → normalize immediately** (`canonicalize_id()` or `uri_to_canonical_id_from_str()`)
-2. **Store only canonical IDs** in all maps and caches
-3. **Denormalize at exit boundaries** (file:// URIs or OS paths)
-4. **Never compare raw paths** — always compare canonical IDs
+See the `/host-session` skill for the contract's three-layer structure (`ProjectResolver`/`CarrierRegistry`/`EngineBackend`), the `BoundProject` witness type-state, and the carrier-publish path.
 
 ## Build
 
@@ -440,158 +337,202 @@ pnpm test                                    # All JS/TS tests
 pnpm vitest --run                            # All tests (non-watch)
 pnpm vitest --run path/to/test.spec.ts       # Specific file
 
-# Rust
-cargo test --workspace --verbose             # All Rust tests
-cargo test --package verter_core test_name   # Specific Rust test
-cargo test --package verter_core 2>&1 | tail -60  # Full suite with truncated output
+# Rust — CANONICAL agent gate
+node scripts/gate.mjs                         # THE Rust gate. Builds the test universe ONCE via `cargo nextest archive` (single compile, no second-command recompile), then runs BOTH surfaces from the same artifacts: SURFACE 1 = nextest run (per-test process isolation), SURFACE 2 = the verter_session libtest binaries executed directly (in-process / multi-test-per-process). Before the archive build it runs a freshness-tooling preflight: it ensures the workspace `buf` + `oxfmt` binaries are present (auto-running `pnpm install --frozen-lockfile` inside the mutex/timeout/stall machinery when the `node_modules/.bin` shims are missing), then VERDICT-GATES the `cases::typeinfo_proto_ts_freshness::*` byte-pin tolerance on the outcome — tooling present/installed ⇒ tolerance OFF, so a freshness failure is a HARD gate failure (exit 1), NOT PASS-WITH-TOLERATED; a deterministic install failure (e.g. frozen-lockfile mismatch) ⇒ a LOUD setup failure (exit 127), never silently tolerated (when an install is attempted — both `node_modules/.bin/{buf,oxfmt}` shims already present ⇒ the preflight returns already-present and no install runs); when pnpm is not resolvable AND `buf` is not resolvable the Rust byte-pin pair SKIPS gracefully and PASSES, so the gate reports an ORDINARY PASS (no FAIL line) — the verdict-gated tolerance flips ON there only as a LATENT safety net that would surface PASS-WITH-TOLERATED solely in the unusual case the pair produced a tolerated FAIL despite `buf` being absent. `oxfmt` absence NEVER grants tolerance — with `buf` present, a missing `oxfmt` is a LOUD setup failure (exit 127), not a degraded run. Run it with `node_modules` present (the normal path) so the byte-pin runs GENUINELY: with the tooling present a freshness failure is a HARD FAIL (a real stale-binding regression to regenerate + commit) — PASS-WITH-TOLERATED is NEVER the regression signal on a normal machine, and on a buf-less runner the pair yields an ordinary PASS via the skip, not PASS-WITH-TOLERATED. See docs/arch/gate-performance.md.
+
+# The TWO UNDERLYING SURFACES gate.mjs runs — runnable directly (no Node, or debugging one surface in isolation):
+cargo nextest run --workspace                # SURFACE 1 — every workspace test target INCLUDING the ~25 verter_session integration binaries, per-test process isolation
+cargo test -p verter_session --tests         # SURFACE 2 — shared-process (in-process) surface for the verter_session integration suite
+cargo test --workspace --doc                 # Rust doctests only; run when rustdoc examples changed or explicitly requested
+cargo test --package verter_compiler test_name   # Specific Rust test
+# NOTE: bare `cargo test --workspace --tests` SILENTLY SKIPS the verter_session integration suite (~4404 tests) because `session_metrics` feature unification drops those binaries from the workspace test set — it MUST NOT be the sole Rust gate; run `node scripts/gate.mjs` (which runs both surfaces from one archive) or the two-surface pair above directly.
+cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncated output
 ```
 
 ### End-of-change Checks
 
-Run these after making changes:
+Run after **every** change. Verter's crates are highly interconnected — a change in one crate frequently breaks tests in dependent crates. Always run the full workspace suite:
 
 ```bash
-cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
-cargo fmt --all
-pnpm install --frozen-lockfile   # Verify lockfile is in sync (CI uses this)
+node scripts/gate.mjs 2>&1 | tee /tmp/test-output.txt   # CANONICAL Rust gate — single-compile archive; runs BOTH surfaces (nextest process-isolation + direct in-process verter_session) with zero second-compile. Run with `node_modules` present so the freshness-tooling preflight is a no-op and the `cases::typeinfo_proto_ts_freshness::*` byte-pin runs GENUINELY: with the tooling present a freshness failure is a HARD gate failure (exit 1, a real stale-binding regression to regenerate + commit), NOT tolerated. On a buf-less runner (pnpm not resolvable AND `buf` not resolvable) the Rust byte-pin SKIPS and PASSES, so the gate reports an ordinary PASS — the verdict-gated tolerance flips ON there only as a latent safety net (PASS-WITH-TOLERATED appears solely if the pair somehow emitted a tolerated FAIL despite `buf` being absent, which the skip does not). `oxfmt` absence never grants tolerance (with `buf` present a missing `oxfmt` is a LOUD setup failure); a deterministic install failure (frozen-lockfile mismatch) fails loud as setup (exit 127) when an install is attempted (both shims already present ⇒ no install runs).
+cargo clippy --workspace -- -D warnings
+cargo fmt --all --check
+pnpm install --frozen-lockfile   # Verify lockfile is in sync (CI uses this); also what the gate's preflight runs to make the freshness byte-pin run genuinely
 ```
+
+- Corpus audit-test regenerator (run after audit-record schema or fixture changes; idempotent): `node scripts/gen-corpus-audit-tests.mjs`
+
+For TypeScript changes, also run `pnpm test`. Do not skip workspace-wide testing even for "small" changes.
+
+**Agent test policy:** `node scripts/gate.mjs` is the default Rust gate — it builds the test universe once and runs BOTH underlying surfaces (`cargo nextest run --workspace` process-isolation + the in-process `verter_session` libtest binaries, the same direct surface as `cargo test -p verter_session --tests`) from the same archive with no second-command recompile. It runs the `verter_session` binaries under the workspace-unified `session_metrics` feature set (ON), intentionally replacing the old package-scoped default-feature (`session_metrics` OFF) rebuild rather than reproducing its feature config — that ON config is what the shipped LSP uses and what removes the second compile; no test target the old pair compiled is dropped. A contributor without Node, or debugging one surface in isolation, runs `cargo nextest run --workspace` then `cargo test -p verter_session --tests` directly. The `cases::typeinfo_proto_ts_freshness::*` buf/oxfmt byte-pin is the only tolerated failure, and its tolerance is now VERDICT-GATED on the gate's freshness-tooling preflight: the gate ensures `buf`/`oxfmt` are present (auto `pnpm install --frozen-lockfile` when the `node_modules/.bin` shims are missing) so with `node_modules` present that pair runs GENUINELY — and with the tooling present, tolerance is OFF, so a freshness failure is a HARD gate failure (exit 1, a real stale-binding regression to regenerate + commit), NOT surfaced as PASS-WITH-TOLERATED. On a buf-less runner (pnpm not resolvable AND `buf` not resolvable) the Rust byte-pin SKIPS and PASSES, so the gate reports an ordinary PASS (no FAIL line); the verdict-gated tolerance flips ON there only as a latent safety net, surfacing PASS-WITH-TOLERATED solely in the unusual case the pair emitted a tolerated FAIL despite `buf` being absent. PASS-WITH-TOLERATED is never the regression signal on a normal `node_modules`-present machine, and never the normal buf-less verdict either; `oxfmt` absence never grants tolerance (with `buf` present a missing `oxfmt` is a LOUD setup failure); a deterministic install failure (frozen-lockfile mismatch) fails loud as setup (exit 127) when an install is attempted (both shims already present ⇒ no install runs). Run the gate with `node_modules` present. Do not run bare `cargo test --workspace` (no `--tests`) by default: it pulls in doctests and example builds without improving the normal verification loop (and the silent-skip trap is stated once in Running Tests above). Run doctests (`cargo test --workspace --doc`) only when rustdoc examples changed or the user explicitly asks.
 
 ### Documentation Updates
 
-After adding, changing, or removing features, check and update relevant documentation:
+After adding, changing, or removing features, update the **owning** documentation:
 
-- **`CLAUDE.md`** — Architecture tables, module paths, key file references
-- **`docs/`** — API docs, guide pages, contributing guides (`docs/contributing/rust-setup.md`, etc.)
-- **`.claude/skills/`** — Skill files referencing affected modules or APIs
+- **Domain skills** (`.claude/skills/`) — update the skill that owns the affected module or API
+- **`CLAUDE.md`** — only if summaries or skill pointers change
+- **`AGENTS.md`** — if skill routing or shared sources change
+- **`docs/`** — API docs, guide pages, contributing guides
 - **Inline doc comments** — Public API rustdoc (`///`) and JSDoc (`/** */`) on changed signatures
 
-Skip this for purely internal refactors that don't change any public behavior, module paths, or APIs.
+Skip for purely internal refactors that don't change public behavior, module paths, or APIs.
 
 ### Testing Requirements
 
-**MANDATORY RULE — TDD (Test-Driven Development) must be followed for EVERY code change. This is non-negotiable. All agents, subagents, and automated workflows MUST comply. Skipping TDD is never acceptable, regardless of task size or urgency.**
+**MANDATORY: TDD must be followed for EVERY code change. Non-negotiable.**
 
-**TDD workflow (strict order — no exceptions):**
+1. Write failing tests FIRST — verify they fail before implementing
+2. Implement minimum code to pass
+3. Run tests, verify green
+4. Refactor while keeping tests green
 
-1. **Write failing tests FIRST** — before writing ANY implementation code, write one or more tests that demonstrate the expected behavior. Run the tests and **verify they fail**. Do not proceed to step 2 until you have confirmed test failure.
-2. **Implement the minimum code** to make the failing tests pass. Do not write implementation code before tests exist.
-3. **Run the tests again** and verify they pass.
-4. **Refactor** if needed while keeping tests green.
+Coverage: new features need tests, bug fixes need regression tests, refactors must keep existing tests passing.
 
-**Violation examples (DO NOT do these):**
+**Always include negative assertions**: verify both what SHOULD and should NOT be present. Codegen tests must check removed syntax is absent. Type tests must include `@ts-expect-error` guards against `any`/`never`.
 
-- Writing implementation code and then adding tests after the fact
-- Writing tests and implementation simultaneously without verifying the tests fail first
-- Skipping tests for "small" or "trivial" changes
-- Delegating implementation to a subagent without requiring TDD compliance
+**Public-boundary acceptance**: for every changed user-visible IDE, API, or compiler outcome, each affected acceptance ID has an automated public-boundary test asserting the required result AND the relevant forbidden or fail-closed result. Provider-selection, status, unit, and architecture tests supplement but do not substitute for that boundary test. A substrate block may inherit a parent boundary test only by recording the acceptance-ID mapping and executing that test in its gate. Enforcement is judgment — reviewers assess the actual invocation path and assertions, not the filename; §1a proves discrimination; confirm reruns the mapped test.
 
-Coverage expectations:
+**Architecture guards for critical rules**: every new `CRITICAL` architecture rule lands with a static architecture guard or a discriminating regression test in the same change (subject to the landed-scanner bar below — a "static guard" is never a new name-keyed file scanner); if a guard cannot be automated yet, the rule text names the planned guard/test and the gap is tracked in the owning skill/doc. The R6 meta-guard at `crates/verter_session/tests/cases/g_misc0/critical_rules_have_guards.rs` (`every_critical_rule_in_docs_has_registered_guard`) walks `CLAUDE.md` plus every `.claude/skills/*/SKILL.md` and asserts every `(CRITICAL)` heading has a `CRITICAL_RULE_GUARDS` registry row with at least one named guard — a prose-only `(CRITICAL)` section fails the gate.
 
-- New features: Add tests covering the new functionality
-- Bug fixes: Add tests that would have caught the bug
-- Refactoring: Ensure existing tests pass and add tests for edge cases discovered
-- Behavioral changes: Add tests verifying the new behavior
+**Landed guards are structural, never name-keyed file scanners (forward-only)**: a heuristic file-scanner guard/test that keys on a specific tool, function, or identifier name (any spelled source name/path/token — type, module, import/path-segment, and string identities included; `syn`/AST-based scanning included) is a transient plan artifact — WIP-only (scratch branches, squashed out before landing), never a full-fledged landed guard. LANDED enforcement of an invariant is structural — compiler/type-system/tool-based (privacy/visibility/`E0603`, type-state, sealed traits, marker-trait derives, a real used tool or function) — never a name/text/grep scanner over the source tree. This strengthens Structural-Confinement-First (`.claude/skills/mom-cto-orchestration/reference/PROTOCOL.md` → Structural-Confinement-First → Landed-scanner bar): even a residual scanner that rule would permit (justified, recorded, supplement to a structural primary) does not land — keep it WIP, replace it structurally, or accept the residue uncovered by any landed scanner. Review/governance-enforced by design, NOT guard-enforced — a guard that detects "name-keyed scanner guards" would itself be a name-scanner. Forward-only: pre-existing landed scanners are grandfathered as a class — by temporal status (already landed at rule adoption), not by list membership — and retained as-is; the explicitly disclosed high-risk example (illustrative, not an exhaustive inventory) is the hot-materialize syntactic tripwire (`hot_materialize_syntactic_tripwire_residual_backstop` + its `HOT_TERMINAL_SINKS`/`HOT_DECIDE_TAINTED_GATE_IDENTS`/`HOT_EXTRACTING_GATE_IDENTS`/`HOT_MAT_DIRECT_IDENTS` name-lists in `crates/verter_session/tests/cases/output_projector_residual_guards.rs`), retained as-is with no removal planned or required — its STRUCTURAL rail (the `NoTypeExpr` marker + the sealed `OutputProjector` capabilities) remains the durable primary.
 
-Tests serve as documentation of expected behavior and prevent regressions.
+**Rust test file organization**: When inline `#[cfg(test)]` exceeds ~400 lines, extract to a sibling `*_tests.rs` file.
 
-**IMPORTANT — Always include negative assertions**:
+### Verification Must Prove Execution (MANDATORY)
 
-Every test must verify both what SHOULD be present AND what should NOT be present. A test that only checks for expected output can pass even when the output contains invalid/broken content alongside the expected content.
+A required gate passes only on fresh, input-bound evidence that: every applicable required job was eligible and ran; the intended tree-derived surface was owned and independently discovered; selectors matched non-zero work; required source, build, and fixture prerequisites matched the tested tree; executed work was non-zero; unexpected prerequisite skips were zero; child deadlines were strictly below their parent killer; and a terminal summary completed. **Exit status 0 alone, a self-declared test universe, or a missing required-job result is FAIL.** Every tracked test or guard has exactly one declared primary gate; a hand-maintained filename list may not define the primary universe unless generated from independent discovery and parity-checked.
 
-```rust
-// GOOD: Both positive and negative assertions
-let result = gen_tsx_template(r#"<template><div v-if="show">hello</div></template>"#);
-assert!(result.contains("if(show)"), "should have IIFE if-block condition");  // positive
-assert!(!result.contains("v-if"), "v-if attribute must be removed from JSX"); // negative
+Attestation alone is insufficient — a receipt faithfully attests whatever incomplete universe the runner defines for itself. The durable design needs all three: fresh execution attestation; independently tree-derived inventory/discovery parity; and per-surface negative-control mutation through the exact canonical entry point. A single global canary cannot detect an omitted unrelated spec.
 
-// BAD: Only positive assertion — passes even if v-if="show" leaks into output
-let result = gen_tsx_template(r#"<template><div v-if="show">hello</div></template>"#);
-assert!(result.contains("if(show)"), "should have IIFE if-block condition"); // not enough!
-```
+**The negative control must itself be proven to have applied.** A plant that fails to apply reports a pass: `perl`/`sed`/`grep` exit 0 on a non-match, so a mutation's exit code is never proof it landed, and a verification search hitting a PRE-EXISTING occurrence of the planted string is a false positive. Prove the mutation is present, unique, and new in the source before trusting the run; a green planted run means the plant failed until proven otherwise. A discrimination check that cannot distinguish "the plant did not apply" from "the code is correct" is not a discrimination check.
 
-For codegen tests: always verify that removed/transformed Vue syntax does NOT appear in output. For type tests: always include both positive assertions and `@ts-expect-error` negative assertions to guard against `any`/`never`.
+Planned guard: `gate_contract_integrity` — one registered suite exercising the canonical entry point against independent inventory plus per-surface negative controls covering missing summary, disabled or missing job, invalid timeout nesting, zero selection, stale or missing build, missing fixture or unexpected skip, omitted or unowned test, and a mutation that silently fails to apply. Until that guard, its attesting driver, and the required-job aggregator land, this rule is held only by §1a and confirm judgment.
 
-**IMPORTANT — Rust test file organization**:
+**This rule currently fails its own test, and says so.** It ships `(MANDATORY)` — precisely the tier the R6 meta-guard (`every_critical_rule_in_docs_has_registered_guard`) does not check, because that guard scans `(CRITICAL)` headings only. A rule whose thesis is "a gate that cannot prove it ran is a failure" is therefore, today, a gate that cannot prove it ran. `(CRITICAL)` is not available as a shortcut: an unguarded `(CRITICAL)` heading FAILS the meta-guard. So the gap is named rather than hidden — the deferral, its owner (the gate-integrity block), its resolution gate (that block's landing), and the live in-tree instances are recorded in [`docs/arch/gate-integrity-ledger.md`](docs/arch/gate-integrity-ledger.md). Promotion to `(CRITICAL)` with its own `CRITICAL_RULE_GUARDS` row, in the same change that lands the guard, is an ACCEPTANCE CRITERION of that block (ledger row GI-4). It is never folded into `Stub Prevention` — a related but distinct invariant whose guards do not enforce these semantics.
 
-When a Rust source file's inline `#[cfg(test)] mod tests` block exceeds ~400 lines, extract tests to a sibling `*_tests.rs` file:
+### Testing-Hermeticity (MANDATORY)
 
-```rust
-// In foo.rs — replace the inline mod tests block with:
-#[cfg(test)]
-#[path = "foo_tests.rs"]
-mod foo_tests;
-```
+Unit tests must only depend on locally-vendored fixtures. They must compile and run without any third-party repository (e.g., `nuxt-ui`, `element-plus`) checked out alongside this repository. Tests that need external corpora must be feature-gated (e.g., `#[cfg(feature = "external-corpus")]`) and excluded from the default canonical run (`node scripts/gate.mjs`, i.e. its two underlying surfaces `cargo nextest run --workspace` + `cargo test -p verter_session --tests`).
 
-For `mod.rs` files, use the simpler form (loads `tests.rs` from the same directory):
+A test that references `.integration-tests/repos/<third-party>/...` from a non-gated test file is a violation. The architecture guard `external_corpus_paths_not_present_outside_gated_tests` enforces this.
 
-```rust
-#[cfg(test)]
-mod tests;
-```
+### No phase archaeology in production code (MANDATORY)
 
-The extracted file contains the module contents directly (no wrapping `mod tests { }`), starting with `use super::*;`.
+Source comments must not reference plan phases (`phase 5d`, `phase 11`, `post-cutover`, `pre-Phase`), cutover stages (`d-cutover`, `cutover`), deletion history (`deleted in 5g`, `retired in`), or any project-management vocabulary. Once a plan is over, the code reads as final-state.
 
-See `/testing` skill for full TS/Rust test patterns, sourcemap testing, E2E best practices, and server cleanup.
+Durable architecture insights belong in `.claude/skills/*` or `docs/arch/`, not in source comments. Test files named after retired phases must be renamed to describe the invariant they characterize, not the phase that produced them.
+
+The architecture guard `no_phase_archaeology_in_production_code` enforces this on `crates/*/src/**`.
+
+See `/testing` skill for full TS/Rust test patterns, sourcemap testing, and server cleanup.
 
 ### VS Code Extension Testing (MANDATORY)
 
-Changes to the VS Code extension (`packages/vue-vscode/`) or the LSP server (`crates/verter_lsp/`) MUST be verified with automated tests, NOT manual testing. LSP changes directly affect extension behavior — hover, completions, diagnostics, etc. Two test tiers exist:
+Changes to the VS Code extension or the LSP server MUST be verified with automated tests, NOT manual testing. Unit tests (Vitest) for pure logic, E2E tests (Mocha) for LSP integration features.
 
-**Unit tests** (Vitest, `*.spec.ts` co-located in `src/`):
+See `/testing` and `/e2e-vscode-testing` skills for commands, fixture design, and helpers API.
 
-- For pure logic: utility functions, response parsing, restart logic, CSS scanning
-- Run: `pnpm vitest --run packages/vue-vscode/src/path/to/file.spec.ts`
+## Agent Implementation Rules
 
-**E2E tests** (Mocha + @vscode/test-cli, `e2e/suite/*.test.ts`):
+### Codebase Navigation
 
-- For LSP integration: completions, hover, diagnostics, go-to-definition, rename, decorations
-- Single fixture/provider: `E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsserver pnpm --filter verter-vscode test:e2e`
-- Full matrix from the repo root: `pnpm run test:e2e`
-- CI runs the same fixture matrix across both `tsserver` and `tsgo`
-- See `.claude/skills/e2e-vscode-testing.md` for fixture design, helpers API, and adding new tests
+Use semantic code-navigation tools (Serena or equivalent MCP: symbol overviews, symbol/reference lookup, rename/refactor ops) before broad source reads. Read full source files only when symbolic context is insufficient or the file is small enough that a full read is clearly the most direct path.
 
-**When to use which:**
+### Planning
 
-- New extension utility/parser logic → unit test
-- New/changed LSP feature (hover, completion, diagnostics, definition, rename, decorations) → E2E test
-- `verter_lsp` changes (new handler, changed response format, sync behavior) → E2E test
-- Both if the change spans utility logic + LSP behavior
+Prefer architecturally correct, long-term solutions; evaluate by correctness and durability, not implementation speed. Time constraints, implementation size, migration breadth, anticipated breaking changes, or "a lot of work" are not valid reasons to weaken the design, preserve a compromised path, or diverge from the approved plan — if the correct implementation is larger or breaking, plan for it explicitly or raise it before execution; never silently ship an architectural deviation. Do not provide time estimates unless explicitly asked, and never use estimated effort/duration/perceived time cost as a factor for doing, not doing, or partially doing planned work.
 
-**Never acceptable:** "Test manually by opening VS Code" as the sole verification step in a plan.
+Plans must include these sections:
+1. **Context** — why this change is being made
+2. **Intent Contract** — the ratified statement of intent, before any mechanism design
+3. **Changes** — specific files to modify with concrete modifications
+4. **Legacy Deletions** — explicit list of files, functions, code paths, feature flags to remove
+5. **Verification** — full workspace test commands and expected outcomes
+
+Without explicit legacy deletion lists, agents skip deletions and leave dual paths alive.
+
+**Intent before mechanism.** Before mechanism design for a block that changes observable behavior, authority, or fallback, record a ratified intent contract: the actor/problem and why the capability should exist; required and forbidden observable outcomes; authority/fallback order; a planned test or gate for each stable acceptance ID; and material cold, warm, allocation, fan-out, and latency bounds. An internal substrate block may reference its parent contract but must state the invariant and performance contribution it owns. Ratification comes from the approved plan or product authority; no implementation brief is dispatched without it. Enforcement is judgment — exercised at decomposition and again immediately before implementation dispatch.
+
+### Execution
+
+Execute approved plans fully in one pass, end-to-end, without intermediate checkpoints or mid-plan confirmation on already-approved steps. Do not pause, defer scope, leave planned work unfinished, or rewrite the plan into a smaller/safer variant because the correct path is breaking, broad, or labor-intensive. Approved plans land as written unless the user explicitly re-scopes them.
+
+**One-pass execution applies only while the approved design remains valid.** The second-REOPEN circuit breaker lapses approval for the affected design: pause implementation, obtain and record the required architecture/product ruling, and resume only once the design is ratified again. This is not a checkpoint — one-pass governs *executing an approved design*, and the breaker fires when *approval itself has lapsed*, which is a different event and precisely why execution must stop rather than grind on. STOP, failed verification, rule conflict, and verified plan-invalidating discoveries pause at their prescribed evidence gate without creating a discretionary user checkpoint. Breadth, breakage, effort, or migration size never lapses approval; approved scope changes only through the recorded ruling or explicit user re-scope. See `/mom-cto-orchestration` → Decision Admission.
+
+### Orchestrating Large Plans
+
+For a large multi-block plan, refactor, migration, or staged cutover executed autonomously, drive it via the `/multi-agent-orchestration` skill rather than improvising: a pure orchestrator delegates blocks to implementer/reviewer/fix sub-agents, gates each on dual review (independent reviewer + `codex`), runs fix cycles until clean, and verifies sub-agent reports against git state (trust but verify).
+
+When a block runs in a dedicated `git worktree`, run `pnpm install --frozen-lockfile` in the worktree root once at creation time, before any JS/TS test or workspace-importing Node script — fresh worktrees do not get the gitignored `node_modules/`, and a missing install makes JS/TS tests fail spuriously and read as a false regression. See the skill's "Worktree hygiene & environmental discipline" section.
+
+### Self-Review
+
+After completing a plan, review the full implementation before declaring done:
+- Verify all plan steps were executed
+- Check for missed edge cases or incomplete migrations
+- Run the full workspace test suite (see End-of-change Checks above)
+
+### Legacy Code Deletion
+
+When replacing a feature or refactoring a system, delete the superseded code in the same change. Do not add shims, double branches, compatibility wrappers, or feature flags to preserve old behavior alongside new. If unsure whether specific files or code paths should be preserved, ask the user explicitly rather than silently keeping them.
+
+### Fix Quality
+
+When encountering issues during implementation:
+- If the correct fix aligns with the architecture → implement it properly
+- Never apply a dirty fix that contradicts architectural rules just to make tests pass
+- If the proper fix is outside approved scope, do not apply a workaround and do not use a `TODO` as its disposition. Route the finding through the applicable scope authority and record `ADOPT-NOW`, `DEFER`, or `REJECT` before related work continues. A `TODO` may reference an approved debt row but never replaces it.
+
+**Explicit finding disposition.** Every scope-deviating correctness finding is dispositioned before related work continues as `ADOPT-NOW`, `DEFER`, or `REJECT`. `ADOPT-NOW` records the scope and acceptance-contract change. `DEFER` requires a codex-DEFER ruling and a debt row naming the durable owner block, the resolution gate no later than plan close, the acceptance ID/test, and the ruling reference. `REJECT` records evidence and rationale. A TODO, a feedback entry, or an ephemeral agent identity is not a disposition; plan close requires zero open deferrals. Enforcement is judgment — codex at the scope consult, and the plan-close zero-open-deferral check.
+
+### Stub Prevention (CRITICAL)
+
+Do not use empty test bodies, trivially-passing stubs, or "deferred to follow-up commit" placeholders to satisfy a named contract — a gate check, a characterization test, a plan invariant, a review obligation, a declared completion criterion. A stub that happens to pass is a gate-bypass, not a pass.
+
+Concrete anti-patterns, all forbidden on landed/mainline commits:
+
+- **Empty `#[test]` bodies** — `#[test] fn verifies_cycle_guard_terminates_on_recursion() {}` passes trivially and falsely advertises coverage (worse than `#[ignore]`; keep `#[ignore]` until the body can be written).
+- **Unconditional "unknown"/"default" returns as "scaffolding"** — `fn relate_nodes(...) -> RelationResult::Unknown` always-Unknown is a nop, not a scaffold; same for an always-`Opaque(Miss)` resolve. Write real logic, or use `todo!()` / `unimplemented!()` so the nop fails loudly.
+- **"Real body deferred to follow-up commit"** — a stub satisfying a gate now with a later commit planned is a gate-bypass; the gate reflects the tree under review, not future intent.
+- **Always-true assertions** — `assert!(true)`, `assert_eq!(1, 1)`, `assert!(result.is_ok() || true)`: any predicate that holds regardless of the code under test.
+- **Non-discriminating characterization tests** — a characterization test must FAIL against the pre-change codebase AND PASS against the post-change codebase; otherwise it characterizes nothing.
+
+**Rule of thumb:** for every committed assertion ask "would this test catch the bug the change was written to fix?" — if no, it is a stub.
+
+**WIP exemption:** scratch branches that will be squashed (e.g. `staging/*` → squash-merge) may contain `todo!()` bodies, empty tests, placeholder returns. The rule applies to the squashed/landed commit, any PR branch, and any gate evaluated on the final tree; a landed commit message citing "stub satisfies gate mechanically" is a self-identified gate-bypass.
+
+**Self-review obligation:** before concluding a step that un-ignores or adds tests, re-open each test file and verify bodies are non-empty and assertions discriminating; before concluding a step that implements a function, verify the body exercises its inputs rather than returning a constant.
+
+Guards: `macro_impacting_constructs_fail_lowering_not_silent_skip`, `every_consumer_has_production_call_site`, `every_registry_entry_lists_at_least_one_guard`.
 
 ### Agent Feedback Capture
 
-During work sessions, agents encounter issues, discover improvement opportunities, and gain insights that may be lost when context is compacted. To preserve these observations, agents MUST continuously log feedback to a per-conversation file.
+Agents MUST continuously log feedback to a per-conversation file at `.feedback/feedback-{YYYY-MM-DD}-{short-id}.md` (`.feedback/` is gitignored). One feedback file per conversation session; when delegating to subagents, pass the file path and instruct them to append.
 
-**Setup** (at session start, when making code changes):
+Categories: `[issue]` (bugs, unexpected behavior, workarounds), `[improvement]` (code quality, performance, architecture ideas), `[debt]` (works but could be better), `[docs]` (missing/outdated documentation).
 
-- Create a feedback file at `.claude/feedback/feedback-{YYYY-MM-DD}-{short-id}.md` where `short-id` is a 6-character identifier (e.g., from the plan name or timestamp)
-- The `.claude/feedback/` directory is gitignored — these files are for human review only
-
-**What to log** — append entries whenever encountering something noteworthy:
-
-- `[issue]` — bugs, unexpected behavior, workarounds applied
-- `[improvement]` — code quality, performance, architecture ideas
-- `[debt]` — things that work but could be better
-- `[docs]` — missing or outdated documentation discovered
-
-**Format**:
-
-```markdown
-## {date}
-
-- [{category}] `{file_path}:{line}` — Brief description of the observation
-- [{category}] `{file_path}` — Another observation
-```
-
-**Rules**:
-
-- Append continuously as you work — do not wait for context compaction
-- When delegating to subagents, pass the feedback file path in the prompt and instruct them to append their observations
-- This is best-effort — do not let feedback capture slow down actual work
-- One feedback file per conversation session
+Format: `- [{category}] \`{file_path}\` — Brief description`
 
 ## Dependencies Policy
+
+**Repo-owned toolchain is Rust + JS/Node only — no committed Python.** Repo-owned gate, build, CI, test,
+code-generation, packaging, and release tooling is implemented as Rust bins or JS/Node scripts; Python is
+not a committed implementation language for those paths.
+
+- No tracked repo-owned `.py` file (outside third-party / non-toolchain trees `node_modules`,
+  `.integration-tests`, `vendored`/`vendor`, `.claude`, `target`).
+- No `python`/`python3`/`py -3` command invocation in `package.json`, `.github/workflows/*`, or tracked
+  repo-owned command wrappers (`*.sh`/`*.bash`/`*.ps1`/`*.cmd`/`*.bat`). Thin shell/PowerShell/cmd wrappers
+  are allowed as command-entry shims but must not invoke Python; Node/TS tool scripts must not spawn Python
+  transitively.
+- New or ported repo-owned tooling lands as a Rust bin (e.g. the `gen-typeinfo-manifest` cargo bin, the
+  xtask `check-four-mode-terminology` bin) or a Node script — never a committed Python script.
+- Agents may use Python transiently and locally for ad-hoc analysis, but such use is never committed and
+  never on a gate/build/CI/test path.
+- Committing repo-owned Python is allowed only if it is 100% necessary AND neither Rust nor JS/Node can do
+  it, adopted via an architecture-reviewed change to this policy with a narrow documented justification.
+  Until then, do not add Python.
 
 - Keep dependencies at their latest versions
 - Rust deps: update in `Cargo.toml`, run `cargo update`
@@ -600,60 +541,39 @@ During work sessions, agents encounter issues, discover improvement opportunitie
 
 ## Commit Convention
 
-This project uses **conventional commits** for automatic changelog generation via [git-cliff](https://git-cliff.org/).
+This project uses **conventional commits** (`<type>(<scope>): <description>`) for automatic changelog generation via [git-cliff](https://git-cliff.org/).
 
-```
-<type>(<scope>): <description>
+Types: `feat` (new feature), `fix` (bug fix), `perf` (performance), `refactor` (no behavior change), `docs`, `test`, `chore` (build/CI/tooling), `release` (version bump).
 
-Types:
-  feat     - New feature
-  fix      - Bug fix
-  perf     - Performance improvement
-  refactor - Code refactoring (no behavior change)
-  docs     - Documentation only
-  test     - Adding/updating tests
-  chore    - Build, CI, tooling changes
-  release  - Version bump and release
+Scopes: `core` (verter_compiler), `napi` (verter_napi / @verter/native), `wasm` (verter_wasm / @verter/wasm), `play` (playground), `unplugin` (@verter/unplugin), `lsp` (language-server), `types` (@verter/types), `meta` (@verter/component-meta), `ci` (CI/CD workflows), `*` (multiple areas).
 
-Scopes:
-  core     - verter_core Rust crate
-  napi     - verter_napi / @verter/native
-  wasm     - verter_wasm / @verter/wasm
-  play     - playground
-  unplugin - @verter/unplugin
-  lsp      - language-server
-  types    - @verter/types
-  ts       - @verter/core (TypeScript)
-  meta     - @verter/component-meta
-  ci       - CI/CD workflows
-  *        - multiple areas
-
-Examples:
-  feat(core): add v-memo directive support
-  fix(wasm): correct memory leak in compile()
-  chore(ci): add nightly WASM build workflow
-  release(all): v0.0.1-alpha.1
-```
+Example: `feat(core): add v-memo directive support`
 
 ## CI/CD
 
-See [docs/contributing/ci-cd.md](docs/contributing/ci-cd.md) for detailed CI/CD documentation including:
-
-- Workflow specifications (CI, nightly, release)
-- Pre-release versioning flow (alpha → beta → rc → stable)
-- Publishing process (npm + crates.io)
-- Nightly WASM builds and playground deployment
-- Required GitHub secrets configuration
+See [docs/contributing/ci-cd.md](docs/contributing/ci-cd.md) for CI/CD documentation: workflow specifications (CI, nightly, release), pre-release versioning flow (alpha → beta → rc → stable), publishing (npm + crates.io), nightly WASM builds + playground deployment, required GitHub secrets configuration.
 
 ## Skills Reference
 
 Detailed reference material is available as on-demand skills (loaded automatically when relevant):
 
-| Skill                  | Use When                                                                                                 |
-| ---------------------- | -------------------------------------------------------------------------------------------------------- |
-| `/architecture`        | Working on any specific module, need key files, type tables, LSP features, plugin system, analysis types |
-| `/position-encoding`   | Working with spans, positions, coordinate conversions, path normalization details                        |
-| `/build-and-profiling` | Debugging build order, rebuild sequences, profiling, MCP server setup                                    |
-| `/testing`             | Writing tests, test patterns, sourcemap testing, E2E workflow, server cleanup                            |
-| `/wsl-e2e-testing`     | Running E2E tests in WSL to reproduce Linux/CI failures, fixture matrix, acceptance criteria             |
-| `/rust-performance`    | Optimizing Rust code, allocation patterns, batch operations, CodeTransform API                           |
+| Skill                    | Use When                                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------------------------ |
+| `/type-resolution`       | Type solver, cross-file types, ShallowFileState, frontier engine, cache rules, macro traversal   |
+| `/type-cache-architecture` | Fact-based cache architecture, env hash split (R21), `FileArtifactStore`, R1–R31 rules, module augmentation, multi-candidate storage |
+| `/component-meta`        | Component metadata extraction, native/compat boundary, fallthrough, root inheritance             |
+| `/compiler-codegen`      | Template codegen (VDOM/IDE), CodeTransform, cached directives, strict slots, style preprocessing |
+| `/host-session`          | TypeProvider (TSGO/tsserver), workspace management, async scheduler, LSP host integration        |
+| `/architecture`          | High-level module map, TS packages, plugin system, CSS analysis, MCP server, analysis types     |
+| `/audit-infrastructure`  | `verter_audit` substrate, `HostAuditRuntime`, `AuditRequestRegistration`, `*_with_audit` API, footprint miner, structured events |
+| `/framework-adapters`    | Framework-adapter substrate: registry, descriptor + virtual-file naming column, facts/carrier-only ctx, framework-surface executor, two-pass script-fact seam, Vue as the reference adapter |
+| `/position-encoding`     | Span types, position encoding, coordinate conversions, path normalization                        |
+| `/build-and-profiling`   | Build order, rebuild sequences, profiling, MCP server setup                                      |
+| `/testing`               | Test patterns, TDD workflow, the canonical `gate.mjs` Rust gate runner, sourcemap testing, server cleanup |
+| `/e2e-vscode-testing`    | VS Code E2E test fixtures, helpers API, adding new tests                                         |
+| `/wsl-e2e-testing`       | WSL E2E tests to reproduce Linux/CI failures, fixture matrix                                     |
+| `/rust-performance`      | Rust optimization patterns, allocation hierarchy, CodeTransform API                              |
+| `/multi-agent-orchestration` | Driving a large multi-block plan, refactor, migration, or staged cutover autonomously: pure orchestrator + implementer/reviewer/fix sub-agents, dual review (independent + codex), per-block fix cycles, trust-but-verify |
+| `/scheduler`             | Scheduler submission/admission APIs (`submit_request`/`submit_batch`/`submit_batch_atomic`), CPU vs I/O pool routing, host CPU-pool coordination |
+| `/debug-tooling`         | Hangs, unexpectedly slow paths, stack snapshots: backtrace watchdog, LLDB attach wrapper, release-dbg profile |
+| `/agent-prompts`         | Generating implementation/continuation/review/fix prompts for driving separate agent sessions |

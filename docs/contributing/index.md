@@ -9,7 +9,8 @@ How to contribute to Verter.
 ## Prerequisites
 
 - **Node.js** 18+ and **pnpm** 9+
-- **Rust** stable toolchain via [rustup](https://rustup.rs/)
+- **Rust** stable toolchain via [rustup](https://rustup.rs/), including
+  `rustfmt`, `clippy`, and `cargo-nextest`
 - **VS Code** (for extension development)
 
 ## Setup
@@ -36,13 +37,14 @@ To test the extension locally, press **F5** in VS Code after building to launch 
 
 ```bash
 # TypeScript / JavaScript
-pnpm test                              # All JS/TS tests
-pnpm vitest --run                      # All tests, non-watch mode
-pnpm vitest --run path/to/test.ts      # Specific file
+pnpm test                                      # Every package-owned test script
+pnpm --filter @verter/typescript-plugin test  # One package
+pnpm exec vitest run path/to/test.ts           # One test file
 
 # Rust
-cargo test --workspace --verbose       # All Rust tests
-cargo test --package verter_core test  # Specific Rust test
+cargo nextest run --workspace              # Every workspace test target
+cargo test -p verter_session --tests       # Shared-process session surface
+cargo test -p verter_compiler test_name    # Targeted iteration
 ```
 
 See the [Testing Guide](./testing.md) for detailed testing patterns and requirements.
@@ -52,8 +54,8 @@ See the [Testing Guide](./testing.md) for detailed testing patterns and requirem
 Run these checks after making changes:
 
 ```bash
-cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
-cargo fmt --all
+cargo clippy --workspace -- -D warnings
+cargo fmt --all --check
 ```
 
 TypeScript formatting follows the project's existing style. There is no separate formatter command -- maintain consistency with surrounding code.
@@ -83,35 +85,34 @@ This project uses **conventional commits** for automatic changelog generation vi
 
 | Scope      | Area                             |
 | ---------- | -------------------------------- |
-| `core`     | `verter_core` Rust crate         |
+| `compiler` | `verter_compiler` Rust crate     |
 | `napi`     | `verter_napi` / `@verter/native` |
 | `wasm`     | `verter_wasm` / `@verter/wasm`   |
 | `play`     | Playground                       |
 | `unplugin` | `@verter/unplugin`               |
 | `lsp`      | Language server                  |
 | `types`    | `@verter/types`                  |
-| `ts`       | `@verter/core` (TypeScript)      |
 | `ci`       | CI/CD workflows                  |
 | `*`        | Multiple areas                   |
 
 ### Examples
 
 ```
-feat(core): add v-memo directive support
+feat(compiler): add v-memo directive support
 fix(lsp): correct hover position for multi-line expressions
 perf(core): batch mutation passes in template codegen
-refactor(ts): simplify macro plugin architecture
+refactor(session): simplify semantic query ownership
 docs: update contributing guide
-test(core): add v-for key validation tests
+test(compiler): add v-for key validation tests
 chore(ci): add nightly WASM build workflow
-release(all): v0.0.1-alpha.3
+release(all): v0.0.1-beta.1
 ```
 
 ## Repository Structure
 
 ```
-crates/          # Rust crates (compiler, LSP, analysis, FFI)
-packages/        # TypeScript packages (core, types, unplugin, extension)
+crates/          # Rust crates (compiler, semantic/session, LSP, FFI)
+packages/        # TypeScript adapters, types, integrations, and clients
 scripts/         # CI/CD and utility scripts
 docs/            # Documentation (VitePress)
 ```
@@ -125,7 +126,8 @@ Before submitting a pull request:
 - [ ] Tests added or updated covering the change
 - [ ] Documentation updated if applicable
 - [ ] No TypeScript errors (`pnpm build:ts` succeeds)
-- [ ] Rust checks pass (`cargo clippy`, `cargo fmt`, `cargo test`)
+- [ ] Rust checks pass (`cargo fmt --all --check`, warning-denied Clippy, and
+      the canonical Nextest/session pair where applicable)
 - [ ] Code style is consistent with surrounding code
 - [ ] Conventional commit message used
 - [ ] Both positive and negative assertions in tests (see [Testing Guide](./testing.md))

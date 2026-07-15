@@ -4,7 +4,7 @@
 Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
-Verter is a hybrid Rust + TypeScript monorepo. Rust crates handle template compilation (exposed via NAPI-RS native bindings and wasm-bindgen WASM) and the LSP server, while TypeScript packages handle the SFC-to-TSX transformation, IDE integration, and bundler plugins.
+Verter is a hybrid Rust + TypeScript monorepo. Rust owns carrier parsing, IDE TSX generation, runtime code generation, the shared semantic session, and the LSP server. TypeScript packages provide editor integration, TypeScript-provider adapters, protocol bindings, and bundler orchestration.
 
 ## System Overview
 
@@ -17,16 +17,14 @@ graph TB
         LSP["verter-lsp<br/>(Rust LSP binary, stdio)"]
         Native["@verter/native<br/>(NAPI-RS Bindings)"]
         WASM["@verter/wasm<br/>(WASM Bindings)"]
-        VFS["verter_vfs<br/>(Virtual Filesystem)"]
-        RustCore["verter_core<br/>(Rust Template Compiler)"]
+        VFS["verter_workspace<br/>(Virtual Filesystem)"]
+        Session["verter_session<br/>(Host + Semantic Graph)"]
+        RustCore["verter_compiler<br/>(Runtime + IDE Codegen)"]
     end
     subgraph "Language Services"
+        Provider["TSGO / tsserver<br/>(Type Provider)"]
         TSPlugin["@verter/typescript-plugin<br/>(TS Plugin)"]
         Shared["@verter/language-shared<br/>(Protocol Types)"]
-    end
-    subgraph "Transformation"
-        Core["@verter/core<br/>(SFC → TSX)"]
-        Types["@verter/types<br/>(Type Utilities)"]
     end
     subgraph "Build Tools"
         Unplugin["@verter/unplugin<br/>(Universal Bundler Plugin)"]
@@ -38,11 +36,12 @@ graph TB
         Playground["@verter/playground<br/>(Online Playground)"]
     end
     VSCode --> LSP
-    VSCode --> TSPlugin
-    LSP --> RustCore
+    VSCode --> Provider
+    LSP --> Session
+    Session --> RustCore
+    LSP --> Provider
     LSP --> Shared
-    TSPlugin --> Core
-    Core --> Types
+    Provider -->|loads for carrier imports| TSPlugin
     Native --> VFS
     Native --> RustCore
     WASM --> RustCore
@@ -52,41 +51,41 @@ graph TB
     ComponentMeta -.-> WASM
 ```
 
-## Dual Compilation Pipeline
+## One Compiler Authority, Two Outputs
 
-Verter has two distinct compilation paths, each optimized for its purpose:
+The Rust compiler parses each carrier and produces purpose-specific outputs from the same compiler authority:
 
 ```mermaid
 flowchart LR
-    SFC[".vue file"] --> TSCore["@verter/core<br/>(TypeScript)"]
-    SFC --> RustCompiler["verter_core<br/>(Rust)"]
-    TSCore --> TSX["Typed TSX<br/>(for IDE analysis)"]
+    SFC[".vue file"] --> RustCompiler["verter_compiler + verter_session<br/>(Rust)"]
+    RustCompiler --> TSX["Typed TSX<br/>(for IDE analysis)"]
     RustCompiler --> Render["Render Functions<br/>(for runtime)"]
-    TSX --> LSP["verter-lsp<br/>+ IDE Features"]
+    TSX --> Provider["TSGO / tsserver"]
+    Provider --> LSP["verter-lsp<br/>+ IDE Features"]
     Render --> Vite["Vite Build<br/>+ Production"]
 ```
 
-**TypeScript pipeline** (`@verter/core`) -- Transforms `.vue` files into valid TSX using MagicString for sourcemap preservation. This output is consumed by the LSP server and TypeScript plugin to provide IDE features like hover types, completions, go-to-definition, and diagnostics.
+**IDE output** -- `verter_compiler` emits valid TSX and source mappings. `verter_session` owns host-backed resolution, invalidation, and the shared semantic graph; the LSP delegates TypeScript checking to TSGO or tsserver.
 
-**Rust pipeline** (`verter_core`) -- Compiles Vue templates into optimized render functions (VDOM or Vapor mode) for production builds. This runs through `@verter/unplugin` during your Vite/webpack/Rollup build, and also powers the LSP's template analysis.
-
-Both pipelines share the same Vue SFC input and produce consistent results -- the TypeScript path prioritizes type accuracy while the Rust path prioritizes runtime performance.
+**Runtime output** -- The same Rust compiler emits optimized render functions for production builds through `@verter/unplugin`.
 
 ## Repository Structure
 
 | Directory                    | Purpose                                                                  |
 | ---------------------------- | ------------------------------------------------------------------------ |
-| `crates/verter_core/`        | Rust template compiler                                                   |
-| `crates/verter_vfs/`         | Virtual filesystem: sole authority for file access and import resolution |
-| `crates/verter_analysis/`    | Static analysis: imports, exports, bindings, types                       |
-| `crates/verter_host/`        | In-memory file host: caching, dependencies, multi-file compilation       |
+| `crates/verter_parser/`      | Framework-neutral parser and syntax facts                                |
+| `crates/verter_compiler/`    | Runtime and IDE code generation                                          |
+| `crates/verter_semantic/`    | Reusable semantic facts and typed IR                                     |
+| `crates/verter_session_query/` | Session query schema and query-domain contracts                        |
+| `crates/verter_session/`     | Host-backed resolution, semantic graph, caches, and compilation sessions |
+| `crates/verter_type_runtime/` | Shared runtime support for native type evaluation                       |
+| `crates/verter_workspace/`   | Virtual filesystem and import-resolution authority                       |
 | `crates/verter_diagnostics/` | Diagnostic engine: 22+ lint rules, visitor, DiagnosticSet                |
 | `crates/verter_actions/`     | Code actions engine: quick fixes, refactoring                            |
 | `crates/verter_lsp/`         | Rust LSP server binary (stdio)                                           |
 | `crates/verter_ffi/`         | FFI types for NAPI/WASM boundaries                                       |
 | `crates/verter_napi/`        | Native Node.js bindings (NAPI-RS)                                        |
 | `crates/verter_wasm/`        | WASM bindings (wasm-bindgen)                                             |
-| `packages/core/`             | `@verter/core` -- SFC parser & TSX transformer                           |
 | `packages/types/`            | `@verter/types` -- TypeScript utility types                              |
 | `packages/native/`           | `@verter/native` -- Native binding loader                                |
 | `packages/wasm/`             | `@verter/wasm` -- WASM binding wrapper                                   |
@@ -109,7 +108,7 @@ The scheduler is integrated into `VerterHost` via the `scheduler` feature flag. 
 
 ## Rust Compilation Pipeline
 
-The Rust compiler uses an AST-based pipeline with five phases. The `compile()` function in `verter_core` orchestrates the entire flow:
+The Rust compiler uses an AST-based pipeline with five phases. The `compile()` function in `verter_compiler` orchestrates the entire flow:
 
 ```mermaid
 flowchart TD
@@ -167,7 +166,7 @@ The pipeline produces a `CodeTransform` -- a chunk-based deferred mutation engin
 
 ## TSX Codegen Path
 
-In addition to the VDOM/Vapor render function backends, the Rust compiler has a separate TSX codegen path (`crates/verter_core/src/tsx/`). This path converts Vue templates into valid JSX that TypeScript can type-check:
+In addition to the VDOM/Vapor render function backends, the Rust compiler has a separate TSX codegen path (`crates/verter_compiler/src/tsx/`). This path converts Vue templates into valid JSX that TypeScript can type-check:
 
 - `v-if`/`v-else-if`/`v-else` become ternary expressions
 - `v-for` becomes `.map()` calls
@@ -179,18 +178,18 @@ The LSP server uses this TSX output for type-checking via TSGO (TypeScript's Go-
 
 ## Virtual Filesystem (VFS)
 
-All workspace file access and import resolution flows through `verter_vfs`. This crate is the **single authority** — no code outside `NativeFs` touches `std::fs`, and the host never does its own heuristic resolution.
+All workspace file access and import resolution flows through `verter_workspace`. This crate is the **single authority** — no code outside `NativeFs` touches `std::fs`, and the host never does its own heuristic resolution.
 
 ```mermaid
 graph TB
     subgraph "Consumers"
-        Host["verter_host<br/>(Compilation Host)"]
+        Host["verter_session<br/>(Compilation Host)"]
         LSP["verter_lsp<br/>(Language Server)"]
         Unplugin["@verter/unplugin<br/>(Bundler Plugin)"]
         Meta["@verter/component-meta<br/>(Metadata Extraction)"]
     end
 
-    subgraph "verter_vfs"
+    subgraph "verter_workspace"
         WS["WorkspaceAccess Trait"]
         Engine["Engine<br/>(overlay → snapshot → resolver)"]
         Resolver["ProjectResolver<br/>(tsconfig, aliases, node_modules)"]

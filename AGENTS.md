@@ -1,52 +1,71 @@
 # Verter Agent Guide
 
-This repository keeps most reusable agent context in shared markdown files. Some of those files live under Claude-named paths for historical reasons, but they are project documentation, not Claude-only data.
+Most reusable agent context lives in shared markdown files. Some sit under Claude-named paths for historical reasons but are project documentation, not Claude-only data.
 
-Use this file as the neutral entry point. Reuse the shared sources below instead of creating duplicate agent-specific copies.
+Use this as the neutral entry point. Reuse the shared sources below instead of creating duplicate agent-specific copies.
 
 ## Shared Sources
 
-- `CLAUDE.md`
-  - Canonical high-level reference for architecture, repository structure, critical invariants, build commands, testing rules, and commit conventions.
-- `.claude/skills/architecture/SKILL.md`
-  - Module map, package responsibilities, plugin system, LSP structure, and key file locations.
-- `.claude/skills/position-encoding/SKILL.md`
-  - Span types, encoding conversions, and path normalization details.
-- `.claude/skills/build-and-profiling/SKILL.md`
-  - Build order, rebuild strategy, profiling workflow, and MCP server setup.
-- `.claude/skills/testing/SKILL.md`
-  - Rust and TypeScript test patterns, sourcemap checks, and VS Code extension testing guidance.
-- `.claude/skills/rust-performance/SKILL.md`
-  - Rust optimization guidance, allocation patterns, and `CodeTransform` usage notes.
-- `docs/`
-  - User-facing and contributor-facing documentation.
+- `CLAUDE.md` — canonical high-level reference: architecture principles, critical invariants, build commands, testing rules, agent implementation rules, commit conventions.
+- `.claude/skills/type-resolution/SKILL.md` — type solver, ShallowFileState, ExternalTypeFrontier, canonical cache rules, macro traversal, prepared declarations.
+- `.claude/skills/type-cache-architecture/SKILL.md` — fact-based cache architecture, 5-way env hash split (R21), `FileArtifactStore`, R1–R31 rules, module augmentation, multi-candidate storage, `parse_stable_hash`.
+- `.claude/skills/component-meta/SKILL.md` — component-meta native/compat boundary, fallthrough/root inheritance, resolver rules, cache-owned hydration.
+- `.claude/skills/compiler-codegen/SKILL.md` — Rust compiler pipeline, template codegen (VDOM/IDE), CodeTransform, cached directives, strict slots, style preprocessing, CompileTarget.
+- `.claude/skills/host-session/SKILL.md` — TypeProvider (TSGO/tsserver), workspace management, async scheduler, SyncCoordinator, ownership lifecycle.
+- `.claude/skills/architecture/SKILL.md` — high-level module map, TS packages, plugin system, CSS analysis, MCP server, static analysis types.
+- `.claude/skills/position-encoding/SKILL.md` — span types, encoding conversions, path normalization.
+- `.claude/skills/build-and-profiling/SKILL.md` — build order, rebuild strategy, profiling workflow, MCP server setup.
+- `.claude/skills/testing/SKILL.md` — Rust + TypeScript test patterns, TDD workflow, sourcemap checks, test execution hygiene.
+- `.claude/skills/e2e-vscode-testing.md` — VS Code extension E2E fixtures, helpers API, warm-session rules, adding new extension/LSP tests.
+- `.claude/skills/rust-performance/SKILL.md` — Rust optimization guidance, allocation patterns, `CodeTransform` usage notes.
+- `.claude/skills/audit-infrastructure/SKILL.md` — audit substrate (`verter_audit`), `HostAuditRuntime`, audited entry-points, footprint miner, structured events.
+- `.claude/skills/scheduler/SKILL.md` — scheduler submission/admission APIs, CPU/I-O pool routing, batch atomic admission.
+- `.claude/skills/debug-tooling/SKILL.md` — backtrace watchdog, LLDB attach wrapper, release-dbg profile for hang/slow-path diagnosis.
+- `.claude/skills/agent-prompts/SKILL.md` — copy-pasteable implementation/continuation/review/fix prompts for driving separate sessions.
+- `.claude/skills/wsl-e2e-testing.md` — WSL E2E tests reproducing Linux/CI failures, fixture matrix.
+- `docs/` — user-facing and contributor-facing documentation.
 
 ## Neutrality Rules
 
 - Treat `CLAUDE.md` and `.claude/skills/` as shared project references for any coding agent.
-- Keep durable project knowledge in shared docs such as `CLAUDE.md`, `docs/`, or the relevant reference file under `.claude/skills/`.
-- Keep agent-specific files thin. They should point at shared documentation, not become separate sources of truth.
+- Keep durable project knowledge in shared docs (`CLAUDE.md`, `docs/`, or the relevant `.claude/skills/` reference).
+- Keep agent-specific files thin — point at shared documentation, do not become separate sources of truth.
 - `.claude/settings.local.json` is local tool configuration, not repository policy.
-- `.claude/feedback/` contains optional working notes and is not committed project documentation.
+- `.feedback/` contains optional working notes, not committed project documentation.
 
 ## Working Rules
 
-- Follow TDD for code changes: write failing tests first, implement the minimum fix, rerun tests, then refactor.
-- Update documentation when public behavior, module paths, or APIs change.
+- Follow TDD for code changes: failing tests first, minimum fix, rerun, then refactor.
+- Default Rust verification gate is the canonical PAIR: `cargo nextest run --workspace` (completeness — runs every workspace test target including the ~25 verter_session integration binaries) plus `cargo test -p verter_session --tests` (shared-process surface). Bare `cargo test --workspace --tests` SILENTLY SKIPS the verter_session integration suite (feature unification drops those binaries) and must NOT be the sole Rust gate.
+- Do not run bare `cargo test --workspace` (no `--tests`) unless the user explicitly asks for doctests or you changed rustdoc examples — it also runs doctests and example builds, substantially slower than the normal agent verification loop.
+- Do not provide time estimates unless the user explicitly asks. Plans are executed fully in one pass; do not use estimated effort or duration as a reason to skip, defer, or partially implement approved work.
+- The codebase expects the best architecture for the problem. Time constraints, breaking-change avoidance, migration breadth, or "a lot of work" are not valid reasons to weaken the design or deviate from an approved plan.
+- Update the **owning** documentation when public behavior, module paths, or APIs change. Update the relevant skill, not CLAUDE.md, unless summaries or pointers change.
 - Use conventional commits: `<type>(<scope>): <description>`.
-- Load only the specific reference material needed for the task instead of bulk-reading every file.
-- For `component-meta` type work, use cached lookup/eval state only. Do not add AST/source-walk fallback to recover or expand types after the cache-owning pass.
-- For `component-meta` registry publication, stay shallow and demand-driven: load only the symbols required by the current query, and expand only when a cached lookup result is actually needed.
-- For `component-meta` cross-file resolution, deepen in one place only: follow the active declaration route for the requested symbol/query and do not branch into unrelated sibling symbols/files.
-- For `component-meta` companion/type-target selection, keep canonicalization shallow too: choosing between runtime and declaration companions may probe cached raw source existence, but must not build export analysis, snapshots, or eval envs just to pick the target file.
-- For `component-meta` metadata or fallthrough projection, reuse the already-resolved state and the captured store/session view. Do not bounce back out to a fresh top-level snapshot/query when a resolved query is already in hand.
-- For `component-meta` imported-type hydration, treat the imported dependency cache as the only source of file state after shallow seeding. Resolver paths must not call raw snapshot/source builders to recover missing imported data; if the cache does not own the needed snapshot/env yet, stay shallow and stop.
-- For `component-meta` imported-eval collection, keep one strategy only: lazy/BFS over the active symbol route. Do not add eager collector modes, source-text fallback parsing, or alternate collection branches that widen traversal.
+- Load only the specific reference material the task needs instead of bulk-reading every file.
+- When semantic code-navigation tools such as Serena are available, use them for symbol overview, lookup, references, and targeted refactors as described in `CLAUDE.md` "Codebase Navigation".
+- Follow the build philosophy and shallow file processing invariant in `CLAUDE.md`.
+- For component-meta work, follow `/component-meta`. For type resolution work, follow `/type-resolution`.
+- **Testing hermeticity**: see `CLAUDE.md` "Testing-Hermeticity (MANDATORY)" and `.claude/skills/testing/SKILL.md`.
+- **No phase archaeology in code**: see `CLAUDE.md` "No phase archaeology in production code (MANDATORY)".
 
 ## Task Routing
 
-- Architecture or ownership questions: start with `CLAUDE.md`, then `.claude/skills/architecture/SKILL.md`.
-- Span, offset, URI, or source map work: load `.claude/skills/position-encoding/SKILL.md` before editing.
-- Build, release, profiling, or MCP work: load `.claude/skills/build-and-profiling/SKILL.md`.
-- Test design or verification planning: load `.claude/skills/testing/SKILL.md`.
-- Rust hot paths or allocation-sensitive work: load `.claude/skills/rust-performance/SKILL.md`.
+- Architecture principles or ownership questions: start with `CLAUDE.md`.
+- Type resolution, solver, cross-file types, macro traversal: `/type-resolution`.
+- Cache layer keys, env hash split, fact-based cache rules, `FileArtifactStore`, module augmentation: `/type-cache-architecture`.
+- Component-meta, fallthrough, compat layer: `/component-meta`.
+- Compiler, codegen, template, style, CodeTransform: `/compiler-codegen`.
+- LSP host, TypeProvider, workspace, scheduler: `/host-session`.
+- Module map, TS packages, plugin system, CSS analysis: `/architecture`.
+- Span, offset, URI, or source map work: `/position-encoding`.
+- Build, release, profiling, or MCP work: `/build-and-profiling`.
+- Test design or verification planning: `/testing`.
+- VS Code extension or LSP E2E verification: `/e2e-vscode-testing`.
+- Rust hot paths or allocation-sensitive work: `/rust-performance`.
+- Audit records, per-request observability, footprint capture: `/audit-infrastructure`.
+- Scheduler submission, batching, CPU-pool coordination: `/scheduler`.
+- Hangs, unexpectedly slow paths, stack snapshots: `/debug-tooling`.
+- Generating prompts for separate implementation/review sessions: `/agent-prompts`.
+- Reproducing Linux/CI-only failures: `/wsl-e2e-testing`.
+- Driving a large multi-block plan, refactor, migration, or cutover autonomously (orchestrator + sub-agents + dual review): `/multi-agent-orchestration`.

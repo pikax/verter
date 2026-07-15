@@ -13,7 +13,9 @@ This package benchmarks Vue and Verter compilers using real-world Vue SFC fixtur
 
 - **Time**: Compilation time in milliseconds (p50/p95/p99)
 - **Throughput**: Megabytes per second (MB/s)
-- **Memory**: Peak heap used during compilation (MB)
+- **Legacy Vue-harness heap**: V8 `heapUsed` during compilation (MB). This
+  excludes Rust/native allocations and is not total-process memory evidence.
+- **Svelte-fence memory**: Isolated-process peak RSS for each backend (MiB)
 - **Operations**: Operations per second
 - **Speedup**: Verter performance relative to Vue (e.g., 2.0x = twice as fast)
 
@@ -39,6 +41,26 @@ pnpm bench
 # Generate JSON report
 pnpm bench:json
 ```
+
+## Svelte Compiler Fence
+
+The Svelte fence compares Verter's experimental native client compiler with the
+pinned official `svelte@5.56.3` compiler:
+
+```bash
+pnpm --filter @verter/benchmark bench:svelte:compiler
+```
+
+The fence deliberately fails unless it can attest a clean worktree at a full
+Git SHA. Both backends compile the same source with source maps enabled, output
+and source-map contracts are validated before timing, Verter must report fresh
+stateless compilation, backend order alternates, and warmup precedes recorded
+samples. Wall-time workers and peak-RSS workers are isolated; RSS includes the
+native allocations that a JavaScript-heap-only comparison would miss.
+
+The result is valid only for the recorded fixture corpus, platform, versions,
+and supported feature surface. It is a regression fence, not a general claim
+that Verter is faster or uses less memory than the official Svelte compiler.
 
 ## LSP Benchmark
 
@@ -202,7 +224,7 @@ if (!result.passed) {
 
 Triggered via PR comment `/benchmark` or manually through GitHub Actions.
 
-Results posted as PR comments with:
+The legacy Vue harness reports its threshold classification in PR comments:
 
 - ✅ **Pass**: Verter ≥ Vue performance (speedup ≥ 1.0x)
 - ⚠️ **Warning**: Verter 50-99% of Vue performance (speedup 0.5-1.0x)

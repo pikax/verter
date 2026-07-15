@@ -6,7 +6,7 @@ Step-by-step guide for bumping from alpha to beta (or between beta releases).
 
 - Clean working tree on `main` branch
 - All CI checks passing
-- All integration tests passing (or exceptions documented)
+- The complete release gate and required integration suites pass without waivers
 
 ## 1. Version Bump
 
@@ -90,14 +90,13 @@ The `release.yml` workflow runs automatically on tag push:
 ```bash
 # Verify npm packages
 npm view @verter/unplugin version  # Should show 0.0.1-beta.1
-npm view @verter/core version
 npm view @verter/native version
 
 # Verify VS Code marketplace
 # Check https://marketplace.visualstudio.com/items?itemName=verter.verter-vscode
 
 # Verify crates.io
-cargo search verter_core
+cargo search verter_compiler
 
 # Smoke test
 npm create vite@latest test-app -- --template vue-ts
@@ -106,24 +105,23 @@ npm install @verter/unplugin@beta
 # Add to vite.config.ts, run dev server, verify compilation works
 ```
 
-## Files That Need Version Bumps
+## Versioned Surfaces
 
-| File                                     | Count     |
-| ---------------------------------------- | --------- |
-| `Cargo.toml` (workspace)                 | 1         |
-| `package.json` (root)                    | 1         |
-| `packages/*/package.json`                | 16        |
-| `packages/native/npm/*/package.json`     | 7         |
-| `packages/verter-tsc/npm/*/package.json` | 4         |
-| `extensions/vscode/package.json`         | 1         |
-| **Total**                                | ~30 files |
+Do not rely on a hard-coded file count. Version-bearing surfaces include the
+workspace `Cargo.toml`, root `package.json`, publishable `packages/*` manifests,
+native and `verter-tsc` platform manifests, and the VS Code extension manifest.
+`node scripts/check-versions.mjs` is the executable completeness check.
 
-## Dry Run
+## Pre-publish rehearsal
 
-To validate the CI pipeline without publishing, tag an `alpha.4` first:
+Do not create a synthetic release tag as a dry run: every `v*` tag triggers the
+publishing workflow. Rehearse on the immutable release-candidate SHA instead:
 
 ```bash
-# Bump to alpha.4, commit, tag, push
-# Verify the release workflow completes successfully
-# Then proceed with beta.1
+pnpm install --frozen-lockfile
+node scripts/gate.mjs
+node scripts/check-versions.mjs --json
 ```
+
+Only tag the already-reviewed candidate after those checks and the release
+review are complete.
