@@ -179,3 +179,7 @@ model):
   context / request store view) — nothing keys on wall-clock or generation heuristics.
 - Cache-population path-independence is unaffected: the memos sit ABOVE the shared caches and only
   short-circuit repeated identical reads within one frozen view.
+
+## Round 2
+
+Second optimisation round + correctness fixes: see `14-round-2-program.md` — steady 6144→4594 ms (−25.2%), RSS 720→624 MB, allocs −10.6%, cumulative 22.5 s → 4.59 s (4.9×).
