@@ -222,6 +222,17 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
             .prepared_value_decl_with_context(self, canonical_id, symbol_name)
     }
 
+    /// Expose the request-scoped completion overlay so the view-aware
+    /// prepared-decl producer can consult the session-overlay bundle memo
+    /// (see the memo field docs on
+    /// [`CanonicalCompletionOverlay`]). Every context this request builds
+    /// shares the same `Arc`, so the memo's lifetime is exactly the
+    /// request's.
+    #[inline]
+    fn request_completion_overlay(&self) -> Option<&CanonicalCompletionOverlay> {
+        Some(self.request_view.overlay())
+    }
+
     #[inline]
     fn ensure_indexed_ready_serve(
         &self,

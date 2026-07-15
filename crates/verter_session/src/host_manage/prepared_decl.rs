@@ -453,8 +453,58 @@ impl VerterHost {
             // `overlay_content_hash_for` reports `Some` ONLY for an
             // actual overlay-Upsert, so an unmasked canonical keeps its
             // warm-bundle reuse on the base path.
-            if view.overlay_content_hash_for(canonical_id).is_some() {
-                return self.materialize_prepared_decl_bundle_via_ctx(ctx, &identity);
+            if let Some(overlay_hash) = view.overlay_content_hash_for(canonical_id) {
+                // Request-scoped, SUCCESS-ONLY memo (the R17-compliant
+                // reuse tier). R17 keeps this bundle OUT of the shared
+                // `prepared_decl_bundles` cache, so pre-memo every touch
+                // re-ran the full materialisation — including the
+                // per-import re-export-chain walk
+                // (`build_prepared_import_canonicalization`). The memo
+                // lives on the request's `CanonicalCompletionOverlay`
+                // (dies with the request; never a host/shared cache) and
+                // keys on `(raw owner, overlay content hash, store-view
+                // compat token)` — the token pins entries to ONE
+                // externally-coherent world so a stability-retry attempt
+                // under a fresh view misses and re-materialises. See the
+                // memo field docs on `CanonicalCompletionOverlay`.
+                let memo = ctx.request_completion_overlay();
+                let token = ctx.store_view().compat_token();
+                if let Some(memo) = memo {
+                    if let Some(bundle) =
+                        memo.overlay_bundle_memo_get(canonical_id, overlay_hash, token)
+                    {
+                        self.provenance
+                            .overlay_bundle_memo_hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return Some(bundle);
+                    }
+                }
+                // Cacheability bracket around the materialisation: the
+                // nested scope observes the same non-cacheable fan-out
+                // every enclosing tracer receives (fan-out reaches ALL
+                // active scopes, so enclosing verdicts are unchanged) and
+                // gates memo admission. A materialisation that consumed a
+                // FENCED overlay serve, an UNROOTABLE route, or a broken
+                // decl-body lease is served to THIS caller but never
+                // memoised — the per-call re-materialisation (and its
+                // per-call fan-out into whatever tracer scopes enclose
+                // each later touch) is load-bearing for that class.
+                let (bundle, non_cacheable) =
+                    crate::fact_signature_helpers::with_cacheability_scope(self, |_probe| {
+                        self.materialize_prepared_decl_bundle_via_ctx(ctx, &identity)
+                    });
+                let bundle = bundle?;
+                if !non_cacheable {
+                    if let Some(memo) = memo {
+                        memo.overlay_bundle_memo_insert(
+                            canonical_id,
+                            overlay_hash,
+                            token,
+                            std::sync::Arc::clone(&bundle),
+                        );
+                    }
+                }
+                return Some(bundle);
             }
         }
         // Per-request hoist: route the non-overlay fall-through

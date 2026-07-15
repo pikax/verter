@@ -73,6 +73,7 @@ use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
 use crate::file_artifact_store::FileFacts;
+use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::{
     DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, ResolverHash16,
     RouteSurfaceFactRef, StoreView, StoreViewCompatToken,
@@ -149,6 +150,61 @@ pub(crate) struct CanonicalCompletionOverlay {
     whole_hashes_nonempty: AtomicBool,
     derived_hashes_nonempty: AtomicBool,
     file_facts_nonempty: AtomicBool,
+    /// Request-scoped, SUCCESS-ONLY memo of session-overlay prepared-decl
+    /// bundles, keyed per raw overlay owner by `(overlay content hash,
+    /// store-view compat token)`.
+    ///
+    /// R17 forbids admitting an overlay-bearing bundle to the host's
+    /// shared `prepared_decl_bundles` cache (the shared slot is keyed by
+    /// canonical alone and would alias the base bundle), so pre-memo the
+    /// session-tier resolver re-ran
+    /// `materialize_prepared_decl_bundle_via_ctx` — including the full
+    /// per-import re-export-chain walk
+    /// (`build_prepared_import_canonicalization`) — on EVERY bundle touch.
+    /// This memo is the request-scoped home for that value: it lives and
+    /// dies with this overlay (one top-level request), never writes to any
+    /// host/shared/store-level cache, and is NOT a request-local mirror of
+    /// host state — the value it holds is exactly the one R17 keeps OUT of
+    /// host state.
+    ///
+    /// Key semantics:
+    /// - the overlay content hash pins entries to the session view's
+    ///   frozen overlay bytes (the view is request-bound; its overlay maps
+    ///   never change within the request);
+    /// - the [`StoreViewCompatToken`] pins entries to ONE
+    ///   externally-coherent base-world snapshot — the SAME complete
+    ///   validity oracle singleflight lanes coalesce on (external
+    ///   supersession dimensions folded, the request's own additive
+    ///   artifact/load generations excluded). A `run_stable_request` retry
+    ///   attempt re-snapshots the base view while SHARING this overlay, so
+    ///   without the token a bundle whose import canonicalization walked
+    ///   the superseded world could serve the fresh attempt; with it the
+    ///   fresh attempt misses and re-materialises. The token also folds
+    ///   the session-overlay identity (`with_session_overlay` recomputes
+    ///   it from the overlay fingerprint), so two different session views
+    ///   can never collide on a memo entry even if an overlay object were
+    ///   ever shared between them.
+    ///
+    /// Success-only admission is enforced at the single producer call site
+    /// (`prepared_decl_bundle_with_context`): a materialisation whose
+    /// cacheability scope observed a NON-CACHEABLE read (fenced overlay
+    /// serve, unrootable route, broken decl-body lease) is served to its
+    /// caller but never inserted, preserving per-call re-materialisation —
+    /// and the per-call non-cacheable fan-out into enclosing tracer
+    /// scopes — for exactly the class where that fan-out is load-bearing.
+    overlay_bundle_memo: RwLock<FxHashMap<String, OverlayBundleMemoEntry>>,
+    overlay_bundle_memo_nonempty: AtomicBool,
+}
+
+/// Per-owner memo slot: the overlay content hash + view compat token the
+/// bundle was materialised under, and the bundle itself. One slot per
+/// raw overlay owner — a request observes ONE overlay content per owner
+/// (the view is frozen) and ONE compat token per attempt, so a
+/// hash/token move simply replaces the superseded entry.
+struct OverlayBundleMemoEntry {
+    overlay_hash: Hash16,
+    token: StoreViewCompatToken,
+    bundle: Arc<PreparedDeclBundle>,
 }
 
 /// Per-canonical derived hashes captured by the overlay. The fields
@@ -189,7 +245,70 @@ impl CanonicalCompletionOverlay {
             whole_hashes_nonempty: AtomicBool::new(false),
             derived_hashes_nonempty: AtomicBool::new(false),
             file_facts_nonempty: AtomicBool::new(false),
+            overlay_bundle_memo: RwLock::new(FxHashMap::default()),
+            overlay_bundle_memo_nonempty: AtomicBool::new(false),
         }
+    }
+
+    /// Read the memoised session-overlay prepared-decl bundle for
+    /// `(canonical, overlay_hash, token)`, if this request already
+    /// materialised it under exactly that overlay content and view
+    /// identity. See the [`Self::overlay_bundle_memo`] field docs for the
+    /// key semantics.
+    pub(crate) fn overlay_bundle_memo_get(
+        &self,
+        canonical: &str,
+        overlay_hash: Hash16,
+        token: StoreViewCompatToken,
+    ) -> Option<Arc<PreparedDeclBundle>> {
+        // Fast path: see `lookup_whole_hash` — skip the lock while the
+        // request has memoised nothing.
+        if !self.overlay_bundle_memo_nonempty.load(Ordering::Acquire) {
+            return None;
+        }
+        let memo = self.overlay_bundle_memo.read();
+        let entry = memo.get(canonical)?;
+        (entry.overlay_hash == overlay_hash && entry.token == token)
+            .then(|| Arc::clone(&entry.bundle))
+    }
+
+    /// Memoise a successfully-materialised session-overlay prepared-decl
+    /// bundle for the rest of this request. Replaces a superseded entry
+    /// for the same owner (an earlier attempt's hash/token). The caller
+    /// owns the success-only gate — only a materialisation whose
+    /// cacheability scope stayed clean may be inserted.
+    pub(crate) fn overlay_bundle_memo_insert(
+        &self,
+        canonical: &str,
+        overlay_hash: Hash16,
+        token: StoreViewCompatToken,
+        bundle: Arc<PreparedDeclBundle>,
+    ) {
+        // Same flag-after-insert ordering discipline as
+        // `write_completion_entry` (flag stored under the write lock). The
+        // race is benign here — a reader observing `false` just
+        // re-materialises — but the overlay's writer pattern stays
+        // uniform.
+        let mut memo = self.overlay_bundle_memo.write();
+        memo.insert(
+            canonical.to_owned(),
+            OverlayBundleMemoEntry {
+                overlay_hash,
+                token,
+                bundle,
+            },
+        );
+        self.overlay_bundle_memo_nonempty
+            .store(true, Ordering::Release);
+        drop(memo);
+    }
+
+    /// Test-only: number of memoised overlay bundles. The discriminating
+    /// tests assert base-path / tombstone / non-cacheable reads never
+    /// populate the memo.
+    #[cfg(test)]
+    pub(crate) fn overlay_bundle_memo_len_for_tests(&self) -> usize {
+        self.overlay_bundle_memo.read().len()
     }
 
     /// Idempotently promote a freshly-loaded canonical's facts into the
