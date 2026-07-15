@@ -21102,3 +21102,158 @@ fn instantiate_context_for_maps_body_source_by_canonical() {
             .resolve_env_hash
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Empty-path Shallow fast path for already-materialised Object roots.
+//
+// A root-level node that is ALREADY a `SemanticNodeData::Object` needs no
+// terminal-surface synthesis: the walker's root seed carries no role
+// override, no heritage overlay, and no provenance downgrade (those
+// transformations exist only on non-root frames), so the owned rebuild
+// reconstructs a member-for-member identical surface. The fast path must
+// return the ORIGINAL interned node id — preserving its identity and origin
+// scope — instead of round-tripping through `ShallowSurface` and re-interning
+// a payload-equal copy at `Global` scope.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Intern an `Object` surface at a `File` origin scope. The scope makes the
+/// id-identity assertion discriminating: a rebuild path re-interns the
+/// payload-equal copy at `Global` scope, which allocates a DIFFERENT id, so
+/// only the true fast path returns the original.
+fn intern_file_scoped_object(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    members: Vec<SurfaceMember>,
+    has_index_signature: bool,
+) -> SemanticNodeId {
+    graph.intern_node_with_scope(
+        SemanticNodeData::Object(SurfaceView {
+            members: Arc::from(members.into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature,
+        }),
+        NodeScopeId::File {
+            canonical_id: Arc::from("/w/fastpath_origin.ts"),
+            whole_hash: crate::semantic_query::HashValue::default(),
+            local_scope: None,
+        },
+    )
+}
+
+/// Fast path: an already-materialised Object root returns the ORIGINAL
+/// node id from the empty-path Shallow projection — no rebuild, no
+/// re-intern. Discriminating: the pre-fast-path walker round-trips the
+/// surface and re-interns it at `Global` scope, producing a different id
+/// for this `File`-scoped input.
+#[test]
+fn shallow_empty_path_materialized_object_root_returns_original_node_id() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let base = intern_file_scoped_object(
+        &graph,
+        vec![
+            surface_member("alpha", str_id, false, false),
+            surface_member("beta", str_id, true, true),
+        ],
+        false,
+    );
+
+    let result = run_empty_path_shallow(&dispatch, base);
+    assert_eq!(
+        result, base,
+        "empty-path Shallow over an already-materialised Object root must \
+         return the ORIGINAL node id (fast path), not a re-interned copy",
+    );
+    // The preserved node keeps its origin scope (the rebuild would have
+    // re-interned at Global scope and lost it).
+    assert!(
+        matches!(
+            graph.node_scope(result),
+            Some(NodeScopeId::File { canonical_id, .. }) if canonical_id.as_ref() == "/w/fastpath_origin.ts"
+        ),
+        "fast path must preserve the original node's File origin scope",
+    );
+}
+
+/// Fall-through pin: an Object whose `has_index_signature` flag is
+/// INCONSISTENT with its `index_signatures` list (flag true, list empty —
+/// reachable via intrinsic/lib-backed surfaces) must KEEP the owned rebuild
+/// path, because the rebuild derives `has_index_signature` from the carried
+/// list and thus normalises the flag. Discriminates against an over-eager
+/// fast path that skips the normalisation.
+#[test]
+fn shallow_empty_path_object_with_inconsistent_index_flag_still_rebuilds() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let base = intern_file_scoped_object(
+        &graph,
+        vec![surface_member("alpha", str_id, false, false)],
+        true, // inconsistent: no index_signatures carried
+    );
+
+    let result = run_empty_path_shallow(&dispatch, base);
+    assert_ne!(
+        result, base,
+        "an inconsistent has_index_signature flag must keep the owned \
+         rebuild path (the rebuild normalises the derived flag)",
+    );
+    let view = require_object_surface(
+        &graph,
+        result,
+        "shallow_empty_path_object_with_inconsistent_index_flag_still_rebuilds",
+    );
+    assert!(
+        !view.has_index_signature,
+        "the rebuild derives has_index_signature from the carried \
+         index_signatures (empty ⇒ false)",
+    );
+    assert_eq!(view.members.len(), 1, "members carry through the rebuild");
+}
+
+/// Fall-through pin: a compositional root (intersection of two Objects)
+/// still runs the owned synthesis and produces a MERGED surface — the fast
+/// path fires only for a bare Object root.
+#[test]
+fn shallow_empty_path_intersection_root_still_rebuilds_merged_surface() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let str_id = primitive(&graph, PrimitiveKind::String);
+    let left = intern_file_scoped_object(
+        &graph,
+        vec![surface_member("left", str_id, false, false)],
+        false,
+    );
+    let right = intern_file_scoped_object(
+        &graph,
+        vec![surface_member("right", str_id, false, false)],
+        false,
+    );
+    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        vec![left, right].into_boxed_slice(),
+    )));
+
+    let result = run_empty_path_shallow(&dispatch, base);
+    assert_ne!(result, left, "intersection root must not alias an arm");
+    assert_ne!(result, right, "intersection root must not alias an arm");
+    let view = require_object_surface(
+        &graph,
+        result,
+        "shallow_empty_path_intersection_root_still_rebuilds_merged_surface",
+    );
+    let names: Vec<&str> = view.members.iter().map(|m| m.name.as_ref()).collect();
+    assert_eq!(
+        names,
+        vec!["left", "right"],
+        "intersection root must still synthesise the merged surface",
+    );
+}

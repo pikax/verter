@@ -3138,6 +3138,33 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         &mut self,
         node: SemanticNodeId,
     ) -> SemanticNodeId {
+        // Fast path: an already-materialised `Object` root needs no
+        // synthesis. The root seed carries no member-role override, no
+        // heritage overlay, and no provenance downgrade (those
+        // transformations exist only on non-root frames — heritage
+        // restamping, macro-arg stamping, and transparent-carrier
+        // provenance all enter via arm descent), so the owned walk below
+        // would round-trip the surface through `ShallowSurface` and
+        // re-intern a member-for-member identical payload. Returning the
+        // original id preserves the node's interned identity and origin
+        // scope and skips the worklist / buffer-map / visited-set
+        // allocations plus two full member-vector clones.
+        //
+        // The ONE normalisation the rebuild performs is deriving
+        // `has_index_signature` from the carried `index_signatures`
+        // (`surface_view_from_shallow`), so an Object whose flag is
+        // inconsistent with its list (reachable via intrinsic/lib-backed
+        // surfaces) keeps the owned rebuild path.
+        if let Some(data) = self.graph().node_data(node) {
+            if let SemanticNodeData::Object(view) = &*data {
+                if view.has_index_signature == !view.index_signatures.is_empty() {
+                    // Keep the frame-depth probe truthful: this walk
+                    // consumed the equivalent of the single root frame.
+                    LAST_SHALLOW_WALKER_MAX_FRAMES.store(1, Ordering::Relaxed);
+                    return node;
+                }
+            }
+        }
         let span = tracing::debug_span!(
             target: "verter::dispatch::walk",
             "walk_shallow_surface",
@@ -3338,9 +3365,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     buffer_id,
                     parent_target,
                 } => {
-                    let arm_surfaces = intersection_buffers.remove(&buffer_id).unwrap_or_default();
-                    let merged =
-                        merge_intersection_surfaces_with_graph(self.graph(), &arm_surfaces);
+                    let mut arm_surfaces =
+                        intersection_buffers.remove(&buffer_id).unwrap_or_default();
+                    // One-live-arm wrapper: the intersection merge is the
+                    // identity for a single contributing surface
+                    // (`merge_intersection_surfaces_with_graph` clones it
+                    // verbatim), so MOVE the owned surface out of the
+                    // drained buffer instead of cloning its member vector.
+                    let live_count = arm_surfaces.iter().filter(|s| s.is_some()).count();
+                    let merged = if live_count == 1 {
+                        arm_surfaces.iter_mut().find_map(std::mem::take)
+                    } else {
+                        merge_intersection_surfaces_with_graph(self.graph(), &arm_surfaces)
+                    };
                     self.contribute_surface(
                         parent_target,
                         &mut root_contribution,
