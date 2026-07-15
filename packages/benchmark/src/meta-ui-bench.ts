@@ -2,30 +2,40 @@ import { createRequire } from "node:module";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   applyDefaultBenchmarkTransforms,
+  buildProfileAuditArtifact,
   compareNormalizedArtifacts,
   rotateComponentOrder,
   summarizeLatencySeries,
   type ArtifactComparison,
+  type ProfileAuditComponentRow,
+  type MemoryAuditQueryMeasure,
+  type MemoryAuditSiteRow,
   type MetaUiBackend,
+  type MetaUiProfileAuditArtifact,
   type MetaUiOutcomeBucket,
   type MetaUiScenario,
   type NormalizedMetaArtifact,
 } from "./meta-ui-core.js";
-import { aggregateRunFromRepeats, type MetaUiBenchmarkRun } from "./meta-ui-report.js";
+import {
+  aggregateRunFromRepeats,
+  buildSlaCount,
+  type ComponentResultRow,
+  type MetaUiBenchmarkRun,
+} from "./meta-ui-report.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, "../../..");
 const require = createRequire(import.meta.url);
-const tsxLoaderPath = require.resolve("tsx");
+const tsxLoaderPath = pathToFileURL(require.resolve("tsx")).href;
 
 const JSON_MODE = process.argv.includes("--json");
 
-const SUPPORTED_BACKENDS: MetaUiBackend[] = ["vue-component-meta", "verter", "tsserver", "tsgo"];
+const SUPPORTED_BACKENDS: MetaUiBackend[] = ["vue-component-meta", "verter"];
 const SUPPORTED_SCENARIOS: MetaUiScenario[] = [
   "single_cold",
   "single_warm",
@@ -40,7 +50,23 @@ interface MetaUiBenchArgs {
   scenarios: MetaUiScenario[];
   repeats: number;
   warmupPasses: number;
+  /// Kill threshold for runaway requests. Aliased from the legacy
+  /// `--query-timeout-ms` flag.
   queryTimeoutMs: number;
+  /// SLA threshold (metric only). Components that
+  /// resolve above `slaMs` but below `queryTimeoutMs` are tallied as
+  /// `slaCount.exceededSla` but allowed to complete; under or equal
+  /// counts as `slaCount.withinSla`. CI compares
+  /// `slaCount.withinSla` regression against the committed baseline
+  /// in packages/benchmark/baselines/.
+  slaMs: number;
+  jsAudit: boolean;
+  /// Opt-in deep memory audit: per-query native allocator counters +
+  /// process memory, phase timings, and (when sampling is armed)
+  /// allocation sites, written to a SEPARATE `.profile.json` artifact.
+  /// Enables the runtime memory audit on the single regular binding;
+  /// setup fails loudly against a binding that predates the surface.
+  profileAudit: boolean;
   components: string[];
   limit: number | null;
   expected: "vue-component-meta" | "none";
@@ -75,12 +101,32 @@ interface BackendInstance {
   query(component: PreparedComponentSnapshot): Promise<MeasuredQueryResult>;
   dispose(): Promise<void> | void;
   isAvailable(): boolean;
+  /**
+   * return the stderr text the worker emitted
+   * between the query-send and query-end of the most recent
+   * `query()` call (or null when no query has run yet). Used by
+   * the runner to write a per-component sidecar log on failure.
+   *
+   * Returns `null` when the backend does not support per-query
+   * stderr capture.
+   */
+  takeLastQueryStderr?(): string | null;
+  /**
+   * End-of-pass sampled allocation-site collection (memory-audit mode
+   * with `VERTER_MEMORY_AUDIT_SAMPLE` armed). Resolves `null` when the
+   * backend/worker has no site data — additive, never a loud failure.
+   */
+  collectMemorySites?(topK: number): Promise<MemoryAuditSiteRow[] | null>;
 }
 
 interface MeasuredQueryResult {
   artifact: NormalizedMetaArtifact;
   latencyMs: number;
   outcome: MetaUiOutcomeBucket;
+  /** Worker-process RSS right after the query (bytes); absent from older workers. */
+  rssBytes?: number;
+  /** Per-query memory + timing measure; present only when --profile-audit is on. */
+  memoryAudit?: MemoryAuditQueryMeasure;
 }
 
 interface WorkerInitPayload {
@@ -88,6 +134,12 @@ interface WorkerInitPayload {
   uiRoot: string;
   checkerConfig: Record<string, unknown>;
   components: PreparedComponentSnapshot[];
+  /** When true the worker enables the runtime memory audit at setup
+   * (loud failure when the binding predates the surface), queries
+   * through the audited native variant for phase timings, and attaches
+   * per-query memory measures. Absent/false keeps today's timing
+   * behavior untouched. */
+  profileAudit?: boolean;
 }
 
 interface QueryWorkerOptions {
@@ -119,14 +171,41 @@ interface WorkerFatalMessage {
   stack?: string;
 }
 
+interface WorkerSitesMessage {
+  type: "sites";
+  requestId: number;
+  /** null ⇔ site sampling not armed / export absent — additive surface. */
+  sites: MemoryAuditSiteRow[] | null;
+}
+
 type WorkerMessage =
   | WorkerReadyMessage
   | WorkerResultMessage
   | WorkerErrorMessage
-  | WorkerFatalMessage;
+  | WorkerFatalMessage
+  | WorkerSitesMessage;
 
-const DEFAULT_QUERY_TIMEOUT_MS = 250;
+// SLA-vs-hard-timeout split:
+//   - DEFAULT_SLA_MS measures responsiveness (within-SLA / exceeded-SLA
+//     buckets). Components above this threshold are reported but not
+//     killed; the within-SLA count drives the CI regression gate.
+//   - DEFAULT_HARD_TIMEOUT_MS is the actual kill threshold. The
+//     pre-Step-10 single 250 ms threshold conflated metric and kill;
+//     splitting them lets us tighten the SLA without prematurely
+//     terminating slow but still-finishing requests.
+const DEFAULT_SLA_MS = 250;
+const DEFAULT_HARD_TIMEOUT_MS = 5_000;
+/// Backwards-compatible alias retained so existing JSON consumers and
+/// older invocations passing --query-timeout-ms continue to work
+/// (the legacy flag aliases --hard-timeout-ms with a stderr deprecation
+/// warning emitted by `parseMetaUiBenchArgs`).
+const DEFAULT_QUERY_TIMEOUT_MS = DEFAULT_HARD_TIMEOUT_MS;
 const DEFAULT_SETUP_TIMEOUT_MS = 30_000;
+/// End-of-pass allocation-site collection: how many top-by-bytes sites
+/// the worker reports, and how long the runner waits for the (read-time
+/// symbol-resolving) reply before proceeding without sites.
+const MEMORY_SITES_TOP_K = 50;
+const MEMORY_SITES_TIMEOUT_MS = 30_000;
 
 type GlobalWithOptionalGc = typeof globalThis & {
   gc?: () => void;
@@ -158,10 +237,61 @@ function logProgress(
   index: number,
   total: number,
   detail: string,
+  jsAudit: boolean,
 ): void {
-  logLine(
-    `${prefix} ${index}/${total} ${component.relativePath} ${detail} heap=${formatHeapUsageMb()}`,
-  );
+  const auditSuffix = jsAudit ? ` heap=${formatHeapUsageMb()}` : "";
+  logLine(`${prefix} ${index}/${total} ${component.relativePath} ${detail}${auditSuffix}`);
+}
+
+/**
+ * detect unquoted CSV in `--scenarios=` / `--backends=` /
+ * `--components=`. When the user runs (typically in a shell that
+ * splits unquoted commas):
+ *
+ *   pnpm bench:meta:ui -- --scenarios=single_cold repo_first_pass
+ *
+ * the `repo_first_pass` token arrives as a positional arg (no flag
+ * prefix). The argv parser silently ignores it, leaving the user
+ * with a benchmark run that does NOT include the second scenario.
+ * The correct quoted form is documented in `packages/benchmark/
+ * README.md`:
+ *
+ *   pnpm bench:meta:ui -- --scenarios="single_cold,repo_first_pass"
+ *
+ * This helper returns the list of positional tokens that look like
+ * known scenario / backend names so the parser can warn the user.
+ *
+ * Pure helper, exported for the discriminating
+ * `bench_meta_ui_per_component_isolation` test.
+ */
+export function detectUnquotedCsvSpillover(argv: readonly string[]): {
+  scenarioSpillover: string[];
+  backendSpillover: string[];
+  unrecognizedPositional: string[];
+} {
+  const scenarioSpillover: string[] = [];
+  const backendSpillover: string[] = [];
+  const unrecognizedPositional: string[] = [];
+  for (const arg of argv) {
+    if (
+      arg.startsWith("--") ||
+      arg === "--json" ||
+      arg === "--build-expected-only" ||
+      arg === "--js-audit"
+    ) {
+      continue;
+    }
+    if ((SUPPORTED_SCENARIOS as readonly string[]).includes(arg)) {
+      scenarioSpillover.push(arg);
+      continue;
+    }
+    if ((SUPPORTED_BACKENDS as readonly string[]).includes(arg)) {
+      backendSpillover.push(arg);
+      continue;
+    }
+    unrecognizedPositional.push(arg);
+  }
+  return { scenarioSpillover, backendSpillover, unrecognizedPositional };
 }
 
 export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
@@ -178,7 +308,10 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
     scenarios: [...SUPPORTED_SCENARIOS],
     repeats: 1,
     warmupPasses: 1,
-    queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS,
+    queryTimeoutMs: DEFAULT_HARD_TIMEOUT_MS,
+    slaMs: DEFAULT_SLA_MS,
+    jsAudit: false,
+    profileAudit: false,
     components: [],
     limit: null,
     expected: "vue-component-meta",
@@ -187,6 +320,40 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
     outputDir: defaultOutputDir,
   };
   let expectedDirExplicit = false;
+
+  // detect unquoted CSV before the per-flag walk; the warning
+  // surfaces on stderr so it does not corrupt --json output, and the
+  // walk still proceeds so the parser remains backward-compatible.
+  const spillover = detectUnquotedCsvSpillover(argv);
+  if (spillover.scenarioSpillover.length > 0) {
+    // Reconstruct the most likely intended CSV by combining the
+    // existing `--scenarios=...` value with the spillover tokens.
+    const existingScenariosValue =
+      argv.find((arg) => arg.startsWith("--scenarios="))?.slice("--scenarios=".length) ?? "";
+    const reconstructedCsv = [existingScenariosValue, ...spillover.scenarioSpillover]
+      .filter(Boolean)
+      .join(",");
+    process.stderr.write(
+      `warning: positional argument(s) [${spillover.scenarioSpillover.join(
+        ", ",
+      )}] look like scenario names — did you mean to write\n` +
+        `         --scenarios="${reconstructedCsv}" (quoted CSV)? Unquoted CSV with whitespace splits in most\n` +
+        `         shells; see packages/benchmark/README.md.\n`,
+    );
+  }
+  if (spillover.backendSpillover.length > 0) {
+    const existingBackendsValue =
+      argv.find((arg) => arg.startsWith("--backends="))?.slice("--backends=".length) ?? "";
+    const reconstructedCsv = [existingBackendsValue, ...spillover.backendSpillover]
+      .filter(Boolean)
+      .join(",");
+    process.stderr.write(
+      `warning: positional argument(s) [${spillover.backendSpillover.join(
+        ", ",
+      )}] look like backend names — did you mean to write\n` +
+        `         --backends="${reconstructedCsv}" (quoted CSV)? See packages/benchmark/README.md.\n`,
+    );
+  }
 
   for (const arg of argv) {
     if (arg === "--json") {
@@ -215,11 +382,37 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
       );
       continue;
     }
-    if (arg.startsWith("--query-timeout-ms=")) {
+    if (arg.startsWith("--hard-timeout-ms=")) {
       args.queryTimeoutMs = parseNonNegativeInt(
+        arg.slice("--hard-timeout-ms=".length),
+        "hard-timeout-ms",
+      );
+      continue;
+    }
+    if (arg.startsWith("--sla-ms=")) {
+      args.slaMs = parseNonNegativeInt(arg.slice("--sla-ms=".length), "sla-ms");
+      continue;
+    }
+    if (arg.startsWith("--query-timeout-ms=")) {
+      // --query-timeout-ms is deprecated. Aliases --hard-timeout-ms
+      // with a stderr deprecation warning.
+      const value = parseNonNegativeInt(
         arg.slice("--query-timeout-ms=".length),
         "query-timeout-ms",
       );
+      args.queryTimeoutMs = value;
+      process.stderr.write(
+        "warning: --query-timeout-ms is deprecated; use --hard-timeout-ms instead\n",
+      );
+      continue;
+    }
+    if (arg === "--js-audit") {
+      args.jsAudit = true;
+      continue;
+    }
+    if (arg === "--profile-audit" || arg === "--memory-audit") {
+      // --memory-audit is the pre-rename alias of --profile-audit.
+      args.profileAudit = true;
       continue;
     }
     if (arg.startsWith("--components=")) {
@@ -375,7 +568,7 @@ function readNuxtCompilerOptions(uiRoot: string) {
   };
 }
 
-function buildCheckerConfig(
+export function buildCheckerConfig(
   prepared: PreparedProject,
   componentPaths: PreparedComponentSnapshot[],
 ): Record<string, unknown> {
@@ -424,6 +617,7 @@ async function createBackendInstance(
       uiRoot: prepared.uiRoot,
       checkerConfig,
       components: componentPaths,
+      profileAudit: args.profileAudit,
     },
     {
       queryTimeoutMs: args.queryTimeoutMs,
@@ -535,10 +729,19 @@ class WorkerBackendInstance implements BackendInstance {
       resolve: (value: MeasuredQueryResult) => void;
       reject: (reason?: unknown) => void;
       timer: NodeJS.Timeout | null;
+      // snapshot of `this.stderr.length` at
+      // query-send time. The slice from this index to the array's
+      // end at query-completion captures the stderr emitted during
+      // this query.
+      stderrChunkStart: number;
     }
   >();
   private nextRequestId = 1;
   private unavailableError: Error | null = null;
+  // stderr captured during the most recent
+  // query, surfaced via `takeLastQueryStderr()`. Cleared on the
+  // next query-send to keep the sidecar log per-component-precise.
+  private lastQueryStderr: string | null = null;
 
   constructor(child: ChildProcess, stderr: string[], queryTimeoutMs: number) {
     this.child = child;
@@ -553,11 +756,20 @@ class WorkerBackendInstance implements BackendInstance {
     return this.unavailableError === null;
   }
 
+  takeLastQueryStderr(): string | null {
+    const value = this.lastQueryStderr;
+    this.lastQueryStderr = null;
+    return value;
+  }
+
   async query(component: PreparedComponentSnapshot): Promise<MeasuredQueryResult> {
     if (this.unavailableError) {
       throw this.unavailableError;
     }
     const requestId = this.nextRequestId++;
+    // Snapshot the stderr buffer so the post-query slice captures
+    // only what this component triggered.
+    const stderrChunkStart = this.stderr.length;
     return new Promise<MeasuredQueryResult>((resolveResult, rejectResult) => {
       const timer =
         this.queryTimeoutMs > 0
@@ -565,6 +777,7 @@ class WorkerBackendInstance implements BackendInstance {
               const timeoutError = new Error(
                 `meta-ui query timed out after ${this.queryTimeoutMs}ms while resolving ${component.relativePath}`,
               );
+              this.captureQueryStderr(stderrChunkStart);
               this.markUnavailable(timeoutError, true);
             }, this.queryTimeoutMs)
           : null;
@@ -572,8 +785,49 @@ class WorkerBackendInstance implements BackendInstance {
         resolve: resolveResult,
         reject: rejectResult,
         timer,
+        stderrChunkStart,
       });
       this.child.send({ type: "query", requestId, component });
+    });
+  }
+
+  private captureQueryStderr(chunkStart: number): void {
+    if (chunkStart < 0 || chunkStart > this.stderr.length) {
+      this.lastQueryStderr = "";
+      return;
+    }
+    this.lastQueryStderr = this.stderr.slice(chunkStart).join("");
+  }
+
+  /**
+   * One-shot end-of-pass site collection. Uses its own scoped message
+   * listener (never the pending-query map) and degrades to `null` on
+   * timeout, closed channel, or an unavailable worker — sites are
+   * additive and must never fail a pass that already measured.
+   */
+  async collectMemorySites(topK: number): Promise<MemoryAuditSiteRow[] | null> {
+    if (this.unavailableError) {
+      return null;
+    }
+    const requestId = this.nextRequestId++;
+    return new Promise<MemoryAuditSiteRow[] | null>((resolveSites) => {
+      const finish = (sites: MemoryAuditSiteRow[] | null) => {
+        clearTimeout(timer);
+        this.child.off("message", onMessage);
+        resolveSites(sites);
+      };
+      const timer = setTimeout(() => finish(null), MEMORY_SITES_TIMEOUT_MS);
+      const onMessage = (message: WorkerMessage) => {
+        if (message?.type === "sites" && message.requestId === requestId) {
+          finish(message.sites);
+        }
+      };
+      this.child.on("message", onMessage);
+      try {
+        this.child.send({ type: "sites", requestId, topK });
+      } catch {
+        finish(null);
+      }
     });
   }
 
@@ -597,6 +851,9 @@ class WorkerBackendInstance implements BackendInstance {
         clearTimeout(pending.timer);
       }
       this.pending.delete(message.requestId);
+      // capture per-query stderr (success path)
+      // so callers that always want the sidecar log can read it.
+      this.captureQueryStderr(pending.stderrChunkStart);
       pending.resolve(message.result);
       return;
     }
@@ -610,6 +867,10 @@ class WorkerBackendInstance implements BackendInstance {
         clearTimeout(pending.timer);
       }
       this.pending.delete(message.requestId);
+      // capture per-query stderr on the error
+      // path before the rejection so the sidecar log captures the
+      // exact window of worker output that produced the failure.
+      this.captureQueryStderr(pending.stderrChunkStart);
       const error = new Error(message.message);
       if (message.stack) {
         error.stack = message.stack;
@@ -689,6 +950,7 @@ async function buildExpectedArtifacts(
         index + 1,
         total,
         `baseline-ready outcome=${outcome} latency=${latencyMs.toFixed(2)}ms`,
+        args.jsAudit,
       );
     } finally {
       await instance.dispose();
@@ -757,11 +1019,81 @@ async function executeMeasuredQuery(
   return instance.query(component);
 }
 
+/**
+ * Collect a per-component memory-audit row from a measured query
+ * result. No-op when memory audit is off (`memoryRows === null`) or the
+ * worker attached no measure (e.g. an older synthetic test worker).
+ */
+/**
+ * Mutable end-of-pass allocation-sites slot, non-null only when
+ * --profile-audit is on AND VERTER_MEMORY_AUDIT_SAMPLE is set (the env
+ * is inherited by the worker, whose allocator does the actual
+ * sampling). `current` stays null until a pass reports sites.
+ */
+interface MemorySitesHolder {
+  current: MemoryAuditSiteRow[] | null;
+}
+
+/** Exported for the hermetic memory-audit spec. */
+export function shouldCollectMemorySites(
+  profileAudit: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return profileAudit && (env.VERTER_MEMORY_AUDIT_SAMPLE ?? "").trim() !== "";
+}
+
+function collectMemoryAuditRow(
+  memoryRows: ProfileAuditComponentRow[] | null,
+  repeatIndex: number,
+  relativePath: string,
+  measure: MemoryAuditQueryMeasure | undefined,
+): void {
+  if (!memoryRows || !measure) {
+    return;
+  }
+  memoryRows.push({ relativePath, repeatIndex, ...measure });
+}
+
 function classifyFailure(error: unknown): MetaUiOutcomeBucket {
   const message = error instanceof Error ? error.message : String(error);
   return /(closed|shutdown|terminated|crash|disconnect|EPIPE|broken pipe)/i.test(message)
     ? "crash"
     : "query_error";
+}
+
+/**
+ * write a per-component stderr sidecar log.
+ *
+ * Sidecar path: `<outputDir>/sidecar-logs/<relativePath>.stderr.log`
+ * Directory structure mirrors the component's path so two
+ * components with the same basename do not collide.
+ *
+ * Returns the absolute path of the written sidecar, or `null` when
+ * the captured stderr was empty (no file is written).
+ *
+ * Pure helper — exported for the discriminating
+ * `bench_meta_ui_per_component_isolation` test.
+ */
+export function writeComponentStderrSidecar(
+  outputDir: string,
+  relativePath: string,
+  stderrText: string | null,
+  reason:
+    | { kind: "success"; latencyMs: number; outcome: MetaUiOutcomeBucket }
+    | { kind: "failure"; outcome: MetaUiOutcomeBucket; errorMessage: string },
+): string | null {
+  if (!stderrText || stderrText.length === 0) {
+    return null;
+  }
+  const sidecarDir = resolve(outputDir, "sidecar-logs");
+  const sidecarPath = resolve(sidecarDir, `${relativePath}.stderr.log`);
+  mkdirSync(dirname(sidecarPath), { recursive: true });
+  const header =
+    reason.kind === "success"
+      ? `# Component: ${relativePath}\n# Outcome: ${reason.outcome} (latency=${reason.latencyMs.toFixed(2)}ms)\n# Generated: ${new Date().toISOString()}\n# per-component stderr sidecar\n\n`
+      : `# Component: ${relativePath}\n# Outcome: ${reason.outcome} (FAILED)\n# Error: ${reason.errorMessage}\n# Generated: ${new Date().toISOString()}\n# per-component stderr sidecar\n\n`;
+  writeFileSync(sidecarPath, header + stderrText, "utf8");
+  return sidecarPath;
 }
 
 async function runScenario(
@@ -772,12 +1104,17 @@ async function runScenario(
   repeats: number,
   warmupPasses: number,
   expectedArtifacts: Map<string, string>,
+  memoryRows: ProfileAuditComponentRow[] | null,
+  memorySites: MemorySitesHolder | null,
 ): Promise<MetaUiBenchmarkRun> {
   const repeatResults: MetaUiBenchmarkRun["repeats"] = [];
 
   for (let index = 0; index < repeats; index++) {
     const rotated = rotateComponentOrder(prepared.componentSnapshots, index);
     if (scenario === "single_cold" || scenario === "single_warm") {
+      // Site sampling accumulates per worker process; single_* scenarios
+      // spawn one worker per component, so a single end-of-pass report
+      // cannot represent the pass — sites stay repo-scenario-only.
       repeatResults.push(
         await runSingleScenarioRepeat(
           prepared,
@@ -788,6 +1125,7 @@ async function runScenario(
           rotated,
           warmupPasses,
           expectedArtifacts,
+          memoryRows,
         ),
       );
     } else {
@@ -801,6 +1139,8 @@ async function runScenario(
           rotated,
           warmupPasses,
           expectedArtifacts,
+          memoryRows,
+          memorySites,
         ),
       );
     }
@@ -846,12 +1186,14 @@ async function runSingleScenarioRepeat(
   components: PreparedComponentSnapshot[],
   warmupPasses: number,
   expectedArtifacts: Map<string, string>,
+  memoryRows: ProfileAuditComponentRow[] | null,
 ): Promise<MetaUiBenchmarkRun["repeats"][number]> {
   let setupMs = 0;
   let warmupMs = 0;
   let steadyStateMs = 0;
-  const componentLatenciesMs: number[] = [];
+  const componentResults: ComponentResultRow[] = [];
   const outcomeCounts = { success: 0, degraded: 0, query_error: 0, crash: 0 };
+  let peakWorkerRssBytes = 0;
   const deviationTotals = {
     exactMatches: 0,
     totalMissing: 0,
@@ -875,9 +1217,17 @@ async function runSingleScenarioRepeat(
       }
 
       const result = await executeMeasuredQuery(instance, component);
-      componentLatenciesMs.push(result.latencyMs);
       steadyStateMs += result.latencyMs;
       outcomeCounts[result.outcome]++;
+      peakWorkerRssBytes = Math.max(peakWorkerRssBytes, result.rssBytes ?? 0);
+      collectMemoryAuditRow(memoryRows, repeatIndex, component.relativePath, result.memoryAudit);
+      componentResults.push({
+        relativePath: component.relativePath,
+        componentName: componentNameFromPath(component.relativePath),
+        latencyMs: result.latencyMs,
+        outcome: result.outcome,
+        error: null,
+      });
       updateDeviationTotals(
         deviationTotals,
         expectedArtifacts.get(component.relativePath),
@@ -889,16 +1239,39 @@ async function runSingleScenarioRepeat(
         componentIndex + 1,
         total,
         `${scenario} outcome=${result.outcome} latency=${result.latencyMs.toFixed(2)}ms`,
+        args.jsAudit,
       );
     } catch (error) {
       const outcome = classifyFailure(error);
       outcomeCounts[outcome]++;
+      componentResults.push({
+        relativePath: component.relativePath,
+        componentName: componentNameFromPath(component.relativePath),
+        latencyMs: null,
+        outcome,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // write per-component stderr sidecar on
+      // failure so the failure context (loader output, plugin
+      // resolver noise, native panic line) survives the worker
+      // process crash for offline diagnosis.
+      writeComponentStderrSidecar(
+        args.outputDir,
+        component.relativePath,
+        instance.takeLastQueryStderr?.() ?? null,
+        {
+          kind: "failure",
+          outcome,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        },
+      );
       logProgress(
         `[repeat ${repeatIndex}]`,
         component,
         componentIndex + 1,
         total,
         `${scenario} outcome=${outcome} error=${error instanceof Error ? error.message : String(error)}`,
+        args.jsAudit,
       );
     } finally {
       await instance.dispose();
@@ -906,6 +1279,7 @@ async function runSingleScenarioRepeat(
     }
   }
 
+  const latencies = componentResults.filter((r) => r.latencyMs !== null).map((r) => r.latencyMs!);
   return {
     index: repeatIndex,
     orderStart: repeatIndex - 1,
@@ -913,12 +1287,13 @@ async function runSingleScenarioRepeat(
     warmupMs,
     steadyStateMs,
     endToEndMs: setupMs + warmupMs + steadyStateMs,
-    componentLatenciesMs,
+    componentResults,
     outcomeCounts,
+    slaCount: buildSlaCount(componentResults, args.slaMs),
+    peakWorkerRssMb:
+      peakWorkerRssBytes > 0 ? Math.round((peakWorkerRssBytes / 1024 / 1024) * 10) / 10 : null,
     deviationTotals,
-    stats: summarizeLatencySeries(
-      componentLatenciesMs.length > 0 ? componentLatenciesMs : [steadyStateMs],
-    ),
+    stats: summarizeLatencySeries(latencies.length > 0 ? latencies : [steadyStateMs]),
   };
 }
 
@@ -931,11 +1306,14 @@ async function runRepoScenarioRepeat(
   components: PreparedComponentSnapshot[],
   warmupPasses: number,
   expectedArtifacts: Map<string, string>,
+  memoryRows: ProfileAuditComponentRow[] | null,
+  memorySites: MemorySitesHolder | null,
 ): Promise<MetaUiBenchmarkRun["repeats"][number]> {
   let setupMs = 0;
   let warmupMs = 0;
-  const componentLatenciesMs: number[] = [];
+  const componentResults: ComponentResultRow[] = [];
   const outcomeCounts = { success: 0, degraded: 0, query_error: 0, crash: 0 };
+  let peakWorkerRssBytes = 0;
   const deviationTotals = {
     exactMatches: 0,
     totalMissing: 0,
@@ -992,8 +1370,21 @@ async function runRepoScenarioRepeat(
         setupMs += performance.now() - singleSetupStartedAt;
         try {
           const result = await executeMeasuredQuery(singleInstance, component);
-          componentLatenciesMs.push(result.latencyMs);
           outcomeCounts[result.outcome]++;
+          peakWorkerRssBytes = Math.max(peakWorkerRssBytes, result.rssBytes ?? 0);
+          collectMemoryAuditRow(
+            memoryRows,
+            repeatIndex,
+            component.relativePath,
+            result.memoryAudit,
+          );
+          componentResults.push({
+            relativePath: component.relativePath,
+            componentName: componentNameFromPath(component.relativePath),
+            latencyMs: result.latencyMs,
+            outcome: result.outcome,
+            error: null,
+          });
           updateDeviationTotals(
             deviationTotals,
             expectedArtifacts.get(component.relativePath),
@@ -1005,16 +1396,37 @@ async function runRepoScenarioRepeat(
             componentIndex + 1,
             total,
             `${scenario} outcome=${result.outcome} latency=${result.latencyMs.toFixed(2)}ms`,
+            args.jsAudit,
           );
         } catch (error) {
           const outcome = classifyFailure(error);
           outcomeCounts[outcome]++;
+          componentResults.push({
+            relativePath: component.relativePath,
+            componentName: componentNameFromPath(component.relativePath),
+            latencyMs: null,
+            outcome,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          // sidecar write for the
+          // recovery-mode (post-crash) per-component path.
+          writeComponentStderrSidecar(
+            args.outputDir,
+            component.relativePath,
+            singleInstance.takeLastQueryStderr?.() ?? null,
+            {
+              kind: "failure",
+              outcome,
+              errorMessage: error instanceof Error ? error.message : String(error),
+            },
+          );
           logProgress(
             `[repeat ${repeatIndex}]`,
             component,
             componentIndex + 1,
             total,
             `${scenario} outcome=${outcome} error=${error instanceof Error ? error.message : String(error)}`,
+            args.jsAudit,
           );
         } finally {
           await singleInstance.dispose();
@@ -1023,8 +1435,16 @@ async function runRepoScenarioRepeat(
       }
       try {
         const result = await executeMeasuredQuery(instance, component);
-        componentLatenciesMs.push(result.latencyMs);
         outcomeCounts[result.outcome]++;
+        peakWorkerRssBytes = Math.max(peakWorkerRssBytes, result.rssBytes ?? 0);
+        collectMemoryAuditRow(memoryRows, repeatIndex, component.relativePath, result.memoryAudit);
+        componentResults.push({
+          relativePath: component.relativePath,
+          componentName: componentNameFromPath(component.relativePath),
+          latencyMs: result.latencyMs,
+          outcome: result.outcome,
+          error: null,
+        });
         updateDeviationTotals(
           deviationTotals,
           expectedArtifacts.get(component.relativePath),
@@ -1036,16 +1456,40 @@ async function runRepoScenarioRepeat(
           componentIndex + 1,
           total,
           `${scenario} outcome=${result.outcome} latency=${result.latencyMs.toFixed(2)}ms`,
+          args.jsAudit,
         );
       } catch (error) {
         const outcome = classifyFailure(error);
         outcomeCounts[outcome]++;
+        componentResults.push({
+          relativePath: component.relativePath,
+          componentName: componentNameFromPath(component.relativePath),
+          latencyMs: null,
+          outcome,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        // sidecar write for the long-lived
+        // shared-instance steady-state path. The instance may
+        // already be unavailable at this point; takeLastQueryStderr
+        // still returns the captured window because stderr was
+        // captured at message-receipt time before dispose runs.
+        writeComponentStderrSidecar(
+          args.outputDir,
+          component.relativePath,
+          instance?.takeLastQueryStderr?.() ?? null,
+          {
+            kind: "failure",
+            outcome,
+            errorMessage: error instanceof Error ? error.message : String(error),
+          },
+        );
         logProgress(
           `[repeat ${repeatIndex}]`,
           component,
           componentIndex + 1,
           total,
           `${scenario} outcome=${outcome} error=${error instanceof Error ? error.message : String(error)}`,
+          args.jsAudit,
         );
         if (instance && !instance.isAvailable()) {
           await instance.dispose();
@@ -1056,6 +1500,21 @@ async function runRepoScenarioRepeat(
     }
     const steadyStateMs = performance.now() - steadyStartedAt;
 
+    // End-of-pass allocation-site collection, OUTSIDE the measured
+    // window (steadyStateMs is already final). One call per pass; with
+    // --repeats=N the freshest pass wins. Recovery mode (shared worker
+    // crashed) has no pass-scoped worker left to ask — sites stay as-is.
+    // (Cast: `instance` is assigned inside the `startInstance` closure,
+    // which TS's flow narrowing cannot see — same pattern as the rest
+    // of this function.)
+    const passInstance = instance as BackendInstance | null;
+    if (memorySites && passInstance?.isAvailable()) {
+      const sites = await passInstance.collectMemorySites?.(MEMORY_SITES_TOP_K);
+      if (sites != null) {
+        memorySites.current = sites;
+      }
+    }
+
     return {
       index: repeatIndex,
       orderStart: repeatIndex - 1,
@@ -1063,11 +1522,19 @@ async function runRepoScenarioRepeat(
       warmupMs,
       steadyStateMs,
       endToEndMs: setupMs + warmupMs + steadyStateMs,
-      componentLatenciesMs,
+      componentResults,
       outcomeCounts,
+      slaCount: buildSlaCount(componentResults, args.slaMs),
+      peakWorkerRssMb:
+        peakWorkerRssBytes > 0 ? Math.round((peakWorkerRssBytes / 1024 / 1024) * 10) / 10 : null,
       deviationTotals,
       stats: summarizeLatencySeries(
-        componentLatenciesMs.length > 0 ? componentLatenciesMs : [steadyStateMs],
+        (() => {
+          const latencies = componentResults
+            .filter((r) => r.latencyMs !== null)
+            .map((r) => r.latencyMs!);
+          return latencies.length > 0 ? latencies : [steadyStateMs];
+        })(),
       ),
     };
   } finally {
@@ -1132,6 +1599,22 @@ function writeRunArtifact(outputDir: string, run: MetaUiBenchmarkRun): string {
   return filePath;
 }
 
+/**
+ * Write the SEPARATE profile-audit artifact
+ * (`meta-ui-<backend>-<scenario>.profile.json`). The timing artifact is
+ * never altered by profile-audit mode. Exported for the hermetic
+ * profile-audit spec.
+ */
+export function writeProfileAuditArtifact(
+  outputDir: string,
+  artifact: MetaUiProfileAuditArtifact,
+): string {
+  mkdirSync(outputDir, { recursive: true });
+  const filePath = join(outputDir, `meta-ui-${artifact.backend}-${artifact.scenario}.profile.json`);
+  writeFileSync(filePath, JSON.stringify(artifact, null, 2));
+  return filePath;
+}
+
 async function main() {
   const args = parseMetaUiBenchArgs(process.argv.slice(2));
   const prepared = prepareMetaUiProject(args);
@@ -1163,6 +1646,10 @@ async function main() {
   for (const backend of args.backends) {
     for (const scenario of args.scenarios) {
       logLine(`Running ${backend} / ${scenario}...`);
+      const memoryRows: ProfileAuditComponentRow[] | null = args.profileAudit ? [] : null;
+      const memorySites: MemorySitesHolder | null = shouldCollectMemorySites(args.profileAudit)
+        ? { current: null }
+        : null;
       const run = await runScenario(
         prepared,
         args,
@@ -1171,9 +1658,26 @@ async function main() {
         args.repeats,
         args.warmupPasses,
         expectedArtifacts,
+        memoryRows,
+        memorySites,
       );
       runs.push(run);
       writeRunArtifact(args.outputDir, run);
+      if (memoryRows) {
+        const memoryArtifactPath = writeProfileAuditArtifact(
+          args.outputDir,
+          buildProfileAuditArtifact({
+            backend,
+            scenario,
+            rows: memoryRows,
+            sites: memorySites?.current ?? null,
+          }),
+        );
+        logLine(`  profile audit -> ${memoryArtifactPath}`);
+        if (memorySites?.current) {
+          logLine(`  allocation sites: ${memorySites.current.length} sampled call sites attached`);
+        }
+      }
       logLine(
         `  steady p50=${run.summary.steadyStateMs.p50.toFixed(2)}ms end-to-end p50=${run.summary.endToEndMs.p50.toFixed(2)}ms`,
       );
@@ -1198,4 +1702,9 @@ if (process.argv[1] && normalizePath(resolve(process.argv[1])) === normalizePath
 
 function normalizePath(value: string): string {
   return value.replace(/\\/g, "/");
+}
+
+function componentNameFromPath(filePath: string): string {
+  const base = filePath.replace(/\\/g, "/").split("/").pop() ?? filePath;
+  return base.replace(/\.vue$/, "");
 }

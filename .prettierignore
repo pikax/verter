@@ -1,0 +1,5 @@
+# Generated TypeScript bindings from ts-rs — source of truth is the
+# Rust derive annotations in verter_session's component_meta_audit
+# module. Formatting this file would diverge from ts-rs output and
+# break the `audit_ts_bindings_are_in_sync` test.
+packages/types/audit.generated.ts

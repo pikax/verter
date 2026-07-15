@@ -1,0 +1,3 @@
+# Keeps src/components/ present on disk so the gate's FS overlay can inject the
+# off-disk carrier (Widget.carrier.tsx) into this directory's enumeration. The
+# carrier itself is NEVER written to disk; only this empty-marker dir is committed.

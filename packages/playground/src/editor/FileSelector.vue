@@ -12,8 +12,11 @@ const newFilename = ref("");
 function handleAddFile() {
   if (showNewFileInput.value && newFilename.value.trim()) {
     let filename = newFilename.value.trim();
+    // A bare name (no explicit extension) gets the effective framework's
+    // carrier extension (descriptor-driven via the store): Svelte → `.svelte`,
+    // Vue → `.vue`. An explicit extension is respected.
     if (!filename.includes(".")) {
-      filename += ".vue";
+      filename += props.store.newFileExtension;
     }
     props.store.addFile(filename);
     newFilename.value = "";
@@ -66,7 +69,7 @@ function handleKeydown(e: KeyboardEvent) {
         v-if="showNewFileInput"
         v-model="newFilename"
         class="new-file-input"
-        placeholder="filename.vue"
+        :placeholder="`filename${store.newFileExtension}`"
         @keydown="handleKeydown"
         @blur="showNewFileInput = false"
         autofocus

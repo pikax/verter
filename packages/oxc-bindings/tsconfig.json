@@ -8,6 +8,7 @@
 
     "target": "ES6",
     "module": "nodenext",
-    "jsx": "preserve"
+    "jsx": "preserve",
+    "types": ["node"]
   }
 }

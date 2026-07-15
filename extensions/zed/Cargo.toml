@@ -1,0 +1,42 @@
+# Standalone crate: the empty `[workspace]` table detaches it from the repo's
+# root Cargo workspace (`members = ["crates/*", "xtask"]`) so the host-target
+# `cargo build` / `cargo nextest run --workspace` never pulls in this
+# wasm32-wasip2 cdylib, and it keeps its own committed Cargo.lock. It touches no
+# existing crate; the shared launch-contract crate is consumed via a path
+# dependency.
+[workspace]
+
+[package]
+name = "verter-zed"
+version = "0.1.0"
+edition = "2024"
+resolver = "3"
+description = "Vue & Svelte language support for Zed, powered by the Verter LSP"
+license = "MIT"
+repository = "https://github.com/pikax/verter"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Host-visible dependencies: the pure launch surface (lib.rs) depends only on
+# serde_json + the shared launch-contract crate, so it compiles and unit-tests on
+# the host target. The shared crate is the single source of truth for the argv,
+# the initializationOptions, discovery precedence, and the platform matrix. The
+# wasi-only Zed glue layers `zed_extension_api` on top under
+# cfg(target_os = "wasi").
+[dependencies]
+serde_json = "1.0"
+verter-editor-client = { path = "../../crates/verter-editor-client" }
+
+[target.'cfg(target_os = "wasi")'.dependencies]
+zed_extension_api = "0.7.0"
+
+[dev-dependencies]
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

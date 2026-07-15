@@ -23,6 +23,7 @@ import {
   DiagnosticSeverity,
   ConfigurationTarget,
   ThemeColor,
+  extensions,
 } from "vscode";
 import {
   LanguageClient,
@@ -32,11 +33,18 @@ import {
   RevealOutputChannelOn,
 } from "vscode-languageclient/node";
 
-import { join, normalize } from "path";
-import { appendFileSync, existsSync, writeFileSync } from "fs";
+import { basename, join, normalize, resolve, sep } from "path";
+import { appendFileSync, existsSync, readdirSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 
 import type { PatchClient, NotificationParams } from "@verter/language-shared";
-import { patchClient, NotificationType, RequestType } from "@verter/language-shared";
+import {
+  CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY,
+  EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY,
+  patchClient,
+  NotificationType,
+  RequestType,
+} from "@verter/language-shared";
 import type { StatisticsSnapshot, StatisticsSummary } from "@verter/language-shared";
 import { computeStatusBarState } from "./statusBar";
 import CompiledCodeContentProvider from "./CompiledCodeContentProvider";
@@ -61,9 +69,34 @@ import {
 } from "./claudeCodeDetection";
 import { createActivationGate } from "./activationGate";
 import { readE2eEnv } from "./e2eEnv";
-import { shouldConfigureBuiltInTypeScriptPlugin } from "./startupOptimizations";
+import {
+  frameworkDocumentSelector,
+  frameworkClientLanguageIds,
+  isFrameworkCarrierLanguageId,
+  shouldConfigureTypeScriptPluginForLanguageId,
+} from "./frameworkWiring";
 import { StartupProbe, readStartupProbeConfig, writeTimingMarker } from "./startupProbe";
 import { shouldRestartLanguageServerForConfigurationChange } from "./languageServerConfig";
+import { addShowRecentAuditRecordsCommand } from "./audit";
+import {
+  buildRelayEditorEnv,
+  isShimAdvertisement,
+  planSharedTsgo,
+  prepareEditorTsdk,
+  typeProviderRoutesTsgo,
+} from "./sharedTsgoLaunch";
+import {
+  NativePreviewRelayController,
+  type NativePreviewApi,
+} from "./nativePreviewRelayController";
+import {
+  attestEditorTsserverBootstrap,
+  VERTER_TYPESCRIPT_PLUGIN_ID,
+  planEditorTsserverBootstrap,
+  receiptIncludesConfiguredProject,
+  selectEditorTsserverBootstrapCarrier,
+  typeProviderRoutesEditorTsserver,
+} from "./editorTsserverBootstrap";
 
 type GetClient = () => PatchClient<LanguageClient>;
 type ActivationRuntime = Awaited<ReturnType<typeof activateExtension>>;
@@ -156,6 +189,27 @@ async function activateExtension(context: ExtensionContext) {
   let configRestartTimer: ReturnType<typeof setTimeout> | undefined;
   let tsPluginConfigured = false;
   let tsPluginPromise: Promise<void> | undefined;
+  let tsPluginRefreshRequested = false;
+  // The resolved per-workspace carrier-store dir the LSP publishes carriers into,
+  // delivered by the LSP's `$/verter/carrierStoreReady` notification (emitted from
+  // the server's init lifecycle, which resolves the dir authoritatively via
+  // `default_carrier_store_dir_string(workspace_root)` and also hands it to its own
+  // spawned tsserver through `VERTER_CARRIER_STORE_DIR`). The notification handler
+  // (`onCarrierStoreReady` → `applyCarrierStoreDir`) records it here and forwards it
+  // to VS Code's OWN TypeScript server via `configurePlugin`, so a plain `.ts`
+  // (served by VS Code's TS service, not the LSP-spawned tsserver) reads the SAME
+  // store the LSP writes — the headline "plain .ts importing a .vue gets real types"
+  // DX. The extension never re-derives the dir itself (the recipe — blake3 over the
+  // canonicalized + case-folded workspace root plus the LSP version — lives solely
+  // in the LSP, so mirroring it here would risk silently targeting the WRONG dir).
+  // `undefined` until the notification arrives; until then VS Code's own TS server
+  // has no store and fails closed (the LSP-spawned tsserver still has the env dir).
+  let carrierStoreDir: string | undefined;
+  // The store directory remains stable across publications. Advance this token
+  // only after the LSP reports that its current carrier generation has fully
+  // synchronized, causing the editor tsserver plugin to reload that configured
+  // project's external roots and snapshots exactly once.
+  let carrierStoreRefreshToken = 0;
 
   const getStartedClient = () => {
     if (!server) {
@@ -175,12 +229,22 @@ async function activateExtension(context: ExtensionContext) {
 
   const getTypeScriptPluginConfig = (): {
     enable: true;
+    editorOwnsCarrierMembership: true;
+    carrierStoreRefreshToken: number;
     exposeBindingsTesting?: boolean;
+    carrierStoreDir?: string;
   } => {
     const pluginConfig: {
       enable: true;
+      editorOwnsCarrierMembership: true;
+      carrierStoreRefreshToken: number;
       exposeBindingsTesting?: boolean;
-    } = { enable: true };
+      carrierStoreDir?: string;
+    } = {
+      enable: true,
+      [EDITOR_OWNS_CARRIER_MEMBERSHIP_CONFIG_KEY]: true,
+      [CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY]: carrierStoreRefreshToken,
+    };
     const experimentalConfig = workspace.getConfiguration("verter.experimental");
     const inspect = experimentalConfig.inspect<boolean>("exposeBindingsTesting");
     const hasExplicitValue =
@@ -198,14 +262,42 @@ async function activateExtension(context: ExtensionContext) {
       );
     }
 
+    // Forward the LSP-reported carrier-store dir to VS Code's TS server plugin
+    // so it reads the same store the LSP publishes carriers into. Omitted until
+    // the LSP reports it (the plugin then falls back to the env var).
+    if (carrierStoreDir !== undefined) {
+      pluginConfig.carrierStoreDir = carrierStoreDir;
+    }
+
     return pluginConfig;
   };
 
+  /**
+   * Record the LSP-reported carrier-store dir and (re-)configure VS Code's TS
+   * server plugin so it picks up the new `carrierStoreDir`. A no-op when the dir
+   * is unchanged (avoids a redundant `configurePlugin` round-trip). When the dir
+   * changes (first report, or a workspace switch), the configured flag is reset
+   * so `ensureTypeScriptPluginConfigured(force)` re-issues `configurePlugin` with
+   * the updated config.
+   */
+  const applyCarrierStoreDir = (dir: string | undefined) => {
+    if (dir === carrierStoreDir) {
+      return;
+    }
+    carrierStoreDir = dir;
+    tsPluginConfigured = false;
+    tsPluginPromise = undefined;
+    void ensureTypeScriptPluginConfigured(undefined, true);
+  };
+
   const ensureTypeScriptPluginConfigured = (document?: TextDocument, force = false) => {
+    if (tsPluginPromise) {
+      if (force) tsPluginRefreshRequested = true;
+      return tsPluginPromise;
+    }
     if (
-      tsPluginConfigured ||
-      tsPluginPromise ||
-      (!force && !shouldConfigureBuiltInTypeScriptPlugin(document?.languageId))
+      (!force && tsPluginConfigured) ||
+      (!force && !shouldConfigureTypeScriptPluginForLanguageId(document?.languageId))
     ) {
       return tsPluginPromise;
     }
@@ -214,7 +306,7 @@ async function activateExtension(context: ExtensionContext) {
     tsPluginPromise = Promise.resolve(
       commands.executeCommand(
         "_typescript.configurePlugin",
-        require.resolve("@verter/typescript-plugin"),
+        VERTER_TYPESCRIPT_PLUGIN_ID,
         getTypeScriptPluginConfig(),
       ),
     )
@@ -231,8 +323,12 @@ async function activateExtension(context: ExtensionContext) {
           Date.now(),
           tsPluginConfigured ? "configured" : "retry",
         );
-        if (!tsPluginConfigured) {
+        tsPluginPromise = undefined;
+        if (tsPluginRefreshRequested) {
+          tsPluginRefreshRequested = false;
+          tsPluginConfigured = false;
           tsPluginPromise = undefined;
+          void ensureTypeScriptPluginConfigured(undefined, true);
         }
       });
 
@@ -262,6 +358,11 @@ async function activateExtension(context: ExtensionContext) {
 
     serverPromise = activateVueLanguageServer(context, log, startupProbe, {
       onReady: ensureDeferredFeaturesRegistered,
+      onCarrierStoreReady: applyCarrierStoreDir,
+      onTypeProviderSyncComplete: () => {
+        carrierStoreRefreshToken += 1;
+        void ensureTypeScriptPluginConfigured(undefined, true);
+      },
     })
       .then((runtime) => {
         server = runtime;
@@ -279,8 +380,8 @@ async function activateExtension(context: ExtensionContext) {
     return serverPromise;
   };
 
-  const ensureStartedForVueDocument = (document?: TextDocument) => {
-    if (document?.languageId !== "vue") {
+  const ensureStartedForFrameworkDocument = (document?: TextDocument) => {
+    if (!isFrameworkCarrierLanguageId(document?.languageId)) {
       return;
     }
     void ensureLanguageServerStarted();
@@ -293,11 +394,11 @@ async function activateExtension(context: ExtensionContext) {
   context.subscriptions.push(
     workspace.onDidOpenTextDocument((document) => {
       ensureTypeScriptPluginConfiguredForDocument(document);
-      ensureStartedForVueDocument(document);
+      ensureStartedForFrameworkDocument(document);
     }),
     window.onDidChangeActiveTextEditor((editor) => {
       ensureTypeScriptPluginConfiguredForDocument(editor?.document);
-      ensureStartedForVueDocument(editor?.document);
+      ensureStartedForFrameworkDocument(editor?.document);
     }),
     workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("verter.experimental.exposeBindingsTesting")) {
@@ -325,6 +426,7 @@ async function activateExtension(context: ExtensionContext) {
   addCompilePreviewCommand(context, ensureLanguageServerStarted);
   addWriteVirtualFilesCommand(context, ensureLanguageServerStarted);
   addShowStatisticsCommand(context, log, ensureLanguageServerStarted, getStartedClient);
+  addShowRecentAuditRecordsCommand(context, log, ensureLanguageServerStarted, getStartedClient);
 
   context.subscriptions.push(
     commands.registerCommand("verter.showOutputChannel", () => log.show()),
@@ -342,8 +444,8 @@ async function activateExtension(context: ExtensionContext) {
   );
 
   if (
-    workspace.textDocuments.some((doc) => doc.languageId === "vue") ||
-    window.activeTextEditor?.document.languageId === "vue"
+    workspace.textDocuments.some((doc) => isFrameworkCarrierLanguageId(doc.languageId)) ||
+    isFrameworkCarrierLanguageId(window.activeTextEditor?.document.languageId)
   ) {
     void ensureLanguageServerStarted();
   }
@@ -431,12 +533,39 @@ export async function activateVueLanguageServer(
   startupProbe?: StartupProbe,
   options?: {
     onReady?: () => void;
+    /**
+     * Called with the LSP-reported per-workspace carrier-store dir (the
+     * `CarrierStoreReady` notification). The extension forwards it to VS Code's
+     * own TS server via `configurePlugin`.
+     */
+    onCarrierStoreReady?: (carrierStoreDir: string) => void;
+    /** Refresh the editor plugin after a durable carrier-store publication pass. */
+    onTypeProviderSyncComplete?: () => void;
   },
 ) {
   const { workspaceFolders } = workspace;
   const rootPath = Array.isArray(workspaceFolders) ? workspaceFolders[0].uri.fsPath : undefined;
 
   const binaryPath = findLspBinary(context.extensionPath, log);
+
+  // Try the exact editor-owned Native Preview Program first. Native Preview launches
+  // the staged relay as its own language server, and its public API attests that exact
+  // session before the Verter LSP is armed.
+  const effectiveTypeProvider =
+    readE2eEnv("TYPE_PROVIDER") ||
+    workspace.getConfiguration("verter").get<string>("typeProvider", "auto");
+  const sharedTsgo = await establishSharedTsgo(
+    context.extensionPath,
+    rootPath,
+    effectiveTypeProvider,
+    log,
+  );
+  context.subscriptions.push({ dispose: () => sharedTsgo.dispose() });
+  const editorTsserver =
+    sharedTsgo.lspArgs.length === 0
+      ? await establishEditorTsserverPlugin(effectiveTypeProvider, rootPath, log)
+      : NO_EDITOR_TSSERVER;
+  context.subscriptions.push({ dispose: () => editorTsserver.dispose() });
 
   // CSS intellisense service — created after client, referenced by middleware closures
   let cssService: CssService | undefined;
@@ -454,12 +583,19 @@ export async function activateVueLanguageServer(
     findStyleBlockAt(scanStyleBlocks(source), source, line, character) !== undefined;
   const hasStyleBlocks = (source: string) => scanStyleBlocks(source).length > 0;
 
+  // The active framework carriers are EVERY registered adapter — derived from
+  // the descriptor-generated client framework manifest, NOT an opt-in client
+  // gate. Svelte is first-class (no opt-in). Each attaches to its manifest
+  // client language id (e.g. the existing `svelte` id; Verter contributes no
+  // grammar and relies on the user's Svelte extension for syntax).
+  const activeFrameworks = frameworkClientLanguageIds();
+
   // Options to control the language client
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
-      { scheme: "file", language: "vue" },
-      { scheme: "file", language: "javascript" },
-      { scheme: "file", language: "typescript" },
+      // The base TS/JS surface + every registered framework's client language
+      // id, derived from the manifest (one `{ scheme: "file", language }` each).
+      ...frameworkDocumentSelector(),
       // Virtual files from the Verter Analysis panel — route through the LSP
       // so it can provide position-mapped features (hover, definition, etc.)
       { scheme: VirtualFileContentProvider.scheme },
@@ -480,6 +616,8 @@ export async function activateVueLanguageServer(
         html: workspace.getConfiguration("html"),
       },
       statistics: getStatisticsInitialization(rootPath),
+      // Every registered framework carrier the client wires (manifest-derived).
+      frameworks: activeFrameworks,
       lint: {
         enabled: workspace.getConfiguration("verter").get<boolean>("lint.enabled", false),
         preset: workspace.getConfiguration("verter").get<string>("lint.preset", "recommended"),
@@ -507,7 +645,7 @@ export async function activateVueLanguageServer(
     revealOutputChannelOn: RevealOutputChannelOn.Never,
     middleware: {
       provideCompletionItem: async (document, position, context, token, next) => {
-        if (document.languageId !== "vue") {
+        if (!isFrameworkCarrierLanguageId(document.languageId)) {
           return next(document, position, context, token);
         }
 
@@ -543,7 +681,7 @@ export async function activateVueLanguageServer(
       },
 
       provideHover: async (document, position, token, next) => {
-        if (document.languageId !== "vue") {
+        if (!isFrameworkCarrierLanguageId(document.languageId)) {
           return next(document, position, token);
         }
 
@@ -578,7 +716,7 @@ export async function activateVueLanguageServer(
       },
 
       provideDocumentColors: async (document, token, next) => {
-        if (document.languageId !== "vue") {
+        if (!isFrameworkCarrierLanguageId(document.languageId)) {
           return next(document, token);
         }
 
@@ -606,7 +744,7 @@ export async function activateVueLanguageServer(
       },
 
       provideColorPresentations: async (color, context, token, next) => {
-        if (context.document.languageId !== "vue") {
+        if (!isFrameworkCarrierLanguageId(context.document.languageId)) {
           return next(color, context, token);
         }
 
@@ -635,7 +773,7 @@ export async function activateVueLanguageServer(
       },
 
       provideDocumentHighlights: async (document, position, token, next) => {
-        if (document.languageId !== "vue") {
+        if (!isFrameworkCarrierLanguageId(document.languageId)) {
           return next(document, position, token);
         }
 
@@ -669,7 +807,10 @@ export async function activateVueLanguageServer(
   };
 
   let client = createLanguageServer(
-    buildServerOptions(binaryPath, rootPath, context.extensionPath, log),
+    buildServerOptions(binaryPath, rootPath, context.extensionPath, log, [
+      ...sharedTsgo.lspArgs,
+      ...editorTsserver.lspArgs,
+    ]),
     clientOptions,
   );
   const getClient = () => client as unknown as PatchClient<LanguageClient>;
@@ -810,6 +951,9 @@ export async function activateVueLanguageServer(
         log.info(
           `Type provider status: ${params.kind}${params.reason ? ` (${params.reason})` : ""}`,
         );
+        if (params.kind !== "none") {
+          startupProbe?.markTypeProviderStarted(params.kind);
+        }
       },
     );
   }
@@ -865,6 +1009,13 @@ export async function activateVueLanguageServer(
     });
     lc.onNotification(NotificationType.TypeProviderSyncComplete, (params: { gen: number }) => {
       log.info(`TypeProviderSyncComplete (init generation ${params.gen})`);
+      options?.onTypeProviderSyncComplete?.();
+    });
+    lc.onNotification(NotificationType.CarrierStoreReady, (params: { carrierStoreDir: string }) => {
+      log.info(`Carrier store dir reported by LSP: ${params.carrierStoreDir}`);
+      // Forward to VS Code's own TS server plugin so a plain `.ts` served by
+      // VS Code's TS service reads the same store the LSP publishes into.
+      options?.onCarrierStoreReady?.(params.carrierStoreDir);
     });
   }
 
@@ -901,7 +1052,7 @@ export async function activateVueLanguageServer(
   // CSS validation diagnostics — update on document change (debounced per URI)
   const cssDiagTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const updateCssDiagnostics = async (document: TextDocument) => {
-    if (document.languageId !== "vue") return;
+    if (!isFrameworkCarrierLanguageId(document.languageId)) return;
     try {
       const uri = document.uri.toString();
       const source = document.getText();
@@ -949,7 +1100,7 @@ export async function activateVueLanguageServer(
 
   context.subscriptions.push(
     workspace.onDidChangeTextDocument((e) => {
-      if (e.document.languageId === "vue") {
+      if (isFrameworkCarrierLanguageId(e.document.languageId)) {
         debouncedCssDiag(e.document);
         startupProbe?.maybeTrackDocument(e.document);
       }
@@ -991,7 +1142,10 @@ export async function activateVueLanguageServer(
         stop: () => client.stop(),
         createAndStart: async () => {
           client = createLanguageServer(
-            buildServerOptions(binaryPath, rootPath, context.extensionPath, log),
+            buildServerOptions(binaryPath, rootPath, context.extensionPath, log, [
+              ...sharedTsgo.lspArgs,
+              ...editorTsserver.lspArgs,
+            ]),
             clientOptions,
           );
           registerTypeProviderPidListener(client);
@@ -1032,11 +1186,242 @@ export async function activateVueLanguageServer(
   };
 }
 
+/** A live editor-owned tsgo rendezvous and its extension-host state disposer. */
+interface SharedTsgoLaunch {
+  /** The complete `--shared-*` pair, or an empty list when this tier is unavailable. */
+  lspArgs: string[];
+  /** Remove listeners and restore the relay environment. */
+  dispose: () => void;
+}
+
+const NO_SHARED_TSGO: SharedTsgoLaunch = { lspArgs: [], dispose: () => {} };
+
+/** A project-bound editor tsserver plugin receipt and its temporary-state disposer. */
+interface EditorTsserverLaunch {
+  /** Neutral receipt facts consumed by the LSP, or empty when this tier is unavailable. */
+  lspArgs: string[];
+  /** Remove the receipt after every LSP restart using it has stopped. */
+  dispose: () => void;
+}
+
+const NO_EDITOR_TSSERVER: EditorTsserverLaunch = { lspArgs: [], dispose: () => {} };
+
+/**
+ * Activate Verter inside VS Code's exact editor-owned tsserver and require proof
+ * that the plugin is bound to at least one current project before arming the LSP.
+ */
+async function establishEditorTsserverPlugin(
+  typeProvider: string,
+  workspaceRoot: string | undefined,
+  log?: LogOutputChannel,
+): Promise<EditorTsserverLaunch> {
+  if (!typeProviderRoutesEditorTsserver(typeProvider) || !workspaceRoot) {
+    return NO_EDITOR_TSSERVER;
+  }
+
+  const editorTypeScript = extensions.getExtension("vscode.typescript-language-features");
+  if (!editorTypeScript) {
+    log?.info("[editor-tsserver] not engaged - VS Code TypeScript extension is unavailable");
+    return NO_EDITOR_TSSERVER;
+  }
+
+  const plan = planEditorTsserverBootstrap({ root: tmpdir() });
+  try {
+    const receipt = await attestEditorTsserverBootstrap(
+      plan,
+      {
+        activate: () =>
+          editorTypeScript.isActive ? editorTypeScript.exports : editorTypeScript.activate(),
+        configurePlugin: (pluginId, config) =>
+          commands.executeCommand("_typescript.configurePlugin", pluginId, config),
+        prepareProject: () => prepareEditorTsserverConfiguredProject(workspaceRoot),
+      },
+      {
+        acceptAttestation: (receipt) => receiptIncludesConfiguredProject(receipt, workspaceRoot),
+      },
+    );
+    log?.info(
+      `[editor-tsserver] armed: pid=${receipt.pid} projects=${JSON.stringify(receipt.projects)} ` +
+        `receipt=${plan.receiptPath} (editor-owned project attested)`,
+    );
+
+    let disposed = false;
+    return {
+      lspArgs: plan.lspArgs,
+      dispose: () => {
+        if (disposed) return;
+        disposed = true;
+        removeEditorTsserverPlanDirectory(plan.directory, log);
+      },
+    };
+  } catch (error) {
+    removeEditorTsserverPlanDirectory(plan.directory, log);
+    log?.warn(`[editor-tsserver] establish failed; continuing to managed fallback: ${error}`);
+    return NO_EDITOR_TSSERVER;
+  }
+}
+
+/** Load one real framework carrier through VS Code's TypeScript feature without changing editors. */
+async function prepareEditorTsserverConfiguredProject(workspaceRoot: string): Promise<void> {
+  const exclude = "**/{node_modules,.git,dist,target}/**";
+  const carrierCandidates = await workspace.findFiles("**/*.{vue,svelte}", exclude, 50);
+  const selectedPath = selectEditorTsserverBootstrapCarrier(
+    workspaceRoot,
+    carrierCandidates.map((uri) => uri.fsPath),
+  );
+  const target = carrierCandidates.find((uri) => uri.fsPath === selectedPath);
+  if (!target) {
+    throw new Error("no workspace framework carrier can establish a configured editor project");
+  }
+
+  await workspace.openTextDocument(target);
+  await commands.executeCommand("vscode.executeDocumentSymbolProvider", target);
+}
+
+/** Remove only the nonce-scoped directory this extension created under the OS temp root. */
+function removeEditorTsserverPlanDirectory(directory: string, log?: LogOutputChannel): void {
+  const target = resolve(directory);
+  const tempRoot = resolve(tmpdir());
+  if (
+    !target.startsWith(`${tempRoot}${sep}`) ||
+    !basename(target).startsWith("verter-editor-tsserver-")
+  ) {
+    log?.warn(`[editor-tsserver] refused to remove unexpected attestation path: ${target}`);
+    return;
+  }
+  try {
+    rmSync(target, { recursive: true, force: true });
+  } catch (error) {
+    log?.warn(`[editor-tsserver] failed to remove attestation path ${target}: ${error}`);
+  }
+}
+
+/**
+ * Establish the exact editor-owned Native Preview tier, fail-closed.
+ *
+ * Native Preview, not Verter, owns the relay and its real-tsgo child. The extension
+ * temporarily selects a staged relay-shaped tsdk, requires a live advertisement and
+ * a successful public-API Program attestation, then restores the user's prior global
+ * tsdk setting. Any failure leaves the rendezvous unarmed for the next serving tier.
+ */
+async function establishSharedTsgo(
+  extensionPath: string,
+  workspaceRoot: string | undefined,
+  typeProvider: string,
+  log?: LogOutputChannel,
+): Promise<SharedTsgoLaunch> {
+  if (!typeProviderRoutesTsgo(typeProvider)) {
+    return NO_SHARED_TSGO;
+  }
+
+  const nativePreview = extensions.getExtension<NativePreviewApi>("TypeScriptTeam.native-preview");
+  if (!nativePreview) {
+    log?.info("[shared-tsgo] not engaged - Native Preview extension is not installed");
+    return NO_SHARED_TSGO;
+  }
+
+  try {
+    const nativePreviewTsdk =
+      workspace.getConfiguration("js/ts").get<string>("tsdk.path") ||
+      workspace.getConfiguration("typescript").get<string>("tsdk") ||
+      workspace.getConfiguration("typescript.native-preview").get<string>("tsdk") ||
+      join(nativePreview.extensionPath, "lib");
+    const plan = planSharedTsgo({
+      extensionPath,
+      controlDirRoot: tmpdir(),
+      env: process.env,
+      nativePreviewTsdk: nativePreviewTsdk || undefined,
+      workspaceRoot,
+    });
+    if (!plan.engaged) {
+      log?.info(`[shared-tsgo] not engaged — ${plan.reason}`);
+      return NO_SHARED_TSGO;
+    }
+
+    // Stage relay bytes under the executable name Native Preview selects. The editor
+    // performs the process spawn; Verter supplies only inherited rendezvous metadata.
+    const staged = prepareEditorTsdk({
+      shimPath: plan.shimPath,
+      controlDir: plan.controlDir,
+    });
+    const restoreEnvironment = installProcessEnvironment(buildRelayEditorEnv(plan));
+    const nativePreviewConfig = workspace.getConfiguration("typescript.native-preview");
+    const controller = new NativePreviewRelayController({
+      stagedTsdk: staged.dir,
+      isExtensionActive: () => nativePreview.isActive,
+      activate: async () => nativePreview.activate(),
+      restart: async () => {
+        await commands.executeCommand("typescript.native-preview.restart");
+      },
+      readGlobalTsdk: () => nativePreviewConfig.inspect<string>("tsdk")?.globalValue,
+      writeGlobalTsdk: async (value) => {
+        await nativePreviewConfig.update("tsdk", value, ConfigurationTarget.Global);
+      },
+      hasAdvertisement: () => {
+        try {
+          return readdirSync(plan.controlDir).some(isShimAdvertisement);
+        } catch {
+          return false;
+        }
+      },
+      onBackgroundError: (error) => {
+        log?.warn(`[shared-tsgo] Native Preview re-attach failed: ${error}`);
+      },
+    });
+
+    try {
+      await controller.establish();
+    } catch (error) {
+      controller.dispose();
+      restoreEnvironment();
+      throw error;
+    }
+    log?.info(
+      `[shared-tsgo] armed: shim=${plan.shimPath} realTsgo=${plan.realTsgo} ` +
+        `controlDir=${plan.controlDir} (SHARED editor-attach attested against Native Preview's current Program)`,
+    );
+
+    let disposed = false;
+    return {
+      lspArgs: plan.lspArgs,
+      dispose: () => {
+        if (disposed) return;
+        disposed = true;
+        controller.dispose();
+        restoreEnvironment();
+      },
+    };
+  } catch (err) {
+    log?.warn(`[shared-tsgo] establish failed; continuing to the next serving tier: ${err}`);
+    return NO_SHARED_TSGO;
+  }
+}
+
+/** Install child-process environment values and return an exact restoration closure. */
+function installProcessEnvironment(values: Record<string, string>): () => void {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(values)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+
+  let restored = false;
+  return () => {
+    if (restored) return;
+    restored = true;
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+}
+
 function buildServerOptions(
   binaryPath: string,
   rootPath: string | undefined,
   extensionPath: string,
   log?: LogOutputChannel,
+  sharedLspArgs: string[] = [],
 ): ServerOptions {
   const logLevel = workspace.getConfiguration("verter.server").get<string>("logLevel", "info");
   const verterConfig = workspace.getConfiguration("verter");
@@ -1059,6 +1444,9 @@ function buildServerOptions(
     args.push(`--mcp-port=0`);
     args.push(`--mcp-lint-preset=${mcpLintPreset}`);
   }
+  // Pass only attested editor-serving facts. These are --prefixed flags, so they
+  // precede the positional workspace-root argument the LSP parses last.
+  args.push(...sharedLspArgs);
   if (rootPath) args.push(rootPath);
 
   log?.info(
@@ -1141,8 +1529,8 @@ function addCompilePreviewCommand(
 ) {
   context.subscriptions.push(
     commands.registerTextEditorCommand("verter.showCompiledCodeToSide", async (editor) => {
-      if (editor?.document?.languageId !== "vue") {
-        window.showInformationMessage("Not a Vue file");
+      if (!isFrameworkCarrierLanguageId(editor?.document?.languageId)) {
+        window.showInformationMessage("Not a component file");
         return;
       }
 
@@ -1166,8 +1554,8 @@ function addWriteVirtualFilesCommand(
 ) {
   context.subscriptions.push(
     commands.registerTextEditorCommand("verter.writeVirtualFiles", async (editor) => {
-      if (editor?.document?.languageId !== "vue") {
-        window.showInformationMessage("Not a Vue file");
+      if (!isFrameworkCarrierLanguageId(editor?.document?.languageId)) {
+        window.showInformationMessage("Not a component file");
         return;
       }
 
@@ -1274,25 +1662,26 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
     }),
   );
 
-  // Track last active Vue file URI so sidebar persists when virtual files or non-.vue files are focused
-  let lastVueFileUri: string | undefined;
-  const getLastVueUri = () => lastVueFileUri;
-  const updateLastVueFile = () => {
+  // Track last active framework-carrier file URI so the sidebar persists when
+  // virtual files or non-carrier files are focused (any carrier: .vue/.svelte).
+  let lastCarrierFileUri: string | undefined;
+  const getLastCarrierUri = () => lastCarrierFileUri;
+  const updateLastCarrierFile = () => {
     const editor = window.activeTextEditor;
-    if (editor?.document?.languageId === "vue") {
-      lastVueFileUri = editor.document.uri.toString();
+    if (isFrameworkCarrierLanguageId(editor?.document?.languageId)) {
+      lastCarrierFileUri = editor!.document.uri.toString();
     }
   };
-  updateLastVueFile();
-  context.subscriptions.push(window.onDidChangeActiveTextEditor(updateLastVueFile));
+  updateLastCarrierFile();
+  context.subscriptions.push(window.onDidChangeActiveTextEditor(updateLastCarrierFile));
 
-  // Track whether active editor is a Vue file
-  const updateHasActiveVueFile = () => {
-    const isVue = window.activeTextEditor?.document?.languageId === "vue";
-    commands.executeCommand("setContext", "verter.hasActiveVueFile", isVue);
+  // Track whether the active editor is a framework-carrier file (.vue/.svelte).
+  const updateHasActiveCarrierFile = () => {
+    const isCarrier = isFrameworkCarrierLanguageId(window.activeTextEditor?.document?.languageId);
+    commands.executeCommand("setContext", "verter.hasActiveCarrierFile", isCarrier);
   };
-  updateHasActiveVueFile();
-  context.subscriptions.push(window.onDidChangeActiveTextEditor(updateHasActiveVueFile));
+  updateHasActiveCarrierFile();
+  context.subscriptions.push(window.onDidChangeActiveTextEditor(updateHasActiveCarrierFile));
 
   // Create content provider for virtual files (no disk writes — uses verter-virtual:// scheme)
   const contentProvider = new VirtualFileContentProvider();
@@ -1307,11 +1696,11 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
   const virtualFilesProvider = new UnifiedVirtualFilesProvider(
     getClient,
     contentProvider,
-    getLastVueUri,
+    getLastCarrierUri,
   );
-  const componentTreeProvider = new ComponentTreeProvider(getClient, getLastVueUri);
-  const routeTreeProvider = new RouteTreeProvider(getClient, getLastVueUri);
-  const analysisProvider = new AnalysisTreeProvider(getClient, getLastVueUri);
+  const componentTreeProvider = new ComponentTreeProvider(getClient, getLastCarrierUri);
+  const routeTreeProvider = new RouteTreeProvider(getClient, getLastCarrierUri);
+  const analysisProvider = new AnalysisTreeProvider(getClient, getLastCarrierUri);
   const decorationProvider = new VueApiDecorationProvider(getClient);
   const bindingColorProvider = new BindingColorDecorationProvider(getClient);
   const propConstnessProvider = new PropConstnessDecorationProvider(getClient);
@@ -1325,6 +1714,22 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
         vueApiCalls: decorationProvider.getState(),
         propConstness: propConstnessProvider.getState(),
       })),
+      // D113: bridge custom-method LSP requests through VS Code commands
+      // so e2e tests can drive `getComponentMeta` / `getComponentMetaSurface`
+      // / `getComponentMetaTypeExpansion` without holding the language
+      // client themselves. Tests call e.g.
+      // `commands.executeCommand("verter._getComponentMeta", { uri })`.
+      commands.registerCommand("verter._getComponentMeta", (params: { uri: string }) =>
+        getClient().sendRequest(RequestType.GetComponentMeta, params),
+      ),
+      commands.registerCommand("verter._getComponentMetaSurface", (params: { uri: string }) =>
+        getClient().sendRequest(RequestType.GetComponentMetaSurface, params),
+      ),
+      commands.registerCommand(
+        "verter._getComponentMetaTypeExpansion",
+        (params: { handleBytes: number[]; depth?: number }) =>
+          getClient().sendRequest(RequestType.GetComponentMetaTypeExpansion, params),
+      ),
     );
   }
 
@@ -1368,9 +1773,9 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
       }
     }),
     commands.registerCommand("verter.showSourceMapVisualization", async () => {
-      const sourceUri = getLastVueUri();
+      const sourceUri = getLastCarrierUri();
       if (!sourceUri) {
-        window.showInformationMessage("No Vue file active");
+        window.showInformationMessage("No active component file");
         return;
       }
 
@@ -1390,9 +1795,9 @@ function addVerterAnalysis(getClient: GetClient, context: ExtensionContext) {
     commands.registerCommand(
       "verter.showSourceMapForFile",
       async (item: UnifiedVirtualFileItem) => {
-        const sourceUri = item.sourceUri || getLastVueUri();
+        const sourceUri = item.sourceUri || getLastCarrierUri();
         if (!sourceUri) {
-          window.showInformationMessage("No Vue file active");
+          window.showInformationMessage("No active component file");
           return;
         }
 

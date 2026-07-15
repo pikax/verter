@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { defineConfig, resolveConfig } from "vite";
-import unplugin, { unpluginFactory } from "./index";
+import unplugin, { unpluginFactory, Verter, VerterSvelte, VerterVue } from "./index";
 import { loadHost, resetHost } from "./core/compiler";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
 
@@ -24,6 +24,24 @@ describe("unplugin factory", () => {
     expect(typeof unplugin.rspack).toBe("function");
     expect(typeof unplugin.rolldown).toBe("function");
     expect(typeof unplugin.farm).toBe("function");
+  });
+
+  it("exports the auto, Vue-pinned, and Svelte-pinned public factories", () => {
+    for (const factory of [Verter, VerterVue, VerterSvelte]) {
+      expect(typeof factory.vite).toBe("function");
+      expect(typeof factory.rollup).toBe("function");
+      expect(typeof factory.webpack).toBe("function");
+    }
+  });
+
+  it("preserves the default Vue-only contract while the named Verter factory auto-detects", () => {
+    const legacyDefault = unplugin.rollup() as any;
+    const auto = Verter.rollup() as any;
+
+    expect(legacyDefault.transformInclude("/path/to/App.vue")).toBe(true);
+    expect(legacyDefault.transformInclude("/path/to/App.svelte")).toBe(false);
+    expect(auto.transformInclude("/path/to/App.vue")).toBe(true);
+    expect(auto.transformInclude("/path/to/App.svelte")).toBe(true);
   });
 
   it("creates a raw plugin object from the factory", () => {
@@ -79,6 +97,40 @@ describe("unplugin hooks", () => {
     const plugin = createPlugin();
     expect(plugin.transformInclude("/path/to/App.vue")).toBe(true);
     expect(plugin.transformInclude("/path/to/Component.vue")).toBe(true);
+  });
+
+  it("auto-detects Svelte carriers while pinned factories remain isolated", () => {
+    const auto = Verter.rollup() as any;
+    const vue = VerterVue.rollup() as any;
+    const svelte = VerterSvelte.rollup() as any;
+
+    expect(auto.transformInclude("/path/to/App.vue")).toBe(true);
+    expect(auto.transformInclude("/path/to/App.svelte")).toBe(true);
+    expect(vue.transformInclude("/path/to/App.vue")).toBe(true);
+    expect(vue.transformInclude("/path/to/App.svelte")).toBe(false);
+    expect(svelte.transformInclude("/path/to/App.svelte")).toBe(true);
+    expect(svelte.transformInclude("/path/to/App.vue")).toBe(false);
+  });
+
+  it("routes Svelte runtime JS and external CSS through neutral virtual modules", async () => {
+    const plugin = VerterSvelte.rollup() as any;
+    const filename = "/test/App.svelte";
+    const source = `<script>let count = $state(0)</script>
+<button onclick={() => count += 1}>{count}</button>
+<style>button { color: red; }</style>`;
+
+    const transformed = await plugin.transform.call({ warn: vi.fn() }, source, filename);
+    expect(transformed).toBeDefined();
+
+    const scriptId = `${filename}?verter&type=script&lang.js`;
+    const styleId = `${filename}?verter&type=style&index=0&lang.css`;
+    expect(plugin.resolveId(scriptId)).toBe(scriptId);
+    expect(plugin.resolveId(styleId)).toBe(styleId);
+
+    const script = await plugin.load(scriptId);
+    const style = await plugin.load(styleId);
+    expect(script.code.length).toBeGreaterThan(0);
+    expect(style.code).toMatch(/button\.svelte-[\w-]+\s*\{\s*color:\s*red/);
   });
 
   it("transformInclude returns false for non-.vue files", () => {
@@ -1078,6 +1130,20 @@ describe("closeBundle hook", () => {
     // closeBundle should not throw even if no host was ever created
     expect(typeof plugin.closeBundle).toBe("function");
     expect(() => plugin.closeBundle()).not.toThrow();
+  });
+
+  it("closeBundle discards framework virtual-module caches", async () => {
+    const plugin = VerterSvelte.rollup() as any;
+    const filename = "/test/CloseBundle.svelte";
+    const source = `<script>let count = $state(0)</script><button onclick={() => count++}>{count}</button>`;
+
+    const transformed = await plugin.transform(source, filename);
+    expect(transformed.code).toContain("?verter&type=script");
+    expect(await plugin.load(`${filename}?verter&type=script&lang.js`)).toBeDefined();
+
+    await plugin.closeBundle();
+
+    expect(await plugin.load(`${filename}?verter&type=script&lang.js`)).toBeUndefined();
   });
 });
 

@@ -13,7 +13,7 @@ const EXCLUDED_DIRS = new Set(["node_modules"]);
  * Excludes `node_modules` and dot-directories (`.git`, `.vite`, etc.).
  * Returns a Map of forward-slash-normalized absolute paths to file contents.
  */
-export async function scanVueFiles(
+export async function scanCarrierFiles(
   root: string,
   filter: (filename: string) => boolean,
 ): Promise<Map<string, string>> {

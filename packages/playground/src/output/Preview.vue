@@ -2,7 +2,14 @@
 import { ref, watch, onMounted, computed } from "vue";
 import type { Store } from "../core/store";
 import srcdocTemplate from "./srcdoc.html?raw";
-import { transformForPreview, orderScriptsByDependency } from "./previewTransforms";
+import {
+  collectSvelteRuntimeFlags,
+  transformForPreview,
+  orderScriptsByDependency,
+  type SvelteRuntimeFlag,
+} from "./previewTransforms";
+import { detectFrameworkId } from "../core/frameworks";
+import { buildPreviewMountScript, type PreviewRuntimeFramework } from "../core/previewRuntime";
 
 const props = defineProps<{
   store: Store;
@@ -33,12 +40,16 @@ function updatePreview() {
   runtimeError.value = "";
 
   const scripts: string[] = [];
+  const svelteRuntimeFlags = new Set<SvelteRuntimeFlag>();
 
   // Build transformed JS map, then topologically sort so dependencies evaluate first
   const transformedFiles: Record<string, string> = {};
   for (const [filename, file] of Object.entries(props.store.files)) {
     if (file.compiled.js) {
-      const moduleName = "./" + filename.replace(/\.(vue|ts)$/, ".js");
+      for (const flag of collectSvelteRuntimeFlags(file.compiled.js)) {
+        svelteRuntimeFlags.add(flag);
+      }
+      const moduleName = "./" + filename.replace(/\.(vue|svelte|ts)$/, ".js");
       transformedFiles[filename] = transformForPreview(file.compiled.js, moduleName);
     }
   }
@@ -46,30 +57,26 @@ function updatePreview() {
   const ordered = orderScriptsByDependency(transformedFiles, props.store.mainFile);
 
   for (const filename of ordered) {
-    const moduleName = "./" + filename.replace(/\.(vue|ts)$/, ".js");
+    const moduleName = "./" + filename.replace(/\.(vue|svelte|ts)$/, ".js");
     scripts.push(`
         window.__modules__["${moduleName}"] = {}
         ${transformedFiles[filename]}
       `);
   }
 
-  // Mount the app (store reference for proper unmounting on next eval)
-  const mainModule = "./" + props.store.mainFile.replace(/\.(vue|ts)$/, ".js");
-  scripts.push(`
-    const { createApp } = window.Vue
-    const Component = window.__modules__["${mainModule}"]?.default
-    if (Component) {
-      const app = createApp(Component)
-      window.__currentApp__ = app
-      app.mount('#app')
-    }
-  `);
+  // Mount through the framework-owned public runtime protocol.
+  const mainModule = "./" + props.store.mainFile.replace(/\.(vue|svelte|ts)$/, ".js");
+  const frameworkId: PreviewRuntimeFramework =
+    detectFrameworkId(props.store.mainFile) === "svelte" ? "svelte" : "vue";
+  scripts.push(buildPreviewMountScript(frameworkId, mainModule));
 
   iframe.value.contentWindow.postMessage(
     {
       action: "eval",
       scripts,
       css: allCss.value,
+      frameworkId,
+      svelteRuntimeFlags: [...svelteRuntimeFlags],
     },
     "*",
   );

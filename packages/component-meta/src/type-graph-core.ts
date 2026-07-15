@@ -1,6 +1,6 @@
-import type { TypeDescriptor } from "./type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 
-export const GRAPH_FORMAT_VERSION = 1;
+export const GRAPH_FORMAT_VERSION = 3;
 
 export const NODE_PRIMITIVE = 1;
 export const NODE_LITERAL = 2;
@@ -22,6 +22,11 @@ export const NODE_PARENTHESIZED = 17;
 export const NODE_UNKNOWN = 18;
 export const NODE_INFER = 19;
 export const NODE_REST = 20;
+export const NODE_RECURSIVE_REF = 21;
+export const NODE_SYNTHETIC_SLOT_BINDING = 22;
+
+export const SYNTHETIC_CARRIER_SURFACE_SLOT_BINDING = 0;
+export const SYNTHETIC_CARRIER_SURFACE_BINDING = 1;
 
 export const LITERAL_STRING = 1;
 export const LITERAL_NUMBER = 2;
@@ -82,6 +87,13 @@ export const MEMBER_AVAILABILITY_ALWAYS = 1;
 export const MEMBER_AVAILABILITY_CONDITIONAL = 2;
 
 const GRAPH_TYPE_REF = Symbol("verter.component-meta.graph-type-ref");
+
+export interface GraphConditionalFrameRecord {
+  branch: number;
+  decided: boolean;
+  checkNodeId: number;
+  extendsNodeId: number;
+}
 
 export interface GraphTupleElementRecord {
   labelId: number;
@@ -159,7 +171,21 @@ export type GraphNodeRecord =
   | { kind: typeof NODE_PARENTHESIZED; innerNodeId: number }
   | { kind: typeof NODE_UNKNOWN; rawId: number }
   | { kind: typeof NODE_INFER; nameId: number }
-  | { kind: typeof NODE_REST; innerNodeId: number };
+  | { kind: typeof NODE_REST; innerNodeId: number }
+  | {
+      kind: typeof NODE_RECURSIVE_REF;
+      nameId: number;
+      typeArgumentNodeIds: number[];
+      conditionalContext: GraphConditionalFrameRecord[];
+    }
+  | {
+      kind: typeof NODE_SYNTHETIC_SLOT_BINDING;
+      valueNode: string;
+      scopeCanonicalId: number;
+      surfaceKind: number;
+      slotNameId: number;
+      bindingNameId: number;
+    };
 
 export class DecodedTypeGraph {
   readonly strings: readonly string[];

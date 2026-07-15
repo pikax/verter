@@ -1,4 +1,4 @@
-export type MetaUiBackend = "vue-component-meta" | "verter" | "tsserver" | "tsgo";
+export type MetaUiBackend = "vue-component-meta" | "verter";
 
 export type MetaUiScenario =
   | "single_cold"
@@ -297,7 +297,10 @@ function normalizeSchemaValue(input: unknown): NormalizedSchema {
     return input;
   }
   if (Array.isArray(input)) {
-    return input.map((item) => normalizeSchemaValue(item)).sort(compareSchemaValues);
+    const normalizedItems = input.map((item) => normalizeSchemaValue(item));
+    return shouldSortNormalizedSchemaArray(normalizedItems)
+      ? normalizedItems.sort(compareSchemaValues)
+      : normalizedItems;
   }
   if (typeof input === "object") {
     const output: Record<string, NormalizedSchema> = {};
@@ -317,6 +320,26 @@ function normalizeSchemaValue(input: unknown): NormalizedSchema {
 
 function compareSchemaValues(left: NormalizedSchema, right: NormalizedSchema): number {
   return stableStringify(left).localeCompare(stableStringify(right));
+}
+
+function shouldSortNormalizedSchemaArray(items: NormalizedSchema[]): boolean {
+  if (items.length < 2) {
+    return false;
+  }
+
+  const kinds = new Set(
+    items.map((item) => {
+      if (Array.isArray(item)) {
+        return "array";
+      }
+      if (item === null) {
+        return "null";
+      }
+      return typeof item;
+    }),
+  );
+
+  return kinds.size === 1;
 }
 
 function normalizeNullableString(value: unknown): string | null {
@@ -498,4 +521,318 @@ function percentile(sorted: readonly number[], ratio: number): number {
   }
   const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
   return sorted[index] ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// Profile-audit mode (--profile-audit; --memory-audit kept as an alias)
+//
+// Opt-in per-component profiling for bench:meta:ui. The single native
+// binary always carries the runtime-gated memory-audit surface:
+// `memoryAuditEnable({sampleEvery?})` flips the allocator gate on
+// (fresh counter epoch), `memoryAuditSnapshot()` /
+// `memoryAuditResetHighWater()` read/reset the counters (null/false
+// while disabled), and `memoryAuditSites(topK)` reports sampled
+// allocation call sites when sampling is armed. Phase timings ride the
+// existing native audit infra (`getComponentMetaWithAudit` →
+// `record.timings`). The helpers below are pure so the loud-failure
+// gate, the enable handshake, the per-query delta math, and the timing
+// extraction are unit-testable without a built .node.
+// ---------------------------------------------------------------------------
+
+/** Counters reported by the instrumented native binding. */
+export interface MemoryAuditSnapshot {
+  allocCount: number;
+  deallocCount: number;
+  allocatedBytesTotal: number;
+  liveBytes: number;
+  peakLiveBytes: number;
+}
+
+/**
+ * One sampled allocation site from the instrumented binding
+ * (`memoryAuditSites`). `count`/`bytes` are the SAMPLED observations;
+ * `estimatedTotalBytes = bytes * N` scales by the
+ * `VERTER_MEMORY_AUDIT_SAMPLE=N` interval into an unbiased estimate of
+ * the site's total allocated bytes. `frames` is a short resolved stack
+ * (innermost first, allocator plumbing skipped).
+ */
+export interface MemoryAuditSiteRow {
+  count: number;
+  bytes: number;
+  estimatedTotalBytes: number;
+  frames: string[];
+}
+
+/** The (possibly absent) memory-audit surface of `@verter/native`. */
+export interface MemoryAuditBinding {
+  /** Runtime gate: enables counters (+ optional site sampling). */
+  memoryAuditEnable?: ((options?: { sampleEvery?: number }) => boolean) | undefined;
+  memoryAuditSnapshot?: (() => MemoryAuditSnapshot | null) | undefined;
+  memoryAuditResetHighWater?: (() => boolean) | undefined;
+  /** Additive surface: absent on binaries predating site sampling. */
+  memoryAuditSites?: ((topK: number) => string | null) | undefined;
+}
+
+/** Validated instrumented-binding handle returned by the setup gate. */
+export interface MemoryAuditCapable {
+  snapshot(): MemoryAuditSnapshot;
+  resetHighWater(): void;
+  /**
+   * Top-K sampled allocation sites, or `null` when the export is
+   * missing (older instrumented binary) or sampling was not armed via
+   * `VERTER_MEMORY_AUDIT_SAMPLE`. Additive — never a loud failure.
+   */
+  sites(topK: number): MemoryAuditSiteRow[] | null;
+}
+
+/**
+ * Per-component phase timings (ms), extracted from the native audit
+ * record (`RequestAuditRecord.timings`) of the audited query. Verter
+ * backend only; absent for backends without the native audit infra.
+ */
+export interface AuditPhaseTimings {
+  totalMs: number;
+  materializeMs: number;
+  solverMs: number;
+  storeReadMs: number;
+  storeMergeMs: number;
+}
+
+/** Per-query memory measurement attached to a worker query result. */
+export interface MemoryAuditQueryMeasure {
+  /** Allocating calls during the query (snapshot delta). */
+  allocCount: number;
+  /** Bytes requested by allocating calls during the query (delta). */
+  allocatedBytes: number;
+  /** Live-bytes high-water mark within the query window (post-reset). */
+  peakLiveBytes: number;
+  /** Worker-process RSS right after the query. */
+  rssBytes: number;
+  /** Worker V8 heapUsed right after the query. */
+  jsHeapUsedBytes: number;
+  /** Native phase timings for the audited query (verter backend only). */
+  timings?: AuditPhaseTimings;
+}
+
+/** Per-component row in the .profile.json artifact. */
+export interface ProfileAuditComponentRow extends MemoryAuditQueryMeasure {
+  relativePath: string;
+  repeatIndex: number;
+}
+
+export interface MetaUiProfileAuditArtifact {
+  kind: "meta-ui-profile-audit";
+  generatedAt: string;
+  backend: MetaUiBackend;
+  scenario: MetaUiScenario;
+  components: ProfileAuditComponentRow[];
+  totals: {
+    components: number;
+    allocCount: number;
+    allocatedBytes: number;
+    maxPeakLiveBytes: number;
+    maxRssBytes: number;
+    maxJsHeapUsedBytes: number;
+  };
+  /**
+   * Sampled allocation-site attribution, present only when
+   * `VERTER_MEMORY_AUDIT_SAMPLE` armed site sampling AND the worker
+   * reported sites at end of pass. An empty array means "collected but
+   * nothing sampled"; the key is OMITTED when sampling was not armed,
+   * keeping pre-sites artifacts byte-shape-identical.
+   */
+  sites?: MemoryAuditSiteRow[];
+}
+
+export const MEMORY_AUDIT_BUILD_HINT =
+  "rebuild @verter/native (pnpm --filter @verter/native run build) — " +
+  "the loaded binary predates the runtime memory-audit surface";
+
+/**
+ * Loud-failure setup gate for --profile-audit: validate that the loaded
+ * `@verter/native` binding carries the runtime memory-audit surface and
+ * ENABLE it. Throws only when the exports are missing entirely (an old
+ * binary) or the enable handshake fails to produce counters — never a
+ * silent fallback, which would report all-zero counters.
+ */
+export function ensureMemoryAuditCapable(binding: MemoryAuditBinding): MemoryAuditCapable {
+  const fail = (reason: string): never => {
+    throw new Error(
+      `--profile-audit requires the runtime memory-audit surface of @verter/native: ${reason}. ` +
+        `Fix: ${MEMORY_AUDIT_BUILD_HINT}.`,
+    );
+  };
+  if (typeof binding.memoryAuditEnable !== "function") {
+    fail("the loaded binding has no memoryAuditEnable export");
+  }
+  if (typeof binding.memoryAuditSnapshot !== "function") {
+    fail("the loaded binding has no memoryAuditSnapshot export");
+  }
+  if (typeof binding.memoryAuditResetHighWater !== "function") {
+    fail("the loaded binding has no memoryAuditResetHighWater export");
+  }
+  // Runtime enable handshake: flip the allocator gate on (fresh counter
+  // epoch). Sampling arming rides the env (`VERTER_MEMORY_AUDIT_SAMPLE`,
+  // read once by the native side).
+  binding.memoryAuditEnable!();
+  const probe = binding.memoryAuditSnapshot!();
+  if (probe === null) {
+    fail("memoryAuditSnapshot() stayed null after memoryAuditEnable()");
+  }
+  return {
+    snapshot: () => {
+      const value = binding.memoryAuditSnapshot!();
+      if (value === null) {
+        return fail("memoryAuditSnapshot() returned null mid-run");
+      }
+      return value;
+    },
+    resetHighWater: () => {
+      binding.memoryAuditResetHighWater!();
+    },
+    sites: (topK: number) => {
+      // Additive surface (never a loud failure): older instrumented
+      // binaries lack the export, and a present export returns null
+      // when VERTER_MEMORY_AUDIT_SAMPLE did not arm sampling.
+      const sitesFn = binding.memoryAuditSites;
+      if (typeof sitesFn !== "function") {
+        return null;
+      }
+      return parseMemoryAuditSites(sitesFn(topK));
+    },
+  };
+}
+
+/**
+ * Parse the JSON site report returned by `memoryAuditSites()`. Returns
+ * `null` for a `null` input (sampling not armed) and for any payload
+ * that does not match the wire contract — sites are additive, so a
+ * malformed report degrades to "no site data" rather than failing the
+ * run.
+ */
+export function parseMemoryAuditSites(json: string | null): MemoryAuditSiteRow[] | null {
+  if (json === null) {
+    return null;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const rows: MemoryAuditSiteRow[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const row = entry as Record<string, unknown>;
+    if (
+      typeof row.count !== "number" ||
+      typeof row.bytes !== "number" ||
+      typeof row.estimatedTotalBytes !== "number" ||
+      !Array.isArray(row.frames) ||
+      !row.frames.every((frame) => typeof frame === "string")
+    ) {
+      return null;
+    }
+    rows.push({
+      count: row.count,
+      bytes: row.bytes,
+      estimatedTotalBytes: row.estimatedTotalBytes,
+      frames: row.frames as string[],
+    });
+  }
+  return rows;
+}
+
+/**
+ * Extract the phase timings consumed by the .profile.json rows from a
+ * parsed native `RequestAuditRecord`. Returns `null` when the record
+ * carries no complete timing block — timings are additive, so a
+ * missing/partial block degrades to "no timing data" for that row.
+ */
+export function extractAuditTimings(record: unknown): AuditPhaseTimings | null {
+  if (record === null || typeof record !== "object") {
+    return null;
+  }
+  const timings = (record as { timings?: unknown }).timings;
+  if (timings === null || typeof timings !== "object") {
+    return null;
+  }
+  const block = timings as Record<string, unknown>;
+  const phase = (key: string): number | null => {
+    const value = block[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  };
+  const totalMs = phase("total_ms");
+  const materializeMs = phase("materialize_ms");
+  const solverMs = phase("solver_ms");
+  const storeReadMs = phase("store_read_ms");
+  const storeMergeMs = phase("store_merge_ms");
+  if (
+    totalMs === null ||
+    materializeMs === null ||
+    solverMs === null ||
+    storeReadMs === null ||
+    storeMergeMs === null
+  ) {
+    return null;
+  }
+  return { totalMs, materializeMs, solverMs, storeReadMs, storeMergeMs };
+}
+
+/** Fold two allocator snapshots plus process memory into a per-query measure. */
+export function computeMemoryAuditMeasure(
+  before: MemoryAuditSnapshot,
+  after: MemoryAuditSnapshot,
+  memory: { rss: number; heapUsed: number },
+): MemoryAuditQueryMeasure {
+  return {
+    allocCount: after.allocCount - before.allocCount,
+    allocatedBytes: after.allocatedBytesTotal - before.allocatedBytesTotal,
+    peakLiveBytes: after.peakLiveBytes,
+    rssBytes: memory.rss,
+    jsHeapUsedBytes: memory.heapUsed,
+  };
+}
+
+/** Aggregate collected per-component rows into the .profile.json artifact. */
+export function buildProfileAuditArtifact(input: {
+  backend: MetaUiBackend;
+  scenario: MetaUiScenario;
+  rows: ProfileAuditComponentRow[];
+  /**
+   * End-of-pass sampled allocation sites. `null`/absent ⇒ sampling was
+   * not armed and the artifact omits the `sites` key entirely; `[]` ⇒
+   * armed but nothing sampled (still attached, distinct from absent).
+   */
+  sites?: MemoryAuditSiteRow[] | null;
+}): MetaUiProfileAuditArtifact {
+  const totals = {
+    components: input.rows.length,
+    allocCount: 0,
+    allocatedBytes: 0,
+    maxPeakLiveBytes: 0,
+    maxRssBytes: 0,
+    maxJsHeapUsedBytes: 0,
+  };
+  for (const row of input.rows) {
+    totals.allocCount += row.allocCount;
+    totals.allocatedBytes += row.allocatedBytes;
+    totals.maxPeakLiveBytes = Math.max(totals.maxPeakLiveBytes, row.peakLiveBytes);
+    totals.maxRssBytes = Math.max(totals.maxRssBytes, row.rssBytes);
+    totals.maxJsHeapUsedBytes = Math.max(totals.maxJsHeapUsedBytes, row.jsHeapUsedBytes);
+  }
+  return {
+    kind: "meta-ui-profile-audit",
+    generatedAt: new Date().toISOString(),
+    backend: input.backend,
+    scenario: input.scenario,
+    components: input.rows,
+    totals,
+    ...(input.sites != null ? { sites: input.sites } : {}),
+  };
 }

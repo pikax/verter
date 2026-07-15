@@ -1,0 +1,15 @@
+{
+  "component": "App",
+  "totalDurationMsMax": 2000,
+  "maxCounts": {
+    "vfsReads": 300,
+    "instantiations": 1000,
+    "materializations": 500
+  },
+  "expectedResult": {
+    "minProps": 1
+  },
+  "rule5Compliance": {
+    "enabled": true
+  }
+}

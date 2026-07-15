@@ -44,12 +44,34 @@ export interface NativeMetaSession {
   readonly overlayGeneration: number;
   /** Single native component-meta query. Returns a protobuf payload. */
   getComponentMeta(canonicalOrAlias: string): Buffer | null;
-  /** Declared-surface native query for Volar-compatible callers. Returns a protobuf payload. */
-  getDeclaredComponentMeta(canonicalOrAlias: string): Buffer | null;
+  /**
+   * Batch component-meta query. Returns one buffer slot per input in
+   * input order — non-empty for a successful payload, empty EXCLUSIVELY
+   * for a genuinely missing canonical. A real per-id failure (a budget
+   * overrun or a fail-closed output-materialization failure) THROWS —
+   * matching the scalar `getComponentMeta` failure semantics; a real
+   * failure is never collapsed onto the missing sentinel. One scheduler
+   * dispatch, one overlay view, host-owned admission caches shared
+   * across the batch.
+   */
+  getComponentMetaBatch(canonicalsOrAliases: string[]): Buffer[];
   /** Full resolved native query with resolution sidecars. Returns a protobuf payload. */
-  getResolvedComponentMeta?(canonicalOrAlias: string): Buffer | null;
+  getResolvedComponentMeta(canonicalOrAlias: string): Buffer | null;
   /** Provenance counters for observability. Returns JSON. */
   getProvenance(): string;
+  /**
+   * Selective surface. Returns
+   * `verter.v1.ComponentMetaSurface` bytes (eager scalars +
+   * `NamedTypeHandle` for every type-bearing field). Error envelopes
+   * are magic-byte-prefixed (`buf[0] === 0xFF`).
+   */
+  getComponentMetaSurface(canonicalOrAlias: string): Buffer | null;
+  /**
+   * Selective surface. Resolves a
+   * `verter.v1.TypeHandle` to a one-layer `verter.v1.TypeExpansion`.
+   * Error envelopes are magic-byte-prefixed (`buf[0] === 0xFF`).
+   */
+  getComponentMetaTypeExpansion(handleBuf: Buffer, depth?: number): Buffer;
 }
 
 export class ProjectEngine {
@@ -57,6 +79,12 @@ export class ProjectEngine {
   readonly root: string;
   readonly workspace: CheckerWorkspace | undefined;
   readonly incarnation: number;
+
+  /**
+   * Monotonic counter bumped when shared base state changes.
+   * Used by session memos to detect cross-session invalidation.
+   */
+  baseGeneration = 0;
 
   private _nativeProject: NativeMetaProject;
   private _liveLeases = new Set<LeaseId>();
@@ -126,6 +154,7 @@ export class ProjectEngine {
   clearCaches(): void {
     if (this._state === "closed") return;
     this._nativeProject.clearCaches();
+    this.baseGeneration++;
   }
 
   /**

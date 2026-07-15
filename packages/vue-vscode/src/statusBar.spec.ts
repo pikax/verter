@@ -10,6 +10,17 @@ describe("computeStatusBarState", () => {
     expect(state.tooltip).toContain("tsserver");
   });
 
+  it("shows an attested editor-owned tsserver as healthy", () => {
+    const state = computeStatusBarState({
+      kind: "editor-tsserver",
+      reason: "Attested VS Code tsserver process 4242",
+    });
+    expect(state.text).toContain("Editor TS");
+    expect(state.text).toContain("$(check)");
+    expect(state.warning).toBe(false);
+    expect(state.tooltip).toContain("4242");
+  });
+
   it("shows tsgo with check icon", () => {
     const state = computeStatusBarState({ kind: "tsgo" });
     expect(state.text).toContain("tsgo");

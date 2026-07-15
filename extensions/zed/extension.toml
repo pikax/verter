@@ -1,0 +1,25 @@
+id = "verter"
+name = "Verter (Vue / Svelte)"
+description = "Vue & Svelte language support powered by the Verter LSP"
+version = "0.1.0"
+schema_version = 1
+authors = ["pikax"]
+repository = "https://github.com/pikax/verter"
+
+# Language-server-ONLY contribution: Verter ships no tree-sitter grammar and no
+# `languages/*/config.toml`. It attaches its LSP to the official "Vue.js" and
+# "Svelte" languages (from the official Vue/Svelte Zed extensions) and is selected
+# via the user's `languages.<lang>.language_servers` setting — an explicit opt-in
+# alternative to Volar / svelte-language-server, not a replacement language
+# package.
+#
+# ONE server id `verter` binds BOTH carriers via the plural `languages` array (the
+# same shape the official tsgo extension uses to bind one server id to four
+# languages). One `verter-lsp` binary serves both Vue and Svelte; one settings key
+# `lsp.verter`. `language_ids` maps each Zed language NAME to the LSP `languageId`
+# the server expects. Vue/Svelte are the carriers; the server projects them to TS
+# internally.
+[language_servers.verter]
+name = "Verter"
+languages = ["Vue.js", "Svelte"]
+language_ids = { "Vue.js" = "vue", "Svelte" = "svelte" }

@@ -2,7 +2,7 @@
  * JSON Schema adapter — converts TypeDescriptor trees to JSON Schema (draft-07).
  */
 
-import type { TypeDescriptor } from "../type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 import type { ComponentMeta } from "../types.js";
 
 export interface JSONSchema {
@@ -105,8 +105,23 @@ export function typeToJsonSchema(type: TypeDescriptor): JSONSchema {
       return { description: type.name };
 
     case "ref":
+    case "recursiveRef":
       // Named type reference — cannot resolve without context
       return { description: type.name };
+
+    case "indexedAccess":
+      // Indexed-access types (`T['K']`) cannot be resolved without
+      // their host registry; surface a description placeholder.
+      return {};
+
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers are opaque terminals. Emit a
+      // descriptive object schema labelled with the user-visible
+      // `bindingName`; do NOT resolve through any registry.
+      return {
+        type: "object",
+        description: `synthetic slot binding ${type.bindingName}`,
+      };
 
     case "enum": {
       const values = type.members.map((m) => m.value ?? m.name);

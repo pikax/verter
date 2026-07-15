@@ -18,6 +18,9 @@ export default defineConfig({
     alias: {
       "@": resolve(__dirname, "src"),
       "verter-wasm-glue": resolve(__dirname, "../wasm/wasm/verter_wasm.js"),
+      // Resolve the descriptor-generated client framework manifest directly from
+      // language-shared source, so the playground never couples to a built dist.
+      "@verter/language-shared": resolve(__dirname, "../language-shared/src/index.ts"),
     },
   },
   optimizeDeps: {
@@ -26,16 +29,6 @@ export default defineConfig({
   server: {
     fs: {
       allow: ["..", "../../node_modules"],
-    },
-    headers: {
-      "Cross-Origin-Opener-Policy": "same-origin",
-      "Cross-Origin-Embedder-Policy": "require-corp",
-    },
-  },
-  preview: {
-    headers: {
-      "Cross-Origin-Opener-Policy": "same-origin",
-      "Cross-Origin-Embedder-Policy": "require-corp",
     },
   },
   build: {

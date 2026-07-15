@@ -8,13 +8,18 @@ export interface VerterCompileResult {
 /**
  * Create a VerterHost instance for benchmarking.
  * @param analysisLevel - "full" (default), "essential", or "none"
+ * @param hostCpuThreads - Optional worker count for the host-owned CPU
+ *   pool used by `compileMany`. `undefined` resolves to the platform's
+ *   available parallelism at host-construction time.
  */
 export function createVerterHost(
   analysisLevel: "full" | "essential" | "none" = "full",
+  hostCpuThreads?: number,
 ): VerterHost {
   return new VerterHost({
     devMode: false,
     analysisLevel,
+    hostCpuThreads,
   } as any);
 }
 

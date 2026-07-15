@@ -15,12 +15,18 @@ const localTimeoutMs = 20_000;
 const directStyleRegressionScript = path.resolve(e2eDir, "scripts", "direct-style-exit-repro.mjs");
 const directStyleTimeoutMs = 20_000;
 
-const defaultNexusUiRoot = "D:/dev/accioresearch/WLS/nexus/nexus-ui";
-const nexusUiRoot = process.env.VERTER_NEXUS_UI_ROOT ?? defaultNexusUiRoot;
-const nexusUiPackageDir = path.resolve(nexusUiRoot, "packages", "ui");
-const nexusUiDistDir = path.resolve(nexusUiPackageDir, "dist");
-const nexusUiTimeoutMs = 60_000;
-const runNexusUiCheck = process.env.VERTER_RUN_NEXUS_UI === "1";
+// The optional external consumer-repro lives in a local checkout whose path comes
+// purely from an env var; no private/local path lives in the tree. The check is
+// gated on VERTER_RUN_EXTERNAL_LIB=1. Opting in without a valid root fails closed.
+const externalLibRoot = process.env.VERTER_EXTERNAL_LIB_ROOT;
+const externalLibPackageDir = externalLibRoot
+  ? path.resolve(externalLibRoot, "packages", "ui")
+  : undefined;
+const externalLibDistDir = externalLibPackageDir
+  ? path.resolve(externalLibPackageDir, "dist")
+  : undefined;
+const externalLibTimeoutMs = 60_000;
+const runExternalLibCheck = process.env.VERTER_RUN_EXTERNAL_LIB === "1";
 
 const viteBin = path.resolve(unpluginDir, "node_modules", "vite", "bin", "vite.js");
 const pnpmInvocation = resolvePnpmInvocation();
@@ -47,9 +53,31 @@ function cleanDir(dir) {
 }
 
 async function runCommand(spec) {
-  cleanDir(spec.cleanupDir);
-
+  // A spec whose paths are env-derived (the external consumer) marks its output as
+  // redacted, so NO env-supplied path is ever logged — not via a cleanup error, an
+  // exception message, stdout, or stderr.
+  const redactOutput = Boolean(spec.redactExpectedOutput);
   const start = Date.now();
+  try {
+    cleanDir(spec.cleanupDir);
+  } catch (error) {
+    // A cleanup error can embed the (private) cleanup dir. For a redacted spec, do
+    // NOT swallow-and-continue (a stale `dist` could then make the expected-output
+    // check pass spuriously) — return a path-free FAILURE so the check fails closed.
+    if (!redactOutput) throw error;
+    return {
+      ok: false,
+      label: spec.label,
+      durationMs: Date.now() - start,
+      stdout: "",
+      stderr: "",
+      shortMessage:
+        "failed to clean the external output dir before the run (details suppressed to avoid logging a private path)",
+      timedOut: false,
+      redactOutput,
+    };
+  }
+
   let stdout = "";
   let stderr = "";
   let timedOut = false;
@@ -96,6 +124,7 @@ async function runCommand(spec) {
         stderr,
         shortMessage: `timed out after ${spec.timeoutMs}ms`,
         timedOut: true,
+        redactOutput,
       };
     }
 
@@ -108,18 +137,26 @@ async function runCommand(spec) {
         stderr,
         shortMessage: `exited with code ${exit.code}${exit.signal ? ` (signal: ${exit.signal})` : ""}`,
         timedOut: false,
+        redactOutput,
       };
     }
 
     if (spec.expectedOutput && !existsSync(spec.expectedOutput)) {
+      // A spec whose expected-output path is env-derived (the external consumer)
+      // sets `redactExpectedOutput` so the operator's private path is never logged;
+      // local fixtures keep their repo-relative path for a useful message.
+      const where = spec.redactExpectedOutput
+        ? "the configured external output dir"
+        : spec.expectedOutput;
       return {
         ok: false,
         label: spec.label,
         durationMs: Date.now() - start,
         stdout,
         stderr,
-        shortMessage: `expected output missing: ${spec.expectedOutput}`,
+        shortMessage: `expected output missing: ${where}`,
         timedOut: false,
+        redactOutput,
       };
     }
 
@@ -129,6 +166,7 @@ async function runCommand(spec) {
       durationMs: Date.now() - start,
       stdout,
       stderr,
+      redactOutput,
     };
   } catch (error) {
     clearTimeout(timeout);
@@ -138,8 +176,15 @@ async function runCommand(spec) {
       durationMs: Date.now() - start,
       stdout,
       stderr,
-      shortMessage: error instanceof Error ? error.message : String(error),
+      // The raw error message can embed the (private) external path; keep it
+      // path-free when this spec is redacted.
+      shortMessage: redactOutput
+        ? "the external command failed (details suppressed to avoid logging a private path)"
+        : error instanceof Error
+          ? error.message
+          : String(error),
       timedOut,
+      redactOutput,
     };
   }
 }
@@ -176,6 +221,15 @@ function printResult(result) {
 
   if (!result.ok) {
     console.log(`[exit-regression] ${result.label} error: ${result.shortMessage}`);
+    // For a redacted (env-path) spec, the external command's stdout/stderr can
+    // contain the operator's private path, so they are NOT echoed; the operator
+    // re-runs the external build directly to see its output.
+    if (result.redactOutput) {
+      console.log(
+        `[exit-regression] ${result.label}: command output suppressed (may contain a private path); re-run the external build directly to inspect it`,
+      );
+      return;
+    }
     if (result.stdout.trim()) {
       console.log(`[exit-regression] ${result.label} stdout:\n${result.stdout}`);
     }
@@ -217,15 +271,24 @@ async function buildLinkedUnplugin() {
   });
 }
 
-async function runNexusUiFallback() {
+async function runExternalLibFallback() {
+  // The pnpm workspace filter for the external consumer also comes from the
+  // environment (the operator's local package name), so no private package name
+  // is hardcoded. Defaults to the package directory's build script.
+  const filter = process.env.VERTER_EXTERNAL_LIB_FILTER;
+  const args = filter
+    ? [...pnpmInvocation.args, "--filter", filter, "build-lib"]
+    : [...pnpmInvocation.args, "run", "build-lib"];
   return runCommand({
-    label: "nexus-ui @nexus/ui build-lib",
-    cwd: nexusUiRoot,
+    label: "external lib build-lib",
+    cwd: externalLibRoot,
     command: pnpmInvocation.command,
-    args: [...pnpmInvocation.args, "--filter", "@nexus/ui", "build-lib"],
-    timeoutMs: nexusUiTimeoutMs,
-    cleanupDir: nexusUiDistDir,
-    expectedOutput: nexusUiDistDir,
+    args,
+    timeoutMs: externalLibTimeoutMs,
+    cleanupDir: externalLibDistDir,
+    expectedOutput: externalLibDistDir,
+    // The expected-output path is the operator's private external dir — never log it.
+    redactExpectedOutput: true,
   });
 }
 
@@ -254,26 +317,35 @@ async function main() {
     throw new Error("Local Vite lib-build smoke test failed after the direct regression passed.");
   }
 
-  if (!runNexusUiCheck) {
+  if (!runExternalLibCheck) {
     console.log(
-      "[exit-regression] nexus-ui validation skipped by default; set VERTER_RUN_NEXUS_UI=1 to run it manually",
+      "[exit-regression] external-lib validation skipped by default; set VERTER_RUN_EXTERNAL_LIB=1 and VERTER_EXTERNAL_LIB_ROOT to run it manually",
     );
     return;
   }
 
-  if (!existsSync(nexusUiPackageDir)) {
-    console.log(`[exit-regression] nexus-ui validation skipped: ${nexusUiPackageDir} not found`);
-    return;
+  if (!externalLibPackageDir) {
+    throw new Error(
+      "[exit-regression] VERTER_RUN_EXTERNAL_LIB=1 but VERTER_EXTERNAL_LIB_ROOT is not set",
+    );
   }
 
-  console.log(`[exit-regression] validating the original consumer repro at ${nexusUiPackageDir}`);
-
-  const nexusResult = await runNexusUiFallback();
-  printResult(nexusResult);
-
-  if (!nexusResult.ok) {
+  if (!existsSync(externalLibPackageDir)) {
     throw new Error(
-      "The CSS-path fix passed locally but nexus-ui/packages/ui still did not exit cleanly.",
+      "[exit-regression] VERTER_RUN_EXTERNAL_LIB=1 but the configured external package dir was not found",
+    );
+  }
+
+  console.log(
+    "[exit-regression] validating the original consumer repro at the configured external package dir",
+  );
+
+  const externalResult = await runExternalLibFallback();
+  printResult(externalResult);
+
+  if (!externalResult.ok) {
+    throw new Error(
+      "The CSS-path fix passed locally but the external lib package still did not exit cleanly.",
     );
   }
 }

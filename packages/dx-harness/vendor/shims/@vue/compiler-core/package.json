@@ -1,0 +1,6 @@
+{
+  "name": "@vue/compiler-core",
+  "version": "3.5.34",
+  "description": "Hermetic version-pinned `@vue/compiler-core` marker for the DX differential baseline (committed; never installed at runtime).",
+  "types": "index.d.ts"
+}

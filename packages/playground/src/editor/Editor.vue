@@ -6,15 +6,13 @@ import { extractVueVersion } from "../core/importMap";
 import type { HostDiagnostic, LintDiagnostic } from "../core/types";
 import { registerLspProviders } from "./lspProviders";
 import { computeAutoCloseTagText } from "./templateIde";
+import { frameworkLanguageIdForFilename, isCarrierFilename } from "../core/frameworks";
 import { TypeScriptService, type MappedDiagnostic } from "./tsService";
-import { TsgoService } from "./tsgoService";
-import { getTypeDiagnosticsSourceMap } from "./diagnosticSourceMap";
 import {
   computeBindingDecorations,
   computeCssClassDecorations,
   getDecorationStyles,
 } from "./decorations";
-import type { TypeScriptServiceBridge } from "./lspProviders";
 import { prefixWith } from "@verter/types/string";
 
 const typeHelpersSource = prefixWith("");
@@ -28,12 +26,7 @@ const editor = shallowRef<monaco.editor.IStandaloneCodeEditor>();
 const pendingCode = ref<string | null>(null);
 let suppressExternalSync = false;
 let lspDisposables: monaco.IDisposable[] = [];
-let tsService: TypeScriptServiceBridge & {
-  init(): Promise<void>;
-  dispose(): void;
-  syncTsx: TypeScriptService["syncTsx"];
-} = new TypeScriptService();
-let tsgoService: TsgoService | null = null;
+const tsService = new TypeScriptService();
 let tsDiagnostics: MappedDiagnostic[] = [];
 let decorationIds: string[] = [];
 let decorationStyleEl: HTMLStyleElement | null = null;
@@ -44,7 +37,11 @@ let tsSyncTimer: ReturnType<typeof setTimeout> | null = null;
 const TS_SYNC_DEBOUNCE_MS = 300;
 
 function getLanguage(filename: string): string {
-  if (filename.endsWith(".vue")) return "vue";
+  // Framework carrier / adapter-module documents resolve to the framework's
+  // Monaco language id (descriptor-driven, longest-suffix). This takes priority
+  // over the base extensions so `store.svelte.ts` is "svelte", not "typescript".
+  const frameworkLangId = frameworkLanguageIdForFilename(filename);
+  if (frameworkLangId) return frameworkLangId;
   if (filename.endsWith(".ts")) return "typescript";
   if (filename.endsWith(".js")) return "javascript";
   if (filename.endsWith(".css")) return "css";
@@ -198,36 +195,15 @@ async function syncTypeScript() {
   const file = props.store.activeFile;
   if (!file) return;
 
-  const tsxCode = file.compiled.types;
-  if (!tsxCode) {
-    tsDiagnostics = [];
-    updateMarkers();
-    return;
-  }
-
-  // Sync ALL files' .d.ts to the worker for cross-file import resolution
-  const dtsFiles: Array<{ filename: string; dtsCode: string }> = [];
-  for (const [filename, f] of Object.entries(props.store.files)) {
-    if (f.compiled.tscCode) {
-      dtsFiles.push({ filename, dtsCode: f.compiled.tscCode });
-    }
-  }
-  if (dtsFiles.length > 0 && tsService instanceof TypeScriptService) {
-    await tsService.syncDtsFiles(dtsFiles);
-  }
-
   // Capture version to detect stale results
   const version = ++tsSyncVersion;
 
   try {
-    const diagnosticsSourceMap = getTypeDiagnosticsSourceMap(file.compiled);
-    const diagnostics = await tsService.syncTsx(
-      file.filename,
-      tsxCode,
-      file.code,
-      diagnosticsSourceMap,
-      file.compiled.destructuredBlock,
-    );
+    // Carrier protocol: push EVERY source atomically (three carrier
+    // surfaces per framework carrier, raw content per plain user file),
+    // then request the active file's strictly-mapped diagnostics.
+    await tsService.syncWorkspace(Object.values(props.store.files));
+    const diagnostics = await tsService.getDiagnostics(file.filename);
 
     // Discard results if a newer sync was requested while we were waiting
     if (version !== tsSyncVersion) return;
@@ -344,7 +320,9 @@ onMounted(() => {
   // Auto-close HTML/Vue tags inside <template> blocks when typing `>`.
   editor.value.onDidType((text) => {
     if (text !== ">") return;
-    if (!props.store.activeFilename.endsWith(".vue")) return;
+    // Auto-close tags inside any framework CARRIER document's markup (descriptor
+    // carrier extensions), not just Vue.
+    if (!isCarrierFilename(props.store.activeFilename)) return;
 
     const monacoEditor = editor.value;
     if (!monacoEditor) return;
@@ -423,9 +401,14 @@ onMounted(() => {
     { deep: true },
   );
 
-  // Watch TSX output changes to trigger debounced TS re-sync
+  // Watch compiled-surface changes to trigger debounced TS re-sync
   watch(
-    () => [props.store.activeFile?.compiled.types, props.store.activeFile?.compiled.typesSourceMap],
+    () => [
+      props.store.activeFile?.compiled.types,
+      props.store.activeFile?.compiled.typesSourceMap,
+      props.store.activeFile?.compiled.declCode,
+      props.store.activeFile?.compiled.tscCode,
+    ],
     () => scheduleTsSync(),
   );
 
@@ -450,11 +433,9 @@ onMounted(() => {
     () => Object.keys(props.store.files),
     (newKeys) => {
       const newKeySet = new Set(newKeys);
-      if (tsService instanceof TypeScriptService) {
-        for (const key of prevFileKeys) {
-          if (!newKeySet.has(key)) {
-            tsService.closeFile(key);
-          }
+      for (const key of prevFileKeys) {
+        if (!newKeySet.has(key)) {
+          tsService.removeSource(key);
         }
       }
       prevFileKeys = newKeySet;
@@ -470,67 +451,14 @@ onMounted(() => {
     },
   );
 
-  // Watch type checker toggle to switch between tsc and tsgo
-  watch(
-    () => props.store.typeChecker,
-    async (mode) => {
-      console.log(`[type-checker] Switching to ${mode}`);
-      props.store.setTypeCheckerStatus("initializing");
-      // Dispose current providers
-      lspDisposables.forEach((d) => d.dispose());
-      lspDisposables = [];
-
-      if (mode === "tsgo") {
-        tsService.dispose();
-        if (!tsgoService) {
-          tsgoService = new TsgoService();
-        }
-        tsService = tsgoService as unknown as typeof tsService;
-        await tsgoService.init();
-        if (tsgoService.isAvailable) {
-          console.log("[type-checker] tsgo initialized successfully");
-          props.store.setTypeCheckerStatus("active");
-        } else {
-          console.warn(
-            "[type-checker] tsgo unavailable (SharedArrayBuffer missing or init failed)",
-          );
-          props.store.setTypeCheckerStatus("unavailable");
-        }
-      } else {
-        if (tsgoService) {
-          tsgoService.dispose();
-          tsgoService = null;
-        }
-        const newTsService = new TypeScriptService();
-        tsService = newTsService;
-        const curVueVersion = extractVueVersion(props.store.importMap) ?? "3.5";
-        await newTsService.init({
-          vueVersion: curVueVersion,
-          verterTypesContent: typeHelpersSource,
-        });
-        console.log("[type-checker] tsc initialized successfully");
-        props.store.setTypeCheckerStatus("active");
-      }
-
-      // Re-register LSP providers with new service
-      lspDisposables = registerLspProviders(props.store, tsService);
-
-      // Re-sync current file
-      tsDiagnostics = [];
-      updateMarkers();
-      syncTypeScript();
-    },
-  );
-
-  // Watch Vue version changes in import map to reload types
+  // Watch Vue version changes in import map to refresh the type program.
+  // The worker's Vue/Verter types are bundled and version-pinned; a version
+  // flip only needs a re-sync of the compiled surfaces.
   watch(
     () => extractVueVersion(props.store.importMap),
-    async (newVersion) => {
+    (newVersion) => {
       if (!newVersion) return;
-      if (tsService instanceof TypeScriptService) {
-        await tsService.updateVueTypes(newVersion);
-        syncTypeScript();
-      }
+      syncTypeScript();
     },
   );
 
@@ -562,7 +490,6 @@ onUnmounted(() => {
   lspDisposables.forEach((d) => d.dispose());
   lspDisposables = [];
   tsService.dispose();
-  tsgoService?.dispose();
   editor.value?.dispose();
   if (decorationStyleEl) {
     decorationStyleEl.remove();

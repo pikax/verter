@@ -1,0 +1,15 @@
+{
+  "name": "vue",
+  "version": "3.5.34",
+  "description": "Hermetic minimal `vue` type shim for the DX differential baseline (committed; never installed at runtime).",
+  "module": "index.d.ts",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts"
+    },
+    "./jsx-runtime": {
+      "types": "./jsx-runtime.d.ts"
+    }
+  }
+}

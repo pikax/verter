@@ -11,7 +11,6 @@ const ROOT = resolve(import.meta.dirname, "..");
 
 /** Packages that are published to npm. */
 const PUBLISHABLE = [
-  "packages/core",
   "packages/types",
   "packages/unplugin",
   "packages/wasm",

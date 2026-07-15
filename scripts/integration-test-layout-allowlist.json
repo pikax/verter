@@ -1,0 +1,31 @@
+{
+  "comment": [
+    "CENTRAL allowlist for the anti-binary-growth integration-test-layout guard.",
+    "SINGLE SOURCE OF TRUTH read by BOTH:",
+    "  - scripts/check-integration-test-layout.mjs (the fast-fail CI Node check), and",
+    "  - crates/verter_session/tests/cases/integration_test_layout_guard.rs (the in-gate Rust guard).",
+    "Each entry is an EXACT, stale-failing exception: { package, target, src_path, reason }.",
+    "src_path is repo-relative, FORWARD-SLASH normalized.",
+    "RULES (enforced by both guards):",
+    "  - EXACT: package + target + normalized src_path must all match a real cargo-metadata test target.",
+    "  - NO globs, NO prefixes, NO package-wide switches.",
+    "  - STALE-FAILING: if an allowlisted (package,target) no longer exists in cargo metadata,",
+    "    or its src_path moved, the guard FAILS — a removed binary cannot leave a dead exception.",
+    "Adding an entry requires a genuine 'needs a separate test process' justification (process-global",
+    "state that must be isolated in its own binary)."
+  ],
+  "allow": [
+    {
+      "package": "verter_session",
+      "target": "allocator_canaries",
+      "src_path": "crates/verter_session/tests/allocator_canaries.rs",
+      "reason": "single counting #[global_allocator] for allocation canaries"
+    },
+    {
+      "package": "verter_lsp",
+      "target": "lsp_audit_trace_out_env_var",
+      "src_path": "crates/verter_lsp/tests/lsp_audit_trace_out_env_var.rs",
+      "reason": "process-global VERTER_LSP_AUDIT_TRACE_OUT env mutation; separate binary isolates it and preserves exact test parity"
+    }
+  ]
+}

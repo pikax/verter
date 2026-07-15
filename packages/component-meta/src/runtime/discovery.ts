@@ -6,8 +6,18 @@
  */
 
 import { resolve, dirname } from "node:path";
+import { CLIENT_CARRIER_EXTENSIONS } from "@verter/language-shared";
 import type { CheckerWorkspace } from "../compat/checker.js";
 import { normalizePath } from "./engine-key.js";
+
+/**
+ * Whether a file name is a framework-carrier component file — ends in ANY
+ * registered carrier extension (`.vue` / `.svelte`). Carrier-generic,
+ * manifest-derived, NOT a hardcoded `.endsWith(".vue")`.
+ */
+function isCarrierComponentFile(name: string): boolean {
+  return CLIENT_CARRIER_EXTENSIONS.some((ext) => name.endsWith(ext));
+}
 
 async function readFileSafe(absPath: string, ws: CheckerWorkspace): Promise<string | null> {
   return (await ws.readFile(normalizePath(absPath))) ?? null;
@@ -128,7 +138,7 @@ async function collectVueFiles(
       if (name.startsWith(".") || name === "node_modules") continue;
       if (entry.isDir) {
         await collectVueFiles(entry.path, files, ws, depth + 1);
-      } else if (name.endsWith(".vue")) {
+      } else if (isCarrierComponentFile(name)) {
         files.push(entry.path);
       }
     }

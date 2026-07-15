@@ -149,7 +149,6 @@ export declare function slotToRender<T>(slot: T): SlotToRender<T>;
  * // This provides type information for the `{ msg }` destructuring
  * ```
  *
- * @see {@link file://packages/core/src/v5/process/script/plugins/component-type/component-type.ts} - Component type plugin that uses this helper
  */
 /**
  * Checks that all required slots of a component are provided by the parent.
@@ -171,4 +170,4 @@ export declare function extractArgumentsFromRenderSlot<
 >(
   component: { $slots: TSlots },
   slotName: N,
-): TSlots[N] extends (...args: infer P) => any ? P[0] : never;
+): TSlots[N] extends ((...args: infer P) => any) | undefined ? P[0] : never;

@@ -1,5 +1,5 @@
 /**
- * TypeScript interfaces mirroring the Rust analysis types from verter_analysis.
+ * TypeScript interfaces mirroring the Rust analysis types from verter_semantic.
  * All field names use camelCase to match serde(rename_all = "camelCase").
  * `spanStart`/`spanEnd` are always absolute source offsets in the boundary encoding
  * chosen by the transport (negotiated LSP encoding for the language server).
@@ -35,6 +35,11 @@ export interface BindingInitializer {
     callee: string;
     calleeImportSource: string | null;
     vueApi: string | null;
+    /**
+     * For `defineAsyncComponent(() => import('./X.vue'))`, the static carrier
+     * specifier of the wrapped component. Absent for every other call.
+     */
+    asyncComponentSource?: string;
   };
   Literal?: { kind: string };
   Reference?: { name: string };
@@ -453,7 +458,8 @@ export interface FileAnalysisSnapshot {
 
 export interface ProjectOverviewFile {
   path: string;
-  kind: "vue" | "ts" | "js";
+  /** `"component"` is any framework CARRIER file (`.vue`, `.svelte`, …). */
+  kind: "component" | "ts" | "js";
 }
 
 export interface ProjectOverviewComponentEdge {
@@ -462,7 +468,8 @@ export interface ProjectOverviewComponentEdge {
 }
 
 export interface ProjectOverviewStats {
-  totalVueFiles: number;
+  /** Count of framework CARRIER component files (`.vue`, `.svelte`, …). */
+  totalComponentFiles: number;
   totalComponents: number;
   totalProvideKeys: number;
   totalInjectKeys: number;

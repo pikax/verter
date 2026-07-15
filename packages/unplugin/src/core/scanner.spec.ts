@@ -7,7 +7,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { scanVueFiles } from "./scanner";
+import { scanCarrierFiles } from "./scanner";
 
 function createTempDir(): string {
   const dir = join(
@@ -18,7 +18,7 @@ function createTempDir(): string {
   return dir;
 }
 
-describe("scanVueFiles", () => {
+describe("scanCarrierFiles", () => {
   let tempDir: string;
 
   beforeEach(() => {
@@ -34,7 +34,7 @@ describe("scanVueFiles", () => {
     mkdirSync(join(tempDir, "components"), { recursive: true });
     writeFileSync(join(tempDir, "components", "Btn.vue"), "<template><button/></template>");
 
-    const files = await scanVueFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
 
     expect(files.size).toBe(2);
     // Keys should be forward-slash normalized absolute paths
@@ -48,7 +48,7 @@ describe("scanVueFiles", () => {
     mkdirSync(join(tempDir, "node_modules", "some-lib"), { recursive: true });
     writeFileSync(join(tempDir, "node_modules", "some-lib", "Comp.vue"), "<template/>");
 
-    const files = await scanVueFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
 
     expect(files.size).toBe(1);
     const keys = [...files.keys()];
@@ -62,7 +62,7 @@ describe("scanVueFiles", () => {
     mkdirSync(join(tempDir, ".vite"), { recursive: true });
     writeFileSync(join(tempDir, ".vite", "cached.vue"), "<template/>");
 
-    const files = await scanVueFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
 
     expect(files.size).toBe(1);
     const keys = [...files.keys()];
@@ -76,7 +76,10 @@ describe("scanVueFiles", () => {
     writeFileSync(join(tempDir, "style.css"), "body{}");
 
     // Filter that only matches files whose basename starts with "App"
-    const files = await scanVueFiles(tempDir, (f) => f.endsWith(".vue") && f.endsWith("/App.vue"));
+    const files = await scanCarrierFiles(
+      tempDir,
+      (f) => f.endsWith(".vue") && f.endsWith("/App.vue"),
+    );
 
     expect(files.size).toBe(1);
     const keys = [...files.keys()];
@@ -87,7 +90,7 @@ describe("scanVueFiles", () => {
     const content = "<template><div>hello</div></template>";
     writeFileSync(join(tempDir, "App.vue"), content);
 
-    const files = await scanVueFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
 
     expect(files.size).toBe(1);
     const value = [...files.values()][0];
@@ -95,7 +98,7 @@ describe("scanVueFiles", () => {
   });
 
   it("returns empty map for empty directory", async () => {
-    const files = await scanVueFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
     expect(files.size).toBe(0);
   });
 
@@ -103,7 +106,7 @@ describe("scanVueFiles", () => {
     mkdirSync(join(tempDir, "src", "views"), { recursive: true });
     writeFileSync(join(tempDir, "src", "views", "Home.vue"), "<template/>");
 
-    const files = await scanVueFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
 
     const keys = [...files.keys()];
     for (const key of keys) {

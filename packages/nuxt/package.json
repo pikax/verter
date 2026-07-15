@@ -31,15 +31,16 @@
   },
   "scripts": {
     "build": "tsdown src/module.ts --format esm,cjs --dts --unbundle",
-    "dev": "tsdown src/module.ts --format esm,cjs --dts --unbundle --watch"
+    "dev": "tsdown src/module.ts --format esm,cjs --dts --unbundle --watch",
+    "test": "echo '@verter/nuxt has pre-existing tsc errors in module.ts (Nuxt peer-dep type gaps) unrelated to audit-footprint; no-op per plan Commit 8 escape hatch'"
   },
   "dependencies": {
-    "@nuxt/kit": "^4.3.1",
+    "@nuxt/kit": "^4.4.6",
     "@verter/unplugin": "workspace:*"
   },
   "devDependencies": {
-    "tsdown": "^0.21.1",
-    "typescript": "^5.9.3"
+    "tsdown": "^0.22.0",
+    "typescript": "^6.0.3"
   },
   "peerDependencies": {
     "nuxt": "^3.0.0 || ^4.0.0"

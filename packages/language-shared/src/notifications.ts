@@ -45,6 +45,19 @@ export enum NotificationType {
   ViteConfigTrustRequired = "$/verter/viteConfigTrustRequired",
   TypeProviderStatus = "$/verter/typeProviderStatus",
   TypeProviderSyncComplete = "$/verter/typeProviderSyncComplete",
+  /**
+   * The LSP publishes the resolved per-workspace carrier-store directory it
+   * writes compiled `.vue`/`.svelte` carriers into. The extension forwards this
+   * dir to VS Code's OWN TypeScript server via `configurePlugin`, so a plain
+   * `.ts` opened in VS Code (served by VS Code's TS service, NOT the
+   * LSP-spawned tsserver) reads the same store and gets real types for imported
+   * carriers. The dir is authoritative — the LSP is the single source of the
+   * `<temp>/verter-carrier-store/<host-version>/<workspace-hash>/` path
+   * derivation (`blake3` over the canonicalized workspace root + the LSP package
+   * version), which the extension cannot reproduce without mirroring that exact
+   * recipe.
+   */
+  CarrierStoreReady = "$/verter/carrierStoreReady",
 }
 
 export type FileNotificationChange = "create" | "update" | "delete";
@@ -96,10 +109,19 @@ export type NotificationParams = {
     reason: string;
   };
   [NotificationType.TypeProviderStatus]: {
-    kind: "tsgo" | "tsserver" | "none";
+    kind: "tsgo" | "tsserver" | "editor-tsserver" | "none";
     reason?: string;
   };
   [NotificationType.TypeProviderSyncComplete]: {
     gen: number;
+  };
+  [NotificationType.CarrierStoreReady]: {
+    /**
+     * The absolute, forward-slash-normalized per-workspace carrier-store dir the
+     * LSP publishes carriers into (and the dir the `@verter/typescript-plugin`
+     * reads via `carrierStoreDir`). Identical to the dir the LSP delivers to its
+     * own spawned tsserver through `VERTER_CARRIER_STORE_DIR`.
+     */
+    carrierStoreDir: string;
   };
 };

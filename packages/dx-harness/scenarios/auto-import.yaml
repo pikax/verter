@@ -1,0 +1,35 @@
+# Auto-import completion: typing an un-imported composable must surface a
+# completion whose accept applies the import edit (the `acceptPath` capability).
+- id: auto-import-completion
+  fixture: auto-import
+  entryFile: App.vue
+  anchors: [imp.autoImportSite]
+  script:
+    - kind: insert
+      anchor: imp.autoImportSite
+      text: "const doubled = computed"
+      burst: true
+  probes:
+    - id: auto-import-computed
+      method: autoImport
+      anchor: imp.autoImportSite
+      mappingPolicy: strict
+      confidence: high
+      dimension: artifactParity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [acceptPath]
+  invariants:
+    - id: completion-offers-computed
+      anchor: imp.autoImportSite
+      method: autoImport
+      assertion: contains
+      value: computed
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    latency:
+      p95Ms: 400
+    flakeWindows: 2

@@ -75,7 +75,7 @@ jobs:
             echo "::error::cargo publish dry-run failed for verter_span"
             exit 1
           }
-          # Note: verter_core dry-run is skipped here because verter_span may not
+          # Note: verter_compiler dry-run is skipped here because verter_span may not
           # yet exist on crates.io. The publish-crates job handles sequencing.
           echo "All pre-publish checks passed"
 
@@ -143,6 +143,22 @@ jobs:
         with:
           name: native-${{ matrix.target }}
           path: packages/native/dist/*.node
+          if-no-files-found: error
+
+      # The NAPI-generated JS loader (`dist/index.js`) is what the
+      # committed root `index.js` wrapper requires at runtime; it owns
+      # platform detection + the optional-dependency fallback. It is
+      # identical across every target (same exported idents + package
+      # name), so upload it from ONE canonical native build. The
+      # publish-npm job drops it into the main package's `dist/` before
+      # packing — without any `.node`, which ships only in the
+      # per-platform optional-dependency packages.
+      - name: Upload generated napi loader
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v6
+        with:
+          name: native-loader
+          path: packages/native/dist/index.js
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -266,6 +282,83 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # Build verter-mcp-server (matrix — standalone MCP HTTP/stdio binary)
+  #
+  # `verter_mcp` ships independently of `verter_lsp`: the LSP binary no
+  # longer embeds the MCP server (Tier 3 §5.1 Step 3.1 retired the
+  # embedding point + Cargo dep). Consumers that previously routed MCP
+  # via `verter-lsp --mcp-port=...` spawn `verter-mcp-server` in its
+  # own OS process. This job mirrors `build-lsp`'s platform matrix so
+  # the standalone binary ships per-platform alongside the LSP.
+  # ---------------------------------------------------------------------------
+  build-mcp-server:
+    name: Build MCP Server (${{ matrix.target }})
+    needs: validate
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            asset-target: linux-x64
+            binary: verter-mcp-server
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: true
+            asset-target: linux-arm64
+            binary: verter-mcp-server
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            asset-target: darwin-x64
+            binary: verter-mcp-server
+          - target: aarch64-apple-darwin
+            os: macos-15
+            asset-target: darwin-arm64
+            binary: verter-mcp-server
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            asset-target: win32-x64
+            binary: verter-mcp-server.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mcp-server-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mcp-server-${{ matrix.target }}-
+      - name: Setup Zig
+        if: matrix.use-cross
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: Install cargo-zigbuild
+        if: matrix.use-cross
+        run: cargo install cargo-zigbuild --locked
+      - name: Build verter-mcp-server binary
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cargo zigbuild --release --package verter_mcp_server --target ${{ matrix.target }}
+          else
+            cargo build --release --package verter_mcp_server --target ${{ matrix.target }}
+          fi
+        shell: bash
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mcp-server-${{ matrix.asset-target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Build WASM
   # ---------------------------------------------------------------------------
   build-wasm:
@@ -286,8 +379,12 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-wasm-
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install wasm-bindgen CLI
+        run: |
+          if command -v wasm-bindgen >/dev/null && wasm-bindgen --version | grep -q '0.2.122'; then
+            exit 0
+          fi
+          cargo install wasm-bindgen-cli --version 0.2.122 --locked --force
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
@@ -315,7 +412,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: crates-io
-      url: https://crates.io/crates/verter_core
+      url: https://crates.io/crates/verter_compiler
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -337,16 +434,16 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-      - name: Publish verter_core
+      - name: Publish verter_compiler
         run: |
           LOCAL=$(grep -oP 'version = "\K[^"]+' Cargo.toml | head -1)
-          echo "Publishing verter_core $LOCAL..."
-          OUTPUT=$(cargo publish -p verter_core --allow-dirty 2>&1) && RC=0 || RC=$?
+          echo "Publishing verter_compiler $LOCAL..."
+          OUTPUT=$(cargo publish -p verter_compiler --allow-dirty 2>&1) && RC=0 || RC=$?
           echo "$OUTPUT"
           if [ $RC -eq 0 ]; then
-            echo "verter_core published successfully"
+            echo "verter_compiler published successfully"
           elif echo "$OUTPUT" | grep -q "already exists"; then
-            echo "verter_core $LOCAL already on crates.io, skipping"
+            echo "verter_compiler $LOCAL already on crates.io, skipping"
           else
             exit 1
           fi
@@ -362,7 +459,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: npm
-      url: https://www.npmjs.com/package/@verter/core
+      url: https://www.npmjs.com/package/@verter/native
     permissions:
       id-token: write
       contents: read
@@ -430,6 +527,31 @@ jobs:
       # Build TS packages
       - name: Build TS packages
         run: pnpm run build:ts
+
+      # Prepare the @verter/native MAIN package for publishing.
+      #
+      # The root `index.js` is a thin wrapper that `require('./dist/index.js')`
+      # — the NAPI-generated loader. That loader (built once on the canonical
+      # native runner) owns platform detection + the optional-dependency
+      # fallback, so the main package must ship `dist/index.js` (the loader)
+      # and `dist/*.d.ts` (the types) but NO `.node`. The real binaries went
+      # to `packages/native/npm/<triple>/` in the "Move native artifacts"
+      # step above; the main package's `dist/` deliberately stays binary-free.
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-loader
+          path: packages/native/dist
+      - name: Generate @verter/native dist types
+        run: pnpm --filter @verter/native run build:types
+      # Gate publish on the packaging guards ONLY (hermetic — they build
+      # their own fake install layouts / use `npm pack --dry-run`, so they
+      # do NOT require a built `.node` in the main package's binary-free
+      # `dist/`). The Rust-backed suite is covered by CI, not the publish
+      # gate.
+      - name: Guard @verter/native pack shape + loader fallback
+        run: >-
+          pnpm --filter @verter/native exec vitest run
+          loader-fallback.spec.ts pack-shape.spec.ts clean-dist.spec.ts
 
       # Publish all packages that need publishing
       - name: Publish packages
@@ -557,13 +679,12 @@ jobs:
 
       - name: Verify critical packages on registry
         run: |
-          LOCAL_VERSION=$(node -p "require('./packages/core/package.json').version")
+          LOCAL_VERSION=$(node -p "require('./package.json').version")
           echo "Verifying published packages (version: $LOCAL_VERSION)..."
           echo "Waiting 15s for registry propagation..."
           sleep 15
 
           CRITICAL_PACKAGES=(
-            "@verter/core"
             "@verter/native"
             "@verter/types"
             "@verter/unplugin"
@@ -719,7 +840,15 @@ jobs:
   # ---------------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs: [validate, build-native, build-wasm, publish-npm, publish-vscode]
+    needs:
+      [
+        validate,
+        build-native,
+        build-wasm,
+        build-mcp-server,
+        publish-npm,
+        publish-vscode,
+      ]
     runs-on: ubuntu-latest
     environment:
       name: github-releases
@@ -764,6 +893,34 @@ jobs:
           name: vsix
           path: /tmp/release-assets/vsix
 
+      # `verter-mcp-server` ships as a separate per-platform binary so
+      # downstream consumers (IDE integrations, container images,
+      # automation) can pick it up without pulling the LSP binary or
+      # vice versa. The decoupling is enforced at the source level by
+      # the `no_cross_product_binary_imports` architecture guard.
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: mcp-server-*
+          path: /tmp/release-assets/mcp-server
+
+      - name: Stage and rename verter-mcp-server binaries
+        run: |
+          mkdir -p /tmp/release-assets/staged
+          for dir in /tmp/release-assets/mcp-server/mcp-server-*; do
+            [ -d "$dir" ] || continue
+            target=$(basename "$dir" | sed 's/^mcp-server-//')
+            if [ "$target" = "win32-x64" ]; then
+              src="$dir/verter-mcp-server.exe"
+              dest="/tmp/release-assets/staged/verter-mcp-server-${target}.exe"
+            else
+              src="$dir/verter-mcp-server"
+              dest="/tmp/release-assets/staged/verter-mcp-server-${target}"
+            fi
+            cp "$src" "$dest"
+            chmod +x "$dest" 2>/dev/null || true
+          done
+          ls -la /tmp/release-assets/staged/
+
       - name: Create GitHub Release
         run: |
           TAG="${GITHUB_REF_NAME}"
@@ -774,9 +931,14 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          # Collect all .node, .wasm, .js, and .vsix files
+          # Collect all .node, .wasm, .js, .vsix files PLUS the
+          # platform-renamed verter-mcp-server binaries staged above.
           ASSETS=""
           for f in $(find /tmp/release-assets -name '*.node' -o -name '*.wasm' -o -name '*.js' -o -name '*.vsix' | head -50); do
+            ASSETS="$ASSETS $f"
+          done
+          for f in /tmp/release-assets/staged/verter-mcp-server-*; do
+            [ -f "$f" ] || continue
             ASSETS="$ASSETS $f"
           done
 

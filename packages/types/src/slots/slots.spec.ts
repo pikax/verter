@@ -404,4 +404,65 @@ describe("extractArgumentsFromRenderSlot", () => {
       result.state satisfies "pending";
     });
   });
+
+  // Test with OPTIONAL slot members. An optional slot member's type is
+  // `((...) => any) | undefined`; the extractor must unwrap the `| undefined`
+  // arm rather than resolving the props to `never` (the RouterView `default?`
+  // regression that broke v-slot destructuring for components with optional
+  // slots).
+  describe("with optional slots", () => {
+    interface VNode {
+      __vnode: true;
+    }
+
+    // Mirrors a component whose `$slots.default` is OPTIONAL, e.g. RouterView:
+    // { default?: (props: { Component: VNode; route: { route: 1 } }) => VNode[] }
+    type OptionalSlotComponent = {
+      $slots: {
+        default?: (props: { Component: VNode; route: { route: 1 } }) => VNode[];
+      };
+    };
+
+    it("extracts props from an optional slot (not never)", () => {
+      const component = {} as OptionalSlotComponent;
+      const result = extractArgumentsFromRenderSlot(component, "default");
+      type Result = typeof result;
+      type Expected = { Component: VNode; route: { route: 1 } };
+
+      assertType<Result>({} as Expected);
+      assertType<Expected>({} as Result);
+
+      // Negative: the optional arm must NOT collapse the props to `never`.
+      // `never` is assignable to everything, so a real `never` result would
+      // make this assignment succeed and turn the @ts-expect-error into an
+      // unused-suppression error — which is exactly the failure we want on the
+      // unfixed declaration.
+      // @ts-expect-error - Result is not never (must carry the slot props)
+      const _never: never = {} as Result;
+      void _never;
+
+      // @ts-expect-error - Result is not any/unknown
+      assertType<{ unrelated: true }>({} as Result);
+
+      // Verify member access survives the optional unwrap.
+      result.Component satisfies VNode;
+      result.route.route satisfies 1;
+    });
+
+    it("still extracts props from a required slot alongside optional ones", () => {
+      type MixedSlotComponent = {
+        $slots: {
+          required: (props: { id: number }) => VNode[];
+          optional?: (props: { label: string }) => VNode[];
+        };
+      };
+      const component = {} as MixedSlotComponent;
+
+      const required = extractArgumentsFromRenderSlot(component, "required");
+      required.id satisfies number;
+
+      const optional = extractArgumentsFromRenderSlot(component, "optional");
+      optional.label satisfies string;
+    });
+  });
 });

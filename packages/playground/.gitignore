@@ -57,6 +57,4 @@ node_modules/
 .dataconnect
 
 public/verter_wasm_bg.wasm
-public/tsgo.wasm
-public/wasm_exec.js
 verter_wasm_bg.wasm

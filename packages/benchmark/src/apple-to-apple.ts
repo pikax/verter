@@ -8,7 +8,8 @@
  *
  * Also runs a multi-threaded stress test (2000 files):
  *   - Vue: sequential (ST baseline)
- *   - Verter: compileBatch with Rayon (N threads = CPU count)
+ *   - Verter: host.compileMany (host-backed: scheduler + dispatch +
+ *     compile_cache + Rayon, N threads = CPU count, Interactive priority)
  *   - Vize: compileSfcBatch with Rayon (N threads = CPU count)
  *
  * Usage: node --import tsx src/apple-to-apple.ts
@@ -21,7 +22,7 @@ import { availableParallelism, tmpdir } from "os";
 import { createRequire } from "module";
 import { compileVue } from "./compilers/vue.js";
 import { createVerterHost, compileVerterHost } from "./compilers/verter.js";
-import { compileBatch as verterCompileBatch } from "@verter/native";
+import type { CompileBatchInput, CompileBatchEntry } from "@verter/native";
 import { formatDuration, formatBytes } from "./utils/stats.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -210,13 +211,36 @@ for (const f of allFiles) {
 const vueSTMs = performance.now() - vueSTStart;
 console.log(` done — ${formatDuration(vueSTMs)}`);
 
-// 2b. Verter MT via compileBatch (native Rayon parallelism)
-process.stdout.write(`  Running Verter MT (${CPU_COUNT} Rayon threads)...`);
+// 2b. Verter MT via host.compileMany (host-backed path: scheduler +
+//     dispatch + compile_cache + the host-owned CPU pool sized at host
+//     construction via HostConfig.hostCpuThreads). The benchmark passes
+//     priority="interactive" because there is no concurrent interactive
+//     work — measures the production path's full throughput.
+process.stdout.write(`  Running Verter MT (${CPU_COUNT} Rayon threads, Interactive priority)...`);
+const verterHostForBatch = createVerterHost("none", CPU_COUNT);
+const inputs: CompileBatchInput[] = allFiles.map((f) => ({
+  canonicalId: f.filename,
+  source: f.source,
+}));
 const verterMTStart = performance.now();
-const verterBatch = verterCompileBatch(allFiles, { threads: CPU_COUNT });
+const verterBatch: CompileBatchEntry[] = verterHostForBatch.compileMany(inputs, {
+  priority: "interactive",
+  // Explicit default cache mode — the fact-validated session cache (the
+  // host default). Reported alongside the throughput numbers below so a
+  // benchmark run records which cache mode it measured.
+  defaultMode: "session",
+});
 const verterMTMs = performance.now() - verterMTStart;
-const verterSucceeded = verterBatch.filter((r) => !r.error).length;
-console.log(` done — ${formatDuration(verterMTMs)} (${verterSucceeded} succeeded)`);
+const verterSucceeded = verterBatch.filter((r) => r.errors.length === 0).length;
+// Surface the actual cache mode + any downgrade reason the batch
+// observed (every entry shares the same default mode here; a downgrade
+// would only appear for an explicit per-input Content request).
+const verterActualModes = new Set(verterBatch.map((r) => r.actualMode));
+const verterDowngrades = verterBatch.filter((r) => r.downgradeReason !== undefined).length;
+console.log(
+  ` done — ${formatDuration(verterMTMs)} (${verterSucceeded} succeeded, ` +
+    `modes=${[...verterActualModes].join("/")}, downgrades=${verterDowngrades})`,
+);
 
 // 2c. Vize MT via compileSfcBatch (native Rayon parallelism)
 process.stdout.write(`  Running Vize MT (${CPU_COUNT} Rayon threads)...`);
@@ -263,7 +287,9 @@ if (vizeBuildType === "debug") {
     " ✅ Both Vize and Verter are using RELEASE builds (optimized). Results are accurate.",
   );
 }
-console.log(" Verter MT: compileBatch with Rayon (native parallelism, source in memory).");
+console.log(
+  ` Verter MT: host-backed (scheduler + compile_cache + dispatch, ${CPU_COUNT} Rayon threads, Interactive priority).`,
+);
 console.log(" Vize MT: compileSfcBatch with Rayon (native parallelism, reads from disk).");
 console.log("═".repeat(74));
 console.log();

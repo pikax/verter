@@ -37,6 +37,25 @@ describe("getDefaultImportMap", () => {
     const map = getDefaultImportMap();
     expect(map.scopes).toBeUndefined();
   });
+
+  it("pins every Svelte runtime entry used by emitted client and server modules", () => {
+    const map = getDefaultImportMap();
+    const base = "https://cdn.jsdelivr.net/npm/svelte@5.56.3";
+
+    expect(map.imports.svelte).toBe(`${base}/src/index-client.js`);
+    expect(map.imports["svelte/internal/client"]).toBe(`${base}/src/internal/client/index.js`);
+    expect(map.imports["svelte/internal/server"]).toBe(`${base}/src/internal/server/index.js`);
+    expect(map.imports["svelte/internal/disclose-version"]).toBe(
+      `${base}/src/internal/disclose-version.js`,
+    );
+    expect(map.imports["svelte/internal/flags/legacy"]).toBe(
+      `${base}/src/internal/flags/legacy.js`,
+    );
+    expect(map.imports["svelte/internal/flags/async"]).toBe(`${base}/src/internal/flags/async.js`);
+    expect(map.imports["svelte/internal/flags/tracing"]).toBe(
+      `${base}/src/internal/flags/tracing.js`,
+    );
+  });
 });
 
 describe("mergeImportMap", () => {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Store } from "../core/store";
 import ProjectManager from "./ProjectManager.vue";
+import LanguageSelect from "./LanguageSelect.vue";
 import VersionSelect from "./VersionSelect.vue";
 import VueVersionSelect from "./VueVersionSelect.vue";
 
@@ -25,6 +26,7 @@ function verterTimingTitle(): string {
       <span class="logo-text">Verter Playground</span>
     </div>
     <ProjectManager :store="store" />
+    <LanguageSelect :store="store" />
     <VersionSelect :store="store" />
     <VueVersionSelect :store="store" />
     <div class="actions">
@@ -60,37 +62,6 @@ function verterTimingTitle(): string {
       >
         Auto {{ store.autoSave ? "ON" : "OFF" }}
       </button>
-      <div
-        class="type-checker-toggle"
-        :title="`Type checker: ${store.typeChecker} (${store.typeCheckerStatus})`"
-      >
-        <button
-          class="tc-btn"
-          :class="{ active: store.typeChecker === 'tsc' }"
-          @click="store.setTypeChecker('tsc')"
-        >
-          tsc
-        </button>
-        <button
-          class="tc-btn"
-          :class="{ active: store.typeChecker === 'tsgo' }"
-          @click="store.setTypeChecker('tsgo')"
-        >
-          tsgo
-        </button>
-        <span
-          v-if="store.typeCheckerStatus !== 'active'"
-          class="tc-status"
-          :class="'tc-status-' + store.typeCheckerStatus"
-          :title="
-            store.typeCheckerStatus === 'unavailable'
-              ? 'Type checker unavailable (SharedArrayBuffer requires COOP/COEP headers)'
-              : 'Initializing...'
-          "
-        >
-          {{ store.typeCheckerStatus === "unavailable" ? "!" : "..." }}
-        </span>
-      </div>
       <div class="timing" v-if="store.compileTiming.verterNewJs !== null">
         <span class="timing-item" :title="verterTimingTitle()">
           V: {{ store.compileTiming.verterNewJs.toFixed(1) }}ms
@@ -243,57 +214,5 @@ function verterTimingTitle(): string {
 
 .theme-toggle:hover {
   background: var(--border-color);
-}
-
-.type-checker-toggle {
-  display: flex;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.tc-btn {
-  padding: 4px 10px;
-  font-size: 11px;
-  font-weight: 600;
-  font-family: monospace;
-  border: none;
-  cursor: pointer;
-  background: var(--bg-tertiary);
-  color: var(--text-secondary);
-  transition: all 0.15s ease;
-}
-
-.tc-btn:not(:last-child) {
-  border-right: 1px solid var(--border-color);
-}
-
-.tc-btn:hover {
-  color: var(--text-primary);
-}
-
-.tc-btn.active {
-  background: var(--accent-color);
-  color: white;
-}
-
-.tc-status {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 6px;
-  font-size: 10px;
-  font-weight: 700;
-  border-left: 1px solid var(--border-color);
-}
-
-.tc-status-unavailable {
-  color: #ef4444;
-  background: rgba(239, 68, 68, 0.1);
-}
-
-.tc-status-initializing {
-  color: #f59e0b;
-  background: rgba(245, 158, 11, 0.1);
 }
 </style>

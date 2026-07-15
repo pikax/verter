@@ -1,0 +1,30 @@
+# Churn: per-character edits on a realistic component, measuring the steady-state
+# host compile-counter delta once quiesced. An operational signal, so the dimension
+# is artifactParity and the probe carries no source-map mapping (mappingPolicy none).
+- id: churn-steady-state-drawer
+  fixture: drawer-realistic
+  entryFile: Drawer.vue
+  anchors: [drawer.editPoint]
+  script:
+    - kind: insert
+      anchor: drawer.editPoint
+      text: "const churnProbe = 1"
+      burst: true
+  probes:
+    - id: steady-state-compile-delta
+      method: churn
+      anchor: drawer.editPoint
+      mappingPolicy: none
+      confidence: high
+      dimension: artifactParity
+      requiresSourceMap: false
+      requiredDrivers: [rawLsp]
+      capabilityRequirements: [debugLogs]
+  invariants: []
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    steadyStateCompileDelta: 1
+    flakeWindows: 2

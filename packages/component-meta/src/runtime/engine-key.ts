@@ -7,7 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { dirname as nativeDirname, resolve as nativeResolve, win32 } from "node:path";
+import { dirname as nativeDirname, resolve as nativeResolve, posix, win32 } from "node:path";
 
 export interface EngineKeyInput {
   backend: "napi" | "wasm";
@@ -17,8 +17,8 @@ export interface EngineKeyInput {
   configHash: string;
   nativeFlags: {
     analysisLevel: string;
+    auditEnabled?: boolean;
   };
-  typeExpansionBackend?: string;
 }
 
 /**
@@ -42,14 +42,13 @@ function looksLikeWindowsPath(p: string): boolean {
 
 export function resolvePath(root: string, ...segments: string[]): string {
   const parts = [root, ...segments].filter((part) => part.length > 0);
-  const resolved = parts.some(looksLikeWindowsPath)
-    ? win32.resolve(...parts)
-    : nativeResolve(...parts);
+  const hasWindowsPath = parts.some(looksLikeWindowsPath);
+  const resolved = hasWindowsPath ? win32.resolve(...parts) : posix.resolve(...parts);
   return normalizePath(resolved);
 }
 
 export function dirnamePath(p: string): string {
-  const dir = looksLikeWindowsPath(p) ? win32.dirname(p) : nativeDirname(p);
+  const dir = looksLikeWindowsPath(p) ? win32.dirname(p) : posix.dirname(p);
   return normalizePath(dir);
 }
 
@@ -104,7 +103,7 @@ export function computeEngineKey(input: EngineKeyInput): string {
     input.tsconfigPath ? normalizePath(input.tsconfigPath) : "",
     input.configHash,
     input.nativeFlags.analysisLevel,
-    input.typeExpansionBackend ?? "verter",
+    input.nativeFlags.auditEnabled ? "audit=1" : "audit=0",
   ];
   return parts.join("|");
 }

@@ -24,6 +24,25 @@ export type TestTypeExpr =
   | {
       kind: "object";
       properties: Array<{ name: string; type: TestTypeExpr; optional?: boolean }>;
+    }
+  | {
+      kind: "recursiveRef";
+      name: string;
+      typeArguments: TestTypeExpr[];
+      conditionalContext: Array<{
+        branch: "true" | "false";
+        decided: boolean;
+        check: TestTypeExpr;
+        extends: TestTypeExpr;
+      }>;
+    }
+  | {
+      kind: "syntheticSlotBinding";
+      scopeCanonicalId: string;
+      surfaceKind: "slotBinding" | "binding";
+      slotName?: string;
+      bindingName: string;
+      valueNode: string;
     };
 
 export interface TestTypeRegistryEntry {
@@ -32,18 +51,46 @@ export interface TestTypeRegistryEntry {
   rawType?: string;
 }
 
+export interface TestExpansionDiagnostic {
+  reason:
+    | "budgetExceeded"
+    | "projectionWorkLimit"
+    | "connectedQueryDepthLimit"
+    | "mappedDepthExceeded"
+    | "unresolvedReference"
+    | "indeterminateConditional"
+    | "infiniteKeySpace"
+    | "unsupportedOperator"
+    | "conditionalContextTruncated"
+    | "idempotentArm"
+    | "cyclicReference"
+    | "cyclicInstantiation"
+    | "instantiationError"
+    | "emptyUnionArm";
+  context: string;
+  propertyName?: string;
+}
+
+export interface TestExpansionMeta {
+  exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+  executionStatus: "completed" | "cancelled" | "interrupted" | "hardStop";
+  diagnostics?: TestExpansionDiagnostic[];
+}
+
 export interface TestPropMeta {
   name: string;
   type: TestTypeExpr;
   rawType?: string;
   required?: boolean;
   hasDefault?: boolean;
+  typeExpansion?: TestExpansionMeta;
 }
 
 export interface TestSlotBindingMeta {
   name: string;
   type: TestTypeExpr;
   rawType?: string;
+  typeExpansion?: TestExpansionMeta;
 }
 
 export interface TestSlotMeta {
@@ -62,7 +109,7 @@ export interface TestComponentMetaPayload {
   typeRegistry?: TestTypeRegistryEntry[];
 }
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 3;
 
 const NODE_PRIMITIVE = 1;
 const NODE_UNION = 3;
@@ -74,6 +121,31 @@ const ACCEPTED_SURFACE_COMPLETENESS_EXACT = 1;
 const ROOT_REACHABILITY_NO_FALLTHROUGH = 1;
 const FALLTHROUGH_NONE = 1;
 const NO_FALLTHROUGH_REASON_NO_TEMPLATE = 5;
+const EXPANSION_EXACTNESS_EXACT_CONCRETE = 1;
+const EXPANSION_EXACTNESS_EXACT_SYMBOLIC = 2;
+const EXPANSION_EXACTNESS_INCOMPLETE = 3;
+const EXPANSION_EXECUTION_STATUS_COMPLETED = 1;
+const EXPANSION_EXECUTION_STATUS_CANCELLED = 2;
+const EXPANSION_EXECUTION_STATUS_INTERRUPTED = 3;
+const EXPANSION_EXECUTION_STATUS_HARD_STOP = 4;
+const EXPANSION_REASON_BUDGET_EXCEEDED = 1;
+const EXPANSION_REASON_MAPPED_DEPTH_EXCEEDED = 2;
+const EXPANSION_REASON_UNRESOLVED_REFERENCE = 3;
+const EXPANSION_REASON_INDETERMINATE_CONDITIONAL = 4;
+const EXPANSION_REASON_INFINITE_KEY_SPACE = 5;
+const EXPANSION_REASON_UNSUPPORTED_OPERATOR = 6;
+const EXPANSION_REASON_CONDITIONAL_CONTEXT_TRUNCATED = 7;
+const EXPANSION_REASON_IDEMPOTENT_ARM = 8;
+const EXPANSION_REASON_CYCLIC_REFERENCE = 9;
+const EXPANSION_REASON_CYCLIC_INSTANTIATION = 10;
+const EXPANSION_REASON_INSTANTIATION_ERROR = 11;
+const EXPANSION_REASON_EMPTY_UNION_ARM = 12;
+const EXPANSION_REASON_PROJECTION_WORK_LIMIT = 13;
+const EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT = 14;
+
+type TypeNodeInit = NonNullable<
+  NonNullable<ComponentMetaPayloadInit["typeGraph"]>["nodes"]
+>[number];
 
 const primitiveTags: Record<TestPrimitiveName, number> = {
   string: 1,
@@ -162,6 +234,32 @@ class TestGraphBuilder {
           })),
         });
         break;
+      case "recursiveRef":
+        proto = {
+          kind: {
+            case: "recursiveRef",
+            value: {
+              nameId: this.stringId(expr.name),
+              typeArgumentNodeIds: expr.typeArguments.map((a) => this.nodeId(a)),
+              conditionalContext: expr.conditionalContext.map((frame) => ({
+                branch: frame.branch === "true" ? 1 : 2,
+                decided: frame.decided,
+                checkNodeId: this.nodeId(frame.check),
+                extendsNodeId: this.nodeId(frame.extends),
+              })),
+            },
+          },
+        } as Record<string, unknown>;
+        break;
+      case "syntheticSlotBinding":
+        proto = typeNode("syntheticSlotBinding", {
+          valueNode: expr.valueNode,
+          scopeCanonicalId: this.stringId(expr.scopeCanonicalId),
+          surfaceKind: expr.surfaceKind === "binding" ? 1 : 0,
+          slotNameId: expr.slotName === undefined ? 0 : this.stringId(expr.slotName),
+          bindingNameId: this.stringId(expr.bindingName),
+        });
+        break;
     }
 
     const id = this.nodes.length + 1;
@@ -179,11 +277,22 @@ class TestGraphBuilder {
   }
 }
 
-function typeNode(caseName: string, value: Record<string, unknown>) {
+function typeNode(
+  caseName:
+    | "primitive"
+    | "literal"
+    | "ref"
+    | "union"
+    | "indexedAccess"
+    | "object"
+    | "recursiveRef"
+    | "syntheticSlotBinding",
+  value: Record<string, unknown>,
+): TypeNodeInit {
   return {
     kind: {
-      case: caseName,
-      value,
+      case: caseName as TypeNodeInit["kind"] extends { case: infer C } ? C : never,
+      value: value as never,
     },
   };
 }
@@ -211,6 +320,7 @@ export function buildTestComponentMetaProtoPayload(
       rawTypeId: builder.stringId(prop.rawType),
       required: Boolean(prop.required),
       hasDefault: Boolean(prop.hasDefault),
+      typeExpansion: expansionMeta(prop.typeExpansion, builder),
       tags: [],
     })),
     events: [],
@@ -221,6 +331,7 @@ export function buildTestComponentMetaProtoPayload(
         nameId: builder.stringId(binding.name),
         typeNodeId: builder.nodeId(binding.type),
         rawTypeId: builder.stringId(binding.rawType),
+        typeExpansion: expansionMeta(binding.typeExpansion, builder),
       })),
       isRequired: Boolean(slot.isRequired),
       returnTypeId: builder.stringId(slot.returnType),
@@ -274,4 +385,79 @@ export function buildTestComponentMetaProtoPayload(
 export function encodeTestComponentMetaPayload(input: TestComponentMetaPayload): Buffer {
   const payload = create(ComponentMetaPayloadSchema, buildTestComponentMetaProtoPayload(input));
   return Buffer.from(toBinary(ComponentMetaPayloadSchema, payload));
+}
+
+function expansionMeta(
+  metadata: TestExpansionMeta | undefined,
+  builder: TestGraphBuilder,
+): Record<string, unknown> | undefined {
+  if (!metadata) {
+    return undefined;
+  }
+  return {
+    exactness: encodeExpansionExactness(metadata.exactness),
+    executionStatus: encodeExpansionExecutionStatus(metadata.executionStatus),
+    diagnostics: (metadata.diagnostics ?? []).map((diagnostic) => ({
+      reason: encodeExpansionReason(diagnostic.reason),
+      contextId: builder.stringId(diagnostic.context),
+      propertyNameId: builder.stringId(diagnostic.propertyName),
+    })),
+  };
+}
+
+function encodeExpansionExactness(value: TestExpansionMeta["exactness"]): number {
+  switch (value) {
+    case "exactConcrete":
+      return EXPANSION_EXACTNESS_EXACT_CONCRETE;
+    case "exactSymbolic":
+      return EXPANSION_EXACTNESS_EXACT_SYMBOLIC;
+    case "incomplete":
+      return EXPANSION_EXACTNESS_INCOMPLETE;
+  }
+}
+
+function encodeExpansionExecutionStatus(value: TestExpansionMeta["executionStatus"]): number {
+  switch (value) {
+    case "completed":
+      return EXPANSION_EXECUTION_STATUS_COMPLETED;
+    case "cancelled":
+      return EXPANSION_EXECUTION_STATUS_CANCELLED;
+    case "interrupted":
+      return EXPANSION_EXECUTION_STATUS_INTERRUPTED;
+    case "hardStop":
+      return EXPANSION_EXECUTION_STATUS_HARD_STOP;
+  }
+}
+
+function encodeExpansionReason(value: TestExpansionDiagnostic["reason"]): number {
+  switch (value) {
+    case "budgetExceeded":
+      return EXPANSION_REASON_BUDGET_EXCEEDED;
+    case "mappedDepthExceeded":
+      return EXPANSION_REASON_MAPPED_DEPTH_EXCEEDED;
+    case "unresolvedReference":
+      return EXPANSION_REASON_UNRESOLVED_REFERENCE;
+    case "indeterminateConditional":
+      return EXPANSION_REASON_INDETERMINATE_CONDITIONAL;
+    case "infiniteKeySpace":
+      return EXPANSION_REASON_INFINITE_KEY_SPACE;
+    case "unsupportedOperator":
+      return EXPANSION_REASON_UNSUPPORTED_OPERATOR;
+    case "conditionalContextTruncated":
+      return EXPANSION_REASON_CONDITIONAL_CONTEXT_TRUNCATED;
+    case "idempotentArm":
+      return EXPANSION_REASON_IDEMPOTENT_ARM;
+    case "cyclicReference":
+      return EXPANSION_REASON_CYCLIC_REFERENCE;
+    case "cyclicInstantiation":
+      return EXPANSION_REASON_CYCLIC_INSTANTIATION;
+    case "instantiationError":
+      return EXPANSION_REASON_INSTANTIATION_ERROR;
+    case "emptyUnionArm":
+      return EXPANSION_REASON_EMPTY_UNION_ARM;
+    case "projectionWorkLimit":
+      return EXPANSION_REASON_PROJECTION_WORK_LIMIT;
+    case "connectedQueryDepthLimit":
+      return EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT;
+  }
 }

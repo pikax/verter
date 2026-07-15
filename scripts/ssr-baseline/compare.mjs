@@ -8,7 +8,7 @@
  *   node scripts/ssr-baseline/compare.mjs [options]
  *
  * Options:
- *   --root <path>       Root directory to scan (default: D:/dev/)
+ *   --root <path>       Root directory to scan (required)
  *   --focus <pattern>   Only process files matching pattern
  *   --limit <n>         Max files to process
  *   --json <path>       Write JSON report to file

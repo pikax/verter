@@ -18,9 +18,10 @@
   },
   "main": "index.js",
   "scripts": {
-    "test": "pnpm --filter @verter/types exec vitest --run",
+    "test": "pnpm -r --parallel run test",
     "test:e2e": "pnpm --filter verter-vscode test:e2e:matrix",
     "test:e2e:single": "pnpm --filter verter-vscode test:e2e",
+    "test:scripts": "vitest run scripts/sccache-env.test.mjs",
     "fmt": "oxfmt",
     "build": "pnpm run build:native && pnpm run build:lsp && pnpm run build:wasm && pnpm run build:ts && pnpm --filter @verter/component-meta build",
     "build:native": "pnpm --filter @verter/native build",
@@ -32,14 +33,21 @@
     "build:tsc:release": "cargo build -p verter_tsc --release",
     "build:mcp": "cargo build -p verter_mcp",
     "build:mcp:release": "cargo build -p verter_mcp --release",
+    "build:lapce": "rustup target add wasm32-wasip1 && cargo build --manifest-path extensions/lapce/Cargo.toml --target wasm32-wasip1 --release && npx shx mkdir -p extensions/lapce/bin && npx shx cp extensions/lapce/target/wasm32-wasip1/release/verter_lapce.wasm extensions/lapce/bin/verter-lapce.wasm",
+    "install:lapce-local": "node extensions/lapce/scripts/install-local.mjs",
+    "build:zed": "rustup target add wasm32-wasip2 && cargo build --manifest-path extensions/zed/Cargo.toml --target wasm32-wasip2 --release && npx shx mkdir -p extensions/zed/bin && npx shx cp extensions/zed/target/wasm32-wasip2/release/verter_zed.wasm extensions/zed/bin/verter-zed.wasm",
     "build:playground": "pnpm --filter @verter/playground build",
     "build:unplugin": "pnpm --filter @verter/unplugin build",
-    "watch": "pnpm --filter @verter/core --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
+    "watch": "pnpm --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
     "dev-extension": "pnpm run build:lsp && pnpm --filter @verter/language-shared --filter verter-vscode --filter @verter/typescript-plugin watch",
     "update-all": "pnpm up -r -i -L",
     "package": "cd extensions/vscode && npm install --omit=dev && npx shx mkdir -p node_modules/@verter && npx shx cp -r ../typescript-plugin node_modules/@verter/typescript-plugin && npx shx rm -r node_modules/@oxc-parser && npx vsce package",
     "copy-plugin": "npx shx mkdir -p extensions/vue-vscode/node_modules/@verter && npx shx cp -r extensions/typescript-plugin extensions/vue-vscode/node_modules/@verter/typescript-plugin",
     "clean": "pnpm -r exec npx shx rm -rf .turbo dist tsconfig.tsbuildinfo && npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
+    "gen:query-key-spec": "cargo run -p verter_session --bin gen-query-key-spec",
+    "gen:oracle-snapshots": "cargo run -p verter_session --features oracle-gen --bin oracle_gen",
+    "gen:typeinfo-manifest": "node scripts/gen-typeinfo-ignore-manifest.mjs",
+    "gen:typeinfo-manifest:check": "node scripts/gen-typeinfo-ignore-manifest.mjs --check",
     "integration-test": "node scripts/integration-test/run.mjs",
     "integration-test:discover": "node scripts/integration-test/run.mjs --discover-local --discover-only",
     "integration-test:local": "node scripts/integration-test/run.mjs --discover-local --local-only",
@@ -52,28 +60,33 @@
     "profile:hotpath:full": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath",
     "profile:hotpath:full:alloc": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc",
     "prepare": "husky",
+    "proto:gen": "buf generate && oxfmt packages/proto/src/gen",
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@vue/compiler-core": "^3.5.30",
-    "@vue/compiler-sfc": "^3.5.30",
-    "oxfmt": "^0.38.0"
+    "@vue/compiler-core": "^3.5.34",
+    "@vue/compiler-sfc": "^3.5.34",
+    "oxfmt": "^0.52.0"
   },
   "devDependencies": {
+    "@bufbuild/buf": "1.70.0",
+    "@bufbuild/protoc-gen-es": "2.12.0",
     "@hyrious/esbuild-plugin-commonjs": "^0.2.6",
-    "@typescript/native-preview": "latest",
-    "@vscode/vsce": "^3.7.1",
-    "esbuild": "^0.27.3",
+    "@vscode/vsce": "^3.9.1",
+    "esbuild": "^0.28.0",
     "esbuild-plugin-alias": "^0.2.1",
     "esbuild-plugin-alias-path": "^2.0.2",
     "glob": "^13.0.6",
     "husky": "^9.1.7",
     "json-diff": "^1.0.6",
-    "vitest": "^4.1.0"
+    "shx": "0.4.0",
+    "svelte": "5.56.3",
+    "typescript": "7.0.2",
+    "vitest": "^4.1.7"
   },
   "lint-staged": {
     "*.rs": "cargo fmt --check --",
-    "*.{ts,js,mjs,cjs}": "oxfmt --check"
+    "*.{ts,js,mjs,cjs}": "oxfmt --check --no-error-on-unmatched-pattern"
   },
   "packageManager": "pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c",
   "pnpm": {

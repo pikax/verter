@@ -22,7 +22,11 @@ jobs:
       wasm: ${{ steps.filter.outputs.wasm }}
       playground: ${{ steps.filter.outputs.playground }}
       vscode: ${{ steps.filter.outputs.vscode }}
-      native: ${{ steps.filter.outputs.native }}
+      dx: ${{ steps.filter.outputs.dx }}
+      svelte_oracle: ${{ steps.filter.outputs.svelte_oracle }}
+      svelte_conformance: ${{ steps.filter.outputs.svelte_conformance }}
+      svelte_client_smokes: ${{ steps.filter.outputs.svelte_client_smokes }}
+      svelte_perf: ${{ steps.filter.outputs.svelte_perf }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -34,23 +38,31 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
+              - '.config/nextest.toml'
               - 'rust-toolchain.toml'
-              - 'scripts/v5-process/**'
+              - 'scripts/check-integration-test-layout.mjs'
+              - 'scripts/integration-test-layout-allowlist.json'
               - '.github/workflows/ci.yml'
             js:
               - 'packages/**'
-              - '!packages/core/**'
               - '!packages/playground/**'
               - 'package.json'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - 'tsconfig*.json'
-              - 'scripts/v5-process/**'
+              - 'scripts/gen-svelte-goldens.mjs'
+              - 'scripts/sccache-env.mjs'
+              - 'scripts/sccache-env.test.mjs'
+              - 'scripts/svelte-golden-lib.mjs'
+              - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
               - '.github/workflows/ci.yml'
             wasm:
-              - 'crates/verter_core/**'
+              - 'crates/verter_compiler/**'
+              - 'crates/verter_parser/**'
               - 'crates/verter_analysis/**'
-              - 'crates/verter_host/**'
+              - 'crates/verter_session/**'
+              - 'crates/verter_workspace/**'
+              - 'crates/verter_semantic/**'
               - 'crates/verter_ffi/**'
               - 'crates/verter_wasm/**'
               - 'crates/verter_diagnostics/**'
@@ -60,9 +72,12 @@ jobs:
               - '.cargo/**'
               - '.github/workflows/ci.yml'
             playground:
-              - 'crates/verter_core/**'
+              - 'crates/verter_compiler/**'
+              - 'crates/verter_parser/**'
               - 'crates/verter_analysis/**'
-              - 'crates/verter_host/**'
+              - 'crates/verter_session/**'
+              - 'crates/verter_workspace/**'
+              - 'crates/verter_semantic/**'
               - 'crates/verter_ffi/**'
               - 'crates/verter_diagnostics/**'
               - 'crates/verter_actions/**'
@@ -73,33 +88,103 @@ jobs:
               - 'packages/playground/**'
               - '.github/workflows/ci.yml'
             vscode:
-              - 'crates/verter_core/**'
+              - 'crates/verter_compiler/**'
+              - 'crates/verter_parser/**'
               - 'crates/verter_analysis/**'
-              - 'crates/verter_host/**'
+              - 'crates/verter_session/**'
+              - 'crates/verter_workspace/**'
+              - 'crates/verter_semantic/**'
               - 'crates/verter_ffi/**'
               - 'crates/verter_diagnostics/**'
               - 'crates/verter_actions/**'
               - 'crates/verter_lsp/**'
+              - 'crates/verter_relay_shim/**'
               - 'crates/verter_span/**'
+              - 'crates/verter_tsgo_api/**'
+              - 'crates/verter_type_runtime/**'
               - 'packages/vue-vscode/**'
               - 'packages/language-shared/**'
               - 'packages/typescript-plugin/**'
               - '.github/workflows/ci.yml'
             native:
               - 'crates/verter_napi/**'
-              - 'crates/verter_core/**'
+              - 'crates/verter_compiler/**'
+              - 'crates/verter_parser/**'
               - 'crates/verter_analysis/**'
-              - 'crates/verter_host/**'
+              - 'crates/verter_session/**'
+              - 'crates/verter_workspace/**'
+              - 'crates/verter_semantic/**'
               - 'crates/verter_ffi/**'
               - 'crates/verter_diagnostics/**'
               - 'crates/verter_actions/**'
               - 'crates/verter_span/**'
+              - 'crates/verter_type_runtime/**'
               - 'packages/native/**'
               - 'packages/unplugin/**'
               - 'packages/typescript-plugin/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+            dx:
+              - 'crates/verter_dx_baseline/**'
+              - 'crates/verter_lsp/**'
+              # The crate that OWNS CompletionResolveData, is_actionable, tsserver
+              # completion parsing, offset stamping, and resolve routing — the
+              # exact logic the real-provider auto-import parity gate proves. A
+              # runtime-only resolve regression MUST trip this filter, or the
+              # parity gate would silently skip.
+              - 'crates/verter_type_runtime/**'
+              - 'packages/dx-harness/**'
+              - 'packages/lsp-test-client/**'
+              - 'scripts/dx/**'
+              - '.github/workflows/ci.yml'
+            svelte_oracle:
+              - 'scripts/gen-svelte-goldens.mjs'
+              - 'scripts/svelte-golden-lib.mjs'
+              - 'scripts/gen-svelte-name-parity-corpus.mjs'
+              - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
+              - 'crates/verter_compiler/tests/fixtures/svelte/name_parity_corpus.json'
+              - 'crates/verter_compiler/tests/fixtures/svelte/remove_typescript_nodes.5.56.3.js'
+              - 'crates/verter_compiler/tests/svelte_oracle_harness.rs'
+              - 'crates/verter_compiler/tests/svelte_goldens_in_sync.rs'
+              - 'crates/verter_compiler/src/svelte_oracle.rs'
+              - 'crates/verter_compiler/Cargo.toml'
+              - 'pnpm-lock.yaml'
+              - '.github/workflows/ci.yml'
+            svelte_conformance:
+              - 'crates/verter_svelte_conformance/**'
+              - 'scripts/gen-svelte-goldens.mjs'
+              - 'scripts/svelte-golden-lib.mjs'
+              - 'pnpm-lock.yaml'
+              - '.github/workflows/ci.yml'
+            svelte_client_smokes:
+              - 'crates/verter_compiler/src/svelte/**'
+              - 'packages/svelte-runtime-tests/**'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.github/workflows/ci.yml'
+            svelte_perf:
+              - 'crates/verter_compiler/**'
+              - 'crates/verter_parser/**'
+              - 'crates/verter_napi/**'
+              - 'packages/native/**'
+              - 'packages/benchmark/package.json'
+              - 'packages/benchmark/src/svelte-perf-*.ts'
+              - 'packages/benchmark/src/svelte-perf-manifest.json'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+
+  terminology-check:
+    name: Four-mode terminology check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash tools/check-four-mode-terminology.sh
 
   rust-fmt:
     name: Rust Format
@@ -154,8 +239,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: lts/*
-      - name: Validate v5/process parity manifest
-        run: node scripts/v5-process/validate_manifest.mjs
+      - name: Anti-binary-growth integration-test layout
+        run: node scripts/check-integration-test-layout.mjs
       - name: Prewarm tsgo cache
         run: npx -y @typescript/native-preview@latest --version
       - name: Install cargo-nextest
@@ -164,6 +249,24 @@ jobs:
         env:
           VERTER_REQUIRE_TSGO: "1"
         run: cargo nextest run --workspace --profile ci
+      - name: Verter session shared-process integration tests
+        env:
+          VERTER_REQUIRE_TSGO: "1"
+        run: cargo test -p verter_session --tests
+      # Independent FEATURE-OFF gate: the workspace runs above UNIFY cargo
+      # features — `verter_svelte_conformance` dev-deps `verter_compiler` with
+      # `features = ["conformance-trace"]`, so every workspace-built
+      # verter_compiler test target carries the trace side channel compiled
+      # in. This isolated `-p verter_compiler` invocation pulls no conformance
+      # crate, so it independently proves the DEFAULT trace-free compiler
+      # still compiles and its full lib suite (the Svelte behavioral tests
+      # included) passes feature-off. The isolation is kept honest by
+      # `svelte_conformance_trace_zero_cost_guard.rs` (no default features, no
+      # dev-dependency re-enable channel on verter_compiler's manifest).
+      - name: verter_compiler default feature-off build + lib tests (isolated)
+        run: |
+          cargo build -p verter_compiler
+          cargo test -p verter_compiler --lib
       - name: Test report
         if: always()
         uses: dorny/test-reporter@v1
@@ -222,13 +325,38 @@ jobs:
           node-version: lts/*
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Validate v5/process parity manifest
-        run: node scripts/v5-process/validate_manifest.mjs
+      - name: Svelte oracle goldens in sync with pinned compiler
+        run: node scripts/gen-svelte-goldens.mjs --check
       - name: Build TS packages
         run: pnpm run build:ts
       - name: Run tests
         run: |
           pnpm --filter @verter/types exec vitest --run --reporter=default --reporter=junit --outputFile=../../test-results/vitest-junit.xml
+      - name: Carrier-routing no-Vue-gate guards (ts-plugin + vue-vscode)
+        # Surgical, by-path run of the two TS carrier-routing static guards so a
+        # re-introduced Vue-only carrier gate is caught in main CI. Explicit file
+        # paths deliberately AVOID the vue-vscode package's pre-existing broken
+        # specs (packageManifest*/ssrReadiness) that block a blanket package run.
+        run: |
+          pnpm vitest run packages/typescript-plugin/src/carrier-routing-no-vue-gate.spec.ts packages/vue-vscode/src/carrier-routing-no-vue-gate.spec.ts
+      - name: Rust build-tooling helper self-tests (sccache-env)
+        # Explicit-path root vitest run: scripts/ is not a workspace package,
+        # so `pnpm -r run test` never reaches these specs — same convention as
+        # the carrier-routing guards step above.
+        run: pnpm run test:scripts
+      - name: Extension-provider headless guards (auto-import + diagnostics)
+        # Regression-guards the in-process EXTENSION type provider headlessly (no
+        # VS Code, no LSP) via `ExtensionTsService`:
+        #   - autoimport: surfaces an unimported export with a `source` resolve
+        #     key and resolves the import edit.
+        #   - diagnostics (GAP-2): unions the SEMANTIC + SYNTACTIC + SUGGESTION
+        #     passes, reaching parity with the native TS / TSGO pull model
+        #     (reverting the syntactic/suggestion handlers makes it throw).
+        # The shared Rust resolve path is covered by the tsserver parity gate;
+        # these prove the extension-specific TS-side shaping. Run by explicit path
+        # for the same reason as the carrier-routing guards above.
+        run: |
+          pnpm vitest run packages/vue-vscode/src/extensionTsService.autoimport.spec.ts packages/vue-vscode/src/extensionTsService.diagnostics.spec.ts
       - name: Test report
         if: always()
         uses: dorny/test-reporter@v1
@@ -239,6 +367,163 @@ jobs:
           fail-on-error: false
       - name: Verify package tarballs
         run: node scripts/verify-packages.mjs
+
+  svelte-oracle:
+    name: Svelte Oracle (live, feature-gated)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.svelte_oracle == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      # Installs the pinned `svelte` devDependency so the feature-gated harness
+      # can shell `node scripts/gen-svelte-goldens.mjs` over the live compiler.
+      - run: pnpm install --frozen-lockfile
+      # The oracle-derived component-name-parity corpus in sync with the pinned
+      # compiler (the name-parity analogue of the goldens `--check`; also run via the
+      # feature-gated Rust rail `pinned_compiler_still_yields_every_committed_name_parity_row`
+      # below, this explicit step gives a fast, direct signal on a corpus / generator /
+      # vendored-source edit).
+      - name: Svelte name-parity corpus in sync with pinned compiler
+        run: node scripts/gen-svelte-name-parity-corpus.mjs --check
+      # Compiles AND runs the `svelte-oracle` feature-gated harness — the live
+      # golden-vs-pinned-compiler drift gate, the topology_diff engine, and the
+      # NormalizedGolden schema housed in `verter_compiler::svelte_oracle`.
+      # `node` is present in this job, so the harness's live tests run (they
+      # HARD-FAIL on a missing toolchain rather than skipping). The default
+      # `cargo nextest run --workspace` run never opts into this feature, so it
+      # stays node-free + hermetic.
+      - name: Svelte oracle harness (live)
+        run: cargo test -p verter_compiler --features svelte-oracle
+
+  svelte-conformance:
+    name: Svelte CSS Conformance (manifest + goldens drift)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.svelte_conformance == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      # Installs the pinned `svelte` devDependency the conformance golden
+      # check compiles against.
+      - run: pnpm install --frozen-lockfile
+      # The committed fixture corpus + review artifacts against the typed
+      # Rust manifest (also builds the CLI the golden check spawns for its
+      # emit-plan).
+      - name: Conformance corpus matches the manifest
+        run: cargo run -p verter_svelte_conformance -- check
+      # The committed conformance goldens against the emit-plan + the pinned
+      # official compiler (the live-oracle drift gate for the CSS manifest).
+      - name: Conformance goldens in sync with pinned compiler
+        run: node scripts/gen-svelte-goldens.mjs --conformance --check
+
+  svelte-client-smokes:
+    name: Svelte Client Behavioral Smokes
+    needs: detect-changes
+    if: needs.detect-changes.outputs.svelte_client_smokes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Run Svelte client behavioral smokes
+        shell: bash
+        working-directory: packages/svelte-runtime-tests
+        run: |
+          shopt -s failglob
+          export LC_ALL=C
+          pnpm exec vitest run test/svelte-client*-smoke.spec.ts
+
+  svelte-compiler-benchmark:
+    name: Svelte Compiler Benchmark (Verter vs official)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.svelte_perf == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-svelte-compiler-benchmark-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-svelte-compiler-benchmark-
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify Svelte benchmark contract
+        run: pnpm --filter @verter/benchmark exec vitest run src/svelte-perf-contract.spec.ts
+      - name: Verify benchmark corpus against official Svelte goldens
+        run: |
+          node scripts/gen-svelte-goldens.mjs --check
+          cargo test -p verter_compiler --test svelte_client_emit_topology \
+            svelte_performance_manifest_is_oracle_proven_and_representative -- --exact
+      - name: Build release native compiler
+        run: pnpm run build:native
+      - name: Compare Verter and official Svelte compilers
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          pnpm --filter @verter/benchmark bench:svelte:compiler -- \
+            --json \
+            --require-immutable \
+            --out="$GITHUB_WORKSPACE/artifacts/svelte-compiler-benchmark.json"
+      - name: Ensure benchmark artifact exists
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          result="$GITHUB_WORKSPACE/artifacts/svelte-compiler-benchmark.json"
+          if [ ! -f "$result" ]; then
+            printf '{"schemaVersion":3,"generatedAt":"%s","pass":false,"error":"Svelte compiler benchmark did not run to completion"}\n' \
+              "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$result"
+          fi
+      - name: Upload Svelte compiler benchmark
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: svelte-compiler-benchmark
+          path: artifacts/svelte-compiler-benchmark.json
+          if-no-files-found: error
 
   playground-test:
     name: Playground Unit Tests
@@ -259,8 +544,12 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-wasm-
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install wasm-bindgen CLI
+        run: |
+          if command -v wasm-bindgen >/dev/null && wasm-bindgen --version | grep -q '0.2.122'; then
+            exit 0
+          fi
+          cargo install wasm-bindgen-cli --version 0.2.122 --locked --force
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
@@ -291,8 +580,12 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-wasm-
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install wasm-bindgen CLI
+        run: |
+          if command -v wasm-bindgen >/dev/null && wasm-bindgen --version | grep -q '0.2.122'; then
+            exit 0
+          fi
+          cargo install wasm-bindgen-cli --version 0.2.122 --locked --force
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
@@ -308,16 +601,10 @@ jobs:
       - name: Test @verter/wasm
         run: pnpm --filter @verter/wasm test
 
-  # TODO: Re-enable once E2E flakiness is resolved — tests pass locally but
-  # fail intermittently in CI due to timing/race conditions in the VS Code test host.
-  # build-vscode-e2e:
-  #   name: Build VS Code E2E
-  #   needs: detect-changes
-  #   if: needs.detect-changes.outputs.vscode == 'true'
   build-vscode-e2e:
-    name: Build VS Code E2E (DISABLED — flaky)
+    name: Build VS Code E2E
     needs: detect-changes
-    if: false # Disabled: E2E tests are too flaky in CI
+    if: needs.detect-changes.outputs.vscode == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -339,11 +626,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Prepare VS Code E2E artifacts
         run: pnpm --filter verter-vscode prepare:e2e
-      - name: Upload LSP binary
+      - name: Upload editor integration binaries
         uses: actions/upload-artifact@v6
         with:
-          name: lsp-binary-debug
-          path: target/debug/verter-lsp
+          name: vscode-e2e-native
+          path: |
+            target/debug/verter-lsp
+            target/debug/verter-relay-shim
           retention-days: 1
       - name: Upload built extension
         uses: actions/upload-artifact@v6
@@ -351,6 +640,7 @@ jobs:
           name: vscode-e2e-build
           path: |
             packages/language-shared/dist/
+            packages/typescript-plugin/dist/
             packages/vue-vscode/dist/
             packages/vue-vscode/out-test/
           retention-days: 1
@@ -358,7 +648,7 @@ jobs:
   vscode-e2e:
     name: VS Code E2E (${{ matrix.fixture }} / ${{ matrix.type_provider }})
     needs: [detect-changes, build-vscode-e2e]
-    if: false # Disabled: E2E tests are too flaky in CI
+    if: needs.detect-changes.outputs.vscode == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -376,6 +666,11 @@ jobs:
         type_provider:
           - tsserver
           - tsgo
+        include:
+          - fixture: editor-owned-project
+            type_provider: tsserver
+          - fixture: editor-owned-project
+            type_provider: shared-tsgo
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
@@ -384,13 +679,13 @@ jobs:
           node-version: lts/*
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Download LSP binary
+      - name: Download editor integration binaries
         uses: actions/download-artifact@v7
         with:
-          name: lsp-binary-debug
+          name: vscode-e2e-native
           path: target/debug
-      - name: Make LSP binary executable
-        run: chmod +x target/debug/verter-lsp
+      - name: Make editor integration binaries executable
+        run: chmod +x target/debug/verter-lsp target/debug/verter-relay-shim
       - name: Prewarm tsgo cache
         run: npx -y @typescript/native-preview@latest --version
       - name: Download built extension
@@ -403,6 +698,8 @@ jobs:
         env:
           E2E_FIXTURE: ${{ matrix.fixture }}
           E2E_TYPE_PROVIDER: ${{ matrix.type_provider }}
+          VERTER_REQUIRE_TSSERVER: "1"
+          VERTER_REQUIRE_TSGO: "1"
       - name: Upload timing report
         if: always()
         uses: actions/upload-artifact@v6
@@ -414,7 +711,14 @@ jobs:
   native-test:
     name: Native Package Tests
     needs: detect-changes
-    if: needs.detect-changes.outputs.native == 'true'
+    # Dependency-closure gate: this job builds the real native binding and
+    # drives the @verter/component-meta native-eval suite against it, whose
+    # dependency closure spans every workspace crate plus the JS workspace
+    # deps it imports (type-ir, proto, types, language-shared, root
+    # manifests/lockfile/tsconfig). A hand-written path subset silently
+    # skips the job for closure members it forgot, so the gate is the broad
+    # rust/js change outputs: ANY Rust or JS change runs native-eval.
+    if: needs.detect-changes.outputs.rust == 'true' || needs.detect-changes.outputs.js == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -444,3 +748,85 @@ jobs:
         run: pnpm --filter @verter/typescript-plugin test
       - name: Test @verter/unplugin
         run: pnpm --filter @verter/unplugin test
+      # MANDATORY native-eval gate: the @verter/component-meta suite that
+      # exercises the REAL native binding (excluded from the package's
+      # artifact-independent default `test` script, so this is its only
+      # enforcement point). Sequenced after `build:native` (the .node
+      # artifact) and `build:ts` (the workspace deps it imports); a
+      # native-eval regression fails this required job.
+      - name: Native-eval @verter/component-meta
+        run: pnpm --filter @verter/component-meta test:native
+
+  dx-harness-hermetic:
+    name: DX Harness (raw-LSP hermetic)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.dx == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The differential-baseline bridge. The strict gate drives this real binary
+      # over the vendored corpus; the workspace also builds it as a [[bin]] target.
+      - name: Build differential-baseline bridge
+        run: cargo build -p verter_dx_baseline
+      # The verter raw-LSP server itself — the binary the spine smoke drives over
+      # the vendored corpus. Without this the job named "raw-LSP" would never run
+      # the raw-LSP path.
+      - name: Build verter-lsp
+        run: cargo build -p verter_lsp
+      # Build the harness (and its workspace deps, including the lsp-test-client) so
+      # the gates can import the published dist and drive both real binaries.
+      - name: Build DX harness
+        run: pnpm --filter "@verter/dx-harness..." build
+      # Pure-hermetic unit suite (no real binary; the integration specs self-skip
+      # without their bin env gates).
+      - name: DX harness hermetic unit suite
+        run: pnpm --filter @verter/dx-harness test:unit
+      # The non-vacuous strict differential: spawns the real tsserver-backed baseline
+      # over the committed vendored corpus and FAILS unless the pinned tool root,
+      # vendored Vue version-sync, versioned artifact-sync refusal, and baseline-ran>0
+      # all hold.
+      - name: Strict differential baseline gate
+        env:
+          DX_REPO_ROOT: ${{ github.workspace }}
+          DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
+        run: node scripts/dx/dx-ci-gate.mjs
+      # Real-provider auto-import PARITY (Issue #1's headline guarantee): spawns the
+      # vendored tsgo AND the pinned tsserver through the baseline bridge, resolves
+      # an unimported-symbol completion through each, and asserts BOTH produce the
+      # SAME auto-import edit. `DX_REQUIRE_PROVIDERS=1` makes a provider that fails
+      # to spawn a HARD FAILURE so this proof can never vacuously skip on a runner
+      # where the assets are present.
+      - name: Real-provider auto-import parity gate
+        env:
+          DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
+          DX_REQUIRE_PROVIDERS: "1"
+        run: pnpm --filter @verter/dx-harness exec vitest --run test/providerResolveParity.integration.test.ts
+      # The verter raw-LSP spine: drives the REAL verter-lsp over the vendored
+      # hermetic corpus (pinned tsserver, no network) and FAILS unless verter-lsp
+      # starts, reaches readiness, RESPONDS to hover/definition/completion, and
+      # produces at least one contentful response. It records the differential but
+      # does NOT enforce verter-vs-tsgo parity — verter's known divergences must not
+      # turn the required gate red. The full record-and-diff corpus sweep is the
+      # scheduled dx-extended.yml job.
+      - name: Verter raw-LSP spine smoke
+        env:
+          DX_REPO_ROOT: ${{ github.workspace }}
+          DX_LSP_BIN: ${{ github.workspace }}/target/debug/verter-lsp
+          DX_BASELINE_BIN: ${{ github.workspace }}/target/debug/verter-dx-baseline
+        run: node scripts/dx/dx-lsp-smoke.mjs

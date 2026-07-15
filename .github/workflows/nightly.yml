@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # --- Rust + wasm-pack ---
+      # --- Rust + wasm-bindgen ---
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -32,8 +32,12 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-wasm-
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install wasm-bindgen CLI
+        run: |
+          if command -v wasm-bindgen >/dev/null && wasm-bindgen --version | grep -q '0.2.122'; then
+            exit 0
+          fi
+          cargo install wasm-bindgen-cli --version 0.2.122 --locked --force
 
       # --- Node + pnpm ---
       - uses: pnpm/action-setup@v4

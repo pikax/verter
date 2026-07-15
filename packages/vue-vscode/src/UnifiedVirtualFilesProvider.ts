@@ -14,6 +14,7 @@ import { debounce } from "lodash";
 import { LanguageClient } from "vscode-languageclient/node";
 import { RequestType, type PatchClient } from "@verter/language-shared";
 import { VirtualFileContentProvider } from "./VirtualFileManager";
+import { isFrameworkCarrierLanguageId } from "./frameworkWiring";
 
 export interface UnifiedVirtualFileItem {
   kind: string;
@@ -42,7 +43,7 @@ export class UnifiedVirtualFilesProvider
   ) {
     this.subscriptions.push(
       window.onDidChangeActiveTextEditor((editor) => {
-        if (editor?.document?.languageId === "vue") {
+        if (isFrameworkCarrierLanguageId(editor?.document?.languageId)) {
           this.refresh();
         }
       }),
@@ -51,7 +52,7 @@ export class UnifiedVirtualFilesProvider
     this.subscriptions.push(
       workspace.onDidChangeTextDocument(
         debounce((e) => {
-          if (e.document.languageId === "vue") {
+          if (isFrameworkCarrierLanguageId(e.document.languageId)) {
             this.refresh();
           }
         }, 500),
@@ -109,10 +110,9 @@ export class UnifiedVirtualFilesProvider
     if (element) return [];
 
     const editor = window.activeTextEditor;
-    const sourceUri =
-      editor?.document?.languageId === "vue"
-        ? editor.document.uri.toString()
-        : this.getLastVueUri();
+    const sourceUri = isFrameworkCarrierLanguageId(editor?.document?.languageId)
+      ? editor!.document.uri.toString()
+      : this.getLastVueUri();
 
     if (!sourceUri) return [];
 

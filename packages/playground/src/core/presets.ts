@@ -3,6 +3,10 @@ import type { SerializedState } from "./urlState";
 export interface Preset {
   name: string;
   description: string;
+  /** The framework adapter id this preset targets (descriptor-driven, e.g. "vue" / "svelte"). */
+  language: string;
+  /** The carrier (main) filename for this preset, e.g. "App.vue" / "App.svelte". */
+  mainFile: string;
   state: SerializedState;
 }
 
@@ -10,6 +14,8 @@ export const presets: Preset[] = [
   {
     name: "Counter",
     description: "Basic ref() + template binding",
+    language: "vue",
+    mainFile: "App.vue",
     state: {
       files: {
         "App.vue": `<script setup lang="ts">
@@ -47,11 +53,14 @@ button {
       activeFile: "App.vue",
       outputMode: "preview",
       compilerOptions: { isProduction: false, ssr: false },
+      language: "vue",
     },
   },
   {
     name: "TypeScript Props",
     description: "defineProps<T> + withDefaults across 2 files",
+    language: "vue",
+    mainFile: "App.vue",
     state: {
       files: {
         "App.vue": `<script setup lang="ts">
@@ -92,11 +101,14 @@ const props = withDefaults(defineProps<Props>(), {
       activeFile: "App.vue",
       outputMode: "preview",
       compilerOptions: { isProduction: false, ssr: false },
+      language: "vue",
     },
   },
   {
     name: "Composable",
     description: "Custom useMouse() composable + consuming component",
+    language: "vue",
+    mainFile: "App.vue",
     state: {
       files: {
         "App.vue": `<script setup lang="ts">
@@ -141,11 +153,14 @@ export function useMouse() {
       activeFile: "App.vue",
       outputMode: "preview",
       compilerOptions: { isProduction: false, ssr: false },
+      language: "vue",
     },
   },
   {
     name: "Multi-Component",
     description: "Parent + child with events and slots",
+    language: "vue",
+    mainFile: "App.vue",
     state: {
       files: {
         "App.vue": `<script setup lang="ts">
@@ -222,11 +237,14 @@ const emit = defineEmits<{
       activeFile: "App.vue",
       outputMode: "preview",
       compilerOptions: { isProduction: false, ssr: false },
+      language: "vue",
     },
   },
   {
     name: "CSS Modules",
     description: "<style module> with $style binding",
+    language: "vue",
+    mainFile: "App.vue",
     state: {
       files: {
         "App.vue": `<script setup lang="ts">
@@ -276,11 +294,14 @@ const active = ref(false)
       activeFile: "App.vue",
       outputMode: "preview",
       compilerOptions: { isProduction: false, ssr: false },
+      language: "vue",
     },
   },
   {
     name: "Slots & Emits",
     description: "defineSlots + defineEmits patterns",
+    language: "vue",
+    mainFile: "App.vue",
     state: {
       files: {
         "App.vue": `<script setup lang="ts">
@@ -354,6 +375,158 @@ li:hover { background: #f5f5f5; }
       activeFile: "App.vue",
       outputMode: "preview",
       compilerOptions: { isProduction: false, ssr: false },
+      language: "vue",
+    },
+  },
+
+  // ── Svelte (experimental) ──────────────────────────────────────────────
+  // Svelte presets default to a non-preview output mode: runtime preview is not
+  // yet supported for Svelte, so they showcase the compiled/analysis surfaces.
+  {
+    name: "Svelte Counter",
+    description: "$state rune + markup binding",
+    language: "svelte",
+    mainFile: "App.svelte",
+    state: {
+      files: {
+        "App.svelte": `<script lang="ts">
+  let count = $state(0)
+</script>
+
+<button onclick={() => count++}>
+  Clicked {count} {count === 1 ? 'time' : 'times'}
+</button>
+`,
+      },
+      activeFile: "App.svelte",
+      outputMode: "files",
+      compilerOptions: { isProduction: false, ssr: false },
+      language: "svelte",
+    },
+  },
+  {
+    name: "Svelte Runes",
+    description: "$state / $derived / $effect",
+    language: "svelte",
+    mainFile: "App.svelte",
+    state: {
+      files: {
+        "App.svelte": `<script lang="ts">
+  let count = $state(0)
+  let doubled = $derived(count * 2)
+
+  $effect(() => {
+    console.log('count is now', count)
+  })
+</script>
+
+<button onclick={() => count++}>increment</button>
+<p>{count} doubled is {doubled}</p>
+`,
+      },
+      activeFile: "App.svelte",
+      outputMode: "files",
+      compilerOptions: { isProduction: false, ssr: false },
+      language: "svelte",
+    },
+  },
+  {
+    name: "Svelte Props",
+    description: "$props() rune across 2 components",
+    language: "svelte",
+    mainFile: "App.svelte",
+    state: {
+      files: {
+        "App.svelte": `<script lang="ts">
+  import Greeting from './Greeting.svelte'
+</script>
+
+<Greeting name="Verter" count={42} />
+<Greeting name="World" />
+`,
+        "Greeting.svelte": `<script lang="ts">
+  interface Props {
+    name: string
+    count?: number
+  }
+
+  let { name, count = 0 }: Props = $props()
+</script>
+
+<h2>Hello, {name}!</h2>
+{#if count > 0}
+  <p>Count: {count}</p>
+{/if}
+`,
+      },
+      activeFile: "App.svelte",
+      outputMode: "files",
+      compilerOptions: { isProduction: false, ssr: false },
+      language: "svelte",
+    },
+  },
+  {
+    name: "Svelte Snippets",
+    description: "{#snippet} + {@render}",
+    language: "svelte",
+    mainFile: "App.svelte",
+    state: {
+      files: {
+        "App.svelte": `<script lang="ts">
+  let items = $state(['Svelte', 'Verter', 'TypeScript'])
+</script>
+
+{#snippet row(label: string, index: number)}
+  <li>#{index + 1}: {label}</li>
+{/snippet}
+
+<ul>
+  {#each items as item, i}
+    {@render row(item, i)}
+  {/each}
+</ul>
+`,
+      },
+      activeFile: "App.svelte",
+      outputMode: "files",
+      compilerOptions: { isProduction: false, ssr: false },
+      language: "svelte",
+    },
+  },
+  {
+    name: "Svelte Rune Module",
+    description: ".svelte.ts rune module + consuming component",
+    language: "svelte",
+    mainFile: "App.svelte",
+    state: {
+      files: {
+        "App.svelte": `<script lang="ts">
+  import { counter } from './counter.svelte'
+</script>
+
+<button onclick={() => counter.increment()}>
+  count is {counter.value}
+</button>
+`,
+        "counter.svelte.ts": `export function createCounter() {
+  let value = $state(0)
+  return {
+    get value() {
+      return value
+    },
+    increment() {
+      value += 1
+    },
+  }
+}
+
+export const counter = createCounter()
+`,
+      },
+      activeFile: "App.svelte",
+      outputMode: "files",
+      compilerOptions: { isProduction: false, ssr: false },
+      language: "svelte",
     },
   },
 ];

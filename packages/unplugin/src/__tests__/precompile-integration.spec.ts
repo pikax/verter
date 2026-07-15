@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { unpluginFactory } from "../index";
 import { resetHost } from "../core/compiler";
-import { scanVueFiles } from "../core/scanner";
+import { scanCarrierFiles } from "../core/scanner";
 
 const COREUI_ROOT = process.env.VERTER_TEST_REPOS
   ? `${process.env.VERTER_TEST_REPOS}/coreui-free-vue-admin-template`
@@ -24,10 +24,10 @@ describe.skipIf(!hasCoreui)("preCompile integration: coreui-free-vue-admin-templ
     resetHost();
   });
 
-  // @ai-generated - scanVueFiles finds all .vue files in a real project
-  it("scanVueFiles discovers .vue files in the coreui project", async () => {
+  // @ai-generated - the carrier scanner finds all .vue files in a real project
+  it("scanCarrierFiles discovers .vue files in the coreui project", async () => {
     const srcRoot = join(COREUI_ROOT, "src");
-    const files = await scanVueFiles(srcRoot, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(srcRoot, (f) => f.endsWith(".vue"));
 
     expect(files.size).toBeGreaterThan(5);
 
@@ -101,7 +101,7 @@ describe.skipIf(!hasCoreui)("preCompile integration: coreui-free-vue-admin-templ
     process.cwd = origCwd;
 
     const srcRoot = join(COREUI_ROOT, "src");
-    const files = await scanVueFiles(srcRoot, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(srcRoot, (f) => f.endsWith(".vue"));
 
     console.log(
       `[benchmark] preCompile coreui (${files.size} .vue files): ${elapsed.toFixed(1)}ms (${(elapsed / files.size).toFixed(2)}ms/file)`,

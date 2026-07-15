@@ -110,7 +110,9 @@ async function runDiagnostics(tsxCode: string) {
 
   try {
     const svc = await ensureTsService();
-    const diagnostics = await svc.syncTsxDirect(tsxCode);
+    // Standalone scratch check: raw TSX-space diagnostics BY DESIGN (this
+    // panel edits generated TSX directly — the only unmapped path).
+    const diagnostics = await svc.checkStandalone(tsxCode);
     applyMarkers(diagnostics);
   } catch {
     // Silently ignore worker errors

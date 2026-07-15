@@ -2,7 +2,8 @@
  * Component metadata types extracted from Vue SFCs.
  */
 
-import type { TypeDescriptor } from "./type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
+import type { NativeOriginGraph } from "./native-component-meta.js";
 
 /** Structured metadata extracted from a Vue Single File Component. */
 export interface ComponentMeta {
@@ -67,6 +68,11 @@ export interface ComponentMeta {
 
   /** Quick O(1) boolean checks for component characteristics. */
   flags: ComponentFlags;
+
+  // ── Origin graph ──────────────────────────────────────────────
+
+  /** Semantic derivation graph tracing how types were resolved. */
+  origin?: NativeOriginGraph;
 }
 
 /** A single JSDoc tag. */
@@ -77,22 +83,32 @@ export interface JsdocTag {
   text?: string;
 }
 
-/** Diagnostic explaining why a type expansion is partial. */
+/** Diagnostic from native type expansion — includes both reasons expansion
+ *  could not stay exact and general observability diagnostics. */
 export interface TypeExpansionDiagnostic {
   reason:
     | "budgetExceeded"
+    | "projectionWorkLimit"
+    | "connectedQueryDepthLimit"
     | "mappedDepthExceeded"
     | "unresolvedReference"
     | "indeterminateConditional"
     | "infiniteKeySpace"
-    | "unsupportedOperator";
+    | "unsupportedOperator"
+    | "conditionalContextTruncated"
+    | "idempotentArm"
+    | "cyclicReference"
+    | "cyclicInstantiation"
+    | "instantiationError"
+    | "emptyUnionArm";
   context: string;
   propertyName?: string;
 }
 
-/** Completeness and diagnostics from native type expansion. */
+/** Exactness, execution status, and diagnostics from native type expansion. */
 export interface TypeExpansionMeta {
-  completeness: "exact" | "partial";
+  exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+  executionStatus: "completed" | "cancelled" | "interrupted" | "hardStop";
   diagnostics: TypeExpansionDiagnostic[];
 }
 
@@ -102,7 +118,7 @@ export interface PropMeta {
   name: string;
   /** Parsed type descriptor. */
   type: TypeDescriptor;
-  /** Native expansion completeness for the prop type, when available. */
+  /** Native expansion exactness/status for the prop type, when available. */
   typeExpansion?: TypeExpansionMeta;
   /** Whether the prop is required (no default, no `?`). */
   required: boolean;
@@ -118,6 +134,19 @@ export interface PropMeta {
   tags?: JsdocTag[];
   /** Default value text (from `withDefaults` or Options API `default`). */
   default?: string;
+  /**
+   * Producer fact: did the SFC author write this prop name explicitly as a
+   * member of the `defineProps<T>()` type argument's own body (or its
+   * directly-referenced interface's own body)? Distinguishes author-declared
+   * names from names that arrived via heritage / utility-type expansion.
+   * Consumed by `@verter/component-meta/published-surface`'s `Refined`
+   * policy to preserve Vue intrinsics (`class`/`style`/etc.) and `on{Event}`
+   * shadow-emit props the author kept on purpose.
+   *
+   * Default `false` so older payloads without the field do NOT silently
+   * mark every prop as author-declared.
+   */
+  declaredInMacroTypeArg?: boolean;
 }
 
 /** Metadata for a single component event. */
@@ -126,7 +155,7 @@ export interface EventMeta {
   name: string;
   /** Payload type descriptor. */
   payload: TypeDescriptor;
-  /** Native expansion completeness for the payload type, when available. */
+  /** Native expansion exactness/status for the payload type, when available. */
   payloadExpansion?: TypeExpansionMeta;
   /** Whether the event has a runtime validator function. */
   hasValidator: boolean;
@@ -158,6 +187,13 @@ export interface SlotMeta {
   description?: string;
   /** JSDoc tags (e.g. `@deprecated`). */
   tags?: JsdocTag[];
+  /**
+   * Producer fact: does this slot come from the component's own AUTHORED
+   * slots surface (the resolved `defineSlots<T>()` macro surface or a
+   * template `<slot>` element)? Consumed by the compat slot blocklist —
+   * an author-declared slot is never blocked, whatever its name.
+   */
+  declaredInMacroTypeArg?: boolean;
 }
 
 /** A single binding exposed by a scoped slot. */
@@ -166,7 +202,7 @@ export interface SlotBinding {
   name: string;
   /** Type descriptor for the binding value. */
   type: TypeDescriptor;
-  /** Native expansion completeness for the binding type, when available. */
+  /** Native expansion exactness/status for the binding type, when available. */
   typeExpansion?: TypeExpansionMeta;
   /** The expression text (e.g. `"row"`, `"i"`) — may differ from `name`. */
   expression?: string;
@@ -188,10 +224,12 @@ export interface ExposedMeta {
   name: string;
   /** Type descriptor for the exposed value. */
   type: TypeDescriptor;
-  /** Native expansion completeness for the exposed type, when available. */
+  /** Native expansion exactness/status for the exposed type, when available. */
   typeExpansion?: TypeExpansionMeta;
   /** JSDoc description from the leading `/** ... *​/` comment. */
   description?: string;
+  /** JSDoc tags from the same leading block. */
+  tags?: JsdocTag[];
 }
 
 /** Host-derived public-instance surface. */
@@ -210,12 +248,14 @@ export interface PublicInstanceMemberMeta {
   kind: "prop" | "slotContainer" | "exposed";
   /** Type descriptor for the public value. */
   type: TypeDescriptor;
-  /** Native expansion completeness for the member type, when available. */
+  /** Native expansion exactness/status for the member type, when available. */
   typeExpansion?: TypeExpansionMeta;
   /** Original TS type annotation text when available. */
   rawType?: string;
   /** JSDoc description carried onto the public member, when available. */
   description?: string;
+  /** JSDoc tags carried onto the public member, when available. */
+  tags?: JsdocTag[];
 }
 
 /** Parsed SFC root block metadata. */
@@ -322,6 +362,34 @@ export interface ComponentVModelUsage {
   bindingName: string;
 }
 
+/** A two-way binding passed to a child component (the Svelte `bind:` family). */
+export interface ComponentBindingUsage {
+  /** The bound local member name (`value` in `bind:value`). */
+  name: string;
+  /** The `|modifier` list, in source order. */
+  modifiers: string[];
+}
+
+/**
+ * An event listened on a child component via the legacy Svelte `on:` directive.
+ *
+ * The props/events split is SYNTACTIC at the usage site: a plain `on*`
+ * attribute (`onclick`, but also `online`/`once`) is a PROP, never an event —
+ * in Svelte 5 a callback handler is a prop, and the CHILD component-meta (not a
+ * usage-site name guess) decides which passed props are callback events. Only
+ * the legacy `on:` directive is unambiguously an event here.
+ */
+export interface ComponentEventUsage {
+  /** The event name — the legacy directive local (`click` from `on:click`). */
+  name: string;
+  /** The handler expression text, when present. */
+  handlerExpression?: string;
+  /** Whether the handler is an inline function expression. */
+  isInline: boolean;
+  /** The `|modifier` list, in source order. */
+  modifiers: string[];
+}
+
 /** A child component used in the template. */
 export interface ComponentUsage {
   /** PascalCase component name. */
@@ -344,6 +412,10 @@ export interface ComponentUsage {
   vModels: string[];
   /** Structured v-model usage entries for call-site-aware consumers. */
   vModelEntries?: ComponentVModelUsage[];
+  /** Framework-neutral two-way bindings (the Svelte `bind:` family). Empty for Vue. */
+  bindings?: ComponentBindingUsage[];
+  /** Framework-neutral events (the legacy Svelte `on:` directive only — a plain `on*` attr is a prop). Empty for Vue. */
+  events?: ComponentEventUsage[];
 }
 
 /** A template ref usage (`ref="foo"` or `:ref="expr"`). */

@@ -11,7 +11,7 @@ export interface HostUpsertRequest {
   /** Full source text of the file. */
   source: string;
   /** File kind hint. Defaults to auto-detection based on extension. */
-  fileKind?: "vue" | "sfc" | "vue_sfc" | "non_sfc" | "text" | "file";
+  fileKind?: "vue" | "sfc" | "vue_sfc" | "svelte" | "non_sfc" | "text" | "file";
 }
 
 /** Internal checker adapter contract over native host/session backends. */

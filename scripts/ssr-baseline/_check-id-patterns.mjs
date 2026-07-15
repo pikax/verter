@@ -1,5 +1,11 @@
 import fs from "fs";
-const data = JSON.parse(fs.readFileSync("C:/temp/ssr-full-43.json", "utf-8"));
+// Pass the mismatches JSON as the first CLI arg (e.g. ssr-full-43.json).
+const __input = process.argv[2];
+if (!__input) {
+  console.error("usage: node _check-id-patterns.mjs <mismatches.json>");
+  process.exit(1);
+}
+const data = JSON.parse(fs.readFileSync(__input, "utf-8"));
 
 // Check what id: patterns exist in the NORMALIZED output
 const patterns = {};

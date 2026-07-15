@@ -54,7 +54,7 @@ startupSuite(`Startup Benchmark [${FIXTURE_NAME}]`, function () {
       timing.typeProviderStartedToReadyMs,
       "typeProviderStartedToReadyMs should be present",
     ).to.be.a("number");
-    expect(timing.providerKind, "provider kind should be detected").to.equal("tsserver");
+    expect(timing.providerKind, "provider kind should be detected").to.equal("editor-tsserver");
     expect(
       typedCompletion.firstTypedCompletionLabel,
       "startup benchmark should target the props.title member probe",
@@ -96,7 +96,7 @@ startupSuite(`Startup Benchmark [${FIXTURE_NAME}]`, function () {
     expect(report.startup.typeProviderStartedToReadyMs).to.equal(
       timing.typeProviderStartedToReadyMs,
     );
-    expect(report.startup.providerKind).to.equal("tsserver");
+    expect(report.startup.providerKind).to.equal("editor-tsserver");
     expect(report.startup.typeProvider).to.not.equal("verter-only");
   });
 });

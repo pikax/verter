@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "fixtures": [
+    {
+      "name": "basic_runes",
+      "slug": "runes/hello_input",
+      "coverage": ["runes", "binding", "event", "reactive-text"]
+    },
+    {
+      "name": "keyed_each",
+      "slug": "blocks/each_keyed_index",
+      "coverage": ["keyed-each", "reactive-index", "nested-dom"]
+    },
+    {
+      "name": "typescript_instance",
+      "slug": "matrix/typescript_script",
+      "coverage": ["typescript", "mixed-import", "typed-state", "typed-lvalue"]
+    },
+    {
+      "name": "typescript_module",
+      "slug": "matrix/typescript_module_items",
+      "coverage": ["module-script", "typescript", "import-attributes", "exports"]
+    },
+    {
+      "name": "scoped_css",
+      "slug": "css/scoped_styles",
+      "coverage": ["scoped-css", "class-directive", "nested-elements"]
+    },
+    {
+      "name": "component_snippet",
+      "slug": "components/component_snippet_children",
+      "coverage": ["component", "snippet", "named-slot", "default-slot"]
+    },
+    {
+      "name": "await_block",
+      "slug": "runtime/breadth_await",
+      "coverage": ["await", "then-scope", "async"]
+    },
+    {
+      "name": "legacy_store",
+      "slug": "stores/store_compound",
+      "coverage": ["legacy-store", "compound-write", "update", "multiple-handlers"]
+    },
+    {
+      "name": "special_window",
+      "slug": "special/svelte_window_binds",
+      "coverage": ["special-element", "window-bindings", "multiple-state"]
+    },
+    {
+      "name": "large_dashboard",
+      "slug": "performance/large_dashboard",
+      "coverage": ["large-component", "typescript", "scoped-css", "if", "binding", "repeated-dom"]
+    }
+  ]
+}

@@ -16,7 +16,6 @@
       ],
       "outFiles": [
         "${workspaceRoot}/packages/vue-vscode/dist/**/*.js",
-        "${workspaceRoot}/packages/core/dist/**/*.js",
         "${workspaceRoot}/packages/typescript-plugin/dist/**/*.js",
         "${workspaceRoot}/packages/language-shared/dist/**/*.js"
       ],
@@ -37,7 +36,6 @@
       ],
       "outFiles": [
         "${workspaceRoot}/packages/vue-vscode/dist/**/*.js",
-        "${workspaceRoot}/packages/core/dist/**/*.js",
         "${workspaceRoot}/packages/typescript-plugin/dist/**/*.js",
         "${workspaceRoot}/packages/language-shared/dist/**/*.js"
       ],
@@ -53,7 +51,6 @@
       ],
       "outFiles": [
         "${workspaceRoot}/packages/vue-vscode/dist/**/*.js",
-        "${workspaceRoot}/packages/core/dist/**/*.js",
         "${workspaceRoot}/packages/typescript-plugin/dist/**/*.js",
         "${workspaceRoot}/packages/language-shared/dist/**/*.js"
       ],
@@ -70,7 +67,6 @@
       ],
       "outFiles": [
         "${workspaceRoot}/packages/vue-vscode/dist/**/*.js",
-        "${workspaceRoot}/packages/core/dist/**/*.js",
         "${workspaceRoot}/packages/typescript-plugin/dist/**/*.js",
         "${workspaceRoot}/packages/language-shared/dist/**/*.js"
       ],

@@ -51,7 +51,6 @@ export type ExtractLoopsResult<T> =
  * // - value is the property value type
  * ```
  *
- * @see {@link file://packages/core/src/v5/process/script/plugins/component-type/component-type.ts} - Component type plugin that uses this helper
  */
 export declare function extractLoops<T extends Array<any>>(
   element: T,

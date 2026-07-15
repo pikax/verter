@@ -43,6 +43,11 @@ export interface TypeScriptServiceBridge {
     triggerSpan: { start: number; end: number } | null;
     locations: Array<{ start: number; end: number }>;
   }>;
+  /**
+   * Push ONE source's full compiled surfaces before LSP operations (the
+   * carrier-protocol bridge). Preferred over `ensureTsxCurrent` when present.
+   */
+  ensureSourceCurrent?: (file: import("../core/types").File) => Promise<void>;
   /** Ensure the worker has the latest TSX file and source map before LSP operations. */
   ensureTsxCurrent?: (
     vueFilename: string,
@@ -124,18 +129,23 @@ export function registerLspProviders(
 ): monaco.IDisposable[] {
   const disposables: monaco.IDisposable[] = [];
 
-  /** Ensure TSX compilation and worker sync are current before any LSP operation. */
+  /** Ensure compilation and worker sync are current before any LSP operation. */
   async function ensureTsxSynced() {
     const file = store.activeFile;
-    if (!tsBridge?.ensureTsxCurrent || !file) return;
+    if (!file || (!tsBridge?.ensureSourceCurrent && !tsBridge?.ensureTsxCurrent)) return;
     // Force recompile — handles the race where the user just typed but
     // Vue's async watcher hasn't triggered compileFile yet.
     // The WASM compile is synchronous (~2ms); the host skips if source unchanged.
     await store.recompile();
+    if (tsBridge.ensureSourceCurrent) {
+      // Carrier protocol: push the source's full compiled surfaces atomically.
+      await tsBridge.ensureSourceCurrent(file);
+      return;
+    }
     const tsxCode = file.compiled.types;
     if (!tsxCode) return;
     const sourceMap = file.compiled.typesSourceMap || null;
-    await tsBridge.ensureTsxCurrent(
+    await tsBridge.ensureTsxCurrent!(
       file.filename,
       tsxCode,
       file.code,

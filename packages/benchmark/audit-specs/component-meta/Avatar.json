@@ -1,0 +1,14 @@
+{
+  "component": "Avatar",
+  "totalDurationMsMax": 1500,
+  "maxCounts": {
+    "vfsReads": 200,
+    "instantiations": 500
+  },
+  "expectedResult": {
+    "minProps": 1
+  },
+  "rule5Compliance": {
+    "enabled": true
+  }
+}

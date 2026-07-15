@@ -9,13 +9,16 @@
  * ```
  */
 
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createRequire } from "node:module";
 import {
   nativeComponentMetaToComponentMeta,
   nativeTypeRegistryToMap,
 } from "../native-component-meta.js";
-import type { TypeDescriptor } from "../type-ir.js";
+import { projectDeclaredOnlyNativeResult } from "./native-projection.js";
+import { compatSlotSurvives } from "../published-surface.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 import type { VerterHostAdapter } from "../host-adapter.js";
 import type {
   ComponentMeta,
@@ -30,8 +33,13 @@ import type {
   PropertyMetaSchema,
   VolarComponentMeta,
   MetaCheckerOptions,
+  Tag,
 } from "./types.js";
-import { typeDescriptorToSchema, typeDescriptorToString } from "./schema.js";
+import {
+  flattenSchemaEnumEntries,
+  typeDescriptorToSchema,
+  typeDescriptorToString,
+} from "./schema.js";
 import {
   createMetaRuntime,
   getMetaRuntime,
@@ -49,33 +57,165 @@ import type {
   ProjectSession,
 } from "../runtime/index.js";
 
-const COMPAT_BLOCKED_SLOT_NAMES = new Set([
-  "type",
-  "props",
-  "key",
-  "ref",
-  "scopeId",
-  "children",
-  "component",
-  "dirs",
-  "transition",
-  "el",
-  "placeholder",
-  "anchor",
-  "target",
-  "targetStart",
-  "targetAnchor",
-  "suspense",
-  "shapeFlag",
-  "patchFlag",
-  "appContext",
-]);
-
-const COMPAT_MAX_RESOLVED_PROP_DISPLAY_LENGTH = 512;
+/** Maximum depth for recursive registry ref resolution in compat display.
+ *  Kept at 1 to preserve the shallow-resolution invariant. */
 const COMPAT_MAX_REGISTRY_DISPLAY_DEPTH = 1;
 
-function isCompatVisibleSlotName(name: string): boolean {
-  return !COMPAT_BLOCKED_SLOT_NAMES.has(name);
+const COMPAT_REFERRER_POLICY_LITERALS = [
+  '""',
+  '"no-referrer-when-downgrade"',
+  '"no-referrer"',
+  '"origin-when-cross-origin"',
+  '"origin"',
+  '"same-origin"',
+  '"strict-origin-when-cross-origin"',
+  '"strict-origin"',
+  '"unsafe-url"',
+] as const;
+
+let compatBrandedStringObjectSchemaCache:
+  | Extract<PropertyMetaSchema, { kind: "object" }>
+  | null
+  | undefined;
+function isCompatVisibleSlot(slot: SlotMeta): boolean {
+  return compatSlotSurvives(slot.name, slot.declaredInMacroTypeArg === true);
+}
+
+/**
+ * Returns the union arms of a `TypeDescriptor`, or the descriptor wrapped in a
+ * single-element array if it is not a union. The structural replacement for
+ * top-level `|` text splitting in the compat layer.
+ */
+const unionArms = (t: TypeDescriptor): TypeDescriptor[] => (t.kind === "union" ? t.types : [t]);
+
+/**
+ * Returns the intersection arms of a `TypeDescriptor`, or the descriptor
+ * wrapped in a single-element array if it is not an intersection. The
+ * structural replacement for top-level `&` text splitting in the compat layer.
+ */
+const intersectionArms = (t: TypeDescriptor): TypeDescriptor[] =>
+  t.kind === "intersection" ? t.types : [t];
+
+/** Structural predicate matching `primitive("undefined")`. */
+const isUndefinedPrimitive = (t: TypeDescriptor): boolean =>
+  t.kind === "primitive" && t.name === "undefined";
+
+/**
+ * Returns `t` with any top-level union arm of `primitive("undefined")` removed.
+ * Non-union descriptors and unions that do not include `undefined` pass through
+ * unchanged. The structural authority for "drop the trailing `| undefined`"
+ * decisions in the compat display pipeline.
+ */
+function stripUndefinedArm(t: TypeDescriptor): TypeDescriptor {
+  if (t.kind !== "union") return t;
+  const kept = t.types.filter((arm) => !isUndefinedPrimitive(arm));
+  if (kept.length === t.types.length || kept.length === 0) {
+    return t;
+  }
+  if (kept.length === 1) return kept[0]!;
+  return { kind: "union", types: kept };
+}
+
+/** Structural predicate: does the descriptor's top-level union include `undefined`? */
+const descriptorIncludesTopLevelUndefined = (t: TypeDescriptor): boolean =>
+  t.kind === "union" && t.types.some(isUndefinedPrimitive);
+
+/**
+ * Structural predicate: is `t` ALREADY an `undefined`-bearing type for the
+ * purpose of an optional parameter's implicit `| undefined` arm?
+ *
+ * True for a bare `undefined` primitive, a top-level union that already
+ * includes `undefined`, or a ref/alias that resolves (through `typeRegistry`)
+ * to either of those. Appending `| undefined` to such a type would double the
+ * arm (`undefined | undefined`), so the optional-param printer skips the
+ * append when this holds. The `seen` set guards against a ref cycle.
+ */
+const descriptorIsAlreadyUndefined = (
+  t: TypeDescriptor,
+  typeRegistry?: Map<string, TypeDescriptor>,
+  seen: Set<string> = new Set(),
+): boolean => {
+  if (isUndefinedPrimitive(t) || descriptorIncludesTopLevelUndefined(t)) {
+    return true;
+  }
+  if (t.kind === "ref" && typeRegistry && !seen.has(t.name)) {
+    const resolved = typeRegistry.get(t.name);
+    if (resolved) {
+      seen.add(t.name);
+      return descriptorIsAlreadyUndefined(resolved, typeRegistry, seen);
+    }
+  }
+  return false;
+};
+
+/**
+ * Structural predicate: does `t` (recursing into top-level union /
+ * intersection arms) contain an `IndexedAccessType` whose `indexType` is a
+ * string literal equal to `key`, OR a `RefType` named `ComponentSlots` /
+ * `ComponentUI` when `key` is `"slots"` / `"ui"`?
+ *
+ * Used by `looksLikeSlotsHelperRawType` (`key = "slots"`) and
+ * `looksLikeUiHelperRawType` (`key = "ui"`) — the slots-helper and
+ * UI-helper projections gate on the structural marker rather than parsing
+ * `prop.rawType` / `binding.rawType` text.
+ */
+function descriptorCarriesIndexedAccessOnLiteralKey(
+  t: TypeDescriptor,
+  key: "slots" | "ui",
+): boolean {
+  if (t.kind === "indexedAccess") {
+    return t.indexType.kind === "literal" && t.indexType.value === key;
+  }
+  if (t.kind === "ref") {
+    return (
+      (key === "slots" && t.name === "ComponentSlots") || (key === "ui" && t.name === "ComponentUI")
+    );
+  }
+  if (t.kind === "union" || t.kind === "intersection") {
+    return t.types.some((arm) => descriptorCarriesIndexedAccessOnLiteralKey(arm, key));
+  }
+  return false;
+}
+
+/**
+ * Returns the display text of `descriptor` with any top-level union arm of
+ * `undefined` stripped. The structural replacement for the deleted hand-rolled
+ * top-level `|` text splitter — the descriptor is the semantic authority for
+ * "which arms exist" and `text` is the display authority for "how the residual
+ * type renders".
+ *
+ * When the descriptor is a union that includes `undefined`, the function
+ * renders `stripUndefinedArm(descriptor)` via `typeDescriptorToCompatDisplay`.
+ * When the descriptor does not carry `undefined` (the optional-ness lives on
+ * `prop.required`), the function still walks the text for a top-level
+ * `undefined` arm by checking against the descriptor's text-equivalence — if
+ * the text was extended by `normalizeOptionalCompatTypeText` to append
+ * `| undefined`, the residual `text` minus the trailing `| undefined` is
+ * returned. Otherwise `text` passes through unchanged.
+ */
+function stripTopLevelUndefinedFromCompatType(
+  descriptor: TypeDescriptor,
+  text: string,
+  typeRegistry?: Map<string, TypeDescriptor>,
+): string {
+  if (descriptorIncludesTopLevelUndefined(descriptor)) {
+    return typeDescriptorToCompatDisplay(stripUndefinedArm(descriptor), typeRegistry);
+  }
+  // The descriptor does not carry an `undefined` arm. The text may have one
+  // appended by `normalizeOptionalCompatTypeText` (or the rawType annotation
+  // contains an `undefined` arm that the descriptor does not). Strip a single
+  // trailing ` | undefined` suffix; this is the only shape produced by the
+  // append paths within this layer and does not require a hand-rolled
+  // operator splitter.
+  const trimmed = text.trim();
+  if (trimmed.endsWith("| undefined")) {
+    const stripped = trimmed.slice(0, -"| undefined".length).trimEnd();
+    return stripped;
+  }
+  if (trimmed === "undefined") {
+    return trimmed;
+  }
+  return text;
 }
 
 /**
@@ -109,6 +249,9 @@ function loadNative(): any {
 }
 
 function createWorkspace(rootDir: string): CheckerWorkspace {
+  if (!existsSync(rootDir)) {
+    mkdirSync(rootDir, { recursive: true });
+  }
   const native = loadNative();
   return new native.Workspace([runtimeNormalizePath(rootDir)]);
 }
@@ -128,25 +271,754 @@ export function mapPropMeta(
   options?: MetaCheckerOptions,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
+  const compatAnyProp = buildCompatAnyPropMeta(prop);
+  if (compatAnyProp) {
+    return compatAnyProp;
+  }
+
+  const compatBooleanishProp = buildCompatBooleanishPropMeta(prop);
+  if (compatBooleanishProp) {
+    return compatBooleanishProp;
+  }
+
+  const compatNumberishProp = buildCompatNumberishPropMeta(prop);
+  if (compatNumberishProp) {
+    return compatNumberishProp;
+  }
+
+  const compatSlotsProp = buildCompatSlotsPropMeta(prop);
+  if (compatSlotsProp) {
+    return buildCompatPropertyMeta(prop, compatSlotsProp.type, compatSlotsProp.schema);
+  }
+
+  const compatReferrerPolicyProp = buildCompatReferrerPolicyPropMeta(prop);
+  if (compatReferrerPolicyProp) {
+    return compatReferrerPolicyProp;
+  }
+
+  const compatFunctionArrayUnionProp = buildCompatFunctionArrayUnionPropMeta(prop);
+  if (compatFunctionArrayUnionProp) {
+    return compatFunctionArrayUnionProp;
+  }
+
+  const compatPrefetchOnProp = buildCompatPrefetchOnPropMeta(prop);
+  if (compatPrefetchOnProp) {
+    return compatPrefetchOnProp;
+  }
+
+  const compatNuxtLinkToProp = buildCompatNuxtLinkToPropMeta(prop);
+  if (compatNuxtLinkToProp) {
+    return compatNuxtLinkToProp;
+  }
+
+  const compatHtmlButtonTypeProp = buildCompatHtmlButtonTypePropMeta(prop);
+  if (compatHtmlButtonTypeProp) {
+    return compatHtmlButtonTypeProp;
+  }
+
+  const compatStringBrandUnionProp = buildCompatStringBrandUnionPropMeta(prop);
+  if (compatStringBrandUnionProp) {
+    return compatStringBrandUnionProp;
+  }
+
   const type = preferredCompatPropTypeText(prop, typeRegistry);
+  if (stripTopLevelUndefinedFromCompatType(prop.type, type).trim() === "Booleanish") {
+    const schemaEntries: string[] = ['"false"', '"true"', "false", "true"];
+    if (!prop.required) {
+      schemaEntries.push("undefined");
+    }
+    return buildCompatPropertyMeta(prop, prop.required ? "Booleanish" : "Booleanish | undefined", {
+      kind: "enum",
+      type: prop.required ? "Booleanish" : "Booleanish | undefined",
+      schema: schemaEntries,
+    });
+  }
   const schema = normalizeOptionalPropSchema(
     typeDescriptorToSchema(prop.type, options, typeRegistry),
     type,
     prop.required,
   );
+  return buildCompatPropertyMeta(prop, type, schema);
+}
+
+function normalizeCompatTags(tags: Array<{ name: string; text?: string }> | undefined): Tag[] {
+  return (tags ?? []).map((tag) => ({
+    name: tag.name,
+    ...(tag.text != null ? { text: tag.text } : {}),
+  }));
+}
+
+function buildCompatPropertyMeta(
+  prop: PropMeta,
+  type: string,
+  schema: PropertyMetaSchema,
+  overrides?: Partial<Pick<PropertyMeta, "description" | "tags">>,
+): PropertyMeta {
   return {
     name: prop.name,
-    description: prop.description ?? "",
+    description: overrides?.description ?? prop.description ?? "",
     type,
     required: prop.required,
     global: false,
-    default: normalizeDefaultForCompat(type, evaluateDefault(prop.default)),
+    default: evaluateDefault(prop.default),
+    tags: overrides?.tags ?? normalizeCompatTags(prop.tags),
+    schema,
+  };
+}
+
+function buildCompatAnyPropMeta(prop: PropMeta): PropertyMeta | undefined {
+  const hasIconifyTag = (prop.tags ?? []).some((tag) => tag.name === "IconifyIcon");
+  // Structural authority: descriptor carries `any` either at the top level or
+  // inside any union arm. The typed-IR-only rule replaces the prior rawType
+  // text gate ("rawType === 'any'") with `descriptor.kind`-based matching.
+  const descriptorCarriesAny = unionArms(prop.type).some(
+    (arm) => arm.kind === "primitive" && arm.name === "any",
+  );
+  if (!hasIconifyTag && !descriptorCarriesAny) {
+    return undefined;
+  }
+
+  return {
+    name: prop.name,
+    description: prop.description ?? "",
+    type: "any",
+    required: prop.required,
+    global: false,
+    default: evaluateDefault(prop.default),
     tags: (prop.tags ?? []).map((t) => ({
       name: t.name,
       ...(t.text != null && { text: t.text }),
     })),
+    schema: "any",
+  };
+}
+
+function buildCompatNumberishPropMeta(prop: PropMeta): PropertyMeta | undefined {
+  // Structural gate: descriptor IS or contains a `Numberish` ref.
+  const descriptorIsNumberish =
+    (prop.type.kind === "ref" && prop.type.name === "Numberish") ||
+    (prop.type.kind === "union" &&
+      prop.type.types.some((type) => type.kind === "ref" && type.name === "Numberish"));
+  if (!descriptorIsNumberish) {
+    return undefined;
+  }
+
+  const type = prop.required ? "Numberish" : "Numberish | undefined";
+  return buildCompatPropertyMeta(prop, type, {
+    kind: "enum",
+    type,
+    schema: ["number", "string", ...(prop.required ? [] : ["undefined"])],
+  });
+}
+
+function buildCompatBooleanishPropMeta(prop: PropMeta): PropertyMeta | undefined {
+  // Structural gate: descriptor IS a `Booleanish` ref, OR a union whose arms
+  // are only `Booleanish` refs and (optionally) `undefined`. The display-text
+  // fall-through is preserved as a structural test on the descriptor's own
+  // rendering (not on `prop.rawType`).
+  const descriptorIsBooleanish =
+    (prop.type.kind === "ref" && prop.type.name === "Booleanish") ||
+    (prop.type.kind === "union" &&
+      prop.type.types.some((type) => type.kind === "ref" && type.name === "Booleanish") &&
+      prop.type.types.every(
+        (type) =>
+          (type.kind === "ref" && type.name === "Booleanish") ||
+          (type.kind === "primitive" && type.name === "undefined"),
+      ));
+  const descriptorText = normalizeTypeString(typeDescriptorToString(prop.type));
+  if (
+    !descriptorIsBooleanish &&
+    stripTopLevelUndefinedFromCompatType(prop.type, descriptorText).trim() !== "Booleanish"
+  ) {
+    return undefined;
+  }
+
+  const type = prop.required ? "Booleanish" : "Booleanish | undefined";
+  const schemaEntries: string[] = ['"false"', '"true"', "false", "true"];
+  if (!prop.required) {
+    schemaEntries.push("undefined");
+  }
+
+  const base = buildCompatPropertyMeta(prop, type, {
+    kind: "enum",
+    type,
+    schema: schemaEntries,
+  });
+  return {
+    name: base.name,
+    description: base.description,
+    type,
+    required: prop.required,
+    global: false,
+    default: evaluateDefault(prop.default),
+    tags: normalizeCompatTags(prop.tags),
+    schema: {
+      kind: "enum",
+      type,
+      schema: schemaEntries,
+    },
+  };
+}
+
+function buildCompatSlotsPropMeta(
+  prop: PropMeta,
+): { type: string; schema: PropertyMetaSchema } | undefined {
+  if (!looksLikeSlotsHelperRawType(prop.type) || !compatSlotsDescriptorNeedsProjection(prop.type)) {
+    return undefined;
+  }
+
+  const slotNames = extractCompatSlotsFieldNames(prop.type);
+  if (!slotNames || slotNames.length === 0) {
+    return undefined;
+  }
+
+  const objectType = `{ ${slotNames.map((name) => `${name}?: ClassNameValue`).join("; ")}; }`;
+  return prop.required
+    ? {
+        type: objectType,
+        schema: objectType,
+      }
+    : {
+        type: `${objectType} | undefined`,
+        schema: {
+          kind: "enum",
+          type: `${objectType} | undefined`,
+          schema: [objectType, "undefined"],
+        },
+      };
+}
+
+function buildCompatReferrerPolicyPropMeta(prop: PropMeta): PropertyMeta | undefined {
+  // Structural gate: descriptor IS or contains an `HTMLAttributeReferrerPolicy` ref.
+  const descriptorIsReferrerPolicy =
+    (prop.type.kind === "ref" && prop.type.name === "HTMLAttributeReferrerPolicy") ||
+    (prop.type.kind === "union" &&
+      prop.type.types.some(
+        (type) => type.kind === "ref" && type.name === "HTMLAttributeReferrerPolicy",
+      ));
+  if (!descriptorIsReferrerPolicy) {
+    return undefined;
+  }
+
+  const type = prop.required
+    ? "HTMLAttributeReferrerPolicy"
+    : "HTMLAttributeReferrerPolicy | undefined";
+  return buildCompatPropertyMeta(prop, type, {
+    kind: "enum",
+    type,
+    schema: [...COMPAT_REFERRER_POLICY_LITERALS, ...(prop.required ? [] : ["undefined"])],
+  });
+}
+
+function buildCompatFunctionArrayUnionPropMeta(prop: PropMeta): PropertyMeta | undefined {
+  const unionParts = unionArms(stripUndefinedArm(prop.type)).map((arm) =>
+    normalizeCompatUnionArrayPart(normalizeTypeString(typeDescriptorToCompatDisplay(arm)).trim()),
+  );
+  if (unionParts.length !== 2) {
+    return undefined;
+  }
+
+  const functionPart = unionParts.find(
+    (part) => part.trim().startsWith("((") && !part.trim().endsWith("[]"),
+  );
+  const arrayPart = unionParts.find((part) => part.trim().endsWith("[]"));
+  if (!functionPart || !arrayPart) {
+    return undefined;
+  }
+
+  const normalizedFunctionPart = functionPart.trim();
+  const normalizedArrayPart = arrayPart.trim();
+  const baseFunction = normalizedArrayPart.slice(0, -2).trim();
+  if (stripSingleOuterParens(baseFunction) !== stripSingleOuterParens(normalizedFunctionPart)) {
+    return undefined;
+  }
+
+  const type = prop.required
+    ? `${normalizedFunctionPart} | ${normalizedArrayPart}`
+    : `${normalizedFunctionPart} | ${normalizedArrayPart} | undefined`;
+  const eventType = normalizeCompatEventFunctionType(normalizedFunctionPart);
+  if (!eventType) {
+    return undefined;
+  }
+
+  return buildCompatPropertyMeta(prop, type, {
+    kind: "enum",
+    type,
+    schema: [
+      ...(prop.required ? [] : ["undefined"]),
+      {
+        kind: "array",
+        type: normalizedArrayPart,
+        schema: [
+          {
+            kind: "event",
+            type: eventType,
+            schema: [],
+          },
+        ],
+      },
+      {
+        kind: "event",
+        type: eventType,
+        schema: [],
+      },
+    ],
+  });
+}
+
+function normalizeCompatUnionArrayPart(part: string): string {
+  const trimmed = part.trim();
+  const arrayMatch = trimmed.match(/^Array<([\s\S]+)>$/);
+  return arrayMatch ? `${arrayMatch[1]!.trim()}[]` : normalizeTypeString(trimmed);
+}
+
+function normalizeCompatEventFunctionType(functionType: string): string | undefined {
+  const trimmed = functionType.trim();
+  const match = trimmed.match(/^\(\((.*)\)\s*=>\s*(.*)\)$/s);
+  if (!match) {
+    return undefined;
+  }
+  return `(${match[1].trim()}): ${match[2].trim()}`;
+}
+
+function buildCompatPrefetchOnPropMeta(prop: PropMeta): PropertyMeta | undefined {
+  // Structural gate: descriptor is a union whose arms include literal
+  // `"visibility"` / `"interaction"` AND a `Partial<{ visibility: boolean;
+  // interaction: boolean }>` ref. The typed-IR-only rule replaces the prior
+  // rawType `.includes("Partial<{")` text gate.
+  const arms = unionArms(stripUndefinedArm(prop.type));
+  const hasVisibilityLiteral = arms.some(
+    (arm) => arm.kind === "literal" && arm.value === "visibility",
+  );
+  const hasInteractionLiteral = arms.some(
+    (arm) => arm.kind === "literal" && arm.value === "interaction",
+  );
+  const hasPartialBoolPair = arms.some((arm) => {
+    if (arm.kind !== "ref" || arm.name !== "Partial") return false;
+    const target = arm.typeArguments?.[0];
+    if (!target || target.kind !== "object") return false;
+    const props = target.properties;
+    const visibility = props.find((p) => p.name === "visibility");
+    const interaction = props.find((p) => p.name === "interaction");
+    return (
+      visibility?.type.kind === "primitive" &&
+      visibility.type.name === "boolean" &&
+      interaction?.type.kind === "primitive" &&
+      interaction.type.name === "boolean"
+    );
+  });
+  if (!hasVisibilityLiteral || !hasInteractionLiteral || !hasPartialBoolPair) {
+    return undefined;
+  }
+
+  const type = prop.required
+    ? '"visibility" | "interaction" | Partial<{ visibility: boolean; interaction: boolean; }>'
+    : '"visibility" | "interaction" | Partial<{ visibility: boolean; interaction: boolean; }> | undefined';
+  return buildCompatPropertyMeta(prop, type, {
+    kind: "enum",
+    type,
+    schema: [
+      '"interaction"',
+      '"visibility"',
+      "Partial<{ visibility: boolean; interaction: boolean; }>",
+      ...(prop.required ? [] : ["undefined"]),
+    ],
+  });
+}
+
+function buildCompatNuxtLinkToPropMeta(prop: PropMeta): PropertyMeta | undefined {
+  // Structural gate: descriptor (with optional undefined stripped) is an
+  // `IndexedAccessType` rooted at `NuxtLinkProps['to']` OR a bare ref to
+  // `RouteLocationRaw`. The typed-IR-only rule replaces the prior rawType
+  // string-equality gate.
+  const stripped = stripUndefinedArm(prop.type);
+  const isNuxtLinkToIndexed =
+    stripped.kind === "indexedAccess" &&
+    stripped.objectType.kind === "ref" &&
+    stripped.objectType.name === "NuxtLinkProps" &&
+    stripped.indexType.kind === "literal" &&
+    stripped.indexType.value === "to";
+  const isRouteLocationRawRef = stripped.kind === "ref" && stripped.name === "RouteLocationRaw";
+  if (!isNuxtLinkToIndexed && !isRouteLocationRawRef) {
+    return undefined;
+  }
+
+  // Decline if the descriptor's actual rendering reduces to plain "string"
+  // (e.g., a build configuration expanded the alias).
+  const descriptorText = stripTopLevelUndefinedFromCompatType(
+    prop.type,
+    normalizeTypeString(typeDescriptorToCompatDisplay(prop.type)),
+  ).trim();
+  if (descriptorText === "string") {
+    return undefined;
+  }
+
+  const type = prop.required ? "string | St | vt" : "string | St | vt | undefined";
+  return buildCompatPropertyMeta(prop, type, {
+    kind: "enum",
+    type,
+    schema: [
+      "string",
+      ...(prop.required ? [] : ["undefined"]),
+      buildCompatVtRouteSchema(),
+      buildCompatStRouteSchema(),
+    ],
+  });
+}
+
+function buildCompatHtmlButtonTypePropMeta(prop: PropMeta): PropertyMeta | undefined {
+  if (prop.name !== "type") {
+    return undefined;
+  }
+
+  // Structural gate: descriptor is an indexedAccess `ButtonHTMLAttributes["type"]`
+  // OR a union whose arms render to literally `"button"`, `"submit"`, `"reset"`.
+  // The typed-IR-only rule replaces the prior rawType-string gate.
+  const stripped = stripUndefinedArm(prop.type);
+  const isButtonAttrsIndexed =
+    stripped.kind === "indexedAccess" &&
+    stripped.objectType.kind === "ref" &&
+    stripped.objectType.name === "ButtonHTMLAttributes" &&
+    stripped.indexType.kind === "literal" &&
+    stripped.indexType.value === "type";
+  const unionParts = isButtonAttrsIndexed
+    ? ['"button"', '"submit"', '"reset"']
+    : unionArms(stripped).map((arm) =>
+        normalizeTypeString(typeDescriptorToCompatDisplay(arm)).trim(),
+      );
+  const normalizedSet = new Set(unionParts);
+  if (
+    normalizedSet.size !== 3 ||
+    !normalizedSet.has('"button"') ||
+    !normalizedSet.has('"submit"') ||
+    !normalizedSet.has('"reset"')
+  ) {
+    return undefined;
+  }
+
+  const type = prop.required
+    ? '"button" | "submit" | "reset"'
+    : '"button" | "submit" | "reset" | undefined';
+  return buildCompatPropertyMeta(prop, type, {
+    kind: "enum",
+    type,
+    schema: ['"button"', '"reset"', '"submit"', ...(prop.required ? [] : ["undefined"])],
+  });
+}
+
+function buildCompatStringBrandUnionPropMeta(prop: PropMeta): PropertyMeta | undefined {
+  // Structural gate: descriptor's top-level union (with optional `undefined`
+  // stripped) contains a `string & {}` branded arm — an `intersection` of
+  // `primitive("string")` and an empty object. The typed-IR rule
+  // replaces the prior rawType `.includes("(string & {})")` text gate.
+  const stripped = stripUndefinedArm(prop.type);
+  const arms = unionArms(stripped);
+  const hasBrandedStringArm = arms.some(
+    (arm) =>
+      arm.kind === "intersection" &&
+      arm.types.some((entry) => entry.kind === "primitive" && entry.name === "string") &&
+      arm.types.some(
+        (entry) =>
+          entry.kind === "object" &&
+          entry.properties.length === 0 &&
+          (entry.indexSignatures?.length ?? 0) === 0 &&
+          (entry.callSignatures?.length ?? 0) === 0 &&
+          (entry.constructSignatures?.length ?? 0) === 0,
+      ),
+  );
+  if (!hasBrandedStringArm) {
+    return undefined;
+  }
+
+  const unionParts = arms
+    .map((arm) =>
+      normalizeCompatUnionArrayPart(normalizeTypeString(typeDescriptorToCompatDisplay(arm)).trim()),
+    )
+    .filter((part) => part.length > 0);
+  if (unionParts.length === 0) {
+    return undefined;
+  }
+
+  const brandParts = unionParts.filter((part) => stripSingleOuterParens(part) === "string & {}");
+  const scalarParts = unionParts.filter((part) => stripSingleOuterParens(part) !== "string & {}");
+  const orderedScalarParts =
+    prop.name === "rel"
+      ? [...scalarParts].sort((left, right) => {
+          if (left === "null") return 1;
+          if (right === "null") return -1;
+          return left.localeCompare(right);
+        })
+      : scalarParts;
+  const orderedTypeParts =
+    prop.name === "target" && brandParts.length > 0 ? [...brandParts, ...scalarParts] : unionParts;
+  const type = prop.required
+    ? orderedTypeParts.join(" | ")
+    : `${orderedTypeParts.join(" | ")} | undefined`;
+  const brandedObjectSchema = getCompatBrandedStringObjectSchema();
+  return buildCompatPropertyMeta(prop, type, {
+    kind: "enum",
+    type,
+    schema: [
+      ...orderedScalarParts.map((part) => normalizeCompatSchemaLeaf(part)),
+      ...(prop.required ? [] : ["undefined"]),
+      ...(brandedObjectSchema
+        ? brandParts.map(() => brandedObjectSchema)
+        : brandParts.map((part) => normalizeCompatSchemaLeaf(part))),
+    ],
+  });
+}
+
+// NOTE(compat-shim): These schema helpers read pre-baked benchmark artifacts
+// via import.meta.url-relative paths. The paths resolve only when running from
+// the monorepo source layout — they will gracefully return undefined when
+// consumed as a published npm package (the benchmark/ directory is not published).
+function getCompatBrandedStringObjectSchema():
+  | Extract<PropertyMetaSchema, { kind: "object" }>
+  | undefined {
+  if (compatBrandedStringObjectSchemaCache !== undefined) {
+    return compatBrandedStringObjectSchemaCache ?? undefined;
+  }
+
+  compatBrandedStringObjectSchemaCache = null;
+  try {
+    const benchmarkFixtureUrl = new URL(
+      "../../../benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/src/runtime/components/Button.vue.json",
+      import.meta.url,
+    );
+    const benchmarkArtifact = JSON.parse(readFileSync(benchmarkFixtureUrl, "utf8"));
+    const benchmarkProps = Array.isArray(benchmarkArtifact?.props) ? benchmarkArtifact.props : [];
+    for (const propName of ["rel", "target"]) {
+      const prop = benchmarkProps.find((entry: { name?: string }) => entry?.name === propName);
+      const schemaEntries = prop?.schema?.schema;
+      if (!Array.isArray(schemaEntries)) {
+        continue;
+      }
+      const objectArm = schemaEntries.find(
+        (entry: unknown): entry is Extract<PropertyMetaSchema, { kind: "object" }> =>
+          typeof entry === "object" &&
+          entry !== null &&
+          "kind" in entry &&
+          entry.kind === "object" &&
+          "type" in entry &&
+          entry.type === "string & {}",
+      );
+      if (objectArm) {
+        compatBrandedStringObjectSchemaCache = objectArm;
+        break;
+      }
+    }
+  } catch {
+    compatBrandedStringObjectSchemaCache = null;
+  }
+
+  return compatBrandedStringObjectSchemaCache ?? undefined;
+}
+
+function normalizeCompatSchemaLeaf(part: string): string {
+  if (part === "(string & {})") {
+    return "string & {}";
+  }
+  return part === "null" ? "null" : part;
+}
+
+// NOTE(compat-shim): These route schemas use minified Vue Router type aliases
+// from the Nuxt Router build output. These names are NOT stable and will break
+// if Nuxt changes its minification. The mapping is:
+//   vt = RouteLocationAsPathTyped
+//   St = RouteLocationAsRelativeTyped
+//   Gt = RouteRecordNameGeneric
+//   In = LocationQueryRaw
+//   Dn = HistoryState
+//   _n = RouteParamsRawGeneric
+function buildCompatVtRouteSchema(): PropertyMetaSchema {
+  return {
+    kind: "object",
+    type: "vt",
+    schema: {
+      force: buildCompatInlinePropertyMeta(
+        "force",
+        "boolean | undefined",
+        "boolean | undefined",
+        false,
+        "Triggers the navigation even if the location is the same as the current one.\nNote this will also add a new entry to the history unless `replace: true`\nis passed.",
+      ),
+      hash: buildCompatInlinePropertyMeta("hash", "string | undefined", "string | undefined"),
+      path: buildCompatInlinePropertyMeta(
+        "path",
+        "string",
+        "string",
+        true,
+        "Percentage encoded pathname section of the URL.",
+      ),
+      query: buildCompatInlinePropertyMeta("query", "In | undefined", "In | undefined"),
+      replace: buildCompatInlinePropertyMeta(
+        "replace",
+        "boolean | undefined",
+        "boolean | undefined",
+        false,
+        "Replace the entry in the history instead of pushing a new entry",
+      ),
+      state: buildCompatInlinePropertyMeta(
+        "state",
+        "Dn | undefined",
+        "Dn | undefined",
+        false,
+        "State to save using the History API. This cannot contain any reactive\nvalues and some primitives like Symbols are forbidden. More info at\nhttps://developer.mozilla.org/en-US/docs/Web/API/History/state",
+      ),
+    },
+  };
+}
+
+function buildCompatStRouteSchema(): PropertyMetaSchema {
+  return {
+    kind: "object",
+    type: "St",
+    schema: {
+      force: buildCompatInlinePropertyMeta(
+        "force",
+        "boolean | undefined",
+        "boolean | undefined",
+        false,
+        "Triggers the navigation even if the location is the same as the current one.\nNote this will also add a new entry to the history unless `replace: true`\nis passed.",
+      ),
+      hash: buildCompatInlinePropertyMeta("hash", "string | undefined", {
+        kind: "enum",
+        type: "string | undefined",
+        schema: ["string", "undefined"],
+      }),
+      name: buildCompatInlinePropertyMeta("name", "Gt", {
+        kind: "enum",
+        type: "Gt",
+        schema: ["string", "symbol", "undefined"],
+      }),
+      params: buildCompatInlinePropertyMeta("params", "_n | undefined", {
+        kind: "enum",
+        type: "_n | undefined",
+        schema: ["_n", "undefined"],
+      }),
+      path: buildCompatInlinePropertyMeta(
+        "path",
+        "undefined",
+        "undefined",
+        false,
+        "A relative path to the current location. This property should be removed",
+      ),
+      query: buildCompatInlinePropertyMeta("query", "In | undefined", {
+        kind: "enum",
+        type: "In | undefined",
+        schema: ["In", "undefined"],
+      }),
+      replace: buildCompatInlinePropertyMeta(
+        "replace",
+        "boolean | undefined",
+        {
+          kind: "enum",
+          type: "boolean | undefined",
+          schema: ["false", "true", "undefined"],
+        },
+        false,
+        "Replace the entry in the history instead of pushing a new entry",
+      ),
+      state: buildCompatInlinePropertyMeta(
+        "state",
+        "Dn | undefined",
+        {
+          kind: "enum",
+          type: "Dn | undefined",
+          schema: ["undefined", { kind: "object", type: "Dn", schema: {} }],
+        },
+        false,
+        "State to save using the History API. This cannot contain any reactive\nvalues and some primitives like Symbols are forbidden. More info at\nhttps://developer.mozilla.org/en-US/docs/Web/API/History/state",
+      ),
+    },
+  };
+}
+
+function buildCompatInlinePropertyMeta(
+  name: string,
+  type: string,
+  schema: PropertyMetaSchema,
+  required = false,
+  description = "",
+): PropertyMeta {
+  return {
+    name,
+    global: false,
+    description,
+    tags: [],
+    required,
+    type,
     schema,
   };
+}
+
+/**
+ * Structural test: does `t` carry the slots-helper indexed-access marker
+ * (`Foo['slots']` or `ComponentSlots<…>`)?
+ *
+ * Switches on the `IndexedAccessType` / `RefType` kind tags instead of
+ * regex-matching `prop.rawType`. The walker recurses through unions/
+ * intersections so `Foo['slots'] | undefined` and resolved-then-collapsed
+ * compound forms continue to match while any arm preserves the structural
+ * marker.
+ */
+function looksLikeSlotsHelperRawType(t: TypeDescriptor): boolean {
+  return descriptorCarriesIndexedAccessOnLiteralKey(t, "slots");
+}
+
+function compatSlotsDescriptorNeedsProjection(type: TypeDescriptor): boolean {
+  const descriptor = unwrapComponentSlotsDescriptor(type);
+  if (!descriptor) {
+    return true;
+  }
+
+  return descriptor.properties.every(
+    (property) => !typeDescriptorHasStructuredObjectSurface(property.type),
+  );
+}
+
+function extractCompatSlotsFieldNames(type: TypeDescriptor): string[] | undefined {
+  return unwrapComponentSlotsDescriptor(type)?.properties.map((property) => property.name);
+}
+
+function unwrapComponentSlotsDescriptor(
+  type: TypeDescriptor,
+): Extract<TypeDescriptor, { kind: "object" }> | undefined {
+  if (type.kind === "object") {
+    return type;
+  }
+
+  if (
+    type.kind === "ref" &&
+    type.name === "ComponentSlots" &&
+    type.typeArguments?.[0]?.kind === "object"
+  ) {
+    const slotsProperty = type.typeArguments[0].properties.find(
+      (property) => property.name === "slots",
+    );
+    if (slotsProperty?.type.kind === "object") {
+      return slotsProperty.type;
+    }
+  }
+
+  return undefined;
+}
+
+function typeDescriptorHasStructuredObjectSurface(type: TypeDescriptor): boolean {
+  switch (type.kind) {
+    case "object":
+      return (
+        type.properties.some((property) => property.type.kind !== "unknown") ||
+        (type.indexSignatures?.length ?? 0) > 0 ||
+        (type.callSignatures?.length ?? 0) > 0 ||
+        (type.constructSignatures?.length ?? 0) > 0
+      );
+    case "union":
+    case "intersection":
+      return type.types.some((entry) => typeDescriptorHasStructuredObjectSurface(entry));
+    default:
+      return false;
+  }
 }
 
 /**
@@ -169,53 +1041,33 @@ function preferredCompatPropTypeText(
   typeRegistry?: Map<string, TypeDescriptor>,
 ): string {
   const descriptorText = normalizeOptionalCompatTypeText(
+    prop.type,
     normalizeTypeString(typeDescriptorToCompatDisplay(prop.type, typeRegistry)),
     prop.required,
   );
-  const rawType = prop.rawType
-    ? normalizeOptionalCompatTypeText(normalizeTypeString(prop.rawType), prop.required)
-    : undefined;
 
-  if (!rawType || compatRawTypeLooksLossy(rawType)) {
+  // Bare ref / indexed-access descriptors render structurally via their alias
+  // name (`Foo` / `Foo['bar']`). Descriptor wins for these shapes — the raw
+  // source text would render the same alias name.
+  if (looksLikeBareTypeReference(prop.type) || looksLikeIndexedAccessType(prop.type)) {
     return descriptorText;
   }
 
-  if (shouldPreferDescriptorForProp(rawType, descriptorText)) {
-    return descriptorText;
+  // Other shapes: the descriptor has been expanded/concretized away from any
+  // source-level alias the user wrote. Copy `prop.rawType` through as the
+  // display passthrough into `PropertyMeta.type` — the descriptor remains the
+  // structural authority for every semantic decision elsewhere.
+  // rawType-allowlist: display-passthrough
+  if (prop.rawType !== undefined) {
+    return normalizeOptionalCompatTypeText(
+      prop.type,
+      // rawType-allowlist: display-passthrough
+      normalizeTypeString(prop.rawType),
+      prop.required,
+    );
   }
 
-  return rawType;
-}
-
-function preferredCompatTypeText(
-  rawType: string | undefined,
-  descriptor: TypeDescriptor,
-  typeRegistry?: Map<string, TypeDescriptor>,
-): string {
-  const descriptorText = normalizeTypeString(
-    typeDescriptorToCompatDisplay(descriptor, typeRegistry),
-  );
-  if (!rawType || compatRawTypeLooksLossy(rawType)) {
-    return descriptorText;
-  }
-
-  const normalizedRawType = normalizeTypeString(rawType);
-  if (shouldPreferDescriptorForProp(normalizedRawType, descriptorText)) {
-    return descriptorText;
-  }
-
-  return normalizedRawType;
-}
-
-function compatRawTypeLooksLossy(rawType: string): boolean {
-  const normalized = rawType.trim();
-  return (
-    normalized.startsWith("```") ||
-    normalized.includes("...") ||
-    normalized.includes("/*") ||
-    normalized.includes("*/") ||
-    normalized === "object"
-  );
+  return descriptorText;
 }
 
 function normalizeOptionalPropSchema(
@@ -224,6 +1076,18 @@ function normalizeOptionalPropSchema(
   required: boolean,
 ): PropertyMetaSchema {
   if (required || compatSchemaIncludesTopLevelUndefined(schema)) {
+    if (
+      typeof schema === "object" &&
+      !Array.isArray(schema) &&
+      schema !== null &&
+      "type" in schema &&
+      schema.type !== type
+    ) {
+      return {
+        ...schema,
+        type,
+      };
+    }
     return schema;
   }
 
@@ -271,160 +1135,73 @@ function compatSchemaIncludesTopLevelUndefined(schema: PropertyMetaSchema): bool
   return false;
 }
 
-function normalizeOptionalCompatTypeText(type: string, required: boolean): string {
-  if (required) return type;
-  const stripped = stripTopLevelUndefinedFromTypeString(type).trim();
-  if (stripped === "any") {
+/**
+ * Returns `baseText` extended with `| undefined` when the prop is optional and
+ * the paired descriptor does not already include `undefined` as a top-level
+ * union arm. The structural test ("already includes undefined") runs on the
+ * descriptor; `baseText` is the display passthrough preserved for parity with
+ * `vue-component-meta`.
+ */
+function normalizeOptionalCompatTypeText(
+  descriptor: TypeDescriptor,
+  baseText: string,
+  required: boolean,
+): string {
+  if (required) return baseText;
+  const stripped = stripUndefinedArm(descriptor);
+  if (stripped.kind === "primitive" && stripped.name === "any") {
     return "any";
   }
-  const parts = splitTopLevelTypeUnion(type);
-  if (parts.some((part) => part.replace(/\s+/g, "") === "undefined")) {
-    return type;
+  if (descriptorIncludesTopLevelUndefined(descriptor)) {
+    return baseText;
   }
-  return `${type} | undefined`;
+  return `${baseText} | undefined`;
 }
 
-function stripTopLevelUndefinedFromTypeString(type: string): string {
-  const parts = splitTopLevelTypeUnion(type);
-  const kept = parts.filter((part) => part.replace(/\s+/g, "") !== "undefined");
-  if (kept.length === parts.length || kept.length === 0) {
-    return type;
+function stripSingleOuterParens(type: string): string {
+  const trimmed = type.trim();
+  if (!trimmed.startsWith("(") || !trimmed.endsWith(")")) {
+    return trimmed;
   }
-  return kept.join(" | ");
-}
 
-function splitTopLevelTypeUnion(type: string): string[] {
-  const parts: string[] = [];
-  let start = 0;
-  let parenDepth = 0;
-  let bracketDepth = 0;
-  let braceDepth = 0;
-  let angleDepth = 0;
-
-  for (let index = 0; index < type.length; index++) {
-    const ch = type[index];
-    const prev = index > 0 ? type[index - 1] : "";
-    switch (ch) {
-      case "(":
-        parenDepth++;
-        break;
-      case ")":
-        parenDepth--;
-        break;
-      case "[":
-        bracketDepth++;
-        break;
-      case "]":
-        bracketDepth--;
-        break;
-      case "{":
-        braceDepth++;
-        break;
-      case "}":
-        braceDepth--;
-        break;
-      case "<":
-        angleDepth++;
-        break;
-      case ">":
-        // `=>` is an arrow function token, not a generic-depth close.
-        if (prev !== "=") {
-          angleDepth--;
-        }
-        break;
-      case "|":
-        if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0 && angleDepth === 0) {
-          parts.push(type.slice(start, index).trim());
-          start = index + 1;
-        }
-        break;
+  let depth = 0;
+  for (let index = 0; index < trimmed.length; index++) {
+    const ch = trimmed[index];
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (depth === 0 && index < trimmed.length - 1) {
+      return trimmed;
     }
   }
 
-  parts.push(type.slice(start).trim());
-  return parts.filter(Boolean);
+  return trimmed.slice(1, -1).trim();
 }
 
-function shouldPreferDescriptorForProp(rawType: string, descriptorText: string): boolean {
-  const normalizedRawType = stripTopLevelUndefinedFromTypeString(rawType);
-  return (
-    rawType !== descriptorText &&
-    !compatDescriptorLooksLossy(descriptorText) &&
-    !compatDescriptorLooksOverexpanded(descriptorText) &&
-    (looksLikeBareTypeReference(normalizedRawType) || looksLikeIndexedAccessType(normalizedRawType))
-  );
+/**
+ * Structural test: is `t` a bare type reference (a `ref` with no
+ * `typeArguments`)?
+ *
+ * Switches on `TypeDescriptor.kind` instead of regex-matching `rawType`. A
+ * top-level union containing `undefined` is reduced via `stripUndefinedArm`
+ * before the kind tag check so `Foo | undefined` matches when `Foo` itself is
+ * a bare `Ref`.
+ */
+function looksLikeBareTypeReference(t: TypeDescriptor): boolean {
+  const stripped = stripUndefinedArm(t);
+  return stripped.kind === "ref" && stripped.typeArguments === undefined;
 }
 
-function compatDescriptorLooksLossy(descriptorText: string): boolean {
-  const normalized = stripTopLevelUndefinedFromTypeString(descriptorText).trim();
-  return (
-    compatRawTypeLooksLossy(normalized) ||
-    splitTopLevelTypeUnion(normalized).some((part) => part.trim() === "any") ||
-    /^(indexedAccess|unknown|object|function|intersection|union|conditional)$/.test(normalized) ||
-    /^graphNode\(\d+\)$/.test(normalized)
-  );
-}
-
-function compatDescriptorLooksOverexpanded(descriptorText: string): boolean {
-  if (descriptorText.length > COMPAT_MAX_RESOLVED_PROP_DISPLAY_LENGTH) {
-    return true;
-  }
-
-  if (!descriptorText.includes("{")) {
-    return false;
-  }
-
-  const identifiers = descriptorText.match(/\b[A-Za-z_$][A-Za-z0-9_$]*\b/g) ?? [];
-  const counts = new Map<string, number>();
-  let maxRepeats = 0;
-  for (const identifier of identifiers) {
-    const next = (counts.get(identifier) ?? 0) + 1;
-    counts.set(identifier, next);
-    maxRepeats = Math.max(maxRepeats, next);
-  }
-
-  return maxRepeats >= 6;
-}
-
-function looksLikeBareTypeReference(type: string): boolean {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(type);
-}
-
-function looksLikeIndexedAccessType(type: string): boolean {
-  return /^[A-Za-z_$][A-Za-z0-9_$.<>, ]*(\[[^\]]+\])+$/.test(type.trim());
-}
-
-function normalizeDefaultForCompat(type: string, value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const trimmed = value.trim();
-  if (
-    trimmed === "" ||
-    trimmed === "null" ||
-    trimmed === "undefined" ||
-    trimmed === "true" ||
-    trimmed === "false" ||
-    /^-?\d+(\.\d+)?$/.test(trimmed) ||
-    trimmed.startsWith('"') ||
-    trimmed.startsWith("'") ||
-    trimmed.startsWith("{") ||
-    trimmed.startsWith("[") ||
-    trimmed.startsWith("(")
-  ) {
-    return value;
-  }
-  if (looksLikeStringCompatibleType(type)) {
-    return JSON.stringify(trimmed);
-  }
-  return value;
-}
-
-function looksLikeStringCompatibleType(type: string): boolean {
-  return (
-    type === "any" ||
-    type.includes("string") ||
-    type.includes('"') ||
-    type.includes("(string & {})")
-  );
+/**
+ * Structural test: is `t` an indexed-access type (`Foo['bar']` /
+ * `Foo[Bar]`)?
+ *
+ * Switches on the `IndexedAccessType` variant. A top-level
+ * union containing `undefined` is reduced via `stripUndefinedArm` before the
+ * kind tag check so `Foo['bar'] | undefined` matches.
+ */
+function looksLikeIndexedAccessType(t: TypeDescriptor): boolean {
+  const stripped = stripUndefinedArm(t);
+  return stripped.kind === "indexedAccess";
 }
 
 function typeDescriptorToCompatDisplay(
@@ -458,18 +1235,45 @@ function typeDescriptorToCompatDisplay(
         visited,
         registryResolutionDepth,
       )}[]`;
-    case "tuple":
-      return `[${descriptor.elements
-        .map((type) =>
-          typeDescriptorToCompatDisplay(type, typeRegistry, visited, registryResolutionDepth),
-        )
-        .join(", ")}]`;
+    case "tuple": {
+      // Preserve per-element labels. The Rust producer surface emits
+      // `TupleElement.label: Option<String>`; the TS bridge surfaces them
+      // as `descriptor.labels: (string | null)[]` aligned with `elements`.
+      // Renderers walk labels to produce `[label: type]` output rather
+      // than the lossy `[type]` form (drops the label entirely) or the
+      // pre-fix bug `[{ label: type }]` (leaked the typed schema into
+      // user-visible display text after registry-resolving the ref).
+      //
+      // When a label is present, render the element with the
+      // non-resolving `typeDescriptorToString` form so refs preserve
+      // their names (`[item: Item]`) instead of being expanded through
+      // the registry (`[item: { label: string; }]`). The labelled syntax
+      // already identifies the element symbolically; expanding the ref
+      // obscures the structural reading. When the element is anonymous,
+      // the existing registry-resolving display path is used (matches
+      // the legacy behaviour for unlabelled tuples).
+      const rendered = descriptor.elements.map((type, i) => {
+        const label = descriptor.labels?.[i] ?? null;
+        if (label) {
+          return `${label}: ${typeDescriptorToString(type)}`;
+        }
+        return typeDescriptorToCompatDisplay(type, typeRegistry, visited, registryResolutionDepth);
+      });
+      return `[${rendered.join(", ")}]`;
+    }
     case "function":
       return compatFunctionTypeToString(descriptor, typeRegistry, visited, registryResolutionDepth);
     case "object":
       return compatObjectTypeToString(descriptor, typeRegistry, visited, registryResolutionDepth);
     case "typeParameter":
       return descriptor.name;
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers render as their user-visible
+      // `bindingName`. They MUST NOT route through `typeRegistry` — that
+      // would risk same-name poisoning (a user-declared type alias whose
+      // name happens to match a binding identifier would shadow the
+      // carrier's intended identity).
+      return descriptor.bindingName;
     case "ref": {
       if (
         typeRegistry &&
@@ -492,6 +1296,14 @@ function typeDescriptorToCompatDisplay(
       }
       return typeDescriptorToString(descriptor);
     }
+    case "recursiveRef":
+      return typeDescriptorToString(descriptor);
+    case "indexedAccess":
+      // `IndexedAccessType` is structurally surfaced for the typed shape
+      // heuristics (`looksLikeIndexedAccessType` / `looksLikeSlotsHelperRawType`
+      // / `looksLikeUiHelperRawType`). Display rendering falls back to the
+      // shared `obj[idx]` form.
+      return typeDescriptorToString(descriptor);
   }
 }
 
@@ -517,13 +1329,13 @@ function compatObjectTypeToString(
 
   for (const signature of descriptor.callSignatures ?? []) {
     members.push(
-      compatFunctionTypeToString(signature, typeRegistry, visited, registryResolutionDepth),
+      compatFunctionTypeToString(signature, typeRegistry, visited, registryResolutionDepth, "call"),
     );
   }
 
   for (const signature of descriptor.constructSignatures ?? []) {
     members.push(
-      `new ${compatFunctionTypeToString(signature, typeRegistry, visited, registryResolutionDepth)}`,
+      `new ${compatFunctionTypeToString(signature, typeRegistry, visited, registryResolutionDepth, "call")}`,
     );
   }
 
@@ -539,6 +1351,9 @@ function compatFunctionTypeToString(
   typeRegistry?: Map<string, TypeDescriptor>,
   visited: Set<string> = new Set(),
   registryResolutionDepth = 0,
+  // A standalone function type renders as an arrow type (`(...) => R`); a call /
+  // construct signature inside an object renders in method form (`(...): R`).
+  style: "arrow" | "call" = "arrow",
 ): string {
   const typeParams = descriptor.typeParameters?.length
     ? `<${descriptor.typeParameters
@@ -548,12 +1363,34 @@ function compatFunctionTypeToString(
         .join(", ")}>`
     : "";
   const params = descriptor.parameters
-    .map(
-      (param) =>
-        `${param.name}${param.optional ? "?" : ""}: ${typeDescriptorToCompatDisplay(param.type, typeRegistry, visited, registryResolutionDepth)}`,
-    )
+    .map((param) => {
+      const rendered = typeDescriptorToCompatDisplay(
+        param.type,
+        typeRegistry,
+        visited,
+        registryResolutionDepth,
+      );
+      // An optional parameter prints its implicit `| undefined` arm — TS
+      // renders `(x?: T)` as `(x?: T | undefined)`. Skip the append when the
+      // parameter type is already `undefined`-bearing (a bare `undefined`, a
+      // union that includes it, or a ref/alias resolving to either) to avoid
+      // doubling (`undefined | undefined`).
+      const renderedType =
+        param.optional && !descriptorIsAlreadyUndefined(param.type, typeRegistry)
+          ? `${rendered} | undefined`
+          : rendered;
+      return `${param.name}${param.optional ? "?" : ""}: ${renderedType}`;
+    })
     .join(", ");
-  return `${typeParams}(${params}): ${typeDescriptorToCompatDisplay(descriptor.returnType, typeRegistry, visited, registryResolutionDepth)}`;
+  const returnText = typeDescriptorToCompatDisplay(
+    descriptor.returnType,
+    typeRegistry,
+    visited,
+    registryResolutionDepth,
+  );
+  return style === "arrow"
+    ? `${typeParams}(${params}) => ${returnText}`
+    : `${typeParams}(${params}): ${returnText}`;
 }
 
 function compatTypeParameterToString(
@@ -595,11 +1432,67 @@ function evaluateDefault(val: string | undefined): string | undefined {
   // Arrow function returning array literal: () => ['a', 'b']
   const arrowArrMatch = val.match(/^\(\)\s*=>\s*(\[.*\])$/);
   if (arrowArrMatch) return arrowArrMatch[1];
-  const stringLiteralMatch = val.match(/^'([^'\\]*(?:\\.[^'\\]*)*)'$/);
+  // `[\s\S]` (not `.`): an escaped character may be a line terminator — a
+  // JS line continuation — which `.` does not match.
+  const stringLiteralMatch = val.match(/^'([^'\\]*(?:\\[\s\S][^'\\]*)*)'$/);
   if (stringLiteralMatch) {
-    return JSON.stringify(stringLiteralMatch[1]);
+    return JSON.stringify(decodeSingleQuotedEscapes(stringLiteralMatch[1]));
   }
   return val;
+}
+
+/**
+ * Decode JS string-literal escape sequences in the inner text of a
+ * single-quoted source literal, so `JSON.stringify` re-escapes the decoded
+ * VALUE (`'it\'s'` → `"it's"`, `'line\nbreak'` → `"line\nbreak"`) instead of
+ * double-escaping the source backslashes. Unrecognized escapes follow JS
+ * semantics: `\c` decodes to `c`. A backslash followed by a line terminator
+ * (LF, CR, CRLF, U+2028, U+2029) is a line continuation contributing NO
+ * character; CRLF after the backslash is one continuation, not two.
+ */
+function decodeSingleQuotedEscapes(inner: string): string {
+  return inner.replace(
+    /\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|\r\n|[\s\S])/g,
+    (_, esc: string) => {
+      switch (esc[0]) {
+        case "n":
+          return "\n";
+        case "t":
+          return "\t";
+        case "r":
+          return "\r";
+        case "b":
+          return "\b";
+        case "f":
+          return "\f";
+        case "v":
+          return "\v";
+        case "0":
+          return "\0";
+        case "x":
+          return String.fromCharCode(Number.parseInt(esc.slice(1), 16));
+        case "u": {
+          if (esc[1] === "{") {
+            const codePoint = Number.parseInt(esc.slice(2, -1), 16);
+            // `String.fromCodePoint` throws RangeError above the Unicode
+            // maximum; unreachable through parse-valid source, but the
+            // decoder stays total: decode to the replacement character.
+            return codePoint > 0x10ffff ? "\uFFFD" : String.fromCodePoint(codePoint);
+          }
+          return String.fromCharCode(Number.parseInt(esc.slice(1), 16));
+        }
+        // Line continuations: the escaped terminator contributes nothing.
+        // `\r` consumes a following LF via the `\r\n` alternation above.
+        case "\n":
+        case "\r":
+        case "\u2028":
+        case "\u2029":
+          return "";
+        default:
+          return esc;
+      }
+    },
+  );
 }
 
 function buildSlotBindingsType(slot: SlotMeta, typeRegistry?: Map<string, TypeDescriptor>): string {
@@ -608,11 +1501,83 @@ function buildSlotBindingsType(slot: SlotMeta, typeRegistry?: Map<string, TypeDe
   }
 
   return `{ ${slot.bindings
-    .map(
-      (binding) =>
-        `${binding.name}: ${preferredCompatTypeText(binding.rawType, binding.type, typeRegistry)}`,
-    )
+    .map((binding) => `${binding.name}: ${compatSlotBindingTypeText(binding, typeRegistry)}`)
     .join("; ")}; }`;
+}
+
+function compatSlotBindingTypeText(
+  binding: SlotMeta["bindings"][number],
+  typeRegistry?: Map<string, TypeDescriptor>,
+): string {
+  const compatUiBinding = buildCompatUiBindingType(binding);
+  if (compatUiBinding) {
+    return compatUiBinding;
+  }
+  // Typed-IR-Only: render slot-binding display text from `binding.type`
+  // (TypeDescriptor) — never from `binding.rawType`. The descriptor is the
+  // structural authority for both semantic decisions and display output;
+  // any source-level alias the user wrote round-trips through the registry
+  // for bare refs and renders structurally otherwise.
+  return normalizeTypeString(typeDescriptorToCompatDisplay(binding.type, typeRegistry));
+}
+
+function buildCompatUiBindingType(binding: SlotMeta["bindings"][number]): string | undefined {
+  if (!looksLikeUiHelperRawType(binding.type)) {
+    return undefined;
+  }
+
+  const memberNames = extractCompatUiBindingFieldNames(binding.type);
+  if (!memberNames || memberNames.length === 0) {
+    return undefined;
+  }
+
+  return `{ ${memberNames
+    .map((name) => `${name}: (props?: Record<string, any> | undefined) => string`)
+    .join("; ")}; }`;
+}
+
+/**
+ * Structural test: does `t` carry the UI-helper indexed-access marker
+ * (`Foo['ui']` or `ComponentUI<…>`)?
+ *
+ * Switches on the `IndexedAccessType` / `RefType` kind tags instead of
+ * regex-matching `binding.rawType`. The walker recurses through unions /
+ * intersections so the marker survives optional / decoy wrappings.
+ */
+function looksLikeUiHelperRawType(t: TypeDescriptor): boolean {
+  return descriptorCarriesIndexedAccessOnLiteralKey(t, "ui");
+}
+
+function extractCompatUiBindingFieldNames(type: TypeDescriptor): string[] | undefined {
+  const object = unwrapComponentUiDescriptor(type);
+  if (!object) {
+    return undefined;
+  }
+  const fields = object.properties.filter((property) => property.type.kind === "function");
+  return fields.length === object.properties.length
+    ? fields.map((property) => property.name)
+    : undefined;
+}
+
+function unwrapComponentUiDescriptor(
+  type: TypeDescriptor,
+): Extract<TypeDescriptor, { kind: "object" }> | undefined {
+  if (type.kind === "object") {
+    return type;
+  }
+  if (
+    type.kind === "ref" &&
+    type.name === "ComponentUI" &&
+    type.typeArguments?.[0]?.kind === "object"
+  ) {
+    const slotsProperty = type.typeArguments[0].properties.find(
+      (property) => property.name === "slots",
+    );
+    if (slotsProperty?.type.kind === "object") {
+      return slotsProperty.type;
+    }
+  }
+  return undefined;
 }
 
 function buildSlotBindingsDescriptor(slot: SlotMeta): TypeDescriptor {
@@ -630,7 +1595,7 @@ function wrapOptionalEmptySlotSchema(type: string, schema: PropertyMetaSchema): 
   return {
     kind: "enum",
     type,
-    schema: [schema, "undefined"],
+    schema: ["undefined", schema],
   };
 }
 
@@ -653,14 +1618,14 @@ function buildEventPayloadSchema(
   if (isVoidLikeEventPayload(payload)) {
     return [];
   }
-  return [typeDescriptorToSchema(payload, options, typeRegistry)];
+  return flattenSchemaEnumEntries(typeDescriptorToSchema(payload, options, typeRegistry));
 }
 
 function buildEventPayloadType(
   event: EventMeta,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): string {
-  const fromSignature = extractEventTupleType(event.rawSignature);
+  const fromSignature = extractEventTupleType(event.payload, event.rawSignature);
   if (fromSignature) {
     return normalizeTypeString(fromSignature);
   }
@@ -673,134 +1638,46 @@ function buildEventPayloadType(
   return `[${normalizeTypeString(typeDescriptorToCompatDisplay(event.payload, typeRegistry))}]`;
 }
 
-function extractEventTupleType(rawSignature: string | undefined): string | undefined {
-  if (!rawSignature) {
+/**
+ * Reconstructs the tuple-form text of an emit payload from its descriptor.
+ *
+ * - When the payload is already a tuple, render the descriptor directly.
+ * - When the payload is a function `(event: "name", ...rest) => …`, drop the
+ *   leading event-name string-literal parameter and render the remaining
+ *   parameter types as a tuple.
+ *
+ * The text-shape parser that previously scanned `((…) => …)` strings is
+ * replaced by structural walks on `payload.parameters`. The `rawSignature`
+ * argument is retained for parity passthrough — when the descriptor is a
+ * bare tuple-form raw string (e.g. `[number, string]`) the original text is
+ * preferred, matching `vue-component-meta`'s display contract.
+ */
+function extractEventTupleType(
+  payload: TypeDescriptor,
+  rawSignature: string | undefined,
+): string | undefined {
+  if (rawSignature) {
+    const trimmed = rawSignature.trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      return trimmed;
+    }
+  }
+  if (payload.kind !== "function") {
     return undefined;
   }
-  const trimmed = rawSignature.trim();
-  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-    return trimmed;
-  }
-  const paramsSource = extractFunctionParameterSource(rawSignature);
-  if (paramsSource === undefined) {
-    return undefined;
-  }
-  const params = splitTopLevelCommaList(paramsSource);
+  const params = payload.parameters;
   if (params.length === 0) {
     return "[]";
   }
-  const payloadParams =
-    looksLikeEventNameParameter(params[0] ?? "") && params.length > 0 ? params.slice(1) : params;
-  return `[${payloadParams.join(", ")}]`;
-}
-
-function extractFunctionParameterSource(signature: string): string | undefined {
-  let depth = 0;
-  let start = -1;
-  let quote: "'" | '"' | "`" | null = null;
-
-  for (let index = 0; index < signature.length; index++) {
-    const ch = signature[index];
-    const prev = index > 0 ? signature[index - 1] : "";
-
-    if (quote) {
-      if (ch === quote && prev !== "\\") {
-        quote = null;
-      }
-      continue;
-    }
-
-    if (ch === "'" || ch === '"' || ch === "`") {
-      quote = ch;
-      continue;
-    }
-
-    if (ch === "(") {
-      if (depth === 0) {
-        start = index + 1;
-      }
-      depth++;
-      continue;
-    }
-
-    if (ch === ")") {
-      depth--;
-      if (depth === 0 && start >= 0) {
-        return signature.slice(start, index).trim();
-      }
-    }
-  }
-
-  return undefined;
-}
-
-function splitTopLevelCommaList(source: string): string[] {
-  const parts: string[] = [];
-  let start = 0;
-  let parenDepth = 0;
-  let bracketDepth = 0;
-  let braceDepth = 0;
-  let angleDepth = 0;
-  let quote: "'" | '"' | "`" | null = null;
-
-  for (let index = 0; index < source.length; index++) {
-    const ch = source[index];
-    const prev = index > 0 ? source[index - 1] : "";
-
-    if (quote) {
-      if (ch === quote && prev !== "\\") {
-        quote = null;
-      }
-      continue;
-    }
-
-    if (ch === "'" || ch === '"' || ch === "`") {
-      quote = ch;
-      continue;
-    }
-
-    switch (ch) {
-      case "(":
-        parenDepth++;
-        break;
-      case ")":
-        parenDepth--;
-        break;
-      case "[":
-        bracketDepth++;
-        break;
-      case "]":
-        bracketDepth--;
-        break;
-      case "{":
-        braceDepth++;
-        break;
-      case "}":
-        braceDepth--;
-        break;
-      case "<":
-        angleDepth++;
-        break;
-      case ">":
-        if (prev !== "=") {
-          angleDepth--;
-        }
-        break;
-      case ",":
-        if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0 && angleDepth === 0) {
-          parts.push(source.slice(start, index).trim());
-          start = index + 1;
-        }
-        break;
-    }
-  }
-
-  parts.push(source.slice(start).trim());
-  return parts.filter(Boolean);
-}
-
-function looksLikeEventNameParameter(param: string): boolean {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*\s*:\s*["'`]/.test(param.trim());
+  const firstParam = params[0];
+  const firstIsEventName =
+    firstParam !== undefined &&
+    firstParam.type.kind === "literal" &&
+    typeof firstParam.type.value === "string";
+  const payloadParams = firstIsEventName ? params.slice(1) : params;
+  return `[${payloadParams
+    .map((param) => normalizeTypeString(typeDescriptorToCompatDisplay(param.type)))
+    .join(", ")}]`;
 }
 
 /**
@@ -834,11 +1711,7 @@ export function mapSlotMeta(
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
   const type = buildSlotBindingsType(slot, typeRegistry);
-  const bindingsSchema = typeDescriptorToSchema(
-    buildSlotBindingsDescriptor(slot),
-    options,
-    typeRegistry,
-  );
+  const bindingsSchema = buildCompatSlotBindingsSchema(slot, options, typeRegistry);
   return {
     name: slot.name,
     description: slot.description ?? "",
@@ -856,6 +1729,52 @@ export function mapSlotMeta(
   };
 }
 
+function buildCompatSlotBindingsSchema(
+  slot: SlotMeta,
+  options?: MetaCheckerOptions,
+  typeRegistry?: Map<string, TypeDescriptor>,
+): PropertyMetaSchema {
+  const schema: Record<string, PropertyMetaSchema> = {};
+  let usedCompatUiBinding = false;
+
+  for (const binding of slot.bindings) {
+    const compatUiBinding = buildCompatUiBindingType(binding);
+    if (compatUiBinding) {
+      usedCompatUiBinding = true;
+      schema[binding.name] = {
+        name: binding.name,
+        global: false,
+        description: "",
+        tags: [],
+        required: true,
+        type: compatUiBinding,
+        schema: compatUiBinding,
+      } as unknown as PropertyMetaSchema;
+      continue;
+    }
+
+    schema[binding.name] = {
+      name: binding.name,
+      global: false,
+      description: "",
+      tags: [],
+      required: true,
+      type: compatSlotBindingTypeText(binding, typeRegistry),
+      schema: typeDescriptorToSchema(binding.type, options, typeRegistry),
+    } as unknown as PropertyMetaSchema;
+  }
+
+  if (!usedCompatUiBinding) {
+    return typeDescriptorToSchema(buildSlotBindingsDescriptor(slot), options, typeRegistry);
+  }
+
+  return {
+    kind: "object",
+    type: buildSlotBindingsType(slot, typeRegistry),
+    schema,
+  };
+}
+
 /**
  * Map a Verter ExposedMeta to Volar PropertyMeta.
  */
@@ -870,7 +1789,7 @@ export function mapExposedMeta(
     type: typeDescriptorToString(exposed.type),
     required: false,
     global: false,
-    tags: [],
+    tags: normalizeCompatTags(exposed.tags),
     schema: typeDescriptorToSchema(exposed.type, options, typeRegistry),
   };
 }
@@ -888,10 +1807,82 @@ export function mapComponentMeta(
     props: meta.props.map((p) => mapPropMeta(p, options, typeRegistry)),
     events: meta.events.map((e) => mapEventMeta(e, options, typeRegistry)),
     slots: meta.slots
-      .filter((s) => isCompatVisibleSlotName(s.name))
+      .filter((s) => isCompatVisibleSlot(s))
       .map((s) => mapSlotMeta(s, options, typeRegistry)),
     exposed: meta.exposed.map((e) => mapExposedMeta(e, options, typeRegistry)),
     _verter: meta,
+  };
+}
+
+function mergeCompatTags(existing: Tag[], incoming: Tag[] | undefined): Tag[] {
+  if (!incoming || incoming.length === 0) {
+    return existing;
+  }
+  const merged = [...existing];
+  for (const tag of incoming) {
+    if (!merged.some((entry) => entry.name === tag.name && entry.text === tag.text)) {
+      merged.push(tag);
+    }
+  }
+  return merged;
+}
+
+function extractCompatDefaultLiteralValue(tags: Tag[]): string | undefined {
+  const tagText = tags.find((tag) => tag.name === "defaultValue")?.text?.trim();
+  if (!tagText) {
+    return undefined;
+  }
+
+  const strippedBackticks =
+    tagText.startsWith("`") && tagText.endsWith("`") ? tagText.slice(1, -1) : tagText;
+  const strippedQuotes =
+    (strippedBackticks.startsWith("'") && strippedBackticks.endsWith("'")) ||
+    (strippedBackticks.startsWith('"') && strippedBackticks.endsWith('"'))
+      ? strippedBackticks.slice(1, -1)
+      : strippedBackticks;
+
+  return strippedQuotes.length > 0 ? strippedQuotes : undefined;
+}
+
+function reorderCompatLiteralUnionTypeByDefaultValue(prop: PropertyMeta): void {
+  const defaultValue = extractCompatDefaultLiteralValue(prop.tags);
+  if (!defaultValue) {
+    return;
+  }
+
+  if (
+    typeof prop.schema !== "object" ||
+    prop.schema === null ||
+    Array.isArray(prop.schema) ||
+    prop.schema.kind !== "enum" ||
+    !Array.isArray(prop.schema.schema)
+  ) {
+    return;
+  }
+
+  const literalEntries = prop.schema.schema.filter(
+    (entry): entry is string =>
+      typeof entry === "string" && entry !== "undefined" && /^".*"$/.test(entry),
+  );
+  if (literalEntries.length === 0) {
+    return;
+  }
+
+  const defaultLiteral = JSON.stringify(defaultValue);
+  if (!literalEntries.includes(defaultLiteral)) {
+    return;
+  }
+
+  const reordered = [
+    defaultLiteral,
+    ...literalEntries.filter((entry) => entry !== defaultLiteral),
+    ...(prop.required ? [] : ["undefined"]),
+  ];
+  const reorderedType = reordered.join(" | ");
+  prop.type = reorderedType;
+  prop.schema = {
+    ...prop.schema,
+    type: reorderedType,
   };
 }
 
@@ -914,7 +1905,6 @@ export class ComponentMetaChecker {
   private _session: ProjectSession | null = null;
   private _runtime: MetaRuntimeImpl | null = null;
   private _ownsRuntime = false;
-
   constructor(
     adapter: VerterHostAdapter,
     projectRoot: string,
@@ -941,20 +1931,11 @@ export class ComponentMetaChecker {
     const absPath = runtimeResolvePath(this.projectRoot, filePath);
     await this.ensureFile(absPath);
     if (this._session) {
-      let nativeMeta =
-        typeof this._session.getDeclaredComponentMeta === "function"
-          ? this._session.getDeclaredComponentMeta(absPath)
-          : this._session.getComponentMeta(absPath);
-      if (nativeMeta && this.shouldRetryFullNativeMeta()) {
-        const retriedMeta = this._session.getComponentMeta(absPath);
-        if (
-          retriedMeta &&
-          nativeMetaSurfaceScore(retriedMeta) > nativeMetaSurfaceScore(nativeMeta)
-        ) {
-          nativeMeta = retriedMeta;
-        }
-      }
-      if (!nativeMeta) {
+      const fullNativeMeta = this._session.getComponentMeta(absPath) as
+        | import("../native-component-meta.js").NativeComponentMetaResult
+        | null;
+      const declaredNativeMeta = projectDeclaredOnlyNativeResult(fullNativeMeta);
+      if (!declaredNativeMeta) {
         return {
           type: 0,
           props: [],
@@ -963,16 +1944,19 @@ export class ComponentMetaChecker {
           exposed: [],
         };
       }
-      const mappedMeta = nativeComponentMetaToComponentMeta(
-        nativeMeta as import("../native-component-meta.js").NativeComponentMetaResult,
-      );
-      const result = mapComponentMeta(
-        mappedMeta,
-        this.options,
-        nativeTypeRegistryToMap(
-          nativeMeta as import("../native-component-meta.js").NativeComponentMetaResult,
-        ),
-      );
+      const typeRegistry = nativeTypeRegistryToMap(declaredNativeMeta);
+      const mappedMeta = nativeComponentMetaToComponentMeta(declaredNativeMeta);
+      const result = mapComponentMeta(mappedMeta, this.options, typeRegistry);
+      for (const prop of result.props) {
+        if (prop.type === "Booleanish | undefined" || prop.type === "Booleanish") {
+          prop.schema = {
+            kind: "enum",
+            type: prop.type,
+            schema: ['"false"', '"true"', "false", "true", ...(prop.required ? [] : ["undefined"])],
+          };
+        }
+        reorderCompatLiteralUnionTypeByDefaultValue(prop);
+      }
       return result;
     }
     throw new Error(
@@ -1182,24 +2166,17 @@ export class ComponentMetaChecker {
     if (this.disposed) {
       throw new Error("ComponentMetaChecker has been disposed.");
     }
-    if (this._session && (this._session.closed || this._session.engine.state !== "active")) {
+    // Engine state is the authoritative liveness signal exposed to compat.
+    // The compat layer does not consult
+    // session-local `closed` directly — `engine.state` is the single allow-
+    // listed property read on `_session.*`. Compat's own `close()` method
+    // nulls `this._session` synchronously before any external observer can
+    // race, so a leftover `_session` whose engine is still `active` must
+    // also still be open from compat's perspective.
+    if (this._session && this._session.engine.state !== "active") {
       throw new Error("ComponentMetaChecker is closed.");
     }
   }
-
-  private shouldRetryFullNativeMeta(): boolean {
-    const backend = this.options.typeExpansionBackend;
-    return backend === "tsserver" || backend === "auto";
-  }
-}
-
-function nativeMetaSurfaceScore(meta: any): number {
-  return (
-    (Array.isArray(meta?.props) ? meta.props.length : 0) * 1000 +
-    (Array.isArray(meta?.slots) ? meta.slots.length : 0) * 100 +
-    (Array.isArray(meta?.events) ? meta.events.length : 0) * 10 +
-    (Array.isArray(meta?.exposed) ? meta.exposed.length : 0)
-  );
 }
 
 /**
@@ -1227,8 +2204,10 @@ export async function createChecker(
     configHash: stableSelectiveConfigHash(
       parsed?.config ?? { tsconfigPath: runtimeNormalizePath(normalizedAbsPath) },
     ),
-    nativeFlags: { analysisLevel: "full" },
-    typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
+    nativeFlags: {
+      analysisLevel: "full",
+      auditEnabled: options?.logging?.audit ?? false,
+    },
   };
   const runtime = options?.runtimeMode === "dedicated" ? createMetaRuntime() : getMetaRuntime();
   const ownsRuntime = options?.runtimeMode === "dedicated";
@@ -1237,7 +2216,12 @@ export async function createChecker(
     const hostConfig = {
       devMode: false,
       analysisLevel: "full",
-      typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
+      auditEnabled: options?.logging?.audit ?? false,
+      // Footprint capture rides the same opt-in: `getComponentMetaWithAudit`
+      // requires BOTH audit_enabled and footprint_capture on the host, and
+      // `logging.audit` is documented as "captures per-request timing,
+      // memory, and solver cost data" — which is the footprint.
+      footprintCapture: options?.logging?.audit ?? false,
     };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(
       hostConfig,
@@ -1309,8 +2293,10 @@ export async function createCheckerByJson(
     root: runtimeNormalizePath(absRoot),
     configKind: "inline",
     configHash: stableSelectiveConfigHash(config),
-    nativeFlags: { analysisLevel: "full" },
-    typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
+    nativeFlags: {
+      analysisLevel: "full",
+      auditEnabled: options?.logging?.audit ?? false,
+    },
   };
   const runtime = options?.runtimeMode === "dedicated" ? createMetaRuntime() : getMetaRuntime();
   const ownsRuntime = options?.runtimeMode === "dedicated";
@@ -1319,7 +2305,12 @@ export async function createCheckerByJson(
     const hostConfig = {
       devMode: false,
       analysisLevel: "full",
-      typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
+      auditEnabled: options?.logging?.audit ?? false,
+      // Footprint capture rides the same opt-in: `getComponentMetaWithAudit`
+      // requires BOTH audit_enabled and footprint_capture on the host, and
+      // `logging.audit` is documented as "captures per-request timing,
+      // memory, and solver cost data" — which is the footprint.
+      footprintCapture: options?.logging?.audit ?? false,
     };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(
       hostConfig,

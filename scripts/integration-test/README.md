@@ -1,6 +1,6 @@
 # Integration Tests
 
-Validates Verter against the full Vue toolchain. Tier 1 runs the curated integration matrix, and Tier 2 inventories local Vue repos under `D:\dev` to decide whether Verter should replace editor tooling, `vue-tsc`, the TS plugin, the build plugin, or the Nuxt module.
+Validates Verter against the full Vue toolchain. Tier 1 runs the curated integration matrix, and Tier 2 inventories local Vue repos under configurable roots to decide whether Verter should replace editor tooling, `vue-tsc`, the TS plugin, the build plugin, or the Nuxt module.
 
 > [!WARNING]
 > This project is **experimental and under active development**. APIs, architecture, and package boundaries may change without notice.
@@ -10,7 +10,7 @@ Validates Verter against the full Vue toolchain. Tier 1 runs the curated integra
 The integration test suite has two layers:
 
 - **Tier 1**: curated open-source projects cloned into `.integration-tests/repos/`, built once with stock Vue tooling, then re-run with Verter.
-- **Tier 2**: local git repos discovered under configurable roots, classified by recipe, then executed in disposable sandboxes under `D:\dev\temp\verter-toolchain-runs/<run-id>/`.
+- **Tier 2**: local git repos discovered under configurable roots, classified by recipe, then executed in disposable sandboxes under `<scratch>/verter-toolchain-runs/<run-id>/`.
 
 There are two entry points that share the same project list:
 
@@ -43,7 +43,7 @@ pnpm integration-test:discover
 pnpm integration-test:local
 
 # Limit local discovery to specific roots / repos
-node scripts/integration-test/run.mjs --discover-local --discover-only --roots D:\dev\personal --repo-filter "vue|nuxt"
+node scripts/integration-test/run.mjs --discover-local --discover-only --roots <repos-root> --repo-filter "vue|nuxt"
 ```
 
 ## CLI Options
@@ -59,7 +59,7 @@ Options:
   --discover-local  Inventory local Vue repos under the configured roots
   --discover-only   Write discovery artifacts and exit
   --local-only      Execute local discovered repos without running the matrix
-  --roots <paths>   Semicolon/comma-separated discovery roots (default: D:\dev)
+  --roots <paths>   Semicolon/comma-separated discovery roots (required; or set VERTER_LOCAL_REPO_ROOTS)
   --out <path>      Output directory for local discovery/execution artifacts
   --repo-filter <r> Regex filter applied to discovered repo paths
   --run-id <id>     Override the local run id used in the output path
@@ -100,7 +100,7 @@ For local discovery runs:
    - build_only
    - manual_review
 5. Write discovery.json + discovery.md
-6. Execute non-manual repos in sandboxes under D:\dev\temp\verter-toolchain-runs\<run-id>\
+6. Execute non-manual repos in sandboxes under <scratch>/verter-toolchain-runs/<run-id>/
 7. Persist baseline logs, Verter logs, normalized diagnostics, diffs, review queue, and summary.md
 ```
 
@@ -134,7 +134,7 @@ Tier 2 local execution never mutates the source repo. Each run copies the repo i
 
 ## Local Artifacts
 
-Each local run writes to `D:\dev\temp\verter-toolchain-runs\<run-id>\` by default:
+Each local run writes to `<scratch>/verter-toolchain-runs/<run-id>/` by default:
 
 | Path                                                   | Purpose                                                      |
 | ------------------------------------------------------ | ------------------------------------------------------------ |

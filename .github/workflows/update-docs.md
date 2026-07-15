@@ -117,7 +117,6 @@ The project documentation uses **VitePress** in `docs/` and is deployed to `http
 | `packages/unplugin/src/core/types.ts` | `docs/api/unplugin.md` |
 | `packages/native/index.js`, `packages/native/index.d.ts` | `docs/api/native.md` |
 | `packages/wasm/src/index.ts` | `docs/api/wasm.md` |
-| `packages/core/src/v5/` | `docs/api/core.md` |
 | `packages/types/src/` | `docs/api/types.md` |
 | `crates/verter_lsp/src/capabilities.rs` | `docs/editor/lsp-features.md` |
 | `packages/vue-vscode/package.json` (contributes) | `docs/editor/settings.md` |

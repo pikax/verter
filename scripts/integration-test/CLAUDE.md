@@ -20,6 +20,16 @@ When adding, removing, or modifying a project in **either** file, you **MUST** u
 | `bundler`           | `bundler`                     |
 | `shallow`           | `shallow`                     |
 
+## Shared Repo Architecture Rules
+
+When integration-test work touches host-backed loading, resolution, or cache behavior, follow the root repository build philosophy in [CLAUDE.md](../../CLAUDE.md):
+
+1. one shared file-ready/read/parse/shallow-process path per canonical file
+2. no request-local fallback parser/load path
+3. no dual-path transition kept alive for safety
+
+Do not add integration-test-only infrastructure that normalizes or depends on a second host-backed read/parse path.
+
 ## Running Integration Tests
 
 ### Local (primary for development)
@@ -37,7 +47,7 @@ pnpm integration-test coreui balancer-frontend-v2 slidev
 # All projects
 pnpm integration-test
 
-# Inventory local repos under D:\dev and stop
+# Inventory local repos under configured roots and stop
 pnpm integration-test:discover
 
 # Discover local repos and execute non-manual Tier 2 entries in sandboxes
@@ -51,7 +61,7 @@ pnpm integration-test:local
   - build: `scripts.build`
   - test: `scripts.test` or `scripts["test:unit"]`
   - typecheck: `tsconfig.json`, then `tsconfig.web.json`, `tsconfig.app.json`, `tsconfig.src.json`
-- Local runs copy the repo to `D:\dev\temp\verter-toolchain-runs\<run-id>\sandboxes\<repo>\` before modifying anything.
+- Local runs copy the repo to `<scratch>/verter-toolchain-runs/<run-id>/sandboxes/<repo>/` before modifying anything.
 - Reports live beside the sandboxes under `reports/<repo>/` and include `project.json`, `replacement.json`, `summary.md`, and `typecheck/review-queue.json`.
 - Repos classified as `manual_review` must not be auto-executed unless the runner logic is intentionally extended.
 

@@ -1,3 +1,8 @@
+// Re-export audit helpers so `@verter/wasm` consumers can import
+// `whyLoaded`, `whyInstantiated`, `assertLoadedFilesExactly`, etc.
+// directly from the package root.
+export * from "./audit";
+
 export interface CodegenOptions {
   /** The filename for source map generation */
   filename?: string;
@@ -137,6 +142,7 @@ type WasmHostGetIdeFn = (
   canonicalId: string,
   profile?: HostCompileProfile,
 ) => HostIdeResponse | null;
+type WasmHostEnsureIdeCompiledFn = (canonicalId: string, profile?: HostCompileProfile) => boolean;
 type WasmHostGetAnalysisFn = (canonicalOrAlias: string) => unknown | null;
 type WasmHostSetImportDependenciesFn = (
   canonicalOrAlias: string,
@@ -161,6 +167,7 @@ interface WasmHostBinding {
   upsert: WasmHostUpsertFn;
   applyBlockOverrides: WasmHostApplyBlockOverridesFn;
   getIde: WasmHostGetIdeFn;
+  ensureIdeCompiled: WasmHostEnsureIdeCompiledFn;
   getVirtualFile: WasmHostGetVirtualFileFn;
   listVirtualFiles: WasmHostListVirtualFilesFn;
   remove: WasmHostRemoveFn;
@@ -299,6 +306,19 @@ export class Host {
     return this.inner.getIde(canonicalId, profile);
   }
 
+  /**
+   * Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
+   *
+   * The explicit IDE-ensure path — compiles the carrier's IDE surface without
+   * requesting the runtime `Main` node, so a Main-less carrier (Svelte)
+   * populates its `CachedTsx` and a subsequent `getIde` succeeds. `getIde`
+   * stays a pure cached read. Returns `true` when the IDE projection now
+   * exists, `false` when the file has no IDE surface (a non-carrier).
+   */
+  ensureIdeCompiled(canonicalId: string, profile?: HostCompileProfile): boolean {
+    return this.inner.ensureIdeCompiled(canonicalId, profile);
+  }
+
   getVirtualFile(query: HostVirtualQuery): HostVirtualFileResponse {
     return this.inner.getVirtualFile(query);
   }
@@ -321,8 +341,8 @@ export class Host {
   }
 
   /**
-   * Sets the resolved import dependencies for a file, enabling Tier 2/3
-   * smart invalidation (cross-file change tracking).
+   * Sets the resolved import dependencies for a file, enabling
+   * cross-file smart invalidation (change tracking).
    */
   setImportDependencies(canonicalOrAlias: string, resolutions: HostDependencyResolution[]): void {
     this.inner.setImportDependencies(canonicalOrAlias, resolutions);
