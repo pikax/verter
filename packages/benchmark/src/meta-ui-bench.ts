@@ -106,6 +106,8 @@ interface MeasuredQueryResult {
   artifact: NormalizedMetaArtifact;
   latencyMs: number;
   outcome: MetaUiOutcomeBucket;
+  /** Worker-process RSS right after the query (bytes); absent from older workers. */
+  rssBytes?: number;
 }
 
 interface WorkerInitPayload {
@@ -1070,6 +1072,7 @@ async function runSingleScenarioRepeat(
   let steadyStateMs = 0;
   const componentResults: ComponentResultRow[] = [];
   const outcomeCounts = { success: 0, degraded: 0, query_error: 0, crash: 0 };
+  let peakWorkerRssBytes = 0;
   const deviationTotals = {
     exactMatches: 0,
     totalMissing: 0,
@@ -1095,6 +1098,7 @@ async function runSingleScenarioRepeat(
       const result = await executeMeasuredQuery(instance, component);
       steadyStateMs += result.latencyMs;
       outcomeCounts[result.outcome]++;
+      peakWorkerRssBytes = Math.max(peakWorkerRssBytes, result.rssBytes ?? 0);
       componentResults.push({
         relativePath: component.relativePath,
         componentName: componentNameFromPath(component.relativePath),
@@ -1164,6 +1168,8 @@ async function runSingleScenarioRepeat(
     componentResults,
     outcomeCounts,
     slaCount: buildSlaCount(componentResults, args.slaMs),
+    peakWorkerRssMb:
+      peakWorkerRssBytes > 0 ? Math.round((peakWorkerRssBytes / 1024 / 1024) * 10) / 10 : null,
     deviationTotals,
     stats: summarizeLatencySeries(latencies.length > 0 ? latencies : [steadyStateMs]),
   };
@@ -1183,6 +1189,7 @@ async function runRepoScenarioRepeat(
   let warmupMs = 0;
   const componentResults: ComponentResultRow[] = [];
   const outcomeCounts = { success: 0, degraded: 0, query_error: 0, crash: 0 };
+  let peakWorkerRssBytes = 0;
   const deviationTotals = {
     exactMatches: 0,
     totalMissing: 0,
@@ -1240,6 +1247,7 @@ async function runRepoScenarioRepeat(
         try {
           const result = await executeMeasuredQuery(singleInstance, component);
           outcomeCounts[result.outcome]++;
+          peakWorkerRssBytes = Math.max(peakWorkerRssBytes, result.rssBytes ?? 0);
           componentResults.push({
             relativePath: component.relativePath,
             componentName: componentNameFromPath(component.relativePath),
@@ -1298,6 +1306,7 @@ async function runRepoScenarioRepeat(
       try {
         const result = await executeMeasuredQuery(instance, component);
         outcomeCounts[result.outcome]++;
+        peakWorkerRssBytes = Math.max(peakWorkerRssBytes, result.rssBytes ?? 0);
         componentResults.push({
           relativePath: component.relativePath,
           componentName: componentNameFromPath(component.relativePath),
@@ -1370,6 +1379,8 @@ async function runRepoScenarioRepeat(
       componentResults,
       outcomeCounts,
       slaCount: buildSlaCount(componentResults, args.slaMs),
+      peakWorkerRssMb:
+        peakWorkerRssBytes > 0 ? Math.round((peakWorkerRssBytes / 1024 / 1024) * 10) / 10 : null,
       deviationTotals,
       stats: summarizeLatencySeries(
         (() => {

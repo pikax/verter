@@ -52,6 +52,9 @@ export interface MetaUiBenchmarkRunRepeat {
   outcomeCounts: Record<"success" | "degraded" | "query_error" | "crash", number>;
   /// SLA bucket counts for the regression gate.
   slaCount: MetaUiSlaCount;
+  /// Peak worker-process RSS observed across the repeat's queries (MB).
+  /// `null` when the backend worker does not report memory.
+  peakWorkerRssMb?: number | null;
   deviationTotals: {
     exactMatches: number;
     totalMissing: number;

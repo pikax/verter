@@ -25,6 +25,8 @@ interface MeasuredQueryResult {
   artifact: NormalizedMetaArtifact;
   latencyMs: number;
   outcome: MetaUiOutcomeBucket;
+  /** Worker-process RSS right after the query (bytes). */
+  rssBytes: number;
 }
 
 type ParentMessage =
@@ -118,5 +120,6 @@ async function executeMeasuredQuery(
     artifact,
     latencyMs,
     outcome,
+    rssBytes: process.memoryUsage().rss,
   };
 }
