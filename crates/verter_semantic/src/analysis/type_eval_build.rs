@@ -1070,8 +1070,9 @@ fn lower_named_interface_parts(
         .map(|tp| lower_type_param_decls(tp, source))
         .unwrap_or_default();
 
-    // Build the body from the interface members
-    let mut members = Vec::new();
+    // Build the body from the interface members. Pre-sized to the AST
+    // member count — a tight upper bound (only unloweable members drop).
+    let mut members = Vec::with_capacity(decl.body.body.len());
     for sig in &decl.body.body {
         if let Some(m) = lower_interface_member(sig, source) {
             members.push(m);
@@ -1084,7 +1085,9 @@ fn lower_named_interface_parts(
     }));
 
     if !decl.extends.is_empty() {
-        let mut parts = Vec::new();
+        // One part per heritage clause (non-identifier clauses drop) plus
+        // the own-member object pushed after the loop.
+        let mut parts = Vec::with_capacity(decl.extends.len() + 1);
         for heritage in &decl.extends {
             let base_name = match &heritage.expression {
                 Expression::Identifier(id) => id.name.to_string(),
