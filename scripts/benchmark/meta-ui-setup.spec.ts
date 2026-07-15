@@ -1,5 +1,10 @@
 /**
  * @ai-generated - Verifies setup-script argument parsing, project resolution, and prepared-repo validation.
+ *
+ * Tier 6 §8.2 / T9.3 — `--ref=<sha>` is now MANDATORY. The
+ * floating-branch fallback was retired; tests pin both the new
+ * required-ref behavior and the porcelain-status detector that
+ * refuses to clobber dirty target worktrees.
  */
 
 import { describe, expect, it } from "vitest";
@@ -8,6 +13,7 @@ import {
   getMetaUiCheckoutCommands,
   getMetaUiInstallStrategies,
   isCommitSha,
+  parseGitStatusPorcelain,
   parseMetaUiSetupArgs,
   resolveMetaUiProject,
   validatePreparedMetaUiRepo,
@@ -24,13 +30,34 @@ describe("resolveMetaUiProject", () => {
 });
 
 describe("parseMetaUiSetupArgs", () => {
-  it("defaults to the integration-test checkout path and no explicit ref", () => {
-    const args = parseMetaUiSetupArgs([], "D:/dev/personal/verter");
+  it("returns the explicit ref, target, and unfrozen-install flag when --ref is provided", () => {
+    const args = parseMetaUiSetupArgs(
+      ["--ref=90a94fb162d532ada26012bfe1ab82adc9217988"],
+      "/work/verter",
+    );
 
-    expect(args.repoRoot).toBe("D:/dev/personal/verter");
-    expect(args.targetRoot).toBe("D:/dev/personal/verter/.integration-tests/repos/nuxt-ui");
-    expect(args.ref).toBeNull();
+    expect(args.repoRoot).toBe("/work/verter");
+    expect(args.targetRoot).toBe("/work/verter/.integration-tests/repos/nuxt-ui");
+    expect(args.ref).toBe("90a94fb162d532ada26012bfe1ab82adc9217988");
     expect(args.allowUnfrozenInstall).toBe(false);
+    expect(args.allowDirtyTarget).toBe(false);
+  });
+
+  it("Tier 6 §8.2 / T9.3 — throws when --ref is absent (strict-ref enforcement)", () => {
+    // Discriminator: pre-T9.3 the parser silently fell back to the
+    // floating branch HEAD. Post-T9.3 it MUST throw.
+    expect(() => parseMetaUiSetupArgs([], "/work/verter")).toThrow(/`--ref=.*` is required/);
+  });
+
+  it("Tier 6 §8.2 / T9.3 — throws when --ref is empty (`--ref=`)", () => {
+    expect(() => parseMetaUiSetupArgs(["--ref="], "/work/verter")).toThrow(
+      /`--ref=.*` is required/,
+    );
+  });
+
+  it("Tier 6 §8.2 / T9.3 — surfaces the --allow-dirty-target opt-in", () => {
+    const args = parseMetaUiSetupArgs(["--ref=v0.5.0", "--allow-dirty-target"], "/work/verter");
+    expect(args.allowDirtyTarget).toBe(true);
   });
 
   it("requires explicit opt-in before allowing an unfrozen install fallback", () => {
@@ -69,6 +96,14 @@ describe("getMetaUiCheckoutCommands", () => {
       ["checkout", "--detach", "FETCH_HEAD"],
     ]);
   });
+
+  it("Tier 6 §8.2 / T9.3 — refuses to build commands without an explicit ref", () => {
+    // Discriminator: defensive guard in case a future caller bypasses
+    // `parseMetaUiSetupArgs`. Pre-T9.3 the function returned a
+    // floating-branch checkout list; post-T9.3 it throws.
+    expect(() => getMetaUiCheckoutCommands(project, {})).toThrow(/`ref` is required/);
+    expect(() => getMetaUiCheckoutCommands(project, { ref: null })).toThrow(/`ref` is required/);
+  });
 });
 
 describe("isCommitSha", () => {
@@ -88,5 +123,42 @@ describe("validatePreparedMetaUiRepo", () => {
           path === "D:/repo/src/runtime/components" || path === "D:/repo/.nuxt/tsconfig.app.json",
       }),
     ).toThrow(/tsconfig\.shared\.json/i);
+  });
+});
+
+describe("Tier 6 §8.2 / T9.3 — parseGitStatusPorcelain", () => {
+  // Discriminator: characterize the pure parser the
+  // setup-meta-ui.mjs cleanliness check uses. The parser must
+  // surface every dirty entry so the caller can refuse to clobber.
+  it("returns an empty array for a clean worktree", () => {
+    expect(parseGitStatusPorcelain("")).toEqual([]);
+    expect(parseGitStatusPorcelain("\n")).toEqual([]);
+  });
+
+  it("parses staged-modified, untracked, and deleted entries", () => {
+    const out = [
+      " M src/runtime/components/Button.vue",
+      "?? new-file.txt",
+      " D removed-file.json",
+      "M  staged-modification.ts",
+    ].join("\n");
+    expect(parseGitStatusPorcelain(out)).toEqual([
+      { xy: " M", path: "src/runtime/components/Button.vue" },
+      { xy: "??", path: "new-file.txt" },
+      { xy: " D", path: "removed-file.json" },
+      { xy: "M ", path: "staged-modification.ts" },
+    ]);
+  });
+
+  it("strips trailing CR characters from porcelain output (Windows compat)", () => {
+    const crlf = " M src/file.ts\r\n?? added.ts\r\n";
+    expect(parseGitStatusPorcelain(crlf)).toEqual([
+      { xy: " M", path: "src/file.ts" },
+      { xy: "??", path: "added.ts" },
+    ]);
+  });
+
+  it("ignores malformed short lines (defensive)", () => {
+    expect(parseGitStatusPorcelain("ab")).toEqual([]);
   });
 });

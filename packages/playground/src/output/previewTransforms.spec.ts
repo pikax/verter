@@ -2,10 +2,11 @@
  * @ai-generated - Tests for preview transform functions.
  * These test the conversion of ES module imports/exports to window.__modules__ assignments.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   transformImportList,
   transformForPreview,
+  collectSvelteRuntimeFlags,
   extractLocalImports,
   orderScriptsByDependency,
 } from "./previewTransforms";
@@ -54,6 +55,53 @@ describe("transformForPreview", () => {
       const code = `import { ref } from "vue"`;
       const result = transformForPreview(code, mod);
       expect(result).toBe(`const { ref } = window.Vue`);
+    });
+  });
+
+  describe("Svelte runtime imports", () => {
+    it("collects each required runtime flag exactly once", () => {
+      const code = [
+        `import 'svelte/internal/flags/legacy';`,
+        `import "svelte/internal/flags/async";`,
+        `import 'svelte/internal/flags/legacy';`,
+        `import 'svelte/internal/flags/tracing';`,
+      ].join("\n");
+
+      expect(collectSvelteRuntimeFlags(code)).toEqual(["legacy", "async", "tracing"]);
+    });
+
+    it("removes runtime-flag imports after the iframe preloads them", () => {
+      const code = `import 'svelte/internal/flags/legacy';\nconst value = 1;`;
+      expect(transformForPreview(code, mod)).toBe(`\nconst value = 1;`);
+    });
+
+    it("binds the official namespace import to the preloaded client runtime", () => {
+      const code = `import * as $ from 'svelte/internal/client'`;
+      expect(transformForPreview(code, mod)).toBe(`const $ = window.SvelteInternalClient`);
+    });
+
+    it("removes the disclose-version import after the iframe preloads it", () => {
+      const code = `import 'svelte/internal/disclose-version';\nconst value = 1;`;
+      expect(transformForPreview(code, mod)).toBe(`\nconst value = 1;`);
+    });
+
+    it("executes an official-shaped client module against the preloaded runtime", () => {
+      const fromHtml = vi.fn(() => () => ({ nodeName: "H1" }));
+      const windowObject = {
+        SvelteInternalClient: { from_html: fromHtml },
+        __modules__: { [mod]: {} as { default?: unknown } },
+      };
+      const compiled = [
+        `import 'svelte/internal/disclose-version';`,
+        `import * as $ from 'svelte/internal/client';`,
+        `var root = $.from_html(\`<h1>hello</h1>\`);`,
+        `export default function App($$anchor) { return root(); }`,
+      ].join("\n");
+
+      Function("window", transformForPreview(compiled, mod))(windowObject);
+
+      expect(fromHtml).toHaveBeenCalledWith("<h1>hello</h1>");
+      expect(typeof windowObject.__modules__[mod].default).toBe("function");
     });
   });
 

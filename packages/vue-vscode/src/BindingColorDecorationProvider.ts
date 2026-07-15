@@ -12,6 +12,7 @@ import { LanguageClient } from "vscode-languageclient/node";
 import { RequestType, type PatchClient } from "@verter/language-shared";
 import type { AnalyzedBinding, AnalyzedMacro, FileAnalysisSnapshot } from "@verter/language-shared";
 import { utf16OffsetToPosition } from "./utils";
+import { isFrameworkCarrierLanguageId } from "./frameworkWiring";
 
 /** Binding category for decoration coloring. */
 type BindingCategory =
@@ -262,7 +263,7 @@ export class BindingColorDecorationProvider implements Disposable {
 
   private async updateActiveEditor(): Promise<void> {
     const editor = window.activeTextEditor;
-    if (!editor || editor.document.languageId !== "vue" || !this.enabled) {
+    if (!editor || !isFrameworkCarrierLanguageId(editor.document.languageId) || !this.enabled) {
       this.clearAllDecorations();
       return;
     }

@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "description": "Benign-divergence allowlist v1. Each entry reclassifies a matched finding to S4 and records the hit (a match is never silently dropped). An entry matches by exact `fingerprint` and/or a `match` subset of the dedupe key {fixture, scenario, signal, divergenceKind, semanticDimension, normalizedRootCauseHint}; at least one of `fingerprint`/`match` is required. Entry shape: { \"id\": string, \"reason\": string, \"fingerprint\"?: string, \"match\"?: Partial<dedupeKey> }. Entries are populated from a real run; this v1 ships intentionally empty.",
+  "entries": []
+}

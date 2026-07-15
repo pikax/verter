@@ -57,8 +57,69 @@ function shouldKeepOwner(owner, ownerFilter) {
   return !ownerFilter || owner.includes(ownerFilter);
 }
 
+function summarizeStructuredJson(summaryPath) {
+  const summary = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+  const results = summary.results ?? [];
+
+  console.log("# Corpus Trace Summary (structured)");
+  console.log(`generated: ${new Date(summary.generated_at).toISOString()}`);
+  console.log(`components: ${results.length}`);
+  console.log(`ok: ${results.filter((r) => r.status === "ok").length}`);
+  console.log(`failed: ${results.filter((r) => r.status !== "ok").length}`);
+  console.log("");
+
+  // Top slowest by wall time
+  const byWall = [...results]
+    .filter((r) => r.wall_ms != null)
+    .sort((a, b) => b.wall_ms - a.wall_ms)
+    .slice(0, 20);
+  console.log("## Top 20 by wall_ms");
+  for (const r of byWall) {
+    console.log(
+      `  ${r.wall_ms}ms\t${r.status}\t${r.component}\tquery=${r.query_ms_from_stdout ?? "?"}ms`,
+    );
+  }
+  console.log("");
+
+  // Failures
+  const failures = results.filter((r) => r.status !== "ok");
+  if (failures.length > 0) {
+    console.log("## Failures");
+    for (const r of failures) {
+      console.log(
+        `  ${r.status}\t${r.component}\texit=${r.exit_code}\tsignal=${r.signal}\twall=${r.wall_ms}ms`,
+      );
+    }
+    console.log("");
+  }
+
+  // Status distribution
+  const statusCounts = {};
+  for (const r of results) {
+    statusCounts[r.status] = (statusCounts[r.status] ?? 0) + 1;
+  }
+  console.log("## Status distribution");
+  for (const [status, count] of Object.entries(statusCounts).sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${count}\t${status}`);
+  }
+}
+
 function main() {
   const { tracePath, ownerFilter, limit } = parseArgs(process.argv.slice(2));
+
+  // If the path is a summary.json (structured result), use the structured summarizer
+  if (tracePath.endsWith("summary.json") || tracePath.endsWith(".json")) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(tracePath, "utf8"));
+      if (parsed.results && Array.isArray(parsed.results)) {
+        summarizeStructuredJson(tracePath);
+        return;
+      }
+    } catch {
+      // Not valid JSON or not structured — fall through to trace log parser
+    }
+  }
+
   const contents = fs.readFileSync(tracePath, "utf8");
   const lines = contents.split(/\r?\n/);
 
@@ -71,8 +132,6 @@ function main() {
   const typeSourceMissCounts = new Map();
   const typeDependencyHitCounts = new Map();
   const typeDependencyMissCounts = new Map();
-  const hostDependencyHitCounts = new Map();
-  const hostDependencyMissCounts = new Map();
 
   for (const line of lines) {
     if (!line.includes("[verter-meta-trace]")) {
@@ -147,21 +206,6 @@ function main() {
       }
       continue;
     }
-
-    if (name === "cached_dependency_resolution_in_view_result") {
-      const owner = extractDetailValue(detail, "owner");
-      const importSource = extractDetailValue(detail, "import");
-      const source = extractDetailValue(detail, "source");
-      const key = `${owner} -> ${importSource}`;
-      if (!shouldKeepOwner(owner, ownerFilter)) {
-        continue;
-      }
-      if (source === "miss") {
-        increment(hostDependencyMissCounts, key);
-      } else {
-        increment(hostDependencyHitCounts, `${key} [${source}]`);
-      }
-    }
   }
 
   const sections = [
@@ -174,8 +218,6 @@ function main() {
     ["Type Resolution Source Cache Misses", typeSourceMissCounts],
     ["Type Resolution Dependency Cache Hits", typeDependencyHitCounts],
     ["Type Resolution Dependency Cache Misses", typeDependencyMissCounts],
-    ["Host Dependency Resolution Hits", hostDependencyHitCounts],
-    ["Host Dependency Resolution Misses", hostDependencyMissCounts],
   ];
 
   console.log(`# Trace Summary`);

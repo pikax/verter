@@ -3,8 +3,13 @@ const fs = require("fs");
 const { parse, compileScript, compileTemplate } = require("@vue/compiler-sfc");
 const { VerterHost } = require(path.join(process.cwd(), "packages/native/index.js"));
 
-const filePath =
-  "D:/dev/github/verter-test-repos/ant-design-vue/components/form/demo/dynamic-form-item.vue";
+// Pass the .vue file to trace as the first CLI arg, e.g.
+//   node scripts/trace-norm.cjs path/to/component.vue
+const filePath = process.argv[2];
+if (!filePath) {
+  console.error("trace-norm: pass a .vue file path as the first argument");
+  process.exit(1);
+}
 const source = fs.readFileSync(filePath, "utf-8");
 const filename = path.basename(filePath);
 

@@ -269,6 +269,45 @@ suite(`Hover [${FIXTURE_NAME}]`, function () {
     expectNoHoverDegrade(content, "event handler hover");
   });
 
+  test("hover on native @click keeps Vue source event label", async function () {
+    // F1: hovering the native event-name token must keep the Vue source syntax
+    // (`@click`) as the hover label, never leak the generated JSX prop (`onClick`).
+    const pos = findPosition(doc, '@click="increment"', 3); // inside `click`, not the handler
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover("@click (native event)", latencyMs);
+    console.log(`    Hover on @click: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "@click hover should exist").to.be.greaterThan(0);
+    const content = hoverText(hovers[0]);
+    expect(content, "hover should use Vue event syntax").to.include("@click");
+    expect(content, "hover must not expose generated TSX prop").to.not.include("onClick");
+  });
+
+  test("hover on event modifier describes the modifier", async function () {
+    // F2: hovering the `.prevent` modifier token returns a source-owned modifier
+    // hover naming `.prevent` (range covers the leading dot) and describing it,
+    // even though the modifier is deleted from the generated TSX.
+    const pos = findPosition(doc, "@click.prevent=", "@click.".length); // inside `prevent`
+    if (!pos) {
+      this.skip();
+      return;
+    }
+
+    const { hovers, latencyMs } = await measureHover(doc.uri, pos);
+    getTimer().recordHover(".prevent (event modifier)", latencyMs);
+    console.log(`    Hover on .prevent: ${latencyMs}ms, ${hovers.length} result(s)`);
+
+    expect(hovers.length, "event modifier hover should exist").to.be.greaterThan(0);
+    const content = hoverText(hovers[0]);
+    expect(content, "modifier hover should name .prevent").to.include(".prevent");
+    expect(content, "modifier hover should describe preventDefault").to.include("preventDefault");
+  });
+
   test("hover on slot outlet tag stays meaningful", async function () {
     if (FIXTURE_NAME !== "single-project") {
       console.log("    N/A");

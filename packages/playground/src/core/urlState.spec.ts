@@ -96,19 +96,22 @@ describe("urlState", () => {
       expect(result?.verterVersion).toBe("release:0.0.1");
     });
 
-    it("preserves typeChecker", () => {
-      const state = makeState({ typeChecker: "tsgo" });
+    it("preserves the framework language pin", () => {
+      const state = makeState({
+        files: { "App.svelte": "<h1>hi</h1>" },
+        activeFile: "App.svelte",
+        language: "svelte",
+      });
       serializeToHash(state);
       const result = deserializeFromHash();
-      expect(result?.typeChecker).toBe("tsgo");
+      expect(result?.language).toBe("svelte");
     });
 
-    it("omits typeChecker when tsc (default)", () => {
-      const state = makeState({ typeChecker: "tsc" });
+    it("omits the language pin when in Auto (undefined)", () => {
+      const state = makeState();
       serializeToHash(state);
       const result = deserializeFromHash();
-      // When tsc, it's not serialized, so deserialization returns undefined
-      expect(result?.typeChecker).toBeUndefined();
+      expect(result?.language).toBeUndefined();
     });
 
     it("roundtrips multi-file state with import map and versions", () => {
@@ -249,23 +252,23 @@ describe("urlState", () => {
       expect(flat["_isProduction"]).toBe("true");
     });
 
-    it("serializes _typeChecker when not tsc", () => {
-      const state = makeState({ typeChecker: "tsgo" });
+    it("serializes _language when pinned", () => {
+      const state = makeState({ language: "svelte" });
       serializeToHash(state);
       const hash = location.hash.slice(1);
       const flat = decodeHash(hash);
-      expect(flat["_typeChecker"]).toBe("tsgo");
+      expect(flat["_language"]).toBe("svelte");
     });
 
-    it("omits _typeChecker when tsc (default)", () => {
-      const state = makeState({ typeChecker: "tsc" });
+    it("omits _language when in Auto (undefined)", () => {
+      const state = makeState();
       serializeToHash(state);
       const hash = location.hash.slice(1);
       const flat = decodeHash(hash);
-      expect(flat["_typeChecker"]).toBeUndefined();
+      expect(flat["_language"]).toBeUndefined();
     });
 
-    it("omits _typeChecker when undefined", () => {
+    it("never serializes _typeChecker (the type checker is the single browser capability)", () => {
       const state = makeState();
       serializeToHash(state);
       const hash = location.hash.slice(1);
@@ -396,22 +399,35 @@ describe("urlState", () => {
       expect(result!.outputMode).toBe("js");
     });
 
-    it("extracts _typeChecker metadata", () => {
+    it("extracts _language metadata", () => {
       const flat: Record<string, string> = {
-        "App.vue": "",
-        _typeChecker: "tsgo",
+        "App.svelte": "<h1>hi</h1>",
+        _language: "svelte",
       };
       window.location.hash = `#${encodeFlat(flat)}`;
       const result = deserializeFromHash();
-      expect(result!.typeChecker).toBe("tsgo");
-      expect(result!.files["_typeChecker"]).toBeUndefined();
+      expect(result!.language).toBe("svelte");
+      expect(result!.files["_language"]).toBeUndefined();
     });
 
-    it("returns undefined typeChecker when _typeChecker is absent", () => {
+    it("returns undefined language when _language is absent", () => {
       const flat: Record<string, string> = { "App.vue": "" };
       window.location.hash = `#${encodeFlat(flat)}`;
       const result = deserializeFromHash();
-      expect(result!.typeChecker).toBeUndefined();
+      expect(result!.language).toBeUndefined();
+    });
+
+    it("ignores a legacy _typeChecker metadata key (never a file, never a selection)", () => {
+      // Old shared URLs may carry a retired engine selection; it is skipped
+      // as metadata — never surfaced as a user file or an engine choice.
+      const flat: Record<string, string> = {
+        "App.vue": "",
+        _typeChecker: "some-retired-engine",
+      };
+      window.location.hash = `#${encodeFlat(flat)}`;
+      const result = deserializeFromHash();
+      expect((result as unknown as Record<string, unknown>).typeChecker).toBeUndefined();
+      expect(result!.files["_typeChecker"]).toBeUndefined();
     });
 
     it("extracts _isProduction and _ssr from flat object", () => {

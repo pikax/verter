@@ -5,7 +5,7 @@
  * evaluator into the public TypeDescriptor format used by adapters and consumers.
  */
 
-import type { TypeDescriptor } from "./type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 import {
   primitive,
   literal,
@@ -17,8 +17,11 @@ import {
   func,
   typeParameter,
   ref as typeRef,
+  recursiveRef,
+  indexedAccess,
   unknown,
-} from "./type-ir.js";
+  syntheticSlotBinding,
+} from "@verter/type-ir";
 import {
   createGraphTypeExprRef,
   DecodedTypeGraph,
@@ -44,10 +47,14 @@ import {
   NODE_OBJECT,
   NODE_PARENTHESIZED,
   NODE_PRIMITIVE,
+  NODE_RECURSIVE_REF,
   NODE_REF,
   NODE_REST,
+  NODE_SYNTHETIC_SLOT_BINDING,
   NODE_TEMPLATE_LITERAL,
   NODE_TUPLE,
+  SYNTHETIC_CARRIER_SURFACE_BINDING,
+  SYNTHETIC_CARRIER_SURFACE_SLOT_BINDING,
   NODE_TYPE_OF,
   NODE_TYPE_PARAMETER,
   NODE_UNION,
@@ -71,8 +78,23 @@ export interface NativeExpandedField {
   name: string;
   type: NativeTypeExpr;
   optional?: boolean;
-  completeness: "exact" | "partial";
+  exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+  executionStatus: "completed" | "cancelled" | "interrupted" | "hardStop";
   diagnostics: NativeExpansionDiagnostic[];
+  /**
+   * Shallow lowered typed form carried alongside `type` (post-expansion).
+   * Surfaces the bare annotation expression the user wrote
+   * (e.g. `Ref { name: "ImportedAlias" }`) so consumers that need the
+   * syntactic shape do not have to reparse the display `rawType`. `None`
+   * when the analyzer's shallow source was absent.
+   */
+  shallowTypeExpr?: NativeTypeExpr;
+  /**
+   * Scope of `shallowTypeExpr`: canonical_id of the file whose OXC parse
+   * produced the shallow expression. Pairing invariant:
+   * `shallowTypeExpr` is set iff `shallowTypeExprScope` is set.
+   */
+  shallowTypeExprScope?: string;
 }
 
 /** Mirrors `ExpandedMacroProps` from Rust. */
@@ -84,7 +106,8 @@ export interface NativeExpandedMacroProps {
 /** Mirrors `ExpansionResult<T>` from Rust. */
 export interface NativeExpansionResult<T> {
   value: T;
-  completeness: "exact" | "partial";
+  exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+  executionStatus: "completed" | "cancelled" | "interrupted" | "hardStop";
   diagnostics: NativeExpansionDiagnostic[];
 }
 
@@ -120,6 +143,13 @@ export type NativeEvaluatedField = NativeExpandedField;
 export type NativeEvaluatedMacroProps = NativeExpandedMacroProps;
 
 /**
+ * The native (raw-JSON) mapped-type modifier as the Rust producer serializes it
+ * (`MappedModifier` -> `modifier_str`): `"none"` (no modifier), `"add"` (`+?` /
+ * `+readonly`), or `"remove"` (`-?` / `-readonly`).
+ */
+export type MappedModifierName = "none" | "add" | "remove";
+
+/**
  * Mirrors the Rust `TypeExpr` enum serialized with `#[serde(tag = "kind")]`.
  *
  * Each variant has a `kind` field matching the Rust enum variant name (camelCase).
@@ -141,7 +171,29 @@ export type NativeTypeExpr =
       returnType?: NativeTypeExpr;
       typeParameters?: NativeTypeParameter[];
     }
+  | {
+      // A bare constructor type (`new (...) => R`). Rust's `to_json_value`
+      // emits the identical payload as `function` with `kind:
+      // "constructorType"`. The bridge maps it function-like — the
+      // constructor-vs-function distinction is consumed in Rust before the
+      // wire (Vue runtime-ctor reducer + wire-graph builder).
+      kind: "constructorType";
+      parameters: NativeFunctionParam[];
+      returnType?: NativeTypeExpr;
+      typeParameters?: NativeTypeParameter[];
+    }
   | { kind: "ref"; name: string; typeArguments: NativeTypeExpr[] }
+  | {
+      kind: "recursiveRef";
+      name: string;
+      typeArguments: NativeTypeExpr[];
+      conditionalContext: Array<{
+        branch: "true" | "false";
+        decided: boolean;
+        check: NativeTypeExpr;
+        extends: NativeTypeExpr;
+      }>;
+    }
   | {
       kind: "typeParameter";
       name: string;
@@ -158,12 +210,34 @@ export type NativeTypeExpr =
       trueType: NativeTypeExpr;
       falseType: NativeTypeExpr;
     }
-  | { kind: "mapped"; parameter: string; source: NativeTypeExpr; value: NativeTypeExpr }
+  | {
+      kind: "mapped";
+      parameter: string;
+      source: NativeTypeExpr;
+      value: NativeTypeExpr;
+      // The Rust producer (`TypeExpr::Mapped` -> `to_json_value`) emits the
+      // optional / readonly modifier (`"none"` / `"add"` / `"remove"`) and the
+      // `as N` key-remap clause (`nameType`, a nested expr or `null`). They are
+      // optional on the wire — an absent field means "no-op" (`MappedModifier::
+      // None` / no remap). `readMappedInfo` reads them so a modifier- or
+      // remap-bearing native mapped bails out of the `Record` recovery.
+      optional?: MappedModifierName;
+      readonly?: MappedModifierName;
+      nameType?: NativeTypeExpr | null;
+    }
   | { kind: "templateLiteral"; quasis: string[]; expressions: NativeTypeExpr[] }
   | { kind: "parenthesized"; inner: NativeTypeExpr }
   | { kind: "unknown"; raw: string }
   | { kind: "infer"; name: string }
-  | { kind: "rest"; inner: NativeTypeExpr };
+  | { kind: "rest"; inner: NativeTypeExpr }
+  | {
+      kind: "syntheticSlotBinding";
+      scopeCanonicalId: string;
+      surfaceKind: "slotBinding" | "binding";
+      slotName?: string;
+      bindingName: string;
+      valueNode: string;
+    };
 
 export type NativeTypeExprLike = NativeTypeExpr | GraphTypeExprRef;
 
@@ -280,12 +354,24 @@ export function typeExprToDescriptor(
     case "array":
       return array(typeExprToDescriptor(expr.element, nativeRegistry, visiting, graphVisiting));
 
-    case "tuple":
-      return tuple(
-        expr.elements.map((e) =>
-          typeExprToDescriptor(e.ty, nativeRegistry, visiting, graphVisiting),
-        ),
+    case "tuple": {
+      const elements = expr.elements.map((e) =>
+        typeExprToDescriptor(e.ty, nativeRegistry, visiting, graphVisiting),
       );
+      // Preserve per-element labels. Producers emit `label: string | null`
+      // (Rust `TupleElement.label: Option<String>`); we mirror that across the
+      // bridge so renderers can produce `[label: type]` output instead of the
+      // pre-fix `[{ label: type }]` shape (which leaked the typed schema into
+      // user-visible display text).
+      const labels = expr.elements.map((e) => e.label ?? null);
+      const t = tuple(elements);
+      // Attach `labels` only when at least one position has a label — the
+      // schema rule is "absent labels === all anonymous".
+      if (labels.some((l) => l !== null)) {
+        return { ...t, labels };
+      }
+      return t;
+    }
 
     case "object": {
       const props = expr.properties
@@ -329,7 +415,13 @@ export function typeExprToDescriptor(
       });
     }
 
-    case "function": {
+    // `function` and `constructorType` share the identical native payload
+    // (parameters / returnType / typeParameters) and both map to a function-
+    // like descriptor. The bare-constructor-vs-function distinction is
+    // consumed in Rust before this bridge, so a `constructorType` node is
+    // treated function-like rather than left as an unrecognised `unknown`.
+    case "function":
+    case "constructorType": {
       const params = expr.parameters.map((p) => ({
         name: p.name ?? "",
         type: typeExprToDescriptor(p.ty, nativeRegistry, visiting, graphVisiting),
@@ -347,6 +439,16 @@ export function typeExprToDescriptor(
 
     case "ref":
       if (expr.typeArguments.length > 0) {
+        const resolved = resolveRegistryRefDescriptor(
+          expr.name,
+          expr.typeArguments,
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+        if (resolved) {
+          return resolved;
+        }
         return typeRef(
           expr.name,
           expr.typeArguments.map((typeArgument) =>
@@ -355,6 +457,20 @@ export function typeExprToDescriptor(
         );
       }
       return typeRef(expr.name);
+
+    case "recursiveRef":
+      return recursiveRef(
+        expr.name,
+        expr.typeArguments.map((typeArgument) =>
+          typeExprToDescriptor(typeArgument, nativeRegistry, visiting, graphVisiting),
+        ),
+        expr.conditionalContext.map((frame) => ({
+          branch: frame.branch,
+          decided: frame.decided,
+          check: typeExprToDescriptor(frame.check, nativeRegistry, visiting, graphVisiting),
+          extends: typeExprToDescriptor(frame.extends, nativeRegistry, visiting, graphVisiting),
+        })),
+      );
 
     case "typeParameter":
       return nativeTypeParameterToDescriptor(expr, nativeRegistry, visiting, graphVisiting);
@@ -394,7 +510,10 @@ export function typeExprToDescriptor(
       if (resolved) {
         return resolved;
       }
-      return unknown(nativeTypeExprToString(expr));
+      return indexedAccess(
+        typeExprToDescriptor(expr.object, nativeRegistry, visiting, graphVisiting),
+        typeExprToDescriptor(expr.index, nativeRegistry, visiting, graphVisiting),
+      );
     }
 
     case "parenthesized":
@@ -402,6 +521,15 @@ export function typeExprToDescriptor(
 
     case "unknown":
       return unknown(expr.raw);
+
+    case "syntheticSlotBinding":
+      return syntheticSlotBinding(
+        expr.scopeCanonicalId,
+        expr.surfaceKind,
+        expr.bindingName,
+        expr.valueNode,
+        expr.slotName,
+      );
 
     default:
       return unknown("unrecognized");
@@ -642,6 +770,8 @@ function collectDescriptorTypeParameterNames(descriptor: TypeDescriptor): string
       case "literal":
       case "enum":
       case "unknown":
+      case "syntheticSlotBinding":
+        // Leaf kinds carry no nested `TypeDescriptor` children to walk.
         return;
       case "union":
       case "intersection":
@@ -670,6 +800,19 @@ function collectDescriptorTypeParameterNames(descriptor: TypeDescriptor): string
       case "ref":
         current.typeArguments?.forEach(visit);
         return;
+      case "indexedAccess":
+        // A mapped key parameter can hide in EITHER position of an indexed
+        // access (`T[P]` is `{ objectType: T, indexType: P }`); walk both.
+        visit(current.objectType);
+        visit(current.indexType);
+        return;
+      case "recursiveRef":
+        current.typeArguments.forEach(visit);
+        current.conditionalContext.forEach((frame) => {
+          visit(frame.check);
+          visit(frame.extends);
+        });
+        return;
       case "typeParameter":
         if (!seen.has(current.name)) {
           seen.add(current.name);
@@ -687,6 +830,81 @@ function collectDescriptorTypeParameterNames(descriptor: TypeDescriptor): string
 
   visit(descriptor);
   return names;
+}
+
+/**
+ * Structural predicate: does `descriptor` contain an `unknown` node anywhere in
+ * its tree?
+ *
+ * An `unknown(...)` is the bridge's residue for a type it could NOT fully
+ * understand — e.g. an unsupported operator (`conditional` / `template literal`
+ * / `infer` / `rest`) that may itself reference a mapped key parameter the
+ * type-parameter collector cannot see through. The open-key-domain `Record`
+ * recovery uses this to refuse a value carrying any such residue: `Record<K, V>`
+ * is only sound when `V` is fully understood AND provably key-independent.
+ */
+function descriptorContainsUnknown(descriptor: TypeDescriptor): boolean {
+  switch (descriptor.kind) {
+    case "unknown":
+      return true;
+    case "primitive":
+    case "literal":
+    case "enum":
+    case "syntheticSlotBinding":
+      return false;
+    case "typeParameter":
+      // A type parameter is NOT a leaf: an `unknown(...)` residue (e.g. an
+      // unsupported operator such as a conditional `P extends … ? … : …`) can
+      // hide inside its `constraint` or `default` — `<Q = P extends X ? A : B>`
+      // lowers `Q.default` to `unknown(...)`. Recurse both sub-positions so the
+      // open-key-domain `Record` recovery refuses any value carrying such
+      // residue. (The `function` branch enumerates each `typeParameters` entry
+      // but relies on this case to inspect its constraint/default.)
+      return (
+        (descriptor.constraint !== undefined && descriptorContainsUnknown(descriptor.constraint)) ||
+        (descriptor.default !== undefined && descriptorContainsUnknown(descriptor.default))
+      );
+    case "union":
+    case "intersection":
+      return descriptor.types.some(descriptorContainsUnknown);
+    case "array":
+      return descriptorContainsUnknown(descriptor.element);
+    case "tuple":
+      return descriptor.elements.some(descriptorContainsUnknown);
+    case "object":
+      return (
+        descriptor.properties.some((property) => descriptorContainsUnknown(property.type)) ||
+        (descriptor.indexSignatures?.some(
+          (signature) =>
+            descriptorContainsUnknown(signature.keyType) ||
+            descriptorContainsUnknown(signature.valueType),
+        ) ??
+          false) ||
+        (descriptor.callSignatures?.some(descriptorContainsUnknown) ?? false) ||
+        (descriptor.constructSignatures?.some(descriptorContainsUnknown) ?? false)
+      );
+    case "function":
+      return (
+        descriptor.parameters.some((parameter) => descriptorContainsUnknown(parameter.type)) ||
+        descriptorContainsUnknown(descriptor.returnType) ||
+        (descriptor.typeParameters?.some(descriptorContainsUnknown) ?? false)
+      );
+    case "ref":
+      return descriptor.typeArguments?.some(descriptorContainsUnknown) ?? false;
+    case "indexedAccess":
+      return (
+        descriptorContainsUnknown(descriptor.objectType) ||
+        descriptorContainsUnknown(descriptor.indexType)
+      );
+    case "recursiveRef":
+      return (
+        descriptor.typeArguments.some(descriptorContainsUnknown) ||
+        descriptor.conditionalContext.some(
+          (frame) =>
+            descriptorContainsUnknown(frame.check) || descriptorContainsUnknown(frame.extends),
+        )
+      );
+  }
 }
 
 function maskTypeParameterBindings(
@@ -722,10 +940,16 @@ function substituteDescriptorTypeParameters(
       );
     case "array":
       return array(substituteDescriptorTypeParameters(descriptor.element, bindings));
-    case "tuple":
-      return tuple(
+    case "tuple": {
+      const t = tuple(
         descriptor.elements.map((element) => substituteDescriptorTypeParameters(element, bindings)),
       );
+      // Preserve labels through type-parameter substitution.
+      if (descriptor.labels) {
+        return { ...t, labels: descriptor.labels };
+      }
+      return t;
+    }
     case "object":
       return object(
         descriptor.properties.map((property) => ({
@@ -787,6 +1011,18 @@ function substituteDescriptorTypeParameters(
           substituteDescriptorTypeParameters(typeArgument, bindings),
         ),
       );
+    case "recursiveRef":
+      return recursiveRef(
+        descriptor.name,
+        descriptor.typeArguments.map((typeArgument) =>
+          substituteDescriptorTypeParameters(typeArgument, bindings),
+        ),
+        descriptor.conditionalContext.map((frame) => ({
+          ...frame,
+          check: substituteDescriptorTypeParameters(frame.check, bindings),
+          extends: substituteDescriptorTypeParameters(frame.extends, bindings),
+        })),
+      );
     case "typeParameter": {
       const bound = bindings.get(descriptor.name);
       if (bound) {
@@ -800,6 +1036,15 @@ function substituteDescriptorTypeParameters(
       }
       return descriptor;
     }
+    case "indexedAccess":
+      return indexedAccess(
+        substituteDescriptorTypeParameters(descriptor.objectType, bindings),
+        substituteDescriptorTypeParameters(descriptor.indexType, bindings),
+      );
+    case "syntheticSlotBinding":
+      // Synthetic carriers are inert terminals — no type-parameter bindings
+      // can apply through them.
+      return descriptor;
   }
 }
 
@@ -1115,7 +1360,11 @@ function resolveMappedDescriptor(
 
   const entries = resolveFiniteSourceEntries(mapped.source, registry, visiting, graphVisiting);
   if (!entries || entries.length === 0) {
-    return undefined;
+    // The source key domain is not a finite enumeration (e.g. `string`). A
+    // homomorphic mapping over an open `Record`-key domain is the
+    // `Record<K, V>` alias — recover it instead of degrading to
+    // `unknown("mapped")`.
+    return resolveOpenKeyDomainMappedDescriptor(mapped, registry, visiting, graphVisiting);
   }
 
   return object(
@@ -1132,6 +1381,111 @@ function resolveMappedDescriptor(
       optional: applyMappedOptionalModifier(entry.optional, mapped.optionalModifier),
     })),
   );
+}
+
+/**
+ * Recover the `Record<K, V>` alias for a mapped type `{ [P in K]: V }` whose
+ * key domain `K` is OPEN (no finite key enumeration).
+ *
+ * `Record<K, V>` is defined as `{ [P in K]: V }` where the key `K` is a
+ * `Record`-key primitive (`string` / `number` / `symbol`, or a union of those)
+ * and the value `V` does not reference the mapped parameter `P`. When the
+ * native producer surfaces `Record<string, any>` in its expanded mapped form,
+ * reconstruct the alias so the compat display layer renders
+ * `Record<string, any>` (matching `vue-component-meta`) rather than the lossy
+ * `unknown("mapped")` placeholder.
+ *
+ * Any other open-domain shape returns `undefined`, preserving the existing
+ * `unknown` fallback — this is a conservative recovery, not a blanket mapped
+ * collapse. The bail conditions are:
+ * - a key-remapping clause (`{ [P in K as N]: V }`) — `as` FILTERS (`as never`
+ *   drops keys) or TRANSFORMS (`as `prefix_${P}`` renames) the produced key
+ *   domain, so the surface is not a plain `Record<K, V>`;
+ * - an added/removed optional (`+?` / `-?`) OR readonly (`+readonly` /
+ *   `-readonly`) modifier — `Record` expresses neither;
+ * - a non-`Record`-key source (e.g. `keyof <generic>`);
+ * - a value that references the mapped parameter `P` (including `P` nested in
+ *   an indexed access such as `T[P]`); OR
+ * - a value carrying ANY `unknown` residue (e.g. an unsupported operator such
+ *   as a conditional `P extends … ? … : …` that lowered to `unknown(...)` and
+ *   may itself reference `P` in a way the collector cannot observe).
+ */
+function resolveOpenKeyDomainMappedDescriptor(
+  mapped: {
+    parameterName: string;
+    source: NativeTypeExprLike;
+    value: NativeTypeExprLike;
+    optionalModifier: number;
+    readonlyModifier: number;
+    nameTypeNodeId: number;
+  },
+  nativeRegistry: NativeTypeRegistry,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): TypeDescriptor | undefined {
+  // A key-remapping clause (`{ [P in K as N]: V }`) FILTERS (`as never` drops
+  // keys) or TRANSFORMS (`as `prefix_${P}`` renames) the produced key domain,
+  // so the result is NOT a plain `Record<K, V>`. Refuse the recovery whenever a
+  // name-type clause is present — the absent (no-remap) case is the sentinel
+  // `0` (the legacy `NativeTypeExpr` mapped form has no remap and reports `0`).
+  if (mapped.nameTypeNodeId !== 0) {
+    return undefined;
+  }
+  // `Record<K, V>` is a non-modifying homomorphic mapping. An added
+  // (`MappedModifier::Add`, 2) or removed (`MappedModifier::Remove`, 3) optional
+  // OR readonly modifier is a different type that `Record` cannot express.
+  if (mapped.optionalModifier === 2 || mapped.optionalModifier === 3) {
+    return undefined;
+  }
+  if (mapped.readonlyModifier === 2 || mapped.readonlyModifier === 3) {
+    return undefined;
+  }
+
+  const keyDescriptor = typeExprToDescriptor(
+    mapped.source,
+    nativeRegistry,
+    visiting,
+    graphVisiting,
+  );
+  if (!isRecordKeyDomainDescriptor(keyDescriptor)) {
+    return undefined;
+  }
+
+  const valueDescriptor = typeExprToDescriptor(
+    mapped.value,
+    nativeRegistry,
+    visiting,
+    graphVisiting,
+  );
+  // A `Record` value must be FULLY understood. Any `unknown` residue (e.g. an
+  // unsupported operator that lowered to `unknown(...)`) could hide a reference
+  // to the mapped key `P`, so refuse the recovery on any uncertainty.
+  if (descriptorContainsUnknown(valueDescriptor)) {
+    return undefined;
+  }
+  // A `Record` value is fixed — it does not reference the mapped key `P`
+  // anywhere (top-level OR nested, e.g. the index position of `T[P]`).
+  if (collectDescriptorTypeParameterNames(valueDescriptor).includes(mapped.parameterName)) {
+    return undefined;
+  }
+
+  return typeRef("Record", [keyDescriptor, valueDescriptor]);
+}
+
+/**
+ * Structural test: is `descriptor` a valid `Record` key domain — a
+ * `string` / `number` / `symbol` primitive, or a union of those?
+ */
+function isRecordKeyDomainDescriptor(descriptor: TypeDescriptor): boolean {
+  if (descriptor.kind === "primitive") {
+    return (
+      descriptor.name === "string" || descriptor.name === "number" || descriptor.name === "symbol"
+    );
+  }
+  if (descriptor.kind === "union") {
+    return descriptor.types.every(isRecordKeyDomainDescriptor);
+  }
+  return false;
 }
 
 function resolveMappedValueDescriptor(
@@ -1379,7 +1733,7 @@ function resolveFiniteObjectEntries(
           resolveIndexedAccessDescriptor(
             createGraphTypeExprRef(expr.graph, node.objectNodeId),
             createGraphTypeExprRef(expr.graph, node.indexNodeId),
-            nativeRegistry,
+            nativeRegistry ?? new Map<string, NativeTypeExprLike>(),
             visiting,
             graphVisiting,
           ),
@@ -1438,7 +1792,7 @@ function resolveFiniteObjectEntries(
         resolveIndexedAccessDescriptor(
           expr.object,
           expr.index,
-          nativeRegistry,
+          nativeRegistry ?? new Map<string, NativeTypeExprLike>(),
           visiting,
           graphVisiting,
         ),
@@ -1522,7 +1876,7 @@ function resolveFiniteDescriptorEntries(
     }
     case "ref":
       return resolveFiniteDescriptorEntries(
-        resolveRegistryRefDescriptor(
+        resolveDescriptorRefDescriptor(
           descriptor.name,
           descriptor.typeArguments ?? [],
           nativeRegistry,
@@ -1535,6 +1889,49 @@ function resolveFiniteDescriptorEntries(
       );
     default:
       return undefined;
+  }
+}
+
+function resolveDescriptorRefDescriptor(
+  name: string,
+  typeArguments: TypeDescriptor[],
+  nativeRegistry: NativeTypeRegistry | undefined,
+  visiting: Set<string>,
+  graphVisiting: Set<number>,
+): TypeDescriptor | undefined {
+  if (!nativeRegistry || visiting.has(name)) {
+    return undefined;
+  }
+
+  const resolved = nativeRegistry.get(name);
+  if (!resolved) {
+    return undefined;
+  }
+
+  visiting.add(name);
+  try {
+    const base = typeExprToDescriptor(resolved, nativeRegistry, visiting, graphVisiting);
+    if (typeArguments.length === 0) {
+      return base;
+    }
+
+    const parameterNames = collectDescriptorTypeParameterNames(base);
+    if (parameterNames.length === 0) {
+      return base;
+    }
+
+    const bindings = new Map<string, TypeDescriptor>();
+    parameterNames.forEach((parameterName, index) => {
+      const typeArgument = typeArguments[index];
+      if (!typeArgument) {
+        return;
+      }
+      bindings.set(parameterName, typeArgument);
+    });
+
+    return substituteDescriptorTypeParameters(base, bindings);
+  } finally {
+    visiting.delete(name);
   }
 }
 
@@ -1569,6 +1966,8 @@ function readMappedInfo(expr: NativeTypeExprLike):
       source: NativeTypeExprLike;
       value: NativeTypeExprLike;
       optionalModifier: number;
+      readonlyModifier: number;
+      nameTypeNodeId: number;
     }
   | undefined {
   if (isGraphTypeExprRef(expr)) {
@@ -1581,17 +1980,50 @@ function readMappedInfo(expr: NativeTypeExprLike):
       source: createGraphTypeExprRef(expr.graph, node.sourceNodeId),
       value: createGraphTypeExprRef(expr.graph, node.valueNodeId),
       optionalModifier: node.optionalModifier,
+      readonlyModifier: node.readonlyModifier,
+      // The `[P in K as N]` key-remap clause node id; `0` is the absent
+      // sentinel (a plain `{ [P in K]: V }` with no remapping).
+      nameTypeNodeId: node.nameTypeNodeId,
     };
   }
   if (expr.kind !== "mapped") {
     return undefined;
   }
+  // The native (raw-JSON) `NativeTypeExpr` mapped form DOES carry the optional /
+  // readonly modifier and the `as N` key-remap clause (the Rust producer emits
+  // `optional` / `readonly` / `nameType` on `TypeExpr::Mapped`). Read the actual
+  // values into the shared graph encoding so a modifier- or remap-bearing native
+  // mapped bails out of the `Record` recovery exactly like its graph
+  // counterpart — never hard-code them absent. A genuinely-plain native mapped
+  // (modifier absent / `"none"`, `nameType` null) decodes to the no-op encoding
+  // (`1` / `1` / `0`) and still recovers `Record`. `nameTypeNodeId` is a
+  // presence flag here (`1` = remap present) — the native form has no graph node
+  // id, and the recovery only tests it for `!== 0`.
   return {
     parameterName: expr.parameter,
     source: expr.source,
     value: expr.value,
-    optionalModifier: 1,
+    optionalModifier: mappedModifierToCode(expr.optional),
+    readonlyModifier: mappedModifierToCode(expr.readonly),
+    nameTypeNodeId: expr.nameType == null ? 0 : 1,
   };
+}
+
+/**
+ * Map the native (raw-JSON) mapped modifier string to the graph numeric
+ * encoding the modifier consumers share (`applyMappedOptionalModifier` and the
+ * `resolveOpenKeyDomainMappedDescriptor` bails): `1` = `MappedModifier::None`,
+ * `2` = `Add` (`+?` / `+readonly`), `3` = `Remove` (`-?` / `-readonly`). An
+ * absent or `"none"` modifier is the no-op encoding (`1`).
+ */
+function mappedModifierToCode(modifier: MappedModifierName | undefined): number {
+  if (modifier === "add") {
+    return 2;
+  }
+  if (modifier === "remove") {
+    return 3;
+  }
+  return 1;
 }
 
 function readIndexedAccessInfo(
@@ -1840,17 +2272,24 @@ function graphNodeToDescriptor(
           graphVisiting,
         ),
       );
-    case NODE_TUPLE:
-      return tuple(
-        node.elements.map((element) =>
-          typeExprToDescriptor(
-            createGraphTypeExprRef(expr.graph, element.typeNodeId),
-            nativeRegistry,
-            visiting,
-            graphVisiting,
-          ),
+    case NODE_TUPLE: {
+      const els = node.elements.map((element) =>
+        typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, element.typeNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
         ),
       );
+      const labels = node.elements.map((element) =>
+        element.labelId ? expr.graph.getString(element.labelId) : null,
+      );
+      const t = tuple(els);
+      if (labels.some((l) => l !== null)) {
+        return { ...t, labels };
+      }
+      return t;
+    }
     case NODE_OBJECT: {
       const props = node.members
         .filter((member) => member.kind === MEMBER_PROPERTY || member.kind === MEMBER_METHOD)
@@ -1958,6 +2397,18 @@ function graphNodeToDescriptor(
     }
     case NODE_REF: {
       const name = expr.graph.getString(node.nameId);
+      if (node.typeArgumentNodeIds.length > 0) {
+        const resolved = resolveRegistryRefDescriptor(
+          name,
+          node.typeArgumentNodeIds.map((id) => createGraphTypeExprRef(expr.graph, id)),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+        if (resolved) {
+          return resolved;
+        }
+      }
       const typeArguments = node.typeArgumentNodeIds.map((id) =>
         typeExprToDescriptor(
           createGraphTypeExprRef(expr.graph, id),
@@ -2020,7 +2471,23 @@ function graphNodeToDescriptor(
             graphVisiting,
           )
         : undefined;
-      return resolved ?? unknown(graphTypeExprToString(expr));
+      if (resolved) {
+        return resolved;
+      }
+      return indexedAccess(
+        typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, node.objectNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+        typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, node.indexNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+      );
     }
     case NODE_PARENTHESIZED:
       return typeExprToDescriptor(
@@ -2029,8 +2496,48 @@ function graphNodeToDescriptor(
         visiting,
         graphVisiting,
       );
+    case NODE_RECURSIVE_REF: {
+      const name = expr.graph.getString(node.nameId);
+      const typeArguments = node.typeArgumentNodeIds.map((id) =>
+        typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, id),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+      );
+      const conditionalContext = node.conditionalContext.map((frame) => ({
+        branch: (frame.branch === 1 ? "true" : "false") as "true" | "false",
+        decided: frame.decided,
+        check: typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, frame.checkNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+        extends: typeExprToDescriptor(
+          createGraphTypeExprRef(expr.graph, frame.extendsNodeId),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        ),
+      }));
+      return recursiveRef(name, typeArguments, conditionalContext);
+    }
     case NODE_UNKNOWN:
       return unknown(expr.graph.getString(node.rawId));
+    case NODE_SYNTHETIC_SLOT_BINDING: {
+      const surfaceKind: "slotBinding" | "binding" =
+        node.surfaceKind === SYNTHETIC_CARRIER_SURFACE_BINDING ? "binding" : "slotBinding";
+      const slotName = node.slotNameId ? expr.graph.getString(node.slotNameId) : undefined;
+      return syntheticSlotBinding(
+        expr.graph.getString(node.scopeCanonicalId),
+        surfaceKind,
+        expr.graph.getString(node.bindingNameId),
+        node.valueNode,
+        slotName,
+      );
+    }
     default:
       return unknown("unrecognized");
   }
@@ -2069,6 +2576,14 @@ function graphPrimitiveName(tag: number): Parameters<typeof primitive>[0] {
 
 function graphTypeExprToString(expr: GraphTypeExprRef): string {
   const node = expr.graph.getNode(expr.nodeId);
+  // Every graph node kind renders to a
+  // structural string form. The legacy `default: graphNode(N)`
+  // fallback leaked operator-node kinds into compat-layer strings as
+  // diagnostic placeholders (graphNode_leak bucket).
+  // Now every kind has explicit structural rendering; the exhaustive
+  // switch below replaces the fallback so future graph-node kinds
+  // surface as TypeScript compile errors at this site rather than
+  // silently leaking through.
   switch (node.kind) {
     case NODE_PRIMITIVE:
       return graphPrimitiveName(node.primitive);
@@ -2083,16 +2598,93 @@ function graphTypeExprToString(expr: GraphTypeExprRef): string {
         return String(node.booleanValue);
       }
       return "literal";
-    case NODE_REF:
+    case NODE_REF: {
+      const name = expr.graph.getString(node.nameId);
+      if (node.typeArgumentNodeIds.length === 0) {
+        return name;
+      }
+      const args = node.typeArgumentNodeIds
+        .map((id) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)))
+        .join(", ");
+      return `${name}<${args}>`;
+    }
+    case NODE_TYPE_PARAMETER:
       return expr.graph.getString(node.nameId);
+    case NODE_UNION:
+      return node.typeNodeIds
+        .map((id) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)))
+        .join(" | ");
+    case NODE_INTERSECTION:
+      return node.typeNodeIds
+        .map((id) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)))
+        .join(" & ");
+    case NODE_ARRAY: {
+      const element = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.elementNodeId));
+      return node.readonly ? `readonly ${element}[]` : `${element}[]`;
+    }
+    case NODE_TUPLE: {
+      const items = node.elements
+        .map((e) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, e.typeNodeId)))
+        .join(", ");
+      return node.readonly ? `readonly [${items}]` : `[${items}]`;
+    }
+    case NODE_OBJECT:
+      return "object";
+    case NODE_FUNCTION:
+      return "function";
     case NODE_KEY_OF:
       return `keyof ${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.operandNodeId))}`;
     case NODE_TYPE_OF:
       return `typeof ${node.pathIds.map((id) => expr.graph.getString(id)).join(".")}`;
+    case NODE_INDEXED_ACCESS: {
+      const obj = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.objectNodeId));
+      const idx = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.indexNodeId));
+      return `${obj}[${idx}]`;
+    }
+    case NODE_CONDITIONAL: {
+      const check = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.checkNodeId));
+      const ext = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.extendsNodeId));
+      const tt = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.trueTypeNodeId));
+      const ft = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.falseTypeNodeId));
+      return `${check} extends ${ext} ? ${tt} : ${ft}`;
+    }
+    case NODE_MAPPED:
+      return "mapped";
+    case NODE_TEMPLATE_LITERAL: {
+      const quasis = node.quasiIds.map((id) => expr.graph.getString(id));
+      const exprs = node.expressionNodeIds.map((id) =>
+        graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)),
+      );
+      let out = "`";
+      for (let i = 0; i < quasis.length; i += 1) {
+        out += quasis[i];
+        if (i < exprs.length) {
+          out += "${" + exprs[i] + "}";
+        }
+      }
+      out += "`";
+      return out;
+    }
+    case NODE_PARENTHESIZED:
+      return `(${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.innerNodeId))})`;
+    case NODE_INFER:
+      return `infer ${expr.graph.getString(node.nameId)}`;
+    case NODE_REST:
+      return `...${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.innerNodeId))}`;
+    case NODE_RECURSIVE_REF:
+      return expr.graph.getString(node.nameId);
     case NODE_UNKNOWN:
       return expr.graph.getString(node.rawId);
-    default:
-      return `graphNode(${node.kind})`;
+    case NODE_SYNTHETIC_SLOT_BINDING:
+      // Synthetic carriers display as their `bindingName` (the user-visible
+      // identity) — they MUST NOT resolve through `TypeRegistry`.
+      return expr.graph.getString(node.bindingNameId);
+    default: {
+      const _exhaustive: never = node;
+      throw new Error(
+        `graphTypeExprToString: unhandled graph node kind ${(_exhaustive as { kind: number }).kind}`,
+      );
+    }
   }
 }
 
@@ -2120,12 +2712,20 @@ function nativeTypeExprToString(expr: NativeTypeExpr): string {
       return String(expr.value);
     case "ref":
       return expr.name;
+    case "recursiveRef":
+      return expr.typeArguments.length > 0
+        ? `${expr.name}<${expr.typeArguments.map(nativeTypeExprToString).join(", ")}>`
+        : expr.name;
     case "keyOf":
       return `keyof ${nativeTypeExprToString(expr.operand)}`;
     case "typeOf":
       return `typeof ${expr.path.join(".")}`;
     case "unknown":
       return expr.raw;
+    case "syntheticSlotBinding":
+      // Synthetic carriers render as their user-visible `bindingName` — they
+      // MUST NOT route through `TypeRegistry` for display.
+      return expr.bindingName;
     default:
       return expr.kind;
   }

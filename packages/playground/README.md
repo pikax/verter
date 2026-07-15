@@ -3,7 +3,10 @@
 > [!WARNING]
 > This project is **experimental and under active development**. APIs, architecture, and package boundaries may change without notice.
 
-Online playground for live Vue SFC compilation using Verter. Write Vue Single File Components in a browser-based editor and instantly see the compiled output -- render functions, TypeScript, JavaScript, CSS, and a live preview.
+Online playground for live framework-carrier compilation using Verter. Write Vue or Svelte components in a browser-based editor and inspect the generated TypeScript, JavaScript, CSS, diagnostics, and live preview.
+
+> [!IMPORTANT]
+> Svelte support is **experimental — not yet validated in real-world use**. The preview uses the compiler-pinned Svelte 5.56.3 runtime. Unsupported runtime surfaces remain visible as diagnostics instead of being previewed as successful empty output.
 
 This is a **private** package (not published to npm). It is deployed to Netlify via the release CI workflow.
 
@@ -13,7 +16,7 @@ This is a **private** package (not published to npm). It is deployed to Netlify 
 graph TD
     subgraph Browser
         A[Monaco Editor] -->|source code| B[Store]
-        B -->|Vue SFC source| C["@verter/wasm<br/>(compile)"]
+        B -->|Vue or Svelte carrier source| C["@verter/wasm<br/>(compile)"]
         C -->|CodegenResult| B
         B -->|TypeScript output| D["OXC Transform<br/>(transpile)"]
         D -->|JavaScript output| B
@@ -25,7 +28,7 @@ graph TD
     end
 
     subgraph WASM
-        C --- J[verter_core<br/>Rust compiler]
+        C --- J[verter_compiler<br/>Rust compiler]
     end
 ```
 
@@ -85,12 +88,12 @@ src/
 
 ## Features
 
-- **Live compilation** -- Vue SFCs are compiled on every keystroke (with auto-save toggle)
+- **Live compilation** -- Vue and Svelte carrier files are compiled on every keystroke (with auto-save toggle)
 - **Multiple output views** -- Preview (live iframe), TypeScript (Verter output), JavaScript (OXC-transpiled), CSS
 - **Compilation timing** -- Displays per-stage timing (Verter SFC-to-TS, OXC TS-to-JS) in the header and output tabs
 - **Dark mode** -- System-preference-aware with manual toggle
 - **Split-pane layout** -- Resizable editor/output panels
-- **Multi-file support** -- Add, rename, and delete files; supports `.vue`, `.ts`, `.js`, and `.css`
+- **Multi-file support** -- Add, rename, and delete files; supports `.vue`, `.svelte`, `.ts`, `.js`, and `.css`
 - **Compiler mode toggles** -- Production mode, SSR mode
 - **Version switching** -- Load different WASM builds (local, nightly commit, release) for comparison
 - **Monaco Editor** -- Full code editor with Vue syntax highlighting
@@ -104,7 +107,7 @@ src/
 | Monaco Editor (`monaco-editor-core`) | Code editor                                 |
 | Shiki (`shiki`, `@shikijs/monaco`)   | Syntax highlighting                         |
 | OXC Transform (`oxc-transform`)      | TypeScript to JavaScript transpilation      |
-| `@verter/wasm`                       | Vue SFC compilation (Rust compiled to WASM) |
+| `@verter/wasm`                       | Vue/Svelte carrier compilation (Rust compiled to WASM) |
 | Vite                                 | Build tool and dev server                   |
 | Netlify                              | Deployment target                           |
 
@@ -157,12 +160,12 @@ Deployment happens automatically via:
 
 | Package                       | Purpose                                          |
 | ----------------------------- | ------------------------------------------------ |
-| `@verter/wasm`                | Rust-based Vue SFC compiler (WASM)               |
+| `@verter/wasm`                | Rust-based Vue/Svelte carrier compiler (WASM)    |
 | `vue`                         | Application framework                            |
 | `monaco-editor-core`          | Code editor component                            |
 | `shiki` / `@shikijs/monaco`   | Syntax highlighting                              |
 | `oxc-transform`               | TypeScript transpilation in the browser          |
-| `@verter/unplugin`            | Universal bundler plugin for Vue SFC compilation |
+| `@verter/unplugin`            | Universal bundler plugin for carrier compilation |
 | `vite` / `@vitejs/plugin-vue` | Build tooling                                    |
 
 ## License

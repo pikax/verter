@@ -1,7 +1,6 @@
 {
   "compilerOptions": {
     "target": "es6",
-    "baseUrl": "'.",
     // "lib": ["WebWorker", "ES2021"],
     "module": "NodeNext",
     "moduleResolution": "nodenext",
@@ -17,10 +16,6 @@
     "jsx": "preserve",
     "strict": true
 
-    // "paths": {
-    //   "@verter/core/*": ["packages/core/src/*"],
-    //   "@verter/language-shared/*": ["packages/language-server/src/*"]
-    // }
   },
   "include": []
 }

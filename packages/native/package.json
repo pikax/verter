@@ -1,13 +1,14 @@
 {
   "name": "@verter/native",
   "version": "0.0.1-beta.1",
-  "description": "Native Node.js bindings for Verter Vue compiler",
+  "description": "Native Node.js bindings for Verter's Vue and experimental Svelte compiler host",
   "keywords": [
     "bindings",
     "compiler",
     "napi",
     "native",
-    "vue"
+    "vue",
+    "svelte"
   ],
   "homepage": "https://verterjs.dev/",
   "license": "MIT",
@@ -19,7 +20,11 @@
   "files": [
     "index.js",
     "host-types.ts",
-    "dist"
+    "audit.ts",
+    "dist/index.js",
+    "dist/index.d.ts",
+    "dist/host-types.d.ts",
+    "dist/audit.d.ts"
   ],
   "main": "index.js",
   "types": "dist/index.d.ts",
@@ -34,18 +39,22 @@
   },
   "scripts": {
     "clean:dist": "node ./scripts/clean-dist.mjs",
-    "build:types": "pnpm exec tsc --declaration --emitDeclarationOnly --outDir dist index.ts",
-    "build": "pnpm run clean:dist && napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
-    "build:debug": "pnpm run clean:dist && napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
+    "build:types": "pnpm exec tsc --ignoreConfig --declaration --emitDeclarationOnly --outDir dist index.ts",
+    "copy-windows-artefact": "node ./scripts/copy-windows-artefact.mjs",
+    "build": "pnpm run clean:dist && napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
+    "build:debug": "pnpm run clean:dist && napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
     "prepublishOnly": "pnpm run build && napi prepublish -t npm",
     "artifacts": "napi artifacts",
+    "ensure-native-loader": "node ./scripts/ensure-native-loader.mjs",
+    "pretest": "pnpm run ensure-native-loader",
     "test": "vitest run"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.5.1",
-    "@types/node": "^25.4.0",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.0"
+    "@napi-rs/cli": "^3.6.2",
+    "@types/node": "^25.9.1",
+    "@verter/types": "workspace:^",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
   },
   "optionalDependencies": {
     "@verter/native-darwin-arm64": "workspace:*",

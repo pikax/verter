@@ -4,7 +4,7 @@
  * Maps Verter's Type IR to Volar's `PropertyMetaSchema` shape.
  */
 
-import type { TypeDescriptor } from "../type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 import type { PropertyMetaSchema, MetaCheckerOptions } from "./types.js";
 
 const MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH = 1;
@@ -67,8 +67,10 @@ function convertType(
       return {
         kind: "enum",
         type,
-        schema: flat.map((t) =>
-          convertType(t, options, typeRegistry, visited, registryResolutionDepth),
+        schema: flat.flatMap((t) =>
+          flattenSchemaEnumEntries(
+            convertType(t, options, typeRegistry, visited, registryResolutionDepth),
+          ),
         ),
       };
     }
@@ -108,11 +110,18 @@ function convertType(
     }
 
     case "tuple": {
-      const type = `[${td.elements
-        .map((entry) =>
-          schemaDescriptorToString(entry, typeRegistry, visited, registryResolutionDepth),
-        )
-        .join(", ")}]`;
+      // Preserve labelled-tuple syntax in display text.
+      const rendered = td.elements.map((entry, i) => {
+        const text = schemaDescriptorToString(
+          entry,
+          typeRegistry,
+          visited,
+          registryResolutionDepth,
+        );
+        const label = td.labels?.[i] ?? null;
+        return label ? `${label}: ${text}` : text;
+      });
+      const type = `[${rendered.join(", ")}]`;
       if (ignore?.(type)) return type;
       return {
         kind: "array",
@@ -207,9 +216,43 @@ function convertType(
       return { kind: "object" as const, type: name, schema: {} };
     }
 
+    case "recursiveRef":
+      return { kind: "object" as const, type: typeDescriptorToString(td), schema: {} };
+
+    case "indexedAccess":
+      // Indexed-access types (`T['K']`) carry a structural shape but
+      // require host-side resolution to materialise the underlying
+      // member. Surface as the structural string form with an empty
+      // schema (matches the Volar "unresolved compound type" behaviour
+      // used for refs).
+      return { kind: "object" as const, type: typeDescriptorToString(td), schema: {} };
+
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers are opaque terminals. They MUST
+      // NOT route through `typeRegistry` (same-name poisoning risk).
+      // Surface the `bindingName` as the structural type label with an
+      // empty schema (matches the Volar "unresolved compound type"
+      // behaviour for refs).
+      return { kind: "object" as const, type: td.bindingName, schema: {} };
+
     case "unknown":
       return td.rawType || "unknown";
   }
+}
+
+export function flattenSchemaEnumEntries(schema: PropertyMetaSchema): PropertyMetaSchema[] {
+  if (
+    typeof schema === "object" &&
+    !Array.isArray(schema) &&
+    schema !== null &&
+    schema.kind === "enum" &&
+    Array.isArray(schema.schema) &&
+    schema.schema.every((entry) => typeof entry === "string")
+  ) {
+    return [...schema.schema];
+  }
+
+  return [schema];
 }
 
 function schemaDescriptorToString(
@@ -243,12 +286,19 @@ function schemaDescriptorToString(
         visited,
         registryResolutionDepth,
       )}[]`;
-    case "tuple":
-      return `[${td.elements
-        .map((entry) =>
-          schemaDescriptorToString(entry, typeRegistry, visited, registryResolutionDepth),
-        )
-        .join(", ")}]`;
+    case "tuple": {
+      const rendered = td.elements.map((entry, i) => {
+        const text = schemaDescriptorToString(
+          entry,
+          typeRegistry,
+          visited,
+          registryResolutionDepth,
+        );
+        const label = td.labels?.[i] ?? null;
+        return label ? `${label}: ${text}` : text;
+      });
+      return `[${rendered.join(", ")}]`;
+    }
     case "object":
       if (
         (td.indexSignatures?.length ?? 0) === 0 &&
@@ -269,6 +319,10 @@ function schemaDescriptorToString(
       return typeDescriptorToString(td);
     case "typeParameter":
       return td.name;
+    case "syntheticSlotBinding":
+      // Synthetic carriers render as `bindingName` — they MUST NOT route
+      // through `typeRegistry`.
+      return td.bindingName;
     case "ref": {
       if (
         typeRegistry &&
@@ -291,6 +345,10 @@ function schemaDescriptorToString(
       }
       return typeDescriptorToString(td);
     }
+    case "recursiveRef":
+      return typeDescriptorToString(td);
+    case "indexedAccess":
+      return typeDescriptorToString(td);
   }
 }
 
@@ -337,8 +395,14 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
       return td.types.map(typeDescriptorToString).join(" & ");
     case "array":
       return `${typeDescriptorToString(td.element)}[]`;
-    case "tuple":
-      return `[${td.elements.map(typeDescriptorToString).join(", ")}]`;
+    case "tuple": {
+      const rendered = td.elements.map((entry, i) => {
+        const text = typeDescriptorToString(entry);
+        const label = td.labels?.[i] ?? null;
+        return label ? `${label}: ${text}` : text;
+      });
+      return `[${rendered.join(", ")}]`;
+    }
     case "object":
       if (
         (td.indexSignatures?.length ?? 0) === 0 &&
@@ -356,10 +420,20 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
       return td.typeArguments
         ? `${td.name}<${td.typeArguments.map(typeDescriptorToString).join(", ")}>`
         : td.name;
+    case "recursiveRef":
+      return td.typeArguments.length > 0
+        ? `${td.name}<${td.typeArguments.map(typeDescriptorToString).join(", ")}>`
+        : td.name;
+    case "indexedAccess":
+      return `${typeDescriptorToString(td.objectType)}[${typeDescriptorToString(td.indexType)}]`;
     case "enum":
       return td.name;
     case "unknown":
       return td.rawType || "unknown";
+    case "syntheticSlotBinding":
+      // Synthetic carriers display as their user-visible `bindingName`. They
+      // MUST NOT route through `TypeRegistry`.
+      return td.bindingName;
   }
 }
 

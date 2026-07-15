@@ -17,6 +17,7 @@ import {
 } from "./compiler";
 import { File } from "./types";
 import { combineSourceMaps, lookupGenerated, lookupSource, parseMappings } from "./sourcemap";
+import { allFrameworkExtensions } from "./frameworks";
 
 async function generateRealTsxOutput(
   vueSource: string,
@@ -116,6 +117,10 @@ function createTypecheckService(tsxCode: string) {
   const fileName = "/App.vue.tsx";
   const files = new Map<string, { version: number; content: string }>([
     [fileName, { version: 1, content: tsxCode }],
+    [
+      "/App.vue.verter.ts",
+      { version: 1, content: "declare const Component: new () => any; export default Component;" },
+    ],
     ["/node_modules/vue/index.d.ts", { version: 1, content: VUE_TYPE_STUB }],
     ["/types/verter-types.d.ts", { version: 1, content: VERTER_TYPES_STUB }],
     ["/types/jsx-global.d.ts", { version: 1, content: JSX_GLOBAL_STUB }],
@@ -125,6 +130,7 @@ function createTypecheckService(tsxCode: string) {
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.ESNext,
     moduleResolution: ts.ModuleResolutionKind.Bundler,
+    allowImportingTsExtensions: true,
     jsx: ts.JsxEmit.Preserve,
     strict: true,
     noEmit: true,
@@ -287,7 +293,8 @@ describe("resolveKnownModuleReferenceDependencies", () => {
         "src/App.vue",
         expect.any(Array),
         ["src/App.vue", "src/types.ts"],
-        ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".vue"],
+        // Base TS/JS resolution extensions + every manifest framework extension.
+        ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ...allFrameworkExtensions()],
       );
       expect(host.setImportDependencies).toHaveBeenCalledWith("src/App.vue", [
         { specifier: "src/types.ts", resolvedCanonicalId: "src/types.ts" },
@@ -584,6 +591,74 @@ defineProps<Props>()
   });
 });
 
+// @ai-generated - Real WASM smoke: a minimal .svelte carrier upserts with
+// fileKind:"svelte" and produces a non-empty main virtual file (client JS).
+// Discriminates the descriptor-driven svelte path against a Vue-only host
+// wiring, including the playground's generic Main/style/IDE surface assembly.
+describe("svelte WASM smoke", () => {
+  it("upserts a .svelte file with fileKind:'svelte' and returns non-empty main virtual file", async () => {
+    const host = await loadWasmHost();
+    const profile = { sourceMap: true, target: "bundler", forceJs: true };
+    const source = `<script lang="ts">\n  let count = $state(0)\n</script>\n\n<button onclick={() => count++}>{count}</button>\n`;
+
+    const upsert = host.upsert({
+      inputId: "App.svelte",
+      source,
+      fileKind: "svelte",
+      aliases: [],
+      compileProfile: profile,
+    });
+    expect(upsert.moduleReferences).toBeDefined();
+
+    const main = host.getVirtualFile({ rawId: "App.svelte", compileProfile: profile });
+    expect(main.code.length).toBeGreaterThan(0);
+    expect(main.diagnostics.diagnostics).toEqual([]);
+  });
+
+  it("compileFile preserves Svelte Main, scoped CSS, and IDE output", async () => {
+    const host = await loadWasmHost();
+    const teardown = __setHostForTest(host as any);
+    try {
+      const file = new File(
+        "Scoped.svelte",
+        `<script lang="ts">let count = $state(0)</script>\n<button class="action" onclick={() => count++}>{count}</button>\n<style>.action { color: red; }</style>`,
+      );
+
+      const timing = await compileFile(file);
+
+      expect(file.compiled.js).toContain("import * as $ from 'svelte/internal/client';");
+      expect(file.compiled.js).not.toContain("_sfc_main");
+      expect(file.compiled.css).toMatch(
+        /\.action\.svelte-[\w-]+\s*\{[^}]*color:\s*(?:red|#(?:f00|ff0000)|rgb\(255,\s*0,\s*0\))/i,
+      );
+      expect(file.compiled.types).toContain("@jsxImportSource @verter/svelte-jsx");
+      expect(file.compiled.compilerDiagnostics).toEqual([]);
+      expect(file.compiled.errors).toEqual([]);
+      expect(timing.styleMs).not.toBeNull();
+      expect(timing.tsxMs).not.toBeNull();
+    } finally {
+      teardown();
+    }
+  });
+
+  it("fails closed for a .svelte.ts adapter module without runtime-module lowering", async () => {
+    const host = await loadWasmHost();
+    const profile = { sourceMap: true, target: "ide", forceJs: true };
+    const source = `export function createCounter() {\n  let v = $state(0)\n  return { get value() { return v } }\n}\n`;
+
+    host.upsert({
+      inputId: "counter.svelte.ts",
+      source,
+      fileKind: "svelte",
+      aliases: [],
+      compileProfile: profile,
+    });
+    expect(() =>
+      host.getVirtualFile({ rawId: "counter.svelte.ts", compileProfile: profile }),
+    ).toThrow(/runtime surface refused|runtime-surface-refused/);
+  });
+});
+
 describe("generated TSX TypeScript semantics", () => {
   it("type-checks v-on object syntax after key rewrite", async () => {
     const source = `<script setup lang="ts">
@@ -641,10 +716,8 @@ describe("generated TSX TypeScript semantics", () => {
     const normalized = code.replace(/\s+/g, "");
 
     expect(messages).toEqual([]);
-    expect(normalized).toContain(
-      "onClick={(...___VERTER___eventArgs)=>___VERTER___eventCallbacks(___VERTER___eventArgs,($event)=>{$event.preventDefault()})}",
-    );
-    expect(normalized).not.toContain("onClick={($event)=>{$event.preventDefault()}}");
+    expect(normalized).toContain("onClick={($event)=>{$event.preventDefault()}}");
+    expect(normalized).not.toContain("___VERTER___eventCallbacks");
   });
 
   it("generates $event handler for template-only SFC (no script block)", async () => {
@@ -655,10 +728,8 @@ describe("generated TSX TypeScript semantics", () => {
     const { code } = await generateRealTsxOutput(source);
     const normalized = code.replace(/\s+/g, "");
 
-    expect(normalized).toContain(
-      "onClick={(...___VERTER___eventArgs)=>___VERTER___eventCallbacks(___VERTER___eventArgs,($event)=>{$event.preventDefault()})}",
-    );
-    expect(normalized).not.toContain("onClick={($event)=>{$event.preventDefault()}}");
+    expect(normalized).toContain("onClick={($event)=>{$event.preventDefault()}}");
+    expect(normalized).not.toContain("___VERTER___eventCallbacks");
   });
 
   it("emits v-if condition and event handler expressions for guarded branches", async () => {
@@ -745,7 +816,14 @@ interface WasmHost {
   }): WasmHostUpsertResult;
   getVirtualFile(query: { rawId: string; compileProfile?: Record<string, unknown> }): VirtualFile;
   listVirtualFiles(canonicalId: string): Array<{ kind: string; index?: number }>;
-  setImportDependencies(canonicalOrAlias: string, resolvedDeps: string[]): void;
+  setImportDependencies(
+    canonicalOrAlias: string,
+    resolutions: Array<{
+      specifier: string;
+      resolvedCanonicalId?: string;
+      possibleCanonicalIds?: string[];
+    }>,
+  ): void;
 }
 
 async function loadWasmHost(): Promise<WasmHost> {

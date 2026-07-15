@@ -1,0 +1,16 @@
+{
+  "name": "@verter/svelte-runtime-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Behavioral runtime tests for Verter-emitted Svelte client modules",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "happy-dom": "^20.9.0",
+    "svelte": "5.56.3",
+    "vitest": "^4.1.7"
+  }
+}

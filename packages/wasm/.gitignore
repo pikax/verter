@@ -1,0 +1,8 @@
+# Generated build outputs — never committed.
+#
+# `wasm/` is the wasm-bindgen + wasm-opt output directory produced by
+# `pnpm run build:wasm` (and wiped by `clean:wasm`); `dist/` is the tsdown
+# output. Both are published via `package.json` `files` but are regenerated
+# from `src/` + the Rust `verter_wasm` crate, so they stay out of git.
+/wasm/
+/dist/

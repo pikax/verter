@@ -1,5 +1,5 @@
 import path from "node:path";
-import { isLikelyTestFileName, normalizePath } from "./utils";
+import { isLikelyTestFileName, normalizePath } from "@verter/language-shared";
 
 const CONFIG_DISCOVERY_BUDGET_MS = 25;
 const MAX_CONFIG_BYTES = 256 * 1024;

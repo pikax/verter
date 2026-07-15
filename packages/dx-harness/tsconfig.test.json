@@ -1,0 +1,29 @@
+{
+  // Strict typecheck of BOTH `src` and `test` under the same compiler settings as
+  // the runtime build (`tsconfig.json`), so test files are held to the package's
+  // `strict` bar. The runtime `tsc -b` excludes `test`; this `--noEmit` pass is the
+  // additive gate that catches latent test-type drift the dist build never sees.
+  "extends": "./tsconfig.json",
+  "include": ["./src", "./test"],
+  "exclude": ["dist", "node_modules"],
+  "compilerOptions": {
+    // Typecheck only — never emit and never write incremental state. `rootDir: ".."`
+    // (the `packages/` dir) admits `test` alongside `src` AND the source-resolved
+    // sibling dep below, all under one root, without an out-of-rootDir complaint;
+    // under `--noEmit` `rootDir` shapes no output and is purely that diagnostic gate.
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "rootDir": "..",
+    // Resolve sibling workspace deps to their SOURCE, mirroring `vitest.config.ts`'s
+    // alias, so this gate is clean-checkout hermetic: it type-checks with NO prior
+    // `dist` build of `@verter/lsp-test-client` (whose `dist` is gitignored). Pointing
+    // at the built `.d.ts` instead would silently fail to resolve on a fresh checkout.
+    // Path is relative to this config (no `baseUrl` needed under `moduleResolution:
+    // Bundler`); the target matches the vitest alias exactly.
+    "paths": {
+      "@verter/lsp-test-client": ["../lsp-test-client/src/index.ts"]
+    }
+  }
+}

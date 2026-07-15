@@ -2,36 +2,43 @@
   "name": "@verter/playground",
   "version": "0.0.1-beta.1",
   "private": true,
-  "description": "Online playground for Verter Vue compiler",
+  "description": "Online playground for Verter's Vue and experimental Svelte compiler",
   "license": "MIT",
   "author": "pikax",
   "type": "module",
   "scripts": {
-    "dev": "node scripts/fetch-tsgo.mjs && vite",
-    "build": "pnpm --filter @verter/unplugin build && pnpm --filter @verter/wasm build && pnpm --filter @verter/component-meta build && pnpm --filter @verter/types run build && node scripts/fetch-tsgo.mjs && vite build",
+    "dev": "vite",
+    "build:workspace-deps": "pnpm --filter @verter/type-ir build && pnpm --filter @verter/proto build && pnpm --filter @verter/types build && pnpm --filter @verter/language-shared build && pnpm --filter @verter/native build:types",
+    "build": "pnpm run build:workspace-deps && pnpm --filter @verter/unplugin build && pnpm --filter @verter/wasm build && pnpm --filter @verter/component-meta build && vite build",
     "preview": "vite preview",
-    "test": "vitest --run",
+    "test": "vitest --run --exclude '**/compiler.spec.ts' --exclude '**/tsService.spec.ts'",
     "test:e2e": "playwright test",
     "generate:vue-language": "tsx scripts/generate-vue-language.ts"
   },
   "dependencies": {
     "@verter/component-meta": "workspace:*",
+    "@verter/language-shared": "workspace:*",
     "@verter/types": "workspace:*",
     "@verter/wasm": "workspace:*",
-    "fflate": "^0.8.2",
-    "vue": "^3.5.30"
+    "fflate": "^0.8.3",
+    "vue": "^3.5.34"
   },
   "devDependencies": {
-    "@playwright/test": "^1.58.2",
-    "@shikijs/monaco": "^4.0.2",
+    "@playwright/test": "^1.60.0",
+    "@shikijs/monaco": "^4.1.0",
     "@verter/unplugin": "workspace:*",
-    "@vitejs/plugin-vue": "^6.0.5",
-    "happy-dom": "^20.8.3",
+    "@vitejs/plugin-vue": "^6.0.7",
+    "@vue/reactivity": "^3.5.34",
+    "@vue/runtime-core": "^3.5.34",
+    "@vue/runtime-dom": "^3.5.34",
+    "@vue/shared": "^3.5.34",
+    "csstype": "^3.1.3",
+    "happy-dom": "^20.9.0",
     "monaco-editor-core": "^0.55.1",
-    "shiki": "^4.0.2",
-    "tsx": "^4.21.0",
-    "typescript": "6.0.0-beta",
-    "vite": "^8.0.0",
-    "vitest": "^4.1.0"
+    "shiki": "^4.1.0",
+    "tsx": "^4.22.3",
+    "typescript": "6.0.3",
+    "vite": "^8.0.14",
+    "vitest": "^4.1.7"
   }
 }

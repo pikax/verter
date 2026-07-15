@@ -1,0 +1,5 @@
+# Build artifact produced by `pnpm build:zed` (the wasm extension binary).
+bin/*.wasm
+
+# Cargo build output for the standalone Zed extension crate.
+/target

@@ -3,13 +3,13 @@
 > [!WARNING]
 > **Experimental** -- This package is under active development and APIs may change without notice. It is not yet recommended for production use.
 
-TypeScript utility types and Vue helpers for the [Verter](https://github.com/nickmessing/vue-typescript) project. Provides type-level primitives for SFC-to-TSX transformation, emit/slot/prop inference, directive typing, and a string-export variant designed for safe injection into the language server.
+TypeScript utility types and Vue helpers for the [Verter](https://github.com/pikax/verter) project. Provides type-level primitives for SFC-to-TSX transformation, emit/slot/prop inference, directive typing, and a string-export variant designed for safe injection into the language server.
 
 ## Overview
 
 `@verter/types` is a types-only package (no runtime side-effects) that serves two purposes:
 
-1. **Type utilities** consumed by `@verter/core` and other Verter packages to correctly type Vue component props, emits, slots, models, directives, and instances.
+1. **Type utilities** consumed by Verter's IDE codegen, TypeScript-provider integration, and other packages to correctly type Vue component props, emits, slots, models, directives, and instances.
 2. **String export** for the Verter language server, where all type declarations are serialized as a string with `$V_` prefixed identifiers to avoid naming collisions when injected into user projects.
 
 ### Key Capabilities

@@ -1,0 +1,45 @@
+# Go-to-definition precision: each probe must land on an EXACT declaration (a
+# cross-file imported symbol, a local binding, the props macro site) and never on
+# the line-0 fallback a desynced source map produces.
+- id: definition-precision
+  fixture: definition-precision
+  entryFile: App.vue
+  anchors: [def.importedUse, def.localUse, def.propsRef]
+  script: []
+  probes:
+    - id: definition-imported-symbol
+      method: definition
+      anchor: def.importedUse
+      mappingPolicy: strict
+      confidence: high
+      dimension: artifactParity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+    - id: definition-local-symbol
+      method: definition
+      anchor: def.localUse
+      mappingPolicy: strict
+      confidence: high
+      dimension: artifactParity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+    - id: definition-props-macro
+      method: definition
+      anchor: def.propsRef
+      mappingPolicy: strict
+      confidence: high
+      dimension: artifactParity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+  invariants: []
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    latency:
+      p95Ms: 250
+    flakeWindows: 2

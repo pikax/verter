@@ -9,6 +9,7 @@ import OnEventPropComp from "./OnEventPropComp.vue";
 import ConditionalRoot from "./ConditionalRoot.vue";
 import FunctionalBtn from "./FunctionalBtn";
 import GenericAttrsComp from "./GenericAttrsComp.vue";
+import ModelNamed from "./ModelNamed.vue";
 import { formatCount } from "./utils";
 
 interface Action {
@@ -28,6 +29,7 @@ const props = defineProps<{ title: string }>();
 const formatted = formatCount(count.value);
 const items = ref(["apple", "banana", "cherry"]);
 const inputVal = ref("");
+const showFlag = ref(false);
 const actions = ref<Action[]>([{ label: "ok", disabled: false, handler: () => {} }]);
 const users = ref<User[]>([{ name: "Alice", email: "a@b.com", age: 30 }]);
 const selectedUser = ref<User | null>(null);
@@ -91,5 +93,6 @@ function handleCustom(payload: string) {
     <ConditionalRoot :show="true" text="hi" class="cond" />
     <FunctionalBtn label="fn" class="fn-class" />
     <GenericAttrsComp :value="'hello'" class="generic-test" />
+    <ModelNamed v-model:show="showFlag" />
   </div>
 </template>

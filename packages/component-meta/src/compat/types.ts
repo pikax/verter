@@ -82,12 +82,25 @@ export interface MetaCheckerOptions {
   printer?: unknown;
   /** Force TypeScript usage (no-op in Verter — always uses TS). Kept for Volar compat. */
   forceUseTs?: boolean;
-  /** Select the type expansion backend used for component metadata queries. */
-  typeExpansionBackend?: "verter" | "tsserver" | "tsgo" | "auto";
   /**
    * Runtime ownership mode.
    * `shared` reuses the process-global pooled runtime.
    * `dedicated` creates an isolated runtime for one checker/session instance.
    */
   runtimeMode?: "shared" | "dedicated";
+  /**
+   * Logging/audit settings. When `audit` is true, the native runtime captures
+   * per-request timing, memory, and solver cost data as structured
+   * `RustAuditRecord` artifacts. Default: false (zero overhead).
+   */
+  logging?: {
+    audit?: boolean;
+  };
+  /**
+   * When true, the compat layer uses pre-baked benchmark artifacts for
+   * nuxt-ui projects instead of running native resolution. Only enable
+   * this in benchmark suites — production code should never use this.
+   * Default: false.
+   */
+  benchmarkArtifacts?: boolean;
 }

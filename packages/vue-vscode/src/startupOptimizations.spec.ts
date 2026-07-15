@@ -2,10 +2,7 @@
  * @ai-generated - Tests startup optimization helpers used by benchmark timing and lazy startup.
  */
 import { describe, expect, it } from "vitest";
-import {
-  computeStartupSegments,
-  shouldConfigureBuiltInTypeScriptPlugin,
-} from "./startupOptimizations";
+import { computeStartupSegments } from "./startupOptimizations";
 
 describe("computeStartupSegments", () => {
   it("computes direct provider startup segments", () => {
@@ -38,20 +35,5 @@ describe("computeStartupSegments", () => {
     expect(result.activationToTypeProviderStartedMs).toBeUndefined();
     expect(result.typeProviderStartedToFirstTypedCompletionMs).toBeUndefined();
     expect(result.typeProviderStartedToReadyMs).toBeUndefined();
-  });
-});
-
-describe("shouldConfigureBuiltInTypeScriptPlugin", () => {
-  it("configures only for TS/JS editor demand", () => {
-    expect(shouldConfigureBuiltInTypeScriptPlugin("typescript")).toBe(true);
-    expect(shouldConfigureBuiltInTypeScriptPlugin("typescriptreact")).toBe(true);
-    expect(shouldConfigureBuiltInTypeScriptPlugin("javascript")).toBe(true);
-    expect(shouldConfigureBuiltInTypeScriptPlugin("javascriptreact")).toBe(true);
-  });
-
-  it("does not treat Vue as a built-in TS plugin trigger", () => {
-    expect(shouldConfigureBuiltInTypeScriptPlugin("vue")).toBe(false);
-    expect(shouldConfigureBuiltInTypeScriptPlugin(undefined)).toBe(false);
-    expect(shouldConfigureBuiltInTypeScriptPlugin("json")).toBe(false);
   });
 });

@@ -3,7 +3,10 @@
 > [!WARNING]
 > This project is **experimental and under active development**. APIs, architecture, and package boundaries may change without notice.
 
-WASM bindings for the Verter Vue template compiler. This package exposes the Rust `verter_core` compiler to browser environments via [wasm-bindgen](https://rustwasm.github.io/wasm-bindgen/), enabling client-side Vue SFC compilation in tools like the Verter playground.
+WASM bindings for Verter's framework-carrier compiler host. This package exposes the Rust compiler to browser environments via [wasm-bindgen](https://rustwasm.github.io/wasm-bindgen/), enabling client-side Vue SFC compilation and the experimental Svelte carrier path in tools such as the Verter playground.
+
+> [!IMPORTANT]
+> Svelte support is **experimental — not yet validated in real-world use**. Unsupported runtime surfaces fail closed with typed diagnostics; they are not returned as successful empty modules.
 
 ## Overview
 
@@ -15,8 +18,8 @@ The WASM binary is size-optimized with `opt-level = "s"` and LTO enabled in the 
 
 ```mermaid
 graph LR
-    A["verter_core<br/><i>Rust crate</i>"] --> B["verter_wasm<br/><i>wasm-bindgen cdylib</i>"]
-    B --> C["wasm-pack build"]
+    A["verter_compiler<br/><i>Rust crate</i>"] --> B["verter_wasm<br/><i>wasm-bindgen cdylib</i>"]
+    B --> C["cargo build + wasm-bindgen + wasm-opt"]
     C --> D[".wasm binary +<br/>JS glue code"]
     D --> E["@verter/wasm<br/><i>TS wrapper (src/index.ts)</i>"]
     E --> F["@verter/playground"]
@@ -33,8 +36,9 @@ graph LR
 
 ```mermaid
 flowchart TD
-    subgraph Step1["1. wasm-pack build"]
-        Rust["crates/verter_wasm/"] -->|"wasm-pack build --target web"| WasmOut["packages/wasm/wasm/"]
+    subgraph Step1["1. cargo build + wasm-bindgen + wasm-opt"]
+        Rust["crates/verter_wasm/"] -->|"cargo build --target wasm32-unknown-unknown"| RawWasm["target/wasm32-unknown-unknown/release/verter_wasm.wasm"]
+        RawWasm -->|"wasm-bindgen --target web, then wasm-opt -Os"| WasmOut["packages/wasm/wasm/"]
         WasmOut --> WasmJS["verter_wasm.js<br/><i>JS glue</i>"]
         WasmOut --> WasmBG["verter_wasm_bg.wasm<br/><i>WASM binary</i>"]
         WasmOut --> WasmDTS["verter_wasm.d.ts<br/><i>type definitions</i>"]
@@ -169,17 +173,18 @@ interface CodegenResult {
 ### Prerequisites
 
 - Rust toolchain (stable)
-- [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/)
+- `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`)
+- `wasm-bindgen` CLI (`cargo install wasm-bindgen-cli --version 0.2.122 --locked`)
 - Node.js >= 18
 
 ### Build Commands
 
 ```bash
-# Full build (wasm-pack -> tsdown -> copy to playground)
+# Full build (cargo build -> wasm-bindgen -> wasm-opt -> tsdown -> copy to playground)
 pnpm run build
 
 # Individual steps:
-pnpm run build:wasm             # Compile Rust to WASM via wasm-pack
+pnpm run build:wasm             # Compile Rust to WASM, generate wasm-bindgen glue, optimize with wasm-opt
 pnpm run build:ts               # Bundle TypeScript wrapper with tsdown
 pnpm run build:copy-playground  # Copy .wasm to playground/public/
 ```
@@ -187,13 +192,19 @@ pnpm run build:copy-playground  # Copy .wasm to playground/public/
 The underlying commands:
 
 ```bash
-# Step 1: Compile Rust crate to WebAssembly
-wasm-pack build ../../crates/verter_wasm --target web --out-dir ../../packages/wasm/wasm
+# Step 1: Compile Rust crate to raw WebAssembly
+cargo build --manifest-path ../../Cargo.toml --release -p verter_wasm --target wasm32-unknown-unknown
 
-# Step 2: Bundle the TypeScript wrapper
+# Step 2: Generate browser JS glue and TypeScript declarations
+wasm-bindgen --target web --out-dir wasm --out-name verter_wasm ../../target/wasm32-unknown-unknown/release/verter_wasm.wasm
+
+# Step 3: Size-optimize the binary in place (Binaryen wasm-opt)
+wasm-opt -Os wasm/verter_wasm_bg.wasm -o wasm/verter_wasm_bg.wasm
+
+# Step 4: Bundle the TypeScript wrapper
 tsdown src/index.ts --format cjs,esm --dts --outDir dist
 
-# Step 3: Copy binary to playground
+# Step 5: Copy binary to playground
 npx shx cp wasm/verter_wasm_bg.wasm ../playground/public/verter_wasm_bg.wasm
 ```
 
@@ -221,6 +232,11 @@ opt-level = "s"   # Optimize for size
 lto = true         # Link-time optimization
 ```
 
+After `wasm-bindgen` runs, the binary is further shrunk by a Binaryen `wasm-opt -Os` pass
+(the `opt:wasm` script, formerly performed automatically by `wasm-pack`). Binaryen is
+vendored cross-platform via the `binaryen` npm package, so no separate toolchain install is
+required.
+
 ### Testing
 
 ```bash
@@ -231,8 +247,10 @@ pnpm test    # runs: vitest run
 
 | Dependency                            | Purpose                                           |
 | ------------------------------------- | ------------------------------------------------- |
-| `verter_core` (Rust)                  | Core Vue template compiler                        |
+| `verter_compiler` (Rust)                  | Core Vue template compiler                        |
 | `wasm-bindgen` (Rust)                 | Rust/WASM interop layer                           |
+| `wasm-bindgen-cli` (tool)             | Generates browser JS glue and TypeScript declarations |
+| `binaryen` / `wasm-opt` (npm tool)    | Size-optimizes the compiled WASM binary           |
 | `serde` / `serde-wasm-bindgen` (Rust) | Serialization between Rust structs and JS objects |
 | `console_error_panic_hook` (Rust)     | Better panic messages in browser console          |
 | `oxc_allocator` (Rust)                | Memory allocator for OXC AST nodes                |

@@ -3,7 +3,10 @@
 > [!WARNING]
 > This project is **experimental and under active development**. APIs, architecture, and package boundaries may change without notice.
 
-Native Node.js bindings for the Verter Vue template compiler. This package exposes the Rust `verter_core` template compiler to Node.js via [NAPI-RS](https://napi.rs/), providing near-native performance for Vue Single File Component (SFC) compilation.
+Native Node.js bindings for Verter's framework-carrier compiler host. This package exposes the Rust `verter_compiler` and `verter_session` stack to Node.js via [NAPI-RS](https://napi.rs/), providing near-native Vue SFC compilation and the experimental native Svelte carrier path.
+
+> [!IMPORTANT]
+> Svelte support is **experimental — not yet validated in real-world use**. Unsupported runtime surfaces fail closed with typed diagnostics; they are not returned as successful empty modules.
 
 ## Overview
 
@@ -15,7 +18,7 @@ The package provides three compilation functions: a general-purpose async `compi
 
 ```mermaid
 graph LR
-    A["verter_core<br/><i>Rust crate</i>"] --> B["verter_napi<br/><i>NAPI-RS cdylib</i>"]
+    A["verter_compiler<br/><i>Rust crate</i>"] --> B["verter_napi<br/><i>NAPI-RS cdylib</i>"]
     B --> C[".node binary<br/><i>platform-specific</i>"]
     C --> D["@verter/native<br/><i>JS loader (index.js)</i>"]
     D --> F["@verter/unplugin"]
@@ -292,7 +295,7 @@ pnpm test                 # runs: vitest run
 
 | Dependency                    | Purpose                            |
 | ----------------------------- | ---------------------------------- |
-| `verter_core` (Rust)          | Core Vue template compiler         |
+| `verter_compiler` (Rust)          | Core Vue template compiler         |
 | `oxc_allocator` (Rust)        | Memory allocator for OXC AST nodes |
 | `napi` / `napi-derive` (Rust) | NAPI-RS bindings framework         |
 | `@napi-rs/cli` (dev)          | Build tooling for NAPI-RS          |

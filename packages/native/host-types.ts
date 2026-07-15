@@ -8,6 +8,24 @@
 // This file must remain environment-agnostic (no Node.js or browser-only types).
 // =============================================================================
 
+/**
+ * Caller-requested compile cache mode. `"session"` (the default)
+ * consults the fact-validated session cache; `"content"` the pure
+ * content-addressed cache; `"stateless"` bypasses both.
+ */
+export type CompileCacheMode = "stateless" | "content" | "session";
+
+/** Why a requested compile cache mode was constrained. */
+export type DowngradeReason =
+  | "HasExternalSrc"
+  | "HasMacroTypeDeps"
+  | "HasWorkspaceAlias"
+  | "HasModuleAugmentation"
+  | "HasBlockOverride"
+  | "HasStyleOverride"
+  | "HasIdeOnlyAnalysis"
+  | "HasDevLastGood";
+
 export interface HostConfig {
   devMode?: boolean;
   compileErrorPolicy?: "strict" | "strictError" | "devServeLastKnownGood";
@@ -16,6 +34,38 @@ export interface HostConfig {
   resolveExtensions?: string[];
   /** Controls static analysis level during upsert(). Default: "full". */
   analysisLevel?: "full" | "essential" | "none";
+  /**
+   * Enable Rust-first native audit for component-meta requests.
+   * When true, timing/memory/store data is captured per request.
+   * Default: false.
+   */
+  auditEnabled?: boolean;
+  /**
+   * Enable per-request semantic footprint capture. Requires
+   * `auditEnabled: true`.
+   * Default: false.
+   */
+  footprintCapture?: boolean;
+  /**
+   * Capacity of the host-owned typeinfo scratch cache used by
+   * `evaluateTypeExpressionWithAudit`. `undefined` (default) selects
+   * 64 entries; `0` disables the cache; other values cap the LRU at
+   * the chosen size — used by the `@verter/typeinfo` LRU eviction
+   * tests.
+   */
+  typeinfoScratchCacheCapacity?: number;
+  /**
+   * Worker count for the host-owned CPU pool used by `compileMany`'s
+   * outer coordinator. `undefined` (default) resolves to the platform's
+   * available parallelism at host-construction time; `0` is treated as
+   * `undefined` (the default), so a misconfigured caller passing `0`
+   * still gets a working host pool; other positive values cap the
+   * pool's worker count.
+   *
+   * The host pool is built once at host construction and reused across
+   * `compileMany` calls. To change the pool size, construct a new host.
+   */
+  hostCpuThreads?: number;
 }
 
 export interface HostCompileProfile {
@@ -34,6 +84,8 @@ export interface HostCompileProfile {
   sourceMap?: boolean;
   /** Compilation target preset: "bundler" (default), "ide", or "analysis". */
   target?: "bundler" | "ide" | "analysis";
+  /** Requested compile cache mode. Defaults to "session". */
+  requestedMode?: CompileCacheMode;
 }
 
 export interface HostIdeProjectConfig {
@@ -195,13 +247,24 @@ export interface HostVirtualFileResponse {
   stale: boolean;
   diagnostics: HostDiagnosticsSnapshot;
   meta: HostVirtualMeta;
+  /**
+   * True iff this response was served from a warm cache slot (the
+   * fact-validated session slot OR the content-addressed store).
+   */
+  cacheHit: boolean;
+  /** The compile cache mode the caller requested. */
+  requestedMode: CompileCacheMode;
+  /** The compile cache mode the runtime actually ran under. */
+  actualMode: CompileCacheMode;
+  /** Highest-priority downgrade reason, or undefined when none fired. */
+  downgradeReason?: DowngradeReason;
 }
 
 export interface HostUpsertRequest {
   canonicalId?: string;
   inputId: string;
   source: string;
-  fileKind?: "vue" | "sfc" | "vue_sfc" | "non_sfc" | "text" | "file";
+  fileKind?: "vue" | "sfc" | "vue_sfc" | "svelte" | "non_sfc" | "text" | "file";
   aliases?: string[];
 }
 

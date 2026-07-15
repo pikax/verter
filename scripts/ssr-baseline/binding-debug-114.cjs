@@ -1,7 +1,15 @@
 const path = require("path");
 const fs = require("fs");
 const { parse, compileScript, compileTemplate } = require("@vue/compiler-sfc");
-const d = JSON.parse(fs.readFileSync("C:/temp/ssr-iter-114.json", "utf8"));
+// Usage: node binding-debug-114.cjs <mismatches.json> <corpus-root>
+//   (corpus-root may also come from VERTER_COMPARE_ROOT)
+const inputPath = process.argv[2];
+const corpusRoot = process.argv[3] ?? process.env.VERTER_COMPARE_ROOT;
+if (!inputPath || !corpusRoot) {
+  console.error("usage: node binding-debug-114.cjs <mismatches.json> <corpus-root>");
+  process.exit(1);
+}
+const d = JSON.parse(fs.readFileSync(inputPath, "utf8"));
 
 const bp = (s) =>
   s
@@ -16,7 +24,7 @@ for (const r of d.mismatches) {
     t = r.verter || "";
   if (bp(v) !== bp(t)) continue;
 
-  const fullPath = "D:/dev/" + r.file;
+  const fullPath = path.join(corpusRoot, r.file);
   let source;
   try {
     source = fs.readFileSync(fullPath, "utf8");

@@ -93,13 +93,23 @@ CI uses a separate `/lsp-benchmark` workflow that runs the PrimeVue target on Li
 
 The package also includes a real-project component-meta benchmark for `nuxt/ui`.
 
-Setup the local checkout first:
+Setup the local checkout first. **`--ref=<sha-or-ref>` is required** so every CI run and developer laptop benchmarks the same upstream tree (Tier 6 §8.2 / T9.3 strict-ref enforcement):
 
 ```bash
-pnpm --filter @verter/benchmark bench:meta:ui:setup
+pnpm --filter @verter/benchmark bench:meta:ui:setup -- \
+  --ref=90a94fb162d532ada26012bfe1ab82adc9217988
 ```
 
-That setup intentionally uses `pnpm install --frozen-lockfile` so every backend/job benchmarks the same dependency graph. For manual debugging only, you can opt into an unfrozen fallback with `pnpm --filter @verter/benchmark bench:meta:ui:setup -- --allow-unfrozen-install`.
+Symbolic refs (tags, PR refs) work too:
+
+```bash
+pnpm --filter @verter/benchmark bench:meta:ui:setup -- --ref=v0.5.0
+pnpm --filter @verter/benchmark bench:meta:ui:setup -- --ref=refs/pull/1234/head
+```
+
+The setup also refuses to clobber a target worktree that has local modifications, untracked files, or staged deletions. Resolve by stashing/committing the changes, or pass `--allow-dirty-target` to opt into the destructive behavior for one-off manual debugging.
+
+That setup intentionally uses `pnpm install --frozen-lockfile` so every backend/job benchmarks the same dependency graph. For manual debugging only, you can opt into an unfrozen fallback with `--allow-unfrozen-install`.
 
 Run a small smoke benchmark:
 
@@ -114,10 +124,34 @@ JSON output:
 
 ```bash
 pnpm --filter @verter/benchmark bench:meta:ui:json -- \
-  --backends=verter,vue-component-meta \
-  --scenarios=single_cold,repo_warm_second_pass \
+  --backends="verter,vue-component-meta" \
+  --scenarios="single_cold,repo_warm_second_pass" \
   --repeats=5
 ```
+
+> **Quote multi-value CSV flags.** `--scenarios`, `--backends`, and
+> `--components` accept comma-separated lists. The runner parses the
+> entire `--scenarios=value` token in one piece, so the value MUST be
+> quoted whenever the shell would otherwise split it on a comma or
+> whitespace:
+>
+> ```bash
+> # Correct — quoted CSV reaches the runner as a single argv token:
+> pnpm --filter @verter/benchmark bench:meta:ui -- \
+>   --scenarios="single_cold,repo_first_pass"
+>
+> # Incorrect — `repo_first_pass` becomes a positional arg and is
+> # silently dropped (the run executes only `single_cold`):
+> pnpm --filter @verter/benchmark bench:meta:ui -- \
+>   --scenarios=single_cold repo_first_pass
+> ```
+>
+> The runner detects the unquoted form and emits a stderr warning
+> showing the recommended quoted spelling, but does NOT auto-correct —
+> the run still proceeds with whatever scenarios were actually passed
+> as `--scenarios=...`. The same applies to `--backends` and
+> `--components`. PowerShell users should also quote the value to
+> defeat its argument-splitting heuristics.
 
 Build or refresh the pinned `vue-component-meta` baseline once and reuse it across later runs:
 
@@ -132,7 +166,7 @@ pnpm --filter @verter/benchmark bench:meta:ui -- \
 Supported flags:
 
 - `--ui-root=<path>` - override the prepared `nuxt-ui` checkout
-- `--backends=<csv>` - any of `vue-component-meta,verter,tsserver,tsgo`
+- `--backends=<csv>` - any of `vue-component-meta,verter`
 - `--scenarios=<csv>` - any of `single_cold,single_warm,repo_first_pass,repo_warm_second_pass`
 - `--repeats=<n>` - repeat count per backend/scenario
 - `--warmup-passes=<n>` - untimed warmup passes before warm scenarios
@@ -144,6 +178,25 @@ Supported flags:
 - `--output-dir=<path>` - write per-run JSON artifacts to a custom directory
 
 The generated JSON artifacts land under `packages/benchmark/benchmark-results/meta-ui/` by default, while reusable expected artifacts default to `packages/benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/`. CI builds the expected artifact set once, uploads it, and reuses it across the backend/scenario matrix in the `/meta-benchmark` workflow.
+
+Correctness validation is driven by the audit record emitted from the
+Rust-side `RustAuditRecord`.
+Specifications live under `packages/benchmark/audit-specs/component-meta/`
+and are consumed by `packages/benchmark/src/audit-validator.ts`. The
+legacy regex-validator CLI (`trace-check.ts`) and its
+`trace-specs/component-meta/*.json` pinned files have been retired —
+the audit record is the sole authority.
+
+```ts
+// packages/benchmark/src/audit-validator.ts
+import { validateAuditBundle } from "./audit-validator.js";
+
+const result = validateAuditBundle(bundle, spec);
+if (!result.passed) {
+  console.error(result.violations.join("\n"));
+  process.exit(1);
+}
+```
 
 ## CI Integration
 

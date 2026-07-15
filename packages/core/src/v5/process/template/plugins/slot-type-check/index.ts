@@ -1,1 +1,0 @@
-export * from "./slotTypeCheck.js";

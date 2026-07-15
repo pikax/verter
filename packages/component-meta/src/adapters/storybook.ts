@@ -3,7 +3,7 @@
  */
 
 import type { ComponentMeta, PropMeta, EventMeta } from "../types.js";
-import type { TypeDescriptor } from "../type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 
 export interface StorybookArgType {
   name?: string;
@@ -138,6 +138,10 @@ function typeToStorybookName(type: TypeDescriptor): string {
       return type.name;
     case "ref":
       return type.name;
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers render as their `bindingName` —
+      // no runtime resolution.
+      return type.bindingName;
     default:
       return "other";
   }
@@ -155,8 +159,14 @@ function typeToSummary(type: TypeDescriptor): string {
       return type.types.map(typeToSummary).join(" & ");
     case "array":
       return `${typeToSummary(type.element)}[]`;
-    case "tuple":
-      return `[${type.elements.map(typeToSummary).join(", ")}]`;
+    case "tuple": {
+      const rendered = type.elements.map((entry, i) => {
+        const text = typeToSummary(entry);
+        const label = type.labels?.[i] ?? null;
+        return label ? `${label}: ${text}` : text;
+      });
+      return `[${rendered.join(", ")}]`;
+    }
     case "object":
       return "object";
     case "function":
@@ -167,9 +177,19 @@ function typeToSummary(type: TypeDescriptor): string {
       return type.typeArguments
         ? `${type.name}<${type.typeArguments.map(typeToSummary).join(", ")}>`
         : type.name;
+    case "recursiveRef":
+      return type.typeArguments.length > 0
+        ? `${type.name}<${type.typeArguments.map(typeToSummary).join(", ")}>`
+        : type.name;
+    case "indexedAccess":
+      return `${typeToSummary(type.objectType)}[${typeToSummary(type.indexType)}]`;
     case "enum":
       return type.name;
     case "unknown":
       return type.rawType || "unknown";
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers summarise as the user-visible
+      // `bindingName` — no runtime resolution.
+      return type.bindingName;
   }
 }

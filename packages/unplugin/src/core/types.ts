@@ -12,16 +12,20 @@ export type BlockPreprocessor = (
   filename: string,
 ) => { code: string; sourceMap?: string } | Promise<{ code: string; sourceMap?: string }> | null;
 
+export type VerterFrameworkLanguage = "auto" | "vue" | "sveltejs";
+
 export interface VerterPluginOptions {
+  /** Framework selection. Auto detects `.vue` and `.svelte` per file. */
+  lang?: VerterFrameworkLanguage;
   /** Custom component ID generator */
   componentId?: (filename: string, source: string, isProd: boolean) => string;
-  /** File patterns to include (default: [/\.vue$/]). Matches @vitejs/plugin-vue `include` option. */
+  /** File patterns to include (default follows `lang`). Matches @vitejs/plugin-vue `include`. */
   include?: string | RegExp | (string | RegExp)[];
   /**
-   * Pre-compile all `.vue` files during `buildStart` by scanning the project root.
+   * Pre-compile all selected carrier files during `buildStart` by scanning the project root.
    * Populates the host cache so that `transform()` calls get instant cache hits
    * when the source hasn't been modified by other plugins.
-   * Third-party `.vue` files in `node_modules` are excluded from scanning.
+   * Third-party carrier files in `node_modules` are excluded from scanning.
    * @default false
    */
   preCompile?: boolean;
@@ -33,6 +37,7 @@ export interface VerterPluginOptions {
    * Those props skip dynamic tracking in the compiled output.
    * @default false
    */
+  /** Vue-only cross-file prop-constness optimization. */
   crossFileOptimize?: boolean;
   /**
    * Template compiler options. Accepted for compatibility with `@vitejs/plugin-vue`

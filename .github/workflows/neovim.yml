@@ -1,0 +1,131 @@
+name: neovim
+
+# Neovim LSP-client config tests. Two gates:
+#   - `test`: the headless plenary suite. It builds `verter-lsp` and exports
+#     `$VERTER_LSP_BIN`, so the real-server attach smoke (`smoke_spec.lua`) runs
+#     a REAL stdio attach against the built binary (it no longer skips
+#     vacuously). The always-on Lua unit specs (config builders + on_attach) run
+#     alongside it.
+#   - `rust-contract`: the Rust single-source-of-truth drift guard
+#     (`nvim_config_contract`), which asserts the Lua init-options layer stays in
+#     lockstep with the shared Rust contract. An nvim-side edit fires this so a
+#     drift from the Rust SSoT is caught here, not only in the Lua suite.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "editors/nvim/**"
+      - "crates/verter-editor-client/**"
+      - ".github/workflows/neovim.yml"
+  pull_request:
+    paths:
+      - "editors/nvim/**"
+      - "crates/verter-editor-client/**"
+      - ".github/workflows/neovim.yml"
+
+jobs:
+  test:
+    name: nvim ${{ matrix.neovim }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Cross-platform portability is a CRITICAL rule: the Lua config layer
+        # must build path strings, resolve the binary, and run the suite on all
+        # three host OSes. The run step uses `shell: bash` so the same script
+        # works under Git-bash on the Windows runner.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Three points of coverage: v0.11.0 is the supported floor (the config
+        # layer needs `vim.lsp.config` / `vim.lsp.enable`, first available in
+        # 0.11), v0.12.3 is the current stable release, and nightly catches
+        # upstream LSP-client changes before they ship.
+        neovim: [v0.11.0, v0.12.3, nightly]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build verter-lsp
+        # The real-server attach smoke (`smoke_spec.lua`) drives a REAL
+        # `verter-lsp` over stdio, so the binary must exist. Build it in release
+        # mode; the plenary step below exports `$VERTER_LSP_BIN` at it so the
+        # smoke runs for real instead of skipping.
+        run: cargo build -p verter_lsp --release
+
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: ${{ matrix.neovim }}
+
+      - name: Checkout plenary.nvim
+        uses: actions/checkout@v4
+        with:
+          repository: nvim-lua/plenary.nvim
+          path: .ci/plenary.nvim
+
+      - name: Run plenary busted suite
+        shell: bash
+        env:
+          PLENARY_PATH: ${{ github.workspace }}/.ci/plenary.nvim
+        run: |
+          set -euo pipefail
+          # Resolve the freshly built verter-lsp binary cross-platform and export
+          # it as $VERTER_LSP_BIN in THIS shell, so `smoke_spec.lua` runs its REAL
+          # stdio attach (it honours $VERTER_LSP_BIN; without it the smoke skips
+          # vacuously). The Windows runner produces a .exe; branch on RUNNER_OS.
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            VERTER_LSP_BIN="${GITHUB_WORKSPACE}/target/release/verter-lsp.exe"
+          else
+            VERTER_LSP_BIN="${GITHUB_WORKSPACE}/target/release/verter-lsp"
+          fi
+          if [ ! -x "${VERTER_LSP_BIN}" ]; then
+            echo "::error::built verter-lsp not found/executable at ${VERTER_LSP_BIN}"
+            exit 1
+          fi
+          export VERTER_LSP_BIN
+          echo "using VERTER_LSP_BIN=${VERTER_LSP_BIN}"
+          # Load minimal_init.lua into the PARENT nvim with `-u` so the
+          # `PlenaryBustedDirectory` command exists (it is defined by
+          # plenary, which minimal_init prepends to the rtp). Without `-u`
+          # the parent nvim has no plenary and the command is a no-op, so the
+          # suite would silently fail to run. The child `{minimal_init=...}`
+          # re-applies the same init for each spawned spec process.
+          #
+          # Capture output so we can fail the job even on plenary builds that do
+          # not propagate a nonzero exit code on test failure.
+          out=$(nvim --headless --noplugin \
+            -u editors/nvim/tests/minimal_init.lua \
+            -c "PlenaryBustedDirectory editors/nvim/tests/ {minimal_init='editors/nvim/tests/minimal_init.lua'}" \
+            -c "qa!" 2>&1) || rc=$?
+          rc=${rc:-0}
+          echo "$out"
+          # Whitespace-tolerant failure tokens. plenary prints `Failed : <n>`
+          # and `Errors : <n>` (ONE space, variable padding), so the old
+          # two-space `Failed  : [1-9]` / `Errored : [1-9]` patterns never
+          # matched and the gate could go green on a real failure.
+          if printf '%s\n' "$out" | grep -Eq 'Tests Failed|Schedule Error|Failed[[:space:]]*:[[:space:]]*[1-9]|Errors?[[:space:]]*:[[:space:]]*[1-9]'; then
+            echo "::error::Neovim plenary suite reported failures"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Neovim exited non-zero ($rc)"
+            exit "$rc"
+          fi
+
+  rust-contract:
+    name: nvim config contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Neovim init-options drift guard
+        shell: bash
+        run: cargo test -p verter-editor-client --test nvim_config_contract

@@ -1,6 +1,12 @@
 import fs from "fs";
 
-const d = JSON.parse(fs.readFileSync("C:/temp/ssr-full-style-merge2.json", "utf8"));
+// Pass the mismatches JSON as the first CLI arg (e.g. ssr-full-style-merge2.json).
+const __input = process.argv[2];
+if (!__input) {
+  console.error("usage: node _close-matches.mjs <mismatches.json>");
+  process.exit(1);
+}
+const d = JSON.parse(fs.readFileSync(__input, "utf8"));
 const mm = d.mismatches;
 
 // For each mismatch, count number of diff lines (a proxy for how far off it is)

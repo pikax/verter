@@ -25,17 +25,48 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
       "require": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./carrier/store": {
+      "types": "./dist/carrier/store.d.ts",
+      "import": "./dist/carrier/store.js",
+      "require": "./dist/carrier/store.js",
+      "default": "./dist/carrier/store.js"
+    },
+    "./carrier/remap": {
+      "types": "./dist/carrier/remap.d.ts",
+      "import": "./dist/carrier/remap.js",
+      "require": "./dist/carrier/remap.js",
+      "default": "./dist/carrier/remap.js"
+    },
+    "./carrier/mapper": {
+      "types": "./dist/carrier/mapper.d.ts",
+      "import": "./dist/carrier/mapper.js",
+      "require": "./dist/carrier/mapper.js",
+      "default": "./dist/carrier/mapper.js"
+    },
+    "./carrier/policy": {
+      "types": "./dist/carrier/policy.d.ts",
+      "import": "./dist/carrier/policy.js",
+      "require": "./dist/carrier/policy.js",
+      "default": "./dist/carrier/policy.js"
     }
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "test": "tsc --noEmit && vitest run"
+  },
+  "dependencies": {
+    "@jridgewell/trace-mapping": "^0.3.31"
   },
   "devDependencies": {
-    "typescript": "^5.9.3",
-    "vite": "^8.0.0",
-    "vite-plugin-dts": "^4.5.4"
+    "@jridgewell/sourcemap-codec": "^1.5.5",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.14",
+    "vite-plugin-dts": "^5.0.1",
+    "vitest": "^4.1.7"
   },
   "engines": {
     "node": ">=18"

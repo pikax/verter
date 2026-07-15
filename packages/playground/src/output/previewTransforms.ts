@@ -6,6 +6,21 @@
  */
 
 /** Transform 'as' to ':' for destructuring (import uses 'as', destructuring uses ':') */
+export const SVELTE_RUNTIME_FLAGS = ["legacy", "async", "tracing"] as const;
+export type SvelteRuntimeFlag = (typeof SVELTE_RUNTIME_FLAGS)[number];
+
+const SVELTE_RUNTIME_FLAG_IMPORT_RE =
+  /import\s+['"]svelte\/internal\/flags\/(legacy|async|tracing)['"]\s*;?/g;
+
+/** Collect side-effect runtime flags that must be evaluated before a Svelte component mounts. */
+export function collectSvelteRuntimeFlags(code: string): SvelteRuntimeFlag[] {
+  const seen = new Set<SvelteRuntimeFlag>();
+  for (const match of code.matchAll(SVELTE_RUNTIME_FLAG_IMPORT_RE)) {
+    seen.add(match[1] as SvelteRuntimeFlag);
+  }
+  return [...seen];
+}
+
 export function transformImportList(imports: string): string {
   return imports.replace(/(\w+)\s+as\s+(\w+)/g, "$1: $2");
 }
@@ -13,6 +28,23 @@ export function transformImportList(imports: string): string {
 /** Transform compiled code to work in preview iframe */
 export function transformForPreview(code: string, moduleName: string): string {
   let transformed = code;
+
+  // The iframe loads these framework-owned runtime modules through its import
+  // map before evaluating compiled carriers. Preserve the compiler's namespace
+  // shape without leaving an ESM import inside the classic-script evaluator.
+  transformed = transformed.replace(
+    /import\s+\*\s+as\s+([$_A-Za-z][$_\w]*)\s+from\s+['"]svelte\/internal\/client['"]\s*;?/g,
+    (_, name) => `const ${name} = window.SvelteInternalClient`,
+  );
+  transformed = transformed.replace(
+    /import\s+['"]svelte\/internal\/disclose-version['"]\s*;?/g,
+    "",
+  );
+  // Runtime flags are preloaded by the iframe before evaluating any compiled
+  // module. Leaving these static imports in a classic-script evaluator would be
+  // a syntax error; simply dropping them without preloading would break legacy,
+  // async, or tracing semantics.
+  transformed = transformed.replace(SVELTE_RUNTIME_FLAG_IMPORT_RE, "");
 
   // Transform: import { x, y as z } from 'vue' -> const { x, y: z } = window.Vue
   transformed = transformed.replace(
@@ -30,7 +62,7 @@ export function transformForPreview(code: string, moduleName: string): string {
   transformed = transformed.replace(
     /import\s+\{([^}]+)\}\s+from\s+['"]\.\/([^'"]+)['"]/g,
     (_, imports, path) => {
-      const modulePath = "./" + path.replace(/\.(vue|ts)$/, ".js");
+      const modulePath = "./" + path.replace(/\.(vue|svelte|ts)$/, ".js");
       return `const {${transformImportList(imports)}} = window.__modules__["${modulePath}"]`;
     },
   );
@@ -39,7 +71,7 @@ export function transformForPreview(code: string, moduleName: string): string {
   transformed = transformed.replace(
     /import\s+(\w+)\s+from\s+['"]\.\/([^'"]+)['"]/g,
     (_, name, path) => {
-      const modulePath = "./" + path.replace(/\.(vue|ts)$/, ".js");
+      const modulePath = "./" + path.replace(/\.(vue|svelte|ts)$/, ".js");
       return `const ${name} = window.__modules__["${modulePath}"].default`;
     },
   );
@@ -117,7 +149,7 @@ export function orderScriptsByDependency(
   for (const [filename, code] of Object.entries(files)) {
     if (!code) continue;
     nonEmpty.push(filename);
-    const moduleName = "./" + filename.replace(/\.(vue|ts)$/, ".js");
+    const moduleName = "./" + filename.replace(/\.(vue|svelte|ts)$/, ".js");
     filenameToModule.set(filename, moduleName);
     moduleToFilename.set(moduleName, filename);
   }

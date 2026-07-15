@@ -417,8 +417,9 @@ export async function hydrateMacroTypeDeps(
         continue;
       }
       // Non-.vue resolved file (.ts, .d.ts, etc.) — only handle relative specifiers.
-      // Bare specifiers (npm packages) should go to Phase 2 which properly finds
-      // the .d.ts declaration entry via package.json, not the .js runtime entry.
+      // Bare specifiers (npm packages) should go to the bare-package step
+      // below, which properly finds the .d.ts declaration entry via
+      // package.json, not the .js runtime entry.
       if (isRelativeImport(specifier)) {
         // If the resolved file is a JS runtime file (.js, .mjs, .cjs), check for a
         // companion .d.ts/.d.mts/.d.cts file that has the actual type declarations.
@@ -490,7 +491,7 @@ export async function hydrateMacroTypeDeps(
       if (found) continue;
     }
 
-    // Not resolved — collect for Phase 2 (bare package specifier handling)
+    // Not resolved — collect for the bare-package specifier handling step
     if (!isRelativeImport(specifier)) {
       remaining.push(specifier);
     }

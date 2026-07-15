@@ -1,5 +1,6 @@
 export interface VueQuery {
   vue: boolean;
+  verter: boolean;
   type?: "script" | "template" | "style" | (string & {});
   index?: number;
   scoped?: boolean;
@@ -15,7 +16,7 @@ export function parseVueRequest(id: string): ParsedVueRequest {
   const [filename, queryString] = id.split("?", 2);
 
   if (!queryString) {
-    return { filename, query: { vue: false } };
+    return { filename, query: { vue: false, verter: false } };
   }
 
   const params = new URLSearchParams(queryString);
@@ -33,6 +34,7 @@ export function parseVueRequest(id: string): ParsedVueRequest {
 
   const query: VueQuery = {
     vue: params.has("vue"),
+    verter: params.has("verter"),
     type: params.get("type") as VueQuery["type"],
     index: params.has("index") ? parseInt(params.get("index")!, 10) : undefined,
     scoped: params.has("scoped"),

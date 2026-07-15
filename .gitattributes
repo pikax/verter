@@ -1,1 +1,76 @@
+# Line-ending enforcement (Windows-safe content addressing for fact-based cache).
+# Verter's cache hashes content directly; CRLF/BOM/path drift silently invalidates
+# content_hash / parse_stable_hash / fact semantic_hash. All text sources are LF.
+
+# Source code
+*.rs        text eol=lf
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.js        text eol=lf
+*.mjs       text eol=lf
+*.cjs       text eol=lf
+*.jsx       text eol=lf
+*.vue       text eol=lf
+*.svelte    text eol=lf
+
+# Data / config
+*.proto     text eol=lf
+*.json      text eol=lf
+*.toml      text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.md        text eol=lf
+*.txt       text eol=lf
+*.css       text eol=lf
+*.scss      text eol=lf
+*.sass      text eol=lf
+*.less      text eol=lf
+*.html      text eol=lf
+*.htm       text eol=lf
+*.svg       text eol=lf
+# Goldens capture emitted output byte-for-byte, including any trailing
+# whitespace the codegen produces; exempt them from whitespace linting so the
+# exact capture is preserved rather than corrupted to satisfy the lint.
+*.golden    text eol=lf whitespace=-trailing-space
+
+# Fixtures are part of the cache identity — strict LF
+tests/fixtures/**           text eol=lf
+crates/*/tests/fixtures/**  text eol=lf
+packages/*/tests/fixtures/** text eol=lf
+.integration-tests/**       text eol=lf
+# The Svelte oracle corpus lives outside `tests/fixtures/` (under
+# `svelte_oracle_corpus/fixtures/` + `…/goldens/`); its fixtures embed
+# INTENTIONAL control chars (a literal LF / CR inside a `class="…"`), so a
+# checkout must preserve them as LF — a CRLF flip would desync the byte-exact
+# emission against the LF-pinned `.json` goldens.
+crates/*/tests/svelte_oracle_corpus/fixtures/** text eol=lf
+crates/*/tests/svelte_oracle_corpus/goldens/**  text eol=lf
+# The generated CLIENT-CODEGEN parity corpus (its own `codegen/` subtree): the
+# `.svelte` fixtures embed the same intentional control chars, and the
+# `.client.json` goldens are byte-exact official captures — both strict LF so a
+# CRLF flip cannot desync the byte gate.
+crates/*/tests/svelte_oracle_corpus/codegen/**  text eol=lf
+
+# Binary outputs (never normalize)
+*.node      binary
+*.wasm      binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.eot       binary
+*.pdf       binary
+*.zip       binary
+*.gz        binary
+*.tar       binary
+*.exe       binary
+*.dll       binary
+*.so        binary
+*.dylib     binary
+
+# Pre-existing rule (preserved)
 .github/workflows/*.lock.yml linguist-generated=true merge=ours

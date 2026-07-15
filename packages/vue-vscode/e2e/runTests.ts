@@ -1,8 +1,19 @@
 import * as path from "path";
 import * as fs from "fs";
 import { execSync } from "child_process";
-import { runTests, downloadAndUnzipVSCode } from "@vscode/test-electron";
+import { resolveCliArgsFromVSCodeExecutablePath, runTests } from "@vscode/test-electron";
 import * as os from "os";
+import {
+  copyLspBinaryToTemp,
+  provisionVsCodeExtension,
+  readE2eEnv,
+  resolveVscodeExecutablePath,
+  writeVsCodeUserSettings,
+} from "./sharedLaunch";
+import { clearRunArtifacts, enforceRunSummary } from "../src/runSummaryOracle";
+
+const EDITOR_ACCEPTANCE_FIXTURE = "editor-owned-project";
+const NATIVE_PREVIEW_EXTENSION = "TypeScriptTeam.native-preview@0.20260708.2";
 
 /**
  * Fixture entries: plain name uses auto type provider,
@@ -28,6 +39,8 @@ const FIXTURES = [
   "single-file@tsgo",
   "barrel-exports@tsserver",
   "barrel-exports@tsgo",
+  `${EDITOR_ACCEPTANCE_FIXTURE}@tsserver`,
+  `${EDITOR_ACCEPTANCE_FIXTURE}@shared-tsgo`,
 ];
 
 /**
@@ -44,81 +57,6 @@ function parseFixtureEntry(entry: string): { fixture: string; typeProvider?: str
   };
 }
 
-function readE2eEnv(name: string): string | undefined {
-  return process.env[`VERTER_E2E_${name}`] ?? process.env[`E2E_${name}`];
-}
-
-/**
- * Find the verter-lsp binary in the monorepo.
- * Searches: target/debug/, target/release/, dist/, PATH.
- * Returns undefined if not found.
- */
-function findLspBinary(extensionPath: string): string | undefined {
-  const ext = process.platform === "win32" ? ".exe" : "";
-  const binaryName = `verter-lsp${ext}`;
-
-  // Check monorepo target/ (walk upward to find the monorepo root)
-  let dir = extensionPath;
-  for (let i = 0; i < 5; i++) {
-    for (const profile of ["debug", "release"]) {
-      const candidate = path.join(dir, "target", profile, binaryName);
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-    }
-    dir = path.dirname(dir);
-  }
-
-  // Check dist/ in extension path
-  const distPath = path.join(extensionPath, "dist", binaryName);
-  if (fs.existsSync(distPath)) {
-    return distPath;
-  }
-
-  // Check bin/ in extension path
-  const binPath = path.join(extensionPath, "bin", binaryName);
-  if (fs.existsSync(binPath)) {
-    return binPath;
-  }
-
-  return undefined;
-}
-
-/**
- * Copy the LSP binary to a temp directory to prevent file locking issues.
- * On Windows, a running .exe is locked and can't be overwritten by cargo build.
- * On Unix, keep the original path to avoid location-sensitive startup issues
- * when running ad-hoc signed debug binaries from a temp directory.
- * Returns the path to use for tests, or undefined if source not found.
- */
-function copyLspBinaryToTemp(extensionPath: string): string | undefined {
-  const sourcePath = findLspBinary(extensionPath);
-  if (!sourcePath) {
-    console.warn("Warning: LSP binary not found — tests will use PATH fallback");
-    return undefined;
-  }
-
-  if (process.platform !== "win32") {
-    console.log(`LSP binary using source path: ${sourcePath}`);
-    return sourcePath;
-  }
-
-  const ext = process.platform === "win32" ? ".exe" : "";
-  const tempDir = path.join(os.tmpdir(), `verter-e2e-bin-${process.pid}`);
-  fs.mkdirSync(tempDir, { recursive: true });
-
-  const destPath = path.join(tempDir, `verter-lsp${ext}`);
-  fs.copyFileSync(sourcePath, destPath);
-
-  // Ensure executable permission on Unix
-  if (process.platform !== "win32") {
-    fs.chmodSync(destPath, 0o755);
-  }
-
-  console.log(`LSP binary copied: ${sourcePath} → ${destPath}`);
-  return destPath;
-}
-
 /**
  * Install dependencies in a fixture directory if it has a package.json.
  * Uses npm (available everywhere) to install deps for Vue type resolution.
@@ -133,15 +71,42 @@ function installFixtureDeps(fixtureDir: string): void {
   }
 
   console.log(`  Installing dependencies in ${fixtureDir}...`);
-  try {
-    execSync("npm install --no-package-lock --ignore-scripts", {
-      cwd: fixtureDir,
-      stdio: "pipe",
-      timeout: 60_000,
-    });
-  } catch (err) {
-    console.warn(`  Warning: npm install failed in ${fixtureDir}:`, (err as Error).message);
+  execSync("npm install --no-package-lock --ignore-scripts", {
+    cwd: fixtureDir,
+    stdio: "pipe",
+    timeout: 60_000,
+  });
+}
+
+interface E2eProfile {
+  root: string;
+  extensionsDir: string;
+  userDataDir: string;
+}
+
+function createE2eProfile(label: string, index: number): E2eProfile {
+  const safeLabel = label.replace(/[^a-zA-Z0-9_-]/g, "-");
+  const root = path.join(os.tmpdir(), `verter-e2e-profile-${process.pid}-${index}-${safeLabel}`);
+  const profile = {
+    root,
+    extensionsDir: path.join(root, "extensions"),
+    userDataDir: path.join(root, "user-data"),
+  };
+  fs.mkdirSync(profile.extensionsDir, { recursive: true });
+  fs.mkdirSync(profile.userDataDir, { recursive: true });
+  return profile;
+}
+
+function removeE2eProfile(profile: E2eProfile): void {
+  const target = path.resolve(profile.root);
+  const tempRoot = path.resolve(os.tmpdir());
+  if (
+    !target.startsWith(`${tempRoot}${path.sep}`) ||
+    !path.basename(target).startsWith("verter-e2e-profile-")
+  ) {
+    throw new Error(`Refusing to remove unexpected E2E profile path: ${target}`);
   }
+  fs.rmSync(target, { recursive: true, force: true });
 }
 
 async function main() {
@@ -160,24 +125,16 @@ async function main() {
         ? FIXTURES.filter((entry) => parseFixtureEntry(entry).typeProvider === envTypeProvider)
         : FIXTURES;
 
-  let vscodeExecutablePath = await downloadAndUnzipVSCode(vscodeVersion);
-
-  // VS Code 1.111+ changed its binary layout: Code.exe is now a Node.js
-  // launcher that doesn't accept CLI flags like --disable-extensions.
-  // Use bin/code.cmd (the CLI entry point) instead.
-  if (process.platform === "win32") {
-    const cliPath = path.resolve(vscodeExecutablePath, "../bin/code.cmd");
-    if (fs.existsSync(cliPath)) {
-      vscodeExecutablePath = cliPath;
-    }
-  }
+  const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion, {
+    explicitExecutablePath: readE2eEnv("VSCODE_EXECUTABLE"),
+  });
 
   // Copy LSP binary to temp to prevent file locking
   const lspBinaryPath = copyLspBinaryToTemp(extensionDevelopmentPath);
 
   let totalFailures = 0;
 
-  for (const entry of fixturesToRun) {
+  for (const [index, entry] of fixturesToRun.entries()) {
     const { fixture, typeProvider } = parseFixtureEntry(entry);
     const label = typeProvider ? `${fixture}@${typeProvider}` : fixture;
     const fixtureDir = path.join(extensionDevelopmentPath, "e2e", "fixtures", fixture);
@@ -200,27 +157,77 @@ async function main() {
       }
     }
 
+    const logFile = path.join(os.tmpdir(), `verter-e2e-${label}.log`);
+    const profile = createE2eProfile(label, index);
+    // Delete any stale run summary before the run so a prior-run summary can
+    // never false-green a current zero-exit crash that writes no fresh summary.
+    clearRunArtifacts(logFile);
     try {
+      if (fixture === EDITOR_ACCEPTANCE_FIXTURE && typeProvider === "shared-tsgo") {
+        const extension = readE2eEnv("NATIVE_PREVIEW_EXTENSION") ?? NATIVE_PREVIEW_EXTENSION;
+        console.log(`  Provisioning ${extension} into the isolated test profile...`);
+        provisionVsCodeExtension({
+          cliArgs: resolveCliArgsFromVSCodeExecutablePath(vscodeExecutablePath),
+          extension,
+          extensionsDir: profile.extensionsDir,
+          userDataDir: profile.userDataDir,
+        });
+        // Native Preview's restart/API-session commands exist only after its
+        // enabled server starts. Seed the isolated profile before first activation
+        // so this acceptance exercises the real editor-owned lifecycle.
+        writeVsCodeUserSettings(profile.userDataDir, {
+          "js/ts.experimental.useTsgo": true,
+        });
+      }
+
+      const launchArgs = [
+        fixtureDir,
+        "--disable-updates",
+        "--disable-workspace-trust",
+        "--skip-welcome",
+        "--skip-release-notes",
+        `--extensions-dir=${profile.extensionsDir}`,
+        `--user-data-dir=${profile.userDataDir}`,
+      ];
+      if (!(fixture === EDITOR_ACCEPTANCE_FIXTURE && typeProvider === "shared-tsgo")) {
+        launchArgs.push("--disable-extensions");
+      }
       await runTests({
         vscodeExecutablePath,
         extensionDevelopmentPath,
         extensionTestsPath,
-        launchArgs: ["--disable-extensions", "--disable-updates", fixtureDir],
+        launchArgs,
         extensionTestsEnv: {
           ...process.env,
           VERTER_E2E_TEST: "1",
-          VERTER_E2E_LOG_FILE: path.join(os.tmpdir(), `verter-e2e-${label}.log`),
+          VERTER_E2E_LOG_FILE: logFile,
           VERTER_E2E_FIXTURE: fixture,
           VERTER_E2E_TIMING_FILE: path.join(os.tmpdir(), `verter-e2e-timing-${label}.json`),
           VERTER_LOG: "debug",
           ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
           ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
+          ...(fixture === EDITOR_ACCEPTANCE_FIXTURE
+            ? { VERTER_E2E_ONLY: "editor-owned-project.test" }
+            : {}),
         },
       });
+      // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
+      // on some hosts (Windows: VS Code can exit 0 even when the extension test run
+      // rejected). The authoritative oracle is the run summary the mocha runner writes
+      // (`suite/index.ts` → `<logFile>.runsummary`): fail on any reported test failure,
+      // and on a vacuous 0-test execution or a MISSING summary. Every matrix entry is a
+      // required gate; no ordinary fixture is allowed a legacy zero-execution pass.
+      await enforceRunSummary(logFile, label, {});
       console.log(`  PASSED: ${label}`);
     } catch (err) {
       console.error(`  FAILED: ${label}`, err);
       totalFailures++;
+    } finally {
+      if (readE2eEnv("KEEP_PROFILE") === "1") {
+        console.log(`  Preserved E2E profile: ${profile.root}`);
+      } else {
+        removeE2eProfile(profile);
+      }
     }
   }
 

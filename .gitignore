@@ -26,12 +26,14 @@ nul
 .vscode/
 
 # Claude Code internal files
-.claude/plans/
+.claude/plans/*
+!.claude/plans/phase-d-approved-test-deletions.txt
+!.claude/plans/phase-d-approved-test-deletions-rationale.md
 .claude/prompts/
 .claude/memory/
 .claude/settings.local.json
 .claude/*.md
-.claude/feedback/
+.feedback/
 .claude/worktrees/
 
 # Benchmark results (generated artifacts)
@@ -41,11 +43,17 @@ packages/benchmark/benchmark-results/
 # Integration test cloned repos
 .integration-tests/
 
+# Local analysis-campaign inputs (corpus paths live here, never committed).
+# Ignore the directory CONTENTS (not the dir itself) so the lone committable
+# example can be re-included — a `!` negation cannot re-include a file whose
+# PARENT directory is excluded, so this must be `.analysis/*`, never `.analysis/`.
+.analysis/*
+!.analysis/projects.local.json.example
+
 # Playwright transient artifacts
 packages/playground/test-results/
 
 # Comparison script output
-scripts/compare-tsx-output/
 
 # VitePress
 docs/.vitepress/dist
@@ -63,3 +71,9 @@ cargo_errors.txt
 cargo_test_errors.txt
 benchmark-results.json
 *.bak
+
+
+.claude/scheduled_tasks.lock
+tmp/
+.tmp-tsgo-checks/
+scratchpad/

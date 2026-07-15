@@ -238,8 +238,88 @@ export class ExtensionTsService {
             replacementSpan: e.replacementSpan
               ? this.spanToRange(text, e.replacementSpan)
               : undefined,
+            // Auto-import resolve key: a module-export entry carries `source`
+            // (+ the optional opaque `data` blob), which `getCompletionEntryDetails`
+            // keys the auto-import `codeActions` lookup on. Forwarding them lets
+            // the provider re-issue `completionEntryDetails` for the selected
+            // entry — without them the extension provider could never resolve an
+            // auto-import. `hasAction` is NOT forwarded: it is purely an output
+            // hint (not an input to the details lookup), and the auto-import
+            // resolve contract is `source`/`data` only — an auto-import entry
+            // always carries `source`. The other `hasAction:true` shapes
+            // (class-member snippet completions, missing-comma insertion,
+            // type-only-alias wrappers) are a DIFFERENT action class this
+            // resolve path deliberately does not route as imports. See
+            // `crates/verter_type_runtime/src/protocol.rs` (`is_actionable`) and
+            // `docs/arch/provider-completion-resolve-design.md`.
+            source: e.source,
+            data: e.data,
+            labelDetails: e.labelDetails,
+            sourceDisplay: e.sourceDisplay
+              ? this.ts.displayPartsToString(e.sourceDisplay)
+              : undefined,
           })),
         };
+      }
+
+      case "completionEntryDetails": {
+        const file = args.file as string;
+        const text = this.getFileText(file);
+        const offset = this.positionToOffset(text, args.line as number, args.offset as number);
+        // The selected entries to resolve, each `{ name, source?, data? }` —
+        // `source`/`data` route an external-module entry to the right symbol.
+        const entryNames = (args.entryNames as unknown[]) ?? [];
+        const details = entryNames.map((raw) => {
+          const entry = raw as { name?: string; source?: string; data?: unknown };
+          const name = entry.name ?? "";
+          // `formatOptions` MUST be provided: when resolving an auto-import
+          // (external-module) entry, TypeScript builds the import-insertion
+          // `codeActions` through its formatter, which dereferences the format
+          // settings. Passing `undefined` crashes the import code-action builder
+          // (`Cannot read properties of undefined (reading 'options')`), so the
+          // extension provider could never resolve an auto-import edit. Default
+          // format settings are sufficient — the inserted import is normalized
+          // by the shared tsserver-family resolve mapper downstream.
+          const detail = this.service.getCompletionEntryDetails(
+            file,
+            offset,
+            name,
+            this.ts.getDefaultFormatCodeSettings("\n"),
+            entry.source,
+            undefined,
+            entry.data as ts.CompletionEntryData | undefined,
+          );
+          if (!detail) return { name };
+          return {
+            name: detail.name,
+            kind: detail.kind,
+            kindModifiers: detail.kindModifiers,
+            displayParts: detail.displayParts?.map((p) => ({ text: p.text, kind: p.kind })),
+            documentation: detail.documentation?.map((p) => ({ text: p.text, kind: p.kind })),
+            tags: detail.tags?.map((t) => ({
+              name: t.name,
+              text: t.text ? t.text.map((p) => p.text).join("") : undefined,
+            })),
+            // The auto-import edit set: each code action's `changes` are tsserver
+            // `{ fileName, textChanges }` with 1-based line/offset positions, the
+            // shape the shared tsserver-family resolve mapper consumes.
+            codeActions: detail.codeActions?.map((action) => ({
+              description: action.description,
+              changes: action.changes.map((change) => ({
+                fileName: change.fileName,
+                textChanges: change.textChanges.map((tc) => {
+                  const changeText = this.getFileText(change.fileName);
+                  return {
+                    start: this.offsetToPosition(changeText, tc.span.start),
+                    end: this.offsetToPosition(changeText, tc.span.start + tc.span.length),
+                    newText: tc.newText,
+                  };
+                }),
+              })),
+            })),
+          };
+        });
+        return details;
       }
 
       case "definition":
@@ -334,22 +414,23 @@ export class ExtensionTsService {
       case "semanticDiagnosticsSync": {
         const file = args.file as string;
         const text = this.getFileText(file);
-        const diags = this.service.getSemanticDiagnostics(file);
-        return diags.map((d) => ({
-          start: d.start !== undefined ? this.offsetToPosition(text, d.start) : undefined,
-          end:
-            d.start !== undefined && d.length !== undefined
-              ? this.offsetToPosition(text, d.start + d.length)
-              : undefined,
-          text: this.ts.flattenDiagnosticMessageText(d.messageText, "\n"),
-          code: d.code,
-          category:
-            d.category === this.ts.DiagnosticCategory.Error
-              ? "error"
-              : d.category === this.ts.DiagnosticCategory.Warning
-                ? "warning"
-                : "suggestion",
-        }));
+        return this.service.getSemanticDiagnostics(file).map((d) => this.mapDiagnostic(text, d));
+      }
+
+      // Parse-error diagnostics. The native TS experience merges these with the
+      // semantic set; a semantic-only path drops them (tsserver-family parity).
+      case "syntacticDiagnosticsSync": {
+        const file = args.file as string;
+        const text = this.getFileText(file);
+        return this.service.getSyntacticDiagnostics(file).map((d) => this.mapDiagnostic(text, d));
+      }
+
+      // Suggestion diagnostics (unused-symbol / hint findings) — also part of the
+      // native merged set, dropped by a semantic-only path (tsserver-family parity).
+      case "suggestionDiagnosticsSync": {
+        const file = args.file as string;
+        const text = this.getFileText(file);
+        return this.service.getSuggestionDiagnostics(file).map((d) => this.mapDiagnostic(text, d));
       }
 
       case "getCodeFixes": {
@@ -378,6 +459,13 @@ export class ExtensionTsService {
 
         return fixes.map((fix) => ({
           description: fix.description,
+          // Pass through the typed fix-all identity so the Rust extension provider
+          // can follow each distinct `fixId` with a `getCombinedCodeFix` request and
+          // surface the "Delete all unused declarations" companion. Both are
+          // OPTIONAL on `ts.CodeFixAction` (a non-combinable fix carries neither);
+          // forwarding `undefined` is harmless (the Rust side reads them as None).
+          fixId: fix.fixId,
+          fixAllDescription: fix.fixAllDescription,
           changes: fix.changes.map((change) => ({
             fileName: change.fileName,
             textChanges: change.textChanges.map((tc) => ({
@@ -390,6 +478,41 @@ export class ExtensionTsService {
             })),
           })),
         }));
+      }
+
+      // The "fix all" companion for a combinable `fixId` (e.g. "Delete all unused
+      // declarations"). The Rust extension provider sends the shared
+      // `combined_code_fix_args` scope shape:
+      //   { scope: { type: "file", args: { file } }, fixId }
+      // (see `verter_type_runtime::tsserver::ipc::combined_code_fix_args`). The
+      // response mirrors the `getCodeFixes` `changes` shape exactly — 1-based
+      // `{ line, offset }` positions — so the shared
+      // `parse_tsserver_combined_code_fix` reads it without a second mapping.
+      case "getCombinedCodeFix": {
+        const scope = args.scope as { type: "file"; args: { file: string } };
+        const file = scope.args.file;
+        const fixId = args.fixId as {} | string;
+
+        const combined = this.service.getCombinedCodeFix(
+          { type: "file", fileName: file },
+          fixId,
+          {},
+          {},
+        );
+
+        return {
+          changes: combined.changes.map((change) => ({
+            fileName: change.fileName,
+            textChanges: change.textChanges.map((tc) => ({
+              start: this.offsetToPosition(this.getFileText(change.fileName), tc.span.start),
+              end: this.offsetToPosition(
+                this.getFileText(change.fileName),
+                tc.span.start + tc.span.length,
+              ),
+              newText: tc.newText,
+            })),
+          })),
+        };
       }
 
       case "encodedSemanticClassifications-full": {
@@ -464,6 +587,29 @@ export class ExtensionTsService {
   }
 
   // ── Helpers ─────────────────────────────────────────────────
+
+  /**
+   * Map a TS `Diagnostic` (from any of the semantic/syntactic/suggestion passes)
+   * onto the wire diagnostic shape the Rust extension provider parses. All three
+   * passes share one mapping so they merge into a uniform set on the Rust side.
+   */
+  private mapDiagnostic(text: string, d: ts.Diagnostic) {
+    return {
+      start: d.start !== undefined ? this.offsetToPosition(text, d.start) : undefined,
+      end:
+        d.start !== undefined && d.length !== undefined
+          ? this.offsetToPosition(text, d.start + d.length)
+          : undefined,
+      text: this.ts.flattenDiagnosticMessageText(d.messageText, "\n"),
+      code: d.code,
+      category:
+        d.category === this.ts.DiagnosticCategory.Error
+          ? "error"
+          : d.category === this.ts.DiagnosticCategory.Warning
+            ? "warning"
+            : "suggestion",
+    };
+  }
 
   private getFileText(file: string): string {
     const snap = this.fileSnapshots.get(file);

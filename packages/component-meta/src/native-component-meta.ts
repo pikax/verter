@@ -18,7 +18,7 @@ import type {
   FallthroughBranch,
   TypeExpansionMeta,
 } from "./types.js";
-import type { TypeDescriptor } from "./type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 import type { NativeTypeExprLike } from "./type-expr-bridge.js";
 
 export interface NativeJsdocTag {
@@ -29,11 +29,19 @@ export interface NativeJsdocTag {
 export interface NativeExpansionDiagnostic {
   reason:
     | "budgetExceeded"
+    | "projectionWorkLimit"
+    | "connectedQueryDepthLimit"
     | "mappedDepthExceeded"
     | "unresolvedReference"
     | "indeterminateConditional"
     | "infiniteKeySpace"
-    | "unsupportedOperator";
+    | "unsupportedOperator"
+    | "conditionalContextTruncated"
+    | "idempotentArm"
+    | "cyclicReference"
+    | "cyclicInstantiation"
+    | "instantiationError"
+    | "emptyUnionArm";
   context: string;
   propertyName?: string;
 }
@@ -52,6 +60,18 @@ export interface NativePropMeta {
   defaultValue?: string;
   description?: string;
   tags?: NativeJsdocTag[];
+  /**
+   * Producer fact: did the SFC author write this prop name explicitly as a
+   * member of the `defineProps<T>()` type argument's own body (or its
+   * directly-referenced interface's own body)? Distinguishes
+   * author-declared names from names that arrived via heritage / utility-
+   * type expansion. Consumed by
+   * `@verter/component-meta/published-surface`'s `Refined` policy.
+   *
+   * Default `false` so a missing payload field (e.g. from an older
+   * native build) does NOT silently mark every prop as declared.
+   */
+  declaredInMacroTypeArg?: boolean;
 }
 
 export interface NativeEventMeta {
@@ -78,6 +98,15 @@ export interface NativeSlotMeta {
   returnType?: string;
   description?: string;
   tags?: NativeJsdocTag[];
+  /**
+   * Producer fact: does this slot come from the component's own AUTHORED
+   * slots surface (the resolved `defineSlots<T>()` macro surface or a
+   * template `<slot>` element)? Consumed by the compat slot blocklist —
+   * an author-declared slot is never blocked, whatever its name.
+   * Forward-compat: coerced with `Boolean(...)` so older payloads
+   * without the field read `false` (the name block applies).
+   */
+  declaredInMacroTypeArg?: boolean;
 }
 
 export interface NativeModelMeta {
@@ -90,6 +119,7 @@ export interface NativeExposedMeta {
   type: NativeTypeExprLike;
   typeExpansion?: NativeExpansionMetadata;
   description?: string;
+  tags?: NativeJsdocTag[];
 }
 
 export interface NativePublicInstanceMeta {
@@ -104,6 +134,7 @@ export interface NativePublicInstanceMemberMeta {
   typeExpansion?: NativeExpansionMetadata;
   rawType?: string;
   description?: string;
+  tags?: NativeJsdocTag[];
 }
 
 export interface NativeSfcBlocksMeta {
@@ -186,35 +217,6 @@ export interface NativeResolvedNativeProp {
   spanEnd: number;
 }
 
-export interface NativeResolvedPropField {
-  name: string;
-  isOptional: boolean;
-  typeAnnotation?: string;
-  description?: string;
-  tags?: NativeJsdocTag[];
-}
-
-export interface NativeResolvedEmitField {
-  name: string;
-  payloadType?: string;
-  description?: string;
-  tags?: NativeJsdocTag[];
-}
-
-export interface NativeResolvedSlotBinding {
-  name: string;
-  typeAnnotation?: string;
-}
-
-export interface NativeResolvedSlotField {
-  name: string;
-  isRequired: boolean;
-  bindings: NativeResolvedSlotBinding[];
-  returnType?: string;
-  description?: string;
-  tags?: NativeJsdocTag[];
-}
-
 export interface NativeResolvedJsdocTag extends NativeJsdocTag {
   rawType?: string;
   subjectName?: string;
@@ -233,9 +235,6 @@ export interface NativeResolvedMacroMeta {
   importSource: string;
   declaration: NativeResolvedTypeDeclaration;
   nativeProps?: NativeResolvedNativeProp[];
-  props?: NativeResolvedPropField[];
-  emits?: NativeResolvedEmitField[];
-  slots?: NativeResolvedSlotField[];
   jsdoc?: NativeResolvedJsdocBlock;
 }
 
@@ -258,6 +257,18 @@ export interface NativeComponentVModelEntry {
   bindingName: string;
 }
 
+export interface NativeComponentBindingUsage {
+  name: string;
+  modifiers: string[];
+}
+
+export interface NativeComponentEventUsage {
+  name: string;
+  handlerExpression?: string;
+  isInline: boolean;
+  modifiers: string[];
+}
+
 export interface NativeComponentUsage {
   name: string;
   importSource?: string;
@@ -269,6 +280,10 @@ export interface NativeComponentUsage {
   hasDynamicClass: boolean;
   vModels: string[];
   vModelEntries?: NativeComponentVModelEntry[];
+  /** Framework-neutral two-way bindings (the Svelte `bind:` family). Empty for Vue. */
+  bindings?: NativeComponentBindingUsage[];
+  /** Framework-neutral events (the legacy Svelte `on:` directive only — a plain `on*` attr is a prop). Empty for Vue. */
+  events?: NativeComponentEventUsage[];
 }
 
 export interface NativeTemplateRefMeta {
@@ -488,6 +503,25 @@ export interface NativeFallthroughBranch {
 
 // ── Top-level native result ─────────────────────────────────────
 
+export interface NativeOriginNode {
+  id: number;
+  kind: string;
+  label?: string;
+}
+
+export interface NativeOriginEdge {
+  source: number;
+  target: number;
+  kind: string;
+  metaIndex?: number;
+}
+
+export interface NativeOriginGraph {
+  nodes: NativeOriginNode[];
+  edges: NativeOriginEdge[];
+  metaStrings: string[];
+}
+
 export interface NativeComponentMetaResult {
   props: NativePropMeta[];
   events: NativeEventMeta[];
@@ -510,9 +544,19 @@ export interface NativeComponentMetaResult {
   rootInfo?: NativeRootInfo;
   rootReachability: NativeRootReachability;
   fallthroughSurface: NativeFallthroughSurface;
+  macroExpansionDiagnostics?: NativeMacroExpansionDiagnostics[];
   optionsApi: boolean;
   filePath: string;
   resolution?: NativeComponentMetaResolution;
+  origin?: NativeOriginGraph;
+}
+
+export interface NativeMacroExpansionDiagnostics {
+  macroKind: "defineProps" | "defineEmits" | "defineSlots";
+  macroIndex: number;
+  exactness: NativeExpansionMetadata["exactness"];
+  executionStatus: NativeExpansionMetadata["executionStatus"];
+  diagnostics: NativeExpansionDiagnostic[];
 }
 
 function deriveComponentName(filePath: string): string {
@@ -535,6 +579,14 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       ...(prop.defaultValue !== undefined ? { default: prop.defaultValue } : {}),
       ...(prop.description !== undefined ? { description: prop.description } : {}),
       ...(prop.tags?.length ? { tags: prop.tags } : {}),
+      // Forward-compat coerce — see `NativePropMeta.declaredInMacroTypeArg`
+      // JSDoc above. The field is optional on the native sidecar type
+      // because older native builds (predating the producer fact on
+      // `PropMeta` proto field 10) emit payloads without it; missing is
+      // correctly `false` (matching the "drop unless explicitly
+      // declared" semantics that the Refined policy enforces). This is
+      // legitimate forward-compat.
+      declaredInMacroTypeArg: Boolean(prop.declaredInMacroTypeArg),
     })),
     events: meta.events.map((event) => ({
       name: event.name,
@@ -559,6 +611,8 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       ...(slot.returnType !== undefined ? { returnType: slot.returnType } : {}),
       ...(slot.description !== undefined ? { description: slot.description } : {}),
       ...(slot.tags?.length ? { tags: slot.tags } : {}),
+      // Forward-compat coerce — see `NativeSlotMeta.declaredInMacroTypeArg`.
+      declaredInMacroTypeArg: Boolean(slot.declaredInMacroTypeArg),
     })),
     models: meta.models.map((model) => ({
       name: model.name,
@@ -569,6 +623,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       type: typeExprToDescriptor(exposed.type, nativeRegistry),
       ...(exposed.typeExpansion !== undefined ? { typeExpansion: exposed.typeExpansion } : {}),
       ...(exposed.description !== undefined ? { description: exposed.description } : {}),
+      ...(exposed.tags?.length ? { tags: exposed.tags } : {}),
     })),
     ...(meta.publicInstance !== undefined
       ? {
@@ -583,6 +638,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
                 : {}),
               ...(member.rawType !== undefined ? { rawType: member.rawType } : {}),
               ...(member.description !== undefined ? { description: member.description } : {}),
+              ...(member.tags?.length ? { tags: member.tags } : {}),
             })),
           },
         }
@@ -614,6 +670,18 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
         component.vModelEntries ?? component.vModels.map((bindingName) => ({ bindingName }))
       ).map((entry) => ({
         bindingName: entry.bindingName,
+      })),
+      bindings: (component.bindings ?? []).map((binding) => ({
+        name: binding.name,
+        modifiers: [...binding.modifiers],
+      })),
+      events: (component.events ?? []).map((event) => ({
+        name: event.name,
+        ...(event.handlerExpression !== undefined
+          ? { handlerExpression: event.handlerExpression }
+          : {}),
+        isInline: event.isInline,
+        modifiers: [...event.modifiers],
       })),
     })),
     templateRefs: meta.templateRefs.map((templateRef) => ({
@@ -664,6 +732,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     rootReachability: meta.rootReachability as RootReachability,
     fallthroughSurface: mapNativeFallthroughSurface(meta.fallthroughSurface, nativeRegistry),
     flags: meta.flags,
+    ...(meta.origin !== undefined ? { origin: meta.origin } : {}),
   };
 }
 

@@ -4,6 +4,12 @@
 
 import { create, toBinary } from "@bufbuild/protobuf";
 import { ComponentMetaPayloadSchema } from "@verter/proto";
+import {
+  ExpansionExactness,
+  ExpansionExecutionStatus,
+  ExpansionStopReason,
+  MacroExpansionDiagnosticEntrySchema,
+} from "../../proto/src/gen/verter/v1/component_meta_pb.js";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -116,6 +122,242 @@ describe("decodeComponentMetaPayload", () => {
     });
   });
 
+  it("preserves recursiveRef through proto decode and bridge", () => {
+    const childrenType: import("./type-graph.test-utils.js").TestTypeExpr = {
+      kind: "recursiveRef",
+      name: "TreeNode",
+      typeArguments: [{ kind: "primitive", name: "string" }],
+      conditionalContext: [
+        {
+          branch: "true" as const,
+          decided: true,
+          check: { kind: "primitive" as const, name: "string" as const },
+          extends: { kind: "primitive" as const, name: "number" as const },
+        },
+      ],
+    };
+    const payload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Recursive.vue",
+      typeRegistry: [
+        {
+          name: "TreeNode",
+          type: {
+            kind: "object",
+            properties: [
+              { name: "label", type: { kind: "primitive", name: "string" } },
+              { name: "children", type: childrenType },
+            ],
+          },
+        },
+      ],
+      props: [{ name: "root", type: { kind: "ref", name: "TreeNode" } }],
+    });
+
+    const native = decodeComponentMetaPayload(payload);
+    const registry = nativeTypeRegistryToMap(native);
+    const treeNode = registry?.get("TreeNode");
+
+    expect(treeNode).toBeDefined();
+    expect(treeNode!.kind).toBe("object");
+
+    if (treeNode!.kind === "object") {
+      const children = treeNode!.properties.find((p) => p.name === "children");
+      expect(children).toBeDefined();
+
+      // Must be recursiveRef, NOT unknown
+      expect(children!.type.kind).toBe("recursiveRef");
+      expect(children!.type.kind).not.toBe("unknown");
+
+      if (children!.type.kind === "recursiveRef") {
+        expect(children!.type.name).toBe("TreeNode");
+        expect(children!.type.typeArguments).toHaveLength(1);
+        expect(children!.type.typeArguments[0]).toEqual({
+          kind: "primitive",
+          name: "string",
+        });
+        expect(children!.type.conditionalContext).toHaveLength(1);
+        expect(children!.type.conditionalContext[0]!.branch).toBe("true");
+        expect(children!.type.conditionalContext[0]!.decided).toBe(true);
+        expect(children!.type.conditionalContext[0]!.check).toEqual({
+          kind: "primitive",
+          name: "string",
+        });
+        expect(children!.type.conditionalContext[0]!.extends).toEqual({
+          kind: "primitive",
+          name: "number",
+        });
+      }
+    }
+  });
+
+  it("decodes expansion exactness and execution status from graph metadata", () => {
+    const payload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Button.vue",
+      props: [
+        {
+          name: "item",
+          type: { kind: "ref", name: "Item" },
+          typeExpansion: {
+            exactness: "exactSymbolic",
+            executionStatus: "completed",
+            diagnostics: [
+              {
+                reason: "mappedDepthExceeded",
+                context: "mapped type stayed symbolic",
+              },
+            ],
+          },
+        },
+      ],
+      slots: [
+        {
+          name: "default",
+          isScoped: true,
+          bindings: [
+            {
+              name: "item",
+              type: { kind: "ref", name: "Item" },
+              typeExpansion: {
+                exactness: "incomplete",
+                executionStatus: "cancelled",
+                diagnostics: [
+                  {
+                    reason: "budgetExceeded",
+                    context: "work budget exceeded",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+      typeRegistry: [
+        {
+          name: "Item",
+          type: {
+            kind: "object",
+            properties: [{ name: "label", type: { kind: "primitive", name: "string" } }],
+          },
+        },
+      ],
+    });
+
+    const native = decodeComponentMetaPayload(payload);
+
+    expect(native.props[0]?.typeExpansion).toEqual({
+      exactness: "exactSymbolic",
+      executionStatus: "completed",
+      diagnostics: [
+        {
+          reason: "mappedDepthExceeded",
+          context: "mapped type stayed symbolic",
+        },
+      ],
+    });
+    expect(native.slots[0]?.bindings[0]?.typeExpansion).toEqual({
+      exactness: "incomplete",
+      executionStatus: "cancelled",
+      diagnostics: [
+        {
+          reason: "budgetExceeded",
+          context: "work budget exceeded",
+        },
+      ],
+    });
+  });
+
+  it("decodes conditionalContextTruncated diagnostics and keeps enum numbering stable", () => {
+    expect(ExpansionStopReason.UNSUPPORTED_OPERATOR).toBe(6);
+    expect(ExpansionStopReason.CONDITIONAL_CONTEXT_TRUNCATED).toBe(7);
+
+    const payload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Button.vue",
+      props: [
+        {
+          name: "item",
+          type: { kind: "ref", name: "Item" },
+          typeExpansion: {
+            exactness: "exactConcrete",
+            executionStatus: "completed",
+            diagnostics: [
+              {
+                reason: "conditionalContextTruncated",
+                context: "12 available, 8 captured",
+              },
+            ],
+          },
+        },
+      ],
+      typeRegistry: [
+        {
+          name: "Item",
+          type: {
+            kind: "object",
+            properties: [{ name: "label", type: { kind: "primitive", name: "string" } }],
+          },
+        },
+      ],
+    });
+
+    const native = decodeComponentMetaPayload(payload);
+
+    expect(native.props[0]?.typeExpansion).toEqual({
+      exactness: "exactConcrete",
+      executionStatus: "completed",
+      diagnostics: [
+        {
+          reason: "conditionalContextTruncated",
+          context: "12 available, 8 captured",
+        },
+      ],
+    });
+  });
+
+  it("decodes distinct connected projection limit reasons", () => {
+    expect(ExpansionStopReason.PROJECTION_WORK_LIMIT).toBe(13);
+    expect(ExpansionStopReason.CONNECTED_QUERY_DEPTH_LIMIT).toBe(14);
+
+    const payload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Limited.vue",
+      props: [
+        {
+          name: "runaway",
+          type: { kind: "ref", name: "Runaway" },
+          typeExpansion: {
+            exactness: "incomplete",
+            executionStatus: "interrupted",
+            diagnostics: [
+              {
+                reason: "projectionWorkLimit",
+                context: "connected demand exhausted its work budget",
+              },
+            ],
+          },
+        },
+        {
+          name: "nested",
+          type: { kind: "ref", name: "Nested" },
+          typeExpansion: {
+            exactness: "incomplete",
+            executionStatus: "interrupted",
+            diagnostics: [
+              {
+                reason: "connectedQueryDepthLimit",
+                context: "connected query nesting exhausted its depth budget",
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    const native = decodeComponentMetaPayload(payload);
+    expect(native.props.map((prop) => prop.typeExpansion?.diagnostics[0]?.reason)).toEqual([
+      "projectionWorkLimit",
+      "connectedQueryDepthLimit",
+    ]);
+  });
+
   it("does not leak descriptor memoization across payload instances", () => {
     const stringPayload = encodeTestComponentMetaPayload({
       filePath: "/project/src/Node.vue",
@@ -187,9 +429,14 @@ describe("decodeComponentMetaPayload", () => {
     const propType = native.props[0]!.type;
     const registry = new Map((native.typeRegistry ?? []).map((entry) => [entry.name, entry.type]));
 
+    // Without a registry the bridge cannot resolve `Fields[label]` to
+    // the underlying member type, so the structural `IndexedAccessType`
+    // form survives end-to-end. With a registry the indexed access
+    // collapses to the resolved member type.
     expect(typeExprToDescriptor(propType)).toEqual({
-      kind: "unknown",
-      rawType: "graphNode(13)",
+      kind: "indexedAccess",
+      objectType: { kind: "ref", name: "Fields" },
+      indexType: { kind: "literal", value: "label" },
     });
     expect(typeExprToDescriptor(propType, registry)).toEqual({ kind: "primitive", name: "string" });
   });
@@ -215,5 +462,60 @@ describe("decodeComponentMetaPayload", () => {
         toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, badNodePayload)),
       ),
     ).toThrow(/node id/i);
+  });
+
+  it("decodes macroExpansionDiagnostics correctly from protobuf", () => {
+    const base = buildTestComponentMetaProtoPayload({
+      filePath: "/project/src/Button.vue",
+      props: [{ name: "label", type: { kind: "primitive", name: "string" } }],
+      typeRegistry: [
+        {
+          name: "Item",
+          type: {
+            kind: "object",
+            properties: [{ name: "value", type: { kind: "primitive", name: "string" } }],
+          },
+        },
+      ],
+    });
+
+    // Inject macroExpansionDiagnostics with one entry using graph string ids
+    // "defineProps" needs a string id — add it to the string table
+    const strings = base.typeGraph!.strings as string[];
+    const definePropsId = strings.length + 1;
+    strings.push("defineProps");
+    const budgetContextId = strings.length + 1;
+    strings.push("work budget exceeded");
+
+    (base.body as Record<string, unknown>).macroExpansionDiagnostics = [
+      create(MacroExpansionDiagnosticEntrySchema, {
+        macroKindId: definePropsId,
+        macroIndex: 0,
+        exactness: ExpansionExactness.EXACT_SYMBOLIC,
+        executionStatus: ExpansionExecutionStatus.COMPLETED,
+        diagnostics: [
+          {
+            reason: ExpansionStopReason.BUDGET_EXCEEDED,
+            contextId: budgetContextId,
+            propertyNameId: 0,
+          },
+        ],
+      }),
+    ];
+
+    const bytes = toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, base));
+    const result = decodeComponentMetaPayload(bytes);
+
+    expect(result.macroExpansionDiagnostics).toBeDefined();
+    expect(result.macroExpansionDiagnostics).toHaveLength(1);
+
+    const entry = result.macroExpansionDiagnostics![0]!;
+    expect(entry.macroKind).toBe("defineProps");
+    expect(entry.macroIndex).toBe(0);
+    expect(entry.exactness).toBe("exactSymbolic");
+    expect(entry.executionStatus).toBe("completed");
+    expect(entry.diagnostics).toHaveLength(1);
+    expect(entry.diagnostics[0]!.reason).toBe("budgetExceeded");
+    expect(entry.diagnostics[0]!.context).toBe("work budget exceeded");
   });
 });

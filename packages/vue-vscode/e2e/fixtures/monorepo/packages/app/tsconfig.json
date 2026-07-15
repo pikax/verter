@@ -7,6 +7,9 @@
     "strict": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
+    "baseUrl": ".",
+    "types": ["my-ambient-types"],
+    "typeRoots": ["./types"],
     "paths": {
       "@monorepo/shared/*": ["../shared/*"]
     }

@@ -165,6 +165,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The benchmark imports @verter/lsp-test-client, whose package entry is its
+      # built ./dist (gitignored, absent on a clean checkout). Build it before the
+      # benchmark runs so the import resolves.
+      - name: Build @verter/lsp-test-client
+        run: pnpm --filter @verter/lsp-test-client build
+
       - name: Build LSP binary (release)
         run: cargo build --release -p verter_lsp
 

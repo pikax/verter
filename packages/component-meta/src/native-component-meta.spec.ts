@@ -119,6 +119,8 @@ describe("nativeComponentMetaToComponentMeta", () => {
         hasDynamicClass: true,
         vModels: ["modelValue"],
         vModelEntries: [{ bindingName: "modelValue" }],
+        bindings: [],
+        events: [],
       },
     ]);
     expect(meta.templateRefs).toEqual([
@@ -285,7 +287,8 @@ describe("nativeComponentMetaToComponentMeta", () => {
           name: "items",
           type: { kind: "ref", name: "Items", typeArguments: [] },
           typeExpansion: {
-            completeness: "partial",
+            exactness: "incomplete",
+            executionStatus: "completed",
             diagnostics: [
               {
                 reason: "unresolvedReference",
@@ -302,7 +305,8 @@ describe("nativeComponentMetaToComponentMeta", () => {
           name: "select",
           payload: { kind: "ref", name: "Payload", typeArguments: [] },
           payloadExpansion: {
-            completeness: "partial",
+            exactness: "incomplete",
+            executionStatus: "completed",
             diagnostics: [
               {
                 reason: "unsupportedOperator",
@@ -322,7 +326,8 @@ describe("nativeComponentMetaToComponentMeta", () => {
               name: "row",
               type: { kind: "ref", name: "Row", typeArguments: [] },
               typeExpansion: {
-                completeness: "partial",
+                exactness: "incomplete",
+                executionStatus: "completed",
                 diagnostics: [
                   {
                     reason: "mappedDepthExceeded",
@@ -340,7 +345,8 @@ describe("nativeComponentMetaToComponentMeta", () => {
           name: "api",
           type: { kind: "ref", name: "Api", typeArguments: [] },
           typeExpansion: {
-            completeness: "partial",
+            exactness: "incomplete",
+            executionStatus: "completed",
             diagnostics: [
               {
                 reason: "budgetExceeded",
@@ -370,10 +376,11 @@ describe("nativeComponentMetaToComponentMeta", () => {
       ...defaultFallthroughFields,
     } as any);
 
-    expect(meta.props[0].typeExpansion?.completeness).toBe("partial");
-    expect(meta.events[0].payloadExpansion?.completeness).toBe("partial");
-    expect(meta.slots[0].bindings[0].typeExpansion?.completeness).toBe("partial");
-    expect(meta.exposed[0].typeExpansion?.completeness).toBe("partial");
+    expect(meta.props[0].typeExpansion?.exactness).toBe("incomplete");
+    expect(meta.events[0].payloadExpansion?.exactness).toBe("incomplete");
+    expect(meta.slots[0].bindings[0].typeExpansion?.exactness).toBe("incomplete");
+    expect(meta.exposed[0].typeExpansion?.exactness).toBe("incomplete");
+    expect(meta.props[0].typeExpansion?.executionStatus).toBe("completed");
   });
 
   it("preserves raw type-registry provenance while compat mapping still uses the expanded type", () => {
@@ -891,6 +898,9 @@ describe("nativeComponentMetaToComponentMeta", () => {
         bindings: [],
         isRequired: false,
         returnType: "VNode[]",
+        // Forward-compat coercion: a native payload without the producer
+        // fact reads `false` (the compat name block applies).
+        declaredInMacroTypeArg: false,
       },
     ]);
   });

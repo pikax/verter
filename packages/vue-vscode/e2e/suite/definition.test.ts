@@ -254,7 +254,7 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     expect(def.uri.fsPath, "should NOT be in generated .tsx").to.not.match(/\.vue\.tsx$/);
   });
 
-  test("B1b: CTRL+click on direct imported WrappedButton tag reaches WrappedButton.vue", async function () {
+  test("CTRL+click on direct imported WrappedButton tag reaches WrappedButton.vue", async function () {
     if (FIXTURE_NAME !== "single-project") {
       console.log("    pass (N/A for this fixture)");
       return;
@@ -288,7 +288,7 @@ suite(`Definition [${FIXTURE_NAME}]`, function () {
     );
   });
 
-  test("B1c: CTRL+click on direct imported WrappedButton binding reaches WrappedButton.vue", async function () {
+  test("CTRL+click on direct imported WrappedButton binding reaches WrappedButton.vue", async function () {
     if (FIXTURE_NAME !== "single-project") {
       console.log("    pass (N/A for this fixture)");
       return;

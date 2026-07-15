@@ -7,6 +7,14 @@ import {
 } from "@verter/proto";
 
 import type { NativeComponentMetaResult } from "./native-component-meta.js";
+import type {
+  NativeConsumedRootBindings,
+  NativeOriginGraph,
+  NativeRootBranch,
+  NativeRootReachability,
+  NativeRootTargetRef,
+  NativeUnresolvedRootTargetReason,
+} from "./native-component-meta.js";
 import {
   BRANCH_STATUS_PARTIALLY_UNRESOLVED,
   BRANCH_STATUS_RESOLVED,
@@ -39,8 +47,10 @@ import {
   NODE_OBJECT,
   NODE_PARENTHESIZED,
   NODE_PRIMITIVE,
+  NODE_RECURSIVE_REF,
   NODE_REF,
   NODE_REST,
+  NODE_SYNTHETIC_SLOT_BINDING,
   NODE_TEMPLATE_LITERAL,
   NODE_TUPLE,
   NODE_TYPE_OF,
@@ -60,6 +70,7 @@ import {
   ROOT_TARGET_DYNAMIC_COMPONENT_USAGE,
   ROOT_TARGET_NATIVE_ELEMENT,
   ROOT_TARGET_UNRESOLVED,
+  type GraphConditionalFrameRecord,
   type GraphFunctionParamRecord,
   type GraphNodeRecord,
   type GraphObjectMemberRecord,
@@ -78,8 +89,14 @@ import {
   UNRESOLVED_ROOT_TARGET_UNSUPPORTED_BUILTIN,
 } from "./type-graph-core.js";
 
-const EXPANSION_COMPLETENESS_EXACT = 1;
-const EXPANSION_COMPLETENESS_PARTIAL = 2;
+const EXPANSION_EXACTNESS_EXACT_CONCRETE = 1;
+const EXPANSION_EXACTNESS_EXACT_SYMBOLIC = 2;
+const EXPANSION_EXACTNESS_INCOMPLETE = 3;
+
+const EXPANSION_EXECUTION_STATUS_COMPLETED = 1;
+const EXPANSION_EXECUTION_STATUS_CANCELLED = 2;
+const EXPANSION_EXECUTION_STATUS_INTERRUPTED = 3;
+const EXPANSION_EXECUTION_STATUS_HARD_STOP = 4;
 
 const EXPANSION_REASON_BUDGET_EXCEEDED = 1;
 const EXPANSION_REASON_MAPPED_DEPTH_EXCEEDED = 2;
@@ -87,6 +104,14 @@ const EXPANSION_REASON_UNRESOLVED_REFERENCE = 3;
 const EXPANSION_REASON_INDETERMINATE_CONDITIONAL = 4;
 const EXPANSION_REASON_INFINITE_KEY_SPACE = 5;
 const EXPANSION_REASON_UNSUPPORTED_OPERATOR = 6;
+const EXPANSION_REASON_CONDITIONAL_CONTEXT_TRUNCATED = 7;
+const EXPANSION_REASON_IDEMPOTENT_ARM = 8;
+const EXPANSION_REASON_CYCLIC_REFERENCE = 9;
+const EXPANSION_REASON_CYCLIC_INSTANTIATION = 10;
+const EXPANSION_REASON_INSTANTIATION_ERROR = 11;
+const EXPANSION_REASON_EMPTY_UNION_ARM = 12;
+const EXPANSION_REASON_PROJECTION_WORK_LIMIT = 13;
+const EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT = 14;
 
 const ACCEPTED_SURFACE_COMPLETENESS_EXACT = 1;
 const ACCEPTED_SURFACE_COMPLETENESS_LOWER_BOUND = 2;
@@ -132,9 +157,11 @@ function decodeTypedPayload(message: ComponentMetaPayload): NativeComponentMetaR
   const graph = decodeTypeGraph(message.typeGraph);
   const typeRegistry = message.typeRegistry.map((entry) => decodeTypeRegistryEntry(entry, graph));
   const body = decodeComponentMetaBody(message.body, graph);
+  const origin = decodeOptionalOriginGraph(message);
   return {
     ...body,
     typeRegistry,
+    ...(origin !== undefined ? { origin } : {}),
   } as unknown as NativeComponentMetaResult;
 }
 
@@ -146,8 +173,35 @@ function decodeTypeGraph(typeGraph: ProtoRecord): DecodedTypeGraph {
   return graph;
 }
 
+function decodeOptionalOriginGraph(message: ComponentMetaPayload): NativeOriginGraph | undefined {
+  const og = (message as ProtoRecord).originGraph as ProtoRecord | undefined;
+  if (!og) return undefined;
+  const metaStrings = [...((og.metaStrings as string[] | undefined) ?? [])];
+  const nodes = ((og.nodes as ProtoRecord[] | undefined) ?? []).map((node) => {
+    const id = Number(node.id ?? 0);
+    const kindId = Number(node.kindId ?? 0);
+    const labelId = Number(node.labelId ?? 0);
+    const kind = metaStrings[kindId] ?? `unknown(${kindId})`;
+    const label = labelId !== 0 ? metaStrings[labelId] : undefined;
+    return { id, kind, ...(label !== undefined ? { label } : {}) };
+  });
+  const edges = ((og.edges as ProtoRecord[] | undefined) ?? []).map((edge) => {
+    const source = Number(edge.source ?? 0);
+    const target = Number(edge.target ?? 0);
+    const kindId = Number(edge.kindId ?? 0);
+    const kind = metaStrings[kindId] ?? `unknown(${kindId})`;
+    const hasMeta = Boolean(edge.hasMeta);
+    const metaIndex = hasMeta ? Number(edge.metaIndex ?? 0) : undefined;
+    return { source, target, kind, ...(metaIndex !== undefined ? { metaIndex } : {}) };
+  });
+  if (edges.length === 0) return undefined;
+  return { nodes, edges, metaStrings };
+}
+
 function decodeTypeNode(node: ProtoTypeNode): GraphNodeRecord {
-  const kind = node.kind?.case;
+  const kind = node.kind?.case as typeof node.kind extends { case: infer C }
+    ? C | "recursiveRef"
+    : string | undefined;
   const value = node.kind?.value as ProtoRecord | undefined;
 
   switch (kind) {
@@ -285,6 +339,29 @@ function decodeTypeNode(node: ProtoTypeNode): GraphNodeRecord {
       return { kind: NODE_INFER, nameId: Number(value?.nameId ?? 0) };
     case "rest":
       return { kind: NODE_REST, innerNodeId: Number(value?.innerNodeId ?? 0) };
+    case "recursiveRef":
+      return {
+        kind: NODE_RECURSIVE_REF,
+        nameId: Number(value?.nameId ?? 0),
+        typeArgumentNodeIds: numberList(value?.typeArgumentNodeIds),
+        conditionalContext: ((value?.conditionalContext as ProtoRecord[] | undefined) ?? []).map(
+          (frame) => ({
+            branch: Number(frame.branch ?? 0),
+            decided: Boolean(frame.decided),
+            checkNodeId: Number(frame.checkNodeId ?? 0),
+            extendsNodeId: Number(frame.extendsNodeId ?? 0),
+          }),
+        ) as GraphConditionalFrameRecord[],
+      };
+    case "syntheticSlotBinding":
+      return {
+        kind: NODE_SYNTHETIC_SLOT_BINDING,
+        valueNode: String(value?.valueNode ?? ""),
+        scopeCanonicalId: Number(value?.scopeCanonicalId ?? 0),
+        surfaceKind: Number(value?.surfaceKind ?? 0),
+        slotNameId: Number(value?.slotNameId ?? 0),
+        bindingNameId: Number(value?.bindingNameId ?? 0),
+      };
     default:
       throw graphError("component-meta graph payload has unknown node kind 0");
   }
@@ -409,6 +486,24 @@ function validateNodeTable(graph: DecodedTypeGraph): void {
       case NODE_REST:
         graph.getNode(node.innerNodeId);
         break;
+      case NODE_RECURSIVE_REF:
+        graph.getString(node.nameId);
+        node.typeArgumentNodeIds.forEach((id) => graph.getNode(id));
+        node.conditionalContext.forEach((frame) => {
+          graph.getNode(frame.checkNodeId);
+          graph.getNode(frame.extendsNodeId);
+        });
+        break;
+      case NODE_SYNTHETIC_SLOT_BINDING:
+        // Synthetic carriers are inert: no node references, only interned
+        // string ids. Validate that the required string-table indices resolve;
+        // `slotNameId === 0` is a sentinel meaning "absent".
+        graph.getString(node.scopeCanonicalId);
+        graph.getString(node.bindingNameId);
+        if (node.slotNameId) {
+          graph.getString(node.slotNameId);
+        }
+        break;
       default:
         break;
     }
@@ -439,7 +534,7 @@ function decodeComponentMetaBody(
   graph: DecodedTypeGraph,
 ): Omit<NativeComponentMetaResult, "typeRegistry"> {
   const resolution = decodeOptionalResolution(body.resolution as ProtoRecord | undefined, graph);
-  const rootReachability = decodeRootReachability(
+  const rootReachability: NativeRootReachability = decodeRootReachability(
     requireProtoMessage(body.rootReachability as ProtoRecord | undefined, "root reachability"),
     graph,
   );
@@ -507,6 +602,7 @@ function decodeComponentMetaBody(
       graph,
     ),
     ...maybe("resolution", resolution),
+    ...decodeMacroExpansionDiagnostics(body, graph),
   } as unknown as Omit<NativeComponentMetaResult, "typeRegistry">;
 }
 
@@ -538,6 +634,10 @@ function decodeOptionalPublicInstance(
       ),
       ...maybe("rawType", graph.getStringMaybe(Number(member.rawTypeId ?? 0))),
       ...maybe("description", graph.getStringMaybe(Number(member.descriptionId ?? 0))),
+      ...maybeArray(
+        "tags",
+        decodeJsdocTags((member.tags as ProtoRecord[] | undefined) ?? [], graph),
+      ),
     })),
   };
 }
@@ -703,6 +803,15 @@ function decodeProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
     ...maybe("defaultValue", graph.getStringMaybe(Number(prop.defaultValueId ?? 0))),
     ...maybe("description", graph.getStringMaybe(Number(prop.descriptionId ?? 0))),
     ...maybeArray("tags", decodeJsdocTags((prop.tags as ProtoRecord[] | undefined) ?? [], graph)),
+    // proto3 wire-level: booleans default to `false` when the field
+    // is absent. Field 10 (`declared_in_macro_type_arg`) on
+    // `verter.v1.PropMeta` is always populated by current Rust
+    // producers, but older native binaries compiled against a proto
+    // definition without field 10 emit messages that lack it —
+    // `Boolean(undefined)` is correctly `false`, matching the "drop
+    // unless explicitly declared" semantics the Refined policy
+    // enforces. This is legitimate forward-compat.
+    declaredInMacroTypeArg: Boolean(prop.declaredInMacroTypeArg),
   };
 }
 
@@ -734,6 +843,9 @@ function decodeSlot(slot: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
       ...maybe("rawType", graph.getStringMaybe(Number(binding.rawTypeId ?? 0))),
     })),
     isRequired: Boolean(slot.isRequired),
+    // Field 8 (`declared_in_macro_type_arg`) — proto3 bool defaults make
+    // the coercion read `false` when the field is absent.
+    declaredInMacroTypeArg: Boolean(slot.declaredInMacroTypeArg),
     ...maybe("returnType", graph.getStringMaybe(Number(slot.returnTypeId ?? 0))),
     ...maybe("description", graph.getStringMaybe(Number(slot.descriptionId ?? 0))),
     ...maybeArray("tags", decodeJsdocTags((slot.tags as ProtoRecord[] | undefined) ?? [], graph)),
@@ -756,6 +868,10 @@ function decodeExposed(exposed: ProtoRecord, graph: DecodedTypeGraph): Record<st
       decodeOptionalExpansionMetadata(exposed.typeExpansion as ProtoRecord | undefined, graph),
     ),
     ...maybe("description", graph.getStringMaybe(Number(exposed.descriptionId ?? 0))),
+    ...maybeArray(
+      "tags",
+      decodeJsdocTags((exposed.tags as ProtoRecord[] | undefined) ?? [], graph),
+    ),
   };
 }
 
@@ -780,6 +896,24 @@ function decodeComponentUsage(
     ),
     hasDynamicClass: Boolean(component.hasDynamicClass),
     vModels: decodeStringList(numberList(component.vModelIds), graph, "component v-models"),
+    bindings: ((component.bindings as ProtoRecord[] | undefined) ?? []).map((binding) => ({
+      name: graph.getString(readRequiredId(binding.nameId, "component binding name")),
+      modifiers: decodeStringList(
+        numberList(binding.modifierIds),
+        graph,
+        "component binding modifiers",
+      ),
+    })),
+    events: ((component.events as ProtoRecord[] | undefined) ?? []).map((event) => ({
+      name: graph.getString(readRequiredId(event.nameId, "component event name")),
+      ...maybe("handlerExpression", graph.getStringMaybe(Number(event.handlerExpressionId ?? 0))),
+      isInline: Boolean(event.isInline),
+      modifiers: decodeStringList(
+        numberList(event.modifierIds),
+        graph,
+        "component event modifiers",
+      ),
+    })),
   };
 }
 
@@ -971,7 +1105,7 @@ function decodeMemberAvailability(
 function decodeRootReachability(
   reachability: ProtoRecord,
   graph: DecodedTypeGraph,
-): Record<string, unknown> {
+): NativeRootReachability {
   const kind = Number(reachability.kind ?? 0);
   switch (kind) {
     case ROOT_REACHABILITY_NO_FALLTHROUGH:
@@ -991,7 +1125,7 @@ function decodeRootReachability(
   }
 }
 
-function decodeRootBranch(branch: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
+function decodeRootBranch(branch: ProtoRecord, graph: DecodedTypeGraph): NativeRootBranch {
   return {
     branchIndex: Number(branch.branchIndex ?? 0),
     ...maybe("conditionText", graph.getStringMaybe(Number(branch.conditionTextId ?? 0))),
@@ -1010,10 +1144,7 @@ function decodeRootBranch(branch: ProtoRecord, graph: DecodedTypeGraph): Record<
   };
 }
 
-function decodeRootTargetRef(
-  target: ProtoRecord,
-  graph: DecodedTypeGraph,
-): Record<string, unknown> {
+function decodeRootTargetRef(target: ProtoRecord, graph: DecodedTypeGraph): NativeRootTargetRef {
   const kind = Number(target.kind ?? 0);
   switch (kind) {
     case ROOT_TARGET_NATIVE_ELEMENT:
@@ -1057,7 +1188,7 @@ function decodeRootTargetRef(
 function decodeUnresolvedRootTargetReason(
   reason: ProtoRecord,
   graph: DecodedTypeGraph,
-): Record<string, unknown> {
+): NativeUnresolvedRootTargetReason {
   const kind = Number(reason.kind ?? 0);
   switch (kind) {
     case UNRESOLVED_ROOT_TARGET_DYNAMIC_COMPONENT_IS:
@@ -1085,7 +1216,7 @@ function decodeUnresolvedRootTargetReason(
 function decodeConsumedRootBindings(
   consumed: ProtoRecord,
   graph: DecodedTypeGraph,
-): Record<string, unknown> {
+): NativeConsumedRootBindings {
   return {
     attrs: decodeStringList(numberList(consumed.attrIds), graph, "consumed attrs"),
     listeners: decodeStringList(numberList(consumed.listenerIds), graph, "consumed listeners"),
@@ -1317,24 +1448,6 @@ function decodeResolvedMacroMeta(
         decodeResolvedNativeProp(prop, graph),
       ),
     ),
-    ...maybeArray(
-      "props",
-      ((macro.props as ProtoRecord[] | undefined) ?? []).map((prop) =>
-        decodeResolvedPropField(prop, graph),
-      ),
-    ),
-    ...maybeArray(
-      "emits",
-      ((macro.emits as ProtoRecord[] | undefined) ?? []).map((emit) =>
-        decodeResolvedEmitField(emit, graph),
-      ),
-    ),
-    ...maybeArray(
-      "slots",
-      ((macro.slots as ProtoRecord[] | undefined) ?? []).map((slot) =>
-        decodeResolvedSlotField(slot, graph),
-      ),
-    ),
     ...maybe("jsdoc", decodeOptionalJsdocBlock(macro.jsdoc as ProtoRecord | undefined, graph)),
   };
 }
@@ -1352,48 +1465,6 @@ function decodeResolvedNativeProp(
     ),
     spanStart: Number(prop.spanStart ?? 0),
     spanEnd: Number(prop.spanEnd ?? 0),
-  };
-}
-
-function decodeResolvedPropField(
-  prop: ProtoRecord,
-  graph: DecodedTypeGraph,
-): Record<string, unknown> {
-  return {
-    name: graph.getString(readRequiredId(prop.nameId, "resolved prop name")),
-    isOptional: Boolean(prop.isOptional),
-    ...maybe("typeAnnotation", graph.getStringMaybe(Number(prop.typeAnnotationId ?? 0))),
-    ...maybe("description", graph.getStringMaybe(Number(prop.descriptionId ?? 0))),
-    ...maybeArray("tags", decodeJsdocTags((prop.tags as ProtoRecord[] | undefined) ?? [], graph)),
-  };
-}
-
-function decodeResolvedEmitField(
-  emit: ProtoRecord,
-  graph: DecodedTypeGraph,
-): Record<string, unknown> {
-  return {
-    name: graph.getString(readRequiredId(emit.nameId, "resolved emit name")),
-    ...maybe("payloadType", graph.getStringMaybe(Number(emit.payloadTypeId ?? 0))),
-    ...maybe("description", graph.getStringMaybe(Number(emit.descriptionId ?? 0))),
-    ...maybeArray("tags", decodeJsdocTags((emit.tags as ProtoRecord[] | undefined) ?? [], graph)),
-  };
-}
-
-function decodeResolvedSlotField(
-  slot: ProtoRecord,
-  graph: DecodedTypeGraph,
-): Record<string, unknown> {
-  return {
-    name: graph.getString(readRequiredId(slot.nameId, "resolved slot name")),
-    isRequired: Boolean(slot.isRequired),
-    bindings: ((slot.bindings as ProtoRecord[] | undefined) ?? []).map((binding) => ({
-      name: graph.getString(readRequiredId(binding.nameId, "resolved slot binding name")),
-      ...maybe("typeAnnotation", graph.getStringMaybe(Number(binding.typeAnnotationId ?? 0))),
-    })),
-    ...maybe("returnType", graph.getStringMaybe(Number(slot.returnTypeId ?? 0))),
-    ...maybe("description", graph.getStringMaybe(Number(slot.descriptionId ?? 0))),
-    ...maybeArray("tags", decodeJsdocTags((slot.tags as ProtoRecord[] | undefined) ?? [], graph)),
   };
 }
 
@@ -1446,13 +1517,39 @@ function decodeOptionalExpansionMetadata(
     return undefined;
   }
   return {
-    completeness: decodeExpansionCompleteness(Number(metadata.completeness ?? 0)),
+    exactness: decodeExpansionExactness(Number(metadata.exactness ?? 0)),
+    executionStatus: decodeExpansionExecutionStatus(Number(metadata.executionStatus ?? 0)),
     diagnostics: ((metadata.diagnostics as ProtoRecord[] | undefined) ?? []).map((diagnostic) => ({
       reason: decodeExpansionStopReason(Number(diagnostic.reason ?? 0)),
       context: graph.getString(
         readRequiredId(diagnostic.contextId, "expansion diagnostic context"),
       ),
       ...maybe("propertyName", graph.getStringMaybe(Number(diagnostic.propertyNameId ?? 0))),
+    })),
+  };
+}
+
+function decodeMacroExpansionDiagnostics(
+  body: ProtoRecord,
+  graph: DecodedTypeGraph,
+): { macroExpansionDiagnostics?: Record<string, unknown>[] } {
+  const entries = body.macroExpansionDiagnostics as ProtoRecord[] | undefined;
+  if (!entries || entries.length === 0) {
+    return {};
+  }
+  return {
+    macroExpansionDiagnostics: entries.map((entry) => ({
+      macroKind: graph.getString(readRequiredId(entry.macroKindId, "macro expansion kind")),
+      macroIndex: Number(entry.macroIndex ?? 0),
+      exactness: decodeExpansionExactness(Number(entry.exactness ?? 0)),
+      executionStatus: decodeExpansionExecutionStatus(Number(entry.executionStatus ?? 0)),
+      diagnostics: ((entry.diagnostics as ProtoRecord[] | undefined) ?? []).map((diagnostic) => ({
+        reason: decodeExpansionStopReason(Number(diagnostic.reason ?? 0)),
+        context: graph.getString(
+          readRequiredId(diagnostic.contextId, "expansion diagnostic context"),
+        ),
+        ...maybe("propertyName", graph.getStringMaybe(Number(diagnostic.propertyNameId ?? 0))),
+      })),
     })),
   };
 }
@@ -1489,14 +1586,37 @@ function decodeStringList(ids: number[], graph: DecodedTypeGraph, context: strin
   return ids.map((id) => graph.getString(readRequiredId(id, context)));
 }
 
-function decodeExpansionCompleteness(value: number): "exact" | "partial" {
+function decodeExpansionExactness(value: number): "exactConcrete" | "exactSymbolic" | "incomplete" {
   switch (value) {
-    case EXPANSION_COMPLETENESS_EXACT:
-      return "exact";
-    case EXPANSION_COMPLETENESS_PARTIAL:
-      return "partial";
+    case EXPANSION_EXACTNESS_EXACT_CONCRETE:
+      return "exactConcrete";
+    case EXPANSION_EXACTNESS_EXACT_SYMBOLIC:
+      return "exactSymbolic";
+    case EXPANSION_EXACTNESS_INCOMPLETE:
+      return "incomplete";
     default:
-      throw graphError(`component-meta graph payload has unknown expansion completeness ${value}`);
+      throw graphError(`component-meta graph payload has unknown expansion exactness ${value}`);
+  }
+}
+
+function decodeExpansionExecutionStatus(
+  value: number,
+): "completed" | "cancelled" | "interrupted" | "hardStop" {
+  switch (value) {
+    case 0:
+      return "completed";
+    case EXPANSION_EXECUTION_STATUS_COMPLETED:
+      return "completed";
+    case EXPANSION_EXECUTION_STATUS_CANCELLED:
+      return "cancelled";
+    case EXPANSION_EXECUTION_STATUS_INTERRUPTED:
+      return "interrupted";
+    case EXPANSION_EXECUTION_STATUS_HARD_STOP:
+      return "hardStop";
+    default:
+      throw graphError(
+        `component-meta graph payload has unknown expansion execution status ${value}`,
+      );
   }
 }
 
@@ -1504,11 +1624,19 @@ function decodeExpansionStopReason(
   value: number,
 ):
   | "budgetExceeded"
+  | "projectionWorkLimit"
+  | "connectedQueryDepthLimit"
   | "mappedDepthExceeded"
   | "unresolvedReference"
   | "indeterminateConditional"
   | "infiniteKeySpace"
-  | "unsupportedOperator" {
+  | "unsupportedOperator"
+  | "conditionalContextTruncated"
+  | "idempotentArm"
+  | "cyclicReference"
+  | "cyclicInstantiation"
+  | "instantiationError"
+  | "emptyUnionArm" {
   switch (value) {
     case EXPANSION_REASON_BUDGET_EXCEEDED:
       return "budgetExceeded";
@@ -1522,6 +1650,22 @@ function decodeExpansionStopReason(
       return "infiniteKeySpace";
     case EXPANSION_REASON_UNSUPPORTED_OPERATOR:
       return "unsupportedOperator";
+    case EXPANSION_REASON_CONDITIONAL_CONTEXT_TRUNCATED:
+      return "conditionalContextTruncated";
+    case EXPANSION_REASON_IDEMPOTENT_ARM:
+      return "idempotentArm";
+    case EXPANSION_REASON_CYCLIC_REFERENCE:
+      return "cyclicReference";
+    case EXPANSION_REASON_CYCLIC_INSTANTIATION:
+      return "cyclicInstantiation";
+    case EXPANSION_REASON_INSTANTIATION_ERROR:
+      return "instantiationError";
+    case EXPANSION_REASON_EMPTY_UNION_ARM:
+      return "emptyUnionArm";
+    case EXPANSION_REASON_PROJECTION_WORK_LIMIT:
+      return "projectionWorkLimit";
+    case EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT:
+      return "connectedQueryDepthLimit";
     default:
       throw graphError(`component-meta graph payload has unknown expansion stop reason ${value}`);
   }

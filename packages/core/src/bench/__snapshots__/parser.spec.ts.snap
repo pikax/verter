@@ -1,5 +1,0 @@
-// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
-
-exports[`bench parser sanity tests > test file > new 1`] = `undefined`;
-
-exports[`bench parser sanity tests > test file > old 1`] = `undefined`;

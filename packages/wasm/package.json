@@ -1,10 +1,11 @@
 {
   "name": "@verter/wasm",
   "version": "0.0.1-beta.1",
-  "description": "WASM bindings for Verter Vue compiler",
+  "description": "WASM bindings for Verter's Vue and experimental Svelte compiler host",
   "keywords": [
     "compiler",
     "vue",
+    "svelte",
     "wasm",
     "webassembly"
   ],
@@ -35,7 +36,9 @@
     }
   },
   "scripts": {
-    "build:wasm": "wasm-pack build ../../crates/verter_wasm --target web --out-dir ../../packages/wasm/wasm",
+    "clean:wasm": "npx shx rm -rf wasm/snippets && npx shx rm -f wasm/verter_wasm.js wasm/verter_wasm.d.ts wasm/verter_wasm_bg.wasm wasm/verter_wasm_bg.wasm.d.ts wasm/package.json wasm/README.md wasm/LICENSE",
+    "build:wasm": "pnpm run clean:wasm && cargo build --manifest-path ../../Cargo.toml --release -p verter_wasm --target wasm32-unknown-unknown && wasm-bindgen --target web --out-dir wasm --out-name verter_wasm ../../target/wasm32-unknown-unknown/release/verter_wasm.wasm && pnpm run opt:wasm",
+    "opt:wasm": "wasm-opt -Os wasm/verter_wasm_bg.wasm -o wasm/verter_wasm_bg.wasm",
     "build:ts": "tsdown",
     "build:copy-playground": "npx shx cp wasm/verter_wasm_bg.wasm ../playground/public/verter_wasm_bg.wasm",
     "build": "pnpm run build:wasm && pnpm run build:ts && pnpm run build:copy-playground",
@@ -43,9 +46,11 @@
   },
   "devDependencies": {
     "@verter/native": "workspace:^",
-    "tsdown": "^0.21.1",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.0"
+    "@verter/types": "workspace:^",
+    "tsdown": "^0.22.0",
+    "typescript": "^6.0.3",
+    "binaryen": "^130.0.0",
+    "vitest": "^4.1.7"
   },
   "engines": {
     "node": ">=18"

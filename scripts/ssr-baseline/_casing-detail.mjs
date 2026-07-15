@@ -1,6 +1,12 @@
 import fs from "fs";
 
-const d = JSON.parse(fs.readFileSync("C:/temp/ssr-full-vmodel-merge.json", "utf8"));
+// Pass the mismatches JSON as the first CLI arg (e.g. ssr-full-vmodel-merge.json).
+const __input = process.argv[2];
+if (!__input) {
+  console.error("usage: node _casing-detail.mjs <mismatches.json>");
+  process.exit(1);
+}
+const d = JSON.parse(fs.readFileSync(__input, "utf8"));
 const mm = d.mismatches;
 
 // Show a few element-plus casing examples with the actual diff

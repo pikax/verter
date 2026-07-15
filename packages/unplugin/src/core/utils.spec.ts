@@ -41,6 +41,16 @@ describe("parseVueRequest", () => {
     expect(result.query.vue).toBe(false);
   });
 
+  it("parses framework-neutral virtual requests without classifying them as Vue", () => {
+    const result = parseVueRequest("/path/to/App.svelte?verter&type=style&index=0&lang.css");
+    expect(result.filename).toBe("/path/to/App.svelte");
+    expect(result.query.vue).toBe(false);
+    expect(result.query.verter).toBe(true);
+    expect(result.query.type).toBe("style");
+    expect(result.query.index).toBe(0);
+    expect(result.query.lang).toBe("css");
+  });
+
   it("parses scss lang correctly", () => {
     const result = parseVueRequest("/path/to/App.vue?vue&type=style&index=1&lang=scss");
     expect(result.query.lang).toBe("scss");

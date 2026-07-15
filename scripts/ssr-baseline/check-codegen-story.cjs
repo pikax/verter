@@ -1,12 +1,21 @@
 const { compileTemplate, parse, compileScript } = require("@vue/compiler-sfc");
 const fs = require("fs");
-const d = JSON.parse(fs.readFileSync("C:/temp/ssr-iter-114.json", "utf8"));
+const path = require("path");
+// Usage: node check-codegen-story.cjs <mismatches.json> <corpus-root>
+//   (corpus-root may also come from VERTER_COMPARE_ROOT)
+const inputPath = process.argv[2];
+const corpusRoot = process.argv[3] ?? process.env.VERTER_COMPARE_ROOT;
+if (!inputPath || !corpusRoot) {
+  console.error("usage: node check-codegen-story.cjs <mismatches.json> <corpus-root>");
+  process.exit(1);
+}
+const d = JSON.parse(fs.readFileSync(inputPath, "utf8"));
 
 // Find CodeGen.story.vue
 for (const r of d.mismatches) {
   if (!r.file.includes("CodeGen.story.vue")) continue;
 
-  const fullPath = "D:/dev/" + r.file;
+  const fullPath = path.join(corpusRoot, r.file);
   const source = fs.readFileSync(fullPath, "utf8");
   const { descriptor } = parse(source);
 

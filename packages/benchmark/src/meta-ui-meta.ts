@@ -1,16 +1,40 @@
-function camelCase(input: string): string {
-  return input
-    .replace(/^[^a-zA-Z0-9]+/, "")
-    .replace(/[^a-zA-Z0-9]+([a-zA-Z0-9])/g, (_match, char: string) => char.toUpperCase())
-    .replace(/^[A-Z]/, (char) => char.toLowerCase());
-}
+import { refinedPropSurvives } from "@verter/component-meta/published-surface";
 
 export function refineMetaForBenchmark(meta: any) {
-  const eventProps = new Set(
-    (meta?.events ?? []).map((event: any) => camelCase(`on_${event.name}`)),
-  );
+  // Derive props through `PublishedSurfacePolicy::Refined` — the
+  // single architectural source for the structural projection
+  // rules (no name-prefix heuristics, no thresholds). Producer-
+  // flagged `prop.global`, `on{Event}`-shadow-prop, and Vue
+  // intrinsic filtering live in `@verter/component-meta/published-surface`
+  // (TS port of Rust `verter_audit::names_for_policy`).
+  //
+  // `declared_in_macro_type_arg` is the producer fact threaded
+  // through `FfiPropMeta` → `NativePropMeta` → Verter's `PropMeta`.
+  // The compat-layer `PropertyMeta` (Volar parity shape) deliberately
+  // omits the field, so we look it up on the native sidecar
+  // (`meta._verter.props[i]`) by name. A missing sidecar (e.g.
+  // vue-component-meta side of the parity bench) falls back to
+  // `false` — matching the "drop unless explicitly declared"
+  // refined semantics for upstream that has no producer fact.
+  const eventNames = (meta?.events ?? []).map((event: any) => String(event.name));
+  const nativeProps: any[] = Array.isArray(meta?._verter?.props) ? meta._verter.props : [];
+  const declaredByName = new Map<string, boolean>();
+  for (const native of nativeProps) {
+    if (native && typeof native.name === "string") {
+      declaredByName.set(native.name, Boolean(native.declaredInMacroTypeArg));
+    }
+  }
   const props = (meta?.props ?? [])
-    .filter((prop: any) => !prop.global && !eventProps.has(prop.name))
+    .filter((prop: any) =>
+      refinedPropSurvives(
+        {
+          name: prop.name,
+          declared_in_macro_type_arg: declaredByName.get(String(prop.name)) ?? false,
+          global: Boolean(prop.global),
+        },
+        eventNames,
+      ),
+    )
     .sort((left: any, right: any) => {
       if (!left.required && right.required) {
         return 1;
@@ -31,7 +55,10 @@ export function refineMetaForBenchmark(meta: any) {
   const sourceMeta = meta?._verter;
 
   return {
-    componentName: sourceMeta?.componentName ?? meta?.componentName ?? null,
+    // Use the compat-layer componentName (null for VolarComponentMeta)
+    // rather than digging into _verter.componentName which is a verter
+    // extension not present in vue-component-meta output.
+    componentName: meta?.componentName ?? null,
     props,
     events: (meta?.events ?? []).map((event: any) => stripInternalSchemaNoise(event)),
     slots: (meta?.slots ?? []).map((slot: any) => stripInternalSchemaNoise(slot)),
@@ -47,8 +74,14 @@ export function refineMetaForBenchmark(meta: any) {
 }
 
 function benchmarkTypeDescriptorToString(type: any): string {
-  if (!type || typeof type !== "object") {
+  if (type == null) {
     return "unknown";
+  }
+  if (typeof type === "string") {
+    return type;
+  }
+  if (typeof type !== "object") {
+    return String(type);
   }
 
   switch (type.kind) {
@@ -62,8 +95,16 @@ function benchmarkTypeDescriptorToString(type: any): string {
         : [];
       return args.length > 0 ? `${type.name}<${args.join(", ")}>` : String(type.name ?? "unknown");
     }
-    case "array":
-      return `${benchmarkTypeDescriptorToString(type.elementType)}[]`;
+    case "recursiveRef": {
+      const args = Array.isArray(type.typeArguments)
+        ? type.typeArguments.map((entry: any) => benchmarkTypeDescriptorToString(entry))
+        : [];
+      return args.length > 0 ? `${type.name}<${args.join(", ")}>` : String(type.name ?? "unknown");
+    }
+    case "array": {
+      const element = type.element ?? type.elementType;
+      return `${benchmarkTypeDescriptorToString(element)}[]`;
+    }
     case "tuple":
       return `[${(type.elements ?? [])
         .map((entry: any) => benchmarkTypeDescriptorToString(entry))
@@ -76,9 +117,42 @@ function benchmarkTypeDescriptorToString(type: any): string {
       return (type.types ?? [])
         .map((entry: any) => benchmarkTypeDescriptorToString(entry))
         .join(" & ");
+    case "object":
+      return "object";
+    case "function":
+      return "Function";
+    case "enum":
+      return String(type.name ?? "enum");
+    case "typeParameter":
+      return String(type.name ?? "unknown");
+    case "unknown":
+      return typeof type.rawType === "string" ? type.rawType : "unknown";
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers are opaque terminals — surface the
+      // user-visible `bindingName`. The bench refiner MUST NOT attempt to
+      // resolve the carrier through any registry.
+      return String(type.bindingName ?? "unknown");
     default:
       return String(type.name ?? type.kind ?? "unknown");
   }
+}
+
+/**
+ * Coerce a type field that may be either a flat string (legacy Volar shape)
+ * or a structured native descriptor into a string suitable for the regex/string
+ * normalisers in `convertPropertyMetaToJsonSchema`.
+ */
+export function typeMetaToString(type: unknown): string {
+  if (type == null) {
+    return "";
+  }
+  if (typeof type === "string") {
+    return type;
+  }
+  if (typeof type === "object") {
+    return benchmarkTypeDescriptorToString(type);
+  }
+  return String(type);
 }
 
 function stripInternalSchemaNoise(value: any): any {
@@ -94,11 +168,18 @@ function stripInternalSchemaNoise(value: any): any {
 
   const next: Record<string, unknown> = {};
   for (const key of Object.keys(value)) {
-    if (key === "declarations") {
-      continue;
-    }
     const entry = value[key];
     if (entry === undefined) {
+      continue;
+    }
+    // Strip vue-component-meta internal noise: `declarations` is always an
+    // array of AST nodes, `getDeclarations`/`getTypeObject` are lazy accessor
+    // functions. Only strip when the value is a function or array (the leaked
+    // forms), not when it's a string or other user-visible data.
+    if (key === "declarations" && Array.isArray(entry)) {
+      continue;
+    }
+    if ((key === "getDeclarations" || key === "getTypeObject") && typeof entry === "function") {
       continue;
     }
     next[key] = stripInternalSchemaNoise(entry);
@@ -110,7 +191,7 @@ export function propsToJsonSchema(props: Array<any>): Record<string, unknown> {
   const properties: Record<string, unknown> = {};
 
   for (const prop of props ?? []) {
-    const schema = convertPropertyMetaToJsonSchema(prop.type, prop.schema);
+    const schema = convertPropertyMetaToJsonSchema(prop.rawType ?? prop.type, prop.schema);
     if (!schema) {
       continue;
     }
@@ -129,10 +210,10 @@ export function propsToJsonSchema(props: Array<any>): Record<string, unknown> {
 }
 
 function convertPropertyMetaToJsonSchema(
-  typeText: string | undefined,
+  typeText: unknown,
   schema: any,
 ): Record<string, unknown> | null {
-  const normalizedType = (typeText ?? "").replace(/\s+/g, " ").trim();
+  const normalizedType = typeMetaToString(typeText).replace(/\s+/g, " ").trim();
 
   if (schema && typeof schema === "object") {
     if (schema.kind === "enum" && Array.isArray(schema.schema)) {
@@ -149,7 +230,10 @@ function convertPropertyMetaToJsonSchema(
         type: "array",
         ...(itemSchema
           ? {
-              items: convertPropertyMetaToJsonSchema(itemSchema.type ?? normalizedType, itemSchema),
+              items: convertPropertyMetaToJsonSchema(
+                itemSchema.rawType ?? itemSchema.type ?? normalizedType,
+                itemSchema,
+              ),
             }
           : {}),
       };
@@ -160,7 +244,10 @@ function convertPropertyMetaToJsonSchema(
       const properties: Record<string, unknown> = {};
       for (const key of Object.keys(nested).sort()) {
         const entry = nested[key];
-        const next = convertPropertyMetaToJsonSchema(entry?.type, entry?.schema ?? entry);
+        const next = convertPropertyMetaToJsonSchema(
+          entry?.rawType ?? entry?.type,
+          entry?.schema ?? entry,
+        );
         if (next) {
           properties[key] = {
             ...next,

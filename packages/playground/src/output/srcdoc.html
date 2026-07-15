@@ -71,7 +71,7 @@
         });
 
         window.addEventListener("message", async (ev) => {
-          const { action, scripts, css } = ev.data;
+          const { action, scripts, css, frameworkId, svelteRuntimeFlags = [] } = ev.data;
 
           if (action === "eval") {
             try {
@@ -89,12 +89,10 @@
                 document.head.appendChild(style);
               }
 
-              // Unmount the previous Vue app to clean up internal state,
-              // then clear the DOM. Without unmount(), Vue's internal component
-              // tree stays alive and interferes when re-mounting (e.g., causes
-              // nextSibling errors when switching from single-root to multi-root).
+              // Unmount the previous framework instance before clearing the DOM,
+              // so runtime state and delegated listeners cannot survive a preview update.
               if (window.__currentApp__) {
-                window.__currentApp__.unmount();
+                await window.__currentApp__.unmount();
                 window.__currentApp__ = null;
               }
               const app = document.getElementById("app");
@@ -103,10 +101,30 @@
               // Remove old dynamically-added scripts
               document.querySelectorAll("script[data-preview]").forEach((el) => el.remove());
 
-              // Load Vue and expose on window (import map must be in the HTML)
-              if (!window.Vue) {
-                const Vue = await import("vue");
-                window.Vue = Vue;
+              // Load exactly the selected framework runtime. Import-map entries
+              // are present in the srcdoc before this classic script starts.
+              if (frameworkId === "svelte") {
+                if (!window.SvelteInternalClient) {
+                  await import("svelte/internal/disclose-version");
+                }
+                // Side-effect flags must run before the next component mount.
+                // Keep this explicit allowlist: preview messages are external input.
+                // This remains outside the client-runtime cache guard so changing a
+                // warm preview from runes to legacy (or enabling another flag) works.
+                if (svelteRuntimeFlags.includes("legacy")) {
+                  await import("svelte/internal/flags/legacy");
+                }
+                if (svelteRuntimeFlags.includes("async")) {
+                  await import("svelte/internal/flags/async");
+                }
+                if (svelteRuntimeFlags.includes("tracing")) {
+                  await import("svelte/internal/flags/tracing");
+                }
+                if (!window.SvelteInternalClient) {
+                  window.SvelteInternalClient = await import("svelte/internal/client");
+                }
+              } else if (!window.Vue) {
+                window.Vue = await import("vue");
               }
 
               // Evaluate scripts sequentially, each wrapped in an IIFE so const

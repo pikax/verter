@@ -1,5 +1,10 @@
 /// <reference types="node" />
 
+// Re-export audit helpers so `@verter/native` consumers can import
+// `whyLoaded`, `whyInstantiated`, `assertLoadedFilesExactly`, etc.
+// directly from the package root.
+export * from "./audit";
+
 // =============================================================================
 // Standalone CSS Style Processing (for preprocessed CSS from Vite plugin)
 // =============================================================================
@@ -90,37 +95,224 @@ export declare function processStyle(
 ): ProcessStyleResult;
 
 // =============================================================================
-// Batch Compilation (Rayon parallel)
+// Runtime-gated deep memory audit (always compiled, single binary)
+//
+// The wrapper allocator ships in every build. Disabled (the default),
+// each allocator call costs one cached branch on top of the system
+// allocator — enable at runtime via `memoryAuditEnable()` (fresh counter
+// epoch) or env `VERTER_MEMORY_AUDIT=1` / `VERTER_MEMORY_AUDIT_SAMPLE=N`
+// (read once, on the first memory-audit call). While disabled,
+// `memoryAuditSnapshot()`/`memoryAuditSites()` return `null` and
+// `memoryAuditResetHighWater()` returns `false` so callers can detect
+// the state and fail loudly instead of reporting zeros.
 // =============================================================================
 
-export interface BatchFile {
-  filename: string;
-  source: string;
+/** Counters from the counting global allocator (since enable). */
+export interface MemoryAuditSnapshot {
+  /** Allocating calls (alloc/alloc_zeroed/realloc) since enable. */
+  allocCount: number;
+  /** Deallocating calls (dealloc/realloc) since enable. */
+  deallocCount: number;
+  /** Total bytes requested by allocating calls (monotonic). */
+  allocatedBytesTotal: number;
+  /**
+   * Live heap bytes relative to the enable epoch (may go negative when
+   * blocks allocated before the epoch are freed after it).
+   */
+  liveBytes: number;
+  /** High-water mark of liveBytes since enable or the last reset. */
+  peakLiveBytes: number;
 }
 
-export interface BatchOptions {
-  /** Number of Rayon threads (0 or undefined = all logical CPUs) */
-  threads?: number;
-}
-
-export interface BatchResult {
-  filename: string;
-  /** Combined script + template code */
-  code: string;
-  /** First error message if compilation failed */
-  error?: string;
-  durationMs: number;
+/** Options for {@link memoryAuditEnable}. */
+export interface MemoryAuditEnableOptions {
+  /**
+   * Arm allocation-site sampling: capture one call-site stack every
+   * `sampleEvery` allocating calls (a prime such as 97 is recommended).
+   * `0`/absent leaves sampling off (counters only).
+   */
+  sampleEvery?: number;
 }
 
 /**
- * Compile a batch of Vue SFC files in parallel using Rayon.
- *
- * Each file is compiled independently with its own allocator — no shared
- * mutable state. No caching, no analysis — compile-only for maximum throughput.
- *
- * Equivalent to Vize's `compileSfcBatch` for fair benchmark comparison.
+ * Enable the runtime memory audit (idempotent; the disabled→enabled
+ * transition starts a fresh counter epoch). Call BEFORE the workload of
+ * interest. Returns `true`.
  */
-export declare function compileBatch(files: BatchFile[], options?: BatchOptions): BatchResult[];
+export declare function memoryAuditEnable(options?: MemoryAuditEnableOptions | null): boolean;
+
+/**
+ * Current allocator counters, or `null` while the runtime audit gate is
+ * disabled (the default).
+ */
+export declare function memoryAuditSnapshot(): MemoryAuditSnapshot | null;
+
+/**
+ * Reset the live-bytes high-water mark to the current live-bytes level.
+ * Returns `false` while the runtime audit gate is disabled.
+ */
+export declare function memoryAuditResetHighWater(): boolean;
+
+/**
+ * Sampled allocation-site attribution: JSON report of the top-`topK`
+ * sampled sites by sampled bytes —
+ * `[{count, bytes, estimatedTotalBytes, frames}, ...]` where
+ * `estimatedTotalBytes = bytes * N` for the armed `sampleEvery` interval
+ * and `frames` is a short resolved stack (innermost first,
+ * allocator/backtrace plumbing skipped, at most 8 frames). Symbols
+ * resolve lazily at call time; sampling itself captures unresolved
+ * frames only.
+ *
+ * Returns `null` while the audit is disabled OR while sampling was not
+ * armed (`memoryAuditEnable({sampleEvery})` / `VERTER_MEMORY_AUDIT_SAMPLE`).
+ */
+export declare function memoryAuditSites(topK: number): string | null;
+
+// =============================================================================
+// Host-backed batch compile — VerterHost.compileMany
+//
+// Replaces the previous free-fn `compileBatch` (Rayon-direct,
+// stateless, bypassing VerterHost). The new entry point is the
+// `host.compileMany(files, options)` instance method, which routes
+// through the host's scheduler + dispatch + compile_cache.
+// =============================================================================
+
+/**
+ * Caller-requested compile cache mode. `"session"` (the default)
+ * consults the fact-validated session cache; `"content"` the pure
+ * content-addressed cache; `"stateless"` bypasses both.
+ */
+export type CompileCacheMode = "stateless" | "content" | "session";
+
+/** Why a requested compile cache mode was constrained. */
+export type DowngradeReason =
+  | "HasExternalSrc"
+  | "HasMacroTypeDeps"
+  | "HasWorkspaceAlias"
+  | "HasModuleAugmentation"
+  | "HasBlockOverride"
+  | "HasStyleOverride"
+  | "HasIdeOnlyAnalysis"
+  | "HasDevLastGood";
+
+export interface CompileBatchInput {
+  canonicalId: string;
+  /** SFC source. Accepts a string or a Buffer (UTF-8 bytes). */
+  source: string | Buffer;
+  /**
+   * Requested compile cache mode. Omit to inherit the batch
+   * `defaultMode` (which itself defaults to "session").
+   */
+  requestedMode?: CompileCacheMode;
+  /**
+   * Explicit per-component scoped-style / HMR id. Threaded into this
+   * input's compile profile ONLY on the `"runtime-render"` lane
+   * (scoped-style / HMR identity is per-component, not per-build). Omit to
+   * let codegen auto-generate the id.
+   */
+  componentId?: string;
+}
+
+/** The compile lane for {@link VerterHost.compileMany}. */
+export type CompileManyTarget = "host-backed" | "runtime-render";
+
+/**
+ * The batch-level render profile for the `"runtime-render"` lane. Every
+ * field is output-affecting and uniform across a single bundler build. It
+ * is REQUIRED for the render lane (the host fails closed when it is absent —
+ * it never substitutes production/client defaults).
+ */
+export interface CompileBatchRenderProfile {
+  /**
+   * Codegen filename override (component-name extraction, scope-id
+   * derivation, source-map source/file). Omit to fall back to the canonical
+   * id — same semantics as `HostCompileProfile.filename`.
+   */
+  filename?: string;
+  isProduction: boolean;
+  ssr: boolean;
+  forceJs: boolean;
+  forceVapor: boolean;
+  sourceMap: boolean;
+  /**
+   * Preserve template comments. TRI-STATE: omit to keep the compiler
+   * default (`!isProduction` — dev preserves, prod strips), same semantics
+   * as an omitted `HostCompileProfile.comments`. Do NOT collapse an omitted
+   * value to `false`.
+   */
+  comments?: boolean;
+  hmrStrategy: "none" | "vite" | "webpack";
+  /** Runtime module import specifier (e.g. "vue"). */
+  runtimeModuleName?: string;
+  /** Types module import specifier. */
+  typesModuleName?: string;
+  /** Custom interpolation delimiter — open. Set together with `delimiterClose`. */
+  delimiterOpen?: string;
+  /** Custom interpolation delimiter — close. */
+  delimiterClose?: string;
+  /** Custom-element tag names (affect template codegen). */
+  customElements?: string[];
+}
+
+export interface CompileBatchOptions {
+  /**
+   * Scheduler priority for batch upserts. Default: "background" (yields to
+   * concurrent interactive work). Use "interactive" when there is no
+   * concurrent interactive work and you want full-throttle execution
+   * (benchmarks, CI cold-start measurement).
+   */
+  priority?: "interactive" | "background";
+  /**
+   * Default compile cache mode for inputs whose `requestedMode` is
+   * unset. Defaults to "session" (the host default).
+   */
+  defaultMode?: CompileCacheMode;
+  /**
+   * The compile lane. `"host-backed"` (default) runs the full session
+   * wrapper; `"runtime-render"` runs the render-only bundler lane, which
+   * REQUIRES `compileProfile`.
+   */
+  target?: CompileManyTarget;
+  /**
+   * The batch-level render profile for the `"runtime-render"` lane.
+   * REQUIRED for that lane; ignored by `"host-backed"`.
+   */
+  compileProfile?: CompileBatchRenderProfile;
+}
+
+export interface CompileBatchEntry {
+  canonicalId: string;
+  code: string;
+  sourceMap?: string;
+  /**
+   * The compiled Main module language ("ts" / "js" / "jsx"), or undefined
+   * on an error/panic outcome. Bundler consumers (vite sub-request
+   * routing) read it.
+   */
+  lang?: string;
+  /** All compilation errors for this file. Empty on success. */
+  errors: string[];
+  /**
+   * Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
+   * compile, separate from the fatal `errors`. Populated by the
+   * RuntimeRender lane's soft-macro contract (an unresolved imported
+   * macro type renders successfully and reports a warning here). Always
+   * empty on the HostBacked lane and on any fatal outcome.
+   */
+  diagnostics: HostDiagnostic[];
+  durationMs: number;
+  /**
+   * True iff this input was served from a warm cache slot (the
+   * fact-validated session slot OR the content-addressed store).
+   */
+  cacheHit: boolean;
+  /** The compile cache mode the caller requested. */
+  requestedMode: CompileCacheMode;
+  /** The compile cache mode the runtime actually ran under. */
+  actualMode: CompileCacheMode;
+  /** Highest-priority downgrade reason, or undefined when none fired. */
+  downgradeReason?: DowngradeReason;
+}
 
 // =============================================================================
 // VerterHost (in-memory virtual file host)
@@ -164,7 +356,7 @@ export type {
   HostIdeProjectConfig,
 } from "./host-types";
 
-import type { HostCompileProfile } from "./host-types";
+import type { HostCompileProfile, HostDiagnostic } from "./host-types";
 
 // ---------------------------------------------------------------------------
 // Native-specific overrides: accept Buffer in addition to string
@@ -175,7 +367,7 @@ export interface HostUpsertRequest {
   inputId: string;
   /** SFC source code. Accepts a string or a Buffer (UTF-8 bytes from `fs.readFileSync(path)`). */
   source: string | Buffer;
-  fileKind?: "vue" | "sfc" | "vue_sfc" | "non_sfc" | "text" | "file";
+  fileKind?: "vue" | "sfc" | "vue_sfc" | "svelte" | "non_sfc" | "text" | "file";
   aliases?: string[];
 }
 
@@ -209,7 +401,7 @@ export interface NativeBlockOverrideRequest {
   overrides: NativeBlockOverrideEntry[];
 }
 
-export type HostPublicApiMode = "public" | "testing";
+export type HostPublicApiMode = "public" | "testing" | "declaration";
 
 // =============================================================================
 // Workspace (filesystem-backed VFS)
@@ -318,6 +510,16 @@ export declare class VerterHost {
 
   resolve(rawId: string): import("./host-types").HostResolvedId | null;
   upsert(request: HostUpsertRequest): import("./host-types").HostUpdateResult;
+  /**
+   * Compile a batch of Vue SFC inputs through the production host
+   * path (scheduler + dispatch + compile_cache).
+   *
+   * Returns one [`CompileBatchEntry`] per input, in the original
+   * input order. Per-input panic isolation: if codegen panics for
+   * one input, only that input's entry receives a `compiler panic:
+   * ...` error message; the rest of the batch completes normally.
+   */
+  compileMany(files: CompileBatchInput[], options?: CompileBatchOptions): CompileBatchEntry[];
   applyBlockOverrides(request: NativeBlockOverrideRequest): import("./host-types").HostUpdateResult;
   getPublicApi(
     canonicalId: string,
@@ -327,6 +529,20 @@ export declare class VerterHost {
     canonicalId: string,
     profile?: import("./host-types").HostCompileProfile,
   ): import("./host-types").HostIdeResponse | null;
+  /**
+   * Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
+   *
+   * The explicit IDE-ensure path — it compiles the carrier's IDE surface
+   * without requesting the runtime `Main` node, so a Main-less carrier
+   * (Svelte) populates its `CachedTsx` and a subsequent `getIde` succeeds.
+   * `getIde` itself stays a pure cached read. Returns `true` when the IDE
+   * projection now exists, `false` when the file has no IDE surface (a
+   * non-carrier); a real failure throws.
+   */
+  ensureIdeCompiled(
+    canonicalId: string,
+    profile?: import("./host-types").HostCompileProfile,
+  ): boolean;
   getVirtualFile(
     query: import("./host-types").HostVirtualQuery,
   ): import("./host-types").HostVirtualFileResponse | null;
@@ -343,8 +559,8 @@ export declare class VerterHost {
    */
   resolveExports(canonicalOrAlias: string): import("./host-types").HostResolvedExport[];
   /**
-   * Sets the resolved import dependencies for a file, enabling Tier 2/3
-   * smart invalidation (cross-file change tracking).
+   * Sets the resolved import dependencies for a file, enabling
+   * cross-file smart invalidation (change tracking).
    */
   setImportDependencies(
     canonicalOrAlias: string,
@@ -410,6 +626,198 @@ export declare class VerterHost {
    * Returns JSON `{ props, emits, slotBindings, bindings }` or `null`.
    */
   evaluateTypes(canonicalOrAlias: string): string | null;
+
+  // ===========================================================================
+  // Typed audit entry-points
+  //
+  // Each entry-point wraps a `VerterHost::*_with_audit` Rust producer
+  // and returns the produced `RequestAuditRecord` as a JSON Buffer.
+  // Audit must be enabled on the host config (`auditEnabled: true`)
+  // for these calls to publish a record; otherwise they short-circuit
+  // to `null` (the underlying operation still runs).
+  // ===========================================================================
+
+  /**
+   * Run a single type-resolution query through the shared dispatch
+   * and return the produced `RequestAuditRecord` as a JSON Buffer.
+   * Resolves `declName` in the top-level scope of `canonicalId`.
+   * Returns `null` when audit is disabled.
+   */
+  resolveTypeWithAudit(canonicalId: string, declName: string): Buffer | null;
+
+  /**
+   * Compile `canonicalId` for the requested codegen target and
+   * return the produced `RequestAuditRecord` as a JSON Buffer.
+   * Accepted target names: `"BUNDLER"`, `"IDE"`, `"ANALYSIS"`,
+   * `"META"`, `"TSX"`, `"TSC"`. Returns `null` when audit is
+   * disabled.
+   */
+  compileWithAudit(canonicalId: string, target: string): Buffer | null;
+
+  /**
+   * Materialise the `AnalysisReady` artifact for `canonicalId` under
+   * audit and return the produced `RequestAuditRecord` as a JSON
+   * Buffer. Returns `null` when audit is disabled or the canonical
+   * does not exist.
+   */
+  analyzeWithAudit(canonicalId: string): Buffer | null;
+
+  /**
+   * Drive a workspace operation under audit and return the produced
+   * `RequestAuditRecord` as a JSON Buffer. The `op` argument is
+   * shaped as `{ type: "AuditResolve", specifier, from } | { type:
+   * "DepGraphTraverse", root } | { type: "ResolverWalk", specifier
+   * }`. Always returns a record (the workspace producer drives the
+   * operation regardless of audit configuration).
+   */
+  auditWorkspaceOp(op: WorkspaceOpArgument): Buffer;
+
+  /**
+   * Drain the most-recent `RequestAuditRecord` from the host's audit
+   * store. Returns `null` when the store is empty.
+   *
+   * "Most recent" is defined by insertion order. The returned record
+   * is removed from the store.
+   */
+  getLastAuditRecord(): Buffer | null;
+
+  /**
+   * Non-destructive filtered query over the host's audit store.
+   * Returns a JSON Buffer carrying an array of matching records.
+   *
+   * Filter fields are independent — combining them narrows further:
+   * - `kind`: `"ComponentMeta"`, `"TypeResolution"`,
+   *   `"SemanticAnalysis"`, `"Compile"`, `"Workspace"`, `"Lsp"`,
+   *   `"Mcp"`, `"BundlerBatch"`, `"Custom"`.
+   * - `sinceRequestId`: minimum request id (exclusive). Decimal
+   *   string matching the JSON serialization of `request_id`.
+   * - `limit`: cap the returned record count (oldest-first).
+   */
+  getAuditRecords(filter?: AuditRecordFilter): Buffer;
+
+  /**
+   * Run the bundler-batch aggregator over the host's audit store and
+   * return the produced `BundlerBatchPayload` as a JSON Buffer.
+   *
+   * - `kind`: `"Vite"`, `"Webpack"`, `"Rollup"`, `"Esbuild"`,
+   *   `"Rolldown"`, or any other string for the `Other` variant.
+   *   Defaults to `"Vite"` when absent.
+   * - `sinceRequestId`: optional minimum request id watermark.
+   */
+  getBundlerBatchSummary(args?: BundlerBatchSummaryArgs): Buffer;
+
+  // ===========================================================================
+  // Typeinfo entry-points
+  //
+  // Wrap the Rust host typeinfo substrate. Used by `@verter/typeinfo`
+  // for `TypeInfoSession`'s public API.
+  // ===========================================================================
+
+  /**
+   * Return the top-level symbol inventory for `canonicalId`.
+   *
+   * JSON Buffer carrying a `Vec<FfiSymbolEntry>` (camelCase shape).
+   * The call is bounded by the shallow-state size and does NOT emit
+   * an audit record.
+   */
+  listSymbols(canonicalId: string): Buffer;
+
+  /**
+   * Resolve `name` in `canonicalId`'s top-level scope and return the
+   * raised `TypeExpr` plus the per-request audit record.
+   *
+   * `typeArgs` is a JSON Buffer carrying an array of native
+   * `TypeExpr` values; pass `null` for "no generic instantiation".
+   * `mode` is one of `"identity" | "navigate" | "shallow" |
+   * "expanded" | "skeleton"`; pass `null` to take the host's default
+   * (Navigate for generic carriers, Expanded otherwise).
+   *
+   * `typeExpr` is `null` when the symbol could not be resolved.
+   * `auditRecord` is `null` when audit is disabled (and is preserved
+   * on the fault path — the audit envelope rides both the success and
+   * the `error` outcome). `error` carries a human-readable description
+   * of a genuine dispatch fault (`BudgetExceeded` / `UnstableState` /
+   * `AliasCycle` / `UnsupportedIntrinsic` / `Other`); `null` / absent
+   * means "no fault".
+   */
+  resolveSymbolWithAudit(
+    canonicalId: string,
+    name: string,
+    typeArgs: Buffer | null,
+    mode: string | null,
+  ): { typeExpr: Buffer | null; auditRecord: Buffer | null; error?: string | null };
+
+  /**
+   * Evaluate a synthetic type expression in a file scope and return
+   * the raised `TypeExpr` plus the per-request audit record.
+   *
+   * `request` is a JSON Buffer carrying a
+   * `verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest`.
+   *
+   * `typeExpr` is `null` when the expression could not be resolved.
+   * `auditRecord` is `null` when audit is disabled (and is preserved
+   * on the fault path — the audit envelope rides both the success and
+   * the `error` outcome). `error` carries a human-readable description
+   * of a genuine dispatch fault (`BudgetExceeded` / `UnstableState` /
+   * `AliasCycle` / `UnsupportedIntrinsic` / `Other`); `null` / absent
+   * means "no fault".
+   */
+  evaluateTypeExpressionWithAudit(request: Buffer): {
+    typeExpr: Buffer | null;
+    auditRecord: Buffer | null;
+    error?: string | null;
+  };
+
+  /**
+   * Resolve a component's framework surfaces (props, emits, slots,
+   * options, expose, model) and return the wire `TypeInfoGraphResponse`
+   * plus the per-request audit record.
+   *
+   * `request` is a protobuf-encoded
+   * `verter.v1.TypeInfoGraphRequest` envelope carrying the
+   * `GRAPH_OPERATION_FRAMEWORK_SURFACES` operation (the framework-surface
+   * operation rides the existing graph envelope — no dedicated request
+   * type). The host runs the envelope validator FIRST, so a malformed
+   * envelope returns the typed wire `error` arm in `response` BEFORE any
+   * registry lookup or semantic dispatch.
+   *
+   * `response` is the protobuf-encoded `TypeInfoGraphResponse` — the
+   * `framework_surface` arm on success, the `error` arm on a typed
+   * rejection — and is ALWAYS present (the validation-first executor
+   * always produces a typed response). `auditRecord` is `null` when
+   * audit is disabled / filtered; the audit envelope rides BOTH the
+   * success AND the rejection outcome.
+   */
+  resolveFrameworkSurfaceWithAudit(request: Buffer): {
+    response: Buffer;
+    auditRecord: Buffer | null;
+  };
+}
+
+/**
+ * Workspace op argument shape for `VerterHost.auditWorkspaceOp`.
+ */
+export type WorkspaceOpArgument =
+  | { type: "AuditResolve"; specifier: string; from: string }
+  | { type: "DepGraphTraverse"; root: string }
+  | { type: "ResolverWalk"; specifier: string };
+
+/**
+ * Filter argument for `VerterHost.getAuditRecords`. All fields are
+ * optional; combining them narrows the result set further.
+ */
+export interface AuditRecordFilter {
+  kind?: string;
+  sinceRequestId?: string;
+  limit?: number;
+}
+
+/**
+ * Args for `VerterHost.getBundlerBatchSummary`.
+ */
+export interface BundlerBatchSummaryArgs {
+  kind?: string;
+  sinceRequestId?: string;
 }
 
 // =============================================================================
@@ -482,8 +890,73 @@ export declare class ComponentMetaSession {
   /** Single native component-meta query. Returns a protobuf payload or null. */
   getComponentMeta(canonicalOrAlias: string): Buffer | null;
 
-  /** Declared-surface native component-meta query. Returns a protobuf payload or null. */
-  getDeclaredComponentMeta(canonicalOrAlias: string): Buffer | null;
+  /**
+   * Plain native component-meta query under a legacy entry-point name.
+   * Returns the same protobuf payload as `getComponentMeta` (kept for
+   * wire compatibility): a full type-resolution pass runs and the
+   * payload embeds the resolved type-registry overlay plus the
+   * `resolution` sidecar. `getComponentMetaWithAudit` adds the
+   * per-request audit record (the `{ analysis, resolution, record }`
+   * JSON bundle), not more resolution.
+   */
+  getResolvedComponentMeta(canonicalOrAlias: string): Buffer | null;
+
+  /**
+   * Selective surface API. Returns the
+   * `ComponentMetaSurface` envelope: eager scalars + `NamedTypeHandle`
+   * for every type-bearing field. Consumers walk the type graph one
+   * layer at a time via {@link getComponentMetaTypeExpansion}. The
+   * bytes are a `verter.v1.ComponentMetaSurface` protobuf message.
+   *
+   * Returns `null` when the canonical does not resolve to a component.
+   * Returns an error envelope (first byte `0xFF`) when the bridge
+   * encountered a typed `BridgeError` (D114).
+   */
+  getComponentMetaSurface(canonicalOrAlias: string): Buffer | null;
+
+  /**
+   * Selective surface API. Resolves a
+   * `TypeHandle` (encoded as a `verter.v1.TypeHandle` protobuf
+   * message) into a one-layer `verter.v1.TypeExpansion`. The optional
+   * `depth` argument is currently informational; the bridge always
+   * returns one layer per call.
+   *
+   * On error returns an error envelope (first byte `0xFF`) carrying a
+   * `verter.v1.TypeHandleError` (D104 + D114).
+   */
+  getComponentMetaTypeExpansion(handleBuf: Buffer, depth?: number): Buffer;
+
+  /**
+   * Synchronous audit bundle — returns JSON bytes of
+   * `{ analysis, resolution, record }` or `null` if the canonical does
+   * not resolve.
+   *
+   * The host must have `audit_enabled` + `footprint_capture` set on
+   * construction; otherwise this throws. Promise ergonomics (if
+   * desired) live in `packages/native/audit.ts` — the Rust binding
+   * itself is synchronous.
+   */
+  getComponentMetaWithAudit(canonicalOrAlias: string): Buffer | null;
+
+  /**
+   * Run the Rust provenance walker against a committed audit bundle
+   * JSON string, rooted at `canonicalId`. Returns a
+   * `ProvenanceChain` JSON string.
+   */
+  whyLoadedFromAuditJson(auditJson: string, canonicalId: string): string;
+
+  /**
+   * Run the Rust provenance walker rooted at the instantiation keyed
+   * by `(declCanonicalId, declSymbolName, argsFingerprintHex)`.
+   * `argsFingerprintHex` is the 32-character lowercase hex rendering
+   * of the 16-byte `Hash16`.
+   */
+  whyInstantiatedFromAuditJson(
+    auditJson: string,
+    declCanonicalId: string,
+    declSymbolName: string,
+    argsFingerprintHex: string,
+  ): string;
 
   /**
    * Get effective source for a file (overlay → base).

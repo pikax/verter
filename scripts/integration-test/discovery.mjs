@@ -529,7 +529,10 @@ export function analyzeRepo(repoRoot, { discoveryRoot } = {}) {
 }
 
 export function buildDiscoveryInventory({
-  roots = ["D:/dev"],
+  // No hardcoded machine default: callers pass discovery roots explicitly
+  // (run.mjs sources them from `--roots` / VERTER_LOCAL_REPO_ROOTS). Empty
+  // means "no roots configured" — discovery then finds nothing.
+  roots = [],
   repoFilter = null,
   matrixProjects = [],
 } = {}) {

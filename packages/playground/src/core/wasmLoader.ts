@@ -66,7 +66,7 @@ export async function loadLocalWasm(): Promise<WasmModule> {
 /**
  * Load WASM from a nightly commit (GitHub Release assets).
  *
- * @param shortSha - 7-char commit SHA (e.g. "6178ecb")
+ * @param shortSha - 7-char commit hash (e.g. "6178ecb")
  */
 export async function loadCommitWasm(shortSha: string): Promise<WasmModule> {
   const wasmUrl = `${GITHUB_RELEASE_BASE}/nightly/verter_wasm_bg-${shortSha}.wasm`;

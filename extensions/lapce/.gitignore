@@ -1,0 +1,5 @@
+# Build artifact produced by `pnpm build:lapce` (the wasm volt binary).
+bin/*.wasm
+
+# Cargo build output for the standalone volt crate.
+/target

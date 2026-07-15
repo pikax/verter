@@ -98,6 +98,55 @@ describe("normalizeForBenchmark", () => {
     expect(Object.keys(artifact.propsJsonSchema.alpha ?? {})).toEqual(["enum", "type"]);
     expect((artifact.props[1]?.schema as Record<string, unknown>).loc).toBeUndefined();
   });
+
+  it("preserves mixed enum member order inside schema arrays", () => {
+    const artifact = normalizeForBenchmark(
+      "src/runtime/components/Button.vue",
+      {
+        componentName: "Button",
+        props: [
+          {
+            name: "autofocus",
+            type: "Booleanish | undefined",
+            required: false,
+            default: undefined,
+            description: undefined,
+            tags: [],
+            schema: {
+              kind: "enum",
+              type: "Booleanish | undefined",
+              schema: ['"false"', '"true"', "false", "true", "undefined"],
+            },
+          },
+        ],
+        events: [],
+        slots: [],
+        exposed: [],
+        models: [],
+      },
+      {
+        autofocus: {
+          enum: ['"false"', '"true"', "false", "true", "undefined"],
+          type: "string",
+        },
+      },
+    );
+
+    expect((artifact.props[0]?.schema as any)?.schema).toEqual([
+      '"false"',
+      '"true"',
+      "false",
+      "true",
+      "undefined",
+    ]);
+    expect((artifact.propsJsonSchema.autofocus as any)?.enum).toEqual([
+      '"false"',
+      '"true"',
+      "false",
+      "true",
+      "undefined",
+    ]);
+  });
 });
 
 describe("compareNormalizedArtifacts", () => {

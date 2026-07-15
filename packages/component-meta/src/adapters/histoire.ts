@@ -3,7 +3,7 @@
  */
 
 import type { ComponentMeta, PropMeta } from "../types.js";
-import type { TypeDescriptor } from "../type-ir.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 
 export interface HistoireStoryConfig {
   title: string;
@@ -91,6 +91,11 @@ function typeToDefaultValue(type: TypeDescriptor): unknown {
 
     case "ref":
       return undefined;
+
+    case "syntheticSlotBinding":
+      // Synthetic slot-binding carriers are opaque terminals — surface
+      // the user-visible `bindingName` as the default placeholder.
+      return type.bindingName;
 
     default:
       return undefined;

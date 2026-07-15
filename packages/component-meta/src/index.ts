@@ -25,6 +25,8 @@ export type {
   JsdocTag,
   ComponentPropUsage,
   ComponentUsage,
+  ComponentBindingUsage,
+  ComponentEventUsage,
   TemplateRefMeta,
   ImportMeta,
   BindingMeta,
@@ -58,7 +60,7 @@ export type {
   ResolvedRootStep,
 } from "./types.js";
 
-// Type IR
+// Type IR — re-exported from @verter/type-ir for public-API stability.
 export type {
   TypeDescriptor,
   PrimitiveName,
@@ -77,8 +79,10 @@ export type {
   EnumType,
   EnumMember,
   RefType,
+  RecursiveRefType,
+  RecursiveRefConditionalFrame,
   UnknownType,
-} from "./type-ir.js";
+} from "@verter/type-ir";
 
 export {
   primitive,
@@ -91,8 +95,9 @@ export {
   func,
   typeParameter,
   ref,
+  recursiveRef,
   unknown,
-} from "./type-ir.js";
+} from "@verter/type-ir";
 
 // Native type evaluation bridge
 export { typeExprToDescriptor, buildEvaluatedTypeMap } from "./type-expr-bridge.js";
@@ -116,10 +121,6 @@ export type {
   NativeResolvedMacroMeta,
   NativeResolvedTypeDeclaration,
   NativeResolvedNativeProp,
-  NativeResolvedPropField,
-  NativeResolvedEmitField,
-  NativeResolvedSlotField,
-  NativeResolvedSlotBinding,
   NativeResolvedJsdocBlock,
   NativeResolvedJsdocTag,
   // Native leaf types for consumers that destructure NativeComponentMetaResult
@@ -163,6 +164,10 @@ export type {
   NativeBranchStatus,
   NativeUnresolvedBranchReason,
   NativeResolvedRootStep,
+  // Native origin graph types
+  NativeOriginNode,
+  NativeOriginEdge,
+  NativeOriginGraph,
 } from "./native-component-meta.js";
 
 // Session-first project API
@@ -172,4 +177,19 @@ export {
   evictComponentMetaSession,
   shutdownMetaRuntime,
 } from "./project.js";
-export type { ComponentMetaSessionConfig, TypeExpansionBackend } from "./project.js";
+export type { ComponentMetaSessionConfig } from "./project.js";
+
+// Origin graph walk API
+export { getMetaOrigin, walkOriginChain, findOriginNodesByKind } from "./origin-walk.js";
+export type { OriginWalkResult, OriginChainEntry } from "./origin-walk.js";
+
+// Semantic pipeline types (from verter_protocol via @verter/language-shared)
+export type {
+  ComponentRuntimeSchema,
+  RuntimePropSchema,
+  RuntimeModelSchema,
+  RuntimeEventSchema,
+  RuntimeSlotSchema,
+  ComponentSurfaceDto,
+  QueryResultDto,
+} from "./semantic-bridge.js";

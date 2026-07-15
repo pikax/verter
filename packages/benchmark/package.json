@@ -2,7 +2,7 @@
   "name": "@verter/benchmark",
   "version": "0.0.1",
   "private": true,
-  "description": "Performance benchmarks comparing Vue and Verter compilation",
+  "description": "Performance and regression benchmarks for Verter compilers",
   "license": "MIT",
   "author": "pikax",
   "type": "module",
@@ -11,6 +11,7 @@
     "bench:json": "node --import tsx src/index.ts --json",
     "bench:ffi": "node --import tsx src/ffi-bench.ts",
     "bench:edit-ops": "node --import tsx src/edit-ops-bench.ts",
+    "bench:svelte:compiler": "node --expose-gc --import tsx src/svelte-perf-fence.ts",
     "bench:apple": "node --import tsx src/apple-to-apple.ts",
     "bench:type-check": "node --import tsx src/type-check-bench.ts",
     "bench:lsp": "node --import tsx src/lsp-bench.ts",
@@ -19,23 +20,34 @@
     "bench:meta:json": "node --import tsx src/meta-bench.ts --json",
     "bench:meta:ui": "node --expose-gc --import tsx src/meta-ui-bench.ts",
     "bench:meta:ui:json": "node --expose-gc --import tsx src/meta-ui-bench.ts --json",
+    "bench:meta:ui:stress": "node --expose-gc --import tsx src/meta-ui-stress.ts",
+    "bench:meta:ui:saturation": "node --expose-gc --import tsx src/meta-ui-saturation.ts",
+    "bench:meta:ui:warm": "node --expose-gc --import tsx src/meta-ui-warm.ts",
     "bench:meta:ui:report": "node --import tsx src/meta-ui-report.ts",
-    "bench:meta:ui:setup": "node ../../scripts/benchmark/setup-meta-ui.mjs"
+    "bench:meta:ui:setup": "node ../../scripts/benchmark/setup-meta-ui.mjs",
+    "bench:perf": "node --import tsx src/perf/run.ts",
+    "bench:perf:gate": "node --import tsx src/perf/gate.ts",
+    "bench:perf:vize": "node --import tsx src/perf/vize-bench.ts",
+    "test": "vitest run src/audit-validator.spec.ts src/corpus-trace-runner.spec.ts src/workspace-invariants.spec.ts src/audit-harness-bootstrap.spec.ts src/lsp-bench.init.spec.ts src/lsp-bench.position.spec.ts src/meta-ui-memory-audit.spec.ts src/svelte-perf-contract.spec.ts src/perf/stats.spec.ts src/perf/gate.spec.ts src/perf/corpus.spec.ts src/perf/lsp-driver.spec.ts src/perf/lsp-binary-resolution.spec.ts src/perf/workloads.spec.ts src/perf/run.spec.ts src/perf/axis-a-child.spec.ts src/perf/audit-attribution.spec.ts"
   },
   "dependencies": {
     "@verter/component-meta": "workspace:*",
+    "@verter/lsp-test-client": "workspace:^",
     "@verter/native": "workspace:*",
     "@verter/wasm": "workspace:*",
-    "@vue/compiler-sfc": "^3.5.30",
-    "@vue/language-server": "^3.2.6",
+    "@vue/compiler-sfc": "^3.5.34",
+    "@vue/language-server": "^3.3.2",
     "magic-string": "^0.30.21",
-    "tinybench": "^6.0.0",
-    "vue": "^3.5.30",
-    "vue-component-meta": "^3.2.6"
+    "svelte": "5.56.3",
+    "tinybench": "^6.0.2",
+    "vue": "^3.5.34",
+    "vue-component-meta": "^3.3.2"
   },
   "devDependencies": {
-    "@types/node": "^25.4.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "@types/node": "^25.9.1",
+    "@verter/types": "workspace:^",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
   }
 }

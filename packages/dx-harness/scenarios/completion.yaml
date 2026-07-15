@@ -1,0 +1,44 @@
+# Member-access and incomplete-expression completion in `<script setup>`.
+# Script-position probes map strictly through the emitted `.vue.tsx` source map.
+- id: completion-member-access
+  fixture: minimal-member-access
+  entryFile: App.vue
+  anchors: [mma.member, mma.incomplete]
+  script:
+    - kind: insert
+      anchor: mma.incomplete
+      text: "."
+      burst: true
+  probes:
+    - id: member-completion
+      method: completion
+      anchor: mma.member
+      mappingPolicy: strict
+      confidence: high
+      dimension: artifactParity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+    - id: incomplete-expression-completion
+      method: completion
+      anchor: mma.incomplete
+      mappingPolicy: strict
+      confidence: high
+      dimension: artifactParity
+      requiresSourceMap: true
+      requiredDrivers: [rawLsp, tsgo]
+      capabilityRequirements: [positionEncoding]
+  invariants:
+    - id: completion-offers-member-label
+      anchor: mma.member
+      method: completion
+      assertion: contains
+      value: label
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    latency:
+      p95Ms: 300
+    flakeWindows: 2

@@ -1,0 +1,32 @@
+# Recovery: after a burst of per-character edits, the server must return to a
+# quiesced steady state within the recovery thresholds. Operational, so dimension
+# is artifactParity with no source-map mapping.
+- id: recovery-after-burst-drawer
+  fixture: drawer-realistic
+  entryFile: Drawer.vue
+  anchors: [drawer.editPoint]
+  script:
+    - kind: insert
+      anchor: drawer.editPoint
+      text: "const recoveryProbe = 2"
+      burst: true
+  probes:
+    - id: recovery-after-burst
+      method: recovery
+      anchor: drawer.editPoint
+      mappingPolicy: none
+      confidence: high
+      dimension: artifactParity
+      requiresSourceMap: false
+      requiredDrivers: [rawLsp]
+      capabilityRequirements: [debugLogs]
+  invariants: []
+  baselines:
+    tsgo: required
+    tsserver: requiredForCi
+    volar: optional
+  thresholds:
+    recovery:
+      maxRecoveryMs: 2000
+      stableIntervals: 3
+    flakeWindows: 2

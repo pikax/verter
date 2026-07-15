@@ -20,6 +20,7 @@
 
 import { execSync, execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -44,8 +45,16 @@ const INTEGRATION_DIR = path.join(ROOT, ".integration-tests");
 const REPOS_DIR = path.join(INTEGRATION_DIR, "repos");
 const TARBALLS_DIR = path.join(INTEGRATION_DIR, "tarballs");
 const LOGS_DIR = path.join(INTEGRATION_DIR, "logs");
-const DEFAULT_LOCAL_ROOTS = ["D:\\dev"];
-const DEFAULT_LOCAL_RUNS_DIR = path.join("D:\\dev", "temp", "verter-toolchain-runs");
+// Discovery roots are machine-specific, so there is no hardcoded default:
+// pass `--roots <paths>` or set VERTER_LOCAL_REPO_ROOTS (semicolon/comma
+// separated). Empty when neither is provided — discovery then finds nothing.
+const DEFAULT_LOCAL_ROOTS = (process.env.VERTER_LOCAL_REPO_ROOTS ?? "")
+  .split(/[;,]/u)
+  .map((value) => value.trim())
+  .filter(Boolean);
+// Disposable sandbox scratch lives under the OS temp dir by default (portable
+// across macOS/Windows/Linux); override with `--out <path>`.
+const DEFAULT_LOCAL_RUNS_DIR = path.join(os.tmpdir(), "verter-toolchain-runs");
 const LOCAL_SANDBOX_SKIP_ALWAYS = [
   ".git",
   "node_modules",
@@ -298,7 +307,7 @@ function parseArgs() {
             "  --discover-local  Inventory local Vue repos under the configured roots",
             "  --discover-only   Write discovery artifacts and exit",
             "  --local-only      Execute local discovered repos without running the matrix",
-            "  --roots <paths>   Semicolon/comma-separated discovery roots (default: D:\\dev)",
+            "  --roots <paths>   Semicolon/comma-separated discovery roots (required; or set VERTER_LOCAL_REPO_ROOTS)",
             "  --out <path>      Output directory for local discovery/execution artifacts",
             "  --repo-filter <r> Regex filter applied to discovered repo paths",
             "  --run-id <id>     Override the local run id used in the output path",
@@ -2316,6 +2325,15 @@ async function main() {
   let runContext = null;
   let localSelected = [];
   let manualReviewSelected = [];
+
+  if (shouldDiscoverLocal && opts.roots.length === 0) {
+    console.error(
+      "[integration-test] local discovery requested (--discover-local/--discover-only/--local-only) " +
+        "but no discovery roots are configured; pass --roots <paths> or set VERTER_LOCAL_REPO_ROOTS " +
+        "(semicolon/comma separated).",
+    );
+    process.exit(1);
+  }
 
   if (shouldDiscoverLocal) {
     runContext = createLocalRunContext(opts);

@@ -1,6 +1,6 @@
 import { mkdirSync, createWriteStream } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 
 function parseArgs(argv) {
   const out = {
@@ -63,15 +63,24 @@ function parseArgs(argv) {
   return out;
 }
 
+function killWindowsProcessTree(pid) {
+  if (!pid) {
+    return;
+  }
+  const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+    stdio: "ignore",
+    windowsHide: true,
+    detached: true,
+  });
+  killer.unref();
+}
+
 function killProcessTree(pid) {
   if (!pid) {
     return;
   }
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
+    killWindowsProcessTree(pid);
     return;
   }
   try {
@@ -110,15 +119,40 @@ async function main() {
   attachPipe(child.stderr, args.errLog, stderrLog ?? process.stderr);
 
   let timedOut = false;
+  let childClosed = false;
+  let windowsTreeKillFallback = null;
   const timer = setTimeout(() => {
     timedOut = true;
+    if (process.platform === "win32") {
+      try {
+        if (child.pid) {
+          process.kill(child.pid, "SIGKILL");
+        }
+      } catch {
+        killWindowsProcessTree(child.pid);
+        return;
+      }
+      windowsTreeKillFallback = setTimeout(() => {
+        if (!childClosed) {
+          killWindowsProcessTree(child.pid);
+        }
+      }, 250);
+      windowsTreeKillFallback.unref();
+      return;
+    }
     killProcessTree(child.pid);
   }, args.timeoutMs);
   timer.unref();
 
   const exitCode = await new Promise((resolvePromise) => {
     child.once("error", () => resolvePromise(1));
-    child.once("close", (code) => resolvePromise(code ?? 1));
+    child.once("close", (code) => {
+      childClosed = true;
+      if (windowsTreeKillFallback) {
+        clearTimeout(windowsTreeKillFallback);
+      }
+      resolvePromise(code ?? 1);
+    });
   });
 
   clearTimeout(timer);

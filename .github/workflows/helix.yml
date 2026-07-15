@@ -1,0 +1,63 @@
+name: helix
+
+# Verter's Helix support is config-only: Helix has a built-in native LSP client,
+# so the deliverable is a `languages.toml` snippet (editors/helix/) with no
+# compiled extension and no server-side change. This job guards the shipped
+# snippet against the shared launch contract via a hermetic Rust test
+# (`crates/verter-editor-client/tests/helix_config_contract.rs`), which parses
+# editors/helix/languages.toml and asserts its `args` equal
+# `verter_editor_client::build_server_args(None, {})`. It is a host-target test
+# crate, so no wasm target is needed.
+#
+# A real-Helix `hx --health` UI smoke is out of scope for v0, mirroring how the
+# zed / neovim / lapce jobs defer their real-server smoke.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "editors/helix/**"
+      - "crates/verter-editor-client/**"
+      - ".github/workflows/helix.yml"
+  pull_request:
+    paths:
+      - "editors/helix/**"
+      - "crates/verter-editor-client/**"
+      - ".github/workflows/helix.yml"
+
+jobs:
+  test:
+    name: helix config contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Cross-platform portability is a CRITICAL rule: the test resolves the
+        # snippet path and parses it on all three host OSes. The run steps use
+        # `shell: bash` so the same scripts work under Git-bash on the Windows
+        # runner.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Run the Helix config-contract test
+        shell: bash
+        run: cargo test -p verter-editor-client --test helix_config_contract
+
+      - name: Run the whole verter-editor-client suite
+        shell: bash
+        run: cargo test -p verter-editor-client
+
+      - name: Clippy
+        shell: bash
+        run: cargo clippy -p verter-editor-client -- -D warnings
+
+      - name: Rustfmt check
+        shell: bash
+        run: cargo fmt -p verter-editor-client --check

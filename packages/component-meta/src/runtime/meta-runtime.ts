@@ -76,10 +76,12 @@ export class MetaRuntimeImpl {
   private ensureEvictionTimer(): void {
     if (this.evictionTimer) return;
     this.evictionTimer = setInterval(() => this.sweepAndEvict(), SWEEP_INTERVAL_MS);
-    // Unref so the timer doesn't keep the process alive
-    if (typeof this.evictionTimer === "object" && "unref" in this.evictionTimer) {
-      this.evictionTimer.unref();
-    }
+    // Unref so the timer doesn't keep the process alive. `setInterval` returns
+    // a `NodeJS.Timeout` (with `unref`) under Node, but a `number` under the
+    // DOM lib typings, so narrow via a cross-env cast rather than a `typeof`
+    // guard that would collapse the union to `never`.
+    const timer = this.evictionTimer as unknown as { unref?: () => void };
+    timer.unref?.();
   }
 
   private ensureProcessHooks(): void {
