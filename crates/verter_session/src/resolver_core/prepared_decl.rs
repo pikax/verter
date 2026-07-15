@@ -43,6 +43,12 @@ type PreparedTypeDeclSlots = Arc<FxHashMap<String, PreparedTypeDeclSlot>>;
 type PreparedValueDeclSlot = Arc<PreparedDeclSlot<PreparedValueDecl>>;
 type PreparedValueDeclSlots = Arc<FxHashMap<String, PreparedValueDeclSlot>>;
 
+/// Per-FILE shared `name_resolution` base table (interned `Arc<str>` names →
+/// resolved root identities): built once per prepared-decl cache and shared
+/// via `Arc` by every non-namespaced prepared decl of the defining file. See
+/// `PreparedTypeDecl::name_resolution` for the sharing + interning contract.
+type SharedNameResolutionBase = Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>;
+
 /// Outcome of a lease-aware prepared-decl build. A genuine `Ready(None)` (the
 /// symbol is not inventoried, is an import-local, or lowered to no decl) is a
 /// cacheable absence; a `LeaseMiss` (a broken decl-body lease pin — the
@@ -259,7 +265,7 @@ fn prepare_local_type_decl_outcome_with_base(
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
-    shared_name_resolution_base: Option<&Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>>,
+    shared_name_resolution_base: Option<&SharedNameResolutionBase>,
     interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedTypeDecl> {
     use verter_semantic::analysis::type_eval::AugmentationScopeKind;
@@ -420,7 +426,7 @@ fn prepare_type_decl_from_lowered(
     dep_edges: Option<&FxHashMap<String, String>>,
     origin: Option<&verter_semantic::analysis::type_eval::AugmentationScopeKind>,
     import_canonicalization: &ImportCanonicalization,
-    shared_name_resolution_base: Option<&Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>>,
+    shared_name_resolution_base: Option<&SharedNameResolutionBase>,
     interner: &IdentityInterner,
 ) -> PreparedTypeDecl {
     #[cfg(test)]
@@ -854,7 +860,7 @@ fn prepare_local_value_decl_outcome_with_base(
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
-    shared_name_resolution_base: Option<&Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>>,
+    shared_name_resolution_base: Option<&SharedNameResolutionBase>,
     interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedValueDecl> {
     let lowered: Arc<LoweredValueDecl> = match state.value_decl_outcome(symbol_name) {
@@ -940,7 +946,7 @@ pub struct PreparedTypeDeclCache {
     /// via `Arc` by every non-namespaced prepared type decl this cache
     /// builds — the per-declaration table rebuild this replaces walked every
     /// file symbol + import per decl.
-    name_resolution_base: Arc<OnceLock<Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>>>,
+    name_resolution_base: Arc<OnceLock<SharedNameResolutionBase>>,
     /// Per-cache-instance count of COLD builds admitted through
     /// [`PreparedTypeDeclCache::get`] (post-gate). Instance-scoped so a
     /// concurrent single-flight test asserts exactly ONE build on ITS OWN
@@ -1074,7 +1080,7 @@ pub struct PreparedValueDeclCache {
     /// Per-FILE VALUE-space `name_resolution` base table — see
     /// [`PreparedTypeDeclCache::name_resolution_base`]; the value space has
     /// no per-declaration bindings, so EVERY prepared value decl shares it.
-    name_resolution_base: Arc<OnceLock<Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>>>,
+    name_resolution_base: Arc<OnceLock<SharedNameResolutionBase>>,
 }
 
 impl PreparedValueDeclCache {
