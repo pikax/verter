@@ -116,10 +116,20 @@ pub(super) fn observe_fan_out(fact: FactVersionRef) {
     // from inside an observer don't cause RefCell panics.
     let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
         ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
-    for ptr in ptrs {
-        if !ptr.is_null() {
-            // SAFETY: see module-level SAFETY contract.
-            unsafe { &*ptr }.observe(fact.clone());
+    // Move the owned fact into the LAST live tracer; only the earlier
+    // ones observe clones. With the common single-tracer stack this
+    // fans out ZERO fact clones (a `FactVersionRef` carries an owned
+    // canonical `String`, so the per-observation clone was a real
+    // allocation on every traced read).
+    let mut live = ptrs.into_iter().filter(|ptr| !ptr.is_null()).peekable();
+    while let Some(ptr) = live.next() {
+        // SAFETY: see module-level SAFETY contract.
+        let cell = unsafe { &*ptr };
+        if live.peek().is_some() {
+            cell.observe(fact.clone());
+        } else {
+            cell.observe(fact);
+            return;
         }
     }
 }
@@ -202,5 +212,43 @@ mod propagation_tests {
         clear();
         assert!(outer.non_cacheable_read_observed());
         assert!(inner.non_cacheable_read_observed());
+    }
+}
+
+#[cfg(test)]
+mod fan_out_tests {
+    use super::*;
+
+    /// One owned fan-out must reach EVERY active tracer on the stack —
+    /// pins the fan-out against a last-only / first-only regression
+    /// (the owned value is moved into the LAST tracer; the earlier
+    /// ones observe clones).
+    #[test]
+    fn owned_fan_out_reaches_every_active_tracer() {
+        let outer = FactReadSetCell::new();
+        let inner = FactReadSetCell::new();
+        install(&outer);
+        install(&inner);
+
+        observe_fan_out(FactVersionRef::FileWholeHash {
+            canonical_id: "/fan.ts".to_string(),
+            hash: [7u8; 16],
+        });
+
+        clear();
+        clear();
+        assert_eq!(outer.len(), 1, "outer tracer must observe the fact");
+        assert_eq!(inner.len(), 1, "inner tracer must observe the fact");
+    }
+
+    /// A fan-out with NO active tracer is a no-op (no panic, nothing
+    /// recorded anywhere) — the moved-value fast path must not assume
+    /// a non-empty stack.
+    #[test]
+    fn owned_fan_out_without_tracers_is_a_noop() {
+        observe_fan_out(FactVersionRef::FileWholeHash {
+            canonical_id: "/none.ts".to_string(),
+            hash: [9u8; 16],
+        });
     }
 }

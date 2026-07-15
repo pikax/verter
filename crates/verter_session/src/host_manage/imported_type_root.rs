@@ -144,10 +144,17 @@ impl VerterHost {
                     // Trace inside the closure: the closure runs only on
                     // cache miss, so the trace event records actual
                     // resolution work — not redundant lookups.
-                    component_meta_trace_custom!(
-                        "resolve_imported_type_root",
-                        format!("canonical={} imported={}", dep_canonical, imported_name),
-                    );
+                    component_meta_trace_custom!("resolve_imported_type_root", {
+                        use std::fmt::Write as _;
+                        let mut detail =
+                            String::with_capacity(24 + dep_canonical.len() + imported_name.len());
+                        let _ = write!(
+                            detail,
+                            "canonical={} imported={}",
+                            dep_canonical, imported_name
+                        );
+                        detail
+                    });
 
                     if let Some((resolved, facts)) = self
                         .resolve_direct_imported_type_root_fast_path(
@@ -206,19 +213,27 @@ impl VerterHost {
             ),
         };
 
-        component_meta_trace_custom!(
-            "resolve_imported_type_root_result",
-            format!(
-                "canonical={} imported={} normalized={} source={} target_canonical={} target_symbol={} store_view={}",
-                dep_canonical,
-                imported_name,
-                normalized_canonical,
-                source_kind,
-                resolved.0,
-                resolved.1,
-                false
-            ),
-        );
+        component_meta_trace_custom!("resolve_imported_type_root_result", {
+            // Audit-gated (the macro skips this block without an active
+            // accumulator). Pre-size the detail so the per-call build is
+            // ONE exact allocation instead of the `format!` grow chain —
+            // this trace fires on every call, warm hits included.
+            use std::fmt::Write as _;
+            let mut detail = String::with_capacity(
+                96 + dep_canonical.len()
+                    + imported_name.len()
+                    + normalized_canonical.len()
+                    + source_kind.len()
+                    + resolved.0.len()
+                    + resolved.1.len(),
+            );
+            let _ = write!(
+                detail,
+                "canonical={} imported={} normalized={} source={} target_canonical={} target_symbol={} store_view=false",
+                dep_canonical, imported_name, normalized_canonical, source_kind, resolved.0, resolved.1,
+            );
+            detail
+        });
 
         if let Some(started) = audit_started {
             crate::component_meta_audit::record_imported_root_proof_ms(
