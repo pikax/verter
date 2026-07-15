@@ -147,9 +147,15 @@ impl TsQueryTransport for ScriptedTsQueryTransport {
             // await) sees the updated content — modelling a concurrent
             // `update_file` landing while the request was in flight. The provider
             // holds no cache lock at the await point, so `try_lock` succeeds.
-            if let Some(mutation) = state
+            // (Front-check + pop instead of `VecDeque::pop_front_if`: the
+            // latter is unstable on the pinned stable toolchain.)
+            let front_matches = state
                 .mutations
-                .pop_front_if(|m| m.command == params.command)
+                .front()
+                .is_some_and(|m| m.command == params.command);
+            if let Some(mutation) = front_matches
+                .then(|| state.mutations.pop_front())
+                .flatten()
             {
                 let mut cache = mutation
                     .handle
