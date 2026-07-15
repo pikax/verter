@@ -1160,6 +1160,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2 0.2.21",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -4139,6 +4141,7 @@ dependencies = [
 name = "verter_protocol"
 version = "0.0.1-beta.1"
 dependencies = [
+ "hashbrown 0.15.5",
  "prost",
  "prost-build",
  "protoc-bin-vendored",

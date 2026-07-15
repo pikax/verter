@@ -4,6 +4,88 @@ use verter_type_expr::{
     LiteralValue, PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame, TypeExpr,
 };
 
+/// Own-once + first-encounter-order invariant for the string / node
+/// interners (the encode-path de-duplication): each interned string is
+/// stored EXACTLY once in `strings`, each structurally-distinct wire node
+/// exactly once in `nodes`, ids are 1-based in first-encounter order, and a
+/// repeated intern returns the same id WITHOUT growing the owning table.
+/// `into_tables` then yields those owning tables verbatim — the equivalence
+/// the finalization by-value move relies on.
+///
+/// Discriminating: a reverse index that failed to dedup (or mishandled a
+/// hash collision) would return a fresh id on a repeat and grow the table —
+/// both asserted absent; an id-order regression flips the pinned sequence.
+#[test]
+fn interner_owns_each_string_and_node_once_in_first_encounter_order() {
+    let mut builder = GraphBuilder::new();
+
+    // Strings: first-encounter order, 1-based, dedup on repeat.
+    assert_eq!(builder.string_id("alpha"), 1);
+    assert_eq!(builder.string_id("beta"), 2);
+    assert_eq!(
+        builder.string_id("alpha"),
+        1,
+        "a repeated string must dedup to the same id"
+    );
+    assert_eq!(builder.string_id("gamma"), 3);
+    assert_eq!(
+        builder.string_id("beta"),
+        2,
+        "a repeated string must dedup to the same id"
+    );
+    assert_eq!(
+        builder.strings(),
+        ["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
+        "each string is owned exactly once, in first-encounter order",
+    );
+
+    // Nodes: two structurally-equal exprs held in distinct values collapse
+    // onto one interned wire node.
+    let first = TypeExpr::Primitive(PrimitiveName::String);
+    let structurally_equal = TypeExpr::Primitive(PrimitiveName::String);
+    let id_first = builder.node_id(&first);
+    let strings_len = builder.strings().len();
+    let nodes_len = builder.nodes().len();
+    let id_equal = builder.node_id(&structurally_equal);
+    assert_eq!(
+        id_first, id_equal,
+        "structurally-identical nodes share one node id"
+    );
+    assert_eq!(
+        builder.nodes().len(),
+        nodes_len,
+        "a structural-dedup hit must not grow the node table",
+    );
+    assert_eq!(
+        builder.strings().len(),
+        strings_len,
+        "a node dedup hit must not add strings",
+    );
+    assert_eq!(
+        builder
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node, GraphNode::Primitive { .. }))
+            .count(),
+        1,
+        "the primitive wire node is owned exactly once",
+    );
+
+    // `into_tables` returns the interned tables verbatim (own-once move
+    // fidelity): the finalization path moves these straight onto the wire.
+    let strings_snapshot = builder.strings().to_vec();
+    let nodes_snapshot = builder.nodes().to_vec();
+    let (strings, nodes) = builder.into_tables();
+    assert_eq!(
+        strings, strings_snapshot,
+        "into_tables yields the interned string table verbatim"
+    );
+    assert_eq!(
+        nodes, nodes_snapshot,
+        "into_tables yields the interned node table verbatim"
+    );
+}
+
 #[test]
 fn graph_builder_encodes_recursive_ref_not_unknown() {
     let expr = TypeExpr::RecursiveRef {
