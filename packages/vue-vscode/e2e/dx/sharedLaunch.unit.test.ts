@@ -111,6 +111,31 @@ describe("applyWindowsCliPathFix", () => {
 });
 
 describe("resolveVscodeExecutablePath", () => {
+  it("uses a validated explicit host path without invoking the downloader", async () => {
+    const explicit = "C:\\vscode\\Code - Insiders.exe";
+    let downloads = 0;
+    const resolved = await resolveVscodeExecutablePath("insiders", {
+      explicitExecutablePath: explicit,
+      download: async () => {
+        downloads++;
+        return "C:\\downloaded\\Code.exe";
+      },
+      existsSync: (candidate) => candidate === explicit,
+    });
+
+    expect(resolved).toBe(explicit);
+    expect(downloads).toBe(0);
+  });
+
+  it("rejects an explicit host path that does not exist", async () => {
+    await expect(
+      resolveVscodeExecutablePath("insiders", {
+        explicitExecutablePath: "C:\\missing\\Code.exe",
+        existsSync: () => false,
+      }),
+    ).rejects.toThrow("Configured VS Code executable does not exist");
+  });
+
   it("returns the downloaded path verbatim on non-Windows platforms", async () => {
     const downloaded = "/opt/vscode/code";
     const resolved = await resolveVscodeExecutablePath("stable", {
@@ -121,14 +146,14 @@ describe("resolveVscodeExecutablePath", () => {
     expect(resolved).toBe(downloaded);
   });
 
-  it("applies the Windows bin/code.cmd fix to the downloaded path", async () => {
+  it("returns the downloaded host executable on Windows", async () => {
     const downloaded = "C:\\vscode\\Code.exe";
     const resolved = await resolveVscodeExecutablePath("stable", {
       download: async () => downloaded,
       platform: "win32",
       existsSync: () => true,
     });
-    expect(resolved.endsWith("code.cmd")).toBe(true);
+    expect(resolved).toBe(downloaded);
   });
 
   it("passes the requested version through to the injected downloader", async () => {

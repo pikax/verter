@@ -1,10 +1,19 @@
 import * as path from "path";
 import * as fs from "fs";
 import { execSync } from "child_process";
-import { runTests } from "@vscode/test-electron";
+import { resolveCliArgsFromVSCodeExecutablePath, runTests } from "@vscode/test-electron";
 import * as os from "os";
-import { copyLspBinaryToTemp, readE2eEnv, resolveVscodeExecutablePath } from "./sharedLaunch";
+import {
+  copyLspBinaryToTemp,
+  provisionVsCodeExtension,
+  readE2eEnv,
+  resolveVscodeExecutablePath,
+  writeVsCodeUserSettings,
+} from "./sharedLaunch";
 import { clearRunArtifacts, enforceRunSummary } from "../src/runSummaryOracle";
+
+const EDITOR_ACCEPTANCE_FIXTURE = "editor-owned-project";
+const NATIVE_PREVIEW_EXTENSION = "TypeScriptTeam.native-preview@0.20260708.2";
 
 /**
  * Fixture entries: plain name uses auto type provider,
@@ -30,6 +39,8 @@ const FIXTURES = [
   "single-file@tsgo",
   "barrel-exports@tsserver",
   "barrel-exports@tsgo",
+  `${EDITOR_ACCEPTANCE_FIXTURE}@tsserver`,
+  `${EDITOR_ACCEPTANCE_FIXTURE}@shared-tsgo`,
 ];
 
 /**
@@ -60,15 +71,42 @@ function installFixtureDeps(fixtureDir: string): void {
   }
 
   console.log(`  Installing dependencies in ${fixtureDir}...`);
-  try {
-    execSync("npm install --no-package-lock --ignore-scripts", {
-      cwd: fixtureDir,
-      stdio: "pipe",
-      timeout: 60_000,
-    });
-  } catch (err) {
-    console.warn(`  Warning: npm install failed in ${fixtureDir}:`, (err as Error).message);
+  execSync("npm install --no-package-lock --ignore-scripts", {
+    cwd: fixtureDir,
+    stdio: "pipe",
+    timeout: 60_000,
+  });
+}
+
+interface E2eProfile {
+  root: string;
+  extensionsDir: string;
+  userDataDir: string;
+}
+
+function createE2eProfile(label: string, index: number): E2eProfile {
+  const safeLabel = label.replace(/[^a-zA-Z0-9_-]/g, "-");
+  const root = path.join(os.tmpdir(), `verter-e2e-profile-${process.pid}-${index}-${safeLabel}`);
+  const profile = {
+    root,
+    extensionsDir: path.join(root, "extensions"),
+    userDataDir: path.join(root, "user-data"),
+  };
+  fs.mkdirSync(profile.extensionsDir, { recursive: true });
+  fs.mkdirSync(profile.userDataDir, { recursive: true });
+  return profile;
+}
+
+function removeE2eProfile(profile: E2eProfile): void {
+  const target = path.resolve(profile.root);
+  const tempRoot = path.resolve(os.tmpdir());
+  if (
+    !target.startsWith(`${tempRoot}${path.sep}`) ||
+    !path.basename(target).startsWith("verter-e2e-profile-")
+  ) {
+    throw new Error(`Refusing to remove unexpected E2E profile path: ${target}`);
   }
+  fs.rmSync(target, { recursive: true, force: true });
 }
 
 async function main() {
@@ -87,14 +125,16 @@ async function main() {
         ? FIXTURES.filter((entry) => parseFixtureEntry(entry).typeProvider === envTypeProvider)
         : FIXTURES;
 
-  const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion);
+  const vscodeExecutablePath = await resolveVscodeExecutablePath(vscodeVersion, {
+    explicitExecutablePath: readE2eEnv("VSCODE_EXECUTABLE"),
+  });
 
   // Copy LSP binary to temp to prevent file locking
   const lspBinaryPath = copyLspBinaryToTemp(extensionDevelopmentPath);
 
   let totalFailures = 0;
 
-  for (const entry of fixturesToRun) {
+  for (const [index, entry] of fixturesToRun.entries()) {
     const { fixture, typeProvider } = parseFixtureEntry(entry);
     const label = typeProvider ? `${fixture}@${typeProvider}` : fixture;
     const fixtureDir = path.join(extensionDevelopmentPath, "e2e", "fixtures", fixture);
@@ -118,15 +158,45 @@ async function main() {
     }
 
     const logFile = path.join(os.tmpdir(), `verter-e2e-${label}.log`);
-    // Delete any STALE run summary + D1 markers BEFORE the run so a prior-run summary can
+    const profile = createE2eProfile(label, index);
+    // Delete any stale run summary before the run so a prior-run summary can
     // never false-green a current zero-exit crash that writes no fresh summary.
     clearRunArtifacts(logFile);
     try {
+      if (fixture === EDITOR_ACCEPTANCE_FIXTURE && typeProvider === "shared-tsgo") {
+        const extension = readE2eEnv("NATIVE_PREVIEW_EXTENSION") ?? NATIVE_PREVIEW_EXTENSION;
+        console.log(`  Provisioning ${extension} into the isolated test profile...`);
+        provisionVsCodeExtension({
+          cliArgs: resolveCliArgsFromVSCodeExecutablePath(vscodeExecutablePath),
+          extension,
+          extensionsDir: profile.extensionsDir,
+          userDataDir: profile.userDataDir,
+        });
+        // Native Preview's restart/API-session commands exist only after its
+        // enabled server starts. Seed the isolated profile before first activation
+        // so this acceptance exercises the real editor-owned lifecycle.
+        writeVsCodeUserSettings(profile.userDataDir, {
+          "js/ts.experimental.useTsgo": true,
+        });
+      }
+
+      const launchArgs = [
+        fixtureDir,
+        "--disable-updates",
+        "--disable-workspace-trust",
+        "--skip-welcome",
+        "--skip-release-notes",
+        `--extensions-dir=${profile.extensionsDir}`,
+        `--user-data-dir=${profile.userDataDir}`,
+      ];
+      if (!(fixture === EDITOR_ACCEPTANCE_FIXTURE && typeProvider === "shared-tsgo")) {
+        launchArgs.push("--disable-extensions");
+      }
       await runTests({
         vscodeExecutablePath,
         extensionDevelopmentPath,
         extensionTestsPath,
-        launchArgs: ["--disable-extensions", "--disable-updates", fixtureDir],
+        launchArgs,
         extensionTestsEnv: {
           ...process.env,
           VERTER_E2E_TEST: "1",
@@ -136,21 +206,28 @@ async function main() {
           VERTER_LOG: "debug",
           ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
           ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
+          ...(fixture === EDITOR_ACCEPTANCE_FIXTURE
+            ? { VERTER_E2E_ONLY: "editor-owned-project.test" }
+            : {}),
         },
       });
       // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
       // on some hosts (Windows: VS Code can exit 0 even when the extension test run
       // rejected). The authoritative oracle is the run summary the mocha runner writes
       // (`suite/index.ts` → `<logFile>.runsummary`): fail on any reported test failure,
-      // and — for a NARROWED run (`VERTER_E2E_ONLY`) OR the D1 acceptance — on a vacuous
-      // 0-test execution AND on a MISSING summary (a zero-exit host crash never green).
-      const isD1 = fixture === "external-ts-d1" || Boolean(process.env.VERTER_E2E_D1);
-      const refuseVacuous = Boolean(process.env.VERTER_E2E_ONLY) || isD1;
-      await enforceRunSummary(logFile, label, { refuseVacuous });
+      // and on a vacuous 0-test execution or a MISSING summary. Every matrix entry is a
+      // required gate; no ordinary fixture is allowed a legacy zero-execution pass.
+      await enforceRunSummary(logFile, label, {});
       console.log(`  PASSED: ${label}`);
     } catch (err) {
       console.error(`  FAILED: ${label}`, err);
       totalFailures++;
+    } finally {
+      if (readE2eEnv("KEEP_PROFILE") === "1") {
+        console.log(`  Preserved E2E profile: ${profile.root}`);
+      } else {
+        removeE2eProfile(profile);
+      }
     }
   }
 

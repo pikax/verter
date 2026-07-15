@@ -21,7 +21,7 @@ where
 fn protocol_version_is_pinned() {
     // A deliberate pin: bumping this is a conscious wire-breaking change.
     assert_eq!(
-        PROTOCOL_VERSION, 1,
+        PROTOCOL_VERSION, 2,
         "PROTOCOL_VERSION is a stable pin; a change must be deliberate + version-gated"
     );
 }
@@ -42,6 +42,7 @@ fn method_names_are_the_stable_wire_strings() {
     );
     assert_eq!(METHOD_CARRIER_DID_CLOSE, "verter/carrierDidClose");
     assert_eq!(METHOD_INITIALIZE_API_SESSION, "verter/initializeApiSession");
+    assert_eq!(METHOD_FEATURE_REQUEST, "verter/featureRequest");
     assert_eq!(METHOD_DETACH, "verter/detach");
     assert_eq!(METHOD_STATUS, "verter/status");
     assert_eq!(METHOD_FATAL, "verter/fatal");
@@ -63,8 +64,41 @@ fn hello_messages_round_trip() {
             carrier_injection: true,
             api_session: true,
             wait_initialized: true,
+            feature_requests: true,
         },
     });
+}
+
+#[test]
+fn feature_request_round_trips_as_a_typed_closed_surface() {
+    let request = FeatureRequestParams {
+        method: FeatureRequestMethod::Hover,
+        params: serde_json::json!({
+            "textDocument": { "uri": "file:///w/Comp.vue.tsx" },
+            "position": { "line": 2, "character": 7 }
+        }),
+    };
+    round_trip(&request);
+    assert_eq!(
+        serde_json::to_value(request.method).unwrap(),
+        serde_json::json!("textDocument/hover"),
+        "the typed enum serializes to the exact upstream LSP method"
+    );
+    round_trip(&FeatureRequestResult {
+        result: serde_json::json!({
+            "contents": { "kind": "markdown", "value": "```ts\nconst label: string\n```" }
+        }),
+    });
+}
+
+#[test]
+fn pull_diagnostics_is_in_the_closed_read_only_feature_set() {
+    let method = FeatureRequestMethod::Diagnostic;
+    assert_eq!(method.as_lsp_method(), "textDocument/diagnostic");
+    assert_eq!(
+        FeatureRequestMethod::from_lsp_method("textDocument/diagnostic"),
+        Some(method)
+    );
 }
 
 #[test]

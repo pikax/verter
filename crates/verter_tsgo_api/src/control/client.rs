@@ -20,10 +20,11 @@ use crate::jsonrpc::{JsonRpcConnection, NotificationHandler};
 
 use super::messages::{
     CarrierDidChangeSyncedParams, CarrierDidCloseParams, CarrierDidOpenSyncedParams, DetachParams,
-    HelloParams, HelloResult, InitializeApiSessionResult, StatusResult, WaitInitializedResult,
+    FeatureRequestMethod, FeatureRequestParams, FeatureRequestResult, HelloParams, HelloResult,
+    InitializeApiSessionResult, StatusResult, WaitInitializedResult,
     METHOD_CARRIER_DID_CHANGE_SYNCED, METHOD_CARRIER_DID_CLOSE, METHOD_CARRIER_DID_OPEN_SYNCED,
-    METHOD_DETACH, METHOD_FATAL, METHOD_HELLO, METHOD_INITIALIZE_API_SESSION, METHOD_STATUS,
-    METHOD_WAIT_INITIALIZED, PROTOCOL_VERSION,
+    METHOD_DETACH, METHOD_FATAL, METHOD_FEATURE_REQUEST, METHOD_HELLO,
+    METHOD_INITIALIZE_API_SESSION, METHOD_STATUS, METHOD_WAIT_INITIALIZED, PROTOCOL_VERSION,
 };
 use super::transport::connect_control_endpoint;
 
@@ -197,6 +198,20 @@ impl ControlClient {
             .request(METHOD_INITIALIZE_API_SESSION, serde_json::json!({}))
             .await?;
         from_result(value)
+    }
+
+    /// Run one typed, read-only LSP feature request on the exact editor-owned
+    /// connection. The closed [`FeatureRequestMethod`] enum prevents this API from
+    /// becoming an arbitrary write/process-control tunnel.
+    pub async fn feature_request(
+        &self,
+        method: FeatureRequestMethod,
+        params: serde_json::Value,
+    ) -> TsgoApiResult<serde_json::Value> {
+        let params = to_params(&FeatureRequestParams { method, params })?;
+        let value = self.conn.request(METHOD_FEATURE_REQUEST, params).await?;
+        let result: FeatureRequestResult = from_result(value)?;
+        Ok(result.result)
     }
 
     /// A control-session status snapshot.

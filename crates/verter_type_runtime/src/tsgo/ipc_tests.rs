@@ -1,5 +1,121 @@
 use super::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, ChildStdout};
+use verter_tsgo_api::jsonrpc::framing::{encode_message, MessageFramer};
+
+#[tokio::test]
+async fn initialized_non_owning_transport_serves_hover_without_initialize_or_child() {
+    let (provider_side, mut relay_side) = tokio::io::duplex(64 * 1024);
+    let (read, write) = tokio::io::split(provider_side);
+    let provider = TsgoTypeProvider::from_initialized_transport(read, write);
+    assert_eq!(
+        provider.child_pid(),
+        None,
+        "a non-owning transport must never claim or own an engine process"
+    );
+
+    let path = if cfg!(windows) {
+        "D:/w/Comp.vue.tsx"
+    } else {
+        "/w/Comp.vue.tsx"
+    };
+    let source = "export const label: string = 'ok';\n";
+    provider
+        .load_file(path, source)
+        .await
+        .expect("cache attached carrier content");
+
+    let server = tokio::spawn(async move {
+        let mut framer = MessageFramer::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = relay_side.read(&mut chunk).await.expect("read request");
+            assert_ne!(n, 0, "provider closed before issuing hover");
+            framer.push(&chunk[..n]);
+            if let Some(request) = framer.next_message().expect("decode request") {
+                assert_eq!(
+                    request["method"],
+                    serde_json::json!("textDocument/hover"),
+                    "the pre-initialized transport must issue hover directly; a second initialize is forbidden"
+                );
+                let response = encode_message(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {
+                        "contents": { "kind": "markdown", "value": "```ts\nconst label: string\n```" }
+                    }
+                }));
+                relay_side.write_all(&response).await.expect("write hover");
+                relay_side.flush().await.expect("flush hover");
+                break;
+            }
+        }
+    });
+
+    let offset = source.find("label").unwrap() as u32;
+    let hover = provider
+        .get_hover(path, offset)
+        .await
+        .expect("hover request")
+        .expect("hover result");
+    assert!(
+        hover.contents.contains("label: string"),
+        "the normal tsgo response parser must serve the non-owning transport: {hover:?}"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn initialized_non_owning_transport_pulls_diagnostics_strictly() {
+    let (provider_side, mut relay_side) = tokio::io::duplex(64 * 1024);
+    let (read, write) = tokio::io::split(provider_side);
+    let provider = TsgoTypeProvider::from_initialized_transport(read, write);
+    let path = if cfg!(windows) {
+        "D:/w/Comp.vue.tsx"
+    } else {
+        "/w/Comp.vue.tsx"
+    };
+    let source = "export const count: number = 'wrong';\n";
+    provider.load_file(path, source).await.unwrap();
+
+    let server = tokio::spawn(async move {
+        let mut framer = MessageFramer::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = relay_side.read(&mut chunk).await.expect("read request");
+            assert_ne!(n, 0, "provider closed before issuing diagnostics");
+            framer.push(&chunk[..n]);
+            if let Some(request) = framer.next_message().expect("decode request") {
+                assert_eq!(request["method"], "textDocument/diagnostic");
+                let response = encode_message(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {
+                        "kind": "full",
+                        "items": [{
+                            "range": {
+                                "start": { "line": 0, "character": 29 },
+                                "end": { "line": 0, "character": 36 }
+                            },
+                            "severity": 1,
+                            "code": 2322,
+                            "message": "Type 'string' is not assignable to type 'number'."
+                        }]
+                    }
+                }));
+                relay_side.write_all(&response).await.unwrap();
+                relay_side.flush().await.unwrap();
+                break;
+            }
+        }
+    });
+
+    let diagnostics = provider.get_diagnostics_strict(path).await.unwrap();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code.as_deref(), Some("2322"));
+    assert!(diagnostics[0].end > diagnostics[0].start);
+    server.await.unwrap();
+}
 
 /// Create an `LspTransport` for tests using a single channel for all priority lanes.
 fn test_transport(stdin_tx: mpsc::Sender<StdinMessage>) -> LspTransport {
@@ -2389,7 +2505,7 @@ async fn test_provider_operations_fail_after_process_death() {
 
     let provider = TsgoTypeProvider {
         transport,
-        child,
+        child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache,
@@ -2474,7 +2590,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
     ));
     let provider = TsgoTypeProvider {
         transport,
-        child,
+        child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::clone(&contents_cache),
         diagnostics_cache,
@@ -2916,7 +3032,7 @@ async fn test_drop_kills_child_process() {
 
     let provider = TsgoTypeProvider {
         transport,
-        child,
+        child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -2951,7 +3067,7 @@ async fn test_child_pid_returns_id() {
 
     let provider = TsgoTypeProvider {
         transport,
-        child,
+        child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -3240,6 +3356,32 @@ async fn shutdown_completes_within_timeout_when_provider_unresponsive() {
     assert!(
         shutdown_result.is_ok(),
         "Shutdown should complete within 5s even when provider is unresponsive"
+    );
+}
+
+/// @ai-generated - A managed provider must kill and reap an unresponsive owned child,
+/// not merely stop its local writer and rely on eventual drop cleanup.
+#[tokio::test]
+async fn managed_shutdown_kills_and_reaps_unresponsive_owned_child() {
+    let mut child = spawn_long_lived_process(Stdio::piped(), Stdio::piped(), true);
+    let pid = child.id().expect("owned child should have a PID");
+    let stdin = child.stdin.take().expect("owned child stdin");
+    let stdout = child.stdout.take().expect("owned child stdout");
+    let provider = TsgoTypeProvider::from_transport_parts(stdout, stdin, Some(child), None);
+
+    tokio::time::timeout(std::time::Duration::from_secs(7), provider.shutdown())
+        .await
+        .expect("managed shutdown exceeded its bounded teardown")
+        .expect("managed shutdown failed");
+
+    assert_eq!(
+        provider.child_pid(),
+        None,
+        "a reaped provider must no longer expose an owned child PID"
+    );
+    assert!(
+        wait_for_process_exit(pid, std::time::Duration::from_secs(2)).await,
+        "managed shutdown left child process {pid} alive"
     );
 }
 
@@ -3647,7 +3789,7 @@ async fn get_completion_details_bounds_enrichment_to_list_cap() {
     let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     let provider = TsgoTypeProvider {
         transport,
-        child,
+        child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -3722,7 +3864,7 @@ async fn get_completion_details_enriches_full_small_list() {
     let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     let provider = TsgoTypeProvider {
         transport,
-        child,
+        child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -3804,7 +3946,7 @@ async fn resolve_completion_returns_some_when_only_label_details_present() {
     let transport = Arc::new(test_transport_with_pending(stdin_tx, Arc::clone(&pending)));
     let provider = TsgoTypeProvider {
         transport,
-        child,
+        child: Some(StdMutex::new(Some(child))),
         versions: Arc::new(Mutex::new(HashMap::new())),
         contents: Arc::new(Mutex::new(HashMap::new())),
         diagnostics_cache: Arc::new(Mutex::new(HashMap::new())),

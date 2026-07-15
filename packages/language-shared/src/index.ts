@@ -6,6 +6,8 @@ export * from "./request";
 export * from "./statistics";
 export * from "./analysis";
 export * from "./routes";
+export * from "./editorTsserverAttestation";
+export * from "./typescriptPluginConfig";
 export * from "./generated";
 // The descriptor-generated client framework manifest — the single authority
 // for the VS Code extension + TS-plugin client wiring (activation, document

@@ -10,6 +10,9 @@
 pub mod auto_import;
 #[cfg(test)]
 mod auto_import_tests;
+pub mod lazy_managed;
+#[cfg(test)]
+mod lazy_managed_tests;
 pub mod merge;
 pub mod mock;
 pub mod project_sync;

@@ -31,13 +31,11 @@
 //!
 //! ## Serving scope
 //!
-//! This provider is the SHARED DIAGNOSTICS / project-bound typecheck oracle
-//! (proven live against the real 7.0.2 engine). Interactive features
-//! (hover/completion/definition/…) over the SHARED path — where the editor's own
-//! `--lsp` surface serves `.ts` features directly and `.vue`-carrier feature
-//! mapping is layered on top — are a residual supervised full-DX concern
-//! and are not served here; SHARED is opt-in and fail-closed, so absent that
-//! surface the caller uses the OWNED provider (full features) as the baseline.
+//! This provider serves both the SHARED project-bound `--api` diagnostic oracle
+//! and the full interactive `--lsp` feature surface. Feature requests traverse
+//! the relay's typed read-only control method under reserved request IDs and are
+//! parsed by the same `TsgoTypeProvider` response code as an owned connection.
+//! The facade owns no process and never sends a second initialize, shutdown, or exit.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -45,8 +43,10 @@ use std::sync::Arc;
 use parking_lot::Mutex as SyncMutex;
 
 use verter_tsgo_api::api_attach::ApiAttachClient;
+use verter_tsgo_api::control::messages::FeatureRequestMethod;
 use verter_tsgo_api::control::{Advertisement, ControlClient};
 use verter_tsgo_api::gate::{self, ObservedEngine};
+use verter_tsgo_api::jsonrpc::framing::{encode_message, MessageFramer};
 use verter_tsgo_api::jsonrpc::JsonRpcConnection;
 use verter_tsgo_api::proto::types::OpaqueHandle;
 use verter_tsgo_api::transport::pipe_attach::connect_attach_pipe;
@@ -66,7 +66,9 @@ use verter_type_runtime::protocol::{
     TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation, TypeProviderError,
 };
 use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
-use verter_type_runtime::tsgo::{position_carrier_diagnostics, select_configured_project_carrier};
+use verter_type_runtime::tsgo::{
+    position_carrier_diagnostics, select_configured_project_carrier, TsgoTypeProvider,
+};
 
 use super::shared_support::{
     language_id_for, parent_dir, path_to_file_uri, resolve_editor_binding, slash,
@@ -381,7 +383,11 @@ impl SharedModeController {
 pub struct TsgoSharedProvider {
     /// The relay-shim control client — the SOLE carrier-injection path (through
     /// the shim's gated injection channel; Verter never mutates leak policy).
-    control: ControlClient,
+    control: Arc<ControlClient>,
+    /// Full interactive TypeProvider facade over the SAME editor-owned LSP
+    /// connection. It owns no process and sends no initialize/shutdown/exit; its
+    /// requests are multiplexed through the relay's typed feature control method.
+    features: Arc<TsgoTypeProvider>,
     /// The directly-connected `--api` checker (the SHARED diagnostics / typecheck
     /// oracle).
     api: ApiAttachClient,
@@ -450,6 +456,16 @@ impl TsgoSharedProvider {
             .hello(&adv.nonce, params.client_label)
             .await
             .map_err(|e| EstablishError::Handshake(format!("hello: {e}")))?;
+        if !hello.capabilities.carrier_injection
+            || !hello.capabilities.api_session
+            || !hello.capabilities.wait_initialized
+            || !hello.capabilities.feature_requests
+        {
+            return Err(EstablishError::Handshake(format!(
+                "relay capabilities incomplete for editor-session reuse: {:?}",
+                hello.capabilities
+            )));
+        }
         let witness = control
             .wait_initialized()
             .await
@@ -576,6 +592,8 @@ impl TsgoSharedProvider {
             return Err(EstablishError::NotShared(decision.decision().clone()));
         }
 
+        let control = Arc::new(control);
+        let features = Arc::new(start_feature_bridge(Arc::clone(&control)));
         let controller = SharedModeController {
             version_gate,
             attach,
@@ -590,6 +608,7 @@ impl TsgoSharedProvider {
 
         Ok(Self {
             control,
+            features,
             api,
             controller,
             tsconfig_path: params.tsconfig_path.to_string(),
@@ -703,6 +722,18 @@ impl TsgoSharedProvider {
     ) -> Result<Option<Vec<TypeDiagnostic>>, TypeProviderError> {
         let carrier = slash(path);
         self.api_carrier_diagnostics(&carrier, tsconfig).await
+    }
+
+    /// Full pull diagnostics from the exact editor-owned LSP session. Unlike the
+    /// ordinary provider facade this is strict: a relay failure is returned to the
+    /// composite, never converted into a legitimate empty report. The composite calls
+    /// this only after the `--api` membership proof has established that the carrier is
+    /// a root of its resolved configured project.
+    pub async fn full_diagnostics_for_carrier(
+        &self,
+        path: &str,
+    ) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {
+        self.features.get_diagnostics_strict(path).await
     }
 
     /// The shared `--api` carrier-diagnostics core: open `tsconfig` on the checker,
@@ -851,11 +882,97 @@ fn redirect_on_references(
         .collect()
 }
 
+/// Build the normal tsgo LSP feature parser over a local duplex transport whose
+/// peer forwards only the closed read-only feature set through the authenticated
+/// relay control channel. This reuses the production response parsing and
+/// byte/UTF-16 conversion without giving the non-owning provider a process handle
+/// or a raw editor wire.
+fn start_feature_bridge(control: Arc<ControlClient>) -> TsgoTypeProvider {
+    let (provider_side, bridge_side) = tokio::io::duplex(1024 * 1024);
+    let (provider_read, provider_write) = tokio::io::split(provider_side);
+    let (bridge_read, bridge_write) = tokio::io::split(bridge_side);
+    tokio::spawn(run_feature_bridge(bridge_read, bridge_write, control));
+    TsgoTypeProvider::from_initialized_transport(provider_read, provider_write)
+}
+
+async fn run_feature_bridge<R, W>(mut read: R, write: W, control: Arc<ControlClient>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let write = Arc::new(tokio::sync::Mutex::new(write));
+    let mut framer = MessageFramer::new();
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        let count = match read.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        framer.push(&chunk[..count]);
+        loop {
+            let message = match framer.next_message() {
+                Ok(Some(message)) => message,
+                Ok(None) => break,
+                Err(_) => return,
+            };
+            let Some(id) = message.get("id").cloned().filter(|id| !id.is_null()) else {
+                // The facade emits no lifecycle notifications. A notification on
+                // this read-only bridge is ignored rather than forwarded.
+                continue;
+            };
+            let Some(method) = message.get("method").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let method = FeatureRequestMethod::from_lsp_method(method);
+            let params = message
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let control = Arc::clone(&control);
+            let write = Arc::clone(&write);
+            tokio::spawn(async move {
+                let response = match method {
+                    Some(method) => match control.feature_request(method, params).await {
+                        Ok(result) => serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": result,
+                        }),
+                        Err(error) => serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": { "code": -32014, "message": error.to_string() },
+                        }),
+                    },
+                    None => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32601,
+                            "message": "method is not in Verter's read-only editor feature set"
+                        },
+                    }),
+                };
+                let frame = encode_message(&response);
+                let mut writer = write.lock().await;
+                let _ = writer.write_all(&frame).await;
+                let _ = writer.flush().await;
+            });
+        }
+    }
+}
+
 impl TypeProvider for TsgoSharedProvider {
     fn provider_id(&self) -> &'static str {
         // The SHARED dual-surface attach IS the tsgo provider — the editor's engine
         // served non-owningly; every engine-identifying branch treats it as tsgo.
         "tsgo"
+    }
+
+    fn supports_completion_resolve(&self) -> bool {
+        true
     }
 
     // ── Carrier lifecycle: inject through the shim's gated control channel (NOT
@@ -866,8 +983,13 @@ impl TypeProvider for TsgoSharedProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.inject_carrier(&path, &content).await?;
+            self.features.load_file(&path, &content).await?;
             Ok(())
         })
+    }
+
+    fn load_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        self.open_file(path, content)
     }
 
     fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
@@ -875,6 +997,7 @@ impl TypeProvider for TsgoSharedProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.inject_carrier(&path, &content).await?;
+            self.features.load_file(&path, &content).await?;
             Ok(())
         })
     }
@@ -883,6 +1006,7 @@ impl TypeProvider for TsgoSharedProvider {
         let path = path.to_string();
         Box::pin(async move {
             self.close_carrier_overlay(&path).await?;
+            self.features.forget_cached_content(&path).await;
             Ok(())
         })
     }
@@ -902,105 +1026,103 @@ impl TypeProvider for TsgoSharedProvider {
         })
     }
 
-    // ── Interactive features: the SHARED path is DIAGNOSTICS-ONLY. Interactive
-    //    features are served by the OWNED baseline (the composite delegates EVERY
-    //    feature method to OWNED), so these raw SHARED methods are UNREACHABLE in
-    //    production. They FAIL LOUDLY ([`SHARED_FEATURE_NOT_SERVED`]) rather than
-    //    silently return an empty/`None` result — a deliberately non-production
-    //    surface, never a silent hollow feature stub that could mask an accidental
-    //    wiring of the raw SHARED provider as a feature backend. ──
+    // Interactive features reuse the exact editor-owned LSP session through the
+    // relay's typed read-only feature multiplexer.
 
     fn get_completions(
         &self,
-        _path: &str,
-        _offset: u32,
-        _trigger_character: Option<&str>,
+        path: &str,
+        offset: u32,
+        trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+        self.features
+            .get_completions(path, offset, trigger_character)
     }
 
     fn get_completion_details<'a>(
         &'a self,
-        _path: &'a str,
-        _offset: u32,
-        _items: &'a [Completion],
+        path: &'a str,
+        offset: u32,
+        items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+        self.features.get_completion_details(path, offset, items)
     }
 
     fn resolve_completion(
         &self,
-        _path: &str,
-        _data: CompletionResolveData,
+        path: &str,
+        data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+        self.features.resolve_completion(path, data)
     }
 
-    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+        self.features.get_hover(path, offset)
     }
 
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        self.features.get_definition(path, offset)
     }
 
     fn get_type_definition(
         &self,
-        _path: &str,
-        _offset: u32,
+        path: &str,
+        offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+        self.features.get_type_definition(path, offset)
     }
 
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        self.features.get_references(path, offset)
     }
 
     fn get_rename_locations(
         &self,
-        _path: &str,
-        _offset: u32,
+        path: &str,
+        offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+        self.features.get_rename_locations(path, offset)
     }
 
     fn get_signature_help(
         &self,
-        _path: &str,
-        _offset: u32,
+        path: &str,
+        offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+        self.features.get_signature_help(path, offset)
     }
 
     fn get_code_actions(
         &self,
-        _path: &str,
-        _start_offset: u32,
-        _end_offset: u32,
-        _diagnostics: &[ProviderDiagnosticContext],
+        path: &str,
+        start_offset: u32,
+        end_offset: u32,
+        diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+        self.features
+            .get_code_actions(path, start_offset, end_offset, diagnostics)
     }
 
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        self.features.get_semantic_tokens(path)
     }
 
     fn get_document_highlights(
         &self,
-        _path: &str,
-        _offset: u32,
+        path: &str,
+        offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+        self.features.get_document_highlights(path, offset)
     }
 
     fn get_inlay_hints(
         &self,
-        _path: &str,
-        _start_offset: u32,
-        _end_offset: u32,
+        path: &str,
+        start_offset: u32,
+        end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
-        Box::pin(async move { Err(TypeProviderError::new(SHARED_FEATURE_NOT_SERVED)) })
+        self.features
+            .get_inlay_hints(path, start_offset, end_offset)
     }
 
     fn shutdown(&self) -> ProviderFuture<'_, ()> {

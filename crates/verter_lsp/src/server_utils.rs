@@ -1077,6 +1077,11 @@ pub(super) fn did_open_provider_sync_policy(
             await_api_sync: false,
             background_api_sync: true,
         },
+        crate::TypeProviderKind::EditorTsserver => DidOpenProviderSyncPolicy {
+            await_ide_sync: false,
+            await_api_sync: false,
+            background_api_sync: true,
+        },
         crate::TypeProviderKind::None => DidOpenProviderSyncPolicy {
             await_ide_sync: true,
             await_api_sync: false,

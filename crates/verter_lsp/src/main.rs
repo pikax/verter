@@ -9,6 +9,7 @@ use verter_lsp::tsgo::ipc::{find_tsgo_binary_canonical, TsgoOwnedProvider, TsgoT
 use verter_lsp::tsgo::resilient as tsgo_resilient;
 use verter_lsp::tsserver::ipc::TsserverTypeProvider;
 use verter_lsp::tsserver::resilient as tsserver_resilient;
+use verter_lsp::type_provider::lazy_managed::LazyManagedTypeProvider;
 use verter_lsp::type_provider::traits::TypeProvider;
 use verter_lsp::{LspConfig, ProjectSyncMode, TypeProviderKind};
 use verter_session::{HostConfig, VerterHost};
@@ -74,7 +75,7 @@ async fn main() {
     let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
 
     // Provider selection: auto → detect TS version, pick provider
-    let (type_provider, provider_kind, suggest_tsgo, type_provider_none_reason) =
+    let (type_provider, provider_kind, suggest_tsgo, type_provider_reason) =
         create_type_provider(&args, &client_cell, &host).await;
 
     let config = LspConfig {
@@ -84,7 +85,7 @@ async fn main() {
         type_provider_kind: provider_kind,
         suggest_tsgo,
         mcp_port: mcp_actual_port,
-        type_provider_none_reason,
+        type_provider_reason,
         // Production keeps the imported-carrier prewarm (test-only suppression seam).
         suppress_imported_carrier_prewarm: false,
     };
@@ -166,9 +167,9 @@ async fn main() {
 /// Parsed CLI arguments.
 struct CliArgs {
     /// Type provider mode: "auto" (default), "tsgo", "shared-tsgo", "tsserver",
-    /// "extension", "off". "tsgo" and "shared-tsgo" are the SAME routing (SHARED
-    /// editor-attach is additive + opt-in on top of the OWNED tsgo baseline); an
-    /// unrecognized value falls through to "auto".
+    /// "extension", "off". `shared-tsgo` selects editor-first attachment with a
+    /// lazy managed fallback; `tsgo` is the explicit eager managed override. An
+    /// unrecognized value follows the automatic editor-first order.
     type_provider: String,
     /// Path to TypeScript SDK directory (tsserver.js location).
     tsdk: Option<String>,
@@ -189,10 +190,35 @@ struct CliArgs {
     /// The shim `--session-key` to discover the advertisement under
     /// (`--shared-session-key`, or `VERTER_SHARED_SESSION_KEY`).
     shared_session_key: Option<String>,
+    /// Project-bound receipt written from inside the editor-owned tsserver plugin.
+    editor_tsserver_receipt: Option<String>,
+    /// Current-session challenge nonce paired with `editor_tsserver_receipt`.
+    editor_tsserver_nonce: Option<String>,
 }
 
 impl CliArgs {
     fn parse() -> Self {
+        Self::parse_with_defaults(
+            std::env::args().skip(1),
+            std::env::var("VERTER_SHARED_CONTROL_DIR").ok(),
+            std::env::var("VERTER_SHARED_SESSION_KEY").ok(),
+            std::env::var("VERTER_EDITOR_TSSERVER_RECEIPT").ok(),
+            std::env::var("VERTER_EDITOR_TSSERVER_NONCE").ok(),
+        )
+    }
+
+    #[cfg(test)]
+    fn parse_from(args: impl IntoIterator<Item = String>) -> Self {
+        Self::parse_with_defaults(args, None, None, None, None)
+    }
+
+    fn parse_with_defaults(
+        args: impl IntoIterator<Item = String>,
+        mut shared_control_dir: Option<String>,
+        mut shared_session_key: Option<String>,
+        mut editor_tsserver_receipt: Option<String>,
+        mut editor_tsserver_nonce: Option<String>,
+    ) -> Self {
         let mut type_provider = "auto".to_string();
         let mut tsdk = None;
         let mut plugin_path = None;
@@ -201,10 +227,7 @@ impl CliArgs {
         // The SHARED editor-attach rendezvous is opt-in via CLI flag or env — the
         // editor extension supplies it when it spawns a `verter-relay-shim` as its
         // `tsgo`. Absent both, SHARED is never attempted (fail-closed OWNED baseline).
-        let mut shared_control_dir = std::env::var("VERTER_SHARED_CONTROL_DIR").ok();
-        let mut shared_session_key = std::env::var("VERTER_SHARED_SESSION_KEY").ok();
-
-        for arg in std::env::args().skip(1) {
+        for arg in args {
             if let Some(val) = arg.strip_prefix("--type-provider=") {
                 type_provider = val.to_string();
             } else if let Some(val) = arg.strip_prefix("--tsdk=") {
@@ -215,6 +238,10 @@ impl CliArgs {
                 shared_control_dir = Some(val.to_string());
             } else if let Some(val) = arg.strip_prefix("--shared-session-key=") {
                 shared_session_key = Some(val.to_string());
+            } else if let Some(val) = arg.strip_prefix("--editor-tsserver-receipt=") {
+                editor_tsserver_receipt = Some(val.to_string());
+            } else if let Some(val) = arg.strip_prefix("--editor-tsserver-nonce=") {
+                editor_tsserver_nonce = Some(val.to_string());
             } else if let Some(val) = arg.strip_prefix("--mcp-port=") {
                 mcp_port = val.parse().ok();
             } else if arg.starts_with("--mcp-lint-preset=") {
@@ -237,6 +264,8 @@ impl CliArgs {
             mcp_port,
             shared_control_dir,
             shared_session_key,
+            editor_tsserver_receipt,
+            editor_tsserver_nonce,
         }
     }
 
@@ -249,17 +278,36 @@ impl CliArgs {
             _ => None,
         }
     }
+
+    /// Validate the neutral editor-owned tsserver identity/provenance facts.
+    fn editor_tsserver_attestation(
+        &self,
+    ) -> Result<Option<verter_lsp::editor_tsserver::EditorTsserverAttestation>, String> {
+        match (&self.editor_tsserver_receipt, &self.editor_tsserver_nonce) {
+            (None, None) => Ok(None),
+            (Some(receipt), Some(nonce)) => {
+                verter_lsp::editor_tsserver::read_editor_tsserver_attestation(
+                    std::path::Path::new(receipt),
+                    nonce,
+                )
+                .map(Some)
+            }
+            _ => Err(
+                "editor tsserver attachment requires both receipt path and session nonce".into(),
+            ),
+        }
+    }
 }
 
 /// Create the type provider based on CLI args.
 ///
-/// Auto mode: a workspace whose active TypeScript engine is tsgo/native-preview
-/// (TS >= 7) uses the tsgo external engine; otherwise a resolved TS 5.x/6.x
-/// tsserver candidate or a composite `tsconfig` selects tsserver, falling back
-/// to tsgo.
+/// Auto mode consumes neutral facts supplied by an editor client: an attested
+/// Native Preview rendezvous first, then a project-bound editor-tsserver plugin
+/// receipt. Without either fact it constructs a stateful managed TSGO fallback
+/// that remains cold until the first connected demand.
 ///
-/// Returns `(provider, kind, suggest_tsgo, none_reason)` where `none_reason`
-/// explains why no provider could be started (only set when provider is None).
+/// Returns `(provider, kind, suggest_tsgo, reason)` where `reason` preserves
+/// selected-route provenance or explains why no provider could be started.
 async fn create_type_provider(
     args: &CliArgs,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
@@ -286,6 +334,19 @@ async fn create_type_provider(
         })
         .unwrap_or_else(|| ".".to_string());
     let ws_canonical = verter_span::path::canonicalize_path(&workspace_root);
+    let editor_tsserver = if matches!(args.type_provider.as_str(), "off" | "tsgo" | "extension") {
+        None
+    } else {
+        match args.editor_tsserver_attestation() {
+            Ok(attestation) => attestation,
+            Err(reason) => {
+                tracing::warn!(
+                    "editor tsserver attestation rejected; continuing to managed fallback: {reason}"
+                );
+                None
+            }
+        }
+    };
 
     match args.type_provider.as_str() {
         "off" => {
@@ -297,19 +358,36 @@ async fn create_type_provider(
                 Some("Disabled by configuration (--type-provider=off)".into()),
             )
         }
-        "shared-tsgo" | "tsgo" => {
-            // OWNED is the universal baseline — built first, always — then WRAPPED in
-            // the ALWAYS-present host-aware admission layer (`TsgoCompositeProvider`),
-            // which gates OWNED carrier diagnostics on the carrier's resolved
-            // `BoundProject` over the published snapshot (a non-bound carrier fails
-            // closed, never a `tsgo --lsp` inferred fall-through). SHARED editor-attach
-            // is additive + opt-in + fail-closed: present only under the rendezvous
-            // evidence as an OPTIONAL overlay that unions bound-carrier `--api`
-            // diagnostics OVER OWNED — it NEVER displaces the OWNED feature/diagnostics
-            // surface. `tsgo` and `shared-tsgo` are the same routing, clearer name.
+        "shared-tsgo" => {
+            let has_editor_rendezvous = args.shared_rendezvous().is_some();
+            if !has_editor_rendezvous {
+                if let Some(attestation) = &editor_tsserver {
+                    return editor_tsserver_topology(attestation);
+                }
+            }
+            // Editor-owned tsgo is authoritative. The managed provider is represented
+            // by a stateful lazy fallback: lifecycle/config updates are cached without
+            // spawning, and only an observed shared attach/sync/decision failure on a
+            // bound query activates it.
+            let provider =
+                wrap_shared_first_admission(args, host, &ws_canonical, Arc::clone(client_cell));
+            (
+                Some(provider),
+                TypeProviderKind::Tsgo,
+                false,
+                Some(if has_editor_rendezvous {
+                    editor_native_preview_reason()
+                } else {
+                    lazy_managed_tsgo_reason()
+                }),
+            )
+        }
+        "tsgo" => {
+            // Explicit managed-tsgo operator override. This does not arm the editor
+            // rendezvous and therefore starts the configured managed provider now.
             match try_spawn_tsgo(&ws_canonical, client_cell).await {
                 Ok(owned) => {
-                    let tp = wrap_host_aware_admission(owned, args, host, &ws_canonical);
+                    let tp = wrap_owned_admission(owned, host);
                     (Some(tp), TypeProviderKind::Tsgo, false, None)
                 }
                 Err(reason) => {
@@ -319,6 +397,9 @@ async fn create_type_provider(
             }
         }
         "tsserver" => {
+            if let Some(attestation) = &editor_tsserver {
+                return editor_tsserver_topology(attestation);
+            }
             // tsserver only — no fallback
             match try_spawn_tsserver(args, &ws_canonical, client_cell).await {
                 Ok(tp) => (Some(tp), TypeProviderKind::Tsserver, false, None),
@@ -345,92 +426,67 @@ async fn create_type_provider(
             )
         }
         _ => {
-            // "auto" (default): the decision keys on the WORKSPACE's active
-            // TypeScript engine, not on whatever find_tsserver resolves (which for
-            // a tsgo/TS7 workspace with no workspace tsserver.js would be the
-            // editor's bundled/global lower tsserver). A tsgo (TS7) workspace is
-            // served by the tsgo external engine; otherwise a TS 5.x/6.x tsserver
-            // or a composite tsconfig prefers tsserver (TSGO cannot resolve path
-            // aliases from referenced configs).
-            let mut tsserver_reason = None;
-
-            let composite_ws = verter_workspace::FilesystemWorkspace::new(
-                verter_workspace::FilesystemOptions::default(),
-            );
-            let has_composite =
-                verter_lsp::config::has_solution_style_tsconfig(&composite_ws, &ws_canonical);
-            if has_composite {
-                tracing::info!(
-                    "auto mode: solution-style tsconfig detected at {} \
-                     (TSGO cannot resolve path aliases from referenced configs)",
-                    ws_canonical
+            // Auto serving order is identity-based: the exact editor tsgo, the exact
+            // editor tsserver plugin, then pinned managed tsgo. Managed fallback is
+            // constructed lazily and stays cold until a bound demand observes that
+            // neither editor route can serve it.
+            if args.shared_rendezvous().is_some() {
+                let provider =
+                    wrap_shared_first_admission(args, host, &ws_canonical, Arc::clone(client_cell));
+                return (
+                    Some(provider),
+                    TypeProviderKind::Tsgo,
+                    false,
+                    Some(editor_native_preview_reason()),
                 );
             }
-
-            // The active workspace TypeScript engine (owner: verter_workspace's
-            // intrinsic-library discovery) — a tsgo/TS7 workspace routes to the
-            // tsgo external engine regardless of any editor-supplied tsserver.
-            let workspace_ts = verter_workspace::NativeIntrinsicLibrary::discover(
-                std::path::Path::new(&ws_canonical),
-            );
-            let workspace_tsgo = workspace_ts.active_typescript_is_tsgo();
-
-            // A tsgo workspace is served by tsgo — never resolve a lower tsserver
-            // launch path for it.
-            let tsserver_path = if workspace_tsgo {
-                None
-            } else {
-                verter_lsp::tsserver::find_tsserver(args.tsdk.as_deref(), Some(&ws_canonical))
-            };
-            let tsserver_major = tsserver_path
-                .as_deref()
-                .and_then(verter_lsp::tsserver::detect_ts_major_version);
-
-            tracing::info!(
-                "auto mode: workspace_tsgo={} tsserver={} has_composite={}",
-                workspace_tsgo,
-                tsserver_major.map_or("none".to_string(), |v| format!("{v}.x")),
-                has_composite
-            );
-
-            if verter_lsp::config::prefer_tsserver_backend(
-                workspace_tsgo,
-                tsserver_major,
-                has_composite,
-            ) {
-                match try_spawn_tsserver(args, &ws_canonical, client_cell).await {
-                    Ok(tp) => return (Some(tp), TypeProviderKind::Tsserver, false, None),
-                    Err(reason) => {
-                        tracing::warn!("auto mode: tsserver unavailable: {reason}");
-                        tsserver_reason = Some(reason);
-                    }
-                }
+            if let Some(attestation) = &editor_tsserver {
+                return editor_tsserver_topology(attestation);
             }
 
-            // No tsserver available or not preferred — build the OWNED TSGO
-            // baseline, then WRAP it in the SHARED-overlay composite when the
-            // rendezvous evidence is present (opt-in; the overlay binds lazily per
-            // query and never displaces the OWNED baseline).
-            let tsgo_reason = match try_spawn_tsgo(&ws_canonical, client_cell).await {
-                Ok(owned) => {
-                    let tp = wrap_host_aware_admission(owned, args, host, &ws_canonical);
-                    return (Some(tp), TypeProviderKind::Tsgo, false, None);
-                }
-                Err(reason) => {
-                    tracing::warn!("auto mode: tsgo unavailable: {reason}");
-                    reason
-                }
-            };
-
-            let reason = if let Some(tsserver_reason) = tsserver_reason {
-                format!("tsserver unavailable: {tsserver_reason}; tsgo unavailable: {tsgo_reason}")
-            } else {
-                format!("tsgo unavailable: {tsgo_reason}")
-            };
-            tracing::info!("no type provider available — running in verter-only mode ({reason})");
-            (None, TypeProviderKind::None, false, Some(reason))
+            let provider =
+                wrap_shared_first_admission(args, host, &ws_canonical, Arc::clone(client_cell));
+            (
+                Some(provider),
+                TypeProviderKind::Tsgo,
+                false,
+                Some(lazy_managed_tsgo_reason()),
+            )
         }
     }
+}
+
+fn editor_native_preview_reason() -> String {
+    "attested editor-owned Native Preview Program; managed TSGO remains cold until an observed attach failure".into()
+}
+
+fn lazy_managed_tsgo_reason() -> String {
+    "editor attachment unavailable; managed TSGO will start only when a connected demand requires it".into()
+}
+
+fn editor_tsserver_topology(
+    attestation: &verter_lsp::editor_tsserver::EditorTsserverAttestation,
+) -> (
+    Option<Arc<dyn TypeProvider>>,
+    TypeProviderKind,
+    bool,
+    Option<String>,
+) {
+    tracing::info!(
+        "using attested editor-owned tsserver plugin: pid={} projects={:?}",
+        attestation.pid,
+        attestation.projects
+    );
+    (
+        None,
+        TypeProviderKind::EditorTsserver,
+        false,
+        Some(format!(
+            "attested editor tsserver process {} across {} project(s)",
+            attestation.pid,
+            attestation.projects.len()
+        )),
+    )
 }
 
 /// Try to spawn the OWNED, project-bound dual-surface TSGO provider.
@@ -493,14 +549,20 @@ async fn try_spawn_tsgo(
     // surface serves features + the user-facing diagnostics (gated on the carrier's
     // resolved `BoundProject` by the admission layer). A probe / wire-gate / attach
     // failure fails closed rather than silently degrading the typecheck oracle.
-    let owned = TsgoOwnedProvider::attach(Arc::new(tp), &tsgo_bin)
-        .await
-        .map_err(|e| {
-            format!(
+    let lsp = Arc::new(tp);
+    let owned = match TsgoOwnedProvider::attach(Arc::clone(&lsp), &tsgo_bin).await {
+        Ok(owned) => owned,
+        Err(error) => {
+            let teardown = lsp.shutdown().await;
+            return Err(format!(
                 "found tsgo at {tsgo_bin} and spawned --lsp, but the version-gated --api \
-                 attach failed: {e}"
-            )
-        })?;
+                 attach failed: {error}; managed child teardown: {}",
+                teardown
+                    .err()
+                    .map_or_else(|| "reaped".to_string(), |error| error.to_string())
+            ));
+        }
+    };
     tracing::info!("TSGO owned dual-surface provider started (--api attached, resilient)");
 
     let resilient = tsgo_resilient::new_owned(
@@ -523,14 +585,39 @@ async fn try_spawn_tsgo(
 /// inferred fall-through). The SHARED editor-attach overlay is OPTIONAL — present only
 /// under the rendezvous evidence, additive + fail-closed (it never displaces OWNED and
 /// never bypasses the OWNED gate).
-fn wrap_host_aware_admission(
+fn wrap_owned_admission(
     owned: Arc<dyn TypeProvider>,
+    host: &Arc<VerterHost>,
+) -> Arc<dyn TypeProvider> {
+    Arc::new(TsgoCompositeProvider::new(owned, Arc::clone(host), None)) as Arc<dyn TypeProvider>
+}
+
+/// Build the shared-first provider without starting a managed process. The lazy
+/// fallback records every lifecycle/configuration update and invokes `try_spawn_tsgo`
+/// at most once, only after the composite has observed that the editor route cannot
+/// serve a bound demand.
+fn wrap_shared_first_admission(
     args: &CliArgs,
     host: &Arc<VerterHost>,
     workspace_root: &str,
+    client_cell: Arc<OnceCell<tower_lsp_server::Client>>,
 ) -> Arc<dyn TypeProvider> {
+    let workspace_root_owned = workspace_root.to_string();
+    let fallback = Arc::new(LazyManagedTypeProvider::new(move || {
+        let workspace_root = workspace_root_owned.clone();
+        let client_cell = Arc::clone(&client_cell);
+        async move {
+            try_spawn_tsgo(&workspace_root, &client_cell)
+                .await
+                .map_err(verter_lsp::type_provider::protocol::TypeProviderError::new)
+        }
+    })) as Arc<dyn TypeProvider>;
     let shared = try_attach_shared_tsgo(args, host, workspace_root);
-    Arc::new(TsgoCompositeProvider::new(owned, Arc::clone(host), shared)) as Arc<dyn TypeProvider>
+    Arc::new(TsgoCompositeProvider::new(
+        fallback,
+        Arc::clone(host),
+        shared,
+    )) as Arc<dyn TypeProvider>
 }
 
 /// Build the OPTIONAL SHARED editor-attach [`SharedTsgoOverlay`] when the rendezvous
@@ -634,5 +721,72 @@ fn path_to_file_uri(path: &str) -> String {
     } else {
         // Windows: C:/Users/... → file:///C:/Users/...
         format!("file:///{normalized}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    const NONCE: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn cli_pairs_editor_tsserver_receipt_with_its_nonce() {
+        let args = CliArgs::parse_from([
+            "--type-provider=auto".to_string(),
+            "--editor-tsserver-receipt=C:/tmp/receipt.json".to_string(),
+            format!("--editor-tsserver-nonce={NONCE}"),
+            "C:/workspace".to_string(),
+        ]);
+
+        assert_eq!(
+            args.editor_tsserver_receipt.as_deref(),
+            Some("C:/tmp/receipt.json")
+        );
+        assert_eq!(args.editor_tsserver_nonce.as_deref(), Some(NONCE));
+        assert_eq!(args.workspace_root.as_deref(), Some("C:/workspace"));
+    }
+
+    #[test]
+    fn cli_attestation_is_fail_closed_for_partial_or_stale_facts() {
+        let partial = CliArgs::parse_from([format!("--editor-tsserver-nonce={NONCE}")]);
+        assert!(partial.editor_tsserver_attestation().is_err());
+
+        let file = tempfile::NamedTempFile::new().expect("temp receipt");
+        fs::write(
+            file.path(),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "nonce": "ffffffffffffffffffffffffffffffff",
+                "pid": 4242,
+                "projects": ["C:/workspace/tsconfig.json"]
+            }))
+            .expect("receipt json"),
+        )
+        .expect("write receipt");
+        let args = CliArgs::parse_from([
+            format!("--editor-tsserver-receipt={}", file.path().display()),
+            format!("--editor-tsserver-nonce={NONCE}"),
+        ]);
+        assert!(args.editor_tsserver_attestation().is_err());
+    }
+
+    #[test]
+    fn editor_tsserver_topology_owns_no_semantic_child() {
+        let topology =
+            editor_tsserver_topology(&verter_lsp::editor_tsserver::EditorTsserverAttestation {
+                pid: 4242,
+                projects: vec!["C:/workspace/tsconfig.json".into()],
+            });
+
+        assert!(topology.0.is_none());
+        assert_eq!(topology.1, TypeProviderKind::EditorTsserver);
+        assert!(!topology.2);
+        assert!(topology
+            .3
+            .as_deref()
+            .is_some_and(|reason| reason.contains("4242")));
     }
 }

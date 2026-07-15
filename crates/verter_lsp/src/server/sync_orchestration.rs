@@ -480,7 +480,25 @@ impl VerterLanguageServer {
                 );
             }
         }
+        self.notify_editor_carrier_store_changed().await;
         true
+    }
+
+    async fn notify_editor_carrier_store_changed(&self) {
+        if !matches!(
+            self.type_provider_kind,
+            crate::TypeProviderKind::EditorTsserver
+        ) {
+            return;
+        }
+        let generation = self
+            .init_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        self.client
+            .send_notification::<super::protocol_types::TypeProviderSyncComplete>(
+                super::protocol_types::TypeProviderSyncCompleteParams { gen: generation },
+            )
+            .await;
     }
 
     /// Retract a carrier source from the external-TS engine — the DELETE /
@@ -500,6 +518,7 @@ impl VerterLanguageServer {
             let _outcome = coordinator
                 .remove_membership(canonical_id, AbsentReason::Deleted)
                 .await?;
+            self.notify_editor_carrier_store_changed().await;
         }
         Ok(())
     }
@@ -804,9 +823,6 @@ impl VerterLanguageServer {
     }
 
     pub(super) fn sync_api_to_provider_in_background(&self, uri: Uri) {
-        let Some(sync) = self.project_sync.clone() else {
-            return;
-        };
         let Some(canonical_id) = self.documents.get_canonical_id(&uri) else {
             return;
         };
@@ -819,6 +835,9 @@ impl VerterLanguageServer {
             self.pending_snapshot_provider_sync.insert(canonical_id);
             return;
         }
+        let Some(sync) = self.project_sync.clone() else {
+            return;
+        };
         let Some(snapshot) = self.published_resolver() else {
             self.pending_snapshot_provider_sync.insert(canonical_id);
             return;
@@ -2137,6 +2156,18 @@ impl VerterLanguageServer {
             .as_ref()
             .map(|s| s.ownership_ready)
             .unwrap_or(false);
+
+        if matches!(
+            self.type_provider_kind,
+            crate::TypeProviderKind::EditorTsserver
+        ) {
+            if ownership_ready {
+                self.publish_carrier_to_external_ts(canonical_id).await;
+            } else {
+                self.queue_snapshot_provider_sync(canonical_id.to_string());
+            }
+            return;
+        }
 
         // Fast path: host already has the file — sync directly from cached artifacts.
         if let Some(api) = self.documents.host.get_public_api(canonical_id) {

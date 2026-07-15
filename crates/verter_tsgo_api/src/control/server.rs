@@ -335,6 +335,9 @@ impl ControlServer {
             messages::METHOD_INITIALIZE_API_SESSION => {
                 (Some(self.handle_initialize_api_session(&id).await), false)
             }
+            messages::METHOD_FEATURE_REQUEST => {
+                (Some(self.handle_feature_request(&id, params).await), false)
+            }
             messages::METHOD_STATUS => (Some(self.handle_status(&id)), false),
             messages::METHOD_DETACH => {
                 // Record the carrier-retraction preference + END this control connection
@@ -371,6 +374,7 @@ impl ControlServer {
                         carrier_injection: true,
                         api_session: true,
                         wait_initialized: true,
+                        feature_requests: true,
                     },
                 };
                 ok_frame(id, &result)
@@ -598,6 +602,37 @@ impl ControlServer {
             Err(_elapsed) => op_error_frame(
                 id,
                 "initializeApiSession",
+                &carrier_send_timeout_error(self.carrier_op_bound),
+            ),
+        }
+    }
+
+    async fn handle_feature_request(
+        &self,
+        id: &serde_json::Value,
+        params: serde_json::Value,
+    ) -> Vec<u8> {
+        let params: messages::FeatureRequestParams = match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return err_frame(
+                    id,
+                    ERROR_MALFORMED_PAYLOAD,
+                    &format!("feature request params: {error}"),
+                )
+            }
+        };
+        match tokio::time::timeout(
+            self.carrier_op_bound,
+            self.relay.feature_request(params.method, params.params),
+        )
+        .await
+        {
+            Ok(Ok(result)) => ok_frame(id, &messages::FeatureRequestResult { result }),
+            Ok(Err(error)) => op_error_frame(id, "feature request", &error),
+            Err(_) => op_error_frame(
+                id,
+                "feature request",
                 &carrier_send_timeout_error(self.carrier_op_bound),
             ),
         }

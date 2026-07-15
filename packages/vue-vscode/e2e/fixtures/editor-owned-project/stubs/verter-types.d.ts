@@ -1,7 +1,3 @@
-// A minimal `@verter/types` module stub (resolved via tsconfig `paths`) — the IDE
-// carrier helper surface, declared loosely so `import from "@verter/types"` resolves
-// cleanly (missing members would be TS2305, never the forbidden TS2307). Mirrors the
-// hermetic stub the headless SHARED slice uses.
 export type Prettify<T> = { [K in keyof T]: T[K] };
 export type ExtractComponentProps<T> = Record<string, unknown>;
 export type ExtractLeafElement<T> = unknown;

@@ -93,10 +93,10 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
     carrier_publish_coordinator: Option<&crate::external_ts::CarrierPublishCoordinator>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) {
-    let Some(sync) = project_sync else {
+    if project_sync.is_none() && carrier_publish_coordinator.is_none() {
         pending_snapshot_provider_sync.clear();
         return;
-    };
+    }
     // Capture the published filesystem workspace once (the carrier-publish
     // ownership-resolution source) alongside the resolver snapshot, so the
     // tsserver publish path resolves against the same published snapshot.
@@ -156,7 +156,7 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
 
     for canonical_id in pending_ids {
         let outcome = sync_pending_snapshot_provider_file(
-            sync,
+            project_sync,
             documents,
             &snapshot,
             provider_sync_states,
@@ -366,7 +366,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         // the companions directly, and a mid-flight owner loss is reconciled inside
         // (a `NotReady` / `Unresolved` no-owner outcome). Any synced kind is progress.
         if let CarrierApplyOutcome::Applied { synced, .. } = apply_owner_resolved_carrier_sync(
-            sync,
+            Some(sync),
             documents,
             provider_sync_states,
             &snapshot,
@@ -526,7 +526,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             // Route the owner-resolved carrier (or an owner lost mid-flight) through
             // the SINGLE carrier-sync gateway. Any synced kind counts as progress.
             if let CarrierApplyOutcome::Applied { synced, .. } = apply_owner_resolved_carrier_sync(
-                sync,
+                Some(sync),
                 documents,
                 provider_sync_states,
                 &snapshot,
@@ -638,7 +638,7 @@ pub(crate) async fn configure_provider_paths_for_source(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn sync_pending_snapshot_provider_file(
-    sync: &ProjectSync,
+    sync: Option<&ProjectSync>,
     documents: &DocumentRegistry,
     snapshot: &super::PublishedResolverSnapshot,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
@@ -660,6 +660,9 @@ pub(super) async fn sync_pending_snapshot_provider_file(
         )
         .await
     } else {
+        let Some(sync) = sync else {
+            return SyncOutcome::Nothing;
+        };
         // Non-carrier files have a single Shadow kind: synced fully or not at all.
         if sync_pending_non_carrier_provider_file(
             sync,
@@ -680,7 +683,7 @@ pub(super) async fn sync_pending_snapshot_provider_file(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn sync_pending_carrier_provider_file(
-    sync: &ProjectSync,
+    sync: Option<&ProjectSync>,
     documents: &DocumentRegistry,
     snapshot: &super::PublishedResolverSnapshot,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
@@ -705,7 +708,9 @@ pub(super) async fn sync_pending_carrier_provider_file(
         block_in_place_if_available(|| documents.host.ensure_ide_compiled(canonical_id, &profile));
     let ide = block_in_place_if_available(|| documents.host.get_ide(canonical_id, &profile));
     if is_tsgo {
-        configure_provider_paths_for_source(sync, snapshot, canonical_id, true).await;
+        if let Some(sync) = sync {
+            configure_provider_paths_for_source(sync, snapshot, canonical_id, true).await;
+        }
     }
 
     // Route through the SINGLE carrier-sync gateway: tsserver PUBLISHES the carrier
@@ -958,7 +963,7 @@ enum CarrierApplyOutcome {
     reason = "carrier sync needs the provider-surface store + documents alongside the sync state"
 )]
 async fn apply_owner_resolved_carrier_sync(
-    sync: &ProjectSync,
+    sync: Option<&ProjectSync>,
     documents: &DocumentRegistry,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     snapshot: &super::PublishedResolverSnapshot,
@@ -1021,6 +1026,12 @@ async fn apply_owner_resolved_carrier_sync(
             transition,
             pending,
         } => {
+            let Some(sync) = sync else {
+                tracing::error!(
+                    "{context}: direct-open carrier decision has no managed provider sync"
+                );
+                return CarrierApplyOutcome::Pending;
+            };
             let previous_state = provider_sync_states.get(canonical_id).map(|e| e.clone());
             let stale_paths = transition.stale_paths;
             let mut committed_state = transition.next;
@@ -1123,31 +1134,35 @@ async fn apply_owner_resolved_carrier_sync(
             // (settle + dequeue, never retry). `Pending` commits nothing and keeps queued.
             match carrier_coordinator.settle(not_owned, canonical_id, None) {
                 crate::external_ts::SettleClass::NotReady => {
-                    reconcile_unowned_carrier_buffer(
-                        sync,
-                        documents,
-                        provider_sync_states,
-                        canonical_id,
-                        ide,
-                        snapshot.ownership_ready,
-                        context,
-                        carrier_coordinator,
-                    )
-                    .await;
+                    if let Some(sync) = sync {
+                        reconcile_unowned_carrier_buffer(
+                            sync,
+                            documents,
+                            provider_sync_states,
+                            canonical_id,
+                            ide,
+                            snapshot.ownership_ready,
+                            context,
+                            carrier_coordinator,
+                        )
+                        .await;
+                    }
                     CarrierApplyOutcome::NotReady
                 }
                 crate::external_ts::SettleClass::Unresolved => {
-                    reconcile_unowned_carrier_buffer(
-                        sync,
-                        documents,
-                        provider_sync_states,
-                        canonical_id,
-                        ide,
-                        snapshot.ownership_ready,
-                        context,
-                        carrier_coordinator,
-                    )
-                    .await;
+                    if let Some(sync) = sync {
+                        reconcile_unowned_carrier_buffer(
+                            sync,
+                            documents,
+                            provider_sync_states,
+                            canonical_id,
+                            ide,
+                            snapshot.ownership_ready,
+                            context,
+                            carrier_coordinator,
+                        )
+                        .await;
+                    }
                     CarrierApplyOutcome::Unresolved
                 }
                 crate::external_ts::SettleClass::Pending => CarrierApplyOutcome::Pending,

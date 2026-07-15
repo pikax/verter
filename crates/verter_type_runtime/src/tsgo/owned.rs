@@ -36,12 +36,13 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex as SyncMutex;
 use verter_span::path::fs_paths_equal;
 use verter_span::Utf16LineIndex;
 use verter_tsgo_api::api_attach::ApiAttachClient;
-use verter_tsgo_api::client::probe_engine_version;
+use verter_tsgo_api::client::probe_engine_version_bounded;
 use verter_tsgo_api::gate::{self, ObservedEngine};
 use verter_tsgo_api::jsonrpc::JsonRpcConnection;
 use verter_tsgo_api::proto::types::OpaqueHandle;
@@ -71,6 +72,11 @@ struct ApiSurface {
     /// per query. `None` until the first `updateSnapshot` succeeds.
     snapshot: SyncMutex<Option<(OpaqueHandle, String)>>,
 }
+
+const OWNED_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const OWNED_API_SESSION_TIMEOUT: Duration = Duration::from_secs(15);
+const OWNED_API_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const OWNED_API_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The OWNED one-instance dual-surface tsgo provider.
 pub struct TsgoOwnedProvider {
@@ -115,22 +121,47 @@ impl TsgoOwnedProvider {
     ) -> Result<Self, crate::protocol::TypeProviderError> {
         // Wire gate FIRST — refuse a diverged/unknown engine before opening the
         // `--api` session, connecting the attach pipe, or constructing the client.
-        let version = probe_engine_version(tsgo_bin.as_ref()).map_err(|e| {
-            crate::protocol::TypeProviderError::new(format!("tsgo capability probe failed: {e}"))
-        })?;
+        let version = probe_engine_version_bounded(tsgo_bin.as_ref(), OWNED_VERSION_PROBE_TIMEOUT)
+            .await
+            .map_err(|e| {
+                crate::protocol::TypeProviderError::new(format!(
+                    "tsgo capability probe failed: {e}"
+                ))
+            })?;
         let clearance = gate::validate(&ObservedEngine::from_codec_wire(version)).map_err(|e| {
             crate::protocol::TypeProviderError::new(format!("unsupported tsgo --api wire: {e}"))
         })?;
         let engine_version = clearance.observed_version;
 
-        let session = lsp.initialize_api_session().await?;
-        let (read, write) = connect_attach_pipe(&session.pipe)
+        let session = tokio::time::timeout(OWNED_API_SESSION_TIMEOUT, lsp.initialize_api_session())
             .await
-            .map_err(|e| crate::protocol::TypeProviderError::new(format!("--api attach: {e}")))?;
+            .map_err(|_| {
+                crate::protocol::TypeProviderError::new(
+                    "timed out initializing the managed TSGO API session",
+                )
+            })??;
+        let (read, write) = tokio::time::timeout(
+            OWNED_API_CONNECT_TIMEOUT,
+            connect_attach_pipe(&session.pipe),
+        )
+        .await
+        .map_err(|_| {
+            crate::protocol::TypeProviderError::new(
+                "timed out connecting to the managed TSGO API session",
+            )
+        })?
+        .map_err(|e| crate::protocol::TypeProviderError::new(format!("--api attach: {e}")))?;
         let client = ApiAttachClient::new(JsonRpcConnection::connect(read, write));
-        client.initialize().await.map_err(|e| {
-            crate::protocol::TypeProviderError::new(format!("--api initialize: {e}"))
-        })?;
+        tokio::time::timeout(OWNED_API_INITIALIZE_TIMEOUT, client.initialize())
+            .await
+            .map_err(|_| {
+                crate::protocol::TypeProviderError::new(
+                    "timed out initializing the managed TSGO API client",
+                )
+            })?
+            .map_err(|e| {
+                crate::protocol::TypeProviderError::new(format!("--api initialize: {e}"))
+            })?;
         Ok(Self {
             lsp,
             api: Arc::new(ApiSurface {

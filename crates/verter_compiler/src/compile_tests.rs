@@ -15103,6 +15103,94 @@ function handlePing(e) { void e; }
 // not an unmapped destructure copy that collapses to line 1); a binding used in
 // the template must keep its value read.
 
+struct CompiledIdentifierFacts<'name> {
+    name: &'name str,
+    bindings: usize,
+    references: usize,
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for CompiledIdentifierFacts<'_> {
+    fn visit_binding_identifier(&mut self, identifier: &oxc_ast::ast::BindingIdentifier<'a>) {
+        if identifier.name == self.name {
+            self.bindings += 1;
+        }
+        oxc_ast_visit::walk::walk_binding_identifier(self, identifier);
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &oxc_ast::ast::IdentifierReference<'a>) {
+        if identifier.name == self.name {
+            self.references += 1;
+        }
+        oxc_ast_visit::walk::walk_identifier_reference(self, identifier);
+    }
+}
+
+fn compiled_tsx_identifier_facts<'name>(
+    source: &str,
+    name: &'name str,
+) -> CompiledIdentifierFacts<'name> {
+    use oxc_ast_visit::Visit;
+
+    let result = compile_tsx(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let code = &result.tsx.as_ref().expect("tsx block").code;
+    let allocator = Allocator::new();
+    let parsed = oxc_parser::Parser::new(&allocator, code, SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "generated IDE carrier must remain valid TSX: {:?}\n---\n{code}",
+        parsed
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    );
+    let mut facts = CompiledIdentifierFacts {
+        name,
+        bindings: 0,
+        references: 0,
+    };
+    facts.visit_program(&parsed.program);
+    facts
+}
+
+#[test]
+fn tsx_destructured_prop_liveness_discriminates_template_use_from_true_unused() {
+    let used = compiled_tsx_identifier_facts(
+        r#"<script setup lang="ts">
+interface Props { count: number }
+const { count } = defineProps<Props>()
+</script>
+<template><div>{{ count }}</div></template>"#,
+        "count",
+    );
+    assert_eq!(
+        used.bindings, 1,
+        "the real destructured binding is preserved"
+    );
+    assert!(
+        used.references >= 1,
+        "a template-only use must value-read the source binding so TypeScript cannot emit a false TS6133"
+    );
+
+    let unused = compiled_tsx_identifier_facts(
+        r#"<script setup lang="ts">
+interface Props { count: number }
+const { count } = defineProps<Props>()
+</script>
+<template><div>static</div></template>"#,
+        "count",
+    );
+    assert_eq!(
+        unused.bindings, 1,
+        "the real destructured binding is preserved"
+    );
+    assert_eq!(
+        unused.references, 0,
+        "a genuinely unused prop must remain eligible for TypeScript's TS6133"
+    );
+}
+
 #[test]
 fn tsx_unused_script_setup_local_is_omitted_from_unwrap() {
     let result = compile_tsx(

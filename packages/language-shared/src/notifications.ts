@@ -109,7 +109,7 @@ export type NotificationParams = {
     reason: string;
   };
   [NotificationType.TypeProviderStatus]: {
-    kind: "tsgo" | "tsserver" | "none";
+    kind: "tsgo" | "tsserver" | "editor-tsserver" | "none";
     reason?: string;
   };
   [NotificationType.TypeProviderSyncComplete]: {

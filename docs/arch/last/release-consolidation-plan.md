@@ -182,10 +182,34 @@ deferrable.
   staged tree independently passed format, Clippy with warnings denied, the 11 projection tests,
   the 13 LSP projection tests, the 68 cache-runtime tests, the deferred-keyof subprocess, and all
   195 architecture guards. Unrelated editor-owned TypeScript work remains outside this commit.
+- 2026-07-15: the verified cache/projection/single-engine tree was committed independently as
+  `9b23f65312854a774e9b2e74119aba009b22b972` (`refactor(type-resolution): complete cache and
+  projection cutover`). Editor-owned serving work was restored only after that commit boundary.
+- 2026-07-15: editor-owned serving now selects an attested Native Preview session first, then an
+  attested plugin in the editor-owned tsserver configured project, with single-flight lazy managed
+  TSGO only after a connected demand observes bounded editor-route failure. Managed probes,
+  attach/initialization, failure cleanup, and shutdown are bounded; a new behavioral regression
+  failed before the fix and now proves an unresponsive owned child is killed and reaped. The
+  affected Rust gates are green: `verter_type_runtime` 272 passed/2 ignored plus 9 integration,
+  `verter_tsgo_api` 259, `verter_relay_shim` 19 unit plus 9 integration, the editor/shared focused
+  LSP routes, the two destructured-prop compiler discriminators, and Clippy with warnings denied
+  across the four affected crates. TypeScript suites are green at 55/55, 269/269, and 206/206;
+  the VS Code package gate now discovers all 24 tracked `src/**/*.spec.ts` files through `vitest`
+  instead of hand-listing only 12.
+  Real VS Code Insiders acceptance is green 3/3 for `editor-owned-project@tsserver` and 3/3 for
+  `editor-owned-project@shared-tsgo`; both prove route/project provenance, mapped `TS2322` plus the
+  real component surface, and no semantic child below Verter's LSP process. No test-profile,
+  Verter LSP, or tsgo process remained after teardown.
+- 2026-07-15: a detached worktree built from the exact staged editor tree passed the complete LSP
+  unit suite: 1802 passed, 0 failed, 6 ignored. The earlier dirty-worktree candidate run reproduced
+  the projection baseline's five real-provider failures because it also contained an unrelated,
+  uncommitted completion-filter extraction. That extraction and its new module are excluded from
+  the editor commit; the staged-tree rerun proves the intended release tree has no corresponding
+  failure or waiver.
 - Raw integration SHA: pending.
 - Clean release SHA: pending.
-- Current next action: commit the verified cache/projection/single-engine block, then resume the
-  editor-owned TypeScript serving block. The Nuxt UI `repo_first_pass` comparison with frozen
-  `origin/feat/framework-adapters-clean` follows without importing baseline compatibility patches
-  into the release tree. Full workspace/release gates and clean-history reconstruction remain
-  pending.
+- Current next action: create the coherent editor-owned serving commit after exact staged-tree
+  verification. Then run the Nuxt UI `repo_first_pass` comparison against frozen
+  `origin/feat/framework-adapters-clean` and diagnose the framework-adapter delta without importing
+  baseline compatibility patches into the release tree. The full release gate, clean-history
+  reconstruction, and immutable-SHA 3/3 review remain pending.

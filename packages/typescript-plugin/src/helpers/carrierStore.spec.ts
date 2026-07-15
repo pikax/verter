@@ -382,13 +382,13 @@ describe("DiskCarrierStoreReader project scoping (no cross-tsconfig leak)", () =
     expect(readerB.readyFile("d:/ws/a/src/A.vue.tsx")).toBeUndefined();
   });
 
-  it("readyIdeCompanions is project-scoped — only the OWN project's companions", () => {
+  it("readyIdeSources is project-scoped — only the OWN project's source identities", () => {
     const dir = track(makeStore(twoProjectManifest()));
     const readerA = new DiskCarrierStoreReader(dir, "d:/ws/a/tsconfig.json");
     const readerB = new DiskCarrierStoreReader(dir, "d:/ws/b/tsconfig.json");
 
-    expect(readerA.readyIdeCompanions()).toEqual(["d:/ws/a/src/A.vue.tsx"]);
-    expect(readerB.readyIdeCompanions()).toEqual(["d:/ws/b/src/B.svelte.tsx"]);
+    expect(readerA.readyIdeSources()).toEqual(["d:/ws/a/src/A.vue"]);
+    expect(readerB.readyIdeSources()).toEqual(["d:/ws/b/src/B.svelte"]);
   });
 
   it("ownedSourceFor is project-scoped — a sibling project's owned source is invisible", () => {
@@ -405,10 +405,7 @@ describe("DiskCarrierStoreReader project scoping (no cross-tsconfig leak)", () =
     const reader = new DiskCarrierStoreReader(dir);
     expect(reader.readyFile("d:/ws/a/src/A.vue.tsx")?.content_hash).toBe("a1");
     expect(reader.readyFile("d:/ws/b/src/B.svelte.tsx")?.content_hash).toBe("b1");
-    expect(reader.readyIdeCompanions().sort()).toEqual([
-      "d:/ws/a/src/A.vue.tsx",
-      "d:/ws/b/src/B.svelte.tsx",
-    ]);
+    expect(reader.readyIdeSources().sort()).toEqual(["d:/ws/a/src/A.vue", "d:/ws/b/src/B.svelte"]);
   });
 
   it("scopes by the normalized project key (backslash + drive-letter case fold)", () => {
@@ -427,7 +424,7 @@ describe("DiskCarrierStoreReader project scoping (no cross-tsconfig leak)", () =
   it("an unknown project key resolves to an EMPTY scope (fail closed)", () => {
     const dir = track(makeStore(twoProjectManifest()));
     const reader = new DiskCarrierStoreReader(dir, "d:/ws/unknown/tsconfig.json");
-    expect(reader.readyIdeCompanions()).toEqual([]);
+    expect(reader.readyIdeSources()).toEqual([]);
     expect(reader.readyFile("d:/ws/a/src/A.vue.tsx")).toBeUndefined();
   });
 });

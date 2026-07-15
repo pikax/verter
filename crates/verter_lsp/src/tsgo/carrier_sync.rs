@@ -806,17 +806,3 @@ pub(crate) fn require_synced_carrier_content(
 ) -> Result<Arc<str>, TypeProviderError> {
     content.ok_or_else(|| TypeProviderError::new("shared carrier has no barrier-synced content"))
 }
-
-/// The error every SHARED interactive-feature `TypeProvider` method returns. SHARED tsgo
-/// is the DIAGNOSTICS-ONLY project-bound typecheck oracle (see the module docs);
-/// interactive features (hover / definition / references / completion / …) are served by
-/// the OWNED baseline, and the composite ([`crate::tsgo::composite::TsgoCompositeProvider`])
-/// delegates EVERY feature method to OWNED — so these methods are UNREACHABLE through the
-/// production composite. Returning a LOUD error (rather than a silent empty result) makes
-/// any accidental production wiring of the raw SHARED provider as a feature backend fail
-/// visibly instead of silently serving no results — the raw feature surface is
-/// deliberately non-production, not a hollow silent stub.
-pub(crate) const SHARED_FEATURE_NOT_SERVED: &str =
-    "shared tsgo is diagnostics-only; interactive features are served by the OWNED baseline \
-     (the composite delegates every feature to OWNED) — this raw SHARED feature method is \
-     not reachable in production";

@@ -585,7 +585,9 @@ impl std::error::Error for ReconcileErr {}
 #[derive(Clone)]
 pub struct MembershipReconciler {
     ledger: Arc<MembershipLedger>,
-    provider: Arc<dyn TypeProvider>,
+    /// Local provider actor for a Verter-managed engine. `None` when the editor's
+    /// tsserver plugin reads the durable membership store directly.
+    provider: Option<Arc<dyn TypeProvider>>,
     committer: Arc<dyn CarrierMembershipCommitter>,
     /// Per-source serialization gates for membership transitions.
     ///
@@ -621,7 +623,24 @@ impl MembershipReconciler {
     ) -> Self {
         Self {
             ledger,
-            provider,
+            provider: Some(provider),
+            committer,
+            source_gates,
+        }
+    }
+
+    /// Build a durable store-only reconciler for an editor-owned tsserver plugin.
+    /// No local provider exists on this route; membership publication and ledger
+    /// admission remain the same authoritative transaction.
+    #[must_use]
+    pub fn new_store_only(
+        ledger: Arc<MembershipLedger>,
+        committer: Arc<dyn CarrierMembershipCommitter>,
+        source_gates: Arc<DashMap<String, Arc<AsyncMutex<()>>>>,
+    ) -> Self {
+        Self {
+            ledger,
+            provider: None,
             committer,
             source_gates,
         }
@@ -791,36 +810,37 @@ impl MembershipReconciler {
         // ledger lock is held across these awaits. Register the new companions
         // first (so an owner change re-points the buffer to the new project before
         // the old buffer is dropped), then close the stale ones.
-        for companion in &companions {
-            self.provider
-                .register_carrier_member(
-                    &companion.provider_uri,
-                    &companion.content,
-                    project.as_str(),
-                )
-                .await
-                .map_err(|err| ReconcileErr::ProviderTransition {
-                    desired: desired.clone(),
-                    detail: err.to_string(),
+        if let Some(provider) = &self.provider {
+            for companion in &companions {
+                provider
+                    .register_carrier_member(
+                        &companion.provider_uri,
+                        &companion.content,
+                        project.as_str(),
+                    )
+                    .await
+                    .map_err(|err| ReconcileErr::ProviderTransition {
+                        desired: desired.clone(),
+                        detail: err.to_string(),
+                    })?;
+            }
+            for stale_path in &stale {
+                provider.close_file(stale_path).await.map_err(|err| {
+                    ReconcileErr::ProviderTransition {
+                        desired: desired.clone(),
+                        detail: err.to_string(),
+                    }
                 })?;
-        }
-        for stale_path in &stale {
-            self.provider.close_file(stale_path).await.map_err(|err| {
-                ReconcileErr::ProviderTransition {
-                    desired: desired.clone(),
-                    detail: err.to_string(),
-                }
-            })?;
-        }
+            }
 
-        // 3. Evict tsserver's sticky resolution for every published companion now
-        // its content is on disk — best-effort (the store is warm; the next
-        // interaction re-reads), so an eviction failure never fails the publish.
-        for companion in &companions {
-            let _ = self
-                .provider
-                .notify_carrier_changed(&companion.provider_uri)
-                .await;
+            // 3. Evict tsserver's sticky resolution for every published companion now
+            // its content is on disk — best-effort (the store is warm; the next
+            // interaction re-reads), so an eviction failure never fails the publish.
+            for companion in &companions {
+                let _ = provider
+                    .notify_carrier_changed(&companion.provider_uri)
+                    .await;
+            }
         }
 
         // 4. Durable ledger commit (transactional + post-commit verify). Source-indexed,
@@ -897,15 +917,17 @@ impl MembershipReconciler {
         // close command also drops the carrier registration, so a respawn does not
         // replay a retracted carrier. NO ledger lock is held across these awaits.
         let prior = self.ledger.record_snapshot(source);
-        if let Some(MembershipRecord::Advertised { companions, .. }) = &prior {
-            for companion in companions {
-                self.provider
-                    .close_file(&companion.provider_uri)
-                    .await
-                    .map_err(|err| ReconcileErr::ProviderTransition {
-                        desired: desired.clone(),
-                        detail: err.to_string(),
-                    })?;
+        if let Some(provider) = &self.provider {
+            if let Some(MembershipRecord::Advertised { companions, .. }) = &prior {
+                for companion in companions {
+                    provider
+                        .close_file(&companion.provider_uri)
+                        .await
+                        .map_err(|err| ReconcileErr::ProviderTransition {
+                            desired: desired.clone(),
+                            detail: err.to_string(),
+                        })?;
+                }
             }
         }
 

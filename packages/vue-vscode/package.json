@@ -25,9 +25,9 @@
     "build": "node esbuild.mjs --production",
     "build:dev": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "test": "vitest run src/carrier-routing-no-vue-gate.spec.ts src/extensionTsService.diagnostics.spec.ts src/extensionTsService.autoimport.spec.ts src/extensionTsService.codefix.spec.ts src/package.spec.ts src/sharedTsgoLaunch.spec.ts src/d1AcceptanceGate.spec.ts src/runSummaryOracle.spec.ts",
+    "test": "vitest run src",
     "vscode:prepublish": "node esbuild.mjs --production",
-    "prepare:e2e": "cargo build -p verter_lsp --manifest-path ../../Cargo.toml && pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm run build:dev && tsc -p tsconfig.test.json",
+    "prepare:e2e": "cargo build -p verter_lsp -p verter_relay_shim --manifest-path ../../Cargo.toml && pnpm --filter @verter/language-shared build && pnpm --filter @verter/typescript-plugin build && pnpm run build:dev && tsc -p tsconfig.test.json",
     "pretest:e2e": "pnpm run prepare:e2e",
     "test:e2e": "pnpm run test:e2e:run",
     "test:e2e:run": "node out-test/e2e/runTests.js",
@@ -279,6 +279,7 @@
           "type": "string",
           "enum": [
             "auto",
+            "shared-tsgo",
             "tsgo",
             "tsserver",
             "extension",
@@ -286,8 +287,9 @@
           ],
           "default": "auto",
           "enumDescriptions": [
-            "Use workspace TypeScript if available, fall back to TSGO (recommended)",
-            "Use TSGO only (faster, but re-exported .vue components may lose typing)",
+            "Prefer the exact editor-owned Native Preview Program when available, with managed fallback (recommended)",
+            "Prefer the exact editor-owned Native Preview Program and activate managed TSGO only after an observed attach failure",
+            "Use a separately managed TSGO process (operator override)",
             "Use workspace TypeScript version (tsserver)",
             "Host TypeScript language service in the extension process (experimental)",
             "Disable TypeScript type checking"
@@ -449,7 +451,11 @@
     "typescriptServerPlugins": [
       {
         "name": "@verter/typescript-plugin",
-        "enableForWorkspaceTypeScriptVersions": true
+        "enableForWorkspaceTypeScriptVersions": true,
+        "languages": [
+          "vue",
+          "svelte"
+        ]
       }
     ],
     "languages": [

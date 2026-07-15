@@ -11,6 +11,7 @@ pub mod carrier_registry;
 pub mod config;
 pub mod css;
 pub mod documents;
+pub mod editor_tsserver;
 pub mod extension_provider;
 pub mod external_ts;
 pub mod external_ts_sync;
@@ -61,6 +62,8 @@ pub enum TypeProviderKind {
     Tsgo,
     /// tsserver (Node.js-based TypeScript server).
     Tsserver,
+    /// The editor's own tsserver, extended by Verter's contributed plugin.
+    EditorTsserver,
     /// No type provider — verter-only mode.
     None,
 }
@@ -70,6 +73,7 @@ impl std::fmt::Display for TypeProviderKind {
         match self {
             TypeProviderKind::Tsgo => write!(f, "TSGO"),
             TypeProviderKind::Tsserver => write!(f, "tsserver"),
+            TypeProviderKind::EditorTsserver => write!(f, "editor-tsserver"),
             TypeProviderKind::None => write!(f, "none"),
         }
     }
@@ -79,8 +83,8 @@ impl std::fmt::Display for TypeProviderKind {
 pub struct LspConfig {
     /// The verter host instance (always required, shared via Arc for MCP embedding).
     pub host: Arc<VerterHost>,
-    /// Optional type provider for TSGO integration.
-    /// When `None`, the LSP runs in verter-only mode.
+    /// Optional in-process provider actor. This is `None` both in Verter-only mode and
+    /// when the editor-owned tsserver/plugin is the attested semantic authority.
     pub type_provider: Option<Arc<dyn TypeProvider>>,
     /// How files are synced to the type provider.
     pub project_sync_mode: ProjectSyncMode,
@@ -92,10 +96,9 @@ pub struct LspConfig {
     /// Actual MCP HTTP port (already bound). `None` when MCP is disabled.
     /// The LSP sends a `$/verter/mcpReady` notification during `initialized()`.
     pub mcp_port: Option<u16>,
-    /// Why no type provider could be started (only set when `type_provider` is `None`).
-    /// Sent to the extension via `$/verter/typeProviderStatus` so it can show a meaningful
-    /// status bar warning (e.g., "Node.js not found", "TypeScript not installed").
-    pub type_provider_none_reason: Option<String>,
+    /// Human-readable provenance for the selected provider, or the reason no provider
+    /// could be started. Sent via `$/verter/typeProviderStatus` for editor status UI.
+    pub type_provider_reason: Option<String>,
     /// TEST SEAM: when `true`, `did_open` does NOT eagerly prewarm an imported
     /// child carrier's `{carrier}.ts` PUBLIC-API surface. Production leaves this
     /// `false` (the prewarm makes hover/completion/go-to-def on `<ChildComponent>`

@@ -2,6 +2,151 @@
 
 use super::*;
 
+use oxc_ast::ast::{BindingIdentifier, IdentifierReference};
+use oxc_ast_visit::{walk, Visit};
+
+struct IdentifierBindingFacts<'name> {
+    name: &'name str,
+    bindings: usize,
+    references: usize,
+    carrier: String,
+}
+
+impl<'a> Visit<'a> for IdentifierBindingFacts<'_> {
+    fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
+        if identifier.name == self.name {
+            self.bindings += 1;
+        }
+        walk::walk_binding_identifier(self, identifier);
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        if identifier.name == self.name {
+            self.references += 1;
+        }
+        walk::walk_identifier_reference(self, identifier);
+    }
+}
+
+fn generated_identifier_facts<'name>(
+    source: &str,
+    name: &'name str,
+) -> IdentifierBindingFacts<'name> {
+    let (code, _, type_constructs) = gen_tsx_script_full(source);
+    let full = format!("{code}\n{type_constructs}");
+    let allocator = oxc_allocator::Allocator::new();
+    let parsed = oxc_parser::Parser::new(&allocator, &full, oxc_span::SourceType::tsx()).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "generated IDE carrier must remain valid TSX: {:?}\n---\n{full}",
+        parsed
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    );
+
+    let mut facts = IdentifierBindingFacts {
+        name,
+        bindings: 0,
+        references: 0,
+        carrier: full.clone(),
+    };
+    facts.visit_program(&parsed.program);
+    facts
+}
+
+#[test]
+fn destructured_define_props_keeps_script_binding_live() {
+    let facts = generated_identifier_facts(
+        r#"<script setup lang="ts">
+import type { LabelProps } from "./props"
+const { label, count } = defineProps<LabelProps>()
+const wrong: number = label
+</script>
+<template><div>{{ label }} {{ count }}</div></template>"#,
+        "label",
+    );
+    assert_eq!(
+        facts.bindings, 1,
+        "the generated carrier must retain exactly one value binding for the destructured prop"
+    );
+    assert!(
+        facts.references >= 1,
+        "the later script expression must remain a reference to that binding"
+    );
+}
+
+#[test]
+fn destructured_define_props_preserves_alias_defaults_and_rest_bindings() {
+    let source = r#"<script setup lang="ts">
+interface Props { label?: string; count: number }
+const { label: localLabel = "fallback", ...rest } = defineProps<Props>()
+const normalized: string = localLabel
+const count: number = rest.count
+</script>"#;
+
+    for name in ["localLabel", "rest"] {
+        let facts = generated_identifier_facts(source, name);
+        assert_eq!(
+            facts.bindings, 1,
+            "the generated carrier must retain one value binding for {name}:\n{}",
+            facts.carrier
+        );
+        assert!(
+            facts.references >= 1,
+            "the later script expression must reference the retained {name} binding:\n{}",
+            facts.carrier
+        );
+    }
+}
+
+#[test]
+fn destructured_with_defaults_keeps_script_binding_and_props_carrier_live() {
+    let source = r#"<script setup lang="ts">
+interface Props { label?: string }
+const { label } = withDefaults(defineProps<Props>(), { label: "fallback" })
+const wrong: number = label
+</script>"#;
+
+    for name in ["label", "___VERTER___props"] {
+        let facts = generated_identifier_facts(source, name);
+        assert_eq!(
+            facts.bindings, 1,
+            "the generated carrier must retain one value binding for {name}:\n{}",
+            facts.carrier
+        );
+        assert!(
+            facts.references >= 1,
+            "the generated carrier must use the retained {name} binding:\n{}",
+            facts.carrier
+        );
+    }
+}
+
+#[test]
+fn destructured_define_model_keeps_tuple_bindings_and_model_carrier_live() {
+    let source = r#"<script setup lang="ts">
+const [model, modifiers] = defineModel<string>()
+const value: string = model.value
+const trim = modifiers.trim
+</script>"#;
+
+    for name in ["model", "modifiers", "___VERTER___models_modelValue"] {
+        let facts = generated_identifier_facts(source, name);
+        assert!(
+            facts.bindings >= 1,
+            "the generated carrier must retain a value binding for {name}:\n{}",
+            facts.carrier
+        );
+        assert!(
+            facts.references >= 1,
+            "the generated carrier must use the retained {name} binding:\n{}",
+            facts.carrier
+        );
+    }
+}
+
 // ── Bare useAttrs() cast tests ─────────────────────────────
 
 #[test]
