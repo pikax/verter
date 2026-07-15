@@ -700,7 +700,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     ]));
     store.warm_publish_one(
         &host,
-        &key,
+        &super::prepared::PreparedKeyHandle::prepare(key.clone()),
         &QueryResult::Value(value),
         &walker_diagnostics,
         &carrier,
@@ -1381,7 +1381,7 @@ fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
     let bad = MaterializedSet::single(MaterializedPoint::new(Demand::navigate(proj_path)));
     store.warm_publish_one(
         &host,
-        &key_expanded,
+        &super::prepared::PreparedKeyHandle::prepare(key_expanded),
         &QueryResult::Value(value),
         &walker_diagnostics,
         &carrier,
@@ -8800,4 +8800,561 @@ fn transit_skeleton_warm_does_not_serve_published_skeleton_request() {
         "a StructuralTransit(Skeleton) request must NOT warm-serve the \
          Published(Skeleton) result"
     );
+}
+
+/// Prepared-identity bijection guards (HARD CONDITION for the prepared
+/// dispatch token).
+///
+/// [`super::prepared::PreparedKeyHandle`] is the per-execute identity the
+/// in-flight table, the recursion stack, and the panic guard key on. Its
+/// equality MUST be exactly full-key equality — `token(a) == token(b) ⟺
+/// a == b` — for EVERY [`SemanticQueryKey`] variant. `(family, slot)`
+/// alone is NOT injective (e.g. every `MacroObjectSurface` mode collapses
+/// onto the one `MacroSurfaceShallow` slot), so a token that keyed on the
+/// projected pair would coalesce distinct queries onto one in-flight
+/// entry; these guards pin that the token never does.
+///
+/// The probe-pair builder below is an EXHAUSTIVE match over
+/// [`SemanticQueryKeyTag`] with NO wildcard arm: adding a
+/// `SemanticQueryKey` variant fails compilation here until the new
+/// variant gets a bijection probe.
+mod prepared_identity_bijection {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::sync::Arc;
+
+    use super::super::family::{family_and_slot, requested_point_for_key};
+    use super::super::prepared::PreparedKeyHandle;
+    use crate::locator_identity::{LocatorLoweringKey, ParseEnvHash, ResolveEnvHash};
+    use crate::project_semantic_dispatch::BodySourceWitness;
+    use crate::semantic_query::{
+        ApparentTypeContext, ClassSurfaceContext, ClassSurfaceSide, ContextualTypingKey,
+        EnumContext, FlowNarrowingKey, FreshnessKey, HashValue, IndexKey, InstantiateContext,
+        InstantiateKey, MacroPayloadContext, MapperKey, MapperKind, OptionalityMod,
+        OverloadSetContext, PathSegment, ProgramAnalysisContext, ProgramPointId, ProjectionMode,
+        ProjectionReductionContext, ReadonlyMod, RelationContext, RelationKind, RelationPolicy,
+        ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId, SemanticNodeId, SemanticQueryKey,
+        SemanticQueryKeyTag, SemanticSymbolSpace, SubstitutionCanonicalHash,
+        SurfaceProvenanceContext, TemplateLiteralReduceContext, TypeOfContext, ValueRootKey,
+        ValueRootSlotIdentity,
+    };
+    use verter_type_expr::locators::{
+        AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
+    };
+
+    fn h16(byte: u8) -> HashValue {
+        [byte; 16]
+    }
+
+    fn node(id: u64) -> SemanticNodeId {
+        SemanticNodeId(id)
+    }
+
+    fn nodes(ids: &[u64]) -> Arc<[SemanticNodeId]> {
+        Arc::from(
+            ids.iter()
+                .copied()
+                .map(SemanticNodeId)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )
+    }
+
+    fn type_slot(name: &str) -> ResolvedDeclSlotIdentity {
+        ResolvedDeclSlotIdentity::type_slot(
+            Arc::from("/w/a.ts"),
+            Arc::from(name),
+            0,
+            h16(0),
+            h16(0),
+        )
+    }
+
+    fn inst_key(name: &str) -> SemanticQueryKey {
+        SemanticQueryKey::Instantiate(InstantiateKey::new(
+            type_slot(name),
+            nodes(&[]),
+            InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                h16(0),
+                BodySourceWitness::mint_for_unit_tests(),
+            ),
+        ))
+    }
+
+    fn mapper(id: u64) -> MapperKey {
+        MapperKey {
+            parameter_node: node(id),
+            key_space: node(id),
+            value_expr: node(id),
+            optionality: OptionalityMod::Keep,
+            readonly: ReadonlyMod::Keep,
+            name_remap: None,
+            kind: MapperKind::Computed,
+        }
+    }
+
+    fn value_root(name: &str) -> ValueRootSlotIdentity {
+        ValueRootSlotIdentity::new(
+            ValueRootKey {
+                scope: ScopeId::file(Arc::from("/w/a.ts")),
+                name: Arc::from(name),
+            },
+            0,
+            h16(0),
+            h16(0),
+        )
+    }
+
+    fn analysis_context() -> ProgramAnalysisContext {
+        ProgramAnalysisContext {
+            parse_env_hash: h16(0),
+            resolve_env_hash: h16(0),
+            type_env_hash: h16(0),
+            lib_env_hash: h16(0),
+            project_identity: 0,
+            substitution: SubstitutionCanonicalHash::empty(),
+        }
+    }
+
+    fn program_point(offset: u32) -> ProgramPointId {
+        ProgramPointId {
+            canonical_id: Arc::from("/w/a.ts"),
+            offset,
+        }
+    }
+
+    fn locator_key(path: &[TypeBodyPathStep]) -> SemanticQueryKey {
+        let slot = type_slot("Foo");
+        let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from("/w/a.ts"),
+                symbol: Arc::from("Foo"),
+                space: LocatorSymbolSpace::Type,
+            },
+            path: Arc::from(path.to_vec().into_boxed_slice()),
+        });
+        SemanticQueryKey::LowerLocator {
+            key: LocatorLoweringKey::new_unsubstituted(
+                slot,
+                locator,
+                ParseEnvHash::from_env_hash(h16(1)),
+                ResolveEnvHash::from_env_hash(h16(2)),
+            )
+            .expect("a coherent slot/locator anchor pair must construct"),
+        }
+    }
+
+    /// A `(base, sibling)` probe pair for `tag`: two NON-equal keys of
+    /// the SAME variant differing in one identity dimension. EXHAUSTIVE
+    /// match, no wildcard — a new `SemanticQueryKey` variant fails
+    /// compilation here until it gets a probe pair.
+    fn probe_pair(tag: SemanticQueryKeyTag) -> (SemanticQueryKey, SemanticQueryKey) {
+        match tag {
+            SemanticQueryKeyTag::ResolveDecl => (
+                SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                    scope: ScopeId::file(Arc::from("/w/a.ts")),
+                    name: Arc::from("Foo"),
+                }),
+                SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                    scope: ScopeId::file(Arc::from("/w/a.ts")),
+                    name: Arc::from("Bar"),
+                }),
+            ),
+            SemanticQueryKeyTag::Instantiate => (inst_key("Foo"), inst_key("Bar")),
+            SemanticQueryKeyTag::ProjectMember => (
+                SemanticQueryKey::ProjectMember {
+                    base: node(1),
+                    member: Arc::from("m"),
+                    mode: ProjectionMode::Navigate,
+                },
+                SemanticQueryKey::ProjectMember {
+                    base: node(1),
+                    member: Arc::from("n"),
+                    mode: ProjectionMode::Navigate,
+                },
+            ),
+            SemanticQueryKeyTag::IndexedAccess => (
+                SemanticQueryKey::IndexedAccess {
+                    base: node(1),
+                    index: IndexKey::String(Arc::from("i")),
+                    mode: ProjectionMode::Navigate,
+                },
+                SemanticQueryKey::IndexedAccess {
+                    base: node(1),
+                    index: IndexKey::String(Arc::from("j")),
+                    mode: ProjectionMode::Navigate,
+                },
+            ),
+            SemanticQueryKeyTag::KeyOf => (
+                SemanticQueryKey::KeyOf {
+                    base: node(1),
+                    context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+                },
+                SemanticQueryKey::KeyOf {
+                    base: node(2),
+                    context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+                },
+            ),
+            SemanticQueryKeyTag::MappedType => (
+                SemanticQueryKey::MappedType {
+                    source: node(1),
+                    mapper: mapper(3),
+                    context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+                },
+                SemanticQueryKey::MappedType {
+                    source: node(2),
+                    mapper: mapper(3),
+                    context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+                },
+            ),
+            SemanticQueryKeyTag::Conditional => (
+                SemanticQueryKey::Conditional {
+                    check: node(1),
+                    extends: node(2),
+                    true_branch: node(3),
+                    false_branch: node(4),
+                    distributive: false,
+                },
+                SemanticQueryKey::Conditional {
+                    check: node(1),
+                    extends: node(2),
+                    true_branch: node(3),
+                    false_branch: node(4),
+                    distributive: true,
+                },
+            ),
+            SemanticQueryKeyTag::TypeOf => (
+                SemanticQueryKey::TypeOf {
+                    value_root: value_root("v"),
+                    context: TypeOfContext::new(
+                        ProjectionReductionContext::published(ProjectionMode::Shallow),
+                        h16(0),
+                    ),
+                },
+                SemanticQueryKey::TypeOf {
+                    value_root: value_root("w"),
+                    context: TypeOfContext::new(
+                        ProjectionReductionContext::published(ProjectionMode::Shallow),
+                        h16(0),
+                    ),
+                },
+            ),
+            SemanticQueryKeyTag::NormalizeUnion => (
+                SemanticQueryKey::NormalizeUnion {
+                    members: nodes(&[1, 2]),
+                },
+                SemanticQueryKey::NormalizeUnion {
+                    members: nodes(&[1, 3]),
+                },
+            ),
+            SemanticQueryKeyTag::NormalizeIntersection => (
+                SemanticQueryKey::NormalizeIntersection {
+                    members: nodes(&[1, 2]),
+                },
+                SemanticQueryKey::NormalizeIntersection {
+                    members: nodes(&[1, 3]),
+                },
+            ),
+            SemanticQueryKeyTag::ProjectPath => (
+                SemanticQueryKey::ProjectPath {
+                    base: node(1),
+                    path: Arc::from([PathSegment::Member(Arc::from("p"))]),
+                    context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                },
+                SemanticQueryKey::ProjectPath {
+                    base: node(1),
+                    path: Arc::from([PathSegment::Member(Arc::from("q"))]),
+                    context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+                },
+            ),
+            SemanticQueryKeyTag::Relate => (
+                SemanticQueryKey::Relate {
+                    source: node(1),
+                    target: node(2),
+                    relation: RelationKind::default(),
+                    policy: RelationPolicy::default(),
+                    source_freshness: FreshnessKey::default(),
+                    inference_context: None,
+                    context: RelationContext::default(),
+                },
+                SemanticQueryKey::Relate {
+                    source: node(1),
+                    target: node(3),
+                    relation: RelationKind::default(),
+                    policy: RelationPolicy::default(),
+                    source_freshness: FreshnessKey::default(),
+                    inference_context: None,
+                    context: RelationContext::default(),
+                },
+            ),
+            SemanticQueryKeyTag::ResolveMacroPayload => (
+                SemanticQueryKey::ResolveMacroPayload {
+                    owner: type_slot("__sfc"),
+                    macro_index: 0,
+                    macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+                    type_args: nodes(&[]),
+                    context: MacroPayloadContext::new(h16(0), ProjectionMode::Navigate),
+                },
+                SemanticQueryKey::ResolveMacroPayload {
+                    owner: type_slot("__sfc"),
+                    macro_index: 1,
+                    macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+                    type_args: nodes(&[]),
+                    context: MacroPayloadContext::new(h16(0), ProjectionMode::Navigate),
+                },
+            ),
+            SemanticQueryKeyTag::ResolveClassSurface => (
+                SemanticQueryKey::ResolveClassSurface {
+                    decl_slot: type_slot("C"),
+                    type_args: nodes(&[]),
+                    side: ClassSurfaceSide::Instance,
+                    context: ClassSurfaceContext {
+                        parse_env_hash: h16(0),
+                        resolve_env_hash: h16(0),
+                        mode: ProjectionMode::Shallow,
+                    },
+                },
+                SemanticQueryKey::ResolveClassSurface {
+                    decl_slot: type_slot("C"),
+                    type_args: nodes(&[]),
+                    side: ClassSurfaceSide::Static,
+                    context: ClassSurfaceContext {
+                        parse_env_hash: h16(0),
+                        resolve_env_hash: h16(0),
+                        mode: ProjectionMode::Shallow,
+                    },
+                },
+            ),
+            SemanticQueryKeyTag::ResolveAmbientNamespace => (
+                SemanticQueryKey::ResolveAmbientNamespace {
+                    namespace_slot: type_slot("N")
+                        .with_symbol_space(SemanticSymbolSpace::Namespace),
+                    type_args: nodes(&[]),
+                    context: crate::semantic_query::AmbientNamespaceContext {
+                        parse_env_hash: h16(0),
+                        resolve_env_hash: h16(0),
+                        mode: ProjectionMode::Shallow,
+                    },
+                },
+                SemanticQueryKey::ResolveAmbientNamespace {
+                    namespace_slot: type_slot("M")
+                        .with_symbol_space(SemanticSymbolSpace::Namespace),
+                    type_args: nodes(&[]),
+                    context: crate::semantic_query::AmbientNamespaceContext {
+                        parse_env_hash: h16(0),
+                        resolve_env_hash: h16(0),
+                        mode: ProjectionMode::Shallow,
+                    },
+                },
+            ),
+            SemanticQueryKeyTag::ResolveEnum => (
+                SemanticQueryKey::ResolveEnum {
+                    enum_slot: type_slot("E"),
+                    context: EnumContext {
+                        resolve_env_hash: h16(0),
+                    },
+                },
+                SemanticQueryKey::ResolveEnum {
+                    enum_slot: type_slot("F"),
+                    context: EnumContext {
+                        resolve_env_hash: h16(0),
+                    },
+                },
+            ),
+            SemanticQueryKeyTag::ResolveOverloadSet => (
+                SemanticQueryKey::ResolveOverloadSet {
+                    callee: node(1),
+                    type_args: nodes(&[]),
+                    context: OverloadSetContext {
+                        resolve_env_hash: h16(0),
+                    },
+                },
+                SemanticQueryKey::ResolveOverloadSet {
+                    callee: node(2),
+                    type_args: nodes(&[]),
+                    context: OverloadSetContext {
+                        resolve_env_hash: h16(0),
+                    },
+                },
+            ),
+            SemanticQueryKeyTag::ApparentType => (
+                SemanticQueryKey::ApparentType {
+                    base: node(1),
+                    context: ApparentTypeContext {
+                        type_env_hash: h16(0),
+                        lib_env_hash: h16(0),
+                        project_identity: 0,
+                    },
+                },
+                SemanticQueryKey::ApparentType {
+                    base: node(2),
+                    context: ApparentTypeContext {
+                        type_env_hash: h16(0),
+                        lib_env_hash: h16(0),
+                        project_identity: 0,
+                    },
+                },
+            ),
+            SemanticQueryKeyTag::TemplateLiteralReduce => (
+                SemanticQueryKey::TemplateLiteralReduce {
+                    pattern: Arc::from([Arc::from("a")]),
+                    args: nodes(&[]),
+                    context: TemplateLiteralReduceContext {
+                        resolve_env_hash: h16(0),
+                        type_env_hash: h16(0),
+                        lib_env_hash: h16(0),
+                        project_identity: 0,
+                    },
+                },
+                SemanticQueryKey::TemplateLiteralReduce {
+                    pattern: Arc::from([Arc::from("b")]),
+                    args: nodes(&[]),
+                    context: TemplateLiteralReduceContext {
+                        resolve_env_hash: h16(0),
+                        type_env_hash: h16(0),
+                        lib_env_hash: h16(0),
+                        project_identity: 0,
+                    },
+                },
+            ),
+            SemanticQueryKeyTag::FlowNarrowingAt => (
+                SemanticQueryKey::FlowNarrowingAt {
+                    point: program_point(0),
+                    flow: FlowNarrowingKey::empty(),
+                    context: analysis_context(),
+                },
+                SemanticQueryKey::FlowNarrowingAt {
+                    point: program_point(1),
+                    flow: FlowNarrowingKey::empty(),
+                    context: analysis_context(),
+                },
+            ),
+            SemanticQueryKeyTag::ContextualTypeAt => (
+                SemanticQueryKey::ContextualTypeAt {
+                    point: program_point(0),
+                    contextual: ContextualTypingKey::empty(),
+                    context: analysis_context(),
+                },
+                SemanticQueryKey::ContextualTypeAt {
+                    point: program_point(1),
+                    contextual: ContextualTypingKey::empty(),
+                    context: analysis_context(),
+                },
+            ),
+            SemanticQueryKeyTag::LowerLocator => (
+                locator_key(&[]),
+                locator_key(&[TypeBodyPathStep::Member { ordinal: 0 }]),
+            ),
+        }
+    }
+
+    fn std_hash(handle: &PreparedKeyHandle) -> u64 {
+        let mut hasher = rustc_hash::FxBuildHasher.build_hasher();
+        handle.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// token equality ⟺ key equality, for EVERY variant. Also pins the
+    /// projection consistency: the prepared family / slot / requested
+    /// point equal the `family.rs` authorities for the same key.
+    #[test]
+    fn every_variant_token_equality_iff_key_equality() {
+        for tag in SemanticQueryKeyTag::ALL {
+            let (a, b) = probe_pair(*tag);
+            assert_eq!(
+                a.tag(),
+                *tag,
+                "probe pair must construct its own tag ({tag:?})"
+            );
+            assert_eq!(b.tag(), *tag, "sibling must stay in-variant ({tag:?})");
+            assert_ne!(a, b, "probe pair must be two distinct keys ({tag:?})");
+
+            let token_a = PreparedKeyHandle::prepare(a.clone());
+            let token_a2 = PreparedKeyHandle::prepare(a.clone());
+            let token_b = PreparedKeyHandle::prepare(b.clone());
+
+            // ⟸ equal keys produce equal tokens (and equal std hashes,
+            // so the in-flight table treats them as one entry).
+            assert_eq!(
+                token_a, token_a2,
+                "equal keys must produce equal tokens ({tag:?})"
+            );
+            assert_eq!(
+                std_hash(&token_a),
+                std_hash(&token_a2),
+                "equal tokens must hash equally ({tag:?})"
+            );
+
+            // ⟹ distinct keys produce distinct tokens — the token never
+            // coalesces two different queries.
+            assert_ne!(
+                token_a, token_b,
+                "distinct keys must produce distinct tokens ({tag:?})"
+            );
+
+            // Projection consistency with the family.rs authorities.
+            let (family, slot) = family_and_slot(&a);
+            assert_eq!(
+                token_a.family(),
+                &family,
+                "prepared family must equal family_and_slot ({tag:?})"
+            );
+            assert_eq!(
+                token_a.slot(),
+                slot,
+                "prepared slot must equal family_and_slot ({tag:?})"
+            );
+            assert_eq!(
+                token_a.requested_point(),
+                &requested_point_for_key(&a),
+                "prepared requested point must equal requested_point_for_key ({tag:?})"
+            );
+            assert_eq!(
+                token_a.key(),
+                &a,
+                "prepared token must carry the key verbatim ({tag:?})"
+            );
+        }
+    }
+
+    /// The anti-aliasing pin: two DISTINCT keys that COLLIDE on
+    /// `(family, slot)` — every `MacroObjectSurface` mode lands in the
+    /// single `MacroSurfaceShallow` slot — must still produce DISTINCT
+    /// tokens. A token keyed on the projected pair (instead of the full
+    /// key) would coalesce these onto one in-flight entry / recursion
+    /// frame and hand one query the other's result.
+    #[test]
+    fn family_slot_colliding_keys_stay_distinct_tokens() {
+        let macro_surface_shallow = SemanticQueryKey::KeyOf {
+            base: node(1),
+            context: ProjectionReductionContext::macro_object_surface(
+                ProjectionMode::Shallow,
+                SurfaceProvenanceContext::Structural,
+            ),
+        };
+        let macro_surface_expanded = SemanticQueryKey::KeyOf {
+            base: node(1),
+            context: ProjectionReductionContext::macro_object_surface(
+                ProjectionMode::Expanded,
+                SurfaceProvenanceContext::Structural,
+            ),
+        };
+        assert_ne!(
+            macro_surface_shallow, macro_surface_expanded,
+            "fixture: the two keys must be distinct"
+        );
+        assert_eq!(
+            family_and_slot(&macro_surface_shallow),
+            family_and_slot(&macro_surface_expanded),
+            "fixture: the two keys must collide on (family, slot) — the \
+             MacroObjectSurface mode collapse"
+        );
+        let token_shallow = PreparedKeyHandle::prepare(macro_surface_shallow);
+        let token_expanded = PreparedKeyHandle::prepare(macro_surface_expanded);
+        assert_ne!(
+            token_shallow, token_expanded,
+            "family/slot-colliding keys must STILL produce distinct tokens — \
+             token equality is full-key equality, never (family, slot) equality"
+        );
+    }
 }

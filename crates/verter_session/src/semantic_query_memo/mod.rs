@@ -51,6 +51,7 @@ mod family;
 mod hash_cons_memos;
 mod inflight;
 mod interner;
+mod prepared;
 mod reverse_index;
 mod stats;
 #[cfg(any(test, feature = "test-support"))]
@@ -82,13 +83,18 @@ use budgeted_caches::BudgetedRelationMemo;
 use derivation::DerivationStore;
 pub use family::AuditEagerKeyRow;
 use family::{
-    carrier_facts_reference_canonical, family_and_slot, requested_path_for_key,
-    requested_point_for_key, CandidateList, FamilyKey, FamilySlots, MemoEntry, ModeSlot,
+    carrier_facts_reference_canonical, family_and_slot, requested_path_for_key, CandidateList,
+    FamilyKey, FamilySlots, MemoEntry, ModeSlot,
 };
+// Used only by the `#[cfg(any(test, feature = "test-support"))]` publish
+// helpers; the production paths read the prepared token instead.
+#[cfg(any(test, feature = "test-support"))]
+use family::requested_point_for_key;
 use inflight::{
     InflightEntry, InflightPanicGuard, RecursionStackGuard, IN_FLIGHT_ON_THIS_THREAD,
     MAX_INFLIGHT_RETRIES,
 };
+use prepared::PreparedKeyHandle;
 use stats::{AtomicSemanticGraphStats, EntriesLockGuard, InFlightStatsGuard};
 
 #[cfg(any(test, feature = "test-support"))]
@@ -166,12 +172,17 @@ pub struct SemanticGraphStore {
     /// lattice-unsound `Shallow → Navigate` clone is REJECTED. Narrower
     /// builds NEVER backfill broader slots, and only into an empty slot.
     entries: Mutex<FxHashMap<FamilyKey, FamilySlots>>,
-    /// In-flight admission keyed by the full [`SemanticQueryKey`]. Because
-    /// mode is part of the key for mode-bearing variants, this keying
-    /// gives per-`(family, mode_slot)` in-flight authority
-    /// concurrent `Navigate` and `Expanded` builds on the same family run
-    /// as two independent in-flight entries.
-    inflight: Mutex<FxHashMap<SemanticQueryKey, Arc<InflightEntry>>>,
+    /// In-flight admission keyed by the prepared query token
+    /// ([`PreparedKeyHandle`]) whose equality IS full
+    /// [`SemanticQueryKey`] equality (bijection pinned by the
+    /// `prepared_identity_bijection` guards). Because mode is part of
+    /// the key for mode-bearing variants, this keying gives
+    /// per-`(family, mode_slot)` in-flight authority — concurrent
+    /// `Navigate` and `Expanded` builds on the same family run as two
+    /// independent in-flight entries. The handle additionally carries
+    /// the prepared `(family, slot)` projection, so invalidation sweeps
+    /// read it instead of re-running `family_and_slot` per entry.
+    inflight: Mutex<FxHashMap<PreparedKeyHandle, Arc<InflightEntry>>>,
     /// Relation-engine memo. Maps the FULL relation identity
     /// [`RelateMemoKey`](crate::semantic_query::RelateMemoKey) (source / target
     /// / relation kind / policy / source freshness / inference context /
@@ -533,7 +544,12 @@ impl SemanticGraphStore {
     /// orthogonal operational budget check; the cooperative path remains the
     /// sole authority that records and returns the sentinel.
     pub(crate) fn is_same_path_inflight_on_current_thread(&self, key: &SemanticQueryKey) -> bool {
-        IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow().iter().any(|active| active == key))
+        let key_hash = prepared::hash_key(key);
+        IN_FLIGHT_ON_THIS_THREAD.with(|slot| {
+            slot.borrow()
+                .iter()
+                .any(|active| active.key_matches(key, key_hash))
+        })
     }
 
     /// Run a test body with `key` installed on the cooperative memo's real
@@ -545,7 +561,7 @@ impl SemanticGraphStore {
         key: SemanticQueryKey,
         body: impl FnOnce() -> T,
     ) -> T {
-        let _guard = RecursionStackGuard::push(key);
+        let _guard = RecursionStackGuard::push(PreparedKeyHandle::prepare(key));
         body()
     }
 
@@ -1122,9 +1138,17 @@ impl SemanticGraphStore {
             let aborted_entries: Vec<Arc<InflightEntry>> = {
                 let mut table = self.inflight.lock();
                 let mut collected: Vec<Arc<InflightEntry>> = Vec::new();
-                table.retain(|key, inflight| {
-                    let (family, slot) = family_and_slot(key);
-                    if affected_pairs.contains(&(family, slot)) {
+                table.retain(|handle, inflight| {
+                    // The prepared handle carries its `(family, slot)`
+                    // projection — no per-entry `family_and_slot`
+                    // rebuild, no owned-`FamilyKey` allocation. The
+                    // slot compares first (a cheap discriminant) so
+                    // most non-matching pairs reject before the family
+                    // comparison.
+                    let affected = affected_pairs
+                        .iter()
+                        .any(|(family, slot)| *slot == handle.slot() && family == handle.family());
+                    if affected {
                         collected.push(Arc::clone(inflight));
                         false // remove — this entry's slot was swept
                     } else {
@@ -2009,6 +2033,39 @@ impl SemanticGraphStore {
         ctx: &dyn crate::resolver_core::ResolverContext,
     ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let (family, slot) = family_and_slot(key);
+        // Same formula as `requested_point_for_key`, reusing the
+        // `family_and_slot` projection above instead of re-running it.
+        let requested = crate::semantic_query::demand::MaterializedPoint::new(
+            family::point_for_slot(slot, &requested_path_for_key(key)),
+        );
+        self.get_validated_impl(&family, slot, &requested, ctx)
+    }
+
+    /// Prepared-token variant of [`Self::get_validated`] — reads the
+    /// family / slot / requested point off the token instead of
+    /// re-projecting the key. Used by the cooperative slow path's
+    /// step-1 warm re-read.
+    #[must_use]
+    fn get_validated_prepared(
+        &self,
+        prepared: &PreparedKeyHandle,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
+        self.get_validated_impl(
+            prepared.family(),
+            prepared.slot(),
+            prepared.requested_point(),
+            ctx,
+        )
+    }
+
+    fn get_validated_impl(
+        &self,
+        family: &FamilyKey,
+        slot: ModeSlot,
+        requested: &crate::semantic_query::demand::MaterializedPoint,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         // Snapshot the candidate list under the lock, then validate
         // OUTSIDE the lock. Holding `entries` across `MemoEntry::validate`
         // — which walks the path-precise fact rail against the resolver
@@ -2016,15 +2073,14 @@ impl SemanticGraphStore {
         // cold publish on the single global memo mutex.
         let snapshot: Option<CandidateList> = {
             let entries = self.entries_lock_diagnosed();
-            entries.get(&family).map(|slots| slots.snapshot_slot(slot))
+            entries.get(family).map(|slots| slots.snapshot_slot(slot))
         };
         // §3.4 TWO-GATE warm hit — `cached_satisfies` (recorded-point
         // dominance, pure) AND `validate_with_self_roots` (fact rail).
         // Both must pass; see `try_warm_hit_fast_path` for the rationale.
-        let requested = requested_point_for_key(key);
         let validated = snapshot.and_then(|list| {
             list.into_iter().find(|entry| {
-                cached_satisfies(&entry.satisfied_projection, &requested) && entry.validate(ctx)
+                cached_satisfies(&entry.satisfied_projection, requested) && entry.validate(ctx)
             })
         });
         if let Some(entry) = &validated {
@@ -2034,7 +2090,7 @@ impl SemanticGraphStore {
             // concurrent invalidation drained it between snapshot and
             // here, the update is a no-op.
             let mut entries = self.entries_lock_diagnosed();
-            if let Some(slots) = entries.get_mut(&family) {
+            if let Some(slots) = entries.get_mut(family) {
                 slots.mark_validated_freshest(slot, entry);
             }
         }
@@ -2067,9 +2123,15 @@ impl SemanticGraphStore {
 
     /// Presence probe — true iff the warm map currently holds a
     /// `(family, slot)` entry for `key`. Does NOT validate, does NOT
-    /// bubble, does NOT bump any counter. Used by the prefix-backfill
-    /// helper in `warm_publish_one_if_absent` to decide whether a
-    /// publish would race a concurrent cold winner.
+    /// bubble, does NOT bump any counter. The production prefix-backfill
+    /// presence probe runs inline on the prepared token inside
+    /// `warm_publish_one_if_absent`; this by-key variant serves the
+    /// in-crate dispatch test suite (`#[cfg(test)]`), the only caller —
+    /// `pub(crate)` keeps it unreachable from external test crates, so
+    /// the tighter `cfg(test)` gate compiles it exactly when its caller
+    /// exists (a `test-support`-without-`test` build would otherwise
+    /// carry it as dead code).
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn contains_key(&self, key: &SemanticQueryKey) -> bool {
         let (family, slot) = family_and_slot(key);
@@ -2193,6 +2255,15 @@ impl SemanticGraphStore {
         crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // Prepare the query token ONCE per execute: one
+        // `family_and_slot` projection, one requested-point build, one
+        // key hash — shared (behind one `Arc`) by the warm probe, the
+        // slow path's warm re-read, the in-flight table entry, the
+        // recursion-stack frame, the panic guard, and the cold-winner
+        // publish. See `prepared` module docs for the equality
+        // contract (token equality ⟺ key equality).
+        let prepared = PreparedKeyHandle::prepare(key);
+
         // Warm-hit fast path. A single non-diagnosed `entries.lock()`
         // acquisition checks the slot; on a hit the entry's carrier is
         // validated strictly (self-roots through
@@ -2208,13 +2279,13 @@ impl SemanticGraphStore {
         // execution falls through to the cooperative slow path that
         // owns same-path recursion, in-flight admission, and cold-build
         // publish.
-        if let Some(hit) = self.try_warm_hit_fast_path(ctx, &key) {
+        if let Some(hit) = self.try_warm_hit_fast_path(ctx, &prepared) {
             return hit;
         }
 
         // Slow path — cooperative-admission flow. Handles same-path
         // recursion, joiner-condvar waits, cold-build publish.
-        self.execute_cooperative_slow(ctx, key, recursion_sentinel, build)
+        self.execute_cooperative_slow(ctx, prepared, recursion_sentinel, build)
     }
 
     /// Warm-hit fast path for [`Self::execute_cooperative`]. Returns
@@ -2258,9 +2329,11 @@ impl SemanticGraphStore {
     fn try_warm_hit_fast_path(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
-        key: &SemanticQueryKey,
+        prepared: &PreparedKeyHandle,
     ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
-        let (family, slot) = family_and_slot(key);
+        let key = prepared.key();
+        let family = prepared.family();
+        let slot = prepared.slot();
 
         // Snapshot the candidate list under the lock; validate OUTSIDE
         // the lock. With the cap-4 multi-candidate substrate the
@@ -2271,7 +2344,7 @@ impl SemanticGraphStore {
         // skipped without bubbling.
         let snapshot: Option<CandidateList> = {
             let entries = self.entries.lock();
-            entries.get(&family).map(|slots| slots.snapshot_slot(slot))
+            entries.get(family).map(|slots| slots.snapshot_slot(slot))
         };
         // §3.4 TWO-GATE warm hit. Gate 1: `cached_satisfies` — the
         // candidate's RECORDED materialised set must dominate the
@@ -2279,10 +2352,10 @@ impl SemanticGraphStore {
         // `validate_with_self_roots` — the fact rail must validate against
         // the live view. BOTH must pass; a candidate failing either is
         // skipped without bubbling.
-        let requested = requested_point_for_key(key);
+        let requested = prepared.requested_point();
         let entry: MemoEntry = snapshot?
             .into_iter()
-            .find(|e| cached_satisfies(&e.satisfied_projection, &requested) && e.validate(ctx))?;
+            .find(|e| cached_satisfies(&e.satisfied_projection, requested) && e.validate(ctx))?;
         // Brief LRU bookkeeping — reacquire ONLY to move the matching
         // candidate to the back of the FIFO order so subsequent
         // lookups treat it as freshest. The match is by discriminant
@@ -2291,7 +2364,7 @@ impl SemanticGraphStore {
         // gets the cloned entry from the snapshot).
         {
             let mut entries = self.entries.lock();
-            if let Some(slots) = entries.get_mut(&family) {
+            if let Some(slots) = entries.get_mut(family) {
                 slots.mark_validated_freshest(slot, &entry);
             }
         }
@@ -2372,7 +2445,7 @@ impl SemanticGraphStore {
     fn execute_cooperative_slow<F, R, O>(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
-        key: SemanticQueryKey,
+        prepared: PreparedKeyHandle,
         recursion_sentinel: R,
         build: F,
     ) -> CacheRead<QueryResult<SemanticNodeId>>
@@ -2398,30 +2471,30 @@ impl SemanticGraphStore {
         // cfg-test dispatch recording (cold). Same as the
         // pre-refactor pre-loop observation.
         #[cfg(test)]
-        crate::project_semantic_dispatch::raise::record_dispatch_cold(&key);
+        crate::project_semantic_dispatch::raise::record_dispatch_cold(prepared.key());
 
         // Capture-token dispatch recording (cold). Gated to match the
         // instrumentation module (absent in release).
         #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| {
-            t.record_dispatch(&key, /* hit */ false)
+            t.record_dispatch(prepared.key(), /* hit */ false)
         });
 
         tracing::debug!(
             target: "verter::memo::miss",
-            ?key,
+            key = ?prepared.key(),
             "memo_miss"
         );
 
-        let (inflight, key) = loop {
+        let inflight = loop {
             // 1. Warm memo hit. Reaches here only on the rare race
             //    where another thread published between our fast-path
             //    check and now (or on retry after an abort sweep). The
-            //    warm read is validated strictly via `get_validated` —
-            //    a freshly-published entry validates; a slot a
-            //    concurrent invalidation made stale misses and the
-            //    cold-build path below recomputes.
-            if let Some(hit) = self.get_validated(&key, ctx) {
+            //    warm read is validated strictly via the prepared-token
+            //    variant of `get_validated` — a freshly-published entry
+            //    validates; a slot a concurrent invalidation made stale
+            //    misses and the cold-build path below recomputes.
+            if let Some(hit) = self.get_validated_prepared(&prepared, ctx) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 if let Some(sched_ctx) = verter_scheduler::request_context::current_context() {
                     sched_ctx
@@ -2443,8 +2516,10 @@ impl SemanticGraphStore {
             }
 
             // 2. Same-path recursion detection — bail with a sentinel.
+            //    Token equality fast-rejects on the cached key hash
+            //    before falling back to full-key comparison.
             let is_self_recursive =
-                IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow().iter().any(|k| k == &key));
+                IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow().iter().any(|k| k == &prepared));
             if is_self_recursive {
                 self.stats
                     .same_path_sentinel_returns
@@ -2464,11 +2539,13 @@ impl SemanticGraphStore {
                 };
             }
 
-            // 3. Register or join the in-flight entry.
+            // 3. Register or join the in-flight entry. The table key is
+            //    the prepared token — an `Arc` refcount bump, not a
+            //    full `SemanticQueryKey` clone.
             let inflight = {
                 let mut table = self.inflight.lock();
                 table
-                    .entry(key.clone())
+                    .entry(prepared.clone())
                     .or_insert_with(|| Arc::new(InflightEntry::new()))
                     .clone()
             };
@@ -2634,10 +2711,10 @@ impl SemanticGraphStore {
                         {
                             let mut table = self.inflight.lock();
                             if table
-                                .get(&key)
+                                .get(&prepared)
                                 .is_some_and(|entry| Arc::ptr_eq(entry, &inflight))
                             {
-                                table.remove(&key);
+                                table.remove(&prepared);
                             }
                         }
                         drop(inflight);
@@ -2676,7 +2753,7 @@ impl SemanticGraphStore {
             }
             state.claimed = true;
             drop(state);
-            break (inflight, key);
+            break inflight;
         };
 
         // Cold winner — record the in-flight presence for peak tracking.
@@ -2692,9 +2769,11 @@ impl SemanticGraphStore {
         // 4. Execute the cold build. Both the recursion stack entry and
         //    the in-flight admission are protected by RAII guards so a
         //    panic inside `build()` cannot deadlock future callers.
-        let _recursion_guard = RecursionStackGuard::push(key.clone());
+        //    Both guards share the prepared token — two `Arc` bumps,
+        //    zero `SemanticQueryKey` clones.
+        let _recursion_guard = RecursionStackGuard::push(prepared.clone());
         let mut panic_guard =
-            InflightPanicGuard::new(Arc::clone(&inflight), &self.inflight, key.clone());
+            InflightPanicGuard::new(Arc::clone(&inflight), &self.inflight, prepared.clone());
         let build_start = Instant::now();
         let build_output: crate::project_semantic_dispatch::walk::QueryBuildOutput = build().into();
         let build_held_ns = build_start.elapsed().as_nanos() as u64;
@@ -2721,7 +2800,7 @@ impl SemanticGraphStore {
         // modeless `Single` family yields `Demand::identity()`, so its
         // gate is a trivial pass.
         let satisfied_projection = if satisfied_projection.is_empty() {
-            MaterializedSet::single(requested_point_for_key(&key))
+            MaterializedSet::single(prepared.requested_point().clone())
         } else {
             satisfied_projection
         };
@@ -2820,7 +2899,7 @@ impl SemanticGraphStore {
         if let Some(carrier) = publish_carrier {
             let published = self.warm_publish_one(
                 ctx,
-                &key,
+                &prepared,
                 &result,
                 &walker_diagnostics,
                 carrier,
@@ -2876,7 +2955,7 @@ impl SemanticGraphStore {
         } else {
             tracing::debug!(
                 target: "verter::memo::suppress",
-                key = ?key,
+                key = ?prepared.key(),
                 "cache_suppress=true; refusing memo insertion (build-output suppression)"
             );
             // Per-request attribution of the no-poison gate. Bumped
@@ -2986,10 +3065,10 @@ impl SemanticGraphStore {
         {
             let mut table = self.inflight.lock();
             if table
-                .get(&key)
+                .get(&prepared)
                 .is_some_and(|entry| Arc::ptr_eq(entry, &inflight))
             {
-                table.remove(&key);
+                table.remove(&prepared);
             }
         }
         // `_inflight_stats_guard` decrements `in_flight_current` on
@@ -3034,7 +3113,7 @@ impl SemanticGraphStore {
     fn warm_publish_one(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
-        key: &SemanticQueryKey,
+        prepared: &PreparedKeyHandle,
         result: &QueryResult<SemanticNodeId>,
         walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
         read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
@@ -3050,14 +3129,16 @@ impl SemanticGraphStore {
             // still consistent, so backfills (if any) stay valid.
             return true;
         }
-        let (family, slot) = family_and_slot(key);
-        let requested_path = requested_path_for_key(key);
+        let family = prepared.family();
+        let slot = prepared.slot();
+        let requested_path = prepared.requested_path();
         // §3.4 soundness invariant (production publish ONLY): the recorded
         // terminal must be at-least the slot's mode — see
         // `family::slot_domain_siblings`. Test-only publishes bypass this.
         debug_assert!(
-            cached_satisfies(satisfied_projection, &requested_point_for_key(key)),
-            "warm_publish_one: {key:?} records no terminal satisfying the slot's mode (§3.4)"
+            cached_satisfies(satisfied_projection, prepared.requested_point()),
+            "warm_publish_one: {:?} records no terminal satisfying the slot's mode (§3.4)",
+            prepared.key()
         );
         // The carrier is the COMPLETED self-version-rooted carrier the
         // shared cold-build helper produced via
@@ -3102,12 +3183,12 @@ impl SemanticGraphStore {
         }
         // Record whether this family is newly entering the memo so the
         // retention budget tracks one ledger record per family.
-        let family_was_new = !entries.contains_key(&family);
+        let family_was_new = !entries.contains_key(family);
         let outcome =
             entries
                 .entry(family.clone())
                 .or_default()
-                .publish(slot, entry, &requested_path);
+                .publish(slot, entry, requested_path);
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution. Each populated slot
         // (primary plus any backfilled narrower slots) counts as one
@@ -3133,7 +3214,7 @@ impl SemanticGraphStore {
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
                 &self.canonical_to_entries,
-                &family,
+                family,
                 *displaced_slot,
                 displaced_entry,
             );
@@ -3148,7 +3229,7 @@ impl SemanticGraphStore {
         // admission for a newly-keyed family and prunes the reverse index
         // of any FIFO victim it evicts.
         if family_was_new && !populated_slots.is_empty() {
-            self.record_family_admission_locked(&mut entries, &family);
+            self.record_family_admission_locked(&mut entries, family);
         }
         // Reverse-index registration. Register each populated slot
         // under EVERY canonical the entry depends on — the UNION of
@@ -3161,7 +3242,7 @@ impl SemanticGraphStore {
         // `invalidate_all`. See `register_reverse_index`'s docstring.
         reverse_index::register_reverse_index(
             &self.canonical_to_entries,
-            &family,
+            family,
             &populated_slots,
             &read_set_signature,
             dispatch_dep_signature,
@@ -3227,14 +3308,20 @@ impl SemanticGraphStore {
         if !matches!(result, QueryResult::Value(_)) {
             return;
         }
-        let (family, slot) = family_and_slot(&key);
-        let requested_path = requested_path_for_key(&key);
+        // Prepare the backfill key's token once — the same
+        // family/slot/path/point projection the by-key helpers ran
+        // separately, plus the hash the in-flight probe needs.
+        let prepared = PreparedKeyHandle::prepare(key);
+        let family = prepared.family();
+        let slot = prepared.slot();
+        let requested_path = prepared.requested_path();
         // §3.4 soundness invariant — same as `warm_publish_one` (a
         // prefix-backfill's `Navigate@prefix` hop is self-satisfying).
         debug_assert!(
-            cached_satisfies(&satisfied_projection, &requested_point_for_key(&key)),
-            "warm_publish_one_if_absent: {key:?} records no terminal satisfying the slot's \
-             mode (§3.4)"
+            cached_satisfies(&satisfied_projection, prepared.requested_point()),
+            "warm_publish_one_if_absent: {:?} records no terminal satisfying the slot's \
+             mode (§3.4)",
+            prepared.key()
         );
         // Skip if already warm OR currently in flight. Both checks
         // happen BEFORE acquiring the entries lock; a concurrent cold
@@ -3242,13 +3329,19 @@ impl SemanticGraphStore {
         // is benign (FamilySlots::publish overrides; both are computing
         // the same canonical prefix node so values agree).
         //
-        // Use `contains_key` rather than `get` so the presence probe
-        // does NOT bubble a stale entry's facts into the outer tracer
-        // before declining to publish.
-        if self.contains_key(&key) {
-            return;
+        // A bare presence probe (never `get`) so the check does NOT
+        // bubble a stale entry's facts into the outer tracer before
+        // declining to publish.
+        {
+            let entries = self.entries_lock_diagnosed();
+            if entries
+                .get(family)
+                .is_some_and(|slots| slots.slot_peek_any(slot).is_some())
+            {
+                return;
+            }
         }
-        if self.inflight.lock().contains_key(&key) {
+        if self.inflight.lock().contains_key(&prepared) {
             return;
         }
         let dispatch_dep_signature_clone = Arc::clone(&dispatch_dep_signature);
@@ -3280,12 +3373,12 @@ impl SemanticGraphStore {
             record_cold_abort_swept(&self.stats);
             return;
         }
-        let family_was_new = !entries.contains_key(&family);
+        let family_was_new = !entries.contains_key(family);
         let outcome =
             entries
                 .entry(family.clone())
                 .or_default()
-                .publish(slot, entry, &requested_path);
+                .publish(slot, entry, requested_path);
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution — see
         // `warm_publish_one` for the full rationale; the prefix-backfill
@@ -3302,7 +3395,7 @@ impl SemanticGraphStore {
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
                 &self.canonical_to_entries,
-                &family,
+                family,
                 *displaced_slot,
                 displaced_entry,
             );
@@ -3311,14 +3404,14 @@ impl SemanticGraphStore {
         // `memo_budget` admission under the held `entries` lock; see
         // `warm_publish_one`.
         if family_was_new && !populated_slots.is_empty() {
-            self.record_family_admission_locked(&mut entries, &family);
+            self.record_family_admission_locked(&mut entries, family);
         }
         // Carrier-aware reverse-index registration — runs UNDER the held
         // `entries` lock; see `warm_publish_one` for the full carrier and
         // lock-order rationale.
         reverse_index::register_reverse_index(
             &self.canonical_to_entries,
-            &family,
+            family,
             &populated_slots,
             &read_set_signature,
             &dispatch_dep_signature_clone,
