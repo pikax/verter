@@ -228,6 +228,30 @@ pub(crate) fn prepare_local_type_decl_outcome(
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
 ) -> PreparedDeclOutcome<PreparedTypeDecl> {
+    prepare_local_type_decl_outcome_with_base(
+        canonical_id,
+        state,
+        symbol_name,
+        dep_edges,
+        import_canonicalization,
+        None,
+    )
+}
+
+/// [`prepare_local_type_decl_outcome`] with an optional caller-owned per-file
+/// TYPE-space `name_resolution` base table
+/// ([`build_type_name_resolution_base`]): a `Some` caller (the prepared-decl
+/// cache, which builds the base once per bundle) shares it via `Arc` across
+/// every non-namespaced decl of the file; `None` builds the table fresh —
+/// the pre-split per-call behavior for standalone entry points.
+fn prepare_local_type_decl_outcome_with_base(
+    canonical_id: &str,
+    state: &ShallowFileState,
+    symbol_name: &str,
+    dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
+    shared_name_resolution_base: Option<&Arc<FxHashMap<String, ResolvedRootIdentity>>>,
+) -> PreparedDeclOutcome<PreparedTypeDecl> {
     use verter_semantic::analysis::type_eval::AugmentationScopeKind;
     // A name absent from the file surface but present in the file's own
     // `declare global { ... }` inventory resolves to the merged global
@@ -278,6 +302,7 @@ pub(crate) fn prepare_local_type_decl_outcome(
         dep_edges,
         origin,
         import_canonicalization,
+        shared_name_resolution_base,
     )))
 }
 
@@ -325,7 +350,9 @@ pub(crate) fn prepare_augmentation_type_decl_outcome(
     };
     // Augmentation-scope decls are off the barrel-final import path (their
     // bodies stitch onto another module's surface, not a re-export hop), so the
-    // barrel fallback applies for any import they reference.
+    // barrel fallback applies for any import they reference. No shared base:
+    // the stitch prepares one decl per (augmenter, name) demand, and the
+    // default canonicalization differs from the bundle-owned base's.
     PreparedDeclOutcome::Ready(Some(prepare_type_decl_from_lowered(
         canonical_id,
         state,
@@ -335,6 +362,7 @@ pub(crate) fn prepare_augmentation_type_decl_outcome(
         dep_edges,
         Some(scope),
         &ImportCanonicalization::default(),
+        None,
     )))
 }
 
@@ -350,6 +378,17 @@ pub(crate) fn prepare_augmentation_type_decl_outcome(
 /// file-scope symbol), threaded to [`add_namespace_sibling_resolutions`] so a
 /// namespaced member binds bare sibling names ONLY from the inventory visible
 /// for that origin.
+///
+/// `shared_name_resolution_base` is the per-FILE type-space base table
+/// ([`build_type_name_resolution_base`]) when the caller owns one (the
+/// prepared-decl cache builds it once per bundle): a NON-namespaced
+/// declaration's `name_resolution` is exactly that base, so it is shared via
+/// `Arc` instead of being rebuilt per declaration. A namespaced declaration
+/// (dotted `symbol_name`) additionally binds its declaration-scoped sibling
+/// names, so it builds its own private table (same insertion order as the
+/// base: file symbols, then siblings, then imports — imports stay the
+/// per-key winners over siblings). `None` (standalone/augmentation entry
+/// points) builds the table fresh — the pre-split per-call behavior.
 #[allow(clippy::too_many_arguments)]
 fn prepare_type_decl_from_lowered(
     canonical_id: &str,
@@ -360,6 +399,7 @@ fn prepare_type_decl_from_lowered(
     dep_edges: Option<&FxHashMap<String, String>>,
     origin: Option<&verter_semantic::analysis::type_eval::AugmentationScopeKind>,
     import_canonicalization: &ImportCanonicalization,
+    shared_name_resolution_base: Option<&Arc<FxHashMap<String, ResolvedRootIdentity>>>,
 ) -> PreparedTypeDecl {
     #[cfg(test)]
     PREPARED_TYPE_DECL_BUILD_COUNT.with(|count| {
@@ -397,70 +437,54 @@ fn prepare_type_decl_from_lowered(
         })
         .collect();
 
-    // Build name_resolution: maps bare names in the body to resolved identities
-    // Local deps resolve to the same file. Reserve the summed inventory
-    // sizes up front (tight upper bound: shadowed imports and cross-space
-    // name collisions only shrink it) — header-index walks, no allocation.
-    prepared.name_resolution.reserve(
-        state.type_symbol_names().count()
-            + state.value_symbol_names().count()
-            + state.import_targets.len(),
-    );
-    for dep_name in state.type_symbol_names() {
-        prepared.name_resolution.insert(
-            dep_name.to_string(),
-            ResolvedRootIdentity::new(canonical_id, dep_name),
-        );
-    }
-    for dep_name in state.value_symbol_names() {
-        prepared.name_resolution.insert(
-            dep_name.to_string(),
-            ResolvedRootIdentity::new(canonical_id, dep_name),
-        );
-    }
-    // Namespace-member scoping: inside `namespace NS { ... }`, an unqualified
-    // reference to a sibling member `M` resolves to `NS.M` (TS namespace
-    // scope). The shallow inventory indexes the member under its QUALIFIED name
-    // (`NS.M`), so a sibling body `Ref("M")` would otherwise miss. For a
-    // namespaced decl (whose `symbol_name` carries an `NS.` prefix), map each
-    // DIRECT sibling's bare name to its qualified identity, drawn from the
-    // inventory visible for the decl's `origin` scope. Inserted AFTER the
-    // unqualified loops so the sibling binding takes precedence over an outer
-    // same-named type — the TS namespace-scope rule.
-    add_namespace_sibling_resolutions(
-        &mut prepared.name_resolution,
-        state,
-        symbol_name,
-        canonical_id,
-        origin,
-    );
-    // External deps resolve through import bindings → the FINAL defining
-    // file. When the import is a re-export hop, the canonicalization
-    // (precomputed at bundle materialisation through the SAME route authority
-    // the carrier fallback / dispatch fallthrough use) carries the final
-    // `(canonical, name)`; otherwise the barrel fallback applies. This keeps
-    // the eager fast-path's stored identity at the FINAL definition rather than
-    // the intermediate barrel.
-    for (local_name, target) in state.import_targets.iter() {
-        // `PreparedTypeDecl` bodies are lowered in TYPE space. Preserve the
-        // same local-first precedence used by route-fact classification and
-        // the declaration-scope fallback: a same-file type header shadows an
-        // import binding with the same local spelling. Value-only imports
-        // continue to populate the map (including `typeof` dependencies).
-        if state.has_type_symbol(local_name) {
-            continue;
+    // name_resolution: bare names in the body → resolved identities. The
+    // file-symbol + import entries are a per-FILE artifact (identical for
+    // every declaration of this file), so a non-namespaced decl SHARES the
+    // caller's base table; only a namespaced decl builds a private table to
+    // add its declaration-scoped sibling bindings.
+    prepared.name_resolution = if !symbol_name.contains('.') {
+        match shared_name_resolution_base {
+            Some(base) => Arc::clone(base),
+            None => Arc::new(build_type_name_resolution_base(
+                canonical_id,
+                state,
+                dep_edges,
+                import_canonicalization,
+            )),
         }
-        let resolved = canonicalize_import_target(
-            import_canonicalization,
-            canonical_id,
-            dep_edges,
-            local_name,
-            target,
+    } else {
+        // Namespace-member scoping: inside `namespace NS { ... }`, an
+        // unqualified reference to a sibling member `M` resolves to `NS.M`
+        // (TS namespace scope). The shallow inventory indexes the member
+        // under its QUALIFIED name (`NS.M`), so a sibling body `Ref("M")`
+        // would otherwise miss. For a namespaced decl (whose `symbol_name`
+        // carries an `NS.` prefix), map each DIRECT sibling's bare name to
+        // its qualified identity, drawn from the inventory visible for the
+        // decl's `origin` scope. Inserted AFTER the file-symbol pass so the
+        // sibling binding takes precedence over an outer same-named type —
+        // the TS namespace-scope rule — and BEFORE the import pass, which
+        // stays the per-key winner for names the file's type namespace does
+        // not declare.
+        let mut table = FxHashMap::default();
+        // Reserve the summed inventory sizes up front (tight upper bound for
+        // the base entries: shadowed imports and cross-space name collisions
+        // only shrink it) — header-index walks, no allocation.
+        table.reserve(
+            state.type_symbol_names().count()
+                + state.value_symbol_names().count()
+                + state.import_targets.len(),
         );
-        prepared
-            .name_resolution
-            .insert(local_name.clone(), resolved);
-    }
+        insert_file_symbol_resolutions(&mut table, canonical_id, state);
+        add_namespace_sibling_resolutions(&mut table, state, symbol_name, canonical_id, origin);
+        insert_type_space_import_resolutions(
+            &mut table,
+            canonical_id,
+            state,
+            dep_edges,
+            import_canonicalization,
+        );
+        Arc::new(table)
+    };
 
     // Populate cache deps for invalidation
     let hash_u64 = u64::from_le_bytes(state.whole_hash[..8].try_into().unwrap_or_default());
@@ -479,6 +503,132 @@ fn prepare_type_decl_from_lowered(
     prepared.heritage_bases = Arc::clone(&lowered.heritage_bases);
     prepared.key_domain_closedness = lowered.key_domain_closedness.clone();
     prepared
+}
+
+/// Insert the same-file symbol entries of the `name_resolution` table: every
+/// TYPE and VALUE symbol name resolves to its own identity in the defining
+/// file. The first pass of BOTH base tables (type-space and value-space) —
+/// imports insert after (and therefore win per key) in both spaces.
+fn insert_file_symbol_resolutions(
+    table: &mut FxHashMap<String, ResolvedRootIdentity>,
+    canonical_id: &str,
+    state: &ShallowFileState,
+) {
+    for dep_name in state.type_symbol_names() {
+        table.insert(
+            dep_name.to_string(),
+            ResolvedRootIdentity::new(canonical_id, dep_name),
+        );
+    }
+    for dep_name in state.value_symbol_names() {
+        table.insert(
+            dep_name.to_string(),
+            ResolvedRootIdentity::new(canonical_id, dep_name),
+        );
+    }
+}
+
+/// Insert the TYPE-space import entries: external deps resolve through import
+/// bindings → the FINAL defining file. When the import is a re-export hop,
+/// the canonicalization (precomputed at bundle materialisation through the
+/// SAME route authority the carrier fallback / dispatch fallthrough use)
+/// carries the final `(canonical, name)`; otherwise the barrel fallback
+/// applies. This keeps the eager fast-path's stored identity at the FINAL
+/// definition rather than the intermediate barrel.
+///
+/// `PreparedTypeDecl` bodies are lowered in TYPE space: preserve the same
+/// local-first precedence used by route-fact classification and the
+/// declaration-scope fallback — a same-file type header shadows an import
+/// binding with the same local spelling. Value-only imports still populate
+/// the table (including `typeof` dependencies).
+fn insert_type_space_import_resolutions(
+    table: &mut FxHashMap<String, ResolvedRootIdentity>,
+    canonical_id: &str,
+    state: &ShallowFileState,
+    dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
+) {
+    for (local_name, target) in state.import_targets.iter() {
+        if state.has_type_symbol(local_name) {
+            continue;
+        }
+        let resolved = canonicalize_import_target(
+            import_canonicalization,
+            canonical_id,
+            dep_edges,
+            local_name,
+            target,
+        );
+        table.insert(local_name.clone(), resolved);
+    }
+}
+
+/// Insert the VALUE-space import entries — same FINAL-definition
+/// canonicalization as the type space, WITHOUT the type-symbol shadow skip:
+/// in a prepared value decl's annotation scope the import binding wins over
+/// a same-named local symbol.
+fn insert_value_space_import_resolutions(
+    table: &mut FxHashMap<String, ResolvedRootIdentity>,
+    canonical_id: &str,
+    state: &ShallowFileState,
+    dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
+) {
+    for (local_name, target) in state.import_targets.iter() {
+        let resolved = canonicalize_import_target(
+            import_canonicalization,
+            canonical_id,
+            dep_edges,
+            local_name,
+            target,
+        );
+        table.insert(local_name.clone(), resolved);
+    }
+}
+
+/// Build the per-FILE TYPE-space `name_resolution` base table: file symbols,
+/// then imports (type-symbol-shadowed). This is the COMPLETE table of every
+/// non-namespaced prepared type decl of the file — the prepared-decl cache
+/// builds it once per bundle and shares it via `Arc` across those decls; a
+/// namespaced decl re-runs the same passes around its sibling bindings.
+fn build_type_name_resolution_base(
+    canonical_id: &str,
+    state: &ShallowFileState,
+    dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
+) -> FxHashMap<String, ResolvedRootIdentity> {
+    let mut table = FxHashMap::default();
+    insert_file_symbol_resolutions(&mut table, canonical_id, state);
+    insert_type_space_import_resolutions(
+        &mut table,
+        canonical_id,
+        state,
+        dep_edges,
+        import_canonicalization,
+    );
+    table
+}
+
+/// Build the per-FILE VALUE-space `name_resolution` base table: file symbols,
+/// then imports (unshadowed). The value space has no per-declaration bindings
+/// at all, so this is the COMPLETE table of EVERY prepared value decl of the
+/// file.
+fn build_value_name_resolution_base(
+    canonical_id: &str,
+    state: &ShallowFileState,
+    dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
+) -> FxHashMap<String, ResolvedRootIdentity> {
+    let mut table = FxHashMap::default();
+    insert_file_symbol_resolutions(&mut table, canonical_id, state);
+    insert_value_space_import_resolutions(
+        &mut table,
+        canonical_id,
+        state,
+        dep_edges,
+        import_canonicalization,
+    );
+    table
 }
 
 /// Map each DIRECT sibling member of a namespaced declaration's enclosing
@@ -623,6 +773,31 @@ pub(crate) fn prepare_local_value_decl_outcome(
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
 ) -> PreparedDeclOutcome<PreparedValueDecl> {
+    prepare_local_value_decl_outcome_with_base(
+        canonical_id,
+        state,
+        symbol_name,
+        dep_edges,
+        import_canonicalization,
+        None,
+    )
+}
+
+/// [`prepare_local_value_decl_outcome`] with an optional caller-owned
+/// per-file VALUE-space `name_resolution` base table
+/// ([`build_value_name_resolution_base`]). The value space has no
+/// per-declaration bindings, so every prepared value decl's table IS the
+/// base: a `Some` caller (the prepared-decl cache, which builds the base
+/// once per bundle) shares it via `Arc`; `None` builds it fresh — the
+/// pre-split per-call behavior for standalone entry points.
+fn prepare_local_value_decl_outcome_with_base(
+    canonical_id: &str,
+    state: &ShallowFileState,
+    symbol_name: &str,
+    dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
+    shared_name_resolution_base: Option<&Arc<FxHashMap<String, ResolvedRootIdentity>>>,
+) -> PreparedDeclOutcome<PreparedValueDecl> {
     let lowered: Arc<LoweredValueDecl> = match state.value_decl_outcome(symbol_name) {
         DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
         DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
@@ -641,36 +816,21 @@ pub(crate) fn prepare_local_value_decl_outcome(
     prepared.object_shape = lowered.object_shape.clone();
     prepared.enum_members = lowered.enum_members.clone();
 
-    for local_name in state.type_symbol_names() {
-        prepared.name_resolution.insert(
-            local_name.to_string(),
-            ResolvedRootIdentity::new(canonical_id, local_name),
-        );
-    }
-    for local_name in state.value_symbol_names() {
-        prepared.name_resolution.insert(
-            local_name.to_string(),
-            ResolvedRootIdentity::new(canonical_id, local_name),
-        );
-    }
-
-    // Build name_resolution for type annotations / `typeof` references that
-    // reference imported or local symbols in the defining file. A re-export-hop
-    // import canonicalizes to the FINAL defining file (the barrel-final
-    // canonicalization, same authority as the type rail); otherwise the barrel
-    // fallback applies.
-    for (local_name, target) in state.import_targets.iter() {
-        let resolved = canonicalize_import_target(
-            import_canonicalization,
+    // name_resolution for type annotations / `typeof` references that
+    // reference imported or local symbols in the defining file — the per-FILE
+    // value-space base table (file symbols, then imports; a re-export-hop
+    // import canonicalizes to the FINAL defining file through the barrel-final
+    // canonicalization, same authority as the type rail; otherwise the barrel
+    // fallback applies), shared across every value decl of the file.
+    prepared.name_resolution = match shared_name_resolution_base {
+        Some(base) => Arc::clone(base),
+        None => Arc::new(build_value_name_resolution_base(
             canonical_id,
+            state,
             dep_edges,
-            local_name,
-            target,
-        );
-        prepared
-            .name_resolution
-            .insert(local_name.clone(), resolved);
-    }
+            import_canonicalization,
+        )),
+    };
 
     let hash_u64 = u64::from_le_bytes(state.whole_hash[..8].try_into().unwrap_or_default());
     prepared.cache_deps.defining_file = Some((canonical_id.to_string(), hash_u64));
@@ -708,6 +868,12 @@ pub struct PreparedTypeDeclCache {
     dep_edges: Arc<FxHashMap<String, String>>,
     import_canonicalization: Arc<ImportCanonicalization>,
     slots: PreparedTypeDeclSlots,
+    /// Per-FILE TYPE-space `name_resolution` base table, built lazily ONCE
+    /// per cache (`OnceLock` collapses concurrent initializers) and shared
+    /// via `Arc` by every non-namespaced prepared type decl this cache
+    /// builds — the per-declaration table rebuild this replaces walked every
+    /// file symbol + import per decl.
+    name_resolution_base: Arc<OnceLock<Arc<FxHashMap<String, ResolvedRootIdentity>>>>,
     /// Per-cache-instance count of COLD builds admitted through
     /// [`PreparedTypeDeclCache::get`] (post-gate). Instance-scoped so a
     /// concurrent single-flight test asserts exactly ONE build on ITS OWN
@@ -771,12 +937,21 @@ impl PreparedTypeDeclCache {
         #[cfg(test)]
         self.cold_build_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        match prepare_local_type_decl_outcome(
+        let name_resolution_base = self.name_resolution_base.get_or_init(|| {
+            Arc::new(build_type_name_resolution_base(
+                self.canonical_id.as_ref(),
+                self.state.as_ref(),
+                (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
+                &self.import_canonicalization,
+            ))
+        });
+        match prepare_local_type_decl_outcome_with_base(
             self.canonical_id.as_ref(),
             self.state.as_ref(),
             symbol_name,
             (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
             &self.import_canonicalization,
+            Some(name_resolution_base),
         ) {
             PreparedDeclOutcome::LeaseMiss => {
                 // Broken decl-body lease: leave the write-once slot VACANT
@@ -824,6 +999,10 @@ pub struct PreparedValueDeclCache {
     dep_edges: Arc<FxHashMap<String, String>>,
     import_canonicalization: Arc<ImportCanonicalization>,
     slots: PreparedValueDeclSlots,
+    /// Per-FILE VALUE-space `name_resolution` base table — see
+    /// [`PreparedTypeDeclCache::name_resolution_base`]; the value space has
+    /// no per-declaration bindings, so EVERY prepared value decl shares it.
+    name_resolution_base: Arc<OnceLock<Arc<FxHashMap<String, ResolvedRootIdentity>>>>,
 }
 
 impl PreparedValueDeclCache {
@@ -855,12 +1034,21 @@ impl PreparedValueDeclCache {
         if let Some(cached) = slot.value.get() {
             return cached.clone();
         }
-        match prepare_local_value_decl_outcome(
+        let name_resolution_base = self.name_resolution_base.get_or_init(|| {
+            Arc::new(build_value_name_resolution_base(
+                self.canonical_id.as_ref(),
+                self.state.as_ref(),
+                (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
+                &self.import_canonicalization,
+            ))
+        });
+        match prepare_local_value_decl_outcome_with_base(
             self.canonical_id.as_ref(),
             self.state.as_ref(),
             symbol_name,
             (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
             &self.import_canonicalization,
+            Some(name_resolution_base),
         ) {
             PreparedDeclOutcome::LeaseMiss => {
                 // Broken decl-body lease: leave the write-once slot VACANT
@@ -1028,6 +1216,7 @@ pub fn build_prepared_type_decl_cache(
         dep_edges,
         import_canonicalization,
         slots: Arc::new(slots),
+        name_resolution_base: Arc::new(OnceLock::new()),
         #[cfg(test)]
         cold_build_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     }
@@ -1052,6 +1241,7 @@ pub fn build_prepared_value_decl_cache(
         dep_edges,
         import_canonicalization,
         slots: Arc::new(slots),
+        name_resolution_base: Arc::new(OnceLock::new()),
     }
 }
 
