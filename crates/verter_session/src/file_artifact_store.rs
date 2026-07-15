@@ -59,7 +59,7 @@
 //!
 //! See `/type-cache-architecture` skill for the full rule set.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::mapref::entry::Entry as CanonicalKeysEntry;
@@ -828,6 +828,69 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
     counts.values().all(|&c| c == 0)
 }
 
+// ── StoredArtifact ──
+
+/// The `self.artifacts` map value: the shared payload plus the
+/// entry-embedded warm-read bookkeeping.
+///
+/// The per-entry hit counter and last-access tick live INSIDE the map
+/// value so a warm hit bumps them through the already-held entry
+/// reference — no side-map key hash, no `FileArtifactKey` clone, no
+/// `Arc<str>` allocation per hit (side maps keyed by `FileArtifactKey`
+/// / canonical cost exactly that on every warm read). The global
+/// [`FileArtifactStore::access_tick`] counter remains the single
+/// monotonic tick source.
+///
+/// Lifecycle: the counters are entry-owned, so they drop with the
+/// entry — an evicted key can never leak a stale hit count into a
+/// later same-key insert — and a REPLACED value starts cold again (a
+/// fresh value has not yet proven warm demand; the promotion-aware LRU
+/// floor treats it as new).
+struct StoredArtifact {
+    payload: Arc<FileArtifacts>,
+    /// Warm-hit counter; saturates at `u32::MAX` so long-lived hot
+    /// entries do not overflow. Consumed by the LRU floor's promotion
+    /// predicate ([`FileArtifactStore::evict_lru_promoted`]).
+    hits: AtomicU32,
+    /// Monotonically-maxed last-access tick (from
+    /// [`FileArtifactStore::access_tick`]). Consumed by the LRU
+    /// floor's recency ordering.
+    last_access_tick: AtomicU64,
+}
+
+impl StoredArtifact {
+    fn new(payload: Arc<FileArtifacts>, tick: u64) -> Self {
+        Self {
+            payload,
+            hits: AtomicU32::new(0),
+            last_access_tick: AtomicU64::new(tick),
+        }
+    }
+
+    /// Bump the warm-hit counter (saturating at `u32::MAX`).
+    fn record_hit(&self) {
+        let _ = self
+            .hits
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |hits| {
+                (hits != u32::MAX).then_some(hits + 1)
+            });
+    }
+
+    /// Stamp the last-access tick (monotonic — a stale racing stamp
+    /// never regresses a fresher one).
+    fn record_access(&self, tick: u64) {
+        self.last_access_tick.fetch_max(tick, Ordering::Relaxed);
+    }
+
+    fn hit_count(&self) -> u32 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    fn access_tick(&self) -> u64 {
+        self.last_access_tick.load(Ordering::Relaxed)
+    }
+}
+
 // ── FileArtifactStore ──
 
 /// The per-host content-addressed file-artifact cache.
@@ -839,9 +902,10 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
 /// Arc<FileArtifacts>`).
 pub struct FileArtifactStore {
     /// Per-(canonical, content_hash, parse_env_hash, parser_version)
-    /// payloads. Keys with the same canonical but different other
-    /// dimensions coexist.
-    artifacts: DashMap<FileArtifactKey, Arc<FileArtifacts>>,
+    /// payloads, each carried in a [`StoredArtifact`] alongside its
+    /// entry-embedded warm-read bookkeeping. Keys with the same
+    /// canonical but different other dimensions coexist.
+    artifacts: DashMap<FileArtifactKey, StoredArtifact>,
     /// Canonical-id → live [`FileArtifactKey`]s inverse index over
     /// `self.artifacts`.
     ///
@@ -880,17 +944,10 @@ pub struct FileArtifactStore {
     ///   and skip ones whose exact read misses — so a dangling key
     ///   costs one extra exact lookup, never a wrong result.
     canonical_keys: DashMap<Arc<str>, SmallVec<[FileArtifactKey; 2]>>,
-    /// Per-canonical last-access tick (monotonically increasing). Used by
-    /// [`Self::evict_lru`] under explicit memory pressure to drop the
-    /// oldest entries down to a configured floor.
-    last_access: DashMap<Arc<str>, u64>,
+    /// Global monotonic access-tick source for the per-entry
+    /// [`StoredArtifact::last_access_tick`] stamps consumed by
+    /// [`Self::evict_lru_promoted`] under explicit memory pressure.
     access_tick: AtomicU64,
-    /// Per-key hit counter — bumped on every warm `get` /
-    /// `get_artifacts` hit. Consumed by the LRU floor's promotion
-    /// predicate: entries whose counter is below
-    /// `promote_threshold` are evicted first regardless of
-    /// `last_access` recency.
-    hit_counters: DashMap<FileArtifactKey, u32>,
     /// Live entry counter.
     live_counter: Arc<AtomicU64>,
     /// Stale-sweep counter.
@@ -978,9 +1035,7 @@ impl FileArtifactStore {
         Self {
             artifacts: DashMap::new(),
             canonical_keys: DashMap::new(),
-            last_access: DashMap::new(),
             access_tick: AtomicU64::new(0),
-            hit_counters: DashMap::new(),
             live_counter: live,
             stale_sweeps: stale,
             artifact_generation: Arc::new(AtomicU64::new(0)),
@@ -1039,14 +1094,12 @@ impl FileArtifactStore {
             return None;
         }
         let key = FileArtifactKey::base(Arc::from(canonical_id), expected_whole_hash);
-        let result = self
-            .artifacts
-            .get(&key)
-            .map(|entry| Arc::clone(&entry.value().indexed));
-        if result.is_some() {
-            self.bump_access_tick(canonical_id);
-            self.bump_hit_counter(&key);
-        }
+        let result = self.artifacts.get(&key).map(|entry| {
+            let stored = entry.value();
+            stored.record_hit();
+            stored.record_access(self.next_access_tick());
+            Arc::clone(&stored.payload.indexed)
+        });
         if let Some(ctx) = crate::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
@@ -1092,14 +1145,12 @@ impl FileArtifactStore {
             expected_whole_hash,
             discriminator,
         );
-        let result = self
-            .artifacts
-            .get(&key)
-            .map(|entry| Arc::clone(&entry.value().indexed));
-        if result.is_some() {
-            self.bump_access_tick(canonical_id);
-            self.bump_hit_counter(&key);
-        }
+        let result = self.artifacts.get(&key).map(|entry| {
+            let stored = entry.value();
+            stored.record_hit();
+            stored.record_access(self.next_access_tick());
+            Arc::clone(&stored.payload.indexed)
+        });
         if let Some(ctx) = crate::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
@@ -1132,22 +1183,17 @@ impl FileArtifactStore {
             return None;
         }
         let mut result: Option<Arc<IndexedReady>> = None;
-        let mut matched_key: Option<FileArtifactKey> = None;
         if let Some(slot) = self.canonical_keys.get(canonical_id) {
             for key in slot.value().iter().filter(|key| key.is_base()) {
                 // Exact read; a (benign) dangling index key just misses
                 // and the next candidate is tried.
                 if let Some(entry) = self.artifacts.get(key) {
-                    result = Some(Arc::clone(&entry.value().indexed));
-                    matched_key = Some(key.clone());
+                    let stored = entry.value();
+                    stored.record_hit();
+                    stored.record_access(self.next_access_tick());
+                    result = Some(Arc::clone(&stored.payload.indexed));
                     break;
                 }
-            }
-        }
-        if result.is_some() {
-            self.bump_access_tick(canonical_id);
-            if let Some(k) = matched_key.as_ref() {
-                self.bump_hit_counter(k);
             }
         }
         if let Some(ctx) = crate::request_context::current_request_context() {
@@ -1188,26 +1234,20 @@ impl FileArtifactStore {
         self.get(canonical_id, expected_content_hash)
     }
 
-    fn bump_access_tick(&self, canonical_id: &str) {
-        let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
-        self.last_access.insert(Arc::from(canonical_id), tick);
+    /// Next global access tick — the single monotonic source for the
+    /// per-entry [`StoredArtifact::last_access_tick`] stamps.
+    #[inline]
+    fn next_access_tick(&self) -> u64 {
+        self.access_tick.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Bump the per-key hit counter — called from every warm
-    /// `get_artifacts` / `get` hit. The counter is consumed by
-    /// [`Self::evict_lru_promoted`] and saturates at `u32::MAX` so
-    /// long-lived hot entries do not overflow.
-    fn bump_hit_counter(&self, key: &FileArtifactKey) {
-        self.hit_counters
-            .entry(key.clone())
-            .and_modify(|c| *c = c.saturating_add(1))
-            .or_insert(1);
-    }
-
-    /// Test-only inspection of the per-key hit counter.
+    /// Test-only inspection of the per-entry hit counter.
     #[cfg(any(test, feature = "test-support"))]
     pub fn hit_count(&self, key: &FileArtifactKey) -> u32 {
-        self.hit_counters.get(key).map(|c| *c.value()).unwrap_or(0)
+        self.artifacts
+            .get(key)
+            .map(|entry| entry.value().hit_count())
+            .unwrap_or(0)
     }
 
     /// Snapshot every `(canonical_id, content_hash)` key in the cache.
@@ -1232,8 +1272,8 @@ impl FileArtifactStore {
     fn insert_artifact_entry(
         &self,
         key: FileArtifactKey,
-        value: Arc<FileArtifacts>,
-    ) -> Option<Arc<FileArtifacts>> {
+        value: StoredArtifact,
+    ) -> Option<StoredArtifact> {
         let mut slot = self
             .canonical_keys
             .entry(Arc::clone(&key.canonical))
@@ -1266,9 +1306,11 @@ impl FileArtifactStore {
     /// drop, a replacement drain, and a hard delete attribute
     /// `live_counter` / `stale_sweeps` / structured events differently —
     /// so this chokepoint touches none of them; it returns the removed
-    /// `(key, payload)` pairs and lets the caller account for them. It DOES
-    /// drop the per-key `hit_counters` entry: an evicted key must never
-    /// carry a stale hit count into a later same-key insert.
+    /// `(key, payload)` pairs and lets the caller account for them.
+    /// Per-entry warm-read bookkeeping (hit counter, access tick) lives
+    /// inside the removed [`StoredArtifact`] value and drops with it —
+    /// an evicted key can never carry a stale hit count into a later
+    /// same-key insert.
     ///
     /// Invalidation runs ONCE over the union of every removed entry's
     /// augmentation facts, after every `self.artifacts` shard guard is
@@ -1302,10 +1344,9 @@ impl FileArtifactStore {
                 }
                 CanonicalKeysEntry::Vacant(_) => self.artifacts.remove(key),
             };
-            if let Some((removed_key, payload)) = removed_entry {
-                removed_augmentations.extend(payload.augmentations.iter().cloned());
-                self.hit_counters.remove(key);
-                removed.push((removed_key, payload));
+            if let Some((removed_key, stored)) = removed_entry {
+                removed_augmentations.extend(stored.payload.augmentations.iter().cloned());
+                removed.push((removed_key, stored.payload));
             }
         }
         // Demand-driven coherence: every removed augmenter drops every index
@@ -1336,9 +1377,9 @@ impl FileArtifactStore {
         self.evict_lru_promoted(min_floor, 0);
     }
 
-    /// Promotion-aware LRU floor. Entries whose per-key hit counter
+    /// Promotion-aware LRU floor. Entries whose per-entry hit counter
     /// is **strictly below** `promote_threshold` are considered
-    /// "cold" and age out first regardless of `last_access`
+    /// "cold" and age out first regardless of access-tick
     /// recency; the floor's recency comparison only applies among
     /// the surviving cold pool. Hot entries (counter >=
     /// `promote_threshold`) survive unless every entry is hot, in
@@ -1354,19 +1395,20 @@ impl FileArtifactStore {
             return;
         }
         let drop_count = len - min_floor;
-        // Collect (key, hit_count, tick) for every entry.
+        // Collect (key, hit_count, tick) for every entry — both read
+        // straight off the entry-embedded atomics during this single
+        // iteration (no side-map lookups). The tick is per ENTRY: a
+        // stale variant of a recently-read canonical ages out before
+        // the variant that actually served the reads.
         let mut entries: Vec<(FileArtifactKey, u32, u64)> = self
             .artifacts
             .iter()
             .map(|entry| {
-                let key = entry.key().clone();
-                let hits = self.hit_counters.get(&key).map(|c| *c.value()).unwrap_or(0);
-                let tick = self
-                    .last_access
-                    .get(&key.canonical)
-                    .map(|t| *t.value())
-                    .unwrap_or(0);
-                (key, hits, tick)
+                (
+                    entry.key().clone(),
+                    entry.value().hit_count(),
+                    entry.value().access_tick(),
+                )
             })
             .collect();
         // Partition: cold (hits < promote_threshold) first, then hot.
@@ -1386,23 +1428,14 @@ impl FileArtifactStore {
             .map(|(key, _hits, _tick)| key)
             .collect();
         // Route through the single removal chokepoint: it drops the
-        // entries, clears their hit counters, and invalidates the
-        // augmentation index the evicted augmenters contributed to.
+        // entries (their embedded hit counters and access ticks go with
+        // them) and invalidates the augmentation index the evicted
+        // augmenters contributed to.
         let removed = self.evict_artifact_keys(&drop_keys);
         let evicted_any = !removed.is_empty();
-        for (key, _payload) in &removed {
+        for _ in &removed {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
-            // Only remove `last_access` if no other version of the
-            // same canonical survives — the access tick is per
-            // canonical, not per FileArtifactKey.
-            let has_more = self
-                .artifacts
-                .iter()
-                .any(|e| e.key().canonical.as_ref() == key.canonical.as_ref());
-            if !has_more {
-                self.last_access.remove(&key.canonical);
-            }
         }
         if evicted_any {
             self.bump_artifact_generation();
@@ -1411,8 +1444,8 @@ impl FileArtifactStore {
 
     /// Enforce per-canonical content-hash retention. Keeps at most
     /// `retention` distinct `FileArtifactKey` variants per
-    /// canonical id; older variants (by `last_access` proxy: their
-    /// canonical's tick, then iteration order) are dropped.
+    /// canonical id; surplus variants are dropped in deterministic
+    /// `content_hash` order (lowest first — see below).
     ///
     /// Setting `retention == usize::MAX` is a no-op. Setting
     /// `retention == 0` drops every variant beyond the most
@@ -1447,8 +1480,9 @@ impl FileArtifactStore {
             drop_keys.extend(keys.into_iter().take(drop_count));
         }
         // Route through the single removal chokepoint: it drops the
-        // entries, clears their hit counters, and invalidates the
-        // augmentation index the evicted augmenters contributed to.
+        // entries (embedded warm-read bookkeeping goes with them) and
+        // invalidates the augmentation index the evicted augmenters
+        // contributed to.
         let removed = self.evict_artifact_keys(&drop_keys);
         let evicted_any = !removed.is_empty();
         for _ in &removed {
@@ -1486,7 +1520,7 @@ impl FileArtifactStore {
             .map(|entry| {
                 (
                     entry.key().canonical.clone(),
-                    Arc::clone(&entry.value().indexed),
+                    Arc::clone(&entry.value().payload.indexed),
                 )
             })
             .collect()
@@ -1506,8 +1540,7 @@ impl FileArtifactStore {
     pub fn insert(&self, canonical_id: Arc<str>, indexed: Arc<IndexedReady>) {
         let whole_hash = indexed.whole_hash;
         let canonical_for_event = Arc::clone(&canonical_id);
-        let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
-        self.last_access.insert(Arc::clone(&canonical_id), tick);
+        let tick = self.next_access_tick();
 
         // The base-visible identity for this insert is the base key at
         // the NEW content hash — the exact key a base `HostStoreView`
@@ -1531,7 +1564,17 @@ impl FileArtifactStore {
         let current_key_is_base_equivalent = self
             .artifacts
             .get(&current_key)
-            .map(|e| base_snapshot_equivalent(e.value(), &payload))
+            .map(|entry| {
+                let equivalent = base_snapshot_equivalent(&entry.value().payload, &payload);
+                if equivalent {
+                    // The no-op path leaves the entry untouched below;
+                    // refresh its access tick here so a no-op reinsert
+                    // still registers as recency for the LRU floor (the
+                    // legacy insert always counts as an access).
+                    entry.value().record_access(tick);
+                }
+                equivalent
+            })
             .unwrap_or(false);
 
         // Legacy semantics: exactly one entry per canonical regardless of
@@ -1565,10 +1608,12 @@ impl FileArtifactStore {
         // Capture the prior BASE (base-key) payload BEFORE draining so the
         // bump-iff-actually-changed gate can compare it against the new
         // payload (a content change replacing a different-hash base entry).
-        let prior_base_payload: Option<Arc<FileArtifacts>> = prior_keys
-            .iter()
-            .find(|k| k.is_base())
-            .and_then(|k| self.artifacts.get(k).map(|e| Arc::clone(e.value())));
+        let prior_base_payload: Option<Arc<FileArtifacts>> =
+            prior_keys.iter().find(|k| k.is_base()).and_then(|k| {
+                self.artifacts
+                    .get(k)
+                    .map(|e| Arc::clone(&e.value().payload))
+            });
         // Capture the NEW artifact's augmentations before the conditional
         // insert moves the payload, so the publish-side invalidation can
         // fold them (the drain below already cleaned the prior target).
@@ -1588,14 +1633,14 @@ impl FileArtifactStore {
             if current_key_is_base_equivalent {
                 self.artifacts
                     .get(&current_key)
-                    .map(|e| Arc::clone(e.value()))
+                    .map(|e| Arc::clone(&e.value().payload))
             } else {
                 None
             };
         // Drain every (non-base-equivalent) prior version through the single
-        // removal chokepoint: it drops the entries, clears their hit
-        // counters, and invalidates the prior versions' augmentation-index
-        // entries. The chokepoint deliberately does NOT touch
+        // removal chokepoint: it drops the entries (embedded warm-read
+        // bookkeeping goes with them) and invalidates the prior versions'
+        // augmentation-index entries. The chokepoint deliberately does NOT touch
         // `artifact_generation` (counter bookkeeping is caller policy) — the
         // base-folded bump for this insert is owned by the
         // `snapshot_changed` gate below so an overlay-only / stale-hash
@@ -1624,7 +1669,7 @@ impl FileArtifactStore {
         // reader can ever observe it absent. Otherwise insert (fresh content
         // or a base-visible change at the current key).
         if !current_key_is_base_equivalent {
-            self.insert_artifact_entry(current_key, payload);
+            self.insert_artifact_entry(current_key, StoredArtifact::new(payload, tick));
         }
         if snapshot_changed {
             self.bump_artifact_generation();
@@ -1679,16 +1724,16 @@ impl FileArtifactStore {
             .filter(|entry| entry.key().canonical.as_ref() == canonical_id)
             .map(|entry| entry.key().clone())
             .collect();
-        // Route through the single removal chokepoint: it clears hit
-        // counters and invalidates the augmentation index the removed
-        // augmenters contributed to.
+        // Route through the single removal chokepoint: it drops the
+        // entries (embedded warm-read bookkeeping goes with them) and
+        // invalidates the augmentation index the removed augmenters
+        // contributed to.
         let removed = self.evict_artifact_keys(&to_remove);
         let removed_any = !removed.is_empty();
         for _ in &removed {
             self.live_counter.fetch_sub(1, Ordering::Relaxed);
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
         }
-        self.last_access.remove(canonical_id);
         if removed_any {
             self.bump_artifact_generation();
         }
@@ -1713,7 +1758,8 @@ impl FileArtifactStore {
         let indexed = Arc::new(IndexedReady::new_for_test([0u8; 16]));
         let payload = Arc::new(FileArtifacts::with_indexed(indexed));
         let key = FileArtifactKey::base(canonical, [0u8; 16]);
-        let prev = self.insert_artifact_entry(key, payload);
+        // Tick 0: the synthetic inserter never counted as an access.
+        let prev = self.insert_artifact_entry(key, StoredArtifact::new(payload, 0));
         if prev.is_none() {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
         }
@@ -1732,11 +1778,10 @@ impl FileArtifactStore {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
-        let v = self.artifacts.get(key).map(|v| v.clone());
-        if v.is_some() {
-            self.bump_hit_counter(key);
-        }
-        v
+        self.artifacts.get(key).map(|entry| {
+            entry.value().record_hit();
+            Arc::clone(&entry.value().payload)
+        })
     }
 
     /// Fetch an augmenter's `FileArtifacts` by its captured exact
@@ -1825,7 +1870,7 @@ impl FileArtifactStore {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
-        let mut matched: Option<(FileArtifactKey, Arc<FileArtifacts>)> = None;
+        let mut matched: Option<Arc<FileArtifacts>> = None;
         if let Some(slot) = self.canonical_keys.get(canonical) {
             for key in slot
                 .value()
@@ -1835,14 +1880,13 @@ impl FileArtifactStore {
                 // Exact read; a (benign) dangling index key just misses
                 // and the next candidate is tried.
                 if let Some(entry) = self.artifacts.get(key) {
-                    matched = Some((key.clone(), entry.value().clone()));
+                    entry.value().record_hit();
+                    matched = Some(Arc::clone(&entry.value().payload));
                     break;
                 }
             }
         }
-        let (matched_key, value) = matched?;
-        self.bump_hit_counter(&matched_key);
-        Some(value)
+        matched
     }
 
     /// Look up the latest **base** `FileArtifacts` payload for
@@ -1863,20 +1907,19 @@ impl FileArtifactStore {
         if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
-        let mut matched: Option<(FileArtifactKey, Arc<FileArtifacts>)> = None;
+        let mut matched: Option<Arc<FileArtifacts>> = None;
         if let Some(slot) = self.canonical_keys.get(canonical) {
             for key in slot.value().iter().filter(|key| key.is_base()) {
                 // Exact read; a (benign) dangling index key just misses
                 // and the next candidate is tried.
                 if let Some(entry) = self.artifacts.get(key) {
-                    matched = Some((key.clone(), entry.value().clone()));
+                    entry.value().record_hit();
+                    matched = Some(Arc::clone(&entry.value().payload));
                     break;
                 }
             }
         }
-        let (matched_key, value) = matched?;
-        self.bump_hit_counter(&matched_key);
-        Some(value)
+        matched
     }
 
     /// Insert (or replace) the payload for `key`.
@@ -1888,8 +1931,7 @@ impl FileArtifactStore {
         let canonical = Arc::clone(&key.canonical);
         let content_hash = key.content_hash;
         let parse_env_hash = key.parse_env_hash;
-        let tick = self.access_tick.fetch_add(1, Ordering::Relaxed) + 1;
-        self.last_access.insert(Arc::clone(&canonical), tick);
+        let tick = self.next_access_tick();
         // Capture the registry handle + the full payload handle BEFORE
         // moving `artifacts` into the DashMap. Cold-path: cheap Arc clones.
         // `artifacts_for_compare` lets the bump-iff-actually-changed gate
@@ -1900,7 +1942,9 @@ impl FileArtifactStore {
         // gate can compare the replaced value against the incoming one without
         // re-fetching from the map.
         let artifacts_for_compare: Arc<FileArtifacts> = Arc::clone(&artifacts);
-        let prev = self.insert_artifact_entry(key, artifacts);
+        let prev = self
+            .insert_artifact_entry(key, StoredArtifact::new(artifacts, tick))
+            .map(|stored| stored.payload);
         // Demand-driven coherence — gated on augmentation-contribution
         // equivalence. A byte-identical reinsert of a module-augmentation file
         // leaves both the augmenter's `ModuleAugmentationFact` set AND its
@@ -2033,9 +2077,10 @@ impl FileArtifactStore {
             .filter(|entry| entry.key().canonical.as_ref() == canonical_id)
             .map(|entry| entry.key().clone())
             .collect();
-        // Route through the single removal chokepoint: it clears hit
-        // counters and invalidates the augmentation index the removed
-        // augmenters contributed to.
+        // Route through the single removal chokepoint: it drops the
+        // entries (embedded warm-read bookkeeping goes with them) and
+        // invalidates the augmentation index the removed augmenters
+        // contributed to.
         let removed_pairs = self.evict_artifact_keys(&to_remove);
         let removed = removed_pairs.len();
         if removed > 0 {
@@ -2045,10 +2090,7 @@ impl FileArtifactStore {
                 .fetch_add(removed as u64, Ordering::Relaxed);
             // Draining every version of a canonical drops by-value
             // snapshot dimensions; bump the generation so a pre-removal
-            // `HostStoreView` is token-invalidated. The per-canonical
-            // access tick goes with it (same chokepoint discipline as
-            // the reachability GC).
-            self.last_access.remove(canonical_id);
+            // `HostStoreView` is token-invalidated.
             self.bump_artifact_generation();
             // R23 typed event: each eviction emits one event so
             // downstream telemetry can attribute drain footprint
@@ -2073,9 +2115,9 @@ impl FileArtifactStore {
     /// canonical's payload (its content authority is gone) and makes a
     /// full rebuild of scheduler-tracked artifacts the only provably
     /// correct posture. Routed through the same removal chokepoint as
-    /// [`Self::remove_canonical`] so hit counters and the augmentation
-    /// index stay coherent, and bumps the artifact generation so a
-    /// pre-clear `HostStoreView` is token-invalidated.
+    /// [`Self::remove_canonical`] so the canonical→keys index and the
+    /// augmentation index stay coherent, and bumps the artifact
+    /// generation so a pre-clear `HostStoreView` is token-invalidated.
     pub fn clear_all(&self) {
         let to_remove: Vec<FileArtifactKey> = self
             .artifacts
@@ -2084,9 +2126,6 @@ impl FileArtifactStore {
             .collect();
         let removed_pairs = self.evict_artifact_keys(&to_remove);
         let removed = removed_pairs.len();
-        // Every entry is gone — drop every access-tick crumb in lockstep
-        // (the same chokepoint discipline as the reachability GC).
-        self.last_access.clear();
         if removed > 0 {
             self.live_counter
                 .fetch_sub(removed as u64, Ordering::Relaxed);
@@ -2121,7 +2160,7 @@ impl FileArtifactStore {
     pub fn snapshot_artifacts(&self) -> Vec<(FileArtifactKey, Arc<FileArtifacts>)> {
         self.artifacts
             .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .map(|entry| (entry.key().clone(), Arc::clone(&entry.value().payload)))
             .collect()
     }
 
@@ -2207,12 +2246,12 @@ impl FileArtifactStore {
                     || overlay_discriminator
                         .is_some_and(|d| !key.is_base() && key.parse_env_hash == d)
             })
-            .filter(|entry| !entry.value().augmentations.is_empty())
+            .filter(|entry| !entry.value().payload.augmentations.is_empty())
             .map(|entry| AugmenterCandidate {
                 artifact_key: entry.key().clone(),
                 canonical: Arc::clone(&entry.key().canonical),
-                parse_stable_hash: entry.value().parse_stable_hash,
-                augmentations: Arc::clone(&entry.value().augmentations),
+                parse_stable_hash: entry.value().payload.parse_stable_hash,
+                augmentations: Arc::clone(&entry.value().payload.augmentations),
             })
             .collect()
     }
@@ -2471,7 +2510,7 @@ impl FileArtifactStore {
             if !artifact_entry.key().is_base() {
                 continue;
             }
-            for fact in artifact_entry.value().augmentations.iter() {
+            for fact in artifact_entry.value().payload.augmentations.iter() {
                 let specifier: &str = fact.specifier.as_ref();
                 if specifier.contains('*') && seen_patterns.insert(Arc::from(specifier)) {
                     wildcard_patterns.push(InternedGlobPattern::from(specifier));
@@ -2505,7 +2544,6 @@ impl crate::cache_schema::CacheSchemaVersioned for FileArtifactStore {
         // the index is missing. See the `canonical_keys` field docs.
         self.canonical_keys.clear();
         self.artifacts.clear();
-        self.last_access.clear();
         self.augmentation_index.clear();
         if count > 0 {
             self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
