@@ -1938,7 +1938,7 @@ import Child from '@/Child.vue'
     fn classify_from_snapshot_configured_is_project_source() {
         use verter_workspace::workspace_snapshot::*;
         use verter_workspace::{
-            CanonicalPath, ConfiguredMembership, FallbackMembership, NormalizedGlob,
+            CanonicalPath, CompiledGlob, ConfiguredMembership, FallbackMembership, NormalizedGlob,
             ProjectResolver, StaticMembershipSpec,
         };
 
@@ -1969,7 +1969,9 @@ import Child from '@/Child.vue'
                     payload: ProjectPayload::Fallback {
                         membership: FallbackMembership {
                             root: root.clone(),
-                            exclude: vec![NormalizedGlob::new("d:/project/node_modules/**")],
+                            exclude: vec![CompiledGlob::new(NormalizedGlob::new(
+                                "d:/project/node_modules/**",
+                            ))],
                         },
                     },
                 },
@@ -2168,12 +2170,14 @@ defineProps<{ msg: string }>()
         let root_cp = verter_workspace::CanonicalPath::new(root);
         let spec = verter_workspace::StaticMembershipSpec {
             files: Vec::new(),
-            include: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
-                &root_cp, "**/*",
+            include: vec![verter_workspace::CompiledGlob::new(
+                verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
             )],
-            exclude: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
-                &root_cp,
-                "node_modules/**",
+            exclude: vec![verter_workspace::CompiledGlob::new(
+                verter_workspace::NormalizedGlob::from_root_and_pattern(
+                    &root_cp,
+                    "node_modules/**",
+                ),
             )],
         };
         let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {

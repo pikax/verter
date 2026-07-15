@@ -146,7 +146,7 @@ pub use membership::{
     typescript_default_excludes, ConfiguredMembership, FallbackMembership, StaticMembershipSpec,
 };
 pub use memory::{MemoryOptions, MemorySnapshot, MemoryWorkspace};
-pub use normalized_glob::NormalizedGlob;
+pub use normalized_glob::{CompiledGlob, NormalizedGlob};
 pub use overlay::OverlayStore;
 pub use package_index::PackageIndex;
 pub use project_key::ProjectStableKey;

@@ -1,7 +1,7 @@
 use super::*;
 use crate::canonical_path::CanonicalPath;
 use crate::membership::{ConfiguredMembership, FallbackMembership, StaticMembershipSpec};
-use crate::normalized_glob::NormalizedGlob;
+use crate::normalized_glob::{CompiledGlob, NormalizedGlob};
 use crate::resolver::{IdeProjectCompilerOptions, ProjectResolver};
 use rustc_hash::FxHashSet;
 
@@ -16,11 +16,13 @@ fn configured_project(
     let root_cp = CanonicalPath::new(root);
     let spec = StaticMembershipSpec {
         files: Vec::new(),
-        include: vec![NormalizedGlob::from_root_and_pattern(&root_cp, "**/*")],
-        exclude: vec![NormalizedGlob::from_root_and_pattern(
+        include: vec![CompiledGlob::new(NormalizedGlob::from_root_and_pattern(
+            &root_cp, "**/*",
+        ))],
+        exclude: vec![CompiledGlob::new(NormalizedGlob::from_root_and_pattern(
             &root_cp,
             "node_modules/**",
-        )],
+        ))],
     };
     let mut materialized = FxHashSet::default();
     for path in file_paths {
@@ -53,7 +55,10 @@ fn fallback_project(id: u32, root: &str) -> OwnershipProject {
         payload: ProjectPayload::Fallback {
             membership: FallbackMembership {
                 root: root_cp,
-                exclude: vec![NormalizedGlob::new(&format!("{}/node_modules/**", root))],
+                exclude: vec![CompiledGlob::new(NormalizedGlob::new(&format!(
+                    "{}/node_modules/**",
+                    root
+                )))],
             },
         },
     }
@@ -672,6 +677,56 @@ fn fallback_project_has_no_configured_fields() {
             panic!("fallback should not be configured");
         }
     }
+}
+
+// ── owners_for_file glob-membership pins ──
+//
+// Pins the exact ownership results for the three membership classes the
+// glob match loops decide: an exact file inside the root, a path matching
+// the default TypeScript excludes the memberships actually hold
+// ({root}/node_modules/**), and a non-member path outside every root.
+// Bridge-mode configured membership (empty materialized set) is used so the
+// include/exclude glob loops — not the materialized FxHashSet — decide.
+
+#[test]
+fn owners_for_file_pins_glob_membership_classes() {
+    let root_cp = CanonicalPath::new("d:/project");
+    let bridge_configured = OwnershipProject {
+        id: ProjectId(0),
+        root: root_cp.clone(),
+        workspace_root: root_cp.clone(),
+        payload: ProjectPayload::Configured {
+            tsconfig_path: CanonicalPath::new("d:/project/tsconfig.json"),
+            membership: ConfiguredMembership {
+                spec: StaticMembershipSpec::with_typescript_defaults(&root_cp),
+                materialized_files: FxHashSet::default(), // bridge → glob loops decide
+            },
+            compiler_options: IdeProjectCompilerOptions::default(),
+            references: Vec::new(),
+            workspace_aliases: Vec::new(),
+        },
+    };
+    let snap = snapshot_with(vec![bridge_configured, fallback_project(1, "d:/project")]);
+
+    // Exact file inside the root: configured claims via include globs; the
+    // fallback stays out because a configured owner already claimed it.
+    let owners = snap.owners_for_file("d:/project/src/main.ts");
+    assert_eq!(owners.len(), 1, "exactly the configured project must own");
+    assert_eq!(owners[0], ProjectId(0));
+
+    // File under node_modules: both memberships hold {root}/node_modules/**
+    // exclude patterns, so nobody claims it.
+    assert!(
+        snap.owners_for_file("d:/project/node_modules/vue/index.ts")
+            .is_empty(),
+        "node_modules paths must stay unowned"
+    );
+
+    // Non-member path outside every root: no owners.
+    assert!(
+        snap.owners_for_file("d:/elsewhere/foo.ts").is_empty(),
+        "paths outside every root must stay unowned"
+    );
 }
 
 // ── Edge case: empty snapshot ──

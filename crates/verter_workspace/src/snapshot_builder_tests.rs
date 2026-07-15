@@ -1,13 +1,21 @@
 use super::*;
 use crate::canonical_path::CanonicalPath;
 use crate::membership::{ConfiguredMembership, FallbackMembership, StaticMembershipSpec};
-use crate::normalized_glob::NormalizedGlob;
+use crate::normalized_glob::{CompiledGlob, NormalizedGlob};
 use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
 use crate::workspace_snapshot::{
     ConfiguredOwnerResolution, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
 };
 
 // ── Helpers ──
+
+fn compiled(raw: &str) -> CompiledGlob {
+    CompiledGlob::new(NormalizedGlob::new(raw))
+}
+
+fn compiled_from_root(root: &CanonicalPath, pattern: &str) -> CompiledGlob {
+    CompiledGlob::new(NormalizedGlob::from_root_and_pattern(root, pattern))
+}
 
 fn make_configured(
     root: &str,
@@ -47,10 +55,7 @@ fn make_fallback(root: &str) -> OwnershipProject {
         payload: ProjectPayload::Fallback {
             membership: FallbackMembership {
                 root: root_cp.clone(),
-                exclude: vec![NormalizedGlob::from_root_and_pattern(
-                    &root_cp,
-                    "node_modules/**",
-                )],
+                exclude: vec![compiled_from_root(&root_cp, "node_modules/**")],
             },
         },
     }
@@ -67,8 +72,8 @@ fn spec_with_files(files: &[&str]) -> StaticMembershipSpec {
 fn spec_with_include_exclude(include: &[&str], exclude: &[&str]) -> StaticMembershipSpec {
     StaticMembershipSpec {
         files: Vec::new(),
-        include: include.iter().map(|s| NormalizedGlob::new(s)).collect(),
-        exclude: exclude.iter().map(|s| NormalizedGlob::new(s)).collect(),
+        include: include.iter().map(|s| compiled(s)).collect(),
+        exclude: exclude.iter().map(|s| compiled(s)).collect(),
     }
 }
 
@@ -468,8 +473,8 @@ fn files_only_no_implicit_include() {
 fn files_immune_to_exclude_in_snapshot() {
     let spec = StaticMembershipSpec {
         files: vec![CanonicalPath::new("d:/project/src/main.ts")],
-        include: vec![NormalizedGlob::new("d:/project/src/**/*")],
-        exclude: vec![NormalizedGlob::new("d:/project/src/**/*")], // excludes everything
+        include: vec![compiled("d:/project/src/**/*")],
+        exclude: vec![compiled("d:/project/src/**/*")], // excludes everything
     };
 
     // But main.ts is in files, so it's immune
@@ -759,8 +764,8 @@ fn materialize_files_entries_always_included_regardless_of_excludes() {
     // and exclude covers dist/. Files entries are immune to exclude.
     let spec = StaticMembershipSpec {
         files: vec![dist_file.clone()],
-        include: vec![NormalizedGlob::from_root_and_pattern(&root, "src/**/*")],
-        exclude: vec![NormalizedGlob::from_root_and_pattern(&root, "dist/**")],
+        include: vec![compiled_from_root(&root, "src/**/*")],
+        exclude: vec![compiled_from_root(&root, "dist/**")],
     };
 
     let ws = crate::filesystem::FilesystemWorkspace::new(
@@ -836,7 +841,7 @@ fn materialize_none_workspace_falls_back_to_files_only() {
 
     let spec = StaticMembershipSpec {
         files: vec![file.clone()],
-        include: vec![NormalizedGlob::from_root_and_pattern(&root, "src/**/*")],
+        include: vec![compiled_from_root(&root, "src/**/*")],
         exclude: Vec::new(),
     };
 

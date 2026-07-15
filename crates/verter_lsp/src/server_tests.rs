@@ -1000,12 +1000,14 @@ fn install_test_resolver_for_root(
         // a harness that does not walk the disk).
         let spec = verter_workspace::StaticMembershipSpec {
             files: Vec::new(),
-            include: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
-                &root_cp, "**/*",
+            include: vec![verter_workspace::CompiledGlob::new(
+                verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
             )],
-            exclude: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
-                &root_cp,
-                "node_modules/**",
+            exclude: vec![verter_workspace::CompiledGlob::new(
+                verter_workspace::NormalizedGlob::from_root_and_pattern(
+                    &root_cp,
+                    "node_modules/**",
+                ),
             )],
         };
         projects.push(verter_workspace::workspace_snapshot::OwnershipProject {
@@ -1031,10 +1033,9 @@ fn install_test_resolver_for_root(
         payload: verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
             membership: verter_workspace::FallbackMembership {
                 root: root_cp.clone(),
-                exclude: vec![verter_workspace::NormalizedGlob::new(&format!(
-                    "{}/node_modules/**",
-                    root
-                ))],
+                exclude: vec![verter_workspace::CompiledGlob::new(
+                    verter_workspace::NormalizedGlob::new(&format!("{}/node_modules/**", root)),
+                )],
             },
         },
     });
@@ -1079,12 +1080,11 @@ fn configured_owner_vfs(root: &str, tsconfig: &str) -> Arc<verter_workspace::Fil
     let root_cp = verter_workspace::CanonicalPath::new(root);
     let spec = verter_workspace::StaticMembershipSpec {
         files: Vec::new(),
-        include: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
-            &root_cp, "**/*",
+        include: vec![verter_workspace::CompiledGlob::new(
+            verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
         )],
-        exclude: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
-            &root_cp,
-            "node_modules/**",
+        exclude: vec![verter_workspace::CompiledGlob::new(
+            verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "node_modules/**"),
         )],
     };
     let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
