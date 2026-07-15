@@ -2217,6 +2217,11 @@ export async function createChecker(
       devMode: false,
       analysisLevel: "full",
       auditEnabled: options?.logging?.audit ?? false,
+      // Footprint capture rides the same opt-in: `getComponentMetaWithAudit`
+      // requires BOTH audit_enabled and footprint_capture on the host, and
+      // `logging.audit` is documented as "captures per-request timing,
+      // memory, and solver cost data" — which is the footprint.
+      footprintCapture: options?.logging?.audit ?? false,
     };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(
       hostConfig,
@@ -2301,6 +2306,11 @@ export async function createCheckerByJson(
       devMode: false,
       analysisLevel: "full",
       auditEnabled: options?.logging?.audit ?? false,
+      // Footprint capture rides the same opt-in: `getComponentMetaWithAudit`
+      // requires BOTH audit_enabled and footprint_capture on the host, and
+      // `logging.audit` is documented as "captures per-request timing,
+      // memory, and solver cost data" — which is the footprint.
+      footprintCapture: options?.logging?.audit ?? false,
     };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(
       hostConfig,

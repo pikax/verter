@@ -4042,11 +4042,13 @@ dependencies = [
 name = "verter_napi"
 version = "0.0.1-beta.1"
 dependencies = [
+ "backtrace",
  "napi",
  "napi-build",
  "napi-derive",
  "oxc_allocator",
  "prost",
+ "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "tokio",

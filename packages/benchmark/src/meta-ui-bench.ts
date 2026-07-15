@@ -6,15 +6,16 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   applyDefaultBenchmarkTransforms,
-  buildMemoryAuditArtifact,
+  buildProfileAuditArtifact,
   compareNormalizedArtifacts,
   rotateComponentOrder,
   summarizeLatencySeries,
   type ArtifactComparison,
-  type MemoryAuditComponentRow,
+  type ProfileAuditComponentRow,
   type MemoryAuditQueryMeasure,
+  type MemoryAuditSiteRow,
   type MetaUiBackend,
-  type MetaUiMemoryAuditArtifact,
+  type MetaUiProfileAuditArtifact,
   type MetaUiOutcomeBucket,
   type MetaUiScenario,
   type NormalizedMetaArtifact,
@@ -61,10 +62,11 @@ interface MetaUiBenchArgs {
   slaMs: number;
   jsAudit: boolean;
   /// Opt-in deep memory audit: per-query native allocator counters +
-  /// process memory, written to a SEPARATE `.memory.json` artifact.
-  /// Requires the instrumented native binding (`--features memory_audit`);
-  /// setup fails loudly against a non-instrumented binary.
-  memoryAudit: boolean;
+  /// process memory, phase timings, and (when sampling is armed)
+  /// allocation sites, written to a SEPARATE `.profile.json` artifact.
+  /// Enables the runtime memory audit on the single regular binding;
+  /// setup fails loudly against a binding that predates the surface.
+  profileAudit: boolean;
   components: string[];
   limit: number | null;
   expected: "vue-component-meta" | "none";
@@ -109,6 +111,12 @@ interface BackendInstance {
    * stderr capture.
    */
   takeLastQueryStderr?(): string | null;
+  /**
+   * End-of-pass sampled allocation-site collection (memory-audit mode
+   * with `VERTER_MEMORY_AUDIT_SAMPLE` armed). Resolves `null` when the
+   * backend/worker has no site data — additive, never a loud failure.
+   */
+  collectMemorySites?(topK: number): Promise<MemoryAuditSiteRow[] | null>;
 }
 
 interface MeasuredQueryResult {
@@ -117,7 +125,7 @@ interface MeasuredQueryResult {
   outcome: MetaUiOutcomeBucket;
   /** Worker-process RSS right after the query (bytes); absent from older workers. */
   rssBytes?: number;
-  /** Per-query memory measure; present only when --memory-audit is on. */
+  /** Per-query memory + timing measure; present only when --profile-audit is on. */
   memoryAudit?: MemoryAuditQueryMeasure;
 }
 
@@ -126,10 +134,12 @@ interface WorkerInitPayload {
   uiRoot: string;
   checkerConfig: Record<string, unknown>;
   components: PreparedComponentSnapshot[];
-  /** When true the worker validates the instrumented native binding at
-   * setup (loud failure otherwise) and attaches per-query memory
-   * measures. Absent/false keeps today's timing behavior untouched. */
-  memoryAudit?: boolean;
+  /** When true the worker enables the runtime memory audit at setup
+   * (loud failure when the binding predates the surface), queries
+   * through the audited native variant for phase timings, and attaches
+   * per-query memory measures. Absent/false keeps today's timing
+   * behavior untouched. */
+  profileAudit?: boolean;
 }
 
 interface QueryWorkerOptions {
@@ -161,11 +171,19 @@ interface WorkerFatalMessage {
   stack?: string;
 }
 
+interface WorkerSitesMessage {
+  type: "sites";
+  requestId: number;
+  /** null ⇔ site sampling not armed / export absent — additive surface. */
+  sites: MemoryAuditSiteRow[] | null;
+}
+
 type WorkerMessage =
   | WorkerReadyMessage
   | WorkerResultMessage
   | WorkerErrorMessage
-  | WorkerFatalMessage;
+  | WorkerFatalMessage
+  | WorkerSitesMessage;
 
 // SLA-vs-hard-timeout split:
 //   - DEFAULT_SLA_MS measures responsiveness (within-SLA / exceeded-SLA
@@ -183,6 +201,11 @@ const DEFAULT_HARD_TIMEOUT_MS = 5_000;
 /// warning emitted by `parseMetaUiBenchArgs`).
 const DEFAULT_QUERY_TIMEOUT_MS = DEFAULT_HARD_TIMEOUT_MS;
 const DEFAULT_SETUP_TIMEOUT_MS = 30_000;
+/// End-of-pass allocation-site collection: how many top-by-bytes sites
+/// the worker reports, and how long the runner waits for the (read-time
+/// symbol-resolving) reply before proceeding without sites.
+const MEMORY_SITES_TOP_K = 50;
+const MEMORY_SITES_TIMEOUT_MS = 30_000;
 
 type GlobalWithOptionalGc = typeof globalThis & {
   gc?: () => void;
@@ -288,7 +311,7 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
     queryTimeoutMs: DEFAULT_HARD_TIMEOUT_MS,
     slaMs: DEFAULT_SLA_MS,
     jsAudit: false,
-    memoryAudit: false,
+    profileAudit: false,
     components: [],
     limit: null,
     expected: "vue-component-meta",
@@ -387,8 +410,9 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
       args.jsAudit = true;
       continue;
     }
-    if (arg === "--memory-audit") {
-      args.memoryAudit = true;
+    if (arg === "--profile-audit" || arg === "--memory-audit") {
+      // --memory-audit is the pre-rename alias of --profile-audit.
+      args.profileAudit = true;
       continue;
     }
     if (arg.startsWith("--components=")) {
@@ -593,7 +617,7 @@ async function createBackendInstance(
       uiRoot: prepared.uiRoot,
       checkerConfig,
       components: componentPaths,
-      memoryAudit: args.memoryAudit,
+      profileAudit: args.profileAudit,
     },
     {
       queryTimeoutMs: args.queryTimeoutMs,
@@ -773,6 +797,38 @@ class WorkerBackendInstance implements BackendInstance {
       return;
     }
     this.lastQueryStderr = this.stderr.slice(chunkStart).join("");
+  }
+
+  /**
+   * One-shot end-of-pass site collection. Uses its own scoped message
+   * listener (never the pending-query map) and degrades to `null` on
+   * timeout, closed channel, or an unavailable worker — sites are
+   * additive and must never fail a pass that already measured.
+   */
+  async collectMemorySites(topK: number): Promise<MemoryAuditSiteRow[] | null> {
+    if (this.unavailableError) {
+      return null;
+    }
+    const requestId = this.nextRequestId++;
+    return new Promise<MemoryAuditSiteRow[] | null>((resolveSites) => {
+      const finish = (sites: MemoryAuditSiteRow[] | null) => {
+        clearTimeout(timer);
+        this.child.off("message", onMessage);
+        resolveSites(sites);
+      };
+      const timer = setTimeout(() => finish(null), MEMORY_SITES_TIMEOUT_MS);
+      const onMessage = (message: WorkerMessage) => {
+        if (message?.type === "sites" && message.requestId === requestId) {
+          finish(message.sites);
+        }
+      };
+      this.child.on("message", onMessage);
+      try {
+        this.child.send({ type: "sites", requestId, topK });
+      } catch {
+        finish(null);
+      }
+    });
   }
 
   async dispose(): Promise<void> {
@@ -968,8 +1024,26 @@ async function executeMeasuredQuery(
  * result. No-op when memory audit is off (`memoryRows === null`) or the
  * worker attached no measure (e.g. an older synthetic test worker).
  */
+/**
+ * Mutable end-of-pass allocation-sites slot, non-null only when
+ * --profile-audit is on AND VERTER_MEMORY_AUDIT_SAMPLE is set (the env
+ * is inherited by the worker, whose allocator does the actual
+ * sampling). `current` stays null until a pass reports sites.
+ */
+interface MemorySitesHolder {
+  current: MemoryAuditSiteRow[] | null;
+}
+
+/** Exported for the hermetic memory-audit spec. */
+export function shouldCollectMemorySites(
+  profileAudit: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return profileAudit && (env.VERTER_MEMORY_AUDIT_SAMPLE ?? "").trim() !== "";
+}
+
 function collectMemoryAuditRow(
-  memoryRows: MemoryAuditComponentRow[] | null,
+  memoryRows: ProfileAuditComponentRow[] | null,
   repeatIndex: number,
   relativePath: string,
   measure: MemoryAuditQueryMeasure | undefined,
@@ -1030,13 +1104,17 @@ async function runScenario(
   repeats: number,
   warmupPasses: number,
   expectedArtifacts: Map<string, string>,
-  memoryRows: MemoryAuditComponentRow[] | null,
+  memoryRows: ProfileAuditComponentRow[] | null,
+  memorySites: MemorySitesHolder | null,
 ): Promise<MetaUiBenchmarkRun> {
   const repeatResults: MetaUiBenchmarkRun["repeats"] = [];
 
   for (let index = 0; index < repeats; index++) {
     const rotated = rotateComponentOrder(prepared.componentSnapshots, index);
     if (scenario === "single_cold" || scenario === "single_warm") {
+      // Site sampling accumulates per worker process; single_* scenarios
+      // spawn one worker per component, so a single end-of-pass report
+      // cannot represent the pass — sites stay repo-scenario-only.
       repeatResults.push(
         await runSingleScenarioRepeat(
           prepared,
@@ -1062,6 +1140,7 @@ async function runScenario(
           warmupPasses,
           expectedArtifacts,
           memoryRows,
+          memorySites,
         ),
       );
     }
@@ -1107,7 +1186,7 @@ async function runSingleScenarioRepeat(
   components: PreparedComponentSnapshot[],
   warmupPasses: number,
   expectedArtifacts: Map<string, string>,
-  memoryRows: MemoryAuditComponentRow[] | null,
+  memoryRows: ProfileAuditComponentRow[] | null,
 ): Promise<MetaUiBenchmarkRun["repeats"][number]> {
   let setupMs = 0;
   let warmupMs = 0;
@@ -1227,7 +1306,8 @@ async function runRepoScenarioRepeat(
   components: PreparedComponentSnapshot[],
   warmupPasses: number,
   expectedArtifacts: Map<string, string>,
-  memoryRows: MemoryAuditComponentRow[] | null,
+  memoryRows: ProfileAuditComponentRow[] | null,
+  memorySites: MemorySitesHolder | null,
 ): Promise<MetaUiBenchmarkRun["repeats"][number]> {
   let setupMs = 0;
   let warmupMs = 0;
@@ -1420,6 +1500,21 @@ async function runRepoScenarioRepeat(
     }
     const steadyStateMs = performance.now() - steadyStartedAt;
 
+    // End-of-pass allocation-site collection, OUTSIDE the measured
+    // window (steadyStateMs is already final). One call per pass; with
+    // --repeats=N the freshest pass wins. Recovery mode (shared worker
+    // crashed) has no pass-scoped worker left to ask — sites stay as-is.
+    // (Cast: `instance` is assigned inside the `startInstance` closure,
+    // which TS's flow narrowing cannot see — same pattern as the rest
+    // of this function.)
+    const passInstance = instance as BackendInstance | null;
+    if (memorySites && passInstance?.isAvailable()) {
+      const sites = await passInstance.collectMemorySites?.(MEMORY_SITES_TOP_K);
+      if (sites != null) {
+        memorySites.current = sites;
+      }
+    }
+
     return {
       index: repeatIndex,
       orderStart: repeatIndex - 1,
@@ -1505,17 +1600,17 @@ function writeRunArtifact(outputDir: string, run: MetaUiBenchmarkRun): string {
 }
 
 /**
- * Write the SEPARATE memory-audit artifact
- * (`meta-ui-<backend>-<scenario>.memory.json`). The timing artifact is
- * never altered by memory-audit mode. Exported for the hermetic
- * memory-audit spec.
+ * Write the SEPARATE profile-audit artifact
+ * (`meta-ui-<backend>-<scenario>.profile.json`). The timing artifact is
+ * never altered by profile-audit mode. Exported for the hermetic
+ * profile-audit spec.
  */
-export function writeMemoryAuditArtifact(
+export function writeProfileAuditArtifact(
   outputDir: string,
-  artifact: MetaUiMemoryAuditArtifact,
+  artifact: MetaUiProfileAuditArtifact,
 ): string {
   mkdirSync(outputDir, { recursive: true });
-  const filePath = join(outputDir, `meta-ui-${artifact.backend}-${artifact.scenario}.memory.json`);
+  const filePath = join(outputDir, `meta-ui-${artifact.backend}-${artifact.scenario}.profile.json`);
   writeFileSync(filePath, JSON.stringify(artifact, null, 2));
   return filePath;
 }
@@ -1551,7 +1646,10 @@ async function main() {
   for (const backend of args.backends) {
     for (const scenario of args.scenarios) {
       logLine(`Running ${backend} / ${scenario}...`);
-      const memoryRows: MemoryAuditComponentRow[] | null = args.memoryAudit ? [] : null;
+      const memoryRows: ProfileAuditComponentRow[] | null = args.profileAudit ? [] : null;
+      const memorySites: MemorySitesHolder | null = shouldCollectMemorySites(args.profileAudit)
+        ? { current: null }
+        : null;
       const run = await runScenario(
         prepared,
         args,
@@ -1561,15 +1659,24 @@ async function main() {
         args.warmupPasses,
         expectedArtifacts,
         memoryRows,
+        memorySites,
       );
       runs.push(run);
       writeRunArtifact(args.outputDir, run);
       if (memoryRows) {
-        const memoryArtifactPath = writeMemoryAuditArtifact(
+        const memoryArtifactPath = writeProfileAuditArtifact(
           args.outputDir,
-          buildMemoryAuditArtifact({ backend, scenario, rows: memoryRows }),
+          buildProfileAuditArtifact({
+            backend,
+            scenario,
+            rows: memoryRows,
+            sites: memorySites?.current ?? null,
+          }),
         );
-        logLine(`  memory audit -> ${memoryArtifactPath}`);
+        logLine(`  profile audit -> ${memoryArtifactPath}`);
+        if (memorySites?.current) {
+          logLine(`  allocation sites: ${memorySites.current.length} sampled call sites attached`);
+        }
       }
       logLine(
         `  steady p50=${run.summary.steadyStateMs.p50.toFixed(2)}ms end-to-end p50=${run.summary.endToEndMs.p50.toFixed(2)}ms`,

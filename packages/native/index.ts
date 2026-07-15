@@ -95,41 +95,78 @@ export declare function processStyle(
 ): ProcessStyleResult;
 
 // =============================================================================
-// Opt-in deep memory audit (cargo feature `memory_audit`)
+// Runtime-gated deep memory audit (always compiled, single binary)
 //
-// Both functions are ALWAYS exported. Against a binary built WITHOUT
-// `--features memory_audit` (every regular/timing build),
-// `memoryAuditSnapshot()` returns `null` and
-// `memoryAuditResetHighWater()` returns `false` so callers can detect a
-// non-instrumented binary and fail loudly instead of reporting zeros.
-// Instrumented build: `pnpm --filter @verter/native run build:memory-audit`.
+// The wrapper allocator ships in every build. Disabled (the default),
+// each allocator call costs one cached branch on top of the system
+// allocator — enable at runtime via `memoryAuditEnable()` (fresh counter
+// epoch) or env `VERTER_MEMORY_AUDIT=1` / `VERTER_MEMORY_AUDIT_SAMPLE=N`
+// (read once, on the first memory-audit call). While disabled,
+// `memoryAuditSnapshot()`/`memoryAuditSites()` return `null` and
+// `memoryAuditResetHighWater()` returns `false` so callers can detect
+// the state and fail loudly instead of reporting zeros.
 // =============================================================================
 
-/** Counters from the instrumented counting global allocator. */
+/** Counters from the counting global allocator (since enable). */
 export interface MemoryAuditSnapshot {
-  /** Allocating calls (alloc/alloc_zeroed/realloc) since process start. */
+  /** Allocating calls (alloc/alloc_zeroed/realloc) since enable. */
   allocCount: number;
-  /** Deallocating calls (dealloc/realloc) since process start. */
+  /** Deallocating calls (dealloc/realloc) since enable. */
   deallocCount: number;
   /** Total bytes requested by allocating calls (monotonic). */
   allocatedBytesTotal: number;
-  /** Currently live heap bytes. */
+  /**
+   * Live heap bytes relative to the enable epoch (may go negative when
+   * blocks allocated before the epoch are freed after it).
+   */
   liveBytes: number;
-  /** High-water mark of liveBytes since start or the last reset. */
+  /** High-water mark of liveBytes since enable or the last reset. */
   peakLiveBytes: number;
 }
 
+/** Options for {@link memoryAuditEnable}. */
+export interface MemoryAuditEnableOptions {
+  /**
+   * Arm allocation-site sampling: capture one call-site stack every
+   * `sampleEvery` allocating calls (a prime such as 97 is recommended).
+   * `0`/absent leaves sampling off (counters only).
+   */
+  sampleEvery?: number;
+}
+
 /**
- * Current allocator counters, or `null` when the loaded binary was
- * built without the `memory_audit` cargo feature.
+ * Enable the runtime memory audit (idempotent; the disabled→enabled
+ * transition starts a fresh counter epoch). Call BEFORE the workload of
+ * interest. Returns `true`.
+ */
+export declare function memoryAuditEnable(options?: MemoryAuditEnableOptions | null): boolean;
+
+/**
+ * Current allocator counters, or `null` while the runtime audit gate is
+ * disabled (the default).
  */
 export declare function memoryAuditSnapshot(): MemoryAuditSnapshot | null;
 
 /**
  * Reset the live-bytes high-water mark to the current live-bytes level.
- * Returns `false` when the loaded binary is not instrumented.
+ * Returns `false` while the runtime audit gate is disabled.
  */
 export declare function memoryAuditResetHighWater(): boolean;
+
+/**
+ * Sampled allocation-site attribution: JSON report of the top-`topK`
+ * sampled sites by sampled bytes —
+ * `[{count, bytes, estimatedTotalBytes, frames}, ...]` where
+ * `estimatedTotalBytes = bytes * N` for the armed `sampleEvery` interval
+ * and `frames` is a short resolved stack (innermost first,
+ * allocator/backtrace plumbing skipped, at most 8 frames). Symbols
+ * resolve lazily at call time; sampling itself captures unresolved
+ * frames only.
+ *
+ * Returns `null` while the audit is disabled OR while sampling was not
+ * armed (`memoryAuditEnable({sampleEvery})` / `VERTER_MEMORY_AUDIT_SAMPLE`).
+ */
+export declare function memoryAuditSites(topK: number): string | null;
 
 // =============================================================================
 // Host-backed batch compile — VerterHost.compileMany

@@ -42,7 +42,6 @@
     "copy-windows-artefact": "node ./scripts/copy-windows-artefact.mjs",
     "build": "pnpm run clean:dist && napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
     "build:debug": "pnpm run clean:dist && napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
-    "build:memory-audit": "pnpm run clean:dist && napi build -o dist --platform --release --features memory_audit --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
     "prepublishOnly": "pnpm run build && napi prepublish -t npm",
     "artifacts": "napi artifacts",
     "ensure-native-loader": "node ./scripts/ensure-native-loader.mjs",
