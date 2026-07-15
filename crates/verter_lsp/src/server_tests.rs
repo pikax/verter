@@ -1008,7 +1008,8 @@ fn install_test_resolver_for_root(
                     &root_cp,
                     "node_modules/**",
                 ),
-            )],
+            )]
+            .into(),
         };
         projects.push(verter_workspace::workspace_snapshot::OwnershipProject {
             id: verter_workspace::workspace_snapshot::ProjectId(0),
@@ -1035,7 +1036,8 @@ fn install_test_resolver_for_root(
                 root: root_cp.clone(),
                 exclude: vec![verter_workspace::CompiledGlob::new(
                     verter_workspace::NormalizedGlob::new(&format!("{}/node_modules/**", root)),
-                )],
+                )]
+                .into(),
             },
         },
     });
@@ -1085,7 +1087,8 @@ fn configured_owner_vfs(root: &str, tsconfig: &str) -> Arc<verter_workspace::Fil
         )],
         exclude: vec![verter_workspace::CompiledGlob::new(
             verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "node_modules/**"),
-        )],
+        )]
+        .into(),
     };
     let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
         id: verter_workspace::workspace_snapshot::ProjectId(0),

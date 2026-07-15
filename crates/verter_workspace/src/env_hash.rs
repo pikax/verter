@@ -321,7 +321,7 @@ fn write_membership(buf: &mut Vec<u8>, membership: &ConfiguredMembership) {
         buf.push(SEP);
     }
     buf.push(SEP);
-    for exc in &spec.exclude {
+    for exc in spec.exclude.iter() {
         buf.extend_from_slice(exc.as_str().as_bytes());
         buf.push(SEP);
     }

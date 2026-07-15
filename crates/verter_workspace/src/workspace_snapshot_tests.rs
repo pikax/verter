@@ -22,7 +22,8 @@ fn configured_project(
         exclude: vec![CompiledGlob::new(NormalizedGlob::from_root_and_pattern(
             &root_cp,
             "node_modules/**",
-        ))],
+        ))]
+        .into(),
     };
     let mut materialized = FxHashSet::default();
     for path in file_paths {
@@ -58,7 +59,8 @@ fn fallback_project(id: u32, root: &str) -> OwnershipProject {
                 exclude: vec![CompiledGlob::new(NormalizedGlob::new(&format!(
                     "{}/node_modules/**",
                     root
-                )))],
+                )))]
+                .into(),
             },
         },
     }

@@ -197,7 +197,7 @@ fn configured_membership_contains() {
 fn fallback_contains_under_root() {
     let membership = FallbackMembership {
         root: root(),
-        exclude: vec![compiled("d:/project/node_modules/**")],
+        exclude: vec![compiled("d:/project/node_modules/**")].into(),
     };
 
     assert!(membership.contains(&CanonicalPath::new("d:/project/src/foo.ts")));
@@ -208,7 +208,7 @@ fn fallback_contains_under_root() {
 fn fallback_rejects_outside_root() {
     let membership = FallbackMembership {
         root: root(),
-        exclude: vec![],
+        exclude: vec![].into(),
     };
 
     assert!(
@@ -221,7 +221,7 @@ fn fallback_rejects_outside_root() {
 fn fallback_rejects_excluded() {
     let membership = FallbackMembership {
         root: root(),
-        exclude: vec![compiled("d:/project/node_modules/**")],
+        exclude: vec![compiled("d:/project/node_modules/**")].into(),
     };
 
     assert!(
@@ -234,7 +234,7 @@ fn fallback_rejects_excluded() {
 fn fallback_rejects_partial_prefix() {
     let membership = FallbackMembership {
         root: root(),
-        exclude: vec![],
+        exclude: vec![].into(),
     };
 
     assert!(
@@ -250,7 +250,7 @@ fn fallback_has_no_configured_settings() {
     // This test just documents the invariant.
     let membership = FallbackMembership {
         root: root(),
-        exclude: vec![],
+        exclude: vec![].into(),
     };
     // There's no way to access tsconfig settings from a FallbackMembership
     // because the type simply doesn't have those fields.
@@ -339,7 +339,7 @@ fn fallback_invalid_exclude_glob_never_excludes() {
 
     let membership = FallbackMembership {
         root: root(),
-        exclude: vec![compiled("d:/project/[unclosed")],
+        exclude: vec![compiled("d:/project/[unclosed")].into(),
     };
     assert!(
         membership.contains(&CanonicalPath::new("d:/project/src/foo.ts")),
@@ -607,4 +607,91 @@ fn supported_set_always_includes_full_ts_family() {
             "with allowJs the supported set must include `{js}`"
         );
     }
+}
+
+// ── typescript_default_excludes: process-wide per-root memo ──
+//
+// The default-exclude compiled-glob set is built ONCE per root and shared
+// (`Arc<[CompiledGlob]>`): membership construction runs on hot host paths
+// (snapshot rebuilds, `IdeProjectConfig::new`, the workspace-default env-hash
+// fallback), and recompiling three `glob::Pattern`s per call dominated
+// allocation profiles. These tests pin the sharing invariant, root precision,
+// and correctness across memo overflow.
+
+/// Same root → the SAME shared allocation (pointer-equal Arc), not a fresh
+/// compile per call. This is the perf invariant the memo exists for.
+#[test]
+fn default_excludes_share_one_compiled_set_per_root() {
+    let root = CanonicalPath::new("d:/memo-share-root");
+    let first = typescript_default_excludes(&root);
+    let second = typescript_default_excludes(&root);
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "repeated calls for the same root must return the memoized allocation"
+    );
+    assert_eq!(first, second, "shared set must also be value-equal");
+    assert_eq!(
+        first.len(),
+        3,
+        "node_modules + bower_components + jspm_packages"
+    );
+}
+
+/// The memoized set stays root-precise: each root gets its own rooted
+/// patterns, and a root's excludes never match paths under another root.
+#[test]
+fn default_excludes_are_root_precise() {
+    let a = typescript_default_excludes(&CanonicalPath::new("d:/memo-root-a"));
+    let b = typescript_default_excludes(&CanonicalPath::new("d:/memo-root-b"));
+    assert!(
+        !std::sync::Arc::ptr_eq(&a, &b),
+        "distinct roots must not alias one compiled set"
+    );
+
+    for dir in ["node_modules", "bower_components", "jspm_packages"] {
+        let inside_a = CanonicalPath::new(&format!("d:/memo-root-a/{dir}/pkg/index.ts"));
+        assert!(
+            a.iter().any(|g| g.matches(&inside_a)),
+            "root-a excludes must match {dir} under root-a"
+        );
+        assert!(
+            !b.iter().any(|g| g.matches(&inside_a)),
+            "root-b excludes must NOT match {dir} under root-a"
+        );
+    }
+
+    let member = CanonicalPath::new("d:/memo-root-a/src/main.ts");
+    assert!(
+        !a.iter().any(|g| g.matches(&member)),
+        "a plain source file under the root must not be excluded"
+    );
+}
+
+/// Exceeding the memo bound must not corrupt results: evicted roots
+/// recompute to the same patterns, and re-queried roots re-share.
+#[test]
+fn default_excludes_stay_correct_across_memo_overflow() {
+    let pinned_root = CanonicalPath::new("d:/memo-overflow-pinned");
+    let before = typescript_default_excludes(&pinned_root);
+
+    for i in 0..(DEFAULT_EXCLUDES_MEMO_CAP + 8) {
+        let _ = typescript_default_excludes(&CanonicalPath::new(&format!("d:/memo-overflow-{i}")));
+    }
+
+    let after = typescript_default_excludes(&pinned_root);
+    assert_eq!(
+        before, after,
+        "recomputed set after eviction must be value-identical"
+    );
+    let again = typescript_default_excludes(&pinned_root);
+    assert!(
+        std::sync::Arc::ptr_eq(&after, &again),
+        "a re-inserted root must share its allocation again"
+    );
+    assert!(
+        after.iter().any(|g| g.matches(&CanonicalPath::new(
+            "d:/memo-overflow-pinned/node_modules/pkg/index.d.ts"
+        ))),
+        "post-overflow set must still match node_modules under the root"
+    );
 }

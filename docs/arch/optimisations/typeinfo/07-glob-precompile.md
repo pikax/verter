@@ -44,3 +44,16 @@
 Full pass (post-fix protocol, median of 3 interleaved runs): steady 20 480 → **20 076 ms (−2.0 %)** —
 small but consistent (every t8 run ≤ every baseline run); p95 345 → 332 ms; peak RSS ~flat. Keep: the cost
 is trivial and the win is real on workspace-heavy operations beyond this benchmark.
+
+## Follow-up: per-root memo for the default-exclude set
+
+Compiling per membership construction was still per-CALL for the TS default excludes: allocation
+sampling over a 179-component pass attributed ~100 MB of transient allocations (6 distinct stacks)
+plus ~1.4% self CPU in `glob::Pattern::new` to `typescript_default_excludes`, driven by hot callers
+that reconstruct memberships (`IdeProjectConfig::new` via the workspace-default env-hash/identity
+helpers in `engine.rs`, invoked per store-view/no-owner env read). Now: a process-wide per-ROOT memo
+(`LazyLock<RwLock<FxHashMap<CanonicalPath, Arc<[CompiledGlob]>>>>`, bounded, clear-on-overflow) and
+`StaticMembershipSpec.exclude` / `FallbackMembership.exclude` are `Arc<[CompiledGlob]>` — each root
+compiles its three default-exclude globs once per process; membership clones stop deep-cloning them.
+The include default (`{root}/**/*`) still compiles per construction — falls out when the
+workspace-default env-hash reconstruction itself is cached (recorded as the remaining owner-layer fix).

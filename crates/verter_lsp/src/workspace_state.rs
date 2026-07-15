@@ -271,7 +271,8 @@ mod tests {
                     exclude: vec![CompiledGlob::new(NormalizedGlob::new(&format!(
                         "{}/node_modules/**",
                         root
-                    )))],
+                    )))]
+                    .into(),
                 },
             },
         }
@@ -297,7 +298,7 @@ mod tests {
                     spec: verter_workspace::StaticMembershipSpec {
                         files: files.iter().map(|f| CanonicalPath::new(f)).collect(),
                         include: Vec::new(),
-                        exclude: Vec::new(),
+                        exclude: Vec::new().into(),
                     },
                     materialized_files: files.iter().map(|f| CanonicalPath::new(f)).collect(),
                 },

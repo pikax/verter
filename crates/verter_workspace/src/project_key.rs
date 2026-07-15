@@ -138,7 +138,7 @@ mod tests {
                     spec: StaticMembershipSpec {
                         files: Vec::new(),
                         include: Vec::new(),
-                        exclude: Vec::new(),
+                        exclude: Vec::new().into(),
                     },
                     materialized_files: FxHashSet::default(),
                 },
@@ -157,7 +157,7 @@ mod tests {
             payload: ProjectPayload::Fallback {
                 membership: FallbackMembership {
                     root: CanonicalPath::new(project_root),
-                    exclude: Vec::new(),
+                    exclude: Vec::new().into(),
                 },
             },
         }

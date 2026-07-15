@@ -55,7 +55,7 @@ fn make_fallback(root: &str) -> OwnershipProject {
         payload: ProjectPayload::Fallback {
             membership: FallbackMembership {
                 root: root_cp.clone(),
-                exclude: vec![compiled_from_root(&root_cp, "node_modules/**")],
+                exclude: vec![compiled_from_root(&root_cp, "node_modules/**")].into(),
             },
         },
     }
@@ -65,7 +65,7 @@ fn spec_with_files(files: &[&str]) -> StaticMembershipSpec {
     StaticMembershipSpec {
         files: files.iter().map(|s| CanonicalPath::new(s)).collect(),
         include: Vec::new(),
-        exclude: Vec::new(),
+        exclude: Vec::new().into(),
     }
 }
 
@@ -474,7 +474,7 @@ fn files_immune_to_exclude_in_snapshot() {
     let spec = StaticMembershipSpec {
         files: vec![CanonicalPath::new("d:/project/src/main.ts")],
         include: vec![compiled("d:/project/src/**/*")],
-        exclude: vec![compiled("d:/project/src/**/*")], // excludes everything
+        exclude: vec![compiled("d:/project/src/**/*")].into(), // excludes everything
     };
 
     // But main.ts is in files, so it's immune
@@ -496,7 +496,7 @@ fn solution_style_empty_files_empty_include() {
     let spec = StaticMembershipSpec {
         files: Vec::new(),
         include: Vec::new(),
-        exclude: Vec::new(),
+        exclude: Vec::new().into(),
     };
 
     assert!(!spec.matches(&CanonicalPath::new("d:/project/src/foo.ts")));
@@ -650,7 +650,7 @@ fn materialize_includes_files_entries() {
             CanonicalPath::new("d:/project/src/app.vue"),
         ],
         include: Vec::new(),
-        exclude: Vec::new(),
+        exclude: Vec::new().into(),
     };
 
     let materialized = materialize_from_spec(&spec, &root, None);
@@ -665,7 +665,7 @@ fn materialize_empty_spec_produces_empty_set() {
     let spec = StaticMembershipSpec {
         files: Vec::new(),
         include: Vec::new(),
-        exclude: Vec::new(),
+        exclude: Vec::new().into(),
     };
 
     let materialized = materialize_from_spec(&spec, &root, None);
@@ -765,7 +765,7 @@ fn materialize_files_entries_always_included_regardless_of_excludes() {
     let spec = StaticMembershipSpec {
         files: vec![dist_file.clone()],
         include: vec![compiled_from_root(&root, "src/**/*")],
-        exclude: vec![compiled_from_root(&root, "dist/**")],
+        exclude: vec![compiled_from_root(&root, "dist/**")].into(),
     };
 
     let ws = crate::filesystem::FilesystemWorkspace::new(
@@ -805,7 +805,7 @@ fn materialize_empty_include_produces_files_only() {
     let spec = StaticMembershipSpec {
         files: vec![main_file.clone()],
         include: Vec::new(),
-        exclude: Vec::new(),
+        exclude: Vec::new().into(),
     };
 
     let ws = crate::filesystem::FilesystemWorkspace::new(
@@ -842,7 +842,7 @@ fn materialize_none_workspace_falls_back_to_files_only() {
     let spec = StaticMembershipSpec {
         files: vec![file.clone()],
         include: vec![compiled_from_root(&root, "src/**/*")],
-        exclude: Vec::new(),
+        exclude: Vec::new().into(),
     };
 
     // None workspace → no walking, just files entries
