@@ -183,6 +183,7 @@ impl ComponentMetaRequestHost for VerterHost {
             ),
         );
         let owner_eval_source = VerterHost::build_eval_script_source(
+            canonical,
             &facts.raw_source,
             facts.framework_parse.as_deref(),
         );

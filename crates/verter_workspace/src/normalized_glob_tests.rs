@@ -130,3 +130,79 @@ fn display_matches_as_str() {
     let g = NormalizedGlob::new("d:/project/**/*.vue");
     assert_eq!(format!("{}", g), g.as_str());
 }
+
+// ── CompiledGlob: precompiled matching, same semantics ──
+
+#[test]
+fn compiled_glob_matches_like_normalized_glob() {
+    // The precompiled form must agree with the compile-per-call form on
+    // matches, misses, and separator semantics — same MatchOptions.
+    let cases: &[(&str, &str, bool)] = &[
+        ("d:/project/src/**/*.vue", "d:/project/src/App.vue", true),
+        (
+            "d:/project/src/**/*.vue",
+            "d:/project/src/components/Button.vue",
+            true,
+        ),
+        ("d:/project/src/**/*.vue", "d:/project/tests/foo.vue", false),
+        ("d:/project/src/**/*.vue", "d:/project/src/main.ts", false),
+        // single * must NOT cross directory boundaries
+        ("d:/project/*", "d:/project/main.ts", true),
+        ("d:/project/*", "d:/project/src/main.ts", false),
+        // ** crosses directories
+        ("d:/project/**/*.ts", "d:/project/src/deep/main.ts", true),
+        // exact (non-wildcard) pattern
+        ("d:/project/src/main.ts", "d:/project/src/main.ts", true),
+        ("d:/project/src/main.ts", "d:/project/src/main.tsx", false),
+        (
+            "d:/project/node_modules/**",
+            "d:/project/node_modules/vue/index.ts",
+            true,
+        ),
+        ("d:/project/node_modules/**", "d:/project/src/foo.ts", false),
+    ];
+
+    for (pattern, path, expected) in cases {
+        let raw = NormalizedGlob::new(pattern);
+        let compiled = CompiledGlob::new(raw.clone());
+        let path = CanonicalPath::new(path);
+        assert_eq!(
+            compiled.matches(&path),
+            *expected,
+            "CompiledGlob({pattern}).matches({})",
+            path.as_str()
+        );
+        assert_eq!(
+            raw.matches(&path),
+            compiled.matches(&path),
+            "CompiledGlob must agree with NormalizedGlob for {pattern} vs {}",
+            path.as_str()
+        );
+    }
+}
+
+#[test]
+fn compiled_glob_invalid_pattern_never_matches() {
+    // Self-check: the fixture must actually fail to compile.
+    assert!(glob::Pattern::new("d:/project/[invalid").is_err());
+
+    let compiled = CompiledGlob::new(NormalizedGlob::new("d:/project/[invalid"));
+    assert!(
+        !compiled.matches(&CanonicalPath::new("d:/project/foo.ts")),
+        "invalid pattern must never match (and must not panic)"
+    );
+}
+
+#[test]
+fn compiled_glob_preserves_raw_glob() {
+    let raw = NormalizedGlob::new("d:\\project\\src\\**\\*.vue");
+    let compiled = CompiledGlob::new(raw.clone());
+    assert_eq!(compiled.as_str(), raw.as_str());
+    assert_eq!(compiled.raw(), &raw);
+}
+
+#[test]
+fn compiled_glob_from_normalized_glob() {
+    let compiled: CompiledGlob = NormalizedGlob::new("d:/project/**/*").into();
+    assert!(compiled.matches(&CanonicalPath::new("d:/project/src/foo.ts")));
+}

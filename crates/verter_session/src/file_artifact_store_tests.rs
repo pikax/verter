@@ -1284,3 +1284,329 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
          contributes to"
     );
 }
+
+// ── Per-canonical read-surface parity battery ──
+//
+// `get_any` / `get_artifacts_any` / `get_artifacts_for_content` resolve a
+// canonical's candidate keys through the canonical→keys index and then read
+// `self.artifacts` by exact key. These tests characterize the exact public
+// read results across EVERY artifact-set mutation shape (legacy insert
+// drain, keyed remove, canonical drain, LRU + retention sweeps, whole-store
+// clear, no-op reinsert) so the index-backed reads can never drift from the
+// authoritative `artifacts` map: each test fails if the index dangles
+// (a read goes `None` while the map still holds the entry) or strands
+// (a read misses an entry the map holds after a mutation).
+
+#[test]
+fn get_any_follows_legacy_insert_content_drain() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/drain-follow.ts");
+    let v1 = synth_indexed(0x01);
+    store.insert(Arc::clone(&canonical), Arc::clone(&v1));
+    let got1 = store
+        .get_any("/drain-follow.ts")
+        .expect("v1 MUST be readable");
+    assert!(Arc::ptr_eq(&got1, &v1));
+
+    // New content version: the legacy insert drains the prior base key and
+    // publishes the new one — the base read MUST follow to the NEW artifact.
+    let v2 = synth_indexed(0x02);
+    store.insert(Arc::clone(&canonical), Arc::clone(&v2));
+    let got2 = store
+        .get_any("/drain-follow.ts")
+        .expect("the freshly inserted version MUST be readable");
+    assert!(
+        Arc::ptr_eq(&got2, &v2),
+        "get_any MUST surface the freshly inserted content version, not the drained one"
+    );
+
+    // The drained prior version is unreachable through every read shape.
+    assert!(store.get("/drain-follow.ts", [0x01u8; 16]).is_none());
+    assert!(store
+        .get_artifacts_for_content("/drain-follow.ts", [0x01u8; 16])
+        .is_none());
+    assert!(store
+        .get_artifacts_for_content("/drain-follow.ts", [0x02u8; 16])
+        .is_some());
+    assert_eq!(store.len(), 1, "the drain leaves exactly one live entry");
+}
+
+#[test]
+fn get_any_is_none_after_every_removal_shape() {
+    // Keyed remove (`remove_artifacts`).
+    let store = FileArtifactStore::new();
+    let key = FileArtifactKey::base(Arc::from("/removed.ts"), [0x11u8; 16]);
+    store.insert_artifacts(key.clone(), synth_artifacts(0x11));
+    assert!(store.get_any("/removed.ts").is_some());
+    store.remove_artifacts(&key);
+    assert!(
+        store.get_any("/removed.ts").is_none(),
+        "a keyed remove MUST make the base read None"
+    );
+    assert!(store.get_artifacts_any("/removed.ts").is_none());
+    assert!(store
+        .get_artifacts_for_content("/removed.ts", [0x11u8; 16])
+        .is_none());
+
+    // Legacy per-canonical remove.
+    store.insert(Arc::from("/removed.ts"), synth_indexed(0x22));
+    assert!(store.get_any("/removed.ts").is_some());
+    store.remove("/removed.ts");
+    assert!(
+        store.get_any("/removed.ts").is_none(),
+        "the legacy remove MUST make the base read None"
+    );
+
+    // Canonical drain.
+    store.insert(Arc::from("/removed.ts"), synth_indexed(0x33));
+    assert_eq!(store.remove_canonical("/removed.ts"), 1);
+    assert!(store.get_any("/removed.ts").is_none());
+    assert!(store
+        .get_artifacts_for_content("/removed.ts", [0x33u8; 16])
+        .is_none());
+
+    // Whole-store clear.
+    store.insert(Arc::from("/removed.ts"), synth_indexed(0x44));
+    assert!(store.get_any("/removed.ts").is_some());
+    store.clear_all();
+    assert!(store.get_any("/removed.ts").is_none());
+    assert!(store.get_artifacts_any("/removed.ts").is_none());
+}
+
+#[test]
+fn base_reads_follow_eviction_sweeps() {
+    // LRU floor: evicted canonicals go None, the survivor stays readable.
+    let store = FileArtifactStore::new();
+    for i in 0..4u8 {
+        let canonical = format!("/lru{i}.ts");
+        store.insert_artifacts(
+            FileArtifactKey::base(Arc::from(canonical.as_str()), [i; 16]),
+            synth_artifacts(i),
+        );
+    }
+    // Pure recency (threshold 0): the freshest-tick entry (/lru3.ts, the
+    // last insert) survives a floor of 1.
+    store.evict_lru_promoted(1, 0);
+    assert_eq!(store.len(), 1);
+    assert!(
+        store.get_any("/lru3.ts").is_some(),
+        "the freshest entry MUST stay readable after the LRU sweep"
+    );
+    for i in 0..3u8 {
+        let canonical = format!("/lru{i}.ts");
+        assert!(
+            store.get_any(&canonical).is_none(),
+            "an LRU-evicted canonical MUST read None (no stale read path)"
+        );
+        assert!(store
+            .get_artifacts_for_content(&canonical, [i; 16])
+            .is_none());
+    }
+
+    // Per-canonical retention: dropped variants go None per content hash,
+    // the kept variant stays readable.
+    let store = FileArtifactStore::new();
+    let kept = synth_artifacts(2);
+    for seed in 0..2u8 {
+        store.insert_artifacts(
+            FileArtifactKey::base(Arc::from("/retained.ts"), [seed; 16]),
+            synth_artifacts(seed),
+        );
+    }
+    store.insert_artifacts(
+        FileArtifactKey::base(Arc::from("/retained.ts"), [2u8; 16]),
+        Arc::clone(&kept),
+    );
+    store.enforce_per_canonical_retention(1);
+    assert_eq!(store.len(), 1);
+    for seed in 0..2u8 {
+        assert!(
+            store
+                .get_artifacts_for_content("/retained.ts", [seed; 16])
+                .is_none(),
+            "a retention-dropped variant MUST read None per content hash"
+        );
+    }
+    let survivor = store
+        .get_artifacts_for_content("/retained.ts", [2u8; 16])
+        .expect("the kept variant MUST stay readable");
+    assert!(Arc::ptr_eq(&survivor, &kept));
+    let any = store
+        .get_artifacts_any("/retained.ts")
+        .expect("the base read MUST still resolve after the sweep");
+    assert!(Arc::ptr_eq(&any, &kept));
+}
+
+#[test]
+fn get_any_skips_overlay_key_inserted_before_base() {
+    // Overlay-scoped entry inserted FIRST (so it precedes the base key in
+    // any insertion-ordered candidate list): the base read must skip it —
+    // before AND after the base entry lands, and again after the base entry
+    // is removed while the overlay survives.
+    let store = FileArtifactStore::new();
+    let content_hash = [0x66u8; 16];
+    let overlay_key = FileArtifactKey::overlay_scoped(
+        Arc::from("/ordered.ts"),
+        content_hash,
+        overlay_discriminator_for_test(),
+    );
+    store.insert_artifacts(overlay_key.clone(), synth_artifacts(0x66));
+    assert!(
+        store.get_any("/ordered.ts").is_none(),
+        "an overlay-only canonical MUST read None through the base read"
+    );
+
+    let base_indexed = synth_indexed(0xb1);
+    let base_key = FileArtifactKey::base(Arc::from("/ordered.ts"), [0xb1u8; 16]);
+    store.insert_artifacts(
+        base_key.clone(),
+        Arc::new(FileArtifacts::with_indexed(Arc::clone(&base_indexed))),
+    );
+    let got = store
+        .get_any("/ordered.ts")
+        .expect("the base entry MUST be readable");
+    assert!(
+        Arc::ptr_eq(&got, &base_indexed),
+        "get_any MUST return the base artifact even when an overlay key precedes it"
+    );
+
+    // Removing ONLY the base entry flips the base read back to None while
+    // the overlay entry stays reachable content-addressed.
+    store.remove_artifacts(&base_key);
+    assert!(store.get_any("/ordered.ts").is_none());
+    assert!(
+        store
+            .get_artifacts_for_content("/ordered.ts", content_hash)
+            .is_some(),
+        "the surviving overlay entry MUST stay reachable content-addressed"
+    );
+}
+
+#[test]
+fn get_artifacts_for_content_selects_by_hash_across_key_shapes() {
+    let store = FileArtifactStore::new();
+    let base_payload = synth_artifacts(0xa1);
+    let overlay_payload = synth_artifacts(0xa2);
+    store.insert_artifacts(
+        FileArtifactKey::base(Arc::from("/mixed.ts"), [0xa1u8; 16]),
+        Arc::clone(&base_payload),
+    );
+    store.insert_artifacts(
+        FileArtifactKey::overlay_scoped(
+            Arc::from("/mixed.ts"),
+            [0xa2u8; 16],
+            overlay_discriminator_for_test(),
+        ),
+        Arc::clone(&overlay_payload),
+    );
+
+    let base_hit = store
+        .get_artifacts_for_content("/mixed.ts", [0xa1u8; 16])
+        .expect("the base content version MUST resolve");
+    assert!(Arc::ptr_eq(&base_hit, &base_payload));
+    let overlay_hit = store
+        .get_artifacts_for_content("/mixed.ts", [0xa2u8; 16])
+        .expect("the overlay content version MUST resolve (view-independent)");
+    assert!(Arc::ptr_eq(&overlay_hit, &overlay_payload));
+    assert!(
+        store
+            .get_artifacts_for_content("/mixed.ts", [0xa3u8; 16])
+            .is_none(),
+        "an unknown content hash MUST miss (content-pinned)"
+    );
+    assert!(
+        store
+            .get_artifacts_for_content("/other.ts", [0xa1u8; 16])
+            .is_none(),
+        "a different canonical MUST miss"
+    );
+}
+
+#[test]
+fn noop_legacy_reinsert_keeps_base_reads_warm() {
+    let store = FileArtifactStore::new();
+    let canonical: Arc<str> = Arc::from("/noop-read.ts");
+    store.insert(Arc::clone(&canonical), synth_indexed(0x55));
+    let before = store
+        .get_any("/noop-read.ts")
+        .expect("entry MUST be readable after the first insert");
+
+    // Byte-identical re-insert — a literal no-op for the current key.
+    store.insert(Arc::clone(&canonical), synth_indexed(0x55));
+    let after = store
+        .get_any("/noop-read.ts")
+        .expect("entry MUST stay readable across a no-op reinsert");
+    assert!(
+        Arc::ptr_eq(&before, &after),
+        "a no-op reinsert MUST leave the same artifact readable (no absent window)"
+    );
+    assert!(store
+        .get_artifacts_for_content("/noop-read.ts", [0x55u8; 16])
+        .is_some());
+}
+
+#[test]
+fn warm_hit_counter_increments_and_dies_with_the_entry() {
+    let store = FileArtifactStore::new();
+    store.insert(Arc::from("/hits.ts"), synth_indexed(0x55));
+    let key = FileArtifactKey::base(Arc::from("/hits.ts"), [0x55u8; 16]);
+    assert_eq!(store.hit_count(&key), 0, "a fresh entry starts cold");
+
+    // Every warm read shape bumps the per-entry counter exactly once.
+    assert!(store.get("/hits.ts", [0x55u8; 16]).is_some());
+    assert!(store.get_any("/hits.ts").is_some());
+    assert!(store.get_artifacts(&key).is_some());
+    assert!(store.get_artifacts_any("/hits.ts").is_some());
+    assert!(store
+        .get_artifacts_for_content("/hits.ts", [0x55u8; 16])
+        .is_some());
+    assert_eq!(
+        store.hit_count(&key),
+        5,
+        "each warm read (get / get_any / get_artifacts / get_artifacts_any / \
+         get_artifacts_for_content) MUST bump the hit counter once"
+    );
+
+    // A miss does not bump.
+    assert!(store.get("/hits.ts", [0x66u8; 16]).is_none());
+    assert_eq!(store.hit_count(&key), 5, "a miss MUST NOT bump");
+
+    // The counter dies with the entry: an evicted key never carries a stale
+    // hit count into a later same-key insert.
+    store.remove_canonical("/hits.ts");
+    assert_eq!(store.hit_count(&key), 0, "eviction MUST clear the counter");
+    store.insert(Arc::from("/hits.ts"), synth_indexed(0x55));
+    assert_eq!(
+        store.hit_count(&key),
+        0,
+        "a re-inserted key MUST start with a fresh counter"
+    );
+}
+
+#[test]
+fn lru_promotion_sees_hits_recorded_through_base_reads() {
+    // Hits recorded through the canonical-wide base read (`get_any`) must
+    // feed the promotion-aware LRU floor exactly like exact-key hits.
+    let store = FileArtifactStore::new();
+    for i in 0..4u8 {
+        let canonical = format!("/promote{i}.ts");
+        store.insert(Arc::from(canonical.as_str()), synth_indexed(i));
+    }
+    // Two warm base reads promote /promote0.ts above the threshold of 2.
+    assert!(store.get_any("/promote0.ts").is_some());
+    assert!(store.get_any("/promote0.ts").is_some());
+
+    store.evict_lru_promoted(1, 2);
+    assert_eq!(store.len(), 1);
+    assert!(
+        store.get_any("/promote0.ts").is_some(),
+        "the hot entry (promoted through get_any hits) MUST survive the floor"
+    );
+    for i in 1..4u8 {
+        let canonical = format!("/promote{i}.ts");
+        assert!(
+            store.get_any(&canonical).is_none(),
+            "cold entries MUST age out before the hot one"
+        );
+    }
+}

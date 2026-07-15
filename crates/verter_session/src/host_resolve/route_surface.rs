@@ -324,6 +324,7 @@ impl VerterHost {
             if let Some(state) = self.effective_file_state(dep_canonical, None) {
                 if self.store_view_allows_current_whole_hash(dep_canonical, state.whole_hash) {
                     let eval_source = Arc::<str>::from(Self::build_eval_script_source(
+                        dep_canonical,
                         state.source.as_ref(),
                         state.framework_parse.as_deref(),
                     ));

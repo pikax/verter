@@ -11,7 +11,7 @@
 //! - Solution-style `{ files: [], references: [...] }` → matches nothing
 
 use crate::canonical_path::CanonicalPath;
-use crate::normalized_glob::NormalizedGlob;
+use crate::normalized_glob::{CompiledGlob, NormalizedGlob};
 use rustc_hash::FxHashSet;
 
 /// The set of file extensions a configured TypeScript project treats as
@@ -165,14 +165,19 @@ fn segment_is_extension_specific(segment: &str) -> bool {
 /// Always explicit — no `MatchAll` variant. When a tsconfig has no
 /// `files`, no `include`, no `exclude`, the builder fills in TypeScript
 /// defaults: `include: ["{dir}/**/*"]`, `exclude: ["{dir}/node_modules/**", ...]`.
+///
+/// Glob patterns are stored precompiled ([`CompiledGlob`]): membership
+/// match loops run per ownership query, and compiling on every match
+/// dominated the query cost. Compilation happens once, at membership
+/// construction (snapshot build) time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticMembershipSpec {
     /// Exact file paths. **Immune to exclude** — always members.
     pub files: Vec<CanonicalPath>,
     /// Glob patterns. Builder fills default `["**/*"]` when needed.
-    pub include: Vec<NormalizedGlob>,
+    pub include: Vec<CompiledGlob>,
     /// Only filters `include`. Builder fills TS defaults when needed.
-    pub exclude: Vec<NormalizedGlob>,
+    pub exclude: Vec<CompiledGlob>,
 }
 
 /// Configured project membership: static spec + materialized file set.
@@ -223,7 +228,8 @@ impl ConfiguredMembership {
 #[derive(Debug, Clone)]
 pub struct FallbackMembership {
     pub root: CanonicalPath,
-    pub exclude: Vec<NormalizedGlob>,
+    /// Precompiled at membership construction — see [`StaticMembershipSpec`].
+    pub exclude: Vec<CompiledGlob>,
 }
 
 impl FallbackMembership {
@@ -272,7 +278,9 @@ impl StaticMembershipSpec {
     pub fn with_typescript_defaults(root: &CanonicalPath) -> Self {
         Self {
             files: Vec::new(),
-            include: vec![NormalizedGlob::from_root_and_pattern(root, "**/*")],
+            include: vec![CompiledGlob::new(NormalizedGlob::from_root_and_pattern(
+                root, "**/*",
+            ))],
             exclude: typescript_default_excludes(root),
         }
     }
@@ -307,10 +315,11 @@ impl StaticMembershipSpec {
             .iter()
             .map(|g| NormalizedGlob::new(&root_membership_entry(root, g, false)))
             .flat_map(|g| expand_include_glob(&g, supported))
+            .map(CompiledGlob::new)
             .collect();
         let exclude = exclude
             .iter()
-            .map(|g| NormalizedGlob::new(&root_membership_entry(root, g, true)))
+            .map(|g| CompiledGlob::new(NormalizedGlob::new(&root_membership_entry(root, g, true))))
             .collect();
         Self {
             files,
@@ -334,18 +343,30 @@ impl StaticMembershipSpec {
         let default_glob = NormalizedGlob::from_root_and_pattern(root, "**/*");
         Self {
             files: Vec::new(),
-            include: expand_include_glob(&default_glob, supported),
+            include: expand_include_glob(&default_glob, supported)
+                .into_iter()
+                .map(CompiledGlob::new)
+                .collect(),
             exclude: typescript_default_excludes(root),
         }
     }
 }
 
-/// TypeScript's default exclude patterns for a project root.
-pub fn typescript_default_excludes(root: &CanonicalPath) -> Vec<NormalizedGlob> {
+/// TypeScript's default exclude patterns for a project root, precompiled.
+pub fn typescript_default_excludes(root: &CanonicalPath) -> Vec<CompiledGlob> {
     vec![
-        NormalizedGlob::from_root_and_pattern(root, "node_modules/**"),
-        NormalizedGlob::from_root_and_pattern(root, "bower_components/**"),
-        NormalizedGlob::from_root_and_pattern(root, "jspm_packages/**"),
+        CompiledGlob::new(NormalizedGlob::from_root_and_pattern(
+            root,
+            "node_modules/**",
+        )),
+        CompiledGlob::new(NormalizedGlob::from_root_and_pattern(
+            root,
+            "bower_components/**",
+        )),
+        CompiledGlob::new(NormalizedGlob::from_root_and_pattern(
+            root,
+            "jspm_packages/**",
+        )),
     ]
 }
 

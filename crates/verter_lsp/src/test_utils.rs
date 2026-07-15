@@ -35,12 +35,14 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
         Some(tsconfig) => {
             let spec = verter_workspace::StaticMembershipSpec {
                 files: Vec::new(),
-                include: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
-                    &root_cp, "**/*",
+                include: vec![verter_workspace::CompiledGlob::new(
+                    verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
                 )],
-                exclude: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
-                    &root_cp,
-                    "node_modules/**",
+                exclude: vec![verter_workspace::CompiledGlob::new(
+                    verter_workspace::NormalizedGlob::from_root_and_pattern(
+                        &root_cp,
+                        "node_modules/**",
+                    ),
                 )],
             };
             verter_workspace::workspace_snapshot::ProjectPayload::Configured {
@@ -57,10 +59,9 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
         None => verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
             membership: verter_workspace::FallbackMembership {
                 root: root_cp.clone(),
-                exclude: vec![verter_workspace::NormalizedGlob::new(&format!(
-                    "{}/node_modules/**",
-                    root
-                ))],
+                exclude: vec![verter_workspace::CompiledGlob::new(
+                    verter_workspace::NormalizedGlob::new(&format!("{}/node_modules/**", root)),
+                )],
             },
         },
     };
@@ -118,12 +119,16 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
                 Some(tsconfig) => {
                     let spec = verter_workspace::StaticMembershipSpec {
                         files: Vec::new(),
-                        include: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
-                            &root_cp, "**/*",
+                        include: vec![verter_workspace::CompiledGlob::new(
+                            verter_workspace::NormalizedGlob::from_root_and_pattern(
+                                &root_cp, "**/*",
+                            ),
                         )],
-                        exclude: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
-                            &root_cp,
-                            "node_modules/**",
+                        exclude: vec![verter_workspace::CompiledGlob::new(
+                            verter_workspace::NormalizedGlob::from_root_and_pattern(
+                                &root_cp,
+                                "node_modules/**",
+                            ),
                         )],
                     };
                     verter_workspace::workspace_snapshot::ProjectPayload::Configured {
@@ -140,10 +145,12 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
                 None => verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
                     membership: verter_workspace::FallbackMembership {
                         root: root_cp.clone(),
-                        exclude: vec![verter_workspace::NormalizedGlob::new(&format!(
-                            "{}/node_modules/**",
-                            p.root
-                        ))],
+                        exclude: vec![verter_workspace::CompiledGlob::new(
+                            verter_workspace::NormalizedGlob::new(&format!(
+                                "{}/node_modules/**",
+                                p.root
+                            )),
+                        )],
                     },
                 },
             };
@@ -194,12 +201,16 @@ pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
                 Some(tsconfig) => {
                     let spec = verter_workspace::StaticMembershipSpec {
                         files: Vec::new(),
-                        include: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
-                            &root_cp, "**/*",
+                        include: vec![verter_workspace::CompiledGlob::new(
+                            verter_workspace::NormalizedGlob::from_root_and_pattern(
+                                &root_cp, "**/*",
+                            ),
                         )],
-                        exclude: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
-                            &root_cp,
-                            "node_modules/**",
+                        exclude: vec![verter_workspace::CompiledGlob::new(
+                            verter_workspace::NormalizedGlob::from_root_and_pattern(
+                                &root_cp,
+                                "node_modules/**",
+                            ),
                         )],
                     };
                     verter_workspace::workspace_snapshot::ProjectPayload::Configured {
@@ -216,10 +227,12 @@ pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
                 None => verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
                     membership: verter_workspace::FallbackMembership {
                         root: root_cp.clone(),
-                        exclude: vec![verter_workspace::NormalizedGlob::new(&format!(
-                            "{}/node_modules/**",
-                            root
-                        ))],
+                        exclude: vec![verter_workspace::CompiledGlob::new(
+                            verter_workspace::NormalizedGlob::new(&format!(
+                                "{}/node_modules/**",
+                                root
+                            )),
+                        )],
                     },
                 },
             };

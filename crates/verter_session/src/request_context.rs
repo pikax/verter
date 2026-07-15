@@ -947,6 +947,21 @@ pub struct RequestContext {
     /// `record_mapper_binder_ordinal_for_classification`.
     pub mapper_source_ordinals:
         parking_lot::Mutex<rustc_hash::FxHashMap<MapperSourceIdentity, u16>>,
+    /// Request-scoped POSITIVE-ONLY memo for
+    /// `VerterHost::resolve_eval_dependency_canonical`: dep canonical id
+    /// (absolute) → resolved analysis canonical. One component-meta
+    /// request re-normalizes the same dependency canonicals tens of
+    /// thousands of times, and each cold walk probes up to 14 candidate
+    /// canonicals against the artifact store, scheduler, and workspace
+    /// VFS; the memo collapses that to one candidate walk per distinct
+    /// dep per request. `None` results are deliberately NOT stored —
+    /// a mid-request artifact publication / load can turn a `None`
+    /// into a hit, and a stale pinned `None` would misroute the rest
+    /// of the request. Empty ids and raw import specifiers never enter
+    /// the memo. The map lives and dies with this context (fresh per
+    /// request, shared across the worker threads the request fans out
+    /// to via `install_tls`).
+    pub dep_canonical_memo: parking_lot::Mutex<rustc_hash::FxHashMap<String, String>>,
 }
 
 /// Identity tuple for the mapped-member materialization
@@ -1214,6 +1229,7 @@ impl RequestContext {
             recursive_substitute_seen: parking_lot::Mutex::new(rustc_hash::FxHashSet::default()),
             mapped_member_seen: parking_lot::Mutex::new(rustc_hash::FxHashSet::default()),
             mapper_source_ordinals: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            dep_canonical_memo: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
         })
     }
 

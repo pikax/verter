@@ -583,6 +583,7 @@ impl VerterHost {
         // same script bytes.
         let (eval_source_text, eval_is_extracted_script) =
             Self::build_eval_script_source_with_extraction(
+                canonical_id,
                 raw_source.as_ref(),
                 framework_parse.as_deref(),
             );

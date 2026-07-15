@@ -333,7 +333,7 @@ defineProps<Props>()
 </script>
 <template><div /></template>"#;
 
-    let extracted = VerterHost::build_eval_script_source(source, None);
+    let extracted = VerterHost::build_eval_script_source("/App.vue", source, None);
     assert!(
         extracted.contains("interface Props"),
         "script content should be preserved without cached parse, got: {extracted}"
@@ -345,6 +345,56 @@ defineProps<Props>()
     assert!(
         !extracted.contains("<template>"),
         "template markup must not be passed into type evaluation, got: {extracted}"
+    );
+}
+
+/// Extraction is gated on the file's LANGUAGE CLASSIFICATION, never on the
+/// raw text: a NON-CARRIER file (`.ts` / `.d.ts`) whose text contains a
+/// `<script ...>` ... `</script>` pair (a JSDoc `@example` block — the
+/// vue-router@5 / @regle/core / unhead dist shape) passes through UNCHANGED.
+/// The former unconditional forgiving raw scan blanked such a file down to
+/// its documentation example, destroying its whole type surface.
+#[test]
+fn build_eval_script_source_never_script_scans_a_non_carrier_file() {
+    let source = r#"/**
+ * Usage example:
+ * ```vue
+ * <script setup>
+ * const value = useReal()
+ * </script>
+ * ```
+ */
+export type Real = string | { path: string }
+"#;
+
+    for canonical in ["/dep.ts", "/dep.d.ts", "/dep.tsx", "/dep.mjs"] {
+        let (eval, extracted) =
+            VerterHost::build_eval_script_source_with_extraction(canonical, source, None);
+        assert!(
+            !extracted,
+            "{canonical}: a non-carrier file must never report script extraction"
+        );
+        assert_eq!(
+            eval, source,
+            "{canonical}: a non-carrier file's source passes through unchanged"
+        );
+    }
+
+    // Control: the SAME text under a carrier canonical keeps the artifact-less
+    // forgiving extraction (the raw scan applies to a genuine `.vue`).
+    let (eval, extracted) =
+        VerterHost::build_eval_script_source_with_extraction("/Doc.vue", source, None);
+    assert!(
+        extracted,
+        "a carrier canonical keeps the artifact-less forgiving extraction"
+    );
+    assert!(
+        eval.contains("const value = useReal()"),
+        "the carrier extraction keeps the script bytes, got: {eval}"
+    );
+    assert!(
+        !eval.contains("export type Real"),
+        "the carrier extraction blanks non-script bytes, got: {eval}"
     );
 }
 
@@ -7447,6 +7497,182 @@ fn resolve_eval_dependency_canonical_prefers_bundle_entry_declaration_companion_
 }
 
 #[test]
+fn resolve_eval_dependency_canonical_memoizes_positive_result_within_request_context() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts",
+        "export interface ButtonHTMLAttributes { disabled?: boolean }\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    let rctx = crate::request_context::RequestContext::new(
+        4201,
+        Arc::from("/workspace/src/App.vue"),
+        false,
+        None,
+    );
+    let _guard = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx));
+
+    let first = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
+    assert_eq!(
+        first.as_deref(),
+        Some("/workspace/src/runtime/types/html.ts"),
+        "the first resolve must run the candidate walk and find the typed companion",
+    );
+    assert_eq!(
+        rctx.dep_canonical_memo
+            .lock()
+            .get("/workspace/src/runtime/types/html")
+            .map(String::as_str),
+        Some("/workspace/src/runtime/types/html.ts"),
+        "a positive resolution must populate the request-scoped memo",
+    );
+
+    ws.reset_exists();
+    let second = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
+    assert_eq!(
+        second, first,
+        "the memoized resolve must return the same canonical as the cold walk",
+    );
+    assert_eq!(
+        ws.exists_count("/workspace/src/runtime/types/html.d.ts"),
+        0,
+        "a memo hit must not re-probe the .d.ts candidate — the candidate walk ran once per request",
+    );
+    assert_eq!(
+        ws.exists_count("/workspace/src/runtime/types/html.ts"),
+        0,
+        "a memo hit must not re-probe the resolved .ts candidate — the candidate walk ran once per request",
+    );
+}
+
+#[test]
+fn resolve_eval_dependency_canonical_resolves_without_request_context() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts",
+        "export interface ButtonHTMLAttributes { disabled?: boolean }\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    assert!(
+        crate::request_context::current_request_context().is_none(),
+        "precondition: no request context is installed on this thread",
+    );
+
+    let first = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
+    assert_eq!(
+        first.as_deref(),
+        Some("/workspace/src/runtime/types/html.ts"),
+        "resolution must keep working with no request context installed",
+    );
+
+    // Without a request context there is no memo layer: a repeated call
+    // re-runs the candidate walk (no behavior change outside requests).
+    ws.reset_exists();
+    let second = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
+    assert_eq!(second, first);
+    assert!(
+        ws.exists_count("/workspace/src/runtime/types/html.d.ts") >= 1,
+        "with no request context the candidate walk must re-run — no host-global memoization",
+    );
+}
+
+#[test]
+fn resolve_eval_dependency_canonical_does_not_memoize_negative_results() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    let rctx = crate::request_context::RequestContext::new(
+        4202,
+        Arc::from("/workspace/src/App.vue"),
+        false,
+        None,
+    );
+    let _guard = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx));
+
+    let first = host.resolve_eval_dependency_canonical("/workspace/src/missing/nope");
+    assert!(
+        first.is_none(),
+        "a dependency with no on-disk candidate resolves to None",
+    );
+    assert!(
+        rctx.dep_canonical_memo.lock().is_empty(),
+        "a None resolution must NOT enter the request-scoped memo — mid-request \
+         artifact publication can turn a None into a hit, so negatives stay uncached",
+    );
+
+    // A later identical call must re-run the candidate walk (the None is
+    // not pinned for the rest of the request).
+    ws.reset_exists();
+    let second = host.resolve_eval_dependency_canonical("/workspace/src/missing/nope");
+    assert!(second.is_none());
+    assert!(
+        ws.exists_count("/workspace/src/missing/nope.d.ts") >= 1,
+        "a repeated None resolve must probe candidates again — negatives are not memoized",
+    );
+}
+
+#[test]
+fn resolve_eval_dependency_canonical_memo_is_isolated_per_request_context() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts",
+        "export interface ButtonHTMLAttributes { disabled?: boolean }\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    {
+        let rctx1 = crate::request_context::RequestContext::new(
+            4203,
+            Arc::from("/workspace/src/App.vue"),
+            false,
+            None,
+        );
+        let _guard1 = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx1));
+        let resolved = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
+        assert_eq!(
+            resolved.as_deref(),
+            Some("/workspace/src/runtime/types/html.ts"),
+        );
+        assert_eq!(
+            rctx1.dep_canonical_memo.lock().len(),
+            1,
+            "the first request's memo holds the positive mapping",
+        );
+        // `_guard1` drops here — the first request is over.
+    }
+
+    let rctx2 = crate::request_context::RequestContext::new(
+        4204,
+        Arc::from("/workspace/src/Other.vue"),
+        false,
+        None,
+    );
+    let _guard2 = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx2));
+    assert!(
+        rctx2.dep_canonical_memo.lock().is_empty(),
+        "a fresh request context starts with an empty memo — no cross-request sharing",
+    );
+
+    ws.reset_exists();
+    let resolved = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
+    assert_eq!(
+        resolved.as_deref(),
+        Some("/workspace/src/runtime/types/html.ts"),
+    );
+    assert!(
+        ws.exists_count("/workspace/src/runtime/types/html.d.ts") >= 1,
+        "a fresh request context must not inherit the previous request's memo — \
+         the candidate walk re-runs once per request",
+    );
+    assert_eq!(
+        rctx2.dep_canonical_memo.lock().len(),
+        1,
+        "the second request populates its OWN memo from its own cold walk",
+    );
+}
+
+#[test]
 fn current_eval_state_normalizes_extensionless_canonical_before_fallback_load() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
@@ -12858,5 +13084,261 @@ mod manifest_types_entry_routing_tests {
         // A genuine bare specifier is still a raw specifier.
         assert!(is_raw_import_specifier_id("./some-pkg"));
         assert!(is_raw_import_specifier_id("lodash"));
+    }
+}
+
+// ── resolve_eval_dependency_canonical_with: candidate probe contract ─────────
+//
+// The exact candidate probe ORDER of `resolve_eval_dependency_canonical_with`
+// is a behavioral contract: callers (`VerterHost::resolve_eval_dependency_canonical`,
+// the executor's `extract_deps` normalizer) rely on higher-priority typed
+// companions winning over lower-priority ones, and the probe closure is
+// side-effectful at some call sites (existence probes are observable). These
+// tests pin the full probe sequence with a recording closure so any change to
+// candidate generation — including allocation-strategy refactors — must keep
+// the order, the probe count, and the returned strings byte-identical.
+mod resolve_eval_dependency_probe_contract_tests {
+    use super::resolve_eval_dependency_canonical_with;
+
+    /// Runs the resolver with a closure that records every probed candidate
+    /// in order and reports existence only for members of `existing`.
+    fn probe_trace(dep: &str, existing: &[&str]) -> (Option<String>, Vec<String>) {
+        let mut probed = Vec::new();
+        let result = resolve_eval_dependency_canonical_with(dep, |candidate| {
+            probed.push(candidate.to_string());
+            existing.contains(&candidate)
+        });
+        (result, probed)
+    }
+
+    #[test]
+    fn runtime_js_input_probes_declaration_companion_then_appends_then_input_last() {
+        let (result, probed) = probe_trace("/ws/pkg/dist/index.js", &[]);
+        assert_eq!(result, None);
+        assert_eq!(
+            probed,
+            vec![
+                "/ws/pkg/dist/index.d.ts",
+                "/ws/pkg/dist/index.js.d.ts",
+                "/ws/pkg/dist/index.js.ts",
+                "/ws/pkg/dist/index.js.tsx",
+                "/ws/pkg/dist/index.js/index.d.ts",
+                "/ws/pkg/dist/index.js/index.ts",
+                "/ws/pkg/dist/index.js/index.tsx",
+                "/ws/pkg/dist/index.js",
+            ],
+            "a runtime .js dependency must probe its declaration companion \
+             first, then the append candidates in declared order, and the raw \
+             input only as the final type-companion fallback",
+        );
+    }
+
+    #[test]
+    fn bundler_suffix_input_probes_bundle_companion_before_plain_js_companion() {
+        let dep = "/ws/@vue/runtime-core/dist/runtime-core.esm-bundler.js";
+        let (result, probed) = probe_trace(dep, &[]);
+        assert_eq!(result, None);
+        assert_eq!(
+            probed,
+            vec![
+                // The bundler-suffix companion strips the WHOLE bundle suffix…
+                "/ws/@vue/runtime-core/dist/runtime-core.d.ts".to_string(),
+                // …and the plain `.js` companion strips only `.js`, later.
+                "/ws/@vue/runtime-core/dist/runtime-core.esm-bundler.d.ts".to_string(),
+                format!("{dep}.d.ts"),
+                format!("{dep}.ts"),
+                format!("{dep}.tsx"),
+                format!("{dep}/index.d.ts"),
+                format!("{dep}/index.ts"),
+                format!("{dep}/index.tsx"),
+                dep.to_string(),
+            ],
+            "bundle-suffix stripping must be probed before plain .js stripping",
+        );
+    }
+
+    #[test]
+    fn every_bundler_suffix_probes_its_declaration_companion_first() {
+        for suffix in [
+            ".esm-bundler.js",
+            ".esm-browser.js",
+            ".esm-browser.prod.js",
+            ".global.js",
+            ".global.prod.js",
+            ".cjs.js",
+            ".cjs.prod.js",
+        ] {
+            let dep = format!("/ws/pkg/dist/entry{suffix}");
+            let (result, probed) = probe_trace(&dep, &["/ws/pkg/dist/entry.d.ts"]);
+            assert_eq!(
+                result.as_deref(),
+                Some("/ws/pkg/dist/entry.d.ts"),
+                "suffix {suffix} must resolve to the stripped declaration companion",
+            );
+            assert_eq!(
+                probed,
+                vec!["/ws/pkg/dist/entry.d.ts".to_string()],
+                "suffix {suffix}: the bundle companion must be the FIRST probe",
+            );
+        }
+    }
+
+    #[test]
+    fn jsx_mjs_cjs_inputs_map_to_their_specific_declaration_companions() {
+        let (result, probed) = probe_trace("/ws/c/comp.jsx", &["/ws/c/comp.d.ts"]);
+        assert_eq!(result.as_deref(), Some("/ws/c/comp.d.ts"));
+        assert_eq!(probed, vec!["/ws/c/comp.d.ts".to_string()]);
+
+        let (result, probed) = probe_trace("/ws/m/entry.mjs", &["/ws/m/entry.d.mts"]);
+        assert_eq!(result.as_deref(), Some("/ws/m/entry.d.mts"));
+        assert_eq!(probed, vec!["/ws/m/entry.d.mts".to_string()]);
+
+        let (result, probed) = probe_trace("/ws/m/entry.cjs", &["/ws/m/entry.d.cts"]);
+        assert_eq!(result.as_deref(), Some("/ws/m/entry.d.cts"));
+        assert_eq!(probed, vec!["/ws/m/entry.d.cts".to_string()]);
+    }
+
+    #[test]
+    fn extensionless_input_probes_typed_candidates_before_raw_input() {
+        let (result, probed) = probe_trace("/ws/src/runtime/types/html", &[]);
+        assert_eq!(result, None);
+        assert_eq!(
+            probed,
+            vec![
+                "/ws/src/runtime/types/html.d.ts",
+                "/ws/src/runtime/types/html.ts",
+                "/ws/src/runtime/types/html.tsx",
+                "/ws/src/runtime/types/html/index.d.ts",
+                "/ws/src/runtime/types/html/index.ts",
+                "/ws/src/runtime/types/html/index.tsx",
+                "/ws/src/runtime/types/html",
+            ],
+            "an extensionless dependency probes every typed candidate before \
+             falling back to the raw extensionless path",
+        );
+    }
+
+    #[test]
+    fn extensionless_input_resolves_to_index_candidate_in_order() {
+        let (result, probed) = probe_trace("/ws/lib/util", &["/ws/lib/util/index.ts"]);
+        assert_eq!(result.as_deref(), Some("/ws/lib/util/index.ts"));
+        assert_eq!(
+            probed,
+            vec![
+                "/ws/lib/util.d.ts",
+                "/ws/lib/util.ts",
+                "/ws/lib/util.tsx",
+                "/ws/lib/util/index.d.ts",
+                "/ws/lib/util/index.ts",
+            ],
+            "probing must stop at the first existing candidate",
+        );
+    }
+
+    #[test]
+    fn extensionless_input_falls_back_to_existing_raw_path_after_all_candidates() {
+        let (result, probed) = probe_trace("/ws/lib/util", &["/ws/lib/util"]);
+        assert_eq!(result.as_deref(), Some("/ws/lib/util"));
+        assert_eq!(
+            probed.len(),
+            7,
+            "the raw path is only probed after all six typed candidates",
+        );
+        assert_eq!(probed.last().map(String::as_str), Some("/ws/lib/util"));
+    }
+
+    #[test]
+    fn explicit_non_js_extension_fast_path_probes_only_the_input() {
+        // (b) the early-return case: an explicit non-js extension that exists
+        // must be returned untouched after probing ONLY the input itself.
+        let (result, probed) = probe_trace("/ws/lib/foo.d.ts", &["/ws/lib/foo.d.ts"]);
+        assert_eq!(result.as_deref(), Some("/ws/lib/foo.d.ts"));
+        assert_eq!(
+            probed,
+            vec!["/ws/lib/foo.d.ts".to_string()],
+            "the explicit-extension fast path must probe exactly the input and \
+             nothing else",
+        );
+
+        let (result, probed) =
+            probe_trace("/ws/components/Button.vue", &["/ws/components/Button.vue"]);
+        assert_eq!(result.as_deref(), Some("/ws/components/Button.vue"));
+        assert_eq!(probed, vec!["/ws/components/Button.vue".to_string()]);
+    }
+
+    #[test]
+    fn explicit_declaration_input_probes_itself_first_then_append_candidates() {
+        let (result, probed) = probe_trace("/ws/lib/foo.d.ts", &[]);
+        assert_eq!(result, None);
+        assert_eq!(
+            probed,
+            vec![
+                "/ws/lib/foo.d.ts",
+                "/ws/lib/foo.d.ts.d.ts",
+                "/ws/lib/foo.d.ts.ts",
+                "/ws/lib/foo.d.ts.tsx",
+                "/ws/lib/foo.d.ts/index.d.ts",
+                "/ws/lib/foo.d.ts/index.ts",
+                "/ws/lib/foo.d.ts/index.tsx",
+            ],
+            "a missing explicit non-js-extension input is probed FIRST (fast \
+             path), then only the append candidates; no trailing raw re-probe",
+        );
+    }
+
+    #[test]
+    fn runtime_js_input_falls_back_to_existing_raw_path_probed_last() {
+        let (result, probed) = probe_trace("/ws/d/index.js", &["/ws/d/index.js"]);
+        assert_eq!(result.as_deref(), Some("/ws/d/index.js"));
+        assert_eq!(
+            probed,
+            vec![
+                "/ws/d/index.d.ts",
+                "/ws/d/index.js.d.ts",
+                "/ws/d/index.js.ts",
+                "/ws/d/index.js.tsx",
+                "/ws/d/index.js/index.d.ts",
+                "/ws/d/index.js/index.ts",
+                "/ws/d/index.js/index.tsx",
+                "/ws/d/index.js",
+            ],
+            "a runtime script that exists is returned only after every typed \
+             companion candidate missed",
+        );
+    }
+
+    #[test]
+    fn empty_input_returns_none_without_any_probe() {
+        // Even an `existing` set containing the empty string must not be
+        // consulted: the resolver returns before any probe.
+        let (result, probed) = probe_trace("", &[""]);
+        assert_eq!(result, None);
+        assert!(probed.is_empty(), "empty input must not probe at all");
+    }
+
+    #[test]
+    fn hidden_js_basename_probes_raw_input_twice_at_the_tail() {
+        // `Path::extension()` treats `.js` (a dot-file basename) as having NO
+        // extension while `ends_with(".js")` still marks it type-companion-
+        // preferring — so BOTH tail fallback probes fire for the raw input.
+        // This pins the exact probe multiset of the current contract.
+        let (result, probed) = probe_trace("/ws/.js", &[]);
+        assert_eq!(result, None);
+        assert_eq!(
+            probed,
+            vec![
+                "/ws/.d.ts",
+                "/ws/.js.d.ts",
+                "/ws/.js.ts",
+                "/ws/.js.tsx",
+                "/ws/.js/index.d.ts",
+                "/ws/.js/index.ts",
+                "/ws/.js/index.tsx",
+                "/ws/.js",
+                "/ws/.js",
+            ],
+            "a dot-file .js basename fires both the extensionless fallback and \
+             the type-companion fallback probes",
+        );
     }
 }

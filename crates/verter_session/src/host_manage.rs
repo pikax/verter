@@ -192,8 +192,19 @@ pub(crate) fn resolve_eval_dependency_canonical_with(
         || dep_canonical.ends_with(".mjs")
         || dep_canonical.ends_with(".cjs");
 
-    let mut candidates = Vec::new();
-    for (suffix, companion_suffix) in [
+    // Explicit-extension fast path: probe the input untouched BEFORE any
+    // candidate string is materialized, so the (hot) already-canonical case
+    // allocates nothing.
+    if !prefers_type_companion && has_explicit_extension && has_candidate(dep_canonical) {
+        return Some(dep_canonical.to_string());
+    }
+
+    // Candidate generation is lazy: each candidate is materialized into one
+    // reusable buffer immediately before its probe, in the exact declared
+    // order. A `(strip, replacement)` row contributes a probe only when the
+    // input ends with `strip`.
+    const STRIP_RULES: [(&str, &str); 11] = [
+        // Bundler bundle-suffix companions (whole bundle suffix → .d.ts)…
         (".esm-bundler.js", ".d.ts"),
         (".esm-browser.js", ".d.ts"),
         (".esm-browser.prod.js", ".d.ts"),
@@ -201,37 +212,38 @@ pub(crate) fn resolve_eval_dependency_canonical_with(
         (".global.prod.js", ".d.ts"),
         (".cjs.js", ".d.ts"),
         (".cjs.prod.js", ".d.ts"),
-    ] {
-        if let Some(stem) = dep_canonical.strip_suffix(suffix) {
-            candidates.push(format!("{stem}{companion_suffix}"));
+        // …then plain runtime-extension companions.
+        (".js", ".d.ts"),
+        (".jsx", ".d.ts"),
+        (".mjs", ".d.mts"),
+        (".cjs", ".d.cts"),
+    ];
+    const APPEND_SUFFIXES: [&str; 6] = [
+        ".d.ts",
+        ".ts",
+        ".tsx",
+        "/index.d.ts",
+        "/index.ts",
+        "/index.tsx",
+    ];
+
+    // Longest candidate = input + "/index.d.ts"; one up-front reservation
+    // keeps every probe below reallocation-free.
+    let mut candidate = String::with_capacity(dep_canonical.len() + "/index.d.ts".len());
+    for (strip, replacement) in STRIP_RULES {
+        if let Some(stem) = dep_canonical.strip_suffix(strip) {
+            candidate.clear();
+            candidate.push_str(stem);
+            candidate.push_str(replacement);
+            if has_candidate(&candidate) {
+                return Some(candidate);
+            }
         }
     }
-    if let Some(stem) = dep_canonical.strip_suffix(".js") {
-        candidates.push(format!("{stem}.d.ts"));
-    }
-    if let Some(stem) = dep_canonical.strip_suffix(".jsx") {
-        candidates.push(format!("{stem}.d.ts"));
-    }
-    if let Some(stem) = dep_canonical.strip_suffix(".mjs") {
-        candidates.push(format!("{stem}.d.mts"));
-    }
-    if let Some(stem) = dep_canonical.strip_suffix(".cjs") {
-        candidates.push(format!("{stem}.d.cts"));
-    }
-    candidates.extend([
-        format!("{dep_canonical}.d.ts"),
-        format!("{dep_canonical}.ts"),
-        format!("{dep_canonical}.tsx"),
-        format!("{dep_canonical}/index.d.ts"),
-        format!("{dep_canonical}/index.ts"),
-        format!("{dep_canonical}/index.tsx"),
-    ]);
-
-    if !prefers_type_companion && has_explicit_extension && has_candidate(dep_canonical) {
-        return Some(dep_canonical.to_string());
-    }
-
-    for candidate in candidates {
+    for suffix in APPEND_SUFFIXES {
+        candidate.clear();
+        candidate.push_str(dep_canonical);
+        candidate.push_str(suffix);
         if has_candidate(&candidate) {
             return Some(candidate);
         }

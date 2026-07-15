@@ -30743,3 +30743,151 @@ defineSlots<SeparatorSlots>()
         "the local ui object retains its root:string member; got {object:?}"
     );
 }
+
+/// A NON-CARRIER dependency (`.ts` / `.d.ts`) whose text contains a
+/// `<script ...>` ... `</script>` pair inside documentation (a JSDoc
+/// `@example` block — the vue-router@5 / @regle/core / unhead dist shape)
+/// must keep its full type surface: eval-source production must never
+/// script-scan a file that is not classified a framework carrier.
+///
+/// The fixture mirrors the vue-router@5 dist layout: a clean re-export
+/// BARREL (`import { yt as Real } from './inner'; export { type Real }`)
+/// in front of an INNER declaration file whose JSDoc carries the
+/// `<script setup>` example. Pre-fix, the forgiving Vue raw scan fired on
+/// the inner file's raw text, blanked everything outside the JSDoc
+/// example, and the inner file's shallow inventory published EMPTY — the
+/// barrel forward ended in an interned `Opaque(Miss)`. The shallow-by-default
+/// publication keeps the component RESOLVING even over the destroyed
+/// dependency surface (the prop publishes a shallow source), so the
+/// discriminating signal is the dependency INVENTORY: the inner file's
+/// prepared declaration scope must retain its type declarations, and the
+/// published member value must demand-materialize to the dependency's REAL
+/// shape instead of an unresolvable miss.
+#[test]
+fn non_carrier_dependency_with_script_tag_docs_keeps_member_values_representable() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/inner.ts",
+            r#"/**
+ * Usage example:
+ * ```vue
+ * <script setup>
+ * const value = useReal()
+ * </script>
+ * ```
+ */
+type Real = string | { path: string }
+export { Real as yt }
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/dep.ts",
+            "import { yt as Real } from './inner'
+export { type Real }
+",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/props.ts",
+            "import type { Real } from './dep'
+export interface Props { to?: Real }
+",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './props'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // INVENTORY: the script-tag-bearing non-carrier keeps its declarations —
+    // pre-fix the raw scan blanked the file and this scope published EMPTY.
+    let inner_bundle = project
+        .host()
+        .prepared_decl_bundle("/inner.ts")
+        .expect("the inner dependency materializes a prepared-decl bundle");
+    assert!(
+        inner_bundle.scope_type_names.contains("Real"),
+        "the non-carrier inner file keeps its type inventory (never \
+         script-scanned); got {:?}",
+        inner_bundle.scope_type_names
+    );
+
+    let output = project
+        .host()
+        .get_component_meta_output("/App.vue")
+        .expect(
+            "a documentation-only <script> pair inside a non-carrier dependency \
+             must not destroy its type surface — output materialization succeeds",
+        )
+        .expect("component must resolve");
+    let (analysis, _resolution, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    let to = analysis
+        .props
+        .iter()
+        .position(|prop| prop.name == "to")
+        .expect("the `to` prop publishes");
+    assert!(
+        analysis.props[to].type_source.present().is_some(),
+        "the imported member value publishes a PRESENT source (the dependency's \
+         declarations resolve); got {:?}",
+        analysis.props[to].type_source
+    );
+    assert!(
+        !matches!(&lanes.props[to], TypeExpr::Unknown { .. }),
+        "the materialized prop type renders the dependency's real shape, \
+         never an unknown; got {:?}",
+        lanes.props[to]
+    );
+
+    // ON-DEMAND RESOLUTION: the published member value demand-materializes to
+    // the dependency's REAL shape (`string | { path: string }`) — the walk
+    // crosses the barrel into the script-tag-bearing inner file.
+    let demanded = demand_published_type(
+        project.host(),
+        "/App.vue",
+        analysis.props[to].type_source.present(),
+        "`to` prop",
+    );
+    let TypeExpr::Union(arms) = &demanded else {
+        panic!("`to` demand-materializes to the dependency union; got {demanded:?}");
+    };
+    assert!(
+        arms.iter()
+            .any(|arm| matches!(arm, TypeExpr::Primitive(PrimitiveName::String))),
+        "the union keeps its `string` arm; got {arms:?}"
+    );
+    assert!(
+        arms.iter().any(|arm| matches!(
+            arm,
+            TypeExpr::Object(object)
+                if object.properties.iter().any(|property| matches!(
+                    property,
+                    ObjectMember::Property(property) if property.name == "path"
+                ))
+        )),
+        "the union keeps its `{{ path: string }}` arm; got {arms:?}"
+    );
+
+    // COMPLETE-success enforcement: a resolvable dependency leaves the
+    // result complete and warm-admissible.
+    let (_analysis, state) = project
+        .host()
+        .get_component_meta_with_resolution("/App.vue")
+        .expect("resolves");
+    assert!(
+        !state.completeness.is_partial(),
+        "a resolvable dependency completes; got {:?}",
+        state.completeness
+    );
+}

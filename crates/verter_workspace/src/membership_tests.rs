@@ -1,16 +1,20 @@
 use super::*;
 use crate::canonical_path::CanonicalPath;
-use crate::normalized_glob::NormalizedGlob;
+use crate::normalized_glob::{CompiledGlob, NormalizedGlob};
 
 fn root() -> CanonicalPath {
     CanonicalPath::new("d:/project")
 }
 
+fn compiled(raw: &str) -> CompiledGlob {
+    CompiledGlob::new(NormalizedGlob::new(raw))
+}
+
 fn make_spec(files: &[&str], include: &[&str], exclude: &[&str]) -> StaticMembershipSpec {
     StaticMembershipSpec {
         files: files.iter().map(|s| CanonicalPath::new(s)).collect(),
-        include: include.iter().map(|s| NormalizedGlob::new(s)).collect(),
-        exclude: exclude.iter().map(|s| NormalizedGlob::new(s)).collect(),
+        include: include.iter().map(|s| compiled(s)).collect(),
+        exclude: exclude.iter().map(|s| compiled(s)).collect(),
     }
 }
 
@@ -193,7 +197,7 @@ fn configured_membership_contains() {
 fn fallback_contains_under_root() {
     let membership = FallbackMembership {
         root: root(),
-        exclude: vec![NormalizedGlob::new("d:/project/node_modules/**")],
+        exclude: vec![compiled("d:/project/node_modules/**")],
     };
 
     assert!(membership.contains(&CanonicalPath::new("d:/project/src/foo.ts")));
@@ -217,7 +221,7 @@ fn fallback_rejects_outside_root() {
 fn fallback_rejects_excluded() {
     let membership = FallbackMembership {
         root: root(),
-        exclude: vec![NormalizedGlob::new("d:/project/node_modules/**")],
+        exclude: vec![compiled("d:/project/node_modules/**")],
     };
 
     assert!(
@@ -290,6 +294,56 @@ fn configured_membership_bridge_fallback_when_empty_materialized() {
     assert!(
         !membership.contains(&CanonicalPath::new("d:/project/node_modules/vue/index.ts")),
         "bridge mode should still respect exclude patterns"
+    );
+}
+
+// ── Invalid glob patterns (pin: invalid pattern → no match, no panic) ──
+
+#[test]
+fn invalid_include_glob_yields_no_membership() {
+    // Self-check: the fixture must actually be an invalid glob pattern.
+    assert!(glob::Pattern::new("d:/project/src/[unclosed").is_err());
+
+    let spec = make_spec(&[], &["d:/project/src/[unclosed"], &[]);
+    assert!(
+        !spec.matches(&CanonicalPath::new("d:/project/src/foo.ts")),
+        "invalid include pattern must never match"
+    );
+
+    // Same through ConfiguredMembership bridge mode (empty materialized set).
+    let membership = ConfiguredMembership {
+        spec: make_spec(&[], &["d:/project/src/[unclosed"], &[]),
+        materialized_files: FxHashSet::default(),
+    };
+    assert!(
+        !membership.contains(&CanonicalPath::new("d:/project/src/foo.ts")),
+        "invalid include pattern must yield contains == false"
+    );
+}
+
+#[test]
+fn invalid_exclude_glob_never_excludes() {
+    assert!(glob::Pattern::new("d:/project/[unclosed").is_err());
+
+    // Valid include, invalid exclude → include wins, no panic.
+    let spec = make_spec(&[], &["d:/project/**/*"], &["d:/project/[unclosed"]);
+    assert!(
+        spec.matches(&CanonicalPath::new("d:/project/src/foo.ts")),
+        "invalid exclude pattern must not exclude included files"
+    );
+}
+
+#[test]
+fn fallback_invalid_exclude_glob_never_excludes() {
+    assert!(glob::Pattern::new("d:/project/[unclosed").is_err());
+
+    let membership = FallbackMembership {
+        root: root(),
+        exclude: vec![compiled("d:/project/[unclosed")],
+    };
+    assert!(
+        membership.contains(&CanonicalPath::new("d:/project/src/foo.ts")),
+        "invalid exclude pattern must not reject files under root"
     );
 }
 

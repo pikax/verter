@@ -342,3 +342,164 @@ mod file_source_env_validation {
         );
     }
 }
+
+// ── `hash_route_surface` — purity pin + per-state memoization ──
+
+mod route_surface_hash {
+    use super::FxHashMap;
+    use crate::resolver_core::shallow_file_state::{
+        ExportTarget, ImportTarget, ShallowFileState, WildcardReexport,
+    };
+    use rustc_hash::FxHashSet;
+    use std::sync::Arc;
+    use verter_semantic::analysis::Hash16;
+
+    /// A routing surface exercising every dimension `hash_route_surface`
+    /// digests: local exports, a named reexport (baked canonical +
+    /// type-only flag), a wildcard edge, and an import target.
+    pub(super) fn routed_state(whole_hash: Hash16) -> ShallowFileState {
+        let exports = FxHashMap::from_iter([
+            (
+                "Local".to_string(),
+                ExportTarget::Local {
+                    symbol_name: "Local".to_string(),
+                },
+            ),
+            (
+                "Renamed".to_string(),
+                ExportTarget::Reexport {
+                    source_specifier: "./dep".to_string(),
+                    original_name: "Orig".to_string(),
+                    canonical_id: "/src/dep.ts".to_string(),
+                    is_type: true,
+                },
+            ),
+        ]);
+        let wildcard_reexports = vec![WildcardReexport {
+            source_specifier: "./barrel".to_string(),
+            canonical_id: "/src/barrel.ts".to_string(),
+        }];
+        let import_locals = FxHashSet::from_iter(["Dep".to_string()]);
+        let import_targets = FxHashMap::from_iter([(
+            "Dep".to_string(),
+            ImportTarget {
+                source_specifier: "./dep".to_string(),
+                imported_name: "Dep".to_string(),
+                canonical_id: "/src/dep.ts".to_string(),
+            },
+        )]);
+        ShallowFileState::routing_tables_only_for_test(
+            whole_hash,
+            exports,
+            wildcard_reexports,
+            import_locals,
+            import_targets,
+            Arc::new(
+                verter_parser::utils::oxc::script::type_surface::AnalyzedExternalTypeSource::default(),
+            ),
+        )
+    }
+
+    /// The hash is a pure function of the routing surface: an
+    /// INDEPENDENTLY CONSTRUCTED identical state hashes identically, and
+    /// any surface move (reexport retarget, content-hash move) moves it.
+    #[test]
+    fn matches_independent_recomputation_and_discriminates_surface_moves() {
+        let state = routed_state([7u8; 16]);
+        let independent = routed_state([7u8; 16]);
+        assert_eq!(
+            crate::resolver_store::hash_route_surface(&state),
+            crate::resolver_store::hash_route_surface(&independent),
+            "identical routing surfaces must hash identically",
+        );
+
+        // Negative: a reexport RETARGET moves the hash — the surface is
+        // digested WITH routing targets, never just export names. The
+        // mutation happens strictly BEFORE the state's first hash (the
+        // construction-time mutation window).
+        let mut retargeted = routed_state([7u8; 16]);
+        retargeted.exports.insert(
+            "Renamed".to_string(),
+            ExportTarget::Reexport {
+                source_specifier: "./dep".to_string(),
+                original_name: "Orig".to_string(),
+                canonical_id: "/src/dep.d.ts".to_string(),
+                is_type: true,
+            },
+        );
+        assert_ne!(
+            crate::resolver_store::hash_route_surface(&state),
+            crate::resolver_store::hash_route_surface(&retargeted),
+            "a dependency retarget must move the route-surface hash",
+        );
+
+        // Negative: the owner content hash participates.
+        let content_moved = routed_state([8u8; 16]);
+        assert_ne!(
+            crate::resolver_store::hash_route_surface(&state),
+            crate::resolver_store::hash_route_surface(&content_moved),
+            "a whole-hash move must move the route-surface hash",
+        );
+    }
+}
+
+// The memo test lives in the same module as the purity pin so both read
+// the same `routed_state` fixture.
+mod route_surface_hash_memo {
+    use super::route_surface_hash::routed_state;
+    use crate::resolver_core::shallow_file_state::ExportTarget;
+
+    /// The memo populates on the state's FIRST hash and every later call
+    /// returns the identical value; a CLONE starts with an EMPTY memo
+    /// (fresh `OnceLock`) so its independent recomputation agrees on an
+    /// unmutated clone and re-digests the clone's OWN surface after a
+    /// clone-side mutation (never the donor's stale digest).
+    #[test]
+    fn memoizes_per_state_and_resets_on_clone() {
+        let state = routed_state([9u8; 16]);
+        assert!(
+            state.route_surface_hash_memo().get().is_none(),
+            "memo must start unpopulated",
+        );
+        let first = crate::resolver_store::hash_route_surface(&state);
+        assert_eq!(
+            state.route_surface_hash_memo().get(),
+            Some(first),
+            "first hash must populate the memo with the computed digest",
+        );
+        assert_eq!(
+            first,
+            crate::resolver_store::hash_route_surface(&state),
+            "the memoized (second) call must return the identical value",
+        );
+
+        // Init path: a clone resets the memo and recomputes fresh — the
+        // recomputation must agree with the donor's digest.
+        let cloned = state.clone();
+        assert!(
+            cloned.route_surface_hash_memo().get().is_none(),
+            "a clone must start with an EMPTY memo, not the donor's cached digest",
+        );
+        assert_eq!(
+            first,
+            crate::resolver_store::hash_route_surface(&cloned),
+            "an unmutated clone's fresh computation must equal the donor's digest",
+        );
+
+        // Clone-then-mutate: the reset means a mutated clone hashes its
+        // OWN surface. Carrying the donor's populated memo across the
+        // clone would serve a stale digest here.
+        let mut mutated = state.clone();
+        mutated.exports.insert(
+            "Extra".to_string(),
+            ExportTarget::Local {
+                symbol_name: "Extra".to_string(),
+            },
+        );
+        assert_ne!(
+            first,
+            crate::resolver_store::hash_route_surface(&mutated),
+            "a mutated clone must hash its own surface, not the donor's cached digest",
+        );
+    }
+}

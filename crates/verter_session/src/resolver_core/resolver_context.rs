@@ -610,6 +610,28 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         None
     }
 
+    /// Return the request-scoped
+    /// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)
+    /// this context threads through the request, if any.
+    ///
+    /// The overlay is the per-request carrier (constructed once at the
+    /// request boundary, shared across every context the request builds,
+    /// dropped with the request — R18-compliant: passed by explicit
+    /// argument, never via a thread-local). The view-aware prepared-decl
+    /// producer (`prepared_decl_bundle_with_context`) consults it for the
+    /// request-scoped session-overlay bundle memo — the R17-compliant
+    /// home for a value that must never enter host/shared caches.
+    ///
+    /// The default impl returns `None` (bare-host contexts have no
+    /// session overlays, so the overlay-bearing branch that reads the
+    /// memo is unreachable for them); the session-bound context overrides
+    /// it to expose its request overlay.
+    fn request_completion_overlay(
+        &self,
+    ) -> Option<&crate::resolver_core::CanonicalCompletionOverlay> {
+        None
+    }
+
     /// Rewrite a raw canonical to its analysis canonical — the identity
     /// every `FileArtifactStore` artifact (base and overlay) is keyed by.
     ///

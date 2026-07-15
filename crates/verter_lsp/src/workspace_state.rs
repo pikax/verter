@@ -251,8 +251,8 @@ mod tests {
     };
     use verter_workspace::ViteConfigTrustInfo;
     use verter_workspace::{
-        CanonicalPath, FallbackMembership, MemoryOptions, MemoryWorkspace, NormalizedGlob,
-        ProjectResolver,
+        CanonicalPath, CompiledGlob, FallbackMembership, MemoryOptions, MemoryWorkspace,
+        NormalizedGlob, ProjectResolver,
     };
 
     fn empty_workspace() -> MemoryWorkspace {
@@ -268,7 +268,10 @@ mod tests {
             payload: ProjectPayload::Fallback {
                 membership: FallbackMembership {
                     root: root_cp,
-                    exclude: vec![NormalizedGlob::new(&format!("{}/node_modules/**", root))],
+                    exclude: vec![CompiledGlob::new(NormalizedGlob::new(&format!(
+                        "{}/node_modules/**",
+                        root
+                    )))],
                 },
             },
         }
