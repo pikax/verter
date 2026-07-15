@@ -1,5 +1,8 @@
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::sync::Arc;
+
+use hashbrown::HashTable;
 
 use verter_type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, LiteralValue, MappedModifier, MethodSignature,
@@ -420,6 +423,16 @@ fn option_arc_ptr_id<T>(value: Option<&Arc<T>>) -> usize {
     value.map(arc_ptr_id).unwrap_or(0)
 }
 
+/// Deterministic hash used as the bucket key for the id-only reverse indices
+/// ([`GraphBuilder::string_ids`] / [`GraphBuilder::node_ids`]). The hash only
+/// steers bucketing; dedup identity is decided by the entry's equality
+/// closure comparing against the owning table, so the id-assignment order is
+/// hasher-independent.
+#[inline]
+fn table_hash<T: std::hash::Hash + ?Sized>(value: &T) -> u64 {
+    rustc_hash::FxBuildHasher.hash_one(value)
+}
+
 /// Compact pointer-based identity key for `TypeExpr` variants whose identity is
 /// fully determined by Arc pointers (no owned/cloned data). Used as a fast-path
 /// cache to avoid building the full `ExprMemoKey` and cloning value fields on
@@ -615,10 +628,20 @@ impl ExprPtrKey {
 
 #[derive(Debug, Default)]
 pub struct GraphBuilder {
+    /// The sole owner of every interned string (own-once). Ids are 1-based
+    /// (id 0 = absent), assigned in first-encounter order.
     strings: Vec<String>,
-    string_ids: HashMap<String, u32>,
+    /// Reverse index: hash of a string -> its 1-based id in [`Self::strings`].
+    /// A `HashTable<u32>` stores ONLY ids and dedups by comparing the query
+    /// against `strings[id - 1]`, so it never owns a second copy of the string.
+    string_ids: HashTable<u32>,
+    /// The sole owner of every interned wire node (own-once). Ids are 1-based
+    /// (id 0 = absent), assigned in first-encounter order.
     nodes: Vec<GraphNode>,
-    node_ids: HashMap<GraphNode, u32>,
+    /// Reverse index: hash of a `GraphNode` -> its 1-based id in
+    /// [`Self::nodes`]. Stores ONLY ids and dedups by comparing against
+    /// `nodes[id - 1]`, so it never owns a second (deep) copy of the node.
+    node_ids: HashTable<u32>,
     expr_ids: HashMap<ExprMemoKey, u32>,
     /// Fast-path cache for pointer-based `TypeExpr` variants. Checked before
     /// building the full `ExprMemoKey`, avoiding clones on cache hits for the
@@ -636,20 +659,31 @@ impl GraphBuilder {
     }
 
     pub fn string_id(&mut self, value: &str) -> u32 {
-        if let Some(id) = self.string_ids.get(value) {
-            return *id;
+        // Own-once: `strings` is the sole owner; `string_ids` holds only ids and
+        // resolves collisions by comparing the query against `strings[id - 1]`.
+        let Self {
+            strings,
+            string_ids,
+            ..
+        } = self;
+        let hash = table_hash::<str>(value);
+        match string_ids.entry(
+            hash,
+            |&id| strings[(id - 1) as usize].as_str() == value,
+            |&id| table_hash::<str>(strings[(id - 1) as usize].as_str()),
+        ) {
+            hashbrown::hash_table::Entry::Occupied(entry) => *entry.get(),
+            hashbrown::hash_table::Entry::Vacant(entry) => {
+                let id = strings
+                    .len()
+                    .checked_add(1)
+                    .and_then(|index| u32::try_from(index).ok())
+                    .expect("string table overflow");
+                strings.push(value.to_string());
+                entry.insert(id);
+                id
+            }
         }
-
-        let id = self
-            .strings
-            .len()
-            .checked_add(1)
-            .and_then(|index| u32::try_from(index).ok())
-            .expect("string table overflow");
-        let owned = value.to_string();
-        self.strings.push(owned.clone());
-        self.string_ids.insert(owned, id);
-        id
     }
 
     pub fn string_id_opt(&mut self, value: Option<&str>) -> u32 {
@@ -681,23 +715,11 @@ impl GraphBuilder {
             return *id;
         }
 
+        // Terminal value-level dedup + own-once push (no `GraphNode` clone).
+        // The memo maps update identically whether the node was already
+        // interned or freshly pushed, so both cases share one tail.
         let node = self.graph_node(expr);
-        if let Some(id) = self.node_ids.get(&node) {
-            self.expr_ids.insert(memo_key, *id);
-            if let Some(pk) = ptr_key {
-                self.expr_ptr_ids.insert(pk, *id);
-            }
-            return *id;
-        }
-
-        let id = self
-            .nodes
-            .len()
-            .checked_add(1)
-            .and_then(|index| u32::try_from(index).ok())
-            .expect("node table overflow");
-        self.nodes.push(node.clone());
-        self.node_ids.insert(node, id);
+        let id = self.intern_node(node);
         self.expr_ids.insert(memo_key, id);
         if let Some(pk) = ptr_key {
             self.expr_ptr_ids.insert(pk, id);
@@ -728,18 +750,30 @@ impl GraphBuilder {
     /// [`Self::node_id`] without the `TypeExpr` memo layers (there is no
     /// source expression here).
     fn intern_node(&mut self, node: GraphNode) -> u32 {
-        if let Some(id) = self.node_ids.get(&node) {
-            return *id;
+        // Own-once: `nodes` is the sole owner; `node_ids` holds only ids and
+        // dedups by comparing against `nodes[id - 1]`. On a miss the node MOVES
+        // into the table (no deep clone of its nested member/id vectors).
+        let Self {
+            nodes, node_ids, ..
+        } = self;
+        let hash = table_hash(&node);
+        match node_ids.entry(
+            hash,
+            |&id| nodes[(id - 1) as usize] == node,
+            |&id| table_hash(&nodes[(id - 1) as usize]),
+        ) {
+            hashbrown::hash_table::Entry::Occupied(entry) => *entry.get(),
+            hashbrown::hash_table::Entry::Vacant(entry) => {
+                let id = nodes
+                    .len()
+                    .checked_add(1)
+                    .and_then(|index| u32::try_from(index).ok())
+                    .expect("node table overflow");
+                nodes.push(node);
+                entry.insert(id);
+                id
+            }
         }
-        let id = self
-            .nodes
-            .len()
-            .checked_add(1)
-            .and_then(|index| u32::try_from(index).ok())
-            .expect("node table overflow");
-        self.nodes.push(node.clone());
-        self.node_ids.insert(node, id);
-        id
     }
 
     /// Append a producer-captured

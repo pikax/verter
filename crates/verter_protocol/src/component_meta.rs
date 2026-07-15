@@ -41,9 +41,14 @@ pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
         .map(|entry| type_registry_entry_to_proto(&mut builder, entry))
         .collect();
     let body = Some(component_meta_body_to_proto(&mut builder, meta));
+    // Consume the builder's interned tables BY VALUE: the string table moves
+    // straight onto the wire (no whole-table clone) and each node is consumed
+    // into `graph_node_to_proto` so its id/member vectors MOVE into the proto
+    // node instead of being cloned.
+    let (strings, nodes) = builder.into_tables();
     let type_graph = Some(TypeGraph {
-        strings: builder.strings().to_vec(),
-        nodes: builder.nodes().iter().map(graph_node_to_proto).collect(),
+        strings,
+        nodes: nodes.into_iter().map(graph_node_to_proto).collect(),
     });
     let origin_graph = origin_graph_to_proto(&meta.origin);
 
@@ -1073,49 +1078,54 @@ fn resolved_type_declaration_to_proto(
     }
 }
 
-fn graph_node_to_proto(node: &GraphNode) -> TypeNode {
+fn graph_node_to_proto(node: GraphNode) -> TypeNode {
+    // Consumes the interned node BY VALUE: id/member vectors (`Union`,
+    // `Intersection`, `Function.type_parameters`, `Ref`/`RecursiveRef`
+    // arguments, `TypeOf.path`, `TemplateLiteral` quasis/expressions) MOVE
+    // straight onto the wire node instead of being cloned. The wire bytes are
+    // unchanged — only the finalization copies are removed.
     let kind = match node {
         GraphNode::Primitive { primitive } => type_node::Kind::Primitive(proto::PrimitiveNode {
-            primitive: *primitive as i32,
+            primitive: primitive as i32,
         }),
         GraphNode::LiteralString { value } => type_node::Kind::Literal(LiteralNode {
             literal_kind: proto::LiteralKind::String as i32,
-            string_id: *value,
+            string_id: value,
             number_value: 0.0,
             boolean_value: false,
         }),
         GraphNode::LiteralNumber { bits } => type_node::Kind::Literal(LiteralNode {
             literal_kind: proto::LiteralKind::Number as i32,
             string_id: 0,
-            number_value: f64::from_bits(*bits),
+            number_value: f64::from_bits(bits),
             boolean_value: false,
         }),
         GraphNode::LiteralBoolean { value } => type_node::Kind::Literal(LiteralNode {
             literal_kind: proto::LiteralKind::Boolean as i32,
             string_id: 0,
             number_value: 0.0,
-            boolean_value: *value,
+            boolean_value: value,
         }),
         GraphNode::LiteralBigInt { value } => type_node::Kind::Literal(LiteralNode {
             literal_kind: proto::LiteralKind::BigInt as i32,
-            string_id: *value,
+            string_id: value,
             number_value: 0.0,
             boolean_value: false,
         }),
         GraphNode::Union { types } => type_node::Kind::Union(UnionNode {
-            type_node_ids: types.clone(),
+            type_node_ids: types,
         }),
         GraphNode::Intersection { types } => {
             type_node::Kind::Intersection(proto::IntersectionNode {
-                type_node_ids: types.clone(),
+                type_node_ids: types,
             })
         }
         GraphNode::Array { element, readonly } => type_node::Kind::Array(ArrayNode {
-            element_node_id: *element,
-            readonly: *readonly,
+            element_node_id: element,
+            readonly,
         }),
         GraphNode::Tuple { readonly, elements } => type_node::Kind::Tuple(TupleNode {
-            readonly: *readonly,
+            readonly,
             elements: elements.iter().map(tuple_element_to_proto).collect(),
         }),
         GraphNode::Object { members } => type_node::Kind::Object(ObjectNode {
@@ -1127,35 +1137,33 @@ fn graph_node_to_proto(node: &GraphNode) -> TypeNode {
             type_parameters,
         } => type_node::Kind::Function(FunctionNode {
             parameters: parameters.iter().map(function_parameter_to_proto).collect(),
-            return_type_node_id: *return_type,
-            type_parameter_node_ids: type_parameters.clone(),
+            return_type_node_id: return_type,
+            type_parameter_node_ids: type_parameters,
         }),
         GraphNode::Ref {
             name,
             type_arguments,
         } => type_node::Kind::Ref(RefNode {
-            name_id: *name,
-            type_argument_node_ids: type_arguments.clone(),
+            name_id: name,
+            type_argument_node_ids: type_arguments,
         }),
         GraphNode::TypeParameter {
             name,
             constraint,
             default,
         } => type_node::Kind::TypeParameter(TypeParameterNode {
-            name_id: *name,
-            constraint_node_id: *constraint,
-            default_node_id: *default,
+            name_id: name,
+            constraint_node_id: constraint,
+            default_node_id: default,
         }),
         GraphNode::KeyOf { operand } => type_node::Kind::KeyOf(KeyOfNode {
-            operand_node_id: *operand,
+            operand_node_id: operand,
         }),
-        GraphNode::TypeOf { path } => type_node::Kind::TypeOf(TypeOfNode {
-            path_ids: path.clone(),
-        }),
+        GraphNode::TypeOf { path } => type_node::Kind::TypeOf(TypeOfNode { path_ids: path }),
         GraphNode::IndexedAccess { object, index } => {
             type_node::Kind::IndexedAccess(IndexedAccessNode {
-                object_node_id: *object,
-                index_node_id: *index,
+                object_node_id: object,
+                index_node_id: index,
             })
         }
         GraphNode::Conditional {
@@ -1164,10 +1172,10 @@ fn graph_node_to_proto(node: &GraphNode) -> TypeNode {
             true_type,
             false_type,
         } => type_node::Kind::Conditional(ConditionalNode {
-            check_node_id: *check,
-            extends_node_id: *extends,
-            true_type_node_id: *true_type,
-            false_type_node_id: *false_type,
+            check_node_id: check,
+            extends_node_id: extends,
+            true_type_node_id: true_type,
+            false_type_node_id: false_type,
         }),
         GraphNode::Mapped {
             parameter,
@@ -1177,35 +1185,35 @@ fn graph_node_to_proto(node: &GraphNode) -> TypeNode {
             readonly,
             name_type,
         } => type_node::Kind::Mapped(MappedNode {
-            parameter_id: *parameter,
-            source_node_id: *source,
-            value_node_id: *value,
-            optional_modifier: *optional as i32,
-            readonly_modifier: *readonly as i32,
-            name_type_node_id: *name_type,
+            parameter_id: parameter,
+            source_node_id: source,
+            value_node_id: value,
+            optional_modifier: optional as i32,
+            readonly_modifier: readonly as i32,
+            name_type_node_id: name_type,
         }),
         GraphNode::TemplateLiteral {
             quasis,
             expressions,
         } => type_node::Kind::TemplateLiteral(TemplateLiteralNode {
-            quasi_ids: quasis.clone(),
-            expression_node_ids: expressions.clone(),
+            quasi_ids: quasis,
+            expression_node_ids: expressions,
         }),
         GraphNode::Parenthesized { inner } => type_node::Kind::Parenthesized(ParenthesizedNode {
-            inner_node_id: *inner,
+            inner_node_id: inner,
         }),
-        GraphNode::Unknown { raw } => type_node::Kind::Unknown(UnknownNode { raw_id: *raw }),
-        GraphNode::Infer { name } => type_node::Kind::Infer(InferNode { name_id: *name }),
+        GraphNode::Unknown { raw } => type_node::Kind::Unknown(UnknownNode { raw_id: raw }),
+        GraphNode::Infer { name } => type_node::Kind::Infer(InferNode { name_id: name }),
         GraphNode::Rest { inner } => type_node::Kind::Rest(RestNode {
-            inner_node_id: *inner,
+            inner_node_id: inner,
         }),
         GraphNode::RecursiveRef {
             name,
             type_arguments,
             conditional_context,
         } => type_node::Kind::RecursiveRef(proto::RecursiveRefNode {
-            name_id: *name,
-            type_argument_node_ids: type_arguments.clone(),
+            name_id: name,
+            type_argument_node_ids: type_arguments,
             conditional_context: conditional_context
                 .iter()
                 .map(|f| proto::ConditionalFrameNode {
@@ -1226,10 +1234,10 @@ fn graph_node_to_proto(node: &GraphNode) -> TypeNode {
             // `value_node` is encoded as a decimal STRING on the wire so
             // JS Number precision cannot truncate the u64.
             value_node: value_node.to_string(),
-            scope_canonical_id: *scope_canonical_id_id,
-            surface_kind: *surface_kind,
-            slot_name_id: *slot_name_id,
-            binding_name_id: *binding_name_id,
+            scope_canonical_id: scope_canonical_id_id,
+            surface_kind,
+            slot_name_id,
+            binding_name_id,
         }),
     };
     TypeNode { kind: Some(kind) }

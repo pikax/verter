@@ -18,6 +18,7 @@ verter_semantic = { path = "../verter_semantic" }
 verter_type_expr = { workspace = true }
 verter_no_typeexpr = { workspace = true }
 rustc-hash = { workspace = true }
+hashbrown = "0.15"
 
 [build-dependencies]
 prost-build = "0.14.3"
