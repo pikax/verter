@@ -333,7 +333,7 @@ defineProps<Props>()
 </script>
 <template><div /></template>"#;
 
-    let extracted = VerterHost::build_eval_script_source(source, None);
+    let extracted = VerterHost::build_eval_script_source("/App.vue", source, None);
     assert!(
         extracted.contains("interface Props"),
         "script content should be preserved without cached parse, got: {extracted}"
@@ -345,6 +345,56 @@ defineProps<Props>()
     assert!(
         !extracted.contains("<template>"),
         "template markup must not be passed into type evaluation, got: {extracted}"
+    );
+}
+
+/// Extraction is gated on the file's LANGUAGE CLASSIFICATION, never on the
+/// raw text: a NON-CARRIER file (`.ts` / `.d.ts`) whose text contains a
+/// `<script ...>` ... `</script>` pair (a JSDoc `@example` block — the
+/// vue-router@5 / @regle/core / unhead dist shape) passes through UNCHANGED.
+/// The former unconditional forgiving raw scan blanked such a file down to
+/// its documentation example, destroying its whole type surface.
+#[test]
+fn build_eval_script_source_never_script_scans_a_non_carrier_file() {
+    let source = r#"/**
+ * Usage example:
+ * ```vue
+ * <script setup>
+ * const value = useReal()
+ * </script>
+ * ```
+ */
+export type Real = string | { path: string }
+"#;
+
+    for canonical in ["/dep.ts", "/dep.d.ts", "/dep.tsx", "/dep.mjs"] {
+        let (eval, extracted) =
+            VerterHost::build_eval_script_source_with_extraction(canonical, source, None);
+        assert!(
+            !extracted,
+            "{canonical}: a non-carrier file must never report script extraction"
+        );
+        assert_eq!(
+            eval, source,
+            "{canonical}: a non-carrier file's source passes through unchanged"
+        );
+    }
+
+    // Control: the SAME text under a carrier canonical keeps the artifact-less
+    // forgiving extraction (the raw scan applies to a genuine `.vue`).
+    let (eval, extracted) =
+        VerterHost::build_eval_script_source_with_extraction("/Doc.vue", source, None);
+    assert!(
+        extracted,
+        "a carrier canonical keeps the artifact-less forgiving extraction"
+    );
+    assert!(
+        eval.contains("const value = useReal()"),
+        "the carrier extraction keeps the script bytes, got: {eval}"
+    );
+    assert!(
+        !eval.contains("export type Real"),
+        "the carrier extraction blanks non-script bytes, got: {eval}"
     );
 }
 

@@ -93,10 +93,11 @@ impl VerterHost {
     /// file the source is returned unchanged (its offsets are already
     /// file-absolute).
     pub(crate) fn build_eval_script_source(
+        canonical_id: &str,
         source: &str,
         framework_parse: Option<&verter_language::FrameworkParseArtifact>,
     ) -> String {
-        Self::build_eval_script_source_with_extraction(source, framework_parse).0
+        Self::build_eval_script_source_with_extraction(canonical_id, source, framework_parse).0
     }
 
     /// [`Self::build_eval_script_source`] plus the extraction provenance: the
@@ -113,7 +114,20 @@ impl VerterHost {
     /// Carrier-NEUTRAL: a non-Vue carrier blanks from the producer's recorded
     /// `script_regions` (both instance + module blocks), Vue keeps its exact
     /// `extract_vue_script_content` behaviour, and a non-carrier passes through.
+    ///
+    /// Extraction is gated on the file's LANGUAGE CLASSIFICATION, never on the
+    /// raw text: `canonical_id` classifies through the single static registry
+    /// (the same authority `resolve_route_type_edge` uses), and ONLY a
+    /// framework-carrier file may script-extract when no parse artifact is
+    /// available. A non-carrier `.ts` / `.d.ts` whose TEXT happens to contain a
+    /// `<script ...>` ... `</script>` pair — a JSDoc `@example` block in a
+    /// package declaration file (vue-router@5, @regle/core, unhead dist all
+    /// ship one) — passes through UNCHANGED; the former unconditional forgiving
+    /// raw scan blanked such a file down to its documentation example,
+    /// destroying its whole type surface (empty shallow inventory → every
+    /// dependent member value unresolvable).
     pub(crate) fn build_eval_script_source_with_extraction(
+        canonical_id: &str,
         source: &str,
         framework_parse: Option<&verter_language::FrameworkParseArtifact>,
     ) -> (String, bool) {
@@ -145,12 +159,25 @@ impl VerterHost {
                 return (blanked, true);
             }
         }
-        // Vue (and the no-artifact fallback) keep the EXACT existing extraction:
-        // the parser-vs-raw-scan agreement + the forgiving raw scan when no
-        // parsed SFC is available + the inter-script `\n` injection. This is the
-        // byte-identical pre-existing behaviour (a Vue file arriving without a
-        // framework_parse still extracts its `<script>` from the raw markup).
+        // Vue (and the CARRIER no-artifact fallback) keep the EXACT existing
+        // extraction: the parser-vs-raw-scan agreement + the forgiving raw scan
+        // when no parsed SFC is available + the inter-script `\n` injection —
+        // a Vue file arriving without a framework_parse still extracts its
+        // `<script>` from the raw markup.
         let parsed = framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse);
+        // A file with NO parse artifact script-extracts ONLY when its
+        // canonical CLASSIFIES as a framework carrier. A non-carrier file's
+        // raw source is already script: `<script>` text inside it is
+        // documentation/data, not structure, and the forgiving raw scan must
+        // never blank it (typed classification decides, never text sniffing).
+        if parsed.is_none()
+            && !verter_language::LanguageRegistry::global()
+                .classify_static(canonical_id)
+                .static_resolution()
+                .is_framework_carrier()
+        {
+            return (source.to_string(), false);
+        }
         match crate::host_resolve::extract_vue_script_content(source, parsed.map(|p| p.as_ref())) {
             Some(script) => (script, true),
             None => (source.to_string(), false),

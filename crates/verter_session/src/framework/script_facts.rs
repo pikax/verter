@@ -426,6 +426,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     let source: Arc<str> = if file_language.is_framework_carrier() {
         Arc::from(
             crate::VerterHost::build_eval_script_source(
+                canonical,
                 raw_source.as_ref(),
                 framework_parse.as_deref(),
             )

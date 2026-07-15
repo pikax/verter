@@ -777,7 +777,7 @@ impl VerterHost {
         let eval_source = owner_eval_source.map(str::to_string).or_else(|| {
             self.current_eval_state(canonical)
                 .map(|(source, framework_parse, _)| {
-                    Self::build_eval_script_source(&source, framework_parse.as_deref())
+                    Self::build_eval_script_source(canonical, &source, framework_parse.as_deref())
                 })
         })?;
         self.compute_evaluated_types_from_owner_context_with_ctx(

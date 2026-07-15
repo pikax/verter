@@ -759,6 +759,7 @@ impl VerterHost {
                 .map(|started| started.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);
             let owner_eval_source = VerterHost::build_eval_script_source(
+                canonical,
                 &facts.raw_source,
                 facts.framework_parse.as_deref(),
             );
