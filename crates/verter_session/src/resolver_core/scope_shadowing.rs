@@ -168,8 +168,19 @@ impl ScopeShadowing {
         S: IntoIterator<Item = &'a String>,
         K: IntoIterator<Item = &'a String>,
         I: IntoIterator<Item = &'a String>,
+        S::IntoIter: ExactSizeIterator,
+        K::IntoIter: ExactSizeIterator,
+        I::IntoIter: ExactSizeIterator,
     {
-        let mut set: FxHashSet<Arc<str>> = FxHashSet::default();
+        let scope_type_names = scope_type_names.into_iter();
+        let type_binding_keys = type_binding_keys.into_iter();
+        let import_binding_keys = import_binding_keys.into_iter();
+        // The three sources are typically disjoint, so their summed length
+        // is a tight capacity bound (duplicates only ever shrink it).
+        let mut set: FxHashSet<Arc<str>> = FxHashSet::with_capacity_and_hasher(
+            scope_type_names.len() + type_binding_keys.len() + import_binding_keys.len(),
+            Default::default(),
+        );
         for name in scope_type_names {
             set.insert(Arc::from(name.as_str()));
         }

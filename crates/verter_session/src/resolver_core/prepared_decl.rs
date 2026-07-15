@@ -398,7 +398,14 @@ fn prepare_type_decl_from_lowered(
         .collect();
 
     // Build name_resolution: maps bare names in the body to resolved identities
-    // Local deps resolve to the same file
+    // Local deps resolve to the same file. Reserve the summed inventory
+    // sizes up front (tight upper bound: shadowed imports and cross-space
+    // name collisions only shrink it) — header-index walks, no allocation.
+    prepared.name_resolution.reserve(
+        state.type_symbol_names().count()
+            + state.value_symbol_names().count()
+            + state.import_targets.len(),
+    );
     for dep_name in state.type_symbol_names() {
         prepared.name_resolution.insert(
             dep_name.to_string(),
@@ -939,7 +946,9 @@ pub fn build_prepared_decl_bundle(
     let import_canonicalization = Arc::new(import_canonicalization);
 
     // Build import bindings from shallow state import_targets + dep_edges.
-    let mut import_bindings = FxHashMap::default();
+    // One binding per import target at most — exact capacity bound.
+    let mut import_bindings =
+        FxHashMap::with_capacity_and_hasher(state.import_targets.len(), Default::default());
     for (local_name, target) in state.import_targets.iter() {
         let resolved_id = if target.canonical_id.is_empty() {
             dep_edges.get(&target.source_specifier).cloned()

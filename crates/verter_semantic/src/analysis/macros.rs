@@ -850,7 +850,11 @@ fn insert_local_type_decl_from_declaration<'a>(
 
 /// Build a registry of local type declarations from the program.
 fn build_local_type_registry<'a>(program: &'a Program<'a>) -> FxHashMap<String, LocalTypeDecl<'a>> {
-    let mut registry = FxHashMap::default();
+    // Each top-level statement contributes at most one registry entry, so
+    // the statement count is a tight capacity bound — sized up front
+    // instead of growing by doubling (type-decl-dominated files, the hot
+    // case, land close to exact).
+    let mut registry = FxHashMap::with_capacity_and_hasher(program.body.len(), Default::default());
     for stmt in &program.body {
         match stmt {
             Statement::TSInterfaceDeclaration(decl) => {

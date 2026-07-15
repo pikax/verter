@@ -419,6 +419,10 @@ fn emit_member_facts_from_kinds(
     }
     members_for_shape.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
 
+    // Exact incoming batch: one `MemberShape` fact plus one `MemberPresence`
+    // fact per member — reserve up front instead of doubling mid-batch.
+    registry.facts.reserve(1 + members_for_shape.len());
+
     let shape_hash = compute_member_shape_hash(name, &members_for_shape, space);
     registry.insert(Fact {
         key: FactKey::MemberShape {
@@ -618,6 +622,8 @@ fn emit_import_refs(registry: &mut FactRegistry, shallow: &ShallowFileState) {
         &crate::resolver_core::shallow_file_state::ImportTarget,
     )> = shallow.import_targets.iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(b.0));
+    // Exact incoming batch: one `ImportRef` fact per import binding.
+    registry.facts.reserve(sorted.len());
     for (local, target) in sorted {
         let space = SymbolSpace::Type;
         let mut buf: Vec<u8> = Vec::with_capacity(64);

@@ -58,22 +58,15 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
         TSType::TSLiteralType(lit) => lower_literal(&lit.literal, source),
 
         // -- Compound types --
+        //
+        // The arms collect straight into the `Arc<[TypeExpr]>` payload via
+        // the exact-size factories — one allocation, no intermediate `Vec`.
         TSType::TSUnionType(union) => {
-            let types: Vec<TypeExpr> = union
-                .types
-                .iter()
-                .map(|t| lower_ts_type(t, source))
-                .collect();
-            TypeExpr::union(types)
+            TypeExpr::union_from_exact_iter(union.types.iter().map(|t| lower_ts_type(t, source)))
         }
-        TSType::TSIntersectionType(intersection) => {
-            let types: Vec<TypeExpr> = intersection
-                .types
-                .iter()
-                .map(|t| lower_ts_type(t, source))
-                .collect();
-            TypeExpr::intersection(types)
-        }
+        TSType::TSIntersectionType(intersection) => TypeExpr::intersection_from_exact_iter(
+            intersection.types.iter().map(|t| lower_ts_type(t, source)),
+        ),
 
         // -- Array --
         TSType::TSArrayType(arr) => TypeExpr::Array {
@@ -82,25 +75,29 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
         },
 
         // -- Tuple --
-        TSType::TSTupleType(tuple) => {
-            let elements: Vec<TupleElement> = tuple
+        TSType::TSTupleType(tuple) => TypeExpr::Tuple {
+            // Exact-size collect straight into the `Arc<[TupleElement]>`
+            // payload — one allocation, no intermediate `Vec`.
+            elements: tuple
                 .element_types
                 .iter()
                 .map(|elem| lower_tuple_element(elem, source))
-                .collect();
-            TypeExpr::Tuple {
-                elements: Arc::from(elements),
-                readonly: false,
-            }
-        }
+                .collect(),
+            readonly: false,
+        },
 
         // -- Object type literal --
         TSType::TSTypeLiteral(literal) => {
-            let members = literal
-                .members
-                .iter()
-                .filter_map(|m| lower_ts_signature(m, source))
-                .collect();
+            // `filter_map` erases the exact size hint, so pre-size to the
+            // AST member count (tight upper bound: only unnameable members
+            // drop) instead of growing by doubling.
+            let mut members = Vec::with_capacity(literal.members.len());
+            members.extend(
+                literal
+                    .members
+                    .iter()
+                    .filter_map(|m| lower_ts_signature(m, source)),
+            );
             TypeExpr::Object(Arc::new(ObjectExpr {
                 properties: members,
             }))
@@ -189,15 +186,12 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
         TSType::TSMappedType(mapped) => lower_mapped_type(mapped, source),
 
         // -- Template literal type: `prefix${T}suffix` --
-        TSType::TSTemplateLiteralType(tpl) => {
-            let quasis = tpl.quasis.iter().map(|q| q.value.raw.to_string()).collect();
-            let expressions: Vec<TypeExpr> =
-                tpl.types.iter().map(|t| lower_ts_type(t, source)).collect();
-            TypeExpr::TemplateLiteral {
-                quasis,
-                expressions: Arc::from(expressions),
-            }
-        }
+        TSType::TSTemplateLiteralType(tpl) => TypeExpr::TemplateLiteral {
+            quasis: tpl.quasis.iter().map(|q| q.value.raw.to_string()).collect(),
+            // Exact-size collect straight into the `Arc<[TypeExpr]>`
+            // payload — one allocation, no intermediate `Vec`.
+            expressions: tpl.types.iter().map(|t| lower_ts_type(t, source)).collect(),
+        },
 
         // -- Parenthesized type --
         TSType::TSParenthesizedType(paren) => {
@@ -311,37 +305,31 @@ fn lower_type_reference(type_ref: &TSTypeReference<'_>, source: &str) -> TypeExp
         }
     };
 
-    let type_arguments: Vec<TypeExpr> = type_ref
+    let params: &[TSType<'_>] = type_ref
         .type_arguments
         .as_ref()
-        .map(|params| {
-            params
-                .params
-                .iter()
-                .map(|p| lower_ts_type(p, source))
-                .collect()
-        })
-        .unwrap_or_default();
+        .map_or(&[], |args| &args.params);
 
-    // Normalize Array<T> and ReadonlyArray<T> to array form
-    if type_arguments.len() == 1 {
-        if name == "Array" {
-            return TypeExpr::Array {
-                element: Arc::new(type_arguments.into_iter().next().unwrap()),
-                readonly: false,
-            };
-        }
-        if name == "ReadonlyArray" {
-            return TypeExpr::Array {
-                element: Arc::new(type_arguments.into_iter().next().unwrap()),
-                readonly: true,
-            };
-        }
+    // Normalize Array<T> and ReadonlyArray<T> to array form. Checked on the
+    // raw argument slice BEFORE lowering so the single element lowers
+    // straight into the `Array` node.
+    if params.len() == 1 && (name == "Array" || name == "ReadonlyArray") {
+        return TypeExpr::Array {
+            element: Arc::new(lower_ts_type(&params[0], source)),
+            readonly: name == "ReadonlyArray",
+        };
+    }
+
+    if params.is_empty() {
+        // Shared empty type-argument slice — no per-call allocation.
+        return TypeExpr::named(name);
     }
 
     TypeExpr::Ref {
         name: Arc::from(name),
-        type_arguments: Arc::from(type_arguments),
+        // Exact-size collect straight into the `Arc<[TypeExpr]>` payload —
+        // one allocation, no intermediate `Vec`.
+        type_arguments: params.iter().map(|p| lower_ts_type(p, source)).collect(),
     }
 }
 
@@ -358,9 +346,13 @@ fn lower_import_type(import: &TSImportType<'_>, source: &str, typeof_query: bool
     if let Some(q) = &import.qualifier {
         collect_import_qualifier_parts(q, &mut qualifier);
     }
-    let type_arguments: Vec<TypeExpr> = import
+    // Exact-size collect straight into the `Arc<[TypeExpr]>` payload; the
+    // no-argument case reuses the shared empty slice (no per-call
+    // allocation).
+    let type_arguments: Arc<[TypeExpr]> = import
         .type_arguments
         .as_ref()
+        .filter(|params| !params.params.is_empty())
         .map(|params| {
             params
                 .params
@@ -368,12 +360,12 @@ fn lower_import_type(import: &TSImportType<'_>, source: &str, typeof_query: bool
                 .map(|p| lower_ts_type(p, source))
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_else(verter_type_expr::empty_type_args);
     TypeExpr::ImportType {
         specifier,
         qualifier: Arc::from(qualifier),
         typeof_query,
-        type_arguments: Arc::from(type_arguments),
+        type_arguments,
     }
 }
 

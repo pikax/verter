@@ -725,10 +725,20 @@ impl ShallowFileState {
         decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
         resolver: &dyn ShallowImportResolver,
     ) -> Self {
-        let mut exports = FxHashMap::default();
-        let mut wildcard_reexports = Vec::new();
-        let mut import_locals = FxHashSet::default();
-        let mut import_targets: FxHashMap<String, ImportTarget> = FxHashMap::default();
+        // Capacity bounds are exact per-source counts (cheap header-inventory
+        // walks, no allocation); `entry` collisions across the export sources
+        // only ever shrink the final size.
+        let binding_count = analysis.extracted.bindings.len();
+        let export_bound = analysis.direct_reexport_entries().count()
+            + analysis.exported_local_type_names().count()
+            + analysis.exported_local_symbol_names().count()
+            + 1; // the implicit `default` local-export probe
+        let mut exports = FxHashMap::with_capacity_and_hasher(export_bound, Default::default());
+        let mut wildcard_reexports = Vec::with_capacity(analysis.wildcard_reexport_sources().len());
+        let mut import_locals =
+            FxHashSet::with_capacity_and_hasher(binding_count, Default::default());
+        let mut import_targets: FxHashMap<String, ImportTarget> =
+            FxHashMap::with_capacity_and_hasher(binding_count, Default::default());
 
         // Populate exports from the extracted bindings
         // Direct reexports

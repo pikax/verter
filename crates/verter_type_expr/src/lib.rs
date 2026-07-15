@@ -1213,6 +1213,46 @@ impl TypeExpr {
         }
     }
 
+    /// Create a union type from an exact-size iterator of arms, collecting
+    /// straight into the `Arc<[TypeExpr]>` payload — a single allocation on
+    /// the `TrustedLen` path (e.g. a `Map` over a slice iterator), with no
+    /// intermediate `Vec` + copy. Semantics are identical to
+    /// [`TypeExpr::union`]: empty → `never`, single → unwrap.
+    pub fn union_from_exact_iter<I>(types: I) -> Self
+    where
+        I: IntoIterator<Item = TypeExpr>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let mut iter = types.into_iter();
+        match iter.len() {
+            0 => Self::Primitive(PrimitiveName::Never),
+            1 => iter
+                .next()
+                .expect("ExactSizeIterator reported len 1 but yielded no item"),
+            _ => Self::Union(iter.collect()),
+        }
+    }
+
+    /// Create an intersection type from an exact-size iterator of arms,
+    /// collecting straight into the `Arc<[TypeExpr]>` payload — a single
+    /// allocation on the `TrustedLen` path, with no intermediate `Vec` +
+    /// copy. Semantics are identical to [`TypeExpr::intersection`]: empty →
+    /// `unknown`, single → unwrap.
+    pub fn intersection_from_exact_iter<I>(types: I) -> Self
+    where
+        I: IntoIterator<Item = TypeExpr>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let mut iter = types.into_iter();
+        match iter.len() {
+            0 => Self::Primitive(PrimitiveName::Unknown),
+            1 => iter
+                .next()
+                .expect("ExactSizeIterator reported len 1 but yielded no item"),
+            _ => Self::Intersection(iter.collect()),
+        }
+    }
+
     /// Create a type reference without type arguments.
     pub fn named(name: impl Into<String>) -> Self {
         Self::Ref {
