@@ -12910,3 +12910,260 @@ mod manifest_types_entry_routing_tests {
         assert!(is_raw_import_specifier_id("lodash"));
     }
 }
+
+
+// ── resolve_eval_dependency_canonical_with: candidate probe contract ─────────
+//
+// The exact candidate probe ORDER of `resolve_eval_dependency_canonical_with`
+// is a behavioral contract: callers (`VerterHost::resolve_eval_dependency_canonical`,
+// the executor's `extract_deps` normalizer) rely on higher-priority typed
+// companions winning over lower-priority ones, and the probe closure is
+// side-effectful at some call sites (existence probes are observable). These
+// tests pin the full probe sequence with a recording closure so any change to
+// candidate generation — including allocation-strategy refactors — must keep
+// the order, the probe count, and the returned strings byte-identical.
+mod resolve_eval_dependency_probe_contract_tests {
+    use super::resolve_eval_dependency_canonical_with;
+
+    /// Runs the resolver with a closure that records every probed candidate
+    /// in order and reports existence only for members of `existing`.
+    fn probe_trace(dep: &str, existing: &[&str]) -> (Option<String>, Vec<String>) {
+        let mut probed = Vec::new();
+        let result = resolve_eval_dependency_canonical_with(dep, |candidate| {
+            probed.push(candidate.to_string());
+            existing.contains(&candidate)
+        });
+        (result, probed)
+    }
+
+    #[test]
+    fn runtime_js_input_probes_declaration_companion_then_appends_then_input_last() {
+        let (result, probed) = probe_trace("/ws/pkg/dist/index.js", &[]);
+        assert_eq!(result, None);
+        assert_eq!(
+            probed,
+            vec![
+                "/ws/pkg/dist/index.d.ts",
+                "/ws/pkg/dist/index.js.d.ts",
+                "/ws/pkg/dist/index.js.ts",
+                "/ws/pkg/dist/index.js.tsx",
+                "/ws/pkg/dist/index.js/index.d.ts",
+                "/ws/pkg/dist/index.js/index.ts",
+                "/ws/pkg/dist/index.js/index.tsx",
+                "/ws/pkg/dist/index.js",
+            ],
+            "a runtime .js dependency must probe its declaration companion \
+             first, then the append candidates in declared order, and the raw \
+             input only as the final type-companion fallback",
+        );
+    }
+
+    #[test]
+    fn bundler_suffix_input_probes_bundle_companion_before_plain_js_companion() {
+        let dep = "/ws/@vue/runtime-core/dist/runtime-core.esm-bundler.js";
+        let (result, probed) = probe_trace(dep, &[]);
+        assert_eq!(result, None);
+        assert_eq!(
+            probed,
+            vec![
+                // The bundler-suffix companion strips the WHOLE bundle suffix…
+                "/ws/@vue/runtime-core/dist/runtime-core.d.ts".to_string(),
+                // …and the plain `.js` companion strips only `.js`, later.
+                "/ws/@vue/runtime-core/dist/runtime-core.esm-bundler.d.ts".to_string(),
+                format!("{dep}.d.ts"),
+                format!("{dep}.ts"),
+                format!("{dep}.tsx"),
+                format!("{dep}/index.d.ts"),
+                format!("{dep}/index.ts"),
+                format!("{dep}/index.tsx"),
+                dep.to_string(),
+            ],
+            "bundle-suffix stripping must be probed before plain .js stripping",
+        );
+    }
+
+    #[test]
+    fn every_bundler_suffix_probes_its_declaration_companion_first() {
+        for suffix in [
+            ".esm-bundler.js",
+            ".esm-browser.js",
+            ".esm-browser.prod.js",
+            ".global.js",
+            ".global.prod.js",
+            ".cjs.js",
+            ".cjs.prod.js",
+        ] {
+            let dep = format!("/ws/pkg/dist/entry{suffix}");
+            let (result, probed) = probe_trace(&dep, &["/ws/pkg/dist/entry.d.ts"]);
+            assert_eq!(
+                result.as_deref(),
+                Some("/ws/pkg/dist/entry.d.ts"),
+                "suffix {suffix} must resolve to the stripped declaration companion",
+            );
+            assert_eq!(
+                probed,
+                vec!["/ws/pkg/dist/entry.d.ts".to_string()],
+                "suffix {suffix}: the bundle companion must be the FIRST probe",
+            );
+        }
+    }
+
+    #[test]
+    fn jsx_mjs_cjs_inputs_map_to_their_specific_declaration_companions() {
+        let (result, probed) = probe_trace("/ws/c/comp.jsx", &["/ws/c/comp.d.ts"]);
+        assert_eq!(result.as_deref(), Some("/ws/c/comp.d.ts"));
+        assert_eq!(probed, vec!["/ws/c/comp.d.ts".to_string()]);
+
+        let (result, probed) = probe_trace("/ws/m/entry.mjs", &["/ws/m/entry.d.mts"]);
+        assert_eq!(result.as_deref(), Some("/ws/m/entry.d.mts"));
+        assert_eq!(probed, vec!["/ws/m/entry.d.mts".to_string()]);
+
+        let (result, probed) = probe_trace("/ws/m/entry.cjs", &["/ws/m/entry.d.cts"]);
+        assert_eq!(result.as_deref(), Some("/ws/m/entry.d.cts"));
+        assert_eq!(probed, vec!["/ws/m/entry.d.cts".to_string()]);
+    }
+
+    #[test]
+    fn extensionless_input_probes_typed_candidates_before_raw_input() {
+        let (result, probed) = probe_trace("/ws/src/runtime/types/html", &[]);
+        assert_eq!(result, None);
+        assert_eq!(
+            probed,
+            vec![
+                "/ws/src/runtime/types/html.d.ts",
+                "/ws/src/runtime/types/html.ts",
+                "/ws/src/runtime/types/html.tsx",
+                "/ws/src/runtime/types/html/index.d.ts",
+                "/ws/src/runtime/types/html/index.ts",
+                "/ws/src/runtime/types/html/index.tsx",
+                "/ws/src/runtime/types/html",
+            ],
+            "an extensionless dependency probes every typed candidate before \
+             falling back to the raw extensionless path",
+        );
+    }
+
+    #[test]
+    fn extensionless_input_resolves_to_index_candidate_in_order() {
+        let (result, probed) = probe_trace("/ws/lib/util", &["/ws/lib/util/index.ts"]);
+        assert_eq!(result.as_deref(), Some("/ws/lib/util/index.ts"));
+        assert_eq!(
+            probed,
+            vec![
+                "/ws/lib/util.d.ts",
+                "/ws/lib/util.ts",
+                "/ws/lib/util.tsx",
+                "/ws/lib/util/index.d.ts",
+                "/ws/lib/util/index.ts",
+            ],
+            "probing must stop at the first existing candidate",
+        );
+    }
+
+    #[test]
+    fn extensionless_input_falls_back_to_existing_raw_path_after_all_candidates() {
+        let (result, probed) = probe_trace("/ws/lib/util", &["/ws/lib/util"]);
+        assert_eq!(result.as_deref(), Some("/ws/lib/util"));
+        assert_eq!(
+            probed.len(),
+            7,
+            "the raw path is only probed after all six typed candidates",
+        );
+        assert_eq!(probed.last().map(String::as_str), Some("/ws/lib/util"));
+    }
+
+    #[test]
+    fn explicit_non_js_extension_fast_path_probes_only_the_input() {
+        // (b) the early-return case: an explicit non-js extension that exists
+        // must be returned untouched after probing ONLY the input itself.
+        let (result, probed) = probe_trace("/ws/lib/foo.d.ts", &["/ws/lib/foo.d.ts"]);
+        assert_eq!(result.as_deref(), Some("/ws/lib/foo.d.ts"));
+        assert_eq!(
+            probed,
+            vec!["/ws/lib/foo.d.ts".to_string()],
+            "the explicit-extension fast path must probe exactly the input and \
+             nothing else",
+        );
+
+        let (result, probed) =
+            probe_trace("/ws/components/Button.vue", &["/ws/components/Button.vue"]);
+        assert_eq!(result.as_deref(), Some("/ws/components/Button.vue"));
+        assert_eq!(probed, vec!["/ws/components/Button.vue".to_string()]);
+    }
+
+    #[test]
+    fn explicit_declaration_input_probes_itself_first_then_append_candidates() {
+        let (result, probed) = probe_trace("/ws/lib/foo.d.ts", &[]);
+        assert_eq!(result, None);
+        assert_eq!(
+            probed,
+            vec![
+                "/ws/lib/foo.d.ts",
+                "/ws/lib/foo.d.ts.d.ts",
+                "/ws/lib/foo.d.ts.ts",
+                "/ws/lib/foo.d.ts.tsx",
+                "/ws/lib/foo.d.ts/index.d.ts",
+                "/ws/lib/foo.d.ts/index.ts",
+                "/ws/lib/foo.d.ts/index.tsx",
+            ],
+            "a missing explicit non-js-extension input is probed FIRST (fast \
+             path), then only the append candidates; no trailing raw re-probe",
+        );
+    }
+
+    #[test]
+    fn runtime_js_input_falls_back_to_existing_raw_path_probed_last() {
+        let (result, probed) = probe_trace("/ws/d/index.js", &["/ws/d/index.js"]);
+        assert_eq!(result.as_deref(), Some("/ws/d/index.js"));
+        assert_eq!(
+            probed,
+            vec![
+                "/ws/d/index.d.ts",
+                "/ws/d/index.js.d.ts",
+                "/ws/d/index.js.ts",
+                "/ws/d/index.js.tsx",
+                "/ws/d/index.js/index.d.ts",
+                "/ws/d/index.js/index.ts",
+                "/ws/d/index.js/index.tsx",
+                "/ws/d/index.js",
+            ],
+            "a runtime script that exists is returned only after every typed \
+             companion candidate missed",
+        );
+    }
+
+    #[test]
+    fn empty_input_returns_none_without_any_probe() {
+        // Even an `existing` set containing the empty string must not be
+        // consulted: the resolver returns before any probe.
+        let (result, probed) = probe_trace("", &[""]);
+        assert_eq!(result, None);
+        assert!(probed.is_empty(), "empty input must not probe at all");
+    }
+
+    #[test]
+    fn hidden_js_basename_probes_raw_input_twice_at_the_tail() {
+        // `Path::extension()` treats `.js` (a dot-file basename) as having NO
+        // extension while `ends_with(".js")` still marks it type-companion-
+        // preferring — so BOTH tail fallback probes fire for the raw input.
+        // This pins the exact probe multiset of the current contract.
+        let (result, probed) = probe_trace("/ws/.js", &[]);
+        assert_eq!(result, None);
+        assert_eq!(
+            probed,
+            vec![
+                "/ws/.d.ts",
+                "/ws/.js.d.ts",
+                "/ws/.js.ts",
+                "/ws/.js.tsx",
+                "/ws/.js/index.d.ts",
+                "/ws/.js/index.ts",
+                "/ws/.js/index.tsx",
+                "/ws/.js",
+                "/ws/.js",
+            ],
+            "a dot-file .js basename fires both the extensionless fallback and \
+             the type-companion fallback probes",
+        );
+    }
+}
