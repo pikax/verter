@@ -1610,3 +1610,89 @@ fn lru_promotion_sees_hits_recorded_through_base_reads() {
         );
     }
 }
+
+// ── Targeted per-canonical content reads (store-view snapshot rail) ──
+
+/// The targeted `(canonical, content_hash)` visitor drives the
+/// store-view `file_facts`/`source_envs` snapshot: it must observe
+/// EVERY live variant of the canonical at the tracked content hash
+/// (base + overlay-scoped coexist per R20) and NOTHING else — no
+/// other content generation, no other canonical — via the
+/// canonical→keys index (no whole-store scan).
+#[test]
+fn for_each_artifact_for_canonical_content_visits_exactly_matching_variants() {
+    let store = FileArtifactStore::new();
+    let live = [1u8; 16];
+    let stale = [2u8; 16];
+
+    let base_key = FileArtifactKey::base(Arc::from("/a.ts"), live);
+    store.insert_artifacts(base_key.clone(), synth_artifacts(0xaa));
+    let overlay_key = FileArtifactKey::overlay_scoped(Arc::from("/a.ts"), live, [7u8; 16]);
+    store.insert_artifacts(overlay_key.clone(), synth_artifacts(0xab));
+    // Stale content generation of the same canonical: excluded.
+    store.insert_artifacts(
+        FileArtifactKey::base(Arc::from("/a.ts"), stale),
+        synth_artifacts(0xac),
+    );
+    // Different canonical at the live hash: excluded.
+    store.insert_artifacts(
+        FileArtifactKey::base(Arc::from("/b.ts"), live),
+        synth_artifacts(0xba),
+    );
+
+    let mut seen: Vec<FileArtifactKey> = Vec::new();
+    store.for_each_artifact_for_canonical_content("/a.ts", live, |key, payload| {
+        assert!(Arc::strong_count(&payload.indexed) >= 1);
+        seen.push(key.clone());
+    });
+    assert_eq!(
+        seen.len(),
+        2,
+        "base + overlay variants at the live hash must both be visited"
+    );
+    assert!(seen.contains(&base_key));
+    assert!(seen.contains(&overlay_key));
+
+    let mut non_live = 0usize;
+    store.for_each_artifact_for_canonical_content("/a.ts", [9u8; 16], |_, _| non_live += 1);
+    assert_eq!(non_live, 0, "a non-live hash must visit nothing");
+
+    let mut absent = 0usize;
+    store.for_each_artifact_for_canonical_content("/missing.ts", live, |_, _| absent += 1);
+    assert_eq!(absent, 0, "an unknown canonical must visit nothing");
+}
+
+/// The audit aggregate must be drawn from the SAME full keyed
+/// population `snapshot_artifacts()` enumerates (base + overlay),
+/// with the same byte formula — computed without materializing the
+/// whole-store `Vec`.
+#[test]
+fn artifact_count_and_source_bytes_agrees_with_snapshot_artifacts() {
+    let store = FileArtifactStore::new();
+    store.insert_artifacts(
+        FileArtifactKey::base(Arc::from("/one.ts"), [1u8; 16]),
+        synth_artifacts(0x11),
+    );
+    store.insert_artifacts(
+        FileArtifactKey::base(Arc::from("/longer/two.ts"), [2u8; 16]),
+        synth_artifacts(0x22),
+    );
+    store.insert_artifacts(
+        FileArtifactKey::overlay_scoped(Arc::from("/one.ts"), [3u8; 16], [9u8; 16]),
+        synth_artifacts(0x33),
+    );
+
+    let (count, bytes) = store.artifact_count_and_source_bytes();
+    let snap = store.snapshot_artifacts();
+    assert_eq!(count as usize, snap.len(), "same full keyed population");
+    let expected: u64 = snap
+        .iter()
+        .map(|(key, artifacts)| {
+            key.canonical.len() as u64
+                + artifacts.indexed.raw_source.len() as u64
+                + artifacts.indexed.eval_source.len() as u64
+        })
+        .sum();
+    assert_eq!(bytes, expected, "same byte formula as the Vec oracle");
+    assert!(bytes > 0, "canonical path bytes must be counted");
+}

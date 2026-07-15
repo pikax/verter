@@ -2504,36 +2504,47 @@ impl HostStoreView {
         // observed real-hash fact under an absent entry) — the
         // consumer falls through to cold recompute, which is the
         // correct R3 outcome under stale producer state.
-        for (key, artifacts) in store.snapshot_artifacts() {
-            let canonical_str = key.canonical.as_ref().to_owned();
-            let matches_live = match snapshot.whole_hashes.get(&canonical_str) {
-                Some(h) => key.content_hash == *h,
-                None => false,
-            };
-            if matches_live {
-                // View-current SOURCE-ENV identity for the canonical:
-                // parser-version/language from the artifact KEY itself
-                // (never re-derived from the path), parse-env from the
-                // canonical's LIVE per-canonical env — the shared
-                // `SourceEnvIdentity::live_for_artifact_key`
-                // construction the fact producer also uses, so record
-                // and validate compare the same dimensions by
-                // construction (the base key's own `parse_env_hash`
-                // slot is the zero sentinel, not an env identity).
-                // Base keys only: an overlay-scoped key carries a
-                // session discriminator in its `parse_env_hash`
-                // dimension and must never seed the base view's
-                // identity map.
-                if key.is_base() {
-                    snapshot.source_envs.insert(
+        //
+        // Targeted read: only the view's TRACKED canonicals can
+        // contribute (everything else fails the `whole_hashes` gate by
+        // definition), so iterate the tracked set and resolve each
+        // canonical's live-hash variants through the canonical→keys
+        // index — never a whole-store snapshot `Vec` (that scan is
+        // O(total live entries incl. stale content generations) per
+        // view build and allocated a `String` per non-matching entry).
+        let whole_hashes = &snapshot.whole_hashes;
+        let source_envs = &mut snapshot.source_envs;
+        let file_facts = &mut snapshot.file_facts;
+        for (canonical_str, tracked_hash) in whole_hashes {
+            store.for_each_artifact_for_canonical_content(
+                canonical_str,
+                *tracked_hash,
+                |key, artifacts| {
+                    // View-current SOURCE-ENV identity for the canonical:
+                    // parser-version/language from the artifact KEY itself
+                    // (never re-derived from the path), parse-env from the
+                    // canonical's LIVE per-canonical env — the shared
+                    // `SourceEnvIdentity::live_for_artifact_key`
+                    // construction the fact producer also uses, so record
+                    // and validate compare the same dimensions by
+                    // construction (the base key's own `parse_env_hash`
+                    // slot is the zero sentinel, not an env identity).
+                    // Base keys only: an overlay-scoped key carries a
+                    // session discriminator in its `parse_env_hash`
+                    // dimension and must never seed the base view's
+                    // identity map.
+                    if key.is_base() {
+                        source_envs.insert(
+                            canonical_str.clone(),
+                            SourceEnvIdentity::live_for_artifact_key(host, key),
+                        );
+                    }
+                    file_facts.insert(
                         canonical_str.clone(),
-                        SourceEnvIdentity::live_for_artifact_key(host, &key),
+                        std::sync::Arc::clone(&artifacts.facts),
                     );
-                }
-                snapshot
-                    .file_facts
-                    .insert(canonical_str, std::sync::Arc::clone(&artifacts.facts));
-            }
+                },
+            );
         }
     }
 
@@ -4289,24 +4300,18 @@ impl VerterHost {
         ComponentMetaStoreCounters,
     ) {
         // Entry count and byte sum MUST be drawn from the SAME
-        // population. `FileArtifactStore::len` counts every keyed
-        // artifact (base + overlay-scoped); the byte sum therefore
-        // routes through `snapshot_artifacts()`, which enumerates that
-        // same full keyed set. `snapshot_all()` is base-only (it
-        // filters to `FileArtifactKey::is_base` keys), so summing
-        // bytes over it while counting entries via `len()` would report
-        // two different populations in a session that materialised
-        // overlay artifacts.
-        let artifacts = self.project_type_store.indexed().snapshot_artifacts();
-        let indexed_entries = artifacts.len() as u32;
-        let indexed_bytes = artifacts
-            .iter()
-            .map(|(key, file_artifacts)| {
-                key.canonical.len() as u64
-                    + file_artifacts.indexed.raw_source.len() as u64
-                    + file_artifacts.indexed.eval_source.len() as u64
-            })
-            .sum::<u64>();
+        // population: every keyed artifact (base + overlay-scoped) —
+        // the same full keyed set `snapshot_artifacts()` enumerates.
+        // `snapshot_all()` is base-only (it filters to
+        // `FileArtifactKey::is_base` keys), so summing bytes over it
+        // while counting entries over the full set would report two
+        // different populations in a session that materialised
+        // overlay artifacts. The store-side fold computes both from
+        // ONE iteration without materializing the whole-store `Vec`.
+        let (indexed_entries, indexed_bytes) = self
+            .project_type_store
+            .indexed()
+            .artifact_count_and_source_bytes();
 
         let prepared_bundles = self
             .resolver_runtime()

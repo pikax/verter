@@ -2164,6 +2164,54 @@ impl FileArtifactStore {
             .collect()
     }
 
+    /// Visit every live `(key, payload)` variant of `canonical` whose
+    /// `content_hash` matches — the targeted read backing the
+    /// store-view `file_facts` / `source_envs` snapshot. Resolves the
+    /// canonical's candidate keys through the canonical→keys index and
+    /// reads `self.artifacts` by EXACT key (no whole-store scan, no
+    /// whole-store `Vec`); a (benign) dangling index key just misses.
+    /// Base and overlay-scoped variants at the hash are both visited.
+    pub fn for_each_artifact_for_canonical_content(
+        &self,
+        canonical: &str,
+        content_hash: Hash16,
+        mut visit: impl FnMut(&FileArtifactKey, &Arc<FileArtifacts>),
+    ) {
+        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+            return;
+        }
+        if let Some(slot) = self.canonical_keys.get(canonical) {
+            for key in slot
+                .value()
+                .iter()
+                .filter(|key| key.content_hash == content_hash)
+            {
+                if let Some(entry) = self.artifacts.get(key) {
+                    visit(key, &entry.value().payload);
+                }
+            }
+        }
+    }
+
+    /// Aggregate `(entry_count, canonical + source byte sum)` over the
+    /// FULL keyed artifact population (base + overlay-scoped) — the
+    /// audit-snapshot read. Count and bytes are drawn from one
+    /// iteration of the same population `snapshot_artifacts()`
+    /// enumerates, without materializing the whole-store `Vec`.
+    #[must_use]
+    pub fn artifact_count_and_source_bytes(&self) -> (u32, u64) {
+        let mut count: u32 = 0;
+        let mut bytes: u64 = 0;
+        for entry in self.artifacts.iter() {
+            count = count.saturating_add(1);
+            let indexed = &entry.value().payload.indexed;
+            bytes += entry.key().canonical.len() as u64
+                + indexed.raw_source.len() as u64
+                + indexed.eval_source.len() as u64;
+        }
+        (count, bytes)
+    }
+
     // ──────────────────────────────────────────────────────────────────
     // Augmentation index API (populated lazily by the
     // augmentation-stitching pass — see `/type-cache-architecture` skill)
