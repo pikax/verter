@@ -91,6 +91,51 @@ pub struct ShallowFileState {
     /// import("./m")` against such a module resolves to `typeof X`, not an
     /// object of named exports. `None` for an ordinary ESM module.
     export_assignment: Option<String>,
+
+    /// Lazy per-state memo of the route-surface digest
+    /// (`crate::resolver_store::hash_route_surface`). The digest is a pure
+    /// function of this state's routing surface (`exports`,
+    /// `wildcard_reexports`, `import_targets`, `whole_hash`), which is
+    /// mutated only during construction — strictly before the state is
+    /// `Arc`-published and first hashed — so one computation serves every
+    /// later read. See [`RouteSurfaceHashMemo`] for the clone semantics.
+    route_surface_hash: RouteSurfaceHashMemo,
+}
+
+/// One-shot memo cell for a [`ShallowFileState`]'s route-surface digest.
+///
+/// Thin wrapper over [`std::sync::OnceLock`] (the state is shared via
+/// `Arc` across threads) whose `Clone` RESETS to an empty cell instead of
+/// carrying the source's cached digest: a cloned state is exactly the
+/// shape that may still be mutated (the routing fields are `pub`, and the
+/// synthesised-`default` injection takes `&mut self`), so the clone must
+/// re-digest its OWN surface on first demand rather than serve a stale
+/// copy. Deliberately excluded from any equality/serialization semantics
+/// — the enclosing struct derives only `Debug` + `Clone`.
+#[derive(Debug, Default)]
+pub(crate) struct RouteSurfaceHashMemo(std::sync::OnceLock<Hash16>);
+
+impl RouteSurfaceHashMemo {
+    /// The memoized digest, computing (and caching) it on first demand.
+    /// Concurrent first demands may both run `compute`; the winning value
+    /// is served to both — `compute` is deterministic over the immutable
+    /// surface, so either result is the same digest.
+    pub(crate) fn get_or_init(&self, compute: impl FnOnce() -> Hash16) -> Hash16 {
+        *self.0.get_or_init(compute)
+    }
+
+    /// Test observability: the currently cached digest, `None` while
+    /// unpopulated.
+    #[cfg(test)]
+    pub(crate) fn get(&self) -> Option<Hash16> {
+        self.0.get().copied()
+    }
+}
+
+impl Clone for RouteSurfaceHashMemo {
+    fn clone(&self) -> Self {
+        Self(std::sync::OnceLock::new())
+    }
 }
 
 /// A wildcard `export * from ‘...’` reexport with its resolved canonical target.
@@ -764,6 +809,7 @@ impl ShallowFileState {
             type_deps_cache: dashmap::DashMap::default(),
             synthesised_value_symbols: FxHashMap::default(),
             synthesised_value_bodies: FxHashMap::default(),
+            route_surface_hash: RouteSurfaceHashMemo::default(),
         }
     }
 
@@ -827,6 +873,14 @@ impl ShallowFileState {
     /// authority for this content generation).
     pub fn decl_bodies(&self) -> &Arc<crate::decl_body_memo::DeclBodyMemo> {
         &self.decl_bodies
+    }
+
+    /// The lazy route-surface digest memo
+    /// ([`crate::resolver_store::hash_route_surface`] populates and reads
+    /// it). Routing mutations are construction-time only, strictly before
+    /// the first hash, so the populated digest never goes stale.
+    pub(crate) fn route_surface_hash_memo(&self) -> &RouteSurfaceHashMemo {
+        &self.route_surface_hash
     }
 
     /// Every file-scope TYPE symbol name in the shallow inventory

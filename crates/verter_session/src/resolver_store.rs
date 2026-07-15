@@ -2875,7 +2875,24 @@ pub(crate) fn hash_import_route_targets(
     })
 }
 
+/// Digest a [`crate::resolver_core::ShallowFileState`]'s route surface,
+/// memoized per state.
+///
+/// The digest is a pure function of the state's routing surface
+/// (`exports` with targets, `wildcard_reexports`, `import_targets`,
+/// `whole_hash`), and that surface is immutable once the state is
+/// `Arc`-published (routing mutations — the test routing-table
+/// constructor and the synthesised-`default` injection — happen during
+/// construction, strictly before the first hash), so the sort+hash
+/// walk over every export/target runs once per state and every later
+/// call reads the memo.
 pub(crate) fn hash_route_surface(state: &crate::resolver_core::ShallowFileState) -> Hash16 {
+    state
+        .route_surface_hash_memo()
+        .get_or_init(|| hash_route_surface_uncached(state))
+}
+
+fn hash_route_surface_uncached(state: &crate::resolver_core::ShallowFileState) -> Hash16 {
     hash16_from_sorted(|hasher| {
         // Hash sorted exports WITH their routing targets. A named
         // reexport bakes a resolved dependency canonical exactly like a
