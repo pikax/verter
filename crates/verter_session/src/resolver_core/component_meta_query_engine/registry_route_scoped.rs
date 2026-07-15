@@ -84,8 +84,14 @@ impl ComponentMetaQueryEngine<'_> {
                 symbol_name,
             )
             .map(|root| (root.canonical_id, root.symbol_name))
-            .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
-        let body_locator = self.named_decl_body(own_canonical.as_str(), own_name.as_str())?;
+            .unwrap_or_else(|| {
+                let interner = self.ctx.project_type_store().identity_interner();
+                (
+                    interner.intern(scope_canonical_id),
+                    interner.intern(symbol_name),
+                )
+            });
+        let body_locator = self.named_decl_body(own_canonical.as_ref(), own_name.as_ref())?;
         let body_root = {
             let dispatch = self.semantic_dispatch();
             dispatch
@@ -119,8 +125,8 @@ impl ComponentMetaQueryEngine<'_> {
                 continue;
             }
             let (fact, crossed_substitution) = self.route_scoped_member_fact(
-                own_canonical.as_str(),
-                own_name.as_str(),
+                own_canonical.as_ref(),
+                own_name.as_ref(),
                 member.name.as_ref(),
             )?;
             // A member reached through a generic SUBSTITUTION retains the

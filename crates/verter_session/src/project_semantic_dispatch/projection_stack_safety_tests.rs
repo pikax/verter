@@ -320,7 +320,7 @@ fn projection_inputs<'a>(
     env: &'a rustc_hash::FxHashMap<String, crate::semantic_query::SemanticNodeId>,
     scope: &'a NodeScopeId,
     names: &'a rustc_hash::FxHashMap<
-        String,
+        std::sync::Arc<str>,
         verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
     >,
     shadowing: &'a ScopeShadowing,

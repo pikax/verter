@@ -4749,6 +4749,13 @@ mod foundations_guards {
         // Crate-private: the materialise closure and the memo are its
         // only callers.
         "pub(crate) mod decl_lowering",
+        // Store-owned identity string intern pool (canonical ids + symbol
+        // names minted into `ResolvedRootIdentity` / prepared-decl maps).
+        // Crate-private: the prepared-decl builders, bare-name resolution,
+        // and host_manage canonicalization reach it through
+        // `ProjectTypeStore::identity_interner()`; no downstream crate
+        // touches it.
+        "pub(crate) mod identity_interner",
         // Structural-carrier producer — the single owner of the query-free
         // `TypeExpr` → dormant-graph-carrier lowering. Owns the module-private
         // raw lowerer plus the witness-gated macro producer surface (the macro
@@ -4886,28 +4893,22 @@ mod foundations_guards {
         // `ProjectionReductionContext`, so the reducing lowering entry is
         // unreachable from the locator path by type.
         "pub use crate::project_semantic_dispatch::locator_shape::LocatorShapeCtx",
-        // Block 6.e per-call-site instrumentation: bench example
-        // (crates/verter_bench/examples/audit_real_component_meta.rs)
-        // dumps the `HostStoreView::from_host` attribution table at the
-        // end of every pass via `dump_from_host_call_sites` and resets
-        // the table at pass entry via `reset_from_host_call_sites`. The
-        // `#[track_caller]` rail on `HostStoreView::from_host`,
-        // `VerterHost::resolver_store_view`, the trait `resolver_store_view`
-        // impls, and the `validate_fact_signature*` helpers propagates
-        // the warm-hit validator location back to the recorder.
-        "pub use resolver_store::{dump_from_host_call_sites, reset_from_host_call_sites}",
         // TS7 oracle harness snapshot GENERATOR entry — `pub` ONLY under the
         // `oracle-gen` feature (off the default closure), so the
         // `src/bin/oracle_gen` binary (a separate crate that sees only non-test
         // `pub` lib items) can invoke it. The default build never compiles it.
         "pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, upgrade_snapshots_to_v3, GenError}",
-        // Actual base-view sweep counter (one bump per `build_coherent`
-        // sweep, NOT per `from_host` call): `store_view_coherent_build_sweeps`
-        // + `reset_store_view_coherent_build_sweeps`. A batch-saturation
-        // gate reads these to assert the `StoreViewManager` collapses a
-        // warm batch onto ~O(1) full-workspace sweeps. The re-export
-        // statement wraps to multiple lines (long symbol names), so the
-        // line-based surface extractor normalizes it to the bare
+        // Resolver-store instrumentation re-exports, one wrapped statement:
+        // the per-call-site `HostStoreView::from_host` attribution table
+        // (`dump_from_host_call_sites` / `reset_from_host_call_sites`,
+        // dumped by crates/verter_bench/examples/audit_real_component_meta.rs
+        // via the `#[track_caller]` rail) plus the base-view sweep counter
+        // (`store_view_coherent_build_sweeps` +
+        // `reset_store_view_coherent_build_sweeps`, one bump per
+        // `build_coherent` sweep — a batch-saturation gate asserts a warm
+        // batch collapses onto ~O(1) full-workspace sweeps). The statement
+        // wraps to multiple lines (long symbol names), so the line-based
+        // surface extractor normalizes it to the bare
         // `pub use resolver_store::` prefix.
         "pub use resolver_store::",
         // NOTE: the session-overlay copy-on-write counter is intentionally

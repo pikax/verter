@@ -33,8 +33,10 @@ use verter_type_expr::{MappedModifier, ObjectMember, PrimitiveName, TypeExpr};
 /// The content-free anchor of a prepared declaration's authored positions.
 fn decl_anchor(root_identity: &ResolvedRootIdentity, space: LocatorSymbolSpace) -> AuthoredAnchor {
     AuthoredAnchor {
-        canonical_id: Arc::from(root_identity.canonical_id.as_str()),
-        symbol: Arc::from(root_identity.symbol_name.as_str()),
+        // The identity fields are shared `Arc<str>` — the anchor reuses the
+        // same allocations instead of copying.
+        canonical_id: Arc::clone(&root_identity.canonical_id),
+        symbol: Arc::clone(&root_identity.symbol_name),
         space,
     }
 }
@@ -146,7 +148,7 @@ pub struct PreparedTypeDecl {
     /// to their resolved root identities. Built at prepare time from the
     /// defining file's local and import scope. Allows the solver to resolve
     /// cross-file references without going back to the host for route discovery.
-    pub name_resolution: FxHashMap<String, ResolvedRootIdentity>,
+    pub name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
 
     /// Declaration provenance metadata.
     pub provenance: DeclProvenance,
@@ -289,7 +291,7 @@ pub struct PreparedValueDecl {
     /// Pre-resolved name context for bare names in type annotations
     /// attached to this value declaration. Same semantics as
     /// `PreparedTypeDecl::name_resolution`.
-    pub name_resolution: FxHashMap<String, ResolvedRootIdentity>,
+    pub name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
 
     /// Cache dependency contract for invalidation.
     pub cache_deps: PreparedCacheDeps,
@@ -466,7 +468,7 @@ impl PreparedTypeDecl {
         // so each member fact is stamped with it. The macro-surface overlay
         // pairs the member's recovered spans with this file.
         let declaration_origin =
-            DeclarationOrigin::Declared(Arc::from(self.root_identity.canonical_id.as_str()));
+            DeclarationOrigin::Declared(Arc::clone(&self.root_identity.canonical_id));
         let mut path_prefix = Vec::new();
         Self::index_transparent_object_members(
             &mut self.member_index,

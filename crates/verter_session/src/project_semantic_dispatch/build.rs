@@ -612,9 +612,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // generic `InstanceType<T>` all fall through to the unchanged chain
         // below.
         let synthesised_default: Option<crate::semantic_query::HashValue> =
-            if root_identity.symbol_name == "default" {
+            if root_identity.symbol_name.as_ref() == "default" {
                 self.ctx
-                    .ensure_indexed_ready_serve(root_identity.canonical_id.as_str())
+                    .ensure_indexed_ready_serve(root_identity.canonical_id.as_ref())
                     .map(|serve| serve.indexed)
                     .and_then(|indexed| {
                         indexed
@@ -628,8 +628,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             };
         let mut composed_partial = false;
         let node_id = if let Some(_resolved_default_whole_hash) = synthesised_default {
-            let resolved_default_canonical: Arc<str> =
-                Arc::from(root_identity.canonical_id.as_str());
+            let resolved_default_canonical: Arc<str> = Arc::clone(&root_identity.canonical_id);
             self.build_synthesized_vue_default_construct_object(&resolved_default_canonical, &scope)
         } else if prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class {
             // Class value root — `typeof C` IS the class's STATIC surface,
@@ -703,10 +702,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                         verter_type_expr::locators::TypeBodySlot {
                             anchor: verter_type_expr::locators::AuthoredAnchor {
-                                canonical_id: Arc::from(
-                                    prepared.root_identity.canonical_id.as_str(),
-                                ),
-                                symbol: Arc::from(prepared.root_identity.symbol_name.as_str()),
+                                canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
+                                symbol: Arc::clone(&prepared.root_identity.symbol_name),
                                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                             },
                             path: Arc::from(Vec::new().into_boxed_slice()),
@@ -732,8 +729,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                     verter_type_expr::locators::TypeBodySlot {
                         anchor: verter_type_expr::locators::AuthoredAnchor {
-                            canonical_id: Arc::from(prepared.root_identity.canonical_id.as_str()),
-                            symbol: Arc::from(prepared.root_identity.symbol_name.as_str()),
+                            canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
+                            symbol: Arc::clone(&prepared.root_identity.symbol_name),
                             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                         },
                         path: Arc::from(Vec::new().into_boxed_slice()),
@@ -785,10 +782,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                         verter_type_expr::locators::TypeBodySlot {
                             anchor: verter_type_expr::locators::AuthoredAnchor {
-                                canonical_id: Arc::from(
-                                    prepared.root_identity.canonical_id.as_str(),
-                                ),
-                                symbol: Arc::from(prepared.root_identity.symbol_name.as_str()),
+                                canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
+                                symbol: Arc::clone(&prepared.root_identity.symbol_name),
                                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                             },
                             path: Arc::from(
@@ -1944,8 +1939,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .get(fact.name_resolution_ref.as_str())
                 {
                     Some(root) => (
-                        Arc::<str>::from(root.canonical_id.as_str()),
-                        Arc::<str>::from(root.symbol_name.as_str()),
+                        Arc::clone(&root.canonical_id),
+                        Arc::clone(&root.symbol_name),
                         Arc::clone(&fact.type_args),
                     ),
                     // Same-file base not in the name-resolution map —
@@ -2974,11 +2969,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             for spec in &matched_specs {
                 let aug_prepared = match
                     crate::resolver_core::prepared_decl::prepare_augmentation_type_decl_outcome(
-                        augmenter_canonical.as_ref(),
+                        augmenter_canonical,
                         state,
                         &AugmentationScopeKind::Module(spec.clone()),
                         decl_name,
                         dep_edges.as_deref(),
+                        self.ctx.project_type_store().identity_interner(),
                     )
                 {
                     crate::resolver_core::prepared_decl::PreparedDeclOutcome::Ready(Some(
@@ -3394,13 +3390,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // The declaration's OWN decl-body locator (whole body).
         let canonical: Arc<str> = match scope {
             NodeScopeId::File { canonical_id, .. } => Arc::clone(canonical_id),
-            NodeScopeId::Global => Arc::from(prepared.root_identity.canonical_id.as_str()),
+            NodeScopeId::Global => Arc::clone(&prepared.root_identity.canonical_id),
         };
         let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
             verter_type_expr::locators::TypeBodySlot {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
                     canonical_id: canonical,
-                    symbol: Arc::from(prepared.root_identity.symbol_name.as_str()),
+                    symbol: Arc::clone(&prepared.root_identity.symbol_name),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },
                 path: Arc::from(Vec::new().into_boxed_slice()),
@@ -3509,7 +3505,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         locator: verter_type_expr::locators::AuthoredBodyLocator,
         decl_kind: verter_semantic::analysis::type_eval::TypeDeclKind,
         type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
-        name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
         scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
@@ -3654,7 +3650,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // retained parse via the fact's span-recovery origin.
         let member_span_memo = self
             .ctx
-            .ensure_indexed_ready_serve(prepared.root_identity.canonical_id.as_str())
+            .ensure_indexed_ready_serve(prepared.root_identity.canonical_id.as_ref())
             .map(|serve| serve.indexed);
         let mut added: Vec<SurfaceMember> = prepared
             .member_index

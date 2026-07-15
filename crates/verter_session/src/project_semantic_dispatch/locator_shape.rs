@@ -92,7 +92,7 @@ enum AnchorPreparedDecl {
 }
 
 impl AnchorPreparedDecl {
-    fn name_resolution(&self) -> &FxHashMap<String, ResolvedRootIdentity> {
+    fn name_resolution(&self) -> &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> {
         match self {
             Self::Type(prepared) => &prepared.name_resolution,
             Self::Value(prepared) => &prepared.name_resolution,
@@ -212,7 +212,7 @@ pub struct LocatorShapeCtx<'a> {
     /// namespace-sibling aware) — the SAME fast path the reducing entry
     /// consults first. `None` when no prepared declaration exists for the
     /// anchor (the in-scope resolver below is then the whole authority).
-    name_resolution: Option<&'a FxHashMap<String, ResolvedRootIdentity>>,
+    name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
     /// The anchor scope's declaration-scope payload (scope-local names +
     /// import bindings), threaded to the shared in-scope resolver.
     scope_payload: Option<&'a DeclarationScopePayload>,
@@ -225,7 +225,7 @@ impl<'a> LocatorShapeCtx<'a> {
     pub(crate) fn new(
         scope: &'a NodeScopeId,
         binders: &'a [LocatorBinderFrame],
-        name_resolution: Option<&'a FxHashMap<String, ResolvedRootIdentity>>,
+        name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
         scope_payload: Option<&'a DeclarationScopePayload>,
     ) -> Self {
         Self {
@@ -242,7 +242,7 @@ impl<'a> LocatorShapeCtx<'a> {
 struct ShapeLowerCtx<'a> {
     scope: &'a NodeScopeId,
     binders: &'a [LocatorBinderFrame],
-    name_resolution: Option<&'a FxHashMap<String, ResolvedRootIdentity>>,
+    name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
     scope_payload: Option<&'a DeclarationScopePayload>,
 }
 
@@ -968,7 +968,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // is still deterministic within the generation).
                     let whole_hash = self
                         .ctx
-                        .shallow_file_state(ri.canonical_id.as_str())
+                        .shallow_file_state(ri.canonical_id.as_ref())
                         .map_or(HashValue::default(), |s| s.whole_hash);
                     Some((ri, whole_hash))
                 }
@@ -977,9 +977,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         use crate::project_semantic_dispatch::carrier::RefHeadResolution;
         if let Some((ri, whole_hash)) = resolved {
             let identity = DeclIdentity {
-                canonical_id: Arc::from(ri.canonical_id.as_str()),
+                canonical_id: Arc::clone(&ri.canonical_id),
                 whole_hash,
-                decl_name: Arc::from(ri.symbol_name.as_str()),
+                decl_name: Arc::clone(&ri.symbol_name),
             };
             return self.intern_ref_head_carrier(
                 RefHeadResolution::Resolved(identity),
@@ -1314,6 +1314,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &scope_kind,
                     anchor_symbol.as_ref(),
                     dep_edges.as_deref(),
+                    self.ctx.project_type_store().identity_interner(),
                 )
                 .map(|prepared| AnchorPreparedDecl::Augmentation(Box::new(prepared)))
             }

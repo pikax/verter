@@ -162,7 +162,7 @@ fn prepared_value_decl_to_value_decl_info(
     prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
 ) -> ValueDeclInfo {
     ValueDeclInfo {
-        name: prepared.root_identity.symbol_name.clone(),
+        name: prepared.root_identity.symbol_name.as_ref().to_string(),
         declaration_id: 0,
         kind: prepared.kind,
         type_annotation: prepared.type_annotation.clone(),

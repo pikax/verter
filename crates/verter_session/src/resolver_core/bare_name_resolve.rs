@@ -93,6 +93,11 @@ pub(crate) fn resolve_bare_name_in_scope(
     scope_payload: Option<&DeclarationScopePayload>,
     name: &str,
 ) -> Option<ResolvedRootIdentity> {
+    // Identity mints below go through the store-owned intern pool so a
+    // repeated `(scope, name)` resolution reuses one shared allocation.
+    let interner = ctx.project_type_store().identity_interner();
+    let mint_in_scope =
+        || ResolvedRootIdentity::new(interner.intern(scope_canonical_id), interner.intern(name));
     // 1. Declaration-scope payload lookup (scope-local type/value,
     //    script-setup type bindings).
     if let Some(payload) = scope_payload {
@@ -100,7 +105,7 @@ pub(crate) fn resolve_bare_name_in_scope(
             || payload.scope_type_names.contains(name)
             || payload.scope_value_names.contains(name)
         {
-            return Some(ResolvedRootIdentity::new(scope_canonical_id, name));
+            return Some(mint_in_scope());
         }
     }
 
@@ -117,13 +122,13 @@ pub(crate) fn resolve_bare_name_in_scope(
         .map(|serve| serve.indexed)
     {
         if symbol_exists_in_facts(&entry, name) {
-            return Some(ResolvedRootIdentity::new(scope_canonical_id, name));
+            return Some(mint_in_scope());
         }
         if matches!(
             entry.shallow_state.export_target(name),
             Some(crate::resolver_core::ExportTarget::Local { .. })
         ) {
-            return Some(ResolvedRootIdentity::new(scope_canonical_id, name));
+            return Some(mint_in_scope());
         }
         // A `declare global { interface Name { ... } }` declaration in this
         // file is not a file-surface symbol, but the name resolves to the
@@ -131,7 +136,7 @@ pub(crate) fn resolve_bare_name_in_scope(
         // both fall back to the global augmentation inventory under the same
         // `(canonical, name)` identity.
         if entry.shallow_state.has_global_augmentation(name) {
-            return Some(ResolvedRootIdentity::new(scope_canonical_id, name));
+            return Some(mint_in_scope());
         }
     }
 
@@ -153,7 +158,10 @@ pub(crate) fn resolve_bare_name_in_scope(
     if let Some((canonical_id, exported_name)) =
         ctx.resolve_named_type_export_target(scope_canonical_id, name)
     {
-        return Some(ResolvedRootIdentity::new(&canonical_id, &exported_name));
+        return Some(ResolvedRootIdentity::new(
+            interner.intern(&canonical_id),
+            interner.intern(&exported_name),
+        ));
     }
 
     None
@@ -261,6 +269,7 @@ fn resolve_namespace_member_from_facts(
     let prefix = &symbol_name[..dot_pos];
     let member = &symbol_name[dot_pos + 1..];
     let binding = resolve_import_binding_from_facts(ctx, canonical_id, scope_payload, prefix)?;
+    let interner = ctx.project_type_store().identity_interner();
 
     // Structurally read-only (see the scope read above).
     if let Some(target_entry) = ctx
@@ -268,15 +277,18 @@ fn resolve_namespace_member_from_facts(
         .map(|serve| serve.indexed)
     {
         if symbol_exists_in_facts(&target_entry, member) {
-            return Some(ResolvedRootIdentity::new(&binding.canonical_id, member));
+            return Some(ResolvedRootIdentity::new(
+                interner.intern(&binding.canonical_id),
+                interner.intern(member),
+            ));
         }
 
         if let Some(crate::resolver_core::ExportTarget::Local { symbol_name }) =
             target_entry.shallow_state.export_target(member)
         {
             return Some(ResolvedRootIdentity::new(
-                &binding.canonical_id,
-                symbol_name,
+                interner.intern(&binding.canonical_id),
+                interner.intern(symbol_name),
             ));
         }
     }
@@ -285,13 +297,18 @@ fn resolve_namespace_member_from_facts(
         ctx.resolve_named_type_export_target(&binding.canonical_id, member)
     {
         return Some(ResolvedRootIdentity::new(
-            &resolved_canonical_id,
-            &exported_name,
+            interner.intern(&resolved_canonical_id),
+            interner.intern(&exported_name),
         ));
     }
 
     ctx.resolve_value_export_target(&binding.canonical_id, member)
-        .map(|target| ResolvedRootIdentity::new(&target.canonical_id, &target.name))
+        .map(|target| {
+            ResolvedRootIdentity::new(
+                interner.intern(&target.canonical_id),
+                interner.intern(&target.name),
+            )
+        })
 }
 
 fn resolve_imported_type_root_identity(
@@ -299,8 +316,12 @@ fn resolve_imported_type_root_identity(
     canonical_id: &str,
     exported_name: &str,
 ) -> ResolvedRootIdentity {
+    let interner = ctx.project_type_store().identity_interner();
     if canonical_id.is_empty() {
-        return ResolvedRootIdentity::new(canonical_id, exported_name);
+        return ResolvedRootIdentity::new(
+            interner.intern(canonical_id),
+            interner.intern(exported_name),
+        );
     }
 
     // Facts-returning form + tracer record: bare-name resolution feeds
@@ -311,7 +332,10 @@ fn resolve_imported_type_root_identity(
     let ((resolved_canonical_id, resolved_symbol_name), route_facts) =
         ctx.resolve_imported_type_root_with_facts(canonical_id, exported_name);
     ctx.observe_borrowed_signature(&route_facts);
-    ResolvedRootIdentity::new(resolved_canonical_id, resolved_symbol_name)
+    ResolvedRootIdentity::new(
+        interner.intern(&resolved_canonical_id),
+        interner.intern(&resolved_symbol_name),
+    )
 }
 
 /// Resolve a `PreparedTypeDecl` for a root identity using ctx-owned
@@ -357,8 +381,8 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
             &root_identity.symbol_name,
         );
     ctx.observe_borrowed_signature(&route_facts);
-    if final_canonical_id == root_identity.canonical_id
-        && final_symbol_name == root_identity.symbol_name
+    if final_canonical_id.as_str() == root_identity.canonical_id.as_ref()
+        && final_symbol_name.as_str() == root_identity.symbol_name.as_ref()
     {
         return None;
     }
@@ -423,7 +447,7 @@ pub(crate) fn resolve_namespace_sibling_in_scope(
                 .type_symbol_names()
                 .chain(state.value_symbol_names())
                 .any(|sym| sym == qualified);
-            is_sibling.then(|| ResolvedRootIdentity::new(scope_canonical_id, &qualified))
+            is_sibling.then(|| ResolvedRootIdentity::new(scope_canonical_id, qualified))
         }
         // Global-augmentation namespace: a global TYPE sibling ONLY.
         LocalScopeOrigin::Global => {
@@ -431,8 +455,7 @@ pub(crate) fn resolve_namespace_sibling_in_scope(
             let is_global_type_sibling = state.augmentation_type_keys().any(|(scope, sym)| {
                 matches!(scope, AugmentationScopeKind::Global) && sym == qualified
             });
-            is_global_type_sibling
-                .then(|| ResolvedRootIdentity::new(scope_canonical_id, &qualified))
+            is_global_type_sibling.then(|| ResolvedRootIdentity::new(scope_canonical_id, qualified))
         }
         // Module-augmentation namespace: no consumable sibling today.
         LocalScopeOrigin::Module => None,

@@ -403,15 +403,16 @@ fn build_policy_macro_role_identities(
     let mut frontier: Vec<ResolvedRootIdentity> = identities.iter().cloned().collect();
     let mut descended: FxHashSet<ResolvedRootIdentity> = FxHashSet::default();
     while let Some(identity) = frontier.pop() {
-        if identity.canonical_id != owner_canonical || !descended.insert(identity.clone()) {
+        if identity.canonical_id.as_ref() != owner_canonical || !descended.insert(identity.clone())
+        {
             continue;
         }
         let body_source = verter_type_expr::facts::SemanticTypeSource::Authored(
             verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                 verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: std::sync::Arc::from(identity.canonical_id.as_str()),
-                        symbol: std::sync::Arc::from(identity.symbol_name.as_str()),
+                        canonical_id: std::sync::Arc::clone(&identity.canonical_id),
+                        symbol: std::sync::Arc::clone(&identity.symbol_name),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                     },
                     path: std::sync::Arc::from(Vec::new().into_boxed_slice()),

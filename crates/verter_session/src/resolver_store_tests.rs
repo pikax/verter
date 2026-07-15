@@ -503,3 +503,84 @@ mod route_surface_hash_memo {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Import-route target digest formula pin
+// ---------------------------------------------------------------------------
+
+/// Pins the exact `hash_import_route_targets` digest formula: per sorted
+/// specifier, a `0u8` tag, the specifier, then the effective resolution as
+/// an `Option<str>`-shaped hash (`Some(resolved | best-candidate)` /
+/// known-miss `None`), split-hashed into the 16-byte pair. Guards the
+/// allocation-free digest path against any formula drift — a digest change
+/// here silently invalidates every recorded `ImportRoute` fact.
+#[test]
+fn import_route_target_digest_formula_is_pinned() {
+    use std::hash::{Hash, Hasher};
+
+    let mut resolutions: FxHashMap<String, crate::types::DependencyResolution> =
+        FxHashMap::default();
+    resolutions.insert(
+        "./exact".to_string(),
+        crate::types::DependencyResolution {
+            specifier: "./exact".to_string(),
+            resolved_canonical_id: Some("/w/exact.ts".to_string()),
+            possible_canonical_ids: vec![],
+        },
+    );
+    resolutions.insert(
+        "./candidates".to_string(),
+        crate::types::DependencyResolution {
+            specifier: "./candidates".to_string(),
+            resolved_canonical_id: None,
+            possible_canonical_ids: vec!["/w/c.js".to_string(), "/w/c.d.ts".to_string()],
+        },
+    );
+    resolutions.insert(
+        "./known-miss".to_string(),
+        crate::types::DependencyResolution {
+            specifier: "./known-miss".to_string(),
+            resolved_canonical_id: None,
+            possible_canonical_ids: vec![],
+        },
+    );
+
+    // Reference digest: the historical owned-`Option<String>` formula,
+    // written out longhand. `Option<String>` and `Option<&str>` hash
+    // byte-identically, so the production digest must match EXACTLY.
+    let mut entries: Vec<_> = resolutions.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let feed = |hasher: &mut rustc_hash::FxHasher| {
+        for (specifier, resolution) in &entries {
+            0u8.hash(hasher);
+            specifier.hash(hasher);
+            resolution
+                .resolved_canonical_id
+                .clone()
+                .or_else(|| resolution.effective_target().map(str::to_string))
+                .hash(hasher);
+        }
+    };
+    let mut left = rustc_hash::FxHasher::default();
+    0u8.hash(&mut left);
+    feed(&mut left);
+    let mut right = rustc_hash::FxHasher::default();
+    1u8.hash(&mut right);
+    feed(&mut right);
+    let mut expected = [0u8; 16];
+    expected[..8].copy_from_slice(&left.finish().to_le_bytes());
+    expected[8..].copy_from_slice(&right.finish().to_le_bytes());
+
+    assert_eq!(
+        crate::resolver_store::hash_import_route_targets(&resolutions),
+        expected,
+        "route-target digest formula drifted — every ImportRoute fact would misvalidate"
+    );
+
+    // The digest DISCRIMINATES: dropping the known-miss entry changes it.
+    resolutions.remove("./known-miss");
+    assert_ne!(
+        crate::resolver_store::hash_import_route_targets(&resolutions),
+        expected
+    );
+}

@@ -104,23 +104,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn resolve_enum_member_value(
         &self,
         scope_canonical: &str,
-        name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         dotted_name: &str,
     ) -> Option<TypeExpr> {
         let (prefix, member) = dotted_name.split_once('.')?;
         let (canonical, name) = if let Some(direct) = name_resolution.get(prefix) {
             (
-                Arc::<str>::from(direct.canonical_id.as_str()),
-                Arc::<str>::from(direct.symbol_name.as_str()),
+                Arc::clone(&direct.canonical_id),
+                Arc::clone(&direct.symbol_name),
             )
         } else {
             let resolved =
                 resolve_bare_name_in_scope(self.ctx, scope_canonical, scope_payload, prefix)?;
-            (
-                Arc::<str>::from(resolved.canonical_id.as_str()),
-                Arc::<str>::from(resolved.symbol_name.as_str()),
-            )
+            (resolved.canonical_id, resolved.symbol_name)
         };
         // Resolve the prefix's enum VALUE decl through the SAME export-target
         // chase `typeof Enum` uses ([`Self::effective_prepared_value_decl`]): a
@@ -195,7 +192,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,

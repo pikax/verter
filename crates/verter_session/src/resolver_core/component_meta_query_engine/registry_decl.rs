@@ -393,11 +393,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             symbol_name,
         )
         .map(|root| (root.canonical_id, root.symbol_name))
-        .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
+        .unwrap_or_else(|| {
+            let interner = self.ctx.project_type_store().identity_interner();
+            (
+                interner.intern(scope_canonical_id),
+                interner.intern(symbol_name),
+            )
+        });
         let dispatch = self.semantic_dispatch();
         match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
-            resolved_root.0.as_str(),
-            resolved_root.1.as_str(),
+            &resolved_root.0,
+            &resolved_root.1,
         ))) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => Some(id),
             _ => None,
@@ -421,10 +427,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             symbol_name,
         )
         .map(|root| (root.canonical_id, root.symbol_name))
-        .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
+        .unwrap_or_else(|| {
+            let interner = self.ctx.project_type_store().identity_interner();
+            (
+                interner.intern(scope_canonical_id),
+                interner.intern(symbol_name),
+            )
+        });
         let dispatch = self.semantic_dispatch();
         let anchor = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(
-            resolve_decl_key(resolved_root.0.as_str(), resolved_root.1.as_str()),
+            resolve_decl_key(&resolved_root.0, &resolved_root.1),
         )) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
             _ => return None,
@@ -433,10 +445,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // `ResolvedDeclSlotIdentity` slot (built via `type_slot_for`); the
         // cold build re-sources the live whole_hash from
         // `ensure_indexed_ready_serve`.
-        let root_canonical: std::sync::Arc<str> = std::sync::Arc::from(resolved_root.0.as_str());
+        let root_canonical: std::sync::Arc<str> = std::sync::Arc::clone(&resolved_root.0);
         let base = dispatch.type_slot_for(
             std::sync::Arc::clone(&root_canonical),
-            std::sync::Arc::from(resolved_root.1.as_str()),
+            std::sync::Arc::clone(&resolved_root.1),
         );
         let root_inst_ctx = dispatch.instantiate_context_for(
             &root_canonical,
@@ -550,11 +562,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 symbol_name,
             )
             .map(|root| (root.canonical_id, root.symbol_name))
-            .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
+            .unwrap_or_else(|| {
+                let interner = self.ctx.project_type_store().identity_interner();
+                (
+                    interner.intern(scope_canonical_id),
+                    interner.intern(symbol_name),
+                )
+            });
         // SHAPE classification runs on the raised DeclBody carrier (the
         // lowered body root) — the decl-anchor node is an identity
         // placeholder, not the body.
-        let body_locator = self.named_decl_body(own_canonical.as_str(), own_name.as_str())?;
+        let body_locator = self.named_decl_body(&own_canonical, &own_name)?;
         let body_root = {
             let dispatch = self.semantic_dispatch();
             dispatch
@@ -608,7 +626,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // Slot lookup mirrors the walker's heritage-shadow precedence: the own
         // declaration's prepared member facts win; heritage members resolve
         // from their declaring contributor in arm order.
-        let own_prepared = self.prepared_type_decl(own_canonical.as_str(), own_name.as_str());
+        let own_prepared = self.prepared_type_decl(own_canonical.as_ref(), own_name.as_ref());
         let heritage_prepared: Vec<_> = heritage
             .iter()
             .filter_map(|(canonical, name)| {

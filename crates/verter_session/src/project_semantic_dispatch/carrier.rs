@@ -60,7 +60,7 @@ pub(crate) struct CarrierResolverContext<'a> {
     /// The prepared-decl `name_resolution` fast-path map (already-resolved
     /// imports from the body-file scope). Consulted before the host-owned
     /// bare-name resolver fallback.
-    name_resolution: &'a FxHashMap<String, ResolvedRootIdentity>,
+    name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
     /// The owner declaration-scope payload (scope-local type names /
     /// bindings), consulted by the bare-name resolver fallback. `None` for a
     /// global scope or a pre-bundle fixture.
@@ -81,7 +81,7 @@ impl<'a> CarrierResolverContext<'a> {
     pub(crate) fn new(
         env: &'a FxHashMap<String, SemanticNodeId>,
         scope: &'a NodeScopeId,
-        name_resolution: &'a FxHashMap<String, ResolvedRootIdentity>,
+        name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
         scope_payload: Option<&'a DeclarationScopePayload>,
         shadowing: &'a ScopeShadowing,
         reduction_context: ProjectionReductionContext,
@@ -107,7 +107,7 @@ impl<'a> CarrierResolverContext<'a> {
     }
 
     /// The prepared-decl `name_resolution` fast-path map.
-    pub(crate) fn name_resolution(&self) -> &FxHashMap<String, ResolvedRootIdentity> {
+    pub(crate) fn name_resolution(&self) -> &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> {
         self.name_resolution
     }
 
@@ -419,8 +419,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // map + the scope payload, so the fallback is the whole resolver there).
         let resolved_root = if let Some(direct) = name_resolution.get(name.as_ref()) {
             Some((
-                Arc::<str>::from(direct.canonical_id.as_str()),
-                Arc::<str>::from(direct.symbol_name.as_str()),
+                Arc::clone(&direct.canonical_id),
+                Arc::clone(&direct.symbol_name),
             ))
         } else if let NodeScopeId::File { canonical_id, .. } = scope {
             resolve_bare_name_in_scope(
@@ -429,12 +429,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 scope_payload,
                 name.as_ref(),
             )
-            .map(|ri| {
-                (
-                    Arc::<str>::from(ri.canonical_id.as_str()),
-                    Arc::<str>::from(ri.symbol_name.as_str()),
-                )
-            })
+            .map(|ri| (ri.canonical_id, ri.symbol_name))
         } else {
             None
         };
@@ -735,9 +730,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // lazily by the head resolver); a multi-hop resolves the head bare and
         // projects the tail.
         let mut injected = ctx.name_resolution().clone();
+        let head_name: Arc<str> = Arc::from(first.as_ref());
         injected.insert(
-            first.as_ref().to_string(),
-            ResolvedRootIdentity::new(&dep_canonical, first.as_ref()),
+            Arc::clone(&head_name),
+            ResolvedRootIdentity::new(dep_canonical.as_str(), head_name),
         );
         // Single-segment terminal carries the args; a multi-hop head is bare (its
         // args, if any, were rejected by the error above).
@@ -1007,7 +1003,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // Rehydrate the value-side resolution inputs from the carrier's scope.
         let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-        let name_resolution: FxHashMap<String, ResolvedRootIdentity> = FxHashMap::default();
+        let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+            FxHashMap::default();
         let resolved = if is_bare {
             let (name, scope) = {
                 let data = graph.node_data(node).expect("BareRef carrier data");
@@ -1203,9 +1200,10 @@ mod tests {
         // and assert every accessor returns the wired value.
         let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
         env.insert("T".to_string(), SemanticNodeId(11));
-        let mut name_resolution: FxHashMap<String, ResolvedRootIdentity> = FxHashMap::default();
+        let mut name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+            FxHashMap::default();
         name_resolution.insert(
-            "Foo".to_string(),
+            Arc::from("Foo"),
             ResolvedRootIdentity::new("/foo.ts", "Foo"),
         );
         let scope = NodeScopeId::Global;
@@ -1226,7 +1224,7 @@ mod tests {
         assert_eq!(
             ctx.name_resolution()
                 .get("Foo")
-                .map(|r| r.symbol_name.as_str()),
+                .map(|r| r.symbol_name.as_ref()),
             Some("Foo")
         );
         assert!(ctx.scope_payload().is_none());

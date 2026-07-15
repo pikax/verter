@@ -168,7 +168,8 @@ fn eager_lower_subject(
 ) -> SemanticNodeId {
     let scope = file_scope(dispatch, canonical);
     let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-    let name_resolution: FxHashMap<String, ResolvedRootIdentity> = FxHashMap::default();
+    let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+        FxHashMap::default();
     let scope_payload = dispatch.ctx.prepared_decl_bundle(canonical).map(|bundle| {
         crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(&bundle)
     });
@@ -613,9 +614,10 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
         let scope_payload = dispatch.ctx.prepared_decl_bundle("/ns.ts").map(|bundle| {
             crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(&bundle)
         });
-        let mut name_resolution: FxHashMap<String, ResolvedRootIdentity> = FxHashMap::default();
+        let mut name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+            FxHashMap::default();
         name_resolution.insert(
-            "Sib".to_string(),
+            std::sync::Arc::from("Sib"),
             ResolvedRootIdentity::new("/ns.ts", "NS.Sib"),
         );
         let shadowing = ScopeShadowing::from_scope_payload(scope_payload.as_ref());
@@ -961,12 +963,16 @@ fn eager_resolved_with_name_resolution(
     });
     // Build the populated name_resolution from the consumer's import binding so
     // the FAST-PATH fires (mirrors the prepared-decl map's import entry).
-    let mut name_resolution: FxHashMap<String, ResolvedRootIdentity> = FxHashMap::default();
+    let mut name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+        FxHashMap::default();
     if let Some(bundle) = dispatch.ctx.prepared_decl_bundle(canonical) {
         for (local, binding) in bundle.import_bindings.iter() {
             name_resolution.insert(
-                local.clone(),
-                ResolvedRootIdentity::new(&binding.canonical_id, &binding.exported_name),
+                std::sync::Arc::from(local.as_str()),
+                ResolvedRootIdentity::new(
+                    binding.canonical_id.as_str(),
+                    binding.exported_name.as_str(),
+                ),
             );
         }
     }
@@ -1093,7 +1099,8 @@ fn carrier_resolver_context_drives_shared_head_resolver() {
     let scope = file_scope(&dispatch, "/ctx.ts");
 
     let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-    let name_resolution: FxHashMap<String, ResolvedRootIdentity> = FxHashMap::default();
+    let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+        FxHashMap::default();
     let scope_payload = dispatch.ctx.prepared_decl_bundle("/ctx.ts").map(|bundle| {
         crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(&bundle)
     });

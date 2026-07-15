@@ -13,14 +13,24 @@
 ///
 /// `canonical_id` always names the defining file, never a barrel hop.
 /// This is the cache key for prepared declarations.
+///
+/// Fields are shared `Arc<str>` allocations so the session layer's
+/// intern pool can hand every identity for the same `(path, name)` one
+/// allocation instead of a fresh `String` pair per mint. Equality and
+/// hashing remain CONTENT-based (`Arc<str>` derives delegate to `str`) —
+/// allocation sharing is never an identity semantic, and pointer
+/// identity never enters a cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
 pub struct ResolvedRootIdentity {
-    pub canonical_id: String,
-    pub symbol_name: String,
+    pub canonical_id: std::sync::Arc<str>,
+    pub symbol_name: std::sync::Arc<str>,
 }
 
 impl ResolvedRootIdentity {
-    pub fn new(canonical_id: impl Into<String>, symbol_name: impl Into<String>) -> Self {
+    pub fn new(
+        canonical_id: impl Into<std::sync::Arc<str>>,
+        symbol_name: impl Into<std::sync::Arc<str>>,
+    ) -> Self {
         Self {
             canonical_id: canonical_id.into(),
             symbol_name: symbol_name.into(),
@@ -83,5 +93,42 @@ mod tests {
     fn root_identity_display() {
         let id = ResolvedRootIdentity::new("/src/types.ts", "MyProps");
         assert_eq!(format!("{}", id), "/src/types.ts::MyProps");
+    }
+
+    #[test]
+    fn root_identity_shares_provided_arc_allocations() {
+        // Interned identity flow: a caller holding `Arc<str>` identity parts
+        // (the session intern pool) must be able to construct the identity
+        // WITHOUT copying — the fields hold the same allocations.
+        let canonical: std::sync::Arc<str> = std::sync::Arc::from("/src/types.ts");
+        let symbol: std::sync::Arc<str> = std::sync::Arc::from("MyProps");
+        let id = ResolvedRootIdentity::new(
+            std::sync::Arc::clone(&canonical),
+            std::sync::Arc::clone(&symbol),
+        );
+        assert!(std::sync::Arc::ptr_eq(&id.canonical_id, &canonical));
+        assert!(std::sync::Arc::ptr_eq(&id.symbol_name, &symbol));
+    }
+
+    #[test]
+    fn root_identity_equality_and_hash_stay_content_based() {
+        use std::hash::{BuildHasher, Hash, Hasher, RandomState};
+        // Identities built from DIFFERENT allocation sources (borrowed str vs
+        // shared Arc) are equal and hash identically: dedup is an allocation
+        // concern only, never an identity semantic.
+        let from_str = ResolvedRootIdentity::new("/src/types.ts", "MyProps");
+        let arc: std::sync::Arc<str> = std::sync::Arc::from("/src/types.ts");
+        let from_arc = ResolvedRootIdentity::new(arc, "MyProps");
+        assert_eq!(from_str, from_arc);
+        let state = RandomState::new();
+        let hash_of = |id: &ResolvedRootIdentity| {
+            let mut hasher = state.build_hasher();
+            id.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash_of(&from_str), hash_of(&from_arc));
+        // And distinct content must NOT collapse.
+        let other = ResolvedRootIdentity::new("/src/types.ts", "OtherProps");
+        assert_ne!(from_str, other);
     }
 }

@@ -1036,6 +1036,15 @@ pub struct ProjectTypeStore {
     /// across dispatcher instances. See
     /// [`crate::mapper_binder_registry`].
     mapper_binder_registry: Arc<crate::mapper_binder_registry::MapperBinderRegistry>,
+    /// Store-owned identity string intern pool: one pool per store
+    /// (per-store lifetime, never process-global or request-local).
+    /// Dedupes the canonical-id / symbol-name `Arc<str>` allocations the
+    /// session minting boundaries (prepared-decl builders, bare-name
+    /// resolution, import canonicalization) hand to
+    /// [`verter_semantic::analysis::type_solver::host::ResolvedRootIdentity`].
+    /// Bounded by retained payload bytes; see
+    /// [`crate::identity_interner::IdentityInterner`].
+    identity_interner: Arc<crate::identity_interner::IdentityInterner>,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -1147,8 +1156,18 @@ impl ProjectTypeStore {
             mapper_binder_registry: Arc::new(
                 crate::mapper_binder_registry::MapperBinderRegistry::new(),
             ),
+            identity_interner: Arc::new(
+                crate::identity_interner::IdentityInterner::with_default_budget(),
+            ),
             counters,
         }
+    }
+
+    /// The store-owned identity intern pool. Minting boundaries clone the
+    /// `Arc` handle; the pool's lifetime is the store's.
+    #[must_use]
+    pub(crate) fn identity_interner(&self) -> &Arc<crate::identity_interner::IdentityInterner> {
+        &self.identity_interner
     }
 
     /// Current monotonic project generation. Owned by the host / workspace

@@ -116,7 +116,7 @@ impl ProjectionStamp {
 pub(super) struct LocatorViewInputs<'a> {
     pub(super) env: &'a FxHashMap<String, SemanticNodeId>,
     pub(super) scope: &'a NodeScopeId,
-    pub(super) name_resolution: &'a FxHashMap<String, ResolvedRootIdentity>,
+    pub(super) name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
     pub(super) scope_payload: Option<&'a DeclarationScopePayload>,
     pub(super) shadowing: &'a ScopeShadowing,
 }
@@ -131,7 +131,7 @@ pub(super) type ViewMemo = FxHashMap<(SemanticNodeId, ProjectionReductionContext
 pub struct ProjectionBenchCase {
     root: SemanticNodeId,
     scope: NodeScopeId,
-    name_resolution: FxHashMap<String, ResolvedRootIdentity>,
+    name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
     scope_payload: Option<DeclarationScopePayload>,
     shadowing: ScopeShadowing,
 }
@@ -210,7 +210,7 @@ impl<'a> ProjectionBenchHarness<'a> {
             .iter()
             .map(|(local_name, defining_canonical, defining_symbol)| {
                 (
-                    (*local_name).to_string(),
+                    Arc::from(*local_name),
                     ResolvedRootIdentity::new(*defining_canonical, *defining_symbol),
                 )
             })

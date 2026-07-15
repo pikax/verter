@@ -624,7 +624,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         })
                         .is_some_and(|body_node| {
                             self.node_has_imported_generic_route(
-                                root_identity.canonical_id.as_str(),
+                                root_identity.canonical_id.as_ref(),
                                 body_node.node(),
                                 active_locals,
                                 depth + 1,
