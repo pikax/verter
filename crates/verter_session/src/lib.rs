@@ -400,20 +400,14 @@ pub use verter_language::{
 // The coherent-build sweep counter is the batch-saturation gate's actual
 // base-view sweep count (NOT the per-call `from_host` count, which also
 // bumps on cheap token-stable Arc-clone hits): warm batches sweep ~O(1).
+#[cfg(not(target_arch = "wasm32"))]
+pub use decl_lowering::{dump_decl_handoff_stats, reset_decl_handoff_stats, DeclHandoffSnapshot};
 pub use resolver_store::{
     dump_from_host_call_sites, reset_from_host_call_sites, reset_store_view_coherent_build_sweeps,
     store_view_coherent_build_sweeps,
 };
-// Env-gated decl-lowering handoff rendezvous profile (queue/service/
-// response split per worker rendezvous) — diagnostic accessors for the
-// bench/profiling harnesses, same pattern as `dump_from_host_call_sites`.
-// Native-only: wasm runs lowering inline with no worker rendezvous.
-#[cfg(not(target_arch = "wasm32"))]
-pub use decl_lowering::{dump_decl_handoff_stats, reset_decl_handoff_stats, DeclHandoffSnapshot};
-// The session-overlay copy-on-write counter is deliberately NOT a
-// process-global re-export: it lives per-host on
-// `VerterHost::provenance().session_overlay_cows` (`types::MetaProvenance`)
-// so the batch regression gate measures only its own host's overlay COWs.
+// The session-overlay copy-on-write counter is deliberately NOT re-exported: it lives
+// per-host on `VerterHost::provenance().session_overlay_cows` (own-host gate metric).
 
 // Re-export for the LSP: standalone @verter/types .d.ts content.
 pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
