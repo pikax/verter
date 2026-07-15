@@ -95,6 +95,16 @@ fn member_span_origin(
 // Prepared type declaration
 // ---------------------------------------------------------------------------
 
+/// Shared empty `name_resolution` table used by the `new()` constructors, so
+/// a freshly constructed prepared decl does not allocate a private empty map
+/// (the prepared-decl builder assigns the real per-file shared table right
+/// after construction; anchor-style consumers keep the empty table).
+fn empty_name_resolution() -> Arc<FxHashMap<String, ResolvedRootIdentity>> {
+    static EMPTY: std::sync::OnceLock<Arc<FxHashMap<String, ResolvedRootIdentity>>> =
+        std::sync::OnceLock::new();
+    Arc::clone(EMPTY.get_or_init(|| Arc::new(FxHashMap::default())))
+}
+
 /// Solver-facing prepared type declaration.
 ///
 /// Prepared declarations are cache-owned, declaration-only, and intentionally
@@ -146,7 +156,14 @@ pub struct PreparedTypeDecl {
     /// to their resolved root identities. Built at prepare time from the
     /// defining file's local and import scope. Allows the solver to resolve
     /// cross-file references without going back to the host for route discovery.
-    pub name_resolution: FxHashMap<String, ResolvedRootIdentity>,
+    ///
+    /// `Arc`-shared: the table is a per-FILE artifact for every
+    /// non-namespaced declaration (file symbols + import bindings vary per
+    /// file, not per declaration), so the prepared-decl builder shares ONE
+    /// immutable base table across all such decls of a defining file; only a
+    /// namespaced declaration (whose direct-sibling bindings are
+    /// declaration-scoped) carries its own private table.
+    pub name_resolution: Arc<FxHashMap<String, ResolvedRootIdentity>>,
 
     /// Declaration provenance metadata.
     pub provenance: DeclProvenance,
@@ -287,9 +304,11 @@ pub struct PreparedValueDecl {
     pub external_deps: Vec<PreparedExternalDep>,
 
     /// Pre-resolved name context for bare names in type annotations
-    /// attached to this value declaration. Same semantics as
-    /// `PreparedTypeDecl::name_resolution`.
-    pub name_resolution: FxHashMap<String, ResolvedRootIdentity>,
+    /// attached to this value declaration. Same semantics (and the same
+    /// per-file `Arc` sharing) as `PreparedTypeDecl::name_resolution`; the
+    /// value-space table has no per-declaration bindings at all, so every
+    /// prepared value decl of a defining file shares one base table.
+    pub name_resolution: Arc<FxHashMap<String, ResolvedRootIdentity>>,
 
     /// Cache dependency contract for invalidation.
     pub cache_deps: PreparedCacheDeps,
@@ -388,7 +407,7 @@ impl PreparedTypeDecl {
             member_index: FxHashMap::default(),
             local_deps: Vec::new(),
             external_deps: Vec::new(),
-            name_resolution: FxHashMap::default(),
+            name_resolution: empty_name_resolution(),
             provenance: DeclProvenance::default(),
             cache_deps: PreparedCacheDeps::default(),
             wrapper_shape: unclassified_wrapper_shape(),
@@ -1229,7 +1248,7 @@ impl PreparedValueDecl {
             member_index: FxHashMap::default(),
             enum_members: None,
             external_deps: Vec::new(),
-            name_resolution: FxHashMap::default(),
+            name_resolution: empty_name_resolution(),
             cache_deps: PreparedCacheDeps::default(),
         }
     }

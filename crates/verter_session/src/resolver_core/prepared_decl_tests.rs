@@ -347,6 +347,269 @@ declare global { namespace JSX {
 }
 
 // ---------------------------------------------------------------------
+// Name-resolution precedence characterization.
+//
+// The prepared-decl `name_resolution` table has a fixed key-wins order
+// (last insert wins per key): same-file TYPE/VALUE symbols, then the
+// per-declaration namespace-sibling bindings, then import bindings —
+// where the TYPE-space import pass skips a local name that is a
+// same-file type symbol, and the VALUE-space import pass never skips.
+// These tests pin the observable per-key winners so the shared
+// per-file base table + per-decl overlay split cannot permute them.
+// ---------------------------------------------------------------------
+
+/// A namespaced declaration's DIRECT sibling binding shadows a same-named
+/// file-level type symbol: inside `namespace NS`, a bare `Item` reference
+/// resolves to `NS.Item`, not the outer file-level `Item` (the TS
+/// namespace-scope rule; sibling bindings insert AFTER the file-symbol
+/// loops).
+#[test]
+fn namespace_sibling_shadows_file_level_type_symbol_in_type_space() {
+    let source = r#"
+export type Item = { file: true };
+export namespace NS {
+  export type Item = { ns: true };
+  export interface Holder { x: Item }
+}
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    // Harness invariants the precedence depends on: the namespace member is
+    // indexed under its QUALIFIED name and the file-level symbol under its
+    // bare name.
+    assert!(state.has_type_symbol("Item"));
+    assert!(state.has_type_symbol("NS.Item"));
+
+    let prepared = prepare_local_type_decl(
+        "/ws/fixture.ts",
+        &state,
+        "NS.Holder",
+        None,
+        &ImportCanonicalization::default(),
+    )
+    .expect("NS.Holder should prepare");
+
+    assert_eq!(
+        prepared
+            .name_resolution
+            .get("Item")
+            .map(|i| (i.canonical_id.as_str(), i.symbol_name.as_str())),
+        Some(("/ws/fixture.ts", "NS.Item")),
+        "a direct namespace sibling must shadow the same-named file-level type symbol"
+    );
+}
+
+/// An import binding wins over a namespace-sibling binding for the same
+/// bare name when that name is NOT a same-file type symbol: the TYPE-space
+/// import pass inserts after the sibling pass and only skips names the
+/// file's own TYPE namespace declares.
+#[test]
+fn import_wins_over_namespace_sibling_for_non_type_symbol_name() {
+    let source = r#"
+import { Item } from './items';
+export namespace NS {
+  export type Item = { ns: true };
+  export interface Holder { x: Item }
+}
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let dep_edges = FxHashMap::from_iter([("./items".to_string(), "/src/items.ts".to_string())]);
+    // The bare name is an import local and NOT a file-scope type symbol
+    // (the namespace member is indexed under "NS.Item" only).
+    assert!(state.is_import_local("Item"));
+    assert!(!state.has_type_symbol("Item"));
+
+    let prepared = prepare_local_type_decl(
+        "/ws/fixture.ts",
+        &state,
+        "NS.Holder",
+        Some(&dep_edges),
+        &ImportCanonicalization::default(),
+    )
+    .expect("NS.Holder should prepare");
+
+    assert_eq!(
+        prepared
+            .name_resolution
+            .get("Item")
+            .map(|i| (i.canonical_id.as_str(), i.symbol_name.as_str())),
+        Some(("/src/items.ts", "Item")),
+        "an import binding wins over a namespace-sibling binding for a \
+             name the file's type namespace does not declare"
+    );
+}
+
+/// TYPE-space vs VALUE-space import shadowing diverge on the SAME file: a
+/// same-file type symbol shadows the same-named import in a prepared TYPE
+/// decl's table, while a prepared VALUE decl's table lets the import win
+/// (its import pass has no type-symbol skip).
+#[test]
+fn value_space_import_wins_where_type_space_prefers_same_file_type_symbol() {
+    let source = r#"
+type Separator = { ui: { root: string } }
+import { Separator } from './runtime'
+export const defaults = { s: 1 }
+export interface SeparatorSlots { root: Separator }
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let dep_edges =
+        FxHashMap::from_iter([("./runtime".to_string(), "/src/runtime.ts".to_string())]);
+    assert!(state.has_type_symbol("Separator"));
+    assert!(state.is_import_local("Separator"));
+
+    let type_prepared = prepare_local_type_decl(
+        "/src/Separator.vue",
+        &state,
+        "SeparatorSlots",
+        Some(&dep_edges),
+        &ImportCanonicalization::default(),
+    )
+    .expect("SeparatorSlots should prepare");
+    assert_eq!(
+        type_prepared
+            .name_resolution
+            .get("Separator")
+            .map(|i| (i.canonical_id.as_str(), i.symbol_name.as_str())),
+        Some(("/src/Separator.vue", "Separator")),
+        "TYPE space: the same-file type symbol shadows the import"
+    );
+
+    let value_prepared = prepare_local_value_decl(
+        "/src/Separator.vue",
+        &state,
+        "defaults",
+        Some(&dep_edges),
+        &ImportCanonicalization::default(),
+    )
+    .expect("defaults should prepare");
+    assert_eq!(
+        value_prepared
+            .name_resolution
+            .get("Separator")
+            .map(|i| (i.canonical_id.as_str(), i.symbol_name.as_str())),
+        Some(("/src/runtime.ts", "Separator")),
+        "VALUE space: the import wins — the value-space import pass has no \
+             type-symbol skip"
+    );
+}
+
+/// File symbols and imports agree between a namespaced and a plain decl of
+/// the same file for every key the sibling pass does not touch: the
+/// namespace overlay is SPARSE (sibling members only), never a divergent
+/// rebuild of the file-level entries.
+#[test]
+fn namespaced_decl_table_matches_plain_decl_table_outside_sibling_keys() {
+    let source = r#"
+import { helper } from './helper';
+export type Plain = { p: number };
+export namespace NS {
+  export type Member = { m: true };
+  export interface Holder { x: Member }
+}
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let dep_edges = FxHashMap::from_iter([("./helper".to_string(), "/src/helper.ts".to_string())]);
+
+    let plain = prepare_local_type_decl(
+        "/ws/fixture.ts",
+        &state,
+        "Plain",
+        Some(&dep_edges),
+        &ImportCanonicalization::default(),
+    )
+    .expect("Plain should prepare");
+    let namespaced = prepare_local_type_decl(
+        "/ws/fixture.ts",
+        &state,
+        "NS.Holder",
+        Some(&dep_edges),
+        &ImportCanonicalization::default(),
+    )
+    .expect("NS.Holder should prepare");
+
+    for key in ["helper", "Plain", "NS.Member", "NS.Holder"] {
+        assert_eq!(
+            plain.name_resolution.get(key),
+            namespaced.name_resolution.get(key),
+            "file-level entry {key:?} must be identical across decls of one file"
+        );
+    }
+    // The sibling binding is the ONLY namespaced-decl addition.
+    assert!(namespaced.name_resolution.contains_key("Member"));
+    assert!(!plain.name_resolution.contains_key("Member"));
+}
+
+/// The per-file `name_resolution` base table is built ONCE per prepared-decl
+/// cache and SHARED (same `Arc`) by every non-namespaced decl the cache
+/// builds — type and value spaces each own one base. A namespaced decl
+/// carries its own private table (sibling bindings are declaration-scoped).
+/// Pre-split, every prepared decl rebuilt its table by walking every file
+/// symbol + import — distinct allocations per decl.
+#[test]
+fn prepared_decls_share_one_name_resolution_base_per_cache() {
+    let source = r#"
+import { helper } from './helper';
+export type A = { a: number };
+export interface B { b: string }
+export const c = { c: true };
+export const d = 4;
+export namespace NS {
+  export type Member = { m: true };
+  export interface Holder { x: Member }
+}
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let type_cache = build_prepared_type_decl_cache(
+        "/ws/fixture.ts",
+        Arc::clone(&state),
+        Arc::new(FxHashMap::default()),
+        Arc::new(ImportCanonicalization::default()),
+    );
+    let value_cache = build_prepared_value_decl_cache(
+        "/ws/fixture.ts",
+        Arc::clone(&state),
+        Arc::new(FxHashMap::default()),
+        Arc::new(ImportCanonicalization::default()),
+    );
+
+    let a = type_cache.get("A").expect("A prepares");
+    let b = type_cache.get("B").expect("B prepares");
+    assert!(
+        Arc::ptr_eq(&a.name_resolution, &b.name_resolution),
+        "non-namespaced type decls of one file must SHARE one base table, \
+             not rebuild it per declaration"
+    );
+
+    let c = value_cache.get("c").expect("c prepares");
+    let d = value_cache.get("d").expect("d prepares");
+    assert!(
+        Arc::ptr_eq(&c.name_resolution, &d.name_resolution),
+        "value decls of one file must SHARE one base table"
+    );
+
+    // The two spaces stay distinct tables (their import shadow rules differ).
+    assert!(
+        !Arc::ptr_eq(&a.name_resolution, &c.name_resolution),
+        "type-space and value-space bases are separate tables"
+    );
+
+    // A namespaced decl binds declaration-scoped sibling names, so it owns a
+    // PRIVATE table — never a mutated view of the shared base.
+    let holder = type_cache.get("NS.Holder").expect("NS.Holder prepares");
+    assert!(
+        !Arc::ptr_eq(&a.name_resolution, &holder.name_resolution),
+        "a namespaced decl owns a private table"
+    );
+    assert!(
+        holder.name_resolution.contains_key("Member"),
+        "the private table carries the sibling binding"
+    );
+    assert!(
+        !a.name_resolution.contains_key("Member"),
+        "the shared base must NOT leak a declaration-scoped sibling binding"
+    );
+}
+
+// ---------------------------------------------------------------------
 // Broken-lease no-warm rail at the CACHE-ADMITTING prepared-decl boundary.
 //
 // The locator-deref rail (`deref_locator_body` → `LocatorBodyDerefError::
