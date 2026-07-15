@@ -1,0 +1,76 @@
+{
+  "slug": "legacy/class_directive_call_raw.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "class_directive_call_raw",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "prop",
+    "init",
+    "template_effect",
+    "set_class",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "init",
+    "pop",
+    "prop",
+    "push",
+    "set_class",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "prop": 1,
+    "init": 1,
+    "template_effect": 1,
+    "set_class": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function class_directive_call_raw($$anchor, $$props) {$.push($$props, false); let obj = $.prop($$props, 'obj', 8); $.init(); var div = root(); let classes; $.template_effect(($0) => classes = $.set_class(div, 1, '', null, classes, $0), [() => ({foo: obj().m()})]); $.append($$anchor, div); $.pop();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

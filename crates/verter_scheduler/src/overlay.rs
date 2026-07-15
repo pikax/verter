@@ -99,6 +99,7 @@ mod tests {
         assert!(!map.is_empty());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn overlay_concurrent_access() {
         use std::sync::Arc as StdArc;

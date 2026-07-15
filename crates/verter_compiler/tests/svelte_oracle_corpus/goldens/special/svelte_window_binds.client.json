@@ -1,0 +1,79 @@
+{
+  "slug": "special/svelte_window_binds.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_window_binds",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "state",
+    "state",
+    "state",
+    "state",
+    "state",
+    "state",
+    "bind_window_size",
+    "set",
+    "bind_window_size",
+    "set",
+    "bind_window_scroll",
+    "get",
+    "set",
+    "bind_online",
+    "set",
+    "bind_focused",
+    "window",
+    "set",
+    "bind_property",
+    "window",
+    "set"
+  ],
+  "helperSet": [
+    "bind_focused",
+    "bind_online",
+    "bind_property",
+    "bind_window_scroll",
+    "bind_window_size",
+    "get",
+    "set",
+    "state",
+    "window"
+  ],
+  "helperCounts": {
+    "state": 6,
+    "bind_window_size": 2,
+    "set": 6,
+    "bind_window_scroll": 1,
+    "get": 1,
+    "bind_online": 1,
+    "bind_focused": 1,
+    "window": 2,
+    "bind_property": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_window_binds($$anchor) {let iw = $.state(0); let ih = $.state(0); let sx = $.state(0); let on = $.state(false); let f = $.state(false); let dpr = $.state(1); $.bind_window_size('innerWidth', ($$value) => $.set(iw, $$value, true)); $.bind_window_size('innerHeight', ($$value) => $.set(ih, $$value, true)); $.bind_window_scroll('x', () => $.get(sx), ($$value) => $.set(sx, $$value, true)); $.bind_online(($$value) => $.set(on, $$value, true)); $.bind_focused($.window, ($$value) => $.set(f, $$value, true)); $.bind_property('devicePixelRatio', 'resize', $.window, ($$value) => $.set(dpr, $$value, true));}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "slug": "type-lit-lit-attr-bool-dynel-ext-comb-u",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "type_lit_lit_attr_bool_dynel_ext_comb_u",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "element"
+  ],
+  "helperSet": [
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-1gle77u",
+    "code": "\n\t.wrap.svelte-<scoped> div:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

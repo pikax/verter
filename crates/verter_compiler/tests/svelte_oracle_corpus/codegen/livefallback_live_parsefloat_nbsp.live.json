@@ -1,0 +1,9 @@
+{
+  "slug": "livefallback_live_parsefloat_nbsp",
+  "bucket": "live-fallback",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "reason": "parseint-radix-or-whitespace",
+  "officialFolds": true,
+  "officialModuleHasInterpolation": false
+}

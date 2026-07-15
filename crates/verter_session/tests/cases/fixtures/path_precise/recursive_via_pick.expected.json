@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "archetype": "recursive_via_pick",
+  "stage_0_termination_sentinels": [
+    { "shape": "Unknown", "discriminator": "raw contains \"semanticMiss\"" },
+    { "shape": "RecursiveRef", "discriminator": "name == \"SelfPick\"" },
+    { "shape": "Ref(Pick<SelfPick, \"next\">)", "discriminator": "preserved Pick with SelfPick as first type-arg" },
+    { "shape": "Ref(SelfPick)", "discriminator": "bare zero-arg SelfPick" }
+  ],
+  "stage_6d_target_termination": {
+    "shape": "CycleRef",
+    "visit_index": 0,
+    "discriminator": "canonical visit order: lexicographic by (name, symbol_space); root SelfPick gets visit_index=0",
+    "fingerprint_invariant_under_source_reorder": true
+  },
+  "fact_dep_signature_observed_by_consumer": [
+    "Export(\"SelfPick\", Type)",
+    "MemberShape(SelfPick, Type)",
+    "MemberPresence(SelfPick, \"next\", Type)",
+    "MemberPresence(SelfPick, \"label\", Type)",
+    "Member(SelfPick, \"next\", Type)",
+    "Member(SelfPick, \"label\", Type)"
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "edit SelfPick.label type",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: Member(SelfPick, \"label\") changes"
+    },
+    {
+      "edit": "rename Self.next to Self.tail",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: MemberShape changes; the recursive shape moves"
+    },
+    {
+      "edit": "reorder SelfPick fields (label before next)",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R27: canonical visit order is name-lexicographic; reordering does not change CycleRef visit index"
+    }
+  ]
+}

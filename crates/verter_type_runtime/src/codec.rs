@@ -137,6 +137,11 @@ impl LineIndex {
         self.source.len() as u32
     }
 
+    /// The position encoding this index was built with.
+    pub fn encoding(&self) -> PositionEncoding {
+        self.encoding
+    }
+
     /// Return the byte offset of the end of a line (before the newline, or EOF).
     pub fn line_end(&self, line: usize) -> Option<u32> {
         let _start = self.line_start(line)?;

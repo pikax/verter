@@ -1,0 +1,62 @@
+{
+  "slug": "imports/multi_import_source_order.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./one.js",
+      "kind": "named",
+      "names": [
+        "one"
+      ]
+    },
+    {
+      "source": "./three.js",
+      "kind": "named",
+      "names": [
+        "three"
+      ]
+    },
+    {
+      "source": "./two.js",
+      "kind": "named",
+      "names": [
+        "two"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "multi_import_source_order",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "escape",
+    "escape",
+    "escape",
+    "escape"
+  ],
+  "helperSet": [
+    "escape"
+  ],
+  "helperCounts": {
+    "escape": 4
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

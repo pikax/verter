@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "archetype": "generic_arg_of_generic",
+  "consumer_published_surface": {
+    "kind": "object",
+    "path": "Container.payload.value.value",
+    "type": "number"
+  },
+  "fact_dep_signature_observed_by_consumer": [
+    "Export(\"Materialised\", Type)",
+    "Export(\"Container\", Type)",
+    "Export(\"Wrapper\", Type)",
+    "Export(\"Inner\", Type)",
+    "MemberPresence(Container, \"payload\", Type)",
+    "MemberPresence(Wrapper, \"value\", Type)",
+    "MemberPresence(Inner, \"x\", Type)",
+    "Member(Container, \"payload\", Type)",
+    "Member(Wrapper, \"value\", Type)",
+    "Member(Inner, \"x\", Type)"
+  ],
+  "normalized_type_args_shape": {
+    "Container": {
+      "U": { "kind": "Ref", "name": "Wrapper", "args": [{ "kind": "Ref", "name": "Inner", "args": [] }] }
+    },
+    "Wrapper": {
+      "T": { "kind": "Ref", "name": "Inner", "args": [] }
+    }
+  },
+  "invalidation_matrix": [
+    {
+      "edit": "edit Inner.x type",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R27: Member(Inner, \"x\") observed; type-arg fingerprint recomputes"
+    },
+    {
+      "edit": "edit Wrapper.metadata body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R14: Wrapper.metadata never reached on the Container.payload.value navigation path"
+    },
+    {
+      "edit": "add Inner.y",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R28: new MemberPresence(Inner, \"y\"); consumer observed only Inner.x"
+    }
+  ]
+}

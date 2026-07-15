@@ -63,7 +63,9 @@ impl LintRule for NoUnusedRefs {
         let use_template_ref_names: std::collections::HashSet<&str> = script
             .vue_api_calls
             .iter()
-            .filter(|c| c.api == verter_analysis::types::VueApiClassification::UseTemplateRef)
+            .filter(|c| {
+                c.api == verter_semantic::analysis::types::VueApiClassification::UseTemplateRef
+            })
             .filter_map(|c| c.arg_value.as_deref())
             .collect();
 
@@ -99,8 +101,8 @@ mod tests {
     use crate::config::LintConfig;
     use crate::rules::FileContext;
     use crate::visitor::LintVisitor;
-    use verter_analysis::template::*;
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::template::*;
+    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule_with_file(

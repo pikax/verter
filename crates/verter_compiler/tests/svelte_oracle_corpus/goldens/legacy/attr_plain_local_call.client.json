@@ -1,0 +1,79 @@
+{
+  "slug": "legacy/attr_plain_local_call.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_plain_local_call",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "prop",
+    "first_child",
+    "sibling",
+    "template_effect",
+    "set_attribute",
+    "untrack",
+    "event",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "event",
+    "first_child",
+    "from_html",
+    "prop",
+    "set_attribute",
+    "sibling",
+    "template_effect",
+    "untrack"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "prop": 1,
+    "first_child": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "untrack": 1,
+    "event": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button>x</button> <div></div>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button>x</button> <div></div>`, 1); export default function attr_plain_local_call($$anchor, $$props) {let p = $.prop($$props, 'p', 8); function m() {return 1;} var fragment = root(); var button = $.first_child(fragment); var div = $.sibling(button, 2); $.template_effect(($0) => $.set_attribute(div, 'title', $0), [() => ($.untrack(m))]); $.event('click', button, m); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

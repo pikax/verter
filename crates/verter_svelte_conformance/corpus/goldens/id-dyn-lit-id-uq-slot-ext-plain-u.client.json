@@ -1,0 +1,69 @@
+{
+  "slug": "id-dyn-lit-id-uq-slot-ext-plain-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dyn_lit_id_uq_slot_ext_plain_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "slot",
+    "template_effect",
+    "set_attribute",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "first_child",
+    "from_html",
+    "set_attribute",
+    "slot",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 1,
+    "first_child": 1,
+    "slot": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"svelte-<scoped>\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"svelte-<scoped>\">x</div>`); export default function id_dyn_lit_id_uq_slot_ext_plain_u($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); $.slot(node, $$props, 'default', {}, ($$anchor) => {var div = root(); $.template_effect(() => $.set_attribute(div, 'id', $$props.value)); $.append($$anchor, div);}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-1ipcmry",
+    "code": "\n\t#b.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

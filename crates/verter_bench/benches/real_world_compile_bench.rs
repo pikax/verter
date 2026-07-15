@@ -3,7 +3,7 @@ use oxc_allocator::Allocator;
 use std::hint::black_box;
 use std::path::PathBuf;
 
-use verter_core::compile::{compile, CodegenOptions, VerterCompileOptions};
+use verter_compiler::compile::{compile, CodegenOptions, VerterCompileOptions};
 
 /// A loaded Vue file ready for benchmarking.
 struct VueFile {

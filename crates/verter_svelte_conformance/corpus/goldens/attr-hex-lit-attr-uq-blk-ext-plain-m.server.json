@@ -1,0 +1,32 @@
+{
+  "slug": "attr-hex-lit-attr-uq-blk-ext-plain-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_hex_lit_attr_uq_blk_ext_plain_m",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-1nqi0vl",
+    "code": "\n\t[data-x=\"b\"].svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

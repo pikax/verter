@@ -1,0 +1,4 @@
+{
+  "rule": "ElementInvalidClosingTag",
+  "official_code": "element_invalid_closing_tag"
+}

@@ -1,0 +1,530 @@
+//! Architecture guards for the SchedulerDag readiness authority.
+//!
+//! These guards assert the final-state invariants:
+//!
+//! - The legacy `JobIndex` symbol does not exist in the scheduler crate.
+//! - The legacy `BlockerRegistry` symbol does not exist.
+//! - The legacy `pending_requests` field does not exist on `FileNode`.
+//! - The legacy `BlockerResolved` Submission variant does not exist.
+//! - `SchedulerDag` is declared in `dag.rs` and is the sole readiness
+//!   authority — i.e. it owns admission (`submit`), readiness
+//!   (`next_ready`), dep gating (`has_pending_deps`/`complete`),
+//!   waiter bookkeeping (`register_request`), priority service
+//!   (`upgrade_priority`), and capacity reservation (`reserve_capacity`).
+//!
+//! The guards run as cheap static source scans against the
+//! `crates/verter_scheduler/src/` tree.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn scheduler_src_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
+}
+
+fn read_scheduler_source() -> String {
+    let mut buf = String::new();
+    walk(&scheduler_src_root(), &mut buf);
+    buf
+}
+
+fn walk(dir: &Path, buf: &mut String) {
+    if !dir.is_dir() {
+        return;
+    }
+    for entry in fs::read_dir(dir).expect("read dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            walk(&path, buf);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            buf.push_str(&fs::read_to_string(&path).expect("read file"));
+            buf.push('\n');
+        }
+    }
+}
+
+/// H23 — `JobIndex` is fully absent from the scheduler crate source.
+///
+/// Discriminator: any of `struct JobIndex`, `impl JobIndex`, or
+/// `Mutex<JobIndex>` re-introduced as a field or symbol makes this
+/// guard fire. Documentation references in test names / comments do
+/// not count — we only flag declarations or storage.
+#[test]
+fn h23_job_index_symbol_does_not_exist_in_scheduler_src() {
+    let src = read_scheduler_source();
+    for needle in ["struct JobIndex", "impl JobIndex", "Mutex<JobIndex>"] {
+        assert!(
+            !src.contains(needle),
+            "H23: legacy `JobIndex` re-appeared in scheduler src — found `{needle}`",
+        );
+    }
+}
+
+/// H23 — `BlockerRegistry`, `BlockerRef`, and `UnblockedJob` are
+/// fully retired. The DAG's typed dep model replaces them.
+#[test]
+fn h23_blocker_registry_symbols_do_not_exist_in_scheduler_src() {
+    let src = read_scheduler_source();
+    for needle in [
+        "struct BlockerRegistry",
+        "impl BlockerRegistry",
+        "struct BlockerRef",
+        "struct UnblockedJob",
+    ] {
+        assert!(
+            !src.contains(needle),
+            "H23: legacy blocker symbol re-appeared in scheduler src — found `{needle}`",
+        );
+    }
+}
+
+/// H23 — `FileNode.pending_requests` does not exist as a field on
+/// the node. Per-file waiter bookkeeping lives in the DAG only.
+#[test]
+fn h23_file_node_pending_requests_field_does_not_exist() {
+    let src = read_scheduler_source();
+    // The retired field declaration was `pub(crate) pending_requests:`.
+    assert!(
+        !src.contains("pending_requests: PendingRequests"),
+        "H23: `FileNode.pending_requests` field re-appeared in scheduler src",
+    );
+    assert!(
+        !src.contains("pending_requests: crate::node::PendingRequests"),
+        "H23: `FileNode.pending_requests` field re-appeared in scheduler src",
+    );
+    // No `PendingRequests` struct declaration anywhere either.
+    assert!(
+        !src.contains("struct PendingRequests"),
+        "H23: legacy `PendingRequests` struct re-appeared in scheduler src",
+    );
+}
+
+/// H23 — `Submission::BlockerResolved` is retired; the DAG resolves
+/// dep edges from `StageComplete` directly. No second submission
+/// variant should pop blockers.
+#[test]
+fn h23_submission_blocker_resolved_variant_does_not_exist() {
+    let src = read_scheduler_source();
+    assert!(
+        !src.contains("BlockerResolved {"),
+        "H23: legacy `Submission::BlockerResolved` variant re-appeared",
+    );
+    assert!(
+        !src.contains("Submission::BlockerResolved"),
+        "H23: legacy `Submission::BlockerResolved` match arm re-appeared",
+    );
+}
+
+/// H23 — `SchedulerDag` is declared in `dag.rs` and is the sole
+/// readiness authority. The guard checks that the dag module exists
+/// and the type declaration is present.
+#[test]
+fn h23_scheduler_dag_is_declared_in_dag_module() {
+    let dag_path = scheduler_src_root().join("dag.rs");
+    assert!(
+        dag_path.exists(),
+        "H23: scheduler src must contain a `dag.rs` module"
+    );
+    let src = fs::read_to_string(&dag_path).expect("read dag.rs");
+    assert!(
+        src.contains("pub struct SchedulerDag"),
+        "H23: `SchedulerDag` type must be declared in dag.rs",
+    );
+}
+
+/// H23 — the DAG owns all five readiness-authority concerns. The
+/// guard inspects `dag.rs` for the public surface that proves it.
+#[test]
+fn h23_scheduler_dag_owns_every_readiness_concern() {
+    let src = fs::read_to_string(scheduler_src_root().join("dag.rs")).expect("read dag.rs");
+    for needle in [
+        "pub fn submit(",                // admission
+        "pub fn next_ready(",            // ordering / readiness
+        "pub fn complete(",              // dep resolution
+        "pub fn has_pending_deps(",      // gate inspection
+        "pub fn register_request(",      // waiter bookkeeping
+        "pub fn reserve_capacity(",      // capacity accounting
+        "pub fn upgrade_priority(",      // priority service
+        "pub fn cancel(",                // supersession / removal
+        "pub fn signal_stage_complete(", // completion fan-out
+    ] {
+        assert!(
+            src.contains(needle),
+            "H23: SchedulerDag must expose `{needle}` to remain the sole readiness authority",
+        );
+    }
+}
+
+/// H23 — `WorkNodeIdentity` is a typed sum with EXACTLY three
+/// variants. A fourth variant would expand the discriminator surface
+/// and is an architectural change, not a routine extension.
+///
+/// We check via the textual signature: each variant header appears
+/// exactly once in dag.rs.
+#[test]
+fn h23_work_node_identity_is_a_three_variant_typed_sum() {
+    let src = fs::read_to_string(scheduler_src_root().join("dag.rs")).expect("read dag.rs");
+
+    // The enum declaration line must be present.
+    assert!(
+        src.contains("pub enum WorkNodeIdentity {"),
+        "H23: WorkNodeIdentity enum declaration missing",
+    );
+
+    // Count variant headers inside the enum body. We use a tight
+    // pattern — `<variant> {` — that matches the struct-variant
+    // declarations and the constructor sites are distinguished by
+    // their full path `WorkNodeIdentity::<variant>`.
+    let enum_body_start = src
+        .find("pub enum WorkNodeIdentity {")
+        .expect("enum header")
+        + "pub enum WorkNodeIdentity {".len();
+    // Find the matching closing `}` for the enum body — bias by the
+    // shortest substring up to the next `}` that's outside any nested
+    // braces. Variants are struct-variants with `{}` so we walk.
+    let mut depth = 0;
+    let mut enum_end = None;
+    for (i, ch) in src[enum_body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                if depth == 0 {
+                    enum_end = Some(enum_body_start + i);
+                    break;
+                } else {
+                    depth -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    let enum_end = enum_end.expect("matched enum closing brace");
+    let enum_body = &src[enum_body_start..enum_end];
+
+    let file_stage = enum_body.matches("FileStage {").count();
+    let artifact = enum_body.matches("Artifact {").count();
+    let cache_node = enum_body.matches("CacheNode {").count();
+    assert_eq!(
+        file_stage, 1,
+        "H23: FileStage must appear exactly once in WorkNodeIdentity"
+    );
+    assert_eq!(
+        artifact, 1,
+        "H23: Artifact must appear exactly once in WorkNodeIdentity"
+    );
+    assert_eq!(
+        cache_node, 1,
+        "H23: CacheNode must appear exactly once in WorkNodeIdentity"
+    );
+    // No fourth variant.
+    let total_variant_headers = file_stage + artifact + cache_node;
+    assert_eq!(
+        total_variant_headers, 3,
+        "H23: WorkNodeIdentity must have exactly three variants — a fourth is an architectural change",
+    );
+}
+
+/// H23 — `DagCapacityReservation::release` consumes the reservation
+/// by value. A second release is statically unrepresentable; we
+/// verify this by inspecting the method signature in the dag module
+/// (either `dag.rs` directly or its `capacity` submodule).
+#[test]
+fn h23_dag_capacity_reservation_release_consumes_by_value() {
+    let src = read_scheduler_source();
+    // Single-release rail: `release(mut self)` consumes the
+    // reservation; the second-release fingerprint
+    // `release(&self)` / `release(&mut self)` would let permits leak.
+    assert!(
+        src.contains("pub fn release(mut self)"),
+        "H23: DagCapacityReservation::release must consume by value (`release(self)`) — \
+         a `&self` or `&mut self` signature would allow double-release",
+    );
+    assert!(
+        !src.contains("pub fn release(&self)"),
+        "H23: DagCapacityReservation::release must not take `&self` — double-release would be possible",
+    );
+    assert!(
+        !src.contains("pub fn release(&mut self)"),
+        "H23: DagCapacityReservation::release must not take `&mut self` — double-release would be possible",
+    );
+}
+
+/// `submit_batch_atomic` is the SOLE batch submission API.
+///
+/// The non-atomic `Scheduler::submit_batch` (which fanned N separate
+/// `NewRequest` items, each its own wake + `submit_count` bump) is
+/// gone. Every batch submission now lands ONE
+/// `Submission::NewRequestBatch` admitted under a single `dag.lock()`
+/// via `submit_batch_atomic`. This guard pins both halves: the
+/// non-atomic signature is gone, and the atomic signature remains.
+///
+/// Discriminator: the needle `pub fn submit_batch(` (open paren
+/// immediately after the name) matches ONLY the deleted non-atomic
+/// method — `pub fn submit_batch_atomic(` does not match because the
+/// byte after `submit_batch` is `_`, not `(`. Backtick doc mentions
+/// (`` `submit_batch` ``) likewise do not match the `pub fn ...(`
+/// shape. If a future change re-introduces the non-atomic fan-out, the
+/// first assertion fires; if it deletes the atomic API, the second
+/// fires.
+#[test]
+fn scheduler_has_only_atomic_batch_api() {
+    let src = read_scheduler_source();
+    assert!(
+        !src.contains("pub fn submit_batch("),
+        "the non-atomic `Scheduler::submit_batch(...)` must stay deleted — \
+         `submit_batch_atomic` is the sole batch submission API. Re-introducing \
+         the N-separate-`NewRequest` fan-out resurrects the dual path \
+         (N wakes + N `submit_count` bumps instead of one atomic batch).",
+    );
+    assert!(
+        src.contains("pub fn submit_batch_atomic("),
+        "`Scheduler::submit_batch_atomic(...)` is the sole batch submission \
+         API and must exist. If it was renamed or removed, every host batch \
+         caller (compile_many Stage B, the single-file `upsert`) lost its \
+         atomic-admission primitive.",
+    );
+}
+
+/// Readiness selection is lane/credit based, NOT a linear scan.
+///
+/// `next_ready_for_pump` is the SOLE selection engine. The
+/// weighted-credit lane selector reads only the bounded
+/// `ready_lanes` matrix; it must NEVER revert to scanning the whole
+/// `self.nodes` map (an O(N)-per-call scan + full sort). This guard
+/// isolates the body of `next_ready_for_pump` and asserts none of the
+/// scan fingerprints appear inside it.
+///
+/// Discriminator: re-introducing `self.nodes.iter()` /
+/// `self.nodes.values()` / a ranked `.collect()` / `.sort_by(` inside
+/// the selector fires this guard. A scanning impl contains all four;
+/// the lane impl contains none.
+#[test]
+fn b7b_next_ready_for_pump_has_no_linear_scan() {
+    let src = fs::read_to_string(scheduler_src_root().join("dag.rs")).expect("read dag.rs");
+    let marker = "pub fn next_ready_for_pump(";
+    let start = src
+        .find(marker)
+        .expect("`next_ready_for_pump` must exist as the sole readiness selector");
+    // Isolate the function body: from the marker to the matching
+    // closing brace of the fn block. Walk brace depth starting at the
+    // first `{` after the signature.
+    let body_open = src[start..]
+        .find('{')
+        .map(|i| start + i)
+        .expect("fn body open brace");
+    let mut depth = 0usize;
+    let mut body_end = None;
+    for (i, ch) in src[body_open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    body_end = Some(body_open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body_end = body_end.expect("matched fn closing brace");
+    let body = &src[body_open..=body_end];
+
+    for needle in [
+        "self.nodes.iter()",
+        "self.nodes.values()",
+        ".collect()",
+        ".sort_by(",
+    ] {
+        assert!(
+            !body.contains(needle),
+            "`next_ready_for_pump` must select via the bounded `ready_lanes` matrix, \
+             not a linear scan over the node map — found scan fingerprint `{needle}`. \
+             Readiness selection must stay O(lanes), never O(N).",
+        );
+    }
+    // Positive anchor: the selector must read the lane matrix.
+    assert!(
+        body.contains("ready_lanes"),
+        "`next_ready_for_pump` must read the `ready_lanes` matrix",
+    );
+}
+
+/// Time-based priority aging does not exist. The weighted-credit lane
+/// selector is the anti-starvation mechanism; no aging config, no
+/// aging field, and no `effective_priority` promotion fn may exist.
+///
+/// Discriminator: re-introducing `DagAgingConfig`,
+/// `SchedulerConfig.aging`, or `fn effective_priority` fires this
+/// guard.
+#[test]
+fn b7b_priority_aging_is_retired() {
+    let src = read_scheduler_source();
+    for needle in [
+        "DagAgingConfig",
+        "fn effective_priority",
+        // The `SchedulerConfig.aging` field declaration.
+        "pub aging:",
+    ] {
+        assert!(
+            !src.contains(needle),
+            "time-based aging does not exist — found `{needle}`. Anti-starvation is \
+             smooth weighted selection-count credit in the lane selector, not aging.",
+        );
+    }
+}
+
+/// The typed CPU/IO `DagCapacityBudget` ledger is the SOLE
+/// admission authority. No second admission-budget type may appear
+/// beside it (a parallel budget such as `DagAdmissionBudget` is
+/// forbidden), and no second ready-queue authority such as an
+/// `ArrayQueue` ready set.
+///
+/// Discriminator: introducing a `struct DagAdmissionBudget` (a second
+/// budget) or an `ArrayQueue` ready-queue fires this guard. The lane
+/// index is a `BTreeSet`-per-cell matrix, not a parallel queue type.
+#[test]
+fn b7b_no_second_admission_budget_or_ready_queue() {
+    let src = read_scheduler_source();
+    for needle in [
+        "struct DagAdmissionBudget",
+        "DagAdmissionBudget",
+        "ArrayQueue",
+    ] {
+        assert!(
+            !src.contains(needle),
+            "the typed CPU/IO `DagCapacityBudget` ledger is the sole admission \
+             authority and `ready_lanes` is the sole ready set — found a second \
+             budget/queue symbol `{needle}`.",
+        );
+    }
+    // The single ledger type must still exist.
+    assert!(
+        src.contains("pub struct DagCapacityBudget"),
+        "`DagCapacityBudget` (the sole admission ledger) must exist",
+    );
+}
+
+/// Isolate the body of the first `fn <name>(` (signature → matching closing
+/// brace of the fn block). Returns the body slice including the outer braces.
+fn fn_body<'a>(src: &'a str, signature_marker: &str) -> &'a str {
+    let start = src.find(signature_marker).unwrap_or_else(|| {
+        panic!("expected `{signature_marker}` to exist in scheduler src");
+    });
+    let body_open = src[start..]
+        .find('{')
+        .map(|i| start + i)
+        .expect("fn body open brace");
+    let mut depth = 0usize;
+    let mut body_end = None;
+    for (i, ch) in src[body_open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    body_end = Some(body_open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body_end = body_end.expect("matched fn closing brace");
+    &src[body_open..=body_end]
+}
+
+/// There is EXACTLY ONE routing point from a dequeued `ReadyJob` to
+/// the `StageExecutor`, and the `CacheNode` case actually ROUTES (it calls
+/// `StageExecutor::execute_cache_node`) rather than being skipped or
+/// `unreachable!()`'d.
+///
+/// This guard pins the dispatch surface:
+///
+/// 1. The lossy `WorkNodeIdentity → TaskKind` adapter `task_kind_for_ready_job`
+///    (whose CacheNode arm was an `unreachable!()`) stays deleted — no
+///    `fn task_kind_for_ready_job` may reappear.
+/// 2. The single dispatch entry `fn dispatch_ready_job_to_executor` exists and
+///    is declared exactly once.
+/// 3. Inside that function, the `CacheNode` dispatch arm calls
+///    `execute_cache_node` and contains NO `unreachable!()` — the routing is
+///    real, not a placeholder.
+///
+/// Discriminators:
+/// - Re-introducing `fn task_kind_for_ready_job` (a second adapter) fires (1).
+/// - Renaming / deleting `dispatch_ready_job_to_executor`, or adding a second
+///   such routing entry, fires (2).
+/// - Replacing the `execute_cache_node` call in the `CacheNode` arm with an
+///   `unreachable!()` / skip fires (3) — the same regression the
+///   `cache_node_dispatch_routes_to_execute_cache_node` unit test catches
+///   dynamically, pinned here statically.
+#[test]
+fn u1_single_dispatch_path_routes_cache_node_to_executor() {
+    let src = read_scheduler_source();
+
+    // (1) The lossy adapter stays deleted. `fn task_kind_for_ready_job` is the
+    //     function-definition fingerprint; backtick doc mentions of the name
+    //     in comments do not match (they lack `fn ` immediately before).
+    assert!(
+        !src.contains("fn task_kind_for_ready_job"),
+        "the lossy `task_kind_for_ready_job` adapter (its CacheNode arm was \
+         an `unreachable!()`) must stay deleted — `dispatch_ready_job_to_executor` \
+         is the sole ReadyJob→executor routing point. Re-introducing the adapter \
+         resurrects a second dispatch path.",
+    );
+
+    // (2) The single dispatch entry exists and is declared exactly once.
+    let entry_decls = src.matches("fn dispatch_ready_job_to_executor(").count();
+    assert_eq!(
+        entry_decls, 1,
+        "`dispatch_ready_job_to_executor` must be the ONE ReadyJob→executor \
+         dispatch entry — found {entry_decls} declarations. A second routing entry \
+         is a forbidden parallel dispatch path.",
+    );
+
+    // (3) Inside the single dispatch entry, the CacheNode arm routes to
+    //     `execute_cache_node` and is not an `unreachable!()` / skip.
+    let body = fn_body(&src, "fn dispatch_ready_job_to_executor(");
+    assert!(
+        body.contains("execute_cache_node"),
+        "`dispatch_ready_job_to_executor` must route CacheNode work to \
+         `StageExecutor::execute_cache_node` — the call is missing, so cache-node \
+         work is not dispatched to the executor.",
+    );
+    // Isolate the `WorkKind::CacheNode` match arm: from the arm header to the
+    // first file-stage arm header (`WorkKind::Load`). The CacheNode arm must
+    // contain the `execute_cache_node` call and must NOT contain `unreachable!`.
+    let cache_arm_start = body
+        .find("WorkKind::CacheNode,")
+        .expect("the dispatch entry must have a `WorkKind::CacheNode` match arm");
+    let after = &body[cache_arm_start..];
+    let cache_arm_end = after
+        .find("(WorkKind::Load,")
+        .expect("the dispatch entry must have a file-stage `WorkKind::Load` arm after CacheNode");
+    let cache_arm = &after[..cache_arm_end];
+    assert!(
+        cache_arm.contains("execute_cache_node"),
+        "the CacheNode dispatch arm must call `execute_cache_node` (real routing)",
+    );
+    assert!(
+        !cache_arm.contains("unreachable!"),
+        "the CacheNode dispatch arm must NOT be `unreachable!()` — it must ROUTE \
+         the cache node to `execute_cache_node`. An `unreachable!()` here is a \
+         placeholder, not real routing.",
+    );
+
+    // The file-stage executor chokepoint is invoked only through the single
+    // dispatch entry's helper — `execute_stage_on_worker` is called exactly
+    // once in the whole scheduler src (inside `run_file_stage`), so file-stage
+    // dispatch cannot fork a second path either.
+    let on_worker_calls = src.matches("execute_stage_on_worker(").count();
+    // One definition + one call site = two textual matches.
+    assert_eq!(
+        on_worker_calls, 2,
+        "`execute_stage_on_worker` must be the single file-stage executor \
+         chokepoint reached from ONE call site (its definition + one invocation = \
+         two matches) — found {on_worker_calls}. A second call site forks the \
+         dispatch path.",
+    );
+}

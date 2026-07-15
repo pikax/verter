@@ -1,0 +1,78 @@
+{
+  "slug": "spread_fold__input_default_value_dyn",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "spread_fold__input_default_value_dyn",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "first_child",
+    "attribute_effect",
+    "get",
+    "sibling",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "sibling",
+    "state",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "first_child": 1,
+    "attribute_effect": 1,
+    "get": 1,
+    "sibling": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/><button>b</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/><button>b</button>`, 1); export default function spread_fold__input_default_value_dyn($$anchor) {let x = $.state(0); var fragment = root(); var input = $.first_child(fragment); $.attribute_effect(input, () => ({...props, defaultValue: $.get(x)})); var button = $.sibling(input); $.delegated('click', button, () => $.update(x)); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

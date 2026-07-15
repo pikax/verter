@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "archetype": "cosmetic_edit_comment",
+  "edit_kind": "comment_edit",
+  "discrimination": {
+    "content_hash_changes": true,
+    "parse_stable_hash_invariant": true,
+    "MemberSemanticFactStore_recomputes": false,
+    "MemberDisplayFactStore_recomputes_but_value_equals_original": true,
+    "consumer_invalidates": false
+  },
+  "fact_dep_signature_observed_by_consumer": [
+    "Export(\"Props\", Type)",
+    "Export(\"Foo\", Type)",
+    "MemberShape(Foo, Type)"
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "rewrite top-of-file comment",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R13 + R16: parse_stable_hash invariant under whitespace/comment edits"
+    },
+    {
+      "edit": "delete inline comment after Foo.a",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R13 + R16: comments are not part of the decl skeleton"
+    }
+  ]
+}

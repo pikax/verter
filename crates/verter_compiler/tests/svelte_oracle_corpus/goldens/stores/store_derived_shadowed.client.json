@@ -1,0 +1,93 @@
+{
+  "slug": "stores/store_derived_shadowed.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable",
+        "derived"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "store_derived_shadowed",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "store_get",
+    "setup_stores",
+    "init",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "init",
+    "pop",
+    "push",
+    "reset",
+    "set_text",
+    "setup_stores",
+    "store_get",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "store_get": 1,
+    "setup_stores": 1,
+    "init": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import {writable, derived} from 'svelte/store'; var root = $.from_html(`<p> </p>`); export default function store_derived_shadowed($$anchor, $$props) {$.push($$props, false); const $doubled = () => $.store_get(doubled, '$doubled', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); const a = writable(1); const doubled = derived(a, ($a) => $a * 2); $.init(); var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $doubled())); $.append($$anchor, p); $.pop(); $$cleanup();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

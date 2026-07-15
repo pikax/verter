@@ -1,11 +1,11 @@
 //! Bridge: convert `verter_diagnostics` types into LSP protocol types.
 
 use tower_lsp_server::ls_types::*;
-use verter_analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
 use verter_diagnostics::{
     DiagnosticSet, DiagnosticTag as LintDiagnosticTag, LintDiagnostic, Severity,
 };
-use verter_host::FileAnalysisSnapshot;
+use verter_semantic::analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 

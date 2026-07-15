@@ -1,0 +1,37 @@
+{
+  "slug": "generated/094_pair_root_each_block__attr_static.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_94_pair_root_each_block__attr_static",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "ensure_array_like"
+  ],
+  "helperSet": [
+    "ensure_array_like"
+  ],
+  "helperCounts": {
+    "ensure_array_like": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

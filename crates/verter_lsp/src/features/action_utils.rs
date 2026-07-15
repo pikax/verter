@@ -5,7 +5,7 @@
 // component_actions, event_type_hints, etc.
 
 use tower_lsp_server::ls_types::*;
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::sfc_scanner::SfcBlock;
 
@@ -445,14 +445,14 @@ mod tests {
         let source = "<script setup>\nimport { ref } from 'vue'\nimport { computed } from 'vue'\nconst x = 1\n</script>";
         let analysis = FileAnalysisSnapshot {
             imports: vec![
-                verter_analysis::AnalyzedImport {
+                verter_semantic::analysis::AnalyzedImport {
                     source: "vue".into(),
                     is_type_only: false,
                     bindings: vec![],
                     span: verter_span::Span::new(15, 40),
                     resolved_canonical_id: None,
                 },
-                verter_analysis::AnalyzedImport {
+                verter_semantic::analysis::AnalyzedImport {
                     source: "vue".into(),
                     is_type_only: false,
                     bindings: vec![],

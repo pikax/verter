@@ -1,0 +1,44 @@
+{
+  "slug": "reactive/attr_class_style.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_class_style",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "attr_class",
+    "attr_style"
+  ],
+  "helperSet": [
+    "attr",
+    "attr_class",
+    "attr_style"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "attr_class": 1,
+    "attr_style": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

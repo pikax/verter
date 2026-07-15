@@ -1,0 +1,65 @@
+{
+  "slug": "member__class_directive__props",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "member__class_directive__props",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "template_effect",
+    "set_class",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "pop",
+    "push",
+    "set_class",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "template_effect": 1,
+    "set_class": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function member__class_directive__props($$anchor, $$props) {$.push($$props, true); var div = root(); let classes; $.template_effect(() => classes = $.set_class(div, 1, '', null, classes, {on: $$props.p.x})); $.append($$anchor, div); $.pop();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

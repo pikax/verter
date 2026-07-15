@@ -1,0 +1,9 @@
+{
+  "slug": "livefallback_live_pow",
+  "bucket": "live-fallback",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "reason": "transcendental-libm",
+  "officialFolds": true,
+  "officialModuleHasInterpolation": false
+}

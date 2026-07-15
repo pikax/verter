@@ -1,0 +1,154 @@
+//! Overlay-priority resolver-tier helpers used by
+//! [`SessionResolverContext`](crate::resolver_core::SessionResolverContext).
+//!
+//! The wrapper trait impl delegates `ensure_loaded` and
+//! `ensure_indexed_ready_serve` here so the overlay-source path is shared
+//! between every session-bearing query entry point. Base-only calls
+//! continue through the host's own `ensure_*` paths without entering
+//! this module.
+//!
+//! ## Authority chain
+//!
+//! - `view.is_tombstoned(canonical)` → short-circuit `None` / `false`.
+//! - `view.overlay_content_hash_for(canonical)` is `Some` (an explicit
+//!   overlay covers the canonical) → publish an overlay-content
+//!   [`IndexedReady`](crate::project_type_store::IndexedReady) candidate
+//!   under an
+//!   [`overlay_scoped`](crate::file_artifact_store::FileArtifactKey::overlay_scoped)
+//!   key (overlay content hash + overlay-set discriminator), then
+//!   return it. Base-host reads stay on the
+//!   [`base`](crate::file_artifact_store::FileArtifactKey::base)
+//!   key and never reach the candidate — even when the overlay bytes
+//!   are identical to the base file.
+//! - View has no overlay for the canonical → fall through to the
+//!   host's own `ensure_indexed_ready_serve` / `ensure_loaded` path.
+
+use crate::resolver_core::resolver_context::ResolverContext;
+use crate::session_view::SessionView;
+use crate::VerterHost;
+
+/// Overlay-priority `ensure_loaded` helper.
+///
+/// When `view` tombstones the canonical, returns `false` without
+/// consulting the host. When `view` carries an overlay for the
+/// canonical, the overlay source is sufficient — the host's scheduler
+/// does not need to load anything (returns `true`). Otherwise falls
+/// through to the host via [`VerterHost::ensure_loaded`].
+pub(crate) fn ensure_loaded_with_view(
+    host: &VerterHost,
+    view: &dyn SessionView,
+    canonical_id: &str,
+) -> bool {
+    if view.is_tombstoned(canonical_id) {
+        return false;
+    }
+    // Distinguish an explicit overlay-Upsert from a base-passthrough
+    // source: the base-only views (`HostView`, `HostViewRef`) delegate
+    // `source` to the base host, so `source(canonical).is_some()`
+    // fires for every loaded canonical and would otherwise bypass the
+    // host's `ensure_loaded` accounting (and the underlying
+    // scheduler-load path).
+    //
+    // Overlay detection uses the **strict** `overlay_content_hash_for`,
+    // NOT a `content_hash_for`-vs-base hash comparison. `content_hash_for`
+    // falls through to the base host's `FileArtifactStore`-derived
+    // content hash for an unmasked canonical — the same content-agnostic
+    // scan as `get_any`, which can surface a STALE lingering artifact's
+    // hash once the own-canonical drain is retired; a stale hash that
+    // differs from the scheduler's current `base_hash` would misreport
+    // an overlay for a canonical with NONE. `overlay_content_hash_for`
+    // reports `Some` ONLY for an actual overlay-Upsert — for which the
+    // overlay source is the content authority and the scheduler does
+    // not need to load anything; an unmasked canonical correctly falls
+    // through to `host.ensure_loaded`.
+    if view.overlay_content_hash_for(canonical_id).is_some() {
+        return true;
+    }
+    host.ensure_loaded(canonical_id)
+}
+
+/// Overlay-priority `ensure_indexed_ready_serve` helper — the
+/// publication status flows BY VALUE (see
+/// [`crate::host_manage::prepared_decl::IndexedReadyServe`]).
+///
+/// When `view` tombstones the canonical, returns `None`. When `view`
+/// carries an **explicit overlay** for the canonical, materialises a
+/// parallel IndexedReady from the overlay source and publishes it under
+/// the overlay's content hash via
+/// [`VerterHost::materialize_overlay_indexed_ready_serve_with_view`].
+/// Otherwise falls through to [`VerterHost::ensure_indexed_ready_serve`].
+pub(crate) fn ensure_indexed_ready_serve_with_view(
+    host: &VerterHost,
+    view: &dyn SessionView,
+    canonical_id: &str,
+) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
+    if view.is_tombstoned(canonical_id) {
+        return None;
+    }
+    // Overlay-priority: if the view carries an **explicit overlay**
+    // candidate for the canonical, prefer it. The host's
+    // `materialize_overlay_indexed_ready_with_view` entry point
+    // publishes the candidate to the file-artifact store under the
+    // overlay's content hash so future reads of the same overlay reuse
+    // the cached candidate. Base-passthrough views (`HostView`,
+    // `HostViewRef`) carry no overlay and fall through to the host's
+    // standard `ensure_indexed_ready_serve`.
+    //
+    // Overlay detection uses the **strict** `overlay_content_hash_for`,
+    // which reports `Some` ONLY when the session installed an actual
+    // overlay-Upsert. An unmasked canonical reports `None` here and
+    // correctly falls through to the host's own `ensure_indexed_ready_serve`
+    // — the overlay materialiser path is reserved for genuine
+    // overlays. The materialiser then derives both the overlay source
+    // and its content hash from the view itself (a single authority),
+    // so no stale hash can be smuggled into the candidate's key or
+    // `whole_hash`.
+    if view.overlay_content_hash_for(canonical_id).is_some() {
+        if let Some(serve) =
+            host.materialize_overlay_indexed_ready_serve_with_view(canonical_id, view)
+        {
+            return Some(serve);
+        }
+    }
+    host.ensure_indexed_ready_serve(canonical_id)
+}
+
+/// Pre-warm overlay [`IndexedReady`](crate::project_type_store::IndexedReady)
+/// candidates for every canonical the view carries an overlay for.
+///
+/// Called from session-bearing query entry points before the cold
+/// compute runs so the resolver-tier reads on cross-file deps see
+/// overlay content via [`FileArtifactStore::get`](crate::file_artifact_store::FileArtifactStore::get).
+/// The pre-warm is idempotent — a candidate already published under
+/// the overlay's content hash short-circuits.
+///
+/// Threads the (host, view) pair through a
+/// [`crate::resolver_core::SessionResolverContext`] so the trait-routed
+/// `ensure_indexed_ready_serve` is the path of record for overlay-priority
+/// materialisation (R18 — view passed explicitly via the
+/// `ResolverContext` trait surface, not a thread-local).
+pub(crate) fn prewarm_view_overlays(host: &VerterHost, view: &dyn SessionView) {
+    // Build the overlay-rooted cold-seed view ONCE here so the
+    // SessionResolverContext threads a borrow into the pre-warm loop
+    // rather than rebuilding the view per-overlay-canonical. This is an
+    // overlay-materialisation pre-warm (an `ensure_indexed_ready_serve` pass);
+    // it seeds from the cold-seed and overlays via the
+    // currentness-preserving `ColdSeedHostStoreView::with_session_overlay`
+    // (never `.into_inner()`, which drops the flag), so any nested
+    // warm-cache probe reachable from `ensure_indexed_ready_serve` fails closed
+    // on a non-current seed.
+    let store_view = host
+        .resolver_store_view_read()
+        .into_cold_seed_view()
+        .with_session_overlay(host, view);
+    let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
+        host,
+        view,
+        &store_view,
+        overlay,
+    );
+    for canonical in view.overlay_canonicals() {
+        let _ = ResolverContext::ensure_indexed_ready_serve(&session_ctx, canonical.as_str());
+    }
+}

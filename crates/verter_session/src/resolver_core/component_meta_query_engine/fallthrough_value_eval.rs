@@ -1,0 +1,525 @@
+//! Node-domain fallthrough value evaluation + spread / dynamic-root readers.
+//!
+//! The fallthrough resolver's root-consumption (spread keys), dynamic-root
+//! (`is=`) and generic child-prop-override decisions read structural facts off a
+//! value expression's PROJECTED NODE instead of a materialised `TypeExpr`. The
+//! engine evaluates a value expression to a `SemanticNodeId` ONCE (override
+//! forwarding + runtime-value env substitution + node Class-A projection); the
+//! free-fn readers then walk `SemanticNodeData`. No semantic decision is taken
+//! on a materialised `TypeExpr`.
+
+use indexmap::IndexSet;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use verter_semantic::analysis::template::TemplatePropUsage;
+use verter_semantic::analysis::type_eval::EvalEnv;
+use verter_semantic::analysis::types::AnalyzedImport;
+use verter_type_expr::{LiteralValue, TypeExpr};
+
+use super::ComponentMetaQueryEngine;
+use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use crate::resolver_core::fallthrough::{
+    component_import_candidate_for_binding, intersect_known_spread_keys,
+    normalize_public_spread_key, structural_substitute_typeof_refs, DynamicRootCandidate,
+    FallthroughPropOverrideSet, KnownSpreadKeys,
+};
+use crate::resolver_core::ResolverContext;
+use crate::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
+
+/// Shared per-call prologue for the two fallthrough node-DAG walkers
+/// ([`known_spread_keys_from_node_inner`] and
+/// [`collect_dynamic_root_candidates_from_node_inner`]). It is the SINGLE
+/// mechanism both walkers reuse:
+///
+/// - **Persistent memo** (`memo`): each distinct `SemanticNodeId` is computed
+///   ONCE per top-level call. A shared subtree reached through two sibling arms
+///   of a content-interned diamond is therefore O(distinct nodes), not the
+///   former O(2^depth) re-traversal.
+/// - **Shared op-budget**: ONE unit of the EXISTING request projection budget
+///   ([`crate::request_budget::RequestBudget`]) is charged per distinct node.
+///   A trip halts the walk (no second budget engine) AND folds a partial into
+///   the active cold-compute completeness scope, so the partial result is never
+///   warm-admitted (the fallthrough store gates admission on the typed
+///   `current_cold_compute_completeness`).
+/// - **Cycle sentinel** (`active`): tracks the in-progress path so a (defensive)
+///   re-entry halts instead of recursing — it is the cycle sentinel, NOT the
+///   memo.
+enum NodeWalkStep<T> {
+    /// `node` was already computed — reuse this value.
+    Cached(T),
+    /// Cycle re-entry OR budget trip — return the walker's halt value.
+    Halt,
+    /// First visit, within budget, marked active — proceed to compute.
+    Visit,
+}
+
+/// Run the shared walk prologue for `node`: memo probe, then cycle-sentinel
+/// check, then per-distinct-node budget charge + sentinel insert. See
+/// [`NodeWalkStep`].
+fn enter_node<T: Clone>(
+    node: SemanticNodeId,
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &FxHashMap<SemanticNodeId, T>,
+) -> NodeWalkStep<T> {
+    if let Some(cached) = memo.get(&node) {
+        return NodeWalkStep::Cached(cached.clone());
+    }
+    // Cycle re-entry is checked BEFORE charging the op-budget so the
+    // "one charge per distinct node" claim is honest: re-entering an
+    // in-progress node is not a distinct node and is not charged.
+    if active.contains(&node) {
+        return NodeWalkStep::Halt;
+    }
+    if crate::request_context::current_request_budget()
+        .is_some_and(|budget| budget.check_projection_op_count())
+    {
+        // The op-budget trip is a genuine incomplete compute: fold a partial
+        // into the active cold-compute completeness scope so the fallthrough
+        // surface this walk feeds is refused warm admission.
+        crate::request_context::mark_request_result_partial();
+        return NodeWalkStep::Halt;
+    }
+    active.insert(node);
+    NodeWalkStep::Visit
+}
+
+/// Shared walk epilogue: pop the cycle sentinel and memoize `result` for `node`.
+fn exit_node<T: Clone>(
+    node: SemanticNodeId,
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut FxHashMap<SemanticNodeId, T>,
+    result: T,
+) -> T {
+    active.remove(&node);
+    memo.insert(node, result.clone());
+    result
+}
+
+impl ComponentMetaQueryEngine<'_> {
+    /// Evaluate a fallthrough value expression to its resolved value NODE,
+    /// entirely in node domain.
+    ///
+    /// Resolution order: (1) override forwarding — a bare single-segment
+    /// `typeof <name>` whose name is a parent-propagated override resolves to
+    /// the override value NODE directly (so a child re-forwarding a generic
+    /// root prop reaches the propagated node, not a re-resolved declaration);
+    /// (2) runtime-value env substitution — `structural_substitute_typeof_refs`
+    /// folds imported value bindings, and a changed shape (a concrete value
+    /// type) lowers to a node directly; (3) node Class-A projection of the
+    /// lowered expression. `None` when the expression neither parses nor
+    /// projects.
+    pub(crate) fn evaluate_fallthrough_value_node(
+        &mut self,
+        scope_canonical_id: &str,
+        expression: &str,
+        env: Option<&EvalEnv>,
+        overrides: Option<&FallthroughPropOverrideSet>,
+    ) -> Option<SemanticNodeId> {
+        let lowered =
+            verter_semantic::analysis::type_eval_build::parse_value_expression_type(expression)?;
+
+        // (1) Override forwarding: a bare single-segment `typeof <name>` whose
+        // name is a propagated override resolves to the override value node.
+        if let TypeExpr::TypeOf(value_ref) = &lowered {
+            if value_ref.path.len() == 1 {
+                if let Some(node) = overrides.and_then(|set| set.lookup(value_ref.path[0].as_str()))
+                {
+                    return Some(node);
+                }
+            }
+        }
+
+        let dispatch = ProjectSemanticDispatch::new(self.ctx);
+
+        // (2) Runtime-value env substitution. A changed shape is already a
+        // concrete value type; lower it to a node directly (Navigate).
+        if let Some(env) = env {
+            let substituted = structural_substitute_typeof_refs(&lowered, env);
+            if substituted != lowered {
+                return dispatch.lower_type_expr_in_scope_with_mode(
+                    scope_canonical_id,
+                    &substituted,
+                    ProjectionMode::Navigate,
+                );
+            }
+        }
+
+        // (3) Node Class-A projection (registry route fast-path + terminal).
+        if let Some(admitted) = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
+            self.ctx,
+            Some(self),
+            scope_canonical_id,
+            &lowered,
+        ) {
+            return Some(admitted.node());
+        }
+        // (4) Key-domain fallback. The class-A terminal admits only a FULLY
+        // materialized expanded surface, but the fallthrough readers consume
+        // the KEY / structure domain: an inferred const-object surface whose
+        // member VALUE is unmaterialized (an un-annotated arrow return) still
+        // exposes its exact spread keys. Lower the expression eagerly and let
+        // the node-domain readers decide what the node statically exposes —
+        // a shape with no static key surface still reads as unknown.
+        dispatch.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            &lowered,
+            ProjectionMode::Expanded,
+        )
+    }
+
+    /// Node-domain spread-key reader for a root-consumption spread value
+    /// expression (`v-bind="expr"`). Returns `None` when the value node carries
+    /// no statically-known key surface (the caller records an unknown spread).
+    pub(crate) fn known_spread_keys_for_value_expression(
+        &mut self,
+        scope_canonical_id: &str,
+        expression: &str,
+        env: Option<&EvalEnv>,
+        overrides: Option<&FallthroughPropOverrideSet>,
+    ) -> Option<KnownSpreadKeys> {
+        let node =
+            self.evaluate_fallthrough_value_node(scope_canonical_id, expression, env, overrides)?;
+        known_spread_keys_from_node(self.ctx, node)
+    }
+
+    /// Node-domain dynamic-root-candidate reader for an `is=` value expression.
+    /// Returns the native-tag / component-import candidates discoverable from
+    /// the value node.
+    pub(crate) fn dynamic_root_candidates_for_value_expression(
+        &mut self,
+        scope_canonical_id: &str,
+        expression: &str,
+        env: Option<&EvalEnv>,
+        overrides: Option<&FallthroughPropOverrideSet>,
+        imports: &[AnalyzedImport],
+    ) -> Vec<DynamicRootCandidate> {
+        let Some(node) =
+            self.evaluate_fallthrough_value_node(scope_canonical_id, expression, env, overrides)
+        else {
+            return Vec::new();
+        };
+        collect_dynamic_root_candidates_from_node(self.ctx, node, imports)
+    }
+
+    /// Build the override value NODE for one component-usage prop: an unbound
+    /// prop lowers its literal string / `true`; a bound / shorthand prop
+    /// evaluates its expression to a node (env + override aware), falling back
+    /// to lowering the bare parse. `None` when the prop contributes no override.
+    pub(crate) fn value_expression_override_node(
+        &mut self,
+        scope_canonical_id: &str,
+        prop: &TemplatePropUsage,
+        env: Option<&EvalEnv>,
+        overrides: Option<&FallthroughPropOverrideSet>,
+    ) -> Option<SemanticNodeId> {
+        if prop.from_spread {
+            return None;
+        }
+
+        if !prop.is_bound {
+            let literal = match &prop.expression {
+                Some(expression) => TypeExpr::string_literal(expression.clone()),
+                None => TypeExpr::boolean_literal(true),
+            };
+            return self.lower_value_literal_node(scope_canonical_id, &literal);
+        }
+
+        if let Some(expression) = &prop.expression {
+            if let Some(node) =
+                self.evaluate_fallthrough_value_node(scope_canonical_id, expression, env, overrides)
+            {
+                return Some(node);
+            }
+            if let Some(parsed) =
+                verter_semantic::analysis::type_eval_build::parse_value_expression_type(expression)
+            {
+                return self.lower_value_literal_node(scope_canonical_id, &parsed);
+            }
+        }
+
+        if prop.is_shorthand {
+            if let Some(node) =
+                self.evaluate_fallthrough_value_node(scope_canonical_id, &prop.name, env, overrides)
+            {
+                return Some(node);
+            }
+            if let Some(parsed) =
+                verter_semantic::analysis::type_eval_build::parse_value_expression_type(&prop.name)
+            {
+                return self.lower_value_literal_node(scope_canonical_id, &parsed);
+            }
+        }
+
+        None
+    }
+
+    /// Lower a concrete value `TypeExpr` (a literal / bare parse) to a node at
+    /// Navigate mode — the symbolic-input pipeline feed for the override carrier.
+    fn lower_value_literal_node(
+        &self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::new(self.ctx).lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            expr,
+            ProjectionMode::Navigate,
+        )
+    }
+}
+
+/// Node-domain mirror of `known_spread_keys_from_type_expr`: walk a value
+/// node's object / alias / intersection / union shape into the statically-known
+/// attr + listener key sets. `None` for any node that exposes no static key
+/// surface (the caller records an unknown spread).
+pub(crate) fn known_spread_keys_from_node(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+) -> Option<KnownSpreadKeys> {
+    known_spread_keys_from_node_inner(
+        ctx,
+        node,
+        &mut FxHashSet::default(),
+        &mut FxHashMap::default(),
+    )
+}
+
+fn known_spread_keys_from_node_inner(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut FxHashMap<SemanticNodeId, Option<KnownSpreadKeys>>,
+) -> Option<KnownSpreadKeys> {
+    match enter_node(node, active, memo) {
+        NodeWalkStep::Cached(cached) => return cached,
+        NodeWalkStep::Halt => return None,
+        NodeWalkStep::Visit => {}
+    }
+    let result = match node_data_for(ctx, node) {
+        None => None,
+        Some(data) => match data.as_ref() {
+            // The `Alias` identity hop is the node equivalent of the
+            // `TypeExpr::Parenthesized` wrap.
+            SemanticNodeData::Alias(inner) => {
+                known_spread_keys_from_node_inner(ctx, *inner, active, memo)
+            }
+            SemanticNodeData::Object(surface) => Some(known_spread_keys_from_surface(surface)),
+            SemanticNodeData::Intersection(arms) => {
+                let mut result = KnownSpreadKeys {
+                    exact: true,
+                    ..KnownSpreadKeys::default()
+                };
+                let mut saw_any = false;
+                for part in arms.iter() {
+                    let Some(summary) = known_spread_keys_from_node_inner(ctx, *part, active, memo)
+                    else {
+                        result.exact = false;
+                        continue;
+                    };
+                    saw_any = true;
+                    result.attrs.extend(summary.attrs);
+                    result.listeners.extend(summary.listeners);
+                    result.exact &= summary.exact;
+                }
+                saw_any.then_some(result)
+            }
+            SemanticNodeData::Union(arms) => {
+                let mut iter = arms.iter();
+                match iter.next() {
+                    None => None,
+                    Some(first_node) => {
+                        match known_spread_keys_from_node_inner(ctx, *first_node, active, memo) {
+                            None => None,
+                            Some(first) => {
+                                let mut result = first.clone();
+                                let mut exact_same_keys = first.exact;
+                                let mut early_inexact = false;
+                                for branch in iter {
+                                    let Some(summary) = known_spread_keys_from_node_inner(
+                                        ctx, *branch, active, memo,
+                                    ) else {
+                                        result.exact = false;
+                                        early_inexact = true;
+                                        break;
+                                    };
+                                    exact_same_keys &= summary.exact
+                                        && summary.attrs == result.attrs
+                                        && summary.listeners == result.listeners;
+                                    result = intersect_known_spread_keys(result, summary);
+                                }
+                                if !early_inexact {
+                                    result.exact = exact_same_keys;
+                                }
+                                Some(result)
+                            }
+                        }
+                    }
+                }
+            }
+            _ => None,
+        },
+    };
+    exit_node(node, active, memo, result)
+}
+
+/// Node-domain mirror of `known_spread_keys_from_object`: classify each surface
+/// member name into the attr / listener sets (via the SHARED
+/// [`normalize_public_spread_key`]) and mark the surface inexact when it carries
+/// an index / call / construct signature (the node equivalent of the object
+/// helper's signature-member arm).
+fn known_spread_keys_from_surface(surface: &crate::semantic_query::SurfaceView) -> KnownSpreadKeys {
+    let mut result = KnownSpreadKeys {
+        exact: true,
+        ..KnownSpreadKeys::default()
+    };
+    for member in surface.members.iter() {
+        normalize_public_spread_key(
+            member.name.as_ref(),
+            &mut result.attrs,
+            &mut result.listeners,
+        );
+    }
+    if surface.has_index_signature
+        || !surface.index_signatures.is_empty()
+        || !surface.call_signatures.is_empty()
+        || !surface.construct_signatures.is_empty()
+    {
+        result.exact = false;
+    }
+    result
+}
+
+/// A DEDUPLICATED set of dynamic-root candidates. Memoizing/unioning a SET
+/// (not a concatenated `Vec`) is what bounds the walker's RESULT cardinality:
+/// on a content-interned diamond (`type D = A | B`, `A = B = D'`) the former
+/// `flat_map` concatenated the cached child `Vec`s, doubling per level into an
+/// O(2^depth) allocation even though node VISITS were memo-bounded. A set
+/// collapses the duplicates, so the result stays O(unique candidates).
+type DynamicRootCandidateSet = IndexSet<DynamicRootCandidate, FxBuildHasher>;
+
+/// Insert `candidate` into `set`, charging the SHARED request projection budget
+/// per NEWLY-INSERTED unique candidate (cardinality). This unifies result-size
+/// accounting with the per-node-visit charge in [`enter_node`] — NO second fuse —
+/// so a genuine result-size explosion trips the SAME budget.
+///
+/// The charge happens BEFORE the insert and the trip HALTS the merge: a tripping
+/// candidate is NOT inserted, `false` is returned, and a partial is folded. The
+/// caller stops merging/recursing on `false`, so a wide-UNIQUE union is BOUNDED at
+/// the trip point rather than grown to its full cardinality. An already-present
+/// candidate carries no new cardinality, so it neither charges nor halts (`true`)
+/// — this keeps a content-interned diamond's duplicate re-insertions free, so the
+/// result-size charge stays per-UNIQUE candidate.
+///
+/// Returns `true` when the merge may continue (inserted, or already present),
+/// `false` when the budget tripped (not inserted; the merge must stop).
+fn insert_dynamic_root_candidate_charged(
+    set: &mut DynamicRootCandidateSet,
+    candidate: DynamicRootCandidate,
+) -> bool {
+    if set.contains(&candidate) {
+        return true;
+    }
+    if crate::request_context::current_request_budget()
+        .is_some_and(|budget| budget.check_projection_op_count())
+    {
+        crate::request_context::mark_request_result_partial();
+        return false;
+    }
+    set.insert(candidate);
+    true
+}
+
+/// Node-domain mirror of `collect_dynamic_root_candidates_from_type`: walk a
+/// value node's literal-string / union / alias / `typeof` shape into the
+/// native-tag + component-import dynamic-root candidates.
+///
+/// Emits a sorted `Vec` using the shared [`DynamicRootCandidate::ordering`]
+/// (the SAME ordering the syntactic-combine site re-applies), so observable
+/// output order is unchanged — only the exponential duplication is removed.
+pub(crate) fn collect_dynamic_root_candidates_from_node(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+    imports: &[AnalyzedImport],
+) -> Vec<DynamicRootCandidate> {
+    let set = collect_dynamic_root_candidates_from_node_inner(
+        ctx,
+        node,
+        imports,
+        &mut FxHashSet::default(),
+        &mut FxHashMap::default(),
+    );
+    let mut out: Vec<DynamicRootCandidate> = set.into_iter().collect();
+    out.sort_by(|left, right| left.ordering(right));
+    out
+}
+
+fn collect_dynamic_root_candidates_from_node_inner(
+    ctx: &dyn ResolverContext,
+    node: SemanticNodeId,
+    imports: &[AnalyzedImport],
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut FxHashMap<SemanticNodeId, DynamicRootCandidateSet>,
+) -> DynamicRootCandidateSet {
+    match enter_node(node, active, memo) {
+        NodeWalkStep::Cached(cached) => return cached,
+        NodeWalkStep::Halt => return DynamicRootCandidateSet::default(),
+        NodeWalkStep::Visit => {}
+    }
+    let out = match node_data_for(ctx, node) {
+        None => DynamicRootCandidateSet::default(),
+        Some(data) => match data.as_ref() {
+            SemanticNodeData::Literal(LiteralValue::String(tag)) => {
+                let mut set = DynamicRootCandidateSet::default();
+                let _ = insert_dynamic_root_candidate_charged(
+                    &mut set,
+                    DynamicRootCandidate::NativeTag { tag: tag.clone() },
+                );
+                set
+            }
+            SemanticNodeData::Union(arms) => {
+                let mut set = DynamicRootCandidateSet::default();
+                'merge: for arm in arms.iter() {
+                    let arm_set = collect_dynamic_root_candidates_from_node_inner(
+                        ctx, *arm, imports, active, memo,
+                    );
+                    for candidate in arm_set {
+                        // A budget trip HALTS the merge: stop unioning further
+                        // candidates (and walking further arms) so a wide-UNIQUE
+                        // union is bounded at the trip, not grown to N.
+                        if !insert_dynamic_root_candidate_charged(&mut set, candidate) {
+                            break 'merge;
+                        }
+                    }
+                }
+                set
+            }
+            SemanticNodeData::Alias(inner) => {
+                collect_dynamic_root_candidates_from_node_inner(ctx, *inner, imports, active, memo)
+            }
+            // A single-segment `typeof <name>` carrier maps to a component
+            // import binding — the node equivalent of the `TypeOf(value_ref)`
+            // arm (`value_ref.path.len() == 1`). The carrier head splits the
+            // reference as `(value_root.name, path)`, so single-segment is an
+            // empty trailing `path` with the head name as the binding name.
+            SemanticNodeData::TypeOf(_) => {
+                let mut set = DynamicRootCandidateSet::default();
+                if let Some((value_root, path)) = data.typeof_head() {
+                    if path.is_empty() {
+                        if let Some(candidate) = component_import_candidate_for_binding(
+                            imports,
+                            value_root.name.as_ref(),
+                        ) {
+                            let _ = insert_dynamic_root_candidate_charged(&mut set, candidate);
+                        }
+                    }
+                }
+                set
+            }
+            _ => DynamicRootCandidateSet::default(),
+        },
+    };
+    exit_node(node, active, memo, out)
+}
+
+#[cfg(test)]
+#[path = "fallthrough_value_eval_recursion_tests.rs"]
+mod recursion_tests;

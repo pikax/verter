@@ -1,0 +1,39 @@
+{
+  "slug": "id-dyn-lit-id-q-blk-ext-prune-u",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dyn_lit_id_q_blk_ext_prune_u",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr"
+  ],
+  "helperSet": [
+    "attr"
+  ],
+  "helperCounts": {
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-1ugdqla",
+    "code": "\n\t#b.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n\n\t/* (unused) .unused-prune {\n\t\tcolor: blue;\n\t}*/\n"
+  }
+}

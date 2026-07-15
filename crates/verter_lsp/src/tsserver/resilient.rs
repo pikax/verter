@@ -9,9 +9,9 @@ use tokio::sync::{Notify, OnceCell};
 use tower_lsp_server::Client;
 
 use crate::resilient_provider::{LspNotifier, ResilientBackend, ResilientProvider};
-use crate::tsgo::protocol::TypeProviderError;
-use crate::tsgo::traits::TypeProvider;
 use crate::tsserver::ipc::TsserverTypeProvider;
+use crate::type_provider::protocol::TypeProviderError;
+use crate::type_provider::traits::TypeProvider;
 
 struct TsserverBackend {
     node_path: String,
@@ -44,11 +44,20 @@ impl ResilientBackend<TsserverTypeProvider> for TsserverBackend {
         >,
     > {
         Box::pin(async move {
+            // The carrier-publish store dir, derived from the workspace root through
+            // the SAME shared resolver the publish backend uses, so a respawn keeps
+            // pointing the plugin at the LSP's live store.
+            let carrier_store_dir =
+                crate::external_ts::default_carrier_store_dir_string(&self.workspace_root);
             TsserverTypeProvider::spawn(
                 &self.node_path,
                 &self.tsserver_path,
                 &self.workspace_root,
                 self.plugin_path.as_deref(),
+                Some(&carrier_store_dir),
+                // verter_lsp-internal backend: a respawn keeps the plugin's
+                // response remap OFF so the Rust merge layer stays the sole mapper.
+                false,
                 Some(crash_notify),
             )
             .await

@@ -1,0 +1,41 @@
+<script lang="ts">
+import type { VNode } from 'vue'
+import type { AppConfig } from '@nuxt/schema'
+import type { ComponentConfig } from '../../types/tv'
+import theme from '#build/ui/prose/table'
+
+type ProseTable = ComponentConfig<typeof theme, AppConfig, 'table', 'ui.prose'>
+
+export interface ProseTableProps {
+  class?: any
+  ui?: ProseTable['slots']
+}
+
+export interface ProseTableSlots {
+  default(props?: {}): VNode[]
+}
+</script>
+
+<script setup lang="ts">
+import { computed } from 'vue'
+import { useAppConfig } from '#imports'
+import { useComponentUI } from '../../composables/useComponentUI'
+import { tv } from '../../utils/tv'
+
+const props = defineProps<ProseTableProps>()
+defineSlots<ProseTableSlots>()
+
+const appConfig = useAppConfig() as ProseTable['AppConfig']
+const uiProp = useComponentUI('prose.table', props)
+
+// eslint-disable-next-line vue/no-dupe-keys
+const ui = computed(() => tv({ extend: tv(theme), ...(appConfig.ui?.prose?.table || {}) })())
+</script>
+
+<template>
+  <div :class="ui.root({ class: [uiProp?.root, props.class] })">
+    <table :class="ui.base({ class: uiProp?.base })">
+      <slot />
+    </table>
+  </div>
+</template>

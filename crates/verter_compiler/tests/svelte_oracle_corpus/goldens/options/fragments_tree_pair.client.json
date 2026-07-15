@@ -1,0 +1,60 @@
+{
+  "slug": "options/fragments_tree_pair.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "fragments_tree_pair",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_tree",
+    "next",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_tree",
+    "next"
+  ],
+  "helperCounts": {
+    "from_tree": 1,
+    "next": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_tree",
+      "html": "[['div', null, 'a'], ' ', ['span', null, 'b']]",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_tree([['div', null, 'a'], ' ', ['span', null, 'b']], 1); export default function fragments_tree_pair($$anchor) {var fragment = root(); $.next(2); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

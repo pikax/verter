@@ -1,0 +1,42 @@
+{
+  "slug": "univ-spread-lit-attr-q-slot-ext-comb-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "univ_spread_lit_attr_q_slot_ext_comb_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot",
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes",
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1,
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-gdg6x",
+    "code": "\n\t.wrap.svelte-<scoped> :where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

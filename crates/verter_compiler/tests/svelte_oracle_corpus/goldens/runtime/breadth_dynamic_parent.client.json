@@ -1,0 +1,80 @@
+{
+  "slug": "runtime/breadth_dynamic_parent.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "breadth_dynamic_parent",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "first_child",
+    "sibling",
+    "component",
+    "get",
+    "delegated",
+    "set",
+    "get",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "component",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "set",
+    "sibling",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "first_child": 1,
+    "sibling": 1,
+    "component": 1,
+    "get": 2,
+    "delegated": 1,
+    "set": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button>update</button> <!>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button>update</button> <!>`, 1); export default function breadth_dynamic_parent($$anchor, $$props) {let label = $.state('a'); var fragment = root(); var button = $.first_child(fragment); var node = $.sibling(button, 2); $.component(node, () => $$props.Child, ($$anchor, $$component) => {$$component($$anchor, {get text() {return $.get(label);}});}); $.delegated('click', button, () => $.set(label, $.get(label) + '!')); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

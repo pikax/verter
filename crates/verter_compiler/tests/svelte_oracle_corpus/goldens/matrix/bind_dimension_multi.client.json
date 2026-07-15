@@ -1,0 +1,70 @@
+{
+  "slug": "matrix/bind_dimension_multi.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_dimension_multi",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "state",
+    "state",
+    "bind_element_size",
+    "set",
+    "bind_element_size",
+    "set",
+    "bind_element_size",
+    "set",
+    "bind_element_size",
+    "set",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_element_size",
+    "from_html",
+    "set",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 4,
+    "bind_element_size": 4,
+    "set": 4,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function bind_dimension_multi($$anchor) {let cw = $.state(0); let ch = $.state(0); let ow = $.state(0); let oh = $.state(0); var div = root(); $.bind_element_size(div, 'clientWidth', ($$value) => $.set(cw, $$value)); $.bind_element_size(div, 'clientHeight', ($$value) => $.set(ch, $$value)); $.bind_element_size(div, 'offsetWidth', ($$value) => $.set(ow, $$value)); $.bind_element_size(div, 'offsetHeight', ($$value) => $.set(oh, $$value)); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

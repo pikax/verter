@@ -1,0 +1,1 @@
+<slot class:on={x} />

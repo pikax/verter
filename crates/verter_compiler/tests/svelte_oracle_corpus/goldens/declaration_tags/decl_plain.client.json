@@ -1,0 +1,83 @@
+{
+  "slug": "declaration_tags/decl_plain.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "decl_plain",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "comment",
+    "first_child",
+    "each",
+    "index",
+    "get",
+    "delegated",
+    "set",
+    "append",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "delegate",
+    "delegated",
+    "each",
+    "first_child",
+    "from_html",
+    "get",
+    "index",
+    "set",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "comment": 1,
+    "first_child": 1,
+    "each": 1,
+    "index": 1,
+    "get": 1,
+    "delegated": 1,
+    "set": 1,
+    "append": 2,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button>x</button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button>x</button>`); export default function decl_plain($$anchor, $$props) {let n = $.state(0); var fragment = $.comment(); var node = $.first_child(fragment); $.each(node, 17, () => $$props.items, $.index, ($$anchor, item) => {const doubled = $.get(item); var button = root(); $.delegated('click', button, () => $.set(n, doubled, true)); $.append($$anchor, button);}); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

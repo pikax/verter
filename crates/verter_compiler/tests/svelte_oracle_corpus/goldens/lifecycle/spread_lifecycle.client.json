@@ -1,0 +1,61 @@
+{
+  "slug": "lifecycle/spread_lifecycle.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "spread_lifecycle",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "attribute_effect",
+    "action",
+    "transition",
+    "append"
+  ],
+  "helperSet": [
+    "action",
+    "append",
+    "attribute_effect",
+    "from_html",
+    "transition"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "attribute_effect": 1,
+    "action": 1,
+    "transition": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function spread_lifecycle($$anchor) {let c = 0; var div = root(); $.attribute_effect(div, () => ({...c})); $.action(div, ($$node) => foo?.($$node)); $.transition(3, div, () => fade); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

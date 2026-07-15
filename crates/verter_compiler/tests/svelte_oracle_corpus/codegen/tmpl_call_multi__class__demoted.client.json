@@ -1,0 +1,58 @@
+{
+  "slug": "tmpl_call_multi__class__demoted",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "tmpl_call_multi__class__demoted",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "template_effect",
+    "set_class",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "set_class",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "template_effect": 1,
+    "set_class": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function tmpl_call_multi__class__demoted($$anchor) {let d = 0; var div = root(); $.template_effect(($0, $1) => $.set_class(div, 1, `a ${$0 ?? ''} b ${$1 ?? ''} c`), [() => d.toString(), () => d.toString()]); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "slug": "generated/065_event_document_click.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "_65_event_document_click",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "event",
+    "document"
+  ],
+  "helperSet": [
+    "document",
+    "event"
+  ],
+  "helperCounts": {
+    "event": 1,
+    "document": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  },
+  "events": [
+    {
+      "type": "click",
+      "target": "document",
+      "delegation": "direct"
+    }
+  ],
+  "nonStaticProperties": [],
+  "attrParts": [],
+  "directiveExprs": [
+    {
+      "kind": "on",
+      "shape": "expr"
+    }
+  ],
+  "decodedText": [],
+  "nodePaths": {
+    "regions": []
+  },
+  "dynamicSlots": {}
+}

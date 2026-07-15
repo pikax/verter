@@ -1,0 +1,42 @@
+{
+  "slug": "nest-dyn-lit-attr-q-dynel-inj-glob-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "nest_dyn_lit_attr_q_dynel_inj_glob_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "element",
+    "attr"
+  ],
+  "helperSet": [
+    "attr",
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1,
+    "attr": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

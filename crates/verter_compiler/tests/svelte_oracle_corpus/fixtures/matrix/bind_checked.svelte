@@ -1,0 +1,4 @@
+<script>
+	let c = $state(false);
+</script>
+<input type="checkbox" bind:checked={c} />

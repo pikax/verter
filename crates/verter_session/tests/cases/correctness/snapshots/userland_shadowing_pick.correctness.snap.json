@@ -1,0 +1,38 @@
+{
+  "component_name": "C",
+  "props": [
+    {
+      "name": "alpha",
+      "type_signature": "string",
+      "required": true,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "beta",
+      "type_signature": "number",
+      "required": true,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "gamma",
+      "type_signature": "boolean",
+      "required": true,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    }
+  ],
+  "events": [],
+  "slots": [],
+  "models": [],
+  "exposed": [],
+  "fallthrough": null,
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}

@@ -1,0 +1,89 @@
+{
+  "slug": "matrix/special_init_order_reverse.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "special_init_order_reverse",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "head",
+    "deferred_template_effect",
+    "document",
+    "get",
+    "event",
+    "window",
+    "set",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "deferred_template_effect",
+    "document",
+    "event",
+    "from_html",
+    "get",
+    "head",
+    "reset",
+    "set",
+    "set_text",
+    "state",
+    "template_effect",
+    "window"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "head": 1,
+    "deferred_template_effect": 1,
+    "document": 1,
+    "get": 2,
+    "event": 1,
+    "window": 1,
+    "set": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); export default function special_init_order_reverse($$anchor) {let key = $.state(''); var p = root(); $.head('xpqqiq', ($$anchor) => {$.deferred_template_effect(() => {$.document.title = ($.get(key) || 'initial') ?? '';});}); $.event('keydown', $.window, (event) => $.set(key, event.key, true)); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $.get(key))); $.append($$anchor, p);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

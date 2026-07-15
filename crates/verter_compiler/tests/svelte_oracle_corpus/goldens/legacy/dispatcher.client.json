@@ -1,0 +1,82 @@
+{
+  "slug": "legacy/dispatcher.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte",
+      "kind": "named",
+      "names": [
+        "createEventDispatcher"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "dispatcher",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "init",
+    "delegated",
+    "append",
+    "pop",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "from_html",
+    "init",
+    "pop",
+    "push"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "init": 1,
+    "delegated": 1,
+    "append": 1,
+    "pop": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button>go</button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import {createEventDispatcher} from 'svelte'; var root = $.from_html(`<button>go</button>`); export default function dispatcher($$anchor, $$props) {$.push($$props, false); const dispatch = createEventDispatcher(); function fire() {dispatch('go', 1);} $.init(); var button = root(); $.delegated('click', button, fire); $.append($$anchor, button); $.pop();} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

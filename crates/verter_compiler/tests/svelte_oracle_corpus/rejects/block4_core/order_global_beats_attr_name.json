@@ -1,0 +1,4 @@
+{
+  "rule": "GlobalReferenceInvalid",
+  "official_code": "global_reference_invalid"
+}

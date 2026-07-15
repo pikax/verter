@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
-use verter_core::tokenizer::byte::tokenize;
+use verter_compiler::tokenizer::byte::tokenize;
 
 /// Simple tag with N attributes (no v-pre)
 fn generate_tag_with_attrs(n: usize) -> String {

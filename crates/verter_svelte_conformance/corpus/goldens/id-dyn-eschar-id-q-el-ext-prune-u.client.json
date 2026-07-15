@@ -1,0 +1,59 @@
+{
+  "slug": "id-dyn-eschar-id-q-el-ext-prune-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dyn_eschar_id_q_el_ext_prune_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "template_effect",
+    "set_attribute",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "set_attribute",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"svelte-<scoped>\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"svelte-<scoped>\">x</div>`); export default function id_dyn_eschar_id_q_el_ext_prune_u($$anchor, $$props) {var div = root(); $.template_effect(() => $.set_attribute(div, 'id', $$props.value)); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-1fttrjz",
+    "code": "\n\t#a\\&b.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n\n\t/* (unused) .unused-prune {\n\t\tcolor: blue;\n\t}*/\n"
+  }
+}

@@ -1,0 +1,53 @@
+[package]
+name = "verter_dx_baseline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "DX harness differential-baseline bridge — owns tsgo/tsserver provider discovery, host-driven baseline materialization, and the versioned per-edit artifact overlay behind a newline-delimited JSON protocol"
+publish = false
+
+[dependencies]
+verter_session = { path = "../verter_session" }
+verter_type_runtime = { path = "../verter_type_runtime" }
+verter_workspace = { path = "../verter_workspace" }
+verter_scheduler = { path = "../verter_scheduler" }
+verter_span = { path = "../verter_span" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+oxc_sourcemap = "7.0.0"
+thiserror = "2.0"
+tokio = { version = "1.52", features = [
+  "rt",
+  "rt-multi-thread",
+  "macros",
+  "io-std",
+  "io-util",
+  "sync",
+  "process",
+  "time",
+] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3.27"
+
+# Test-infra differential-baseline bridge. The TS DX runner drives the built
+# binary over stdin/stdout.
+#
+# `test = true` is INTENTIONAL (it is the [[bin]] default; we keep it, not drop
+# it). nextest runs this target's in-bin `#[cfg(test)]` unit tests — the overlay
+# staleness gate, the dispatch-loop framing, the provider-resolution planning, and
+# the materialize DTO map carriage — and they are HERMETIC: the protocol/overlay
+# tests use an in-process MockProvider, the provider-resolution tests inject their
+# discovery closures, and the only tsgo-touching tests self-skip with a structured
+# `DX_GATE_SKIP` record (hard-failing only under `DX_REQUIRE_TSGO=1`). nextest never
+# executes `main()` / the stdio server as a test, so the "not run as a
+# server-executing suite" requirement holds WITHOUT dropping the unit coverage.
+# Setting `test = false` would silently delete all of that coverage — a regression.
+[[bin]]
+name = "verter-dx-baseline"
+path = "src/main.rs"

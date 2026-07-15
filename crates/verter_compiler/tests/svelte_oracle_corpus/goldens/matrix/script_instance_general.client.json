@@ -1,0 +1,93 @@
+{
+  "slug": "matrix/script_instance_general.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "script_instance_general",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "state",
+    "set",
+    "get",
+    "set",
+    "get",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "delegated",
+    "append",
+    "pop",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "from_html",
+    "get",
+    "pop",
+    "push",
+    "reset",
+    "set",
+    "set_text",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "state": 1,
+    "set": 2,
+    "get": 3,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "delegated": 1,
+    "append": 1,
+    "pop": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button> </button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function script_instance_general($$anchor, $$props) {$.push($$props, true); let count = $.state(0);  const STEP = 2; function advance(delta = STEP) {$.set(count, $.get(count) + delta);} class Marker {value = 3;} console.log(STEP); for (let index = 0; index < 1; index += 1) {if (index < 0) $.set(count, $.get(count) + index);} if (new Marker().value < 0) {advance();} var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(count))); $.delegated('click', button, advance); $.append($$anchor, button); $.pop();} $.delegate(['click']);",
+  "semanticCommentSignature": [
+    "Comment(class=Legal,text=\"/*! general-license */\",anchor=\"pos=Leading/stmt[3]:ExportDefaultDeclaration/child[0]:Function/child[2]:FunctionBody/child[2]:VariableDeclaration\",ord=0)"
+  ],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

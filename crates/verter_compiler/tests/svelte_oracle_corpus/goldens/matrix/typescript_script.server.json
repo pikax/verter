@@ -1,0 +1,48 @@
+{
+  "slug": "matrix/typescript_script.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./values.js",
+      "kind": "named",
+      "names": [
+        "seed"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "typescript_script",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "escape"
+  ],
+  "helperSet": [
+    "attr",
+    "escape"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "escape": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

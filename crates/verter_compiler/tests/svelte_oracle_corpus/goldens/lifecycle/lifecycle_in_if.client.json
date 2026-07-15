@@ -1,0 +1,82 @@
+{
+  "slug": "lifecycle/lifecycle_in_if.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "lifecycle_in_if",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "comment",
+    "first_child",
+    "action",
+    "delegated",
+    "update",
+    "append",
+    "if",
+    "get",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "action",
+    "append",
+    "comment",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "if",
+    "state",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "comment": 1,
+    "first_child": 1,
+    "action": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 2,
+    "if": 1,
+    "get": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); export default function lifecycle_in_if($$anchor) {let c = $.state(0); var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var div = root(); $.action(div, ($$node) => foo?.($$node)); $.delegated('click', div, () => $.update(c)); $.append($$anchor, div);}; $.if(node, ($$render) => {if ($.get(c)) $$render(consequent);});} $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

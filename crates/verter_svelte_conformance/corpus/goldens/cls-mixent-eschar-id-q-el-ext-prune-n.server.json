@@ -1,0 +1,32 @@
+{
+  "slug": "cls-mixent-eschar-id-q-el-ext-prune-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_mixent_eschar_id_q_el_ext_prune_n",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) .\\zz {\n\t\tcolor: red;\n\t}*/\n\n\t/* (unused) .unused-prune {\n\t\tcolor: blue;\n\t}*/\n"
+  }
+}

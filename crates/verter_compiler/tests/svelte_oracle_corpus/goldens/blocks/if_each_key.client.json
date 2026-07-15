@@ -1,0 +1,114 @@
+{
+  "slug": "blocks/if_each_key.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "if_each_key",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "from_html",
+    "from_html",
+    "from_html",
+    "proxy",
+    "first_child",
+    "each",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "reset",
+    "append",
+    "append",
+    "if",
+    "sibling",
+    "key",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "each",
+    "first_child",
+    "from_html",
+    "get",
+    "if",
+    "key",
+    "proxy",
+    "reset",
+    "set_text",
+    "sibling",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 5,
+    "proxy": 1,
+    "first_child": 1,
+    "each": 1,
+    "child": 1,
+    "reset": 2,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "append": 5,
+    "if": 1,
+    "sibling": 1,
+    "key": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<li> </li>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<ul></ul>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<p>nothing</p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<span></span>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<!> <!>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<li> </li>`); var root_1 = $.from_html(`<ul></ul>`); var root_2 = $.from_html(`<p>nothing</p>`); var root_3 = $.from_html(`<span></span>`); var root_4 = $.from_html(`<!> <!>`, 1); export default function if_each_key($$anchor) {let items = $.proxy([{id: 1, label: 'a'}, {id: 2, label: 'b'}]); let show = true; let selected = 0; var fragment = root_4(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var ul = root_1(); $.each(ul, 21, () => items, (item) => item.id, ($$anchor, item) => {var li = root(); var text = $.child(li, true); $.reset(li); $.template_effect(() => $.set_text(text, $.get(item).label)); $.append($$anchor, li);}); $.reset(ul); $.append($$anchor, ul);}; var alternate = ($$anchor) => {var p = root_2(); $.append($$anchor, p);}; $.if(node, ($$render) => {if (show) $$render(consequent); else $$render(alternate, -1);});} var node_1 = $.sibling(node, 2); $.key(node_1, () => selected, ($$anchor) => {var span = root_3(); span.textContent = '0'; $.append($$anchor, span);}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "slug": "lifecycle/attach_dynamic_child.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "attach_dynamic_child",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "child",
+    "child",
+    "reset",
+    "reset",
+    "attach",
+    "template_effect",
+    "set_text",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "attach",
+    "child",
+    "delegate",
+    "delegated",
+    "from_html",
+    "get",
+    "reset",
+    "set_text",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "child": 2,
+    "reset": 2,
+    "attach": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div><span> </span></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div><span> </span></div>`); export default function attach_dynamic_child($$anchor) {let c = $.state(0); var div = root(); var span = $.child(div); var text = $.child(span, true); $.reset(span); $.reset(div); $.attach(div, () => foo); $.template_effect(() => $.set_text(text, $.get(c))); $.delegated('click', div, () => $.update(c)); $.append($$anchor, div);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

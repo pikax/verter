@@ -7,24 +7,25 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 publish = false
-description = "Benchmarks and examples for verter_core"
+description = "Benchmarks and examples for verter_compiler"
 
 [features]
 hotpath = [
-  "verter_core/hotpath",
-  "verter_host/hotpath",
+  "verter_compiler/hotpath",
+  "verter_session/hotpath",
   "verter_diagnostics/hotpath",
   "dep:hotpath",
   "hotpath/hotpath",
 ]
-hotpath-alloc = ["verter_core/hotpath-alloc", "hotpath", "hotpath/hotpath-alloc"]
+hotpath-alloc = ["verter_compiler/hotpath-alloc", "hotpath", "hotpath/hotpath-alloc"]
 
 [dependencies]
-verter_core = { path = "../verter_core", features = ["bench"] }
-verter_host = { path = "../verter_host" }
-verter_vfs = { path = "../verter_vfs" }
+verter_compiler = { path = "../verter_compiler", features = ["bench"] }
+verter_parser = { path = "../verter_parser" }
+verter_session = { path = "../verter_session" }
+verter_workspace = { path = "../verter_workspace" }
 verter_diagnostics = { path = "../verter_diagnostics" }
-verter_analysis = { path = "../verter_analysis" }
+verter_semantic = { path = "../verter_semantic" }
 verter_span = { path = "../verter_span" }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
@@ -32,15 +33,16 @@ oxc_span = { workspace = true }
 oxc_ast = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-walkdir = "2"
-rayon = "1.7"
-tempfile = "3"
-hotpath = { version = "0.13", optional = true }
+walkdir = "2.5"
+glob = "0.3.3"
+rayon = "1.12"
+tempfile = "3.27"
+hotpath = { version = "0.16", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
-smallvec = "1"
-tempfile = "3"
+smallvec = "1.15"
+tempfile = "3.27"
 
 [[bench]]
 name = "bindings_bench"
@@ -90,6 +92,30 @@ harness = false
 name = "new_impl_comparison"
 harness = false
 
+[[bench]]
+name = "cache_baseline"
+harness = false
+
+[[bench]]
+name = "fact_tracer_warm_hit_zero_alloc"
+harness = false
+
+[[bench]]
+name = "fact_validation_hot_path"
+harness = false
+
+[[bench]]
+name = "repo_warm_second_pass"
+harness = false
+
+[[bench]]
+name = "repo_first_pass_loop"
+harness = false
+
+[[bench]]
+name = "list_file_symbols_bench"
+harness = false
+
 
 [[example]]
 name = "expression_validator"
@@ -122,3 +148,7 @@ path = "examples/profile_host_synthetic.rs"
 [[example]]
 name = "profile_component_meta"
 path = "examples/profile_component_meta.rs"
+
+[[example]]
+name = "profile_public_api_batch"
+path = "examples/profile_public_api_batch.rs"

@@ -1,0 +1,97 @@
+{
+  "slug": "events/delegated_and_native.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "delegated_and_native",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "first_child",
+    "child",
+    "reset",
+    "sibling",
+    "sibling",
+    "template_effect",
+    "set_text",
+    "get",
+    "delegated",
+    "update",
+    "event",
+    "event",
+    "delegated",
+    "set",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "event",
+    "first_child",
+    "from_html",
+    "get",
+    "reset",
+    "set",
+    "set_text",
+    "sibling",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "first_child": 1,
+    "child": 1,
+    "reset": 1,
+    "sibling": 2,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "delegated": 2,
+    "update": 1,
+    "event": 2,
+    "set": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click",
+    "input"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button> </button> <div>hover</div> <input/>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button> <div>hover</div> <input/>`, 1); export default function delegated_and_native($$anchor) {let count = $.state(0); var fragment = root(); var button = $.first_child(fragment); var text = $.child(button); $.reset(button); var div = $.sibling(button, 2); var input = $.sibling(div, 2); $.template_effect(() => $.set_text(text, `click ${$.get(count) ?? ''}`)); $.delegated('click', button, () => $.update(count)); $.event('mouseenter', div, () => {}); $.event('mouseleave', div, () => {}); $.delegated('input', input, (e) => $.set(count, e.currentTarget.value.length, true)); $.append($$anchor, fragment);} $.delegate(['click', 'input']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

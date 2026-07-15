@@ -1,0 +1,79 @@
+{
+  "slug": "runes/props_rest_member_handler.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "props_rest_member_handler",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "rest_props",
+    "state",
+    "delegated",
+    "set",
+    "get",
+    "append",
+    "pop",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "from_html",
+    "get",
+    "pop",
+    "push",
+    "rest_props",
+    "set",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "rest_props": 1,
+    "state": 1,
+    "delegated": 1,
+    "set": 1,
+    "get": 1,
+    "append": 1,
+    "pop": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button>x</button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var rest_excludes = new Set(['$$slots', '$$events', '$$legacy', 'a']); var root = $.from_html(`<button>x</button>`); export default function props_rest_member_handler($$anchor, $$props) {$.push($$props, true); let rest = $.rest_props($$props, rest_excludes); let sink = $.state(0); var button = root(); $.delegated('click', button, () => $.set(sink, $.get(sink) + $$props.x)); $.append($$anchor, button); $.pop();} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

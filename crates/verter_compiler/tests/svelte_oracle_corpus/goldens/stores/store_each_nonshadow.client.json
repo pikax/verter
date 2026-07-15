@@ -1,0 +1,97 @@
+{
+  "slug": "stores/store_each_nonshadow.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "store_each_nonshadow",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "store_get",
+    "setup_stores",
+    "comment",
+    "first_child",
+    "each",
+    "index",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "comment",
+    "each",
+    "first_child",
+    "from_html",
+    "index",
+    "pop",
+    "push",
+    "reset",
+    "set_text",
+    "setup_stores",
+    "store_get",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "store_get": 1,
+    "setup_stores": 1,
+    "comment": 1,
+    "first_child": 1,
+    "each": 1,
+    "index": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 2,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import {writable} from 'svelte/store'; var root = $.from_html(`<p> </p>`); export default function store_each_nonshadow($$anchor, $$props) {$.push($$props, true); const $y = () => $.store_get(y, '$y', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); const y = writable(1); var fragment = $.comment(); var node = $.first_child(fragment); $.each(node, 17, () => $$props.items, $.index, ($$anchor, x) => {var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $y())); $.append($$anchor, p);}); $.append($$anchor, fragment); $.pop(); $$cleanup();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

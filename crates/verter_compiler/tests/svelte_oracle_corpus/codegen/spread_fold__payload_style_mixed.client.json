@@ -1,0 +1,81 @@
+{
+  "slug": "spread_fold__payload_style_mixed",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "spread_fold__payload_style_mixed",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "attribute_effect",
+    "STYLE",
+    "get",
+    "child",
+    "reset",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "STYLE",
+    "append",
+    "attribute_effect",
+    "child",
+    "delegate",
+    "delegated",
+    "from_html",
+    "get",
+    "reset",
+    "state",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "attribute_effect": 1,
+    "STYLE": 1,
+    "get": 1,
+    "child": 1,
+    "reset": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div><button>b</button></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div><button>b</button></div>`); export default function spread_fold__payload_style_mixed($$anchor) {let x = $.state(0); var div = root(); $.attribute_effect(div, () => ({...props, [$.STYLE]: {color: `a${$.get(x) ?? ''}b`}})); var button = $.child(div); $.reset(div); $.delegated('click', button, () => $.update(x)); $.append($$anchor, div);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

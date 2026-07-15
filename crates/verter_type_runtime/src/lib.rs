@@ -10,8 +10,8 @@
 //! - Backend-specific query helpers
 //!
 //! It does NOT own:
-//! - Semantic expansion request/result types (→ `verter_resolver`)
-//! - SFC-origin request contracts (→ `verter_resolver`)
+//! - Semantic expansion request/result types (→ `verter_session::resolver_core`)
+//! - SFC-origin request contracts (→ `verter_session::resolver_core`)
 //! - Editor restart policy (→ `verter_lsp`)
 //! - Background workspace sync policy (→ `verter_lsp`)
 //! - Merged diagnostics strategy (→ `verter_lsp`)
@@ -19,14 +19,20 @@
 //! # Dependency Direction
 //!
 //! ```text
-//! verter_resolver ──→ verter_type_runtime (for backend-backed expansion)
+//! verter_session::resolver_core ──→ verter_type_runtime (for backend-backed expansion)
 //! verter_lsp ────────→ verter_type_runtime (for sessions + orchestration)
 //! ```
 //!
-//! `verter_type_runtime` does NOT depend on `verter_resolver` or `verter_host`.
+//! `verter_type_runtime` does NOT depend on `verter_session::resolver_core` or `verter_session`.
+
+// The resilient single-writer actor never holds a synchronous lock across an
+// `.await` or channel send; denying this lint keeps that discipline enforced
+// crate-wide so a held-lock restart/backpressure stall cannot reappear.
+#![deny(clippy::await_holding_lock)]
 
 pub mod backend;
 pub mod codec;
+pub mod contents_snapshot;
 pub mod discovery;
 pub mod protocol;
 pub mod provider_adapter;
@@ -50,9 +56,9 @@ pub use discovery::{detect_ts_major_version, find_node, find_tsserver};
 pub use protocol::*;
 pub use provider_adapter::TypeProviderAdapter;
 pub use trace::{
-    format_type_runtime_trace_line, type_runtime_trace_enabled, type_runtime_trace_event,
-    type_runtime_trace_scope, with_type_runtime_trace_context, TypeRuntimeTraceContext,
-    TypeRuntimeTraceEvent,
+    current_type_runtime_trace_context, format_type_runtime_trace_line, type_runtime_trace_enabled,
+    type_runtime_trace_event, type_runtime_trace_scope_async, with_type_runtime_trace_context,
+    with_type_runtime_trace_context_async, TypeRuntimeTraceContext, TypeRuntimeTraceEvent,
 };
 pub use traits::{ProviderFuture, ProviderPriority, TypeProvider};
 pub use uri::{

@@ -1,0 +1,56 @@
+{
+  "slug": "blocks/key_lone_text.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "key_lone_text",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "key",
+    "text",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "first_child",
+    "key",
+    "text"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "key": 1,
+    "text": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function key_lone_text($$anchor) {let k = 0; var fragment = $.comment(); var node = $.first_child(fragment); $.key(node, () => k, ($$anchor) => {var text = $.text('x'); $.append($$anchor, text);}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

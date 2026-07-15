@@ -1,0 +1,83 @@
+{
+  "slug": "matrix/static_attrs_serialized.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "static_attrs_serialized",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "child",
+    "child",
+    "reset",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "from_html",
+    "get",
+    "reset",
+    "set_text",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "child": 2,
+    "reset": 2,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<a href=\"/x\" class=\"link\" data-id=\"5\" title=\"t\"><button> </button></a>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<a href=\"/x\" class=\"link\" data-id=\"5\" title=\"t\"><button> </button></a>`); export default function static_attrs_serialized($$anchor) {let count = $.state(0); var a = root(); var button = $.child(a); var text = $.child(button, true); $.reset(button); $.reset(a); $.template_effect(() => $.set_text(text, $.get(count))); $.delegated('click', button, () => $.update(count)); $.append($$anchor, a);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

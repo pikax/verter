@@ -1,4 +1,4 @@
-//! Quick fix: convert a runtime `defineProps(...)` to type-based `defineProps<{...}>()`.
+﻿//! Quick fix: convert a runtime `defineProps(...)` to type-based `defineProps<{...}>()`.
 //!
 //! Handles: `define-props-declaration`
 //!
@@ -16,8 +16,8 @@
 
 use crate::provider::{ActionContext, ActionProvider};
 use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
-use verter_analysis::types::AnalyzedMacroKind;
 use verter_diagnostics::LintDiagnostic;
+use verter_semantic::analysis::types::AnalyzedMacroKind;
 
 pub struct ConvertToTypedProps;
 
@@ -101,13 +101,13 @@ mod tests {
     use crate::provider::ActionContext;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
-    use verter_analysis::build_script_analysis;
-    use verter_analysis::types::{
-        AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, ScriptAnalysisSnapshot,
-        TypeResolutionSource,
-    };
     use verter_diagnostics::{
         Certainty, DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity,
+    };
+    use verter_semantic::analysis::build_script_analysis;
+    use verter_semantic::analysis::types::{
+        AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, ScriptAnalysisSnapshot,
+        TypeResolutionSource,
     };
     use verter_span::Span;
 
@@ -155,6 +155,9 @@ mod tests {
             tags: vec![],
             resolution_source: TypeResolutionSource::Rust,
             resolution_error: None,
+            payload: None,
+            type_expr_scope: None,
+            declared_in_macro_type_arg: false,
         }
     }
 
@@ -173,6 +176,8 @@ mod tests {
             expose_fields: vec![],
             default_values: vec![],
             resolved_local_types: vec![],
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span,
         }
     }

@@ -1,8 +1,8 @@
 use super::*;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
-use verter_analysis::template;
-use verter_analysis::types::ImportBindingKind;
-use verter_analysis::*;
+use verter_semantic::analysis::template;
+use verter_semantic::analysis::types::ImportBindingKind;
+use verter_semantic::analysis::*;
 
 fn make_analysis(
     bindings: Vec<AnalyzedBinding>,
@@ -145,7 +145,7 @@ fn test_prepare_rename_css_class_in_template() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -172,7 +172,7 @@ fn test_rename_css_class_across_template_and_style() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -205,14 +205,14 @@ fn make_element_with_attrs(
     tag: &str,
     classes: &[&str],
     id: Option<&str>,
-) -> verter_analysis::TemplateElement {
+) -> verter_semantic::analysis::TemplateElement {
     let mut attrs = Vec::new();
     if !classes.is_empty() {
         let class_val = classes.join(" ");
         let pattern = format!("class=\"{}\"", class_val);
         let start = source.find(&pattern).unwrap_or(0) as u32;
         let end = start + pattern.len() as u32;
-        attrs.push(verter_analysis::TemplateAttribute {
+        attrs.push(verter_semantic::analysis::TemplateAttribute {
             name: "class".into(),
             value: Some(class_val),
             is_dynamic: false,
@@ -225,7 +225,7 @@ fn make_element_with_attrs(
         let pattern = format!("id=\"{}\"", id_val);
         let start = source.find(&pattern).unwrap_or(0) as u32;
         let end = start + pattern.len() as u32;
-        attrs.push(verter_analysis::TemplateAttribute {
+        attrs.push(verter_semantic::analysis::TemplateAttribute {
             name: "id".into(),
             value: Some(id_val.into()),
             is_dynamic: false,
@@ -234,11 +234,11 @@ fn make_element_with_attrs(
             value_span: None,
         });
     }
-    verter_analysis::TemplateElement {
+    verter_semantic::analysis::TemplateElement {
         tag: tag.into(),
         is_component: false,
         is_self_closing: false,
-        namespace: verter_analysis::ElementNamespace::Html,
+        namespace: verter_semantic::analysis::ElementNamespace::Html,
         attributes: attrs,
         directives: vec![],
         v_for: None,
@@ -263,14 +263,14 @@ fn make_element_with_attrs(
     }
 }
 
-fn build_style(source: &str, blocks: &[SfcBlock]) -> verter_analysis::StyleBlockAnalysis {
+fn build_style(source: &str, blocks: &[SfcBlock]) -> verter_semantic::analysis::StyleBlockAnalysis {
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (content_start, content_end) = style_block.content_range();
     let css_content = &source[content_start as usize..content_end as usize];
     let scoped = style_block.attrs_raw.contains("scoped");
-    verter_analysis::style::build_css_style_analysis(
+    verter_semantic::analysis::style::build_css_style_analysis(
         css_content,
-        verter_analysis::style::VueStyleInput {
+        verter_semantic::analysis::style::VueStyleInput {
             v_binds: vec![],
             special_pseudos: vec![],
         },
@@ -293,7 +293,7 @@ fn test_rename_css_id_across_template_and_style() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -338,7 +338,7 @@ fn test_rename_css_class_doesnt_affect_other_names() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_analysis::TemplateAnalysisSnapshot {
+            (verter_semantic::analysis::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })

@@ -1,0 +1,10 @@
+error[E0624]: method `workspace` is private
+  --> tests/cases/compile-fail/workspace_accessor_visibility.rs:18:20
+   |
+18 |     let _ws = host.workspace();
+   |                    ^^^^^^^^^ private method
+   |
+  ::: src/host_construction.rs
+   |
+   |     pub(crate) fn workspace(&self) -> Arc<dyn verter_workspace::WorkspaceAccess> {
+   |     ---------------------------------------------------------------------------- private method defined here

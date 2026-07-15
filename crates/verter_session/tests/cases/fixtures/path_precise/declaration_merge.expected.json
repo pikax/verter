@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "archetype": "declaration_merge",
+  "merged_decls": [
+    {
+      "kind": "interface_merge",
+      "merged_symbol_name": "MergedInterface",
+      "symbol_space": "Type",
+      "merged_parts": [
+        { "part_id": 0, "member": "a" },
+        { "part_id": 1, "member": "b" }
+      ],
+      "stable_across_reorder": true
+    },
+    {
+      "kind": "function_overload",
+      "merged_symbol_name": "mergedFn",
+      "symbol_space": "Value",
+      "merged_parts": [
+        { "part_id": 0, "signature": "(x: number) => number" },
+        { "part_id": 1, "signature": "(x: string) => string" },
+        { "part_id": 2, "signature": "(x: number | string) => number | string", "is_implementation": true }
+      ],
+      "stable_across_reorder": true
+    },
+    {
+      "kind": "namespace_value_merge",
+      "merged_symbol_name": "mergedNamespacedValue",
+      "symbol_space": ["Value", "Namespace"],
+      "merged_parts": [
+        { "part_id": 0, "kind": "function", "signature": "() => void" },
+        { "part_id": 1, "kind": "namespace_member", "member": "tag" }
+      ],
+      "stable_across_reorder": true,
+      "note": "R11: namespace+value merge produces TWO distinct Export facts (Value space and Namespace space); BothTypeValue is forbidden"
+    }
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "reorder MergedInterface parts (part 2 before part 1)",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R7: merged_symbol_name stable across declaration reordering"
+    },
+    {
+      "edit": "add a third mergedFn overload",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R7: merged_parts is payload, not validation granularity; consumers observing only one overload's facts are not invalidated"
+    },
+    {
+      "edit": "edit MergedInterface.a body",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: Member(MergedInterface, \"a\") changes; observing consumers are invalidated"
+    }
+  ]
+}

@@ -6,22 +6,34 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "Async file scheduler for Verter — per-file staging, priority queue, declarative blockers"
+description = "Async file scheduler for Verter — driver-owned DAG with typed identity admission, dependency gating, and per-class capacity accounting"
 publish = false
 
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
+# Exposes test-only HostCpuPool internals (per-pool identity token TLS,
+# `HostCpuPool::pool_id`, `HostCpuPool::build_count`, the
+# `host_cpu_pool_token` re-export) to cross-crate test code. Production
+# binaries MUST NOT enable this feature; downstream crates that need it
+# for their own tests should add `features = ["test-support"]` only in
+# `[dev-dependencies]`.
+test-support = []
 
 [dependencies]
-arc-swap = "1"
-hotpath = { version = "0.13", optional = true }
-parking_lot = "0.12"
+arc-swap = "1.9"
+hotpath = { version = "0.16", optional = true }
+parking_lot = "0.12.5"
 rustc-hash = { workspace = true }
-dashmap = "6"
-crossbeam-channel = "0.5"
+dashmap = "6.2"
+crossbeam-channel = "0.5.15"
+verter_audit = { path = "../verter_audit" }
+verter_language = { path = "../verter_language" }
 verter_span = { path = "../verter_span" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1"
 
 [dev-dependencies]

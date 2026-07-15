@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "archetype": "module_augmentation_global",
+  "augmentation_target_kind": "GlobalAugmentation",
+  "augmented_member": {
+    "interface": "Window",
+    "name": "__verterDebugSession",
+    "type": "{ id: string; epoch: number } | undefined"
+  },
+  "fact_dep_signature_observed_by_consumer": [
+    "ModuleAugmentationIndexShape(target=GlobalAugmentation)"
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "remove the augmenter file",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R29: ModuleAugmentationIndexShape(GlobalAugmentation) fingerprint changes"
+    },
+    {
+      "edit": "edit unrelated global augmenter for `globalThis`",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R29: per-augmenter-target-key isolation; Window-specific consumers do not depend on globalThis-specific augmenters"
+    }
+  ]
+}

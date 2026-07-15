@@ -1,0 +1,50 @@
+{
+  "slug": "special/svelte_head_static_title.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_head_static_title",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "head",
+    "effect",
+    "document"
+  ],
+  "helperSet": [
+    "document",
+    "effect",
+    "head"
+  ],
+  "helperCounts": {
+    "head": 1,
+    "effect": 1,
+    "document": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_head_static_title($$anchor, $$props) {$.head('63bkss', ($$anchor) => {$.effect(() => {$.document.title = 'Dashboard';});});}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

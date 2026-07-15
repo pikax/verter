@@ -4,16 +4,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use verter_host::{FileKind, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 use crate::server::PublishedResolverSnapshot;
 use crate::test_utils::make_test_vfs_workspace_from_registry;
-use crate::tsgo::mock::{MockCall, MockTypeProvider};
-use crate::tsgo::protocol::{
-    CompletionResult, HoverInfo, InlayHint, RenameLocation, SemanticToken, SignatureHelp,
-    TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation,
+use crate::type_provider::mock::{MockCall, MockTypeProvider};
+use crate::type_provider::protocol::{
+    CompletionResolveResult, CompletionResult, HoverInfo, InlayHint, ProviderDiagnosticContext,
+    RenameLocation, SemanticToken, SignatureHelp, TypeCodeAction, TypeDiagnostic,
+    TypeDocumentHighlight, TypeLocation,
 };
-use crate::tsgo::traits::{ProviderFuture, TypeProvider};
+use crate::type_provider::traits::{ProviderFuture, TypeProvider};
 use crate::ProjectSyncMode;
 
 #[derive(Default)]
@@ -22,6 +23,10 @@ struct SlowConfigurePathsProvider {
 }
 
 impl TypeProvider for SlowConfigurePathsProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
     fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
@@ -93,6 +98,7 @@ impl TypeProvider for SlowConfigurePathsProvider {
         _path: &str,
         _start_offset: u32,
         _end_offset: u32,
+        _diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -135,6 +141,10 @@ impl TypeProvider for SlowConfigurePathsProvider {
 struct TriggerSensitiveCompletionProvider;
 
 impl TypeProvider for TriggerSensitiveCompletionProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
     fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
@@ -159,26 +169,38 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
                 Vec::new()
             } else {
                 vec![
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "name".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                         detail: Some("(property) name: string".to_string()),
                         documentation: None,
                         edit_range_start: None,
                         edit_range_end: None,
+                        text_edit_new_text: None,
                         insert_text: None,
                         sort_text: None,
+                        insert_text_format: None,
+                        commit_characters: None,
+                        filter_text: None,
+                        preselect: None,
+                        label_details: None,
                         data: None,
                     },
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "id".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                         detail: Some("(property) id: number".to_string()),
                         documentation: None,
                         edit_range_start: None,
                         edit_range_end: None,
+                        text_edit_new_text: None,
                         insert_text: None,
                         sort_text: None,
+                        insert_text_format: None,
+                        commit_characters: None,
+                        filter_text: None,
+                        preselect: None,
+                        label_details: None,
                         data: None,
                     },
                 ]
@@ -235,6 +257,7 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
         _path: &str,
         _start_offset: u32,
         _end_offset: u32,
+        _diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -273,6 +296,10 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
 struct DotTriggerRequiredCompletionProvider;
 
 impl TypeProvider for DotTriggerRequiredCompletionProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
     fn open_file(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
@@ -295,37 +322,55 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
         Box::pin(async move {
             let items = if trigger.as_deref() == Some(".") {
                 vec![
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "disabled".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                         detail: Some("(property) disabled: boolean".to_string()),
                         documentation: None,
                         edit_range_start: None,
                         edit_range_end: None,
+                        text_edit_new_text: None,
                         insert_text: None,
                         sort_text: None,
+                        insert_text_format: None,
+                        commit_characters: None,
+                        filter_text: None,
+                        preselect: None,
+                        label_details: None,
                         data: None,
                     },
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "label".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                         detail: Some("(property) label: string".to_string()),
                         documentation: None,
                         edit_range_start: None,
                         edit_range_end: None,
+                        text_edit_new_text: None,
                         insert_text: None,
                         sort_text: None,
+                        insert_text_format: None,
+                        commit_characters: None,
+                        filter_text: None,
+                        preselect: None,
+                        label_details: None,
                         data: None,
                     },
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "handler".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Method),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Method),
                         detail: Some("(method) handler(): void".to_string()),
                         documentation: None,
                         edit_range_start: None,
                         edit_range_end: None,
+                        text_edit_new_text: None,
                         insert_text: None,
                         sort_text: None,
+                        insert_text_format: None,
+                        commit_characters: None,
+                        filter_text: None,
+                        preselect: None,
+                        label_details: None,
                         data: None,
                     },
                 ]
@@ -384,6 +429,7 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
         _path: &str,
         _start_offset: u32,
         _end_offset: u32,
+        _diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -418,6 +464,255 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
     }
 }
 
+/// A FAITHFUL type provider for the declaration-overlay close-supersession race:
+/// it applies the open/close EFFECT (mutating `open_paths`) at await-COMPLETION
+/// inside the returned future — exactly as the real `ExtensionTypeProvider` does
+/// (it inserts/removes the path inside the `async move` body), NOT at call-ENTRY
+/// like `MockTypeProvider` (which records the call before its `.await` returns and
+/// therefore MASKS the stale-close race). `open_paths` is the provider's ground
+/// truth: a `.d.<ext>.ts` overlay is resolvable iff it is in this set, so a test
+/// can assert the provider and the refcount agree (no TS2307 stranding).
+///
+/// A one-shot close gate (`block_close_path` / `arrived` / `release`) pauses the
+/// `close_file` future of ONE exact path AFTER it has been entered but BEFORE the
+/// open-set removal effect applies — modelling a slow provider close, so the test
+/// can run a concurrent reopen pass inside the destructive-close window
+/// deterministically (no timing race).
+#[derive(Default)]
+struct GatedDeclOverlayProvider {
+    open_paths: std::sync::Mutex<HashSet<String>>,
+    calls: std::sync::Mutex<Vec<MockCall>>,
+    /// `Some((path, arrived, release))`: a `close_file` against `path` SIGNALS
+    /// `arrived` (the close future has been entered, before the open-set removal),
+    /// then AWAITS `release` before applying the removal effect and returning. The
+    /// gate is taken (one-shot) so subsequent closes of the same path do not block.
+    #[allow(clippy::type_complexity)]
+    close_gate: std::sync::Mutex<
+        Option<(
+            String,
+            std::sync::Arc<tokio::sync::Notify>,
+            std::sync::Arc<tokio::sync::Notify>,
+        )>,
+    >,
+    /// `Some((path, opened))`: an `open_file`/`update_file` against `path` SIGNALS
+    /// `opened` AFTER its open-set insertion effect has applied (the overlay is now
+    /// resolvable). One-shot. Lets a test learn the EXACT moment a specific overlay
+    /// open EFFECT lands — used to release a gated close strictly after a concurrent
+    /// reopen has re-established the overlay, so the stale-close strand is
+    /// deterministic in a tree WITHOUT the owner's per-path serialization.
+    #[allow(clippy::type_complexity)]
+    open_signal: std::sync::Mutex<Option<(String, std::sync::Arc<tokio::sync::Notify>)>>,
+}
+
+impl GatedDeclOverlayProvider {
+    fn open_paths_snapshot(&self) -> HashSet<String> {
+        self.open_paths.lock().unwrap().clone()
+    }
+
+    fn calls(&self) -> Vec<MockCall> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    /// Take (one-shot) the open signal armed for `path`, if any.
+    fn take_open_signal(&self, path: &str) -> Option<std::sync::Arc<tokio::sync::Notify>> {
+        let mut guard = self.open_signal.lock().unwrap();
+        match guard.as_ref() {
+            Some((armed, _)) if armed == path => guard.take().map(|(_, opened)| opened),
+            _ => None,
+        }
+    }
+
+    /// Arm the one-shot close gate for `path`. Returns `(arrived, release)`: the
+    /// test awaits `arrived` to learn the close future has been entered (the
+    /// closing task is now paused INSIDE the destructive close, before the open-set
+    /// removal applies), runs whatever concurrent reopen it needs, then signals
+    /// `release` (`notify_one`, which stores a permit so there is no
+    /// signal-before-await race) to let the close apply its removal and return.
+    fn block_close_path(
+        &self,
+        path: &str,
+    ) -> (
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+    ) {
+        let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        *self.close_gate.lock().unwrap() =
+            Some((path.to_string(), arrived.clone(), release.clone()));
+        (arrived, release)
+    }
+
+    /// Arm a one-shot OPEN signal for `path`. Returns `opened`: a future open (or
+    /// in-place update) of `path` fires it AFTER applying its open-set insertion, so
+    /// the test learns the open EFFECT has landed (the overlay is now resolvable).
+    fn signal_open_path(&self, path: &str) -> std::sync::Arc<tokio::sync::Notify> {
+        let opened = std::sync::Arc::new(tokio::sync::Notify::new());
+        *self.open_signal.lock().unwrap() = Some((path.to_string(), opened.clone()));
+        opened
+    }
+}
+
+impl TypeProvider for GatedDeclOverlayProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
+    fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        let content = content.to_string();
+        // Take the one-shot open signal (if armed for this exact path) WITHOUT
+        // holding the open_paths lock across the await.
+        let opened_signal = self.take_open_signal(&path);
+        Box::pin(async move {
+            // EFFECT at await-completion: the path becomes resolvable only once the
+            // open future actually runs to its end (faithful to the real provider).
+            self.open_paths.lock().unwrap().insert(path.clone());
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::OpenFile { path, content });
+            // Signal AFTER the open-set insertion: the overlay is now resolvable.
+            if let Some(opened) = opened_signal {
+                opened.notify_one();
+            }
+            Ok(())
+        })
+    }
+
+    fn update_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        let content = content.to_string();
+        let opened_signal = self.take_open_signal(&path);
+        Box::pin(async move {
+            // An update keeps the path open (sync_dts of an already-live overlay).
+            self.open_paths.lock().unwrap().insert(path.clone());
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::UpdateFile { path, content });
+            if let Some(opened) = opened_signal {
+                opened.notify_one();
+            }
+            Ok(())
+        })
+    }
+
+    fn close_file(&self, path: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_string();
+        // Capture the one-shot gate (if armed for this exact path) WITHOUT holding
+        // the open_paths lock across the await.
+        let gate = {
+            let mut guard = self.close_gate.lock().unwrap();
+            match guard.as_ref() {
+                Some((armed, _, _)) if armed == &path => {
+                    guard.take().map(|(_, arrived, release)| (arrived, release))
+                }
+                _ => None,
+            }
+        };
+        Box::pin(async move {
+            if let Some((arrived, release)) = gate {
+                // Signal the test that the destructive close has been ENTERED (the
+                // open-set removal has NOT applied yet), then await the release.
+                arrived.notify_one();
+                release.notified().await;
+            }
+            // EFFECT at await-completion: only now is the path no longer resolvable.
+            self.open_paths.lock().unwrap().remove(&path);
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::CloseFile { path });
+            Ok(())
+        })
+    }
+
+    fn get_completions(
+        &self,
+        _path: &str,
+        _offset: u32,
+        _trigger_character: Option<&str>,
+    ) -> ProviderFuture<'_, CompletionResult> {
+        Box::pin(async {
+            Ok(CompletionResult {
+                items: Vec::new(),
+                is_incomplete: false,
+            })
+        })
+    }
+
+    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_type_definition(
+        &self,
+        _path: &str,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_rename_locations(
+        &self,
+        _path: &str,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<RenameLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_signature_help(
+        &self,
+        _path: &str,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<SignatureHelp>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn get_code_actions(
+        &self,
+        _path: &str,
+        _start_offset: u32,
+        _end_offset: u32,
+        _diagnostics: &[ProviderDiagnosticContext],
+    ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_document_highlights(
+        &self,
+        _path: &str,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_inlay_hints(
+        &self,
+        _path: &str,
+        _start_offset: u32,
+        _end_offset: u32,
+    ) -> ProviderFuture<'_, Vec<InlayHint>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
 #[derive(Default)]
 struct LostContentCompletionProvider {
     open_paths: std::sync::Mutex<HashSet<String>>,
@@ -443,6 +738,10 @@ impl LostContentCompletionProvider {
 }
 
 impl TypeProvider for LostContentCompletionProvider {
+    fn provider_id(&self) -> &'static str {
+        "tsgo"
+    }
+
     fn open_file(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {
         let path = path.to_string();
         let content = content.to_string();
@@ -460,15 +759,11 @@ impl TypeProvider for LostContentCompletionProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.calls.lock().unwrap().push(MockCall::UpdateFile {
-                path: path.clone(),
-                content,
-            });
-            if self.open_paths.lock().unwrap().contains(&path) {
-                Ok(())
-            } else {
-                Ok(())
-            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::UpdateFile { path, content });
+            Ok(())
         })
     }
 
@@ -497,43 +792,55 @@ impl TypeProvider for LostContentCompletionProvider {
                 offset: 0,
             });
             if !self.open_paths.lock().unwrap().contains(&path) {
-                return Err(crate::tsgo::protocol::TypeProviderError::new(
+                return Err(crate::type_provider::protocol::TypeProviderError::new(
                     "No content available.",
                 ));
             }
             if self.require_current_api {
                 let current_api_path = path
                     .strip_suffix(".tsx")
-                    .map(|prefix| format!("{prefix}.ts"))
+                    .map(|prefix| format!("{prefix}.verter.ts"))
                     .unwrap_or_else(|| path.clone());
                 if !self.open_paths.lock().unwrap().contains(&current_api_path) {
-                    return Err(crate::tsgo::protocol::TypeProviderError::new(
+                    return Err(crate::type_provider::protocol::TypeProviderError::new(
                         "No content available.",
                     ));
                 }
             }
             Ok(CompletionResult {
                 items: vec![
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "disabled".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                         detail: Some("(property) disabled: boolean".to_string()),
                         documentation: None,
                         edit_range_start: None,
                         edit_range_end: None,
+                        text_edit_new_text: None,
                         insert_text: None,
                         sort_text: None,
+                        insert_text_format: None,
+                        commit_characters: None,
+                        filter_text: None,
+                        preselect: None,
+                        label_details: None,
                         data: None,
                     },
-                    crate::tsgo::protocol::Completion {
+                    crate::type_provider::protocol::Completion {
                         label: "label".to_string(),
-                        kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                        kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                         detail: Some("(property) label: string".to_string()),
                         documentation: None,
                         edit_range_start: None,
                         edit_range_end: None,
+                        text_edit_new_text: None,
                         insert_text: None,
                         sort_text: None,
+                        insert_text_format: None,
+                        commit_characters: None,
+                        filter_text: None,
+                        preselect: None,
+                        label_details: None,
                         data: None,
                     },
                 ],
@@ -587,6 +894,7 @@ impl TypeProvider for LostContentCompletionProvider {
         _path: &str,
         _start_offset: u32,
         _end_offset: u32,
+        _diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -616,6 +924,28 @@ impl TypeProvider for LostContentCompletionProvider {
 fn make_hover_test_service(
     type_provider: Arc<dyn TypeProvider>,
 ) -> tower_lsp_server::LspService<VerterLanguageServer> {
+    make_hover_test_service_with_kind(type_provider, crate::TypeProviderKind::Tsserver)
+}
+
+/// Build a hover/sync test service whose engine exercises the inferred
+/// carrier-open path (tsgo). Used by the tests that characterize the
+/// ENGINE-AGNOSTIC IDE-path commit/close-after-success state machine
+/// (open-new-then-close-old, retain-prior-on-failed-sync, jsx↔tsx flip):
+/// under tsserver the carrier-companion content verbs are no-ops (publish-only),
+/// so the open/fail path that discipline guards is observable only on tsgo. The
+/// tsserver publish-only contract for those same methods is covered separately
+/// (the `project_sync` suppression tests + the imported-carrier publish-only
+/// tests + the real-provider carrier baselines).
+fn make_hover_test_service_tsgo(
+    type_provider: Arc<dyn TypeProvider>,
+) -> tower_lsp_server::LspService<VerterLanguageServer> {
+    make_hover_test_service_with_kind(type_provider, crate::TypeProviderKind::Tsgo)
+}
+
+fn make_hover_test_service_with_kind(
+    type_provider: Arc<dyn TypeProvider>,
+    kind: crate::TypeProviderKind,
+) -> tower_lsp_server::LspService<VerterLanguageServer> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
@@ -626,10 +956,11 @@ fn make_hover_test_service(
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                type_provider_kind: kind,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -645,45 +976,155 @@ fn install_test_resolver_for_root(
     root: &str,
     tsconfig: Option<&str>,
 ) {
-    let vfs_ws = std::sync::Arc::new(verter_vfs::FilesystemWorkspace::new(
-        verter_vfs::FilesystemOptions::default(),
+    let vfs_ws = std::sync::Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
     ));
 
-    // Build a minimal project graph with a single project.
-    let projects = vec![verter_vfs::workspace_snapshot::OwnershipProject {
-        id: verter_vfs::workspace_snapshot::ProjectId(0),
-        root: verter_vfs::CanonicalPath::new(root),
-        workspace_root: verter_vfs::CanonicalPath::new(root),
-        payload: verter_vfs::workspace_snapshot::ProjectPayload::Fallback {
-            membership: verter_vfs::FallbackMembership {
-                root: verter_vfs::CanonicalPath::new(root),
-                exclude: vec![verter_vfs::NormalizedGlob::new(&format!(
-                    "{}/node_modules/**",
-                    root
-                ))],
+    let root_cp = verter_workspace::CanonicalPath::new(root);
+
+    // Mirror the production snapshot builder, which emits a tsconfig-backed
+    // `Configured` project AND a `Fallback` project at the workspace root. A
+    // carrier's external-TS membership resolves through the SHARED publish path
+    // (`publish_carrier` → `WorkspaceProjectResolver`), and that resolver only
+    // mints a `ProjectBinding` for a `Configured` owner — a `Fallback`-only
+    // snapshot fails closed (`NoProject`), so the carrier is never published or
+    // registered. A `tsconfig` therefore yields a `Configured` owner here so the
+    // membership path exercises the same mechanism production uses. The projects
+    // are pushed in precedence order (a `Configured` owner precedes the `Fallback`
+    // at the same root) and re-id'd by index so IDs match position.
+    let mut projects: Vec<verter_workspace::workspace_snapshot::OwnershipProject> = Vec::new();
+    if let Some(tsconfig) = tsconfig {
+        // Spec-bridge membership: an `include` of `{root}/**/*` with an empty
+        // materialized set, so `ConfiguredMembership::contains` matches every
+        // file under `root` via the static spec (the documented bridge mode for
+        // a harness that does not walk the disk).
+        let spec = verter_workspace::StaticMembershipSpec {
+            files: Vec::new(),
+            include: vec![verter_workspace::CompiledGlob::new(
+                verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
+            )],
+            exclude: vec![verter_workspace::CompiledGlob::new(
+                verter_workspace::NormalizedGlob::from_root_and_pattern(
+                    &root_cp,
+                    "node_modules/**",
+                ),
+            )]
+            .into(),
+        };
+        projects.push(verter_workspace::workspace_snapshot::OwnershipProject {
+            id: verter_workspace::workspace_snapshot::ProjectId(0),
+            root: root_cp.clone(),
+            workspace_root: root_cp.clone(),
+            payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+                tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
+                membership: verter_workspace::ConfiguredMembership {
+                    spec,
+                    materialized_files: Default::default(),
+                },
+                compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                references: Vec::new(),
+                workspace_aliases: Vec::new(),
+            },
+        });
+    }
+    projects.push(verter_workspace::workspace_snapshot::OwnershipProject {
+        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        root: root_cp.clone(),
+        workspace_root: root_cp.clone(),
+        payload: verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
+            membership: verter_workspace::FallbackMembership {
+                root: root_cp.clone(),
+                exclude: vec![verter_workspace::CompiledGlob::new(
+                    verter_workspace::NormalizedGlob::new(&format!("{}/node_modules/**", root)),
+                )]
+                .into(),
             },
         },
-    }];
+    });
+    // IDs must match index position (the snapshot invariant
+    // `build_workspace_snapshot_simple` upholds after its precedence sort).
+    for (i, project) in projects.iter_mut().enumerate() {
+        project.id = verter_workspace::workspace_snapshot::ProjectId(i as u32);
+    }
 
-    let resolver =
-        verter_vfs::ProjectResolver::new(vec![crate::project_resolver::IdeProjectConfig::new(
+    let resolver = verter_workspace::ProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
             root.to_string(),
             root.to_string(),
             tsconfig.map(|s| s.to_string()),
-        )]);
+        ),
+    ]);
 
-    let snapshot = std::sync::Arc::new(verter_vfs::WorkspaceSnapshot {
+    let snapshot = std::sync::Arc::new(verter_workspace::WorkspaceSnapshot {
+        owners_memo: Default::default(),
         projects,
         resolver,
-        generation: verter_vfs::workspace_snapshot::SnapshotGeneration(1),
+        generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
     });
 
-    let views = crate::workspace_state::build_lsp_views(&snapshot, vec![]);
-    vfs_ws.publish_snapshot(verter_vfs::PublishedRoot::with_ext(
+    let views = crate::workspace_state::build_lsp_views(&*vfs_ws, &snapshot, vec![]);
+    vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
         snapshot,
         Box::new(views),
     ));
     server.install_vfs_workspace(vfs_ws);
+}
+
+/// A `FilesystemWorkspace` publishing ONE `Configured` project owning everything under
+/// `root` via `tsconfig` (spec-bridge `include: {root}/**/*`), so a carrier under
+/// `root` resolves to a `Bound` project binding through the shared
+/// `WorkspaceProjectResolver` — the ownership-resolution source the carrier-sync
+/// gateway reads for BOTH engines. Mirrors [`install_test_resolver_for_root`] but
+/// returns the published workspace directly (for the direct-call background-task tests).
+fn configured_owner_vfs(root: &str, tsconfig: &str) -> Arc<verter_workspace::FilesystemWorkspace> {
+    let vfs_ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let root_cp = verter_workspace::CanonicalPath::new(root);
+    let spec = verter_workspace::StaticMembershipSpec {
+        files: Vec::new(),
+        include: vec![verter_workspace::CompiledGlob::new(
+            verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
+        )],
+        exclude: vec![verter_workspace::CompiledGlob::new(
+            verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "node_modules/**"),
+        )]
+        .into(),
+    };
+    let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
+        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        root: root_cp.clone(),
+        workspace_root: root_cp.clone(),
+        payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+            tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
+            membership: verter_workspace::ConfiguredMembership {
+                spec,
+                materialized_files: Default::default(),
+            },
+            compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+            references: Vec::new(),
+            workspace_aliases: Vec::new(),
+        },
+    }];
+    let resolver = verter_workspace::ProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
+            root.to_string(),
+            root.to_string(),
+            Some(tsconfig.to_string()),
+        ),
+    ]);
+    let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
+        owners_memo: Default::default(),
+        projects,
+        resolver,
+        generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
+    });
+    let views = crate::workspace_state::build_lsp_views(&*vfs_ws, &snapshot, vec![]);
+    vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
+        snapshot,
+        Box::new(views),
+    ));
+    vfs_ws
 }
 
 fn open_test_vue(server: &VerterLanguageServer, path: &str, source: &str) -> Uri {
@@ -740,6 +1181,29 @@ fn completion_labels(response: Option<CompletionResponse>) -> Vec<String> {
     }
 }
 
+fn mock_completion(
+    label: &str,
+    kind: crate::type_provider::protocol::CompletionKind,
+) -> crate::type_provider::protocol::Completion {
+    crate::type_provider::protocol::Completion {
+        label: label.to_string(),
+        kind: Some(kind),
+        detail: None,
+        documentation: None,
+        edit_range_start: None,
+        edit_range_end: None,
+        text_edit_new_text: None,
+        insert_text: None,
+        sort_text: None,
+        insert_text_format: None,
+        commit_characters: None,
+        filter_text: None,
+        preselect: None,
+        label_details: None,
+        data: None,
+    }
+}
+
 fn hover_text(hover: Option<Hover>) -> String {
     match hover.expect("hover should exist").contents {
         HoverContents::Markup(m) => m.value,
@@ -756,7 +1220,15 @@ fn hover_text(hover: Option<Hover>) -> String {
     }
 }
 
+/// Build a [`TypeProviderContext`] for tests through the SAME captured-surface
+/// path production uses. Tests drive provider sync through many entry points;
+/// when a test set up its document WITHOUT completing a recorded sync, seed the
+/// committed sync state + recorded surface from the live artifacts (the exact
+/// data a successful sync would have recorded) and capture again.
 fn synced_type_provider_context(server: &VerterLanguageServer, uri: &Uri) -> TypeProviderContext {
+    if let Some(ctx) = server.type_provider_context(uri) {
+        return ctx;
+    }
     let canonical_id = server
         .documents
         .get_canonical_id(uri)
@@ -766,28 +1238,24 @@ fn synced_type_provider_context(server: &VerterLanguageServer, uri: &Uri) -> Typ
         .documents
         .get_ide(uri)
         .expect("IDE output should exist");
-    let mapper = server
-        .documents
-        .get_position_mapper(uri)
-        .expect("position mapper should exist");
     let tsx_path = server
         .active_ide_path_for_uri(uri)
         .or_else(|| server.target_ide_path_for_uri(uri))
         .expect("type provider path should exist");
-    let tsx_line_index = LineIndex::new(&ide.code, server.documents.encoding());
-    let vue_line_index = server
-        .documents
-        .get(uri)
-        .expect("document should exist")
-        .line_index
-        .clone();
-    TypeProviderContext {
-        tsx_path,
-        tsx_content: ide.code,
-        mapper,
-        tsx_line_index,
-        vue_line_index,
-    }
+    // Simulate the state a completed successful IDE sync commits + records.
+    let mut state = server
+        .provider_sync_state_for_source(&canonical_id)
+        .unwrap_or_else(|| ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ..Default::default()
+        });
+    state.ide_path = Some(tsx_path.clone());
+    state.ide_background_loaded = true;
+    server.commit_provider_sync_state(&canonical_id, state);
+    server.record_carrier_ide_snapshot(&canonical_id, &tsx_path, &ide.code, None);
+    server
+        .type_provider_context(uri)
+        .expect("a seeded provider surface must yield a query context")
 }
 
 fn set_type_hover_at_vue_position(
@@ -798,9 +1266,9 @@ fn set_type_hover_at_vue_position(
     contents: &str,
 ) {
     let ctx = synced_type_provider_context(server, uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -821,12 +1289,12 @@ fn set_type_completions_at_vue_position(
     provider: &MockTypeProvider,
     uri: &Uri,
     position: Position,
-    items: Vec<crate::tsgo::protocol::Completion>,
+    items: Vec<crate::type_provider::protocol::Completion>,
 ) {
     let ctx = synced_type_provider_context(server, uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -935,13 +1403,13 @@ fn test_module_reference(
     raw_text: &str,
     literal_specifier: Option<&str>,
     finite_specifiers: &[&str],
-    analyzability: verter_analysis::ModuleReferenceAnalyzability,
+    analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
     expr_start: usize,
     expr_end: usize,
-) -> verter_host::ScriptModuleReference {
-    verter_host::ScriptModuleReference {
-        syntax: verter_analysis::ModuleReferenceSyntax::StaticImport,
-        semantics: verter_analysis::ModuleReferenceSemantics::Import,
+) -> verter_session::ScriptModuleReference {
+    verter_session::ScriptModuleReference {
+        syntax: verter_semantic::analysis::ModuleReferenceSyntax::StaticImport,
+        semantics: verter_semantic::analysis::ModuleReferenceSemantics::Import,
         is_type_only: false,
         raw_text: raw_text.to_string(),
         literal_specifier: literal_specifier.map(str::to_string),
@@ -960,13 +1428,13 @@ fn test_module_reference_with_semantics(
     raw_text: &str,
     literal_specifier: Option<&str>,
     finite_specifiers: &[&str],
-    analyzability: verter_analysis::ModuleReferenceAnalyzability,
+    analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
     expr_start: usize,
     expr_end: usize,
-    semantics: verter_analysis::ModuleReferenceSemantics,
+    semantics: verter_semantic::analysis::ModuleReferenceSemantics,
     is_type_only: bool,
-) -> verter_host::ScriptModuleReference {
-    verter_host::ScriptModuleReference {
+) -> verter_session::ScriptModuleReference {
+    verter_session::ScriptModuleReference {
         semantics,
         is_type_only,
         ..test_module_reference(
@@ -984,13 +1452,13 @@ fn test_analyzed_module_reference(
     raw_text: &str,
     literal_specifier: Option<&str>,
     finite_specifiers: &[&str],
-    analyzability: verter_analysis::ModuleReferenceAnalyzability,
+    analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
     expr_start: usize,
     expr_end: usize,
-) -> verter_analysis::AnalyzedModuleReference {
-    verter_analysis::AnalyzedModuleReference {
-        syntax: verter_analysis::ModuleReferenceSyntax::StaticImport,
-        semantics: verter_analysis::ModuleReferenceSemantics::Import,
+) -> verter_semantic::analysis::AnalyzedModuleReference {
+    verter_semantic::analysis::AnalyzedModuleReference {
+        syntax: verter_semantic::analysis::ModuleReferenceSyntax::StaticImport,
+        semantics: verter_semantic::analysis::ModuleReferenceSemantics::Import,
         is_type_only: false,
         raw_text: raw_text.to_string(),
         literal_specifier: literal_specifier.map(str::to_string),
@@ -1025,7 +1493,7 @@ impl TestResolverReader {
     }
 }
 
-impl verter_vfs::WorkspaceAccess for TestResolverReader {
+impl verter_workspace::WorkspaceRead for TestResolverReader {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.texts.get(&canonical_id.replace('\\', "/")).cloned()
     }
@@ -1038,10 +1506,71 @@ impl verter_vfs::WorkspaceAccess for TestResolverReader {
         let normalized = canonical_id.replace('\\', "/");
         self.file_exists(&normalized).then_some(normalized)
     }
+
+    fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+    fn forward_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+    fn dependency_snapshot(
+        &self,
+        _canonical_id: &str,
+    ) -> Option<verter_workspace::DependencySnapshotView> {
+        None
+    }
+}
+
+impl verter_workspace::WorkspaceAccess for TestResolverReader {
+    // Reader-only stub overrides (R6/R7). Rationale: `TestResolverReader`
+    // is an LSP test fixture that only feeds the resolver with file content
+    // for definition/hover/completion test plumbing; it never participates
+    // in the host's dep-flow.
+    fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[verter_workspace::ParsedEdge]) {}
+    fn set_exact_resolutions(
+        &self,
+        _canonical_id: &str,
+        _resolutions: Vec<verter_workspace::ExactResolution>,
+    ) -> verter_workspace::ExactResolutionResult {
+        verter_workspace::ExactResolutionResult::default()
+    }
+    fn record_parsed_edges_with_exact_resolutions(
+        &self,
+        _canonical_id: &str,
+        _edges: &[verter_workspace::ParsedEdge],
+        _resolutions: Vec<verter_workspace::ExactResolution>,
+    ) -> verter_workspace::ExactResolutionResult {
+        verter_workspace::ExactResolutionResult::default()
+    }
+    fn replace_semantic_transitive(
+        &self,
+        _canonical_id: &str,
+        _deps: std::collections::BTreeSet<String>,
+    ) {
+    }
+    fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
+    fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
 }
 
 async fn make_definition_test_server(
     files: &[(&str, &str, &str)],
+) -> (
+    tempfile::TempDir,
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    tokio::task::JoinHandle<()>,
+    Arc<MockTypeProvider>,
+    String,
+) {
+    make_definition_test_server_with_kind(files, crate::TypeProviderKind::Tsserver).await
+}
+
+/// Build a filesystem-backed definition/sync test server bound to `kind`. The
+/// barrel-sync BFS tests route through `Tsgo` so the terminal-carrier sync is an
+/// observable `open_file` (under tsserver the carrier-companion verbs are
+/// publish-only); the resolution-graph walk they characterize is engine-agnostic.
+async fn make_definition_test_server_with_kind(
+    files: &[(&str, &str, &str)],
+    kind: crate::TypeProviderKind,
 ) -> (
     tempfile::TempDir,
     tower_lsp_server::LspService<VerterLanguageServer>,
@@ -1066,8 +1595,8 @@ async fn make_definition_test_server(
 
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let vfs_workspace: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(
-        verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default()),
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
     );
     let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
     let host_for_server = Arc::clone(&host);
@@ -1079,10 +1608,11 @@ async fn make_definition_test_server(
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
                 project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                type_provider_kind: kind,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -1205,10 +1735,10 @@ fn module_reference_request_kind_uses_require_semantics() {
         "'pkg'",
         Some("pkg"),
         &[],
-        verter_analysis::ModuleReferenceAnalyzability::Exact,
+        verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
         0,
         5,
-        verter_analysis::ModuleReferenceSemantics::Require,
+        verter_semantic::analysis::ModuleReferenceSemantics::Require,
         false,
     );
     assert_eq!(
@@ -1220,10 +1750,10 @@ fn module_reference_request_kind_uses_require_semantics() {
         "'pkg'",
         Some("pkg"),
         &[],
-        verter_analysis::ModuleReferenceAnalyzability::Exact,
+        verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
         0,
         5,
-        verter_analysis::ModuleReferenceSemantics::Import,
+        verter_semantic::analysis::ModuleReferenceSemantics::Import,
         true,
     );
     assert_eq!(
@@ -1246,7 +1776,7 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
     let reader =
         TestResolverReader::with_files(&["/workspace/src/Foo.vue", "/workspace/src/util.ts"]);
 
-    let prepared = prepare_non_vue_provider_sync(
+    let prepared = prepare_non_carrier_provider_sync(
         None,
         &reader,
         "/workspace/src/App.ts",
@@ -1256,7 +1786,7 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
                 foo_expr,
                 Some("./Foo.vue"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 foo_start,
                 foo_start + foo_expr.len(),
             ),
@@ -1264,7 +1794,7 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
                 util_expr,
                 Some("./util"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 util_start,
                 util_start + util_expr.len(),
             ),
@@ -1272,7 +1802,7 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
                 dynamic_expr,
                 None,
                 &["./Foo.vue"],
-                verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet,
                 dynamic_start,
                 dynamic_start + dynamic_expr.len(),
             ),
@@ -1304,7 +1834,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
     let util_start = source.find(util_expr).unwrap();
     let dynamic_start = source.find(dynamic_expr).unwrap();
 
-    let prepared = prepare_non_vue_provider_sync(
+    let prepared = prepare_non_carrier_provider_sync(
         Some(&PublishedResolverSnapshot {
             resolver,
             ownership_ready: true,
@@ -1317,7 +1847,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
                 foo_expr,
                 Some("./Foo.vue"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 foo_start,
                 foo_start + foo_expr.len(),
             ),
@@ -1325,7 +1855,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
                 util_expr,
                 Some("./util"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 util_start,
                 util_start + util_expr.len(),
             ),
@@ -1333,7 +1863,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
                 dynamic_expr,
                 None,
                 &["./Foo.vue", "./util"],
-                verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet,
                 dynamic_start,
                 dynamic_start + dynamic_expr.len(),
             ),
@@ -1355,7 +1885,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
         prepared
             .resolved_dependencies
             .iter()
-            .any(|entry| entry.provider_specifier == "./Foo.vue.ts"),
+            .any(|entry| entry.provider_specifier == "./Foo.vue.verter.ts"),
         "Vue dependencies should target their provider API paths"
     );
     assert!(
@@ -1366,7 +1896,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
         "non-Vue workspace dependencies should preserve the source import specifier"
     );
     assert!(
-        prepared.rewritten.contains("'./Foo.vue.ts'"),
+        prepared.rewritten.contains("'./Foo.vue.verter.ts'"),
         "exact Vue imports should rewrite through the resolved provider specifier"
     );
     assert!(
@@ -1408,7 +1938,7 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
                 temp_util_expr,
                 Some("./tempUtil"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 temp_util_start,
                 temp_util_start + temp_util_expr.len(),
             ),
@@ -1416,7 +1946,7 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
                 child_expr,
                 Some("./ExternalChild.vue"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 child_start,
                 child_start + child_expr.len(),
             ),
@@ -1453,7 +1983,7 @@ fn provider_vue_path_helpers_use_original_paths() {
         "Vue IDE path should be canonical_id.tsx"
     );
     assert_eq!(
-        api_path, "/workspace/src/App.vue.ts",
+        api_path, "/workspace/src/App.vue.verter.ts",
         "Vue API path should be canonical_id.ts"
     );
 }
@@ -1469,11 +1999,11 @@ fn provider_path_helpers_round_trip_through_resolver() {
     ]);
     // Host must have the backing .vue source for the collision guard to pass
     let host = VerterHost::new_standalone(HostConfig::default());
-    host.upsert(verter_host::UpsertRequest {
+    host.upsert(verter_session::UpsertRequest {
         canonical_id: Some("/workspace/src/App.vue".to_string()),
         input_id: "/workspace/src/App.vue".to_string(),
         source: "<template><div/></template>".into(),
-        file_kind: verter_host::FileKind::VueSfc,
+        file_language: verter_session::FileLanguage::vue(),
         aliases: Vec::new(),
     })
     .unwrap();
@@ -1482,11 +2012,11 @@ fn provider_path_helpers_round_trip_through_resolver() {
     let api_path = provider_api_path_for_source(&resolver, "/workspace/src/App.vue").unwrap();
 
     assert_eq!(
-        source_id_from_provider_vue_path(&resolver, &host, &ide_path).as_deref(),
+        source_id_from_provider_carrier_path(&resolver, &host, &ide_path).as_deref(),
         Some("/workspace/src/App.vue")
     );
     assert_eq!(
-        source_id_from_provider_vue_path(&resolver, &host, &api_path).as_deref(),
+        source_id_from_provider_carrier_path(&resolver, &host, &api_path).as_deref(),
         Some("/workspace/src/App.vue")
     );
 }
@@ -1494,7 +2024,7 @@ fn provider_path_helpers_round_trip_through_resolver() {
 #[test]
 fn vue_tsx_collision_with_real_file() {
     // A real .vue.tsx file exists but there's no matching .vue source in any project.
-    // source_id_from_provider_vue_path should return None (collision guard).
+    // source_id_from_provider_carrier_path should return None (collision guard).
     let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
         crate::project_resolver::IdeProjectConfig::new(
             "/workspace/src".to_string(),
@@ -1507,7 +2037,7 @@ fn vue_tsx_collision_with_real_file() {
     // "/workspace/src/weird.vue.tsx" has no backing "/workspace/src/weird.vue"
     // registered in any project, so the resolver should not strip the suffix
     assert_eq!(
-        source_id_from_provider_vue_path(&resolver, &host, "/other/weird.vue.tsx"),
+        source_id_from_provider_carrier_path(&resolver, &host, "/other/weird.vue.tsx"),
         None,
         ".vue.tsx with no backing .vue in any project should return None"
     );
@@ -1525,17 +2055,18 @@ fn vue_tsx_virtual_file_resolves() {
     ]);
     // Host must have the backing .vue source for the collision guard to pass
     let host = VerterHost::new_standalone(HostConfig::default());
-    host.upsert(verter_host::UpsertRequest {
+    host.upsert(verter_session::UpsertRequest {
         canonical_id: Some("/workspace/src/App.vue".to_string()),
         input_id: "/workspace/src/App.vue".to_string(),
         source: "<template><div/></template>".into(),
-        file_kind: verter_host::FileKind::VueSfc,
+        file_language: verter_session::FileLanguage::vue(),
         aliases: Vec::new(),
     })
     .unwrap();
 
     assert_eq!(
-        source_id_from_provider_vue_path(&resolver, &host, "/workspace/src/App.vue.tsx").as_deref(),
+        source_id_from_provider_carrier_path(&resolver, &host, "/workspace/src/App.vue.tsx")
+            .as_deref(),
         Some("/workspace/src/App.vue"),
         "virtual .vue.tsx with backing .vue source should resolve to .vue"
     );
@@ -1557,9 +2088,425 @@ fn vue_tsx_collision_guard_rejects_when_host_missing_source() {
     // Do NOT upsert /workspace/src/Real.vue into host
 
     assert_eq!(
-        source_id_from_provider_vue_path(&resolver, &host, "/workspace/src/Real.vue.tsx"),
+        source_id_from_provider_carrier_path(&resolver, &host, "/workspace/src/Real.vue.tsx"),
         None,
         ".vue.tsx in project but no backing .vue in host should return None"
+    );
+}
+
+#[test]
+fn svelte_ts_rune_module_resolves_to_itself_not_phantom_component() {
+    // A REAL `store.svelte.ts` rune module (non-component carrier) is owned by
+    // the project. The resolver strips `.ts` → `store.svelte` (a carrier path),
+    // but no backing `store.svelte` component source exists in the host. The
+    // generalized collision guard must reject the phantom `store.svelte` and
+    // map the rune module to ITSELF.
+    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.app.json".to_string()),
+        ),
+    ]);
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let rune_language = verter_session::FileLanguage::adapter_module(
+        verter_session::ScriptSourceType::Ts,
+        verter_session::FrameworkAdapterId::svelte(),
+        verter_session::LanguageId::new(verter_session::SVELTE_RUNE_MODULE_LANGUAGE_ID),
+    );
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/store.svelte.ts".to_string()),
+        input_id: "/workspace/src/store.svelte.ts".to_string(),
+        source: "export const count = $state(0);\n".into(),
+        file_language: rune_language,
+        aliases: Vec::new(),
+    })
+    .unwrap();
+    // No `store.svelte` component is upserted — the only real source is the
+    // rune module itself.
+
+    let mapped =
+        source_id_from_provider_carrier_path(&resolver, &host, "/workspace/src/store.svelte.ts");
+    assert_eq!(
+        mapped.as_deref(),
+        Some("/workspace/src/store.svelte.ts"),
+        "a real .svelte.ts rune module with no backing .svelte must map to ITSELF, \
+         not the phantom store.svelte component"
+    );
+    assert_ne!(
+        mapped.as_deref(),
+        Some("/workspace/src/store.svelte"),
+        "must NOT reverse-map to a phantom .svelte component"
+    );
+}
+
+#[test]
+fn svelte_component_virtual_still_resolves_to_carrier() {
+    // The genuine component-virtual case: a real `Foo.svelte` component source
+    // exists, and its `Foo.svelte.ts` API virtual must still reverse-map to the
+    // `Foo.svelte` carrier (the generalization must not break this).
+    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.app.json".to_string()),
+        ),
+    ]);
+    let host = VerterHost::new_standalone(HostConfig::default());
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/Foo.svelte".to_string()),
+        input_id: "/workspace/src/Foo.svelte".to_string(),
+        source: "<script>let x = 1;</script>".into(),
+        file_language: verter_session::FileLanguage::svelte(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+
+    assert_eq!(
+        source_id_from_provider_carrier_path(
+            &resolver,
+            &host,
+            "/workspace/src/Foo.svelte.verter.ts"
+        )
+        .as_deref(),
+        Some("/workspace/src/Foo.svelte"),
+        "a Foo.svelte.verter.ts API virtual with a backing Foo.svelte component must \
+         reverse-map to the carrier (the reserved .verter.ts infix — a bare \
+         .svelte.ts is a rune-module path, not the API carrier)"
+    );
+    assert_eq!(
+        source_id_from_provider_carrier_path(&resolver, &host, "/workspace/src/Foo.svelte.tsx")
+            .as_deref(),
+        Some("/workspace/src/Foo.svelte"),
+        "a Foo.svelte.tsx IDE virtual with a backing Foo.svelte component must \
+         reverse-map to the carrier"
+    );
+}
+
+#[test]
+fn build_workspace_components_enumerates_svelte_and_strips_extension() {
+    // Component auto-import must enumerate `.svelte` carriers and
+    // derive the PascalCase component name via the registry-backed strip
+    // (`MyButton.svelte` → `MyButton`). A plain `.ts` is NOT a carrier and is
+    // excluded. Discrimination: pre-change (`!kind.is_vue()`) the Svelte
+    // component is skipped and never appears.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/MyButton.svelte".to_string()),
+        input_id: "/workspace/src/MyButton.svelte".to_string(),
+        source: "<script>let x = 1;</script>".into(),
+        file_language: verter_session::FileLanguage::svelte(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/util.ts".to_string()),
+        input_id: "/workspace/src/util.ts".to_string(),
+        source: "export const x = 1;".into(),
+        file_language: verter_session::FileLanguage::script_ts(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+
+    // A dotted filename stem (`Model.Named.vue`) must sanitize to a VALID JS
+    // identifier (`ModelNamed`) — the `.` is a word separator feeding PascalCase,
+    // NOT a literal character carried into the component name. Pre-fix this
+    // yielded `Model.Named`, an invalid identifier that produced the syntax error
+    // `import Model.Named from './Model.Named.vue'`.
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/Model.Named.vue".to_string()),
+        input_id: "/workspace/src/Model.Named.vue".to_string(),
+        source: "<script setup lang=\"ts\"></script>".into(),
+        file_language: verter_session::FileLanguage::vue(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+    // Parity: the same sanitization must hold for the Svelte carrier.
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/workspace/src/Dotted.Svelte.Name.svelte".to_string()),
+        input_id: "/workspace/src/Dotted.Svelte.Name.svelte".to_string(),
+        source: "<script>let x = 1;</script>".into(),
+        file_language: verter_session::FileLanguage::svelte(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+
+    let components = build_workspace_components(&host, "/workspace/src/App.svelte");
+    let names: Vec<&str> = components.iter().map(|c| c.name.as_str()).collect();
+    assert!(
+        names.contains(&"MyButton"),
+        "Svelte component must be enumerated with the stripped PascalCase name, got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("util")),
+        "a plain .ts file is NOT a carrier and must be excluded, got: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains(".svelte")),
+        "the carrier extension must be stripped from the component name, got: {names:?}"
+    );
+    // Dotted Vue stem → valid identifier (discriminating: pre-fix `Model.Named`).
+    assert!(
+        names.contains(&"ModelNamed"),
+        "a dotted Vue carrier stem `Model.Named.vue` must sanitize to the valid \
+         identifier `ModelNamed`, got: {names:?}"
+    );
+    // Dotted Svelte stem → valid identifier (parity).
+    assert!(
+        names.contains(&"DottedSvelteName"),
+        "a dotted Svelte carrier stem must sanitize to the valid identifier \
+         `DottedSvelteName`, got: {names:?}"
+    );
+    // Negative: NO derived component name may contain a `.` — every name must be
+    // a valid JS identifier usable verbatim as both the tag and import binding.
+    assert!(
+        !names.iter().any(|n| n.contains('.')),
+        "no derived component name may contain a `.` (invalid identifier), got: {names:?}"
+    );
+    // Non-dotted names must NOT regress.
+    assert!(
+        names.contains(&"MyButton"),
+        "non-dotted PascalCase stem must remain unchanged, got: {names:?}"
+    );
+}
+
+#[test]
+fn build_workspace_components_sanitizes_dotted_and_special_chars() {
+    // Identifier-formatting contract for `build_workspace_components`:
+    // - `.` and any char outside `[A-Za-z0-9_$]` act as word separators feeding
+    //   PascalCase (`Model.Named` → `ModelNamed`, `my-comp` → `MyComp`).
+    // - `_` is a valid identifier char but ALSO behaves as a separator (existing
+    //   kebab/snake behavior is preserved: `my_comp` → `MyComp`).
+    // - `$` is a valid identifier char and is NOT a separator: it is kept verbatim
+    //   (`My$Comp` → `My$Comp`).
+    // - A name that would otherwise begin with a digit is prefixed with `_`.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for stem in [
+        "Model.Named",
+        "my-comp",
+        "2cool",
+        "weird@name!here",
+        "MyComponent",
+    ] {
+        host.upsert(verter_session::UpsertRequest {
+            canonical_id: Some(format!("/ws/src/{stem}.vue")),
+            input_id: format!("/ws/src/{stem}.vue"),
+            source: "<script setup lang=\"ts\"></script>".into(),
+            file_language: verter_session::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    }
+
+    let components = build_workspace_components(&host, "/ws/src/App.vue");
+    let names: Vec<&str> = components.iter().map(|c| c.name.as_str()).collect();
+
+    assert!(names.contains(&"ModelNamed"), "got: {names:?}");
+    assert!(names.contains(&"MyComp"), "got: {names:?}");
+    // Leading-digit guard: `2cool` → `_2cool` (PascalCase capitalizes nothing
+    // before the digit, so the `_` guard is the only mutation).
+    assert!(names.contains(&"_2cool"), "got: {names:?}");
+    // Non-identifier chars are separators: `weird@name!here` → `WeirdNameHere`.
+    assert!(names.contains(&"WeirdNameHere"), "got: {names:?}");
+    assert!(names.contains(&"MyComponent"), "got: {names:?}");
+    // Every derived name is a valid JS identifier start + body.
+    for n in &names {
+        let mut chars = n.chars();
+        let first = chars.next().expect("non-empty name");
+        assert!(
+            first.is_ascii_alphabetic() || first == '_' || first == '$',
+            "name {n:?} must start with a valid identifier char, got: {names:?}"
+        );
+        assert!(
+            n.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$'),
+            "name {n:?} must contain only valid identifier chars, got: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn to_pascal_case_pins_dollar_unicode_and_double_extension_behavior() {
+    // Direct, exhaustive pin of the filename→identifier formatter contract.
+    // (`build_workspace_components` is the only caller; this isolates the
+    // edge cases the helper itself owns.) `to_pascal_case` is in scope via the
+    // module's `use self::server_utils::*` glob.
+
+    // Baseline / regression cases.
+    assert_eq!(to_pascal_case("my-button"), "MyButton");
+    assert_eq!(to_pascal_case("my_comp"), "MyComp");
+    assert_eq!(to_pascal_case("MyComponent"), "MyComponent");
+    assert_eq!(to_pascal_case("index"), "Index");
+    assert_eq!(to_pascal_case("Model.Named"), "ModelNamed");
+
+    // `$` GAP — `$` is a VALID identifier char and is NOT a separator: it is
+    // kept verbatim. The doc explicitly excludes `$` from the separator set.
+    assert_eq!(
+        to_pascal_case("My$Comp"),
+        "My$Comp",
+        "`$` is a valid identifier char and must be preserved, not split on"
+    );
+    // A LEADING `$` is a valid identifier start and must survive (NOT prefixed
+    // with `_`, NOT dropped). PascalCase capitalizes the first ALPHA char after
+    // it; `$` itself has no uppercase form.
+    assert_eq!(
+        to_pascal_case("$special"),
+        "$special",
+        "a leading `$` is a valid identifier start and must be preserved verbatim"
+    );
+    assert_eq!(to_pascal_case("$my-comp"), "$myComp");
+
+    // `.vue.ts` / double-carrier-extension GAP. `strip_carrier_extension`
+    // strips ONLY a registered carrier suffix, so a `.vue.ts` sidecar yields the
+    // stem `"Model.Named.vue"` (the `.ts` is not a carrier). Such files are
+    // EXCLUDED upstream by `is_framework_carrier()`, but if the stem ever
+    // reached the formatter it must still produce a VALID identifier — the inner
+    // `.vue` is just another `.` separator. No invalid identifier can result.
+    let double_ext_stem = verter_workspace::strip_carrier_extension("Model.Named.vue.ts");
+    assert_eq!(
+        double_ext_stem, "Model.Named.vue.ts",
+        "`.ts` is not a carrier extension, so the `.vue.ts` suffix is not stripped"
+    );
+    assert_eq!(
+        to_pascal_case(double_ext_stem),
+        "ModelNamedVueTs",
+        "every `.` is a separator, so the double-extension stem stays a valid identifier"
+    );
+    // And on a genuine carrier-stripped stem the result is clean.
+    assert_eq!(
+        to_pascal_case(verter_workspace::strip_carrier_extension("Model.Named.vue")),
+        "ModelNamed"
+    );
+
+    // Non-ASCII GAP — ASCII-only by documented design: non-ASCII chars are
+    // separators (dropped). `café` → `Caf` (the `é` splits, nothing follows).
+    assert_eq!(
+        to_pascal_case("café"),
+        "Caf",
+        "non-ASCII chars are treated as separators (ASCII-only by design)"
+    );
+    assert_eq!(to_pascal_case("über-comp"), "BerComp");
+    // A stem with NO ASCII identifier chars yields the empty string (the carrier
+    // is then skipped upstream rather than emitting a bad name).
+    assert_eq!(to_pascal_case("日本語"), "");
+    assert_eq!(to_pascal_case("---"), "");
+
+    // The leading-digit guard.
+    assert_eq!(to_pascal_case("2cool"), "_2cool");
+    assert_eq!(to_pascal_case("3d-view"), "_3dView");
+}
+
+#[test]
+fn build_workspace_components_preserves_dollar_and_skips_non_ascii_only() {
+    // End-to-end through `build_workspace_components`: a `$`-bearing carrier
+    // keeps its `$`; a non-ASCII-only stem is SKIPPED (empty sanitized name).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for stem in ["My$Comp", "$Leading", "日本語", "MyButton"] {
+        host.upsert(verter_session::UpsertRequest {
+            canonical_id: Some(format!("/ws/src/{stem}.vue")),
+            input_id: format!("/ws/src/{stem}.vue"),
+            source: "<script setup lang=\"ts\"></script>".into(),
+            file_language: verter_session::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    }
+
+    let components = build_workspace_components(&host, "/ws/src/App.vue");
+    let names: Vec<&str> = components.iter().map(|c| c.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"My$Comp"),
+        "`$` must be preserved, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"$Leading"),
+        "a leading `$` carrier must enumerate, got: {names:?}"
+    );
+    assert!(names.contains(&"MyButton"), "got: {names:?}");
+    // The non-ASCII-only carrier sanitizes to `""` and is SKIPPED — no empty or
+    // invalid name leaks into the component list.
+    assert!(
+        !names.iter().any(|n| n.is_empty()),
+        "no empty component name may be emitted, got: {names:?}"
+    );
+    for n in &names {
+        assert!(
+            n.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$'),
+            "every emitted name must be a valid identifier, got: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn build_workspace_components_dotted_collision_is_deterministic() {
+    // Collision case: `Model.Named.vue` and `ModelNamed.vue` BOTH sanitize to
+    // `ModelNamed`. `host.list_files()` is DashMap-backed (non-deterministic
+    // iteration order), so without a tie-break the candidate ORDER — and the
+    // collision winner the downstream label-dedup keeps — would flap run-to-run.
+    // `build_workspace_components` sorts by canonical file id, so the order and
+    // the collision winner are STABLE. This test asserts DETERMINISM: repeated
+    // calls yield byte-identical `(name, import_path)` sequences, the order is
+    // canonical-path-sorted, and the lexicographically-first canonical path
+    // (`Model.Named.vue` < `ModelNamed.vue`) is the first `ModelNamed` candidate.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/ws/src/Model.Named.vue".to_string()),
+        input_id: "/ws/src/Model.Named.vue".to_string(),
+        source: "<script setup lang=\"ts\"></script>".into(),
+        file_language: verter_session::FileLanguage::vue(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+    host.upsert(verter_session::UpsertRequest {
+        canonical_id: Some("/ws/src/ModelNamed.vue".to_string()),
+        input_id: "/ws/src/ModelNamed.vue".to_string(),
+        source: "<script setup lang=\"ts\"></script>".into(),
+        file_language: verter_session::FileLanguage::vue(),
+        aliases: Vec::new(),
+    })
+    .unwrap();
+
+    // Run the enumeration several times; every run must produce byte-identical
+    // output (name + path, in the same order).
+    let baseline: Vec<(String, String)> = build_workspace_components(&host, "/ws/src/App.vue")
+        .into_iter()
+        .map(|c| (c.name, c.import_path))
+        .collect();
+    for _ in 0..8 {
+        let again: Vec<(String, String)> = build_workspace_components(&host, "/ws/src/App.vue")
+            .into_iter()
+            .map(|c| (c.name, c.import_path))
+            .collect();
+        assert_eq!(
+            again, baseline,
+            "enumeration must be deterministic run-to-run, got {again:?} vs {baseline:?}"
+        );
+    }
+
+    let model_named: Vec<&str> = baseline
+        .iter()
+        .filter(|(name, _)| name == "ModelNamed")
+        .map(|(_, path)| path.as_str())
+        .collect();
+    // Both carriers surface under the same sanitized name, each preserving its
+    // OWN real import path (the path is never sanitized).
+    assert_eq!(
+        model_named.len(),
+        2,
+        "both colliding carriers must be enumerated, got paths: {model_named:?}"
+    );
+    // DETERMINISTIC WINNER: candidates are ordered by canonical path, so the
+    // lexicographically-first path `…/Model.Named.vue` is the FIRST `ModelNamed`
+    // candidate (the one the downstream first-wins label dedup keeps).
+    assert!(
+        model_named[0].ends_with("Model.Named.vue"),
+        "the canonical-path-first carrier must be the first collision candidate, got: {model_named:?}"
+    );
+    assert!(
+        model_named[1].ends_with("ModelNamed.vue"),
+        "the second collision candidate must be the later canonical path, got: {model_named:?}"
     );
 }
 
@@ -1568,6 +2515,35 @@ fn import_resolved_matches_target_exact() {
     assert!(import_resolved_matches_target(
         "C:/project/src/components/Foo.vue",
         "C:/project/src/components/Foo.vue"
+    ));
+}
+
+#[test]
+fn import_resolved_matches_target_svelte_carrier() {
+    // The fuzzy import matcher is carrier-generic: `./Popup` resolves a
+    // `.svelte` carrier just as it does `.vue` (gap-5 import resolution).
+    assert!(import_resolved_matches_target(
+        "C:/proj/src/Popup",
+        "C:/proj/src/Popup.svelte"
+    ));
+    assert!(import_resolved_matches_target(
+        "C:/proj/src/Popover",
+        "C:/proj/src/Popover/index.svelte"
+    ));
+    assert!(import_resolved_matches_target(
+        "C:/proj/src/Popover",
+        "C:/proj/src/Popover/Popover.svelte"
+    ));
+    // Discrimination: a resolved that already carries a `.svelte` ext gets no
+    // fuzzy match (mirrors the `.vue` early-out), and an unrelated target does
+    // not match.
+    assert!(!import_resolved_matches_target(
+        "C:/proj/src/Popup.svelte",
+        "C:/proj/src/Other.svelte"
+    ));
+    assert!(!import_resolved_matches_target(
+        "C:/proj/src/Popup",
+        "C:/proj/src/Other.svelte"
     ));
 }
 
@@ -1617,10 +2593,69 @@ fn import_resolved_does_not_match_different_component() {
 /// We use push diagnostics exclusively to avoid flickering during typing.
 #[test]
 fn capabilities_do_not_include_pull_diagnostics() {
-    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16);
+    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
     assert!(
         caps.diagnostic_provider.is_none(),
         "diagnostic_provider must be removed — we use push diagnostics only"
+    );
+}
+
+/// On-type formatting is advertised for the proactive tag auto-close handler.
+/// Its only meaningful trigger is `>` (the close of an open tag): the handler
+/// (`auto_close_tag`) hard-requires a `>` immediately before the cursor, so a
+/// `/` more-trigger is a guaranteed no-op. We advertise `>` and NOT `/` — the
+/// honest trigger set the handler can actually act on.
+#[test]
+fn on_type_formatting_triggers_on_gt_only_not_slash() {
+    let caps = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    let on_type = caps
+        .document_on_type_formatting_provider
+        .as_ref()
+        .expect("on-type formatting must be advertised for tag auto-close");
+
+    assert_eq!(
+        on_type.first_trigger_character, ">",
+        "the first (and only meaningful) on-type trigger must be `>`"
+    );
+
+    // The `/` more-trigger is dead — the handler requires a `>` before the
+    // cursor — so it must NOT be advertised. This assertion FAILS against the
+    // legacy `more_trigger_character: Some(vec![\"/\"])` and PASSES once dropped.
+    let has_slash_trigger = on_type
+        .more_trigger_character
+        .as_ref()
+        .is_some_and(|chars| chars.iter().any(|c| c == "/"));
+    assert!(
+        !has_slash_trigger,
+        "the `/` more-trigger is a guaranteed no-op and must not be advertised"
+    );
+}
+
+/// The advertised `resolve_provider` capability is HONEST: it mirrors the
+/// `resolve_provider` argument (which the initialize handler derives from the
+/// active provider's `supports_completion_resolve`), never a hard-coded `true`.
+#[test]
+fn resolve_provider_capability_is_honest() {
+    let with_resolve = crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, true);
+    assert_eq!(
+        with_resolve
+            .completion_provider
+            .as_ref()
+            .and_then(|c| c.resolve_provider),
+        Some(true),
+        "a resolve-capable provider must advertise resolve_provider: true"
+    );
+
+    let without_resolve =
+        crate::capabilities::server_capabilities(&PositionEncodingKind::UTF16, false);
+    assert_eq!(
+        without_resolve
+            .completion_provider
+            .as_ref()
+            .and_then(|c| c.resolve_provider),
+        Some(false),
+        "a session without resolve support must advertise resolve_provider: false, not a \
+         dishonest true"
     );
 }
 
@@ -1628,7 +2663,7 @@ fn capabilities_do_not_include_pull_diagnostics() {
 fn did_open_startup_policy_enables_sync_for_tsgo_and_tsserver() {
     let tsgo = did_open_startup_policy(crate::TypeProviderKind::Tsgo);
     assert!(
-        tsgo.sync_imported_vue_files,
+        tsgo.sync_imported_carrier_apis,
         "TSGO should eagerly sync imported .vue files"
     );
     assert!(
@@ -1638,12 +2673,18 @@ fn did_open_startup_policy_enables_sync_for_tsgo_and_tsserver() {
 
     let tsserver = did_open_startup_policy(crate::TypeProviderKind::Tsserver);
     assert!(
-        tsserver.sync_imported_vue_files,
+        tsserver.sync_imported_carrier_apis,
         "tsserver should eagerly sync imported .vue files"
     );
     assert!(
         !tsserver.publish_diagnostics,
         "should not publish diagnostics inline"
+    );
+
+    let editor_tsserver = did_open_startup_policy(crate::TypeProviderKind::EditorTsserver);
+    assert!(
+        editor_tsserver.sync_imported_carrier_apis,
+        "the editor tsserver plugin still requires imported carrier-store publication"
     );
 }
 
@@ -1651,7 +2692,7 @@ fn did_open_startup_policy_enables_sync_for_tsgo_and_tsserver() {
 fn did_open_startup_policy_skips_sync_for_no_provider() {
     let none = did_open_startup_policy(crate::TypeProviderKind::None);
     assert!(
-        !none.sync_imported_vue_files,
+        !none.sync_imported_carrier_apis,
         "no type provider should not eagerly sync imported .vue files"
     );
     assert!(
@@ -1686,6 +2727,46 @@ fn did_open_provider_sync_policy_skips_api_sync_for_tsserver_but_not_tsgo() {
     assert!(
         !no_provider.await_api_sync,
         "verter-only mode should not await API sync"
+    );
+
+    let editor_tsserver = did_open_provider_sync_policy(crate::TypeProviderKind::EditorTsserver);
+    assert!(
+        !editor_tsserver.await_ide_sync && !editor_tsserver.await_api_sync,
+        "an editor-owned server must not be driven through local provider sync"
+    );
+    assert!(
+        editor_tsserver.background_api_sync,
+        "an editor-owned server still queues durable carrier-store publication"
+    );
+}
+
+#[test]
+fn editor_tsserver_constructs_store_publication_without_a_local_provider() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: None,
+                project_sync_mode: ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::EditorTsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: Some("attested editor project".into()),
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let server = service.inner();
+
+    assert!(server.type_provider.is_none());
+    assert!(server.project_sync.is_none());
+    assert!(server.sync_coordinator.is_none());
+    assert!(
+        server.carrier_publish_coordinator.is_some(),
+        "the editor plugin route requires the durable store publisher"
     );
 }
 
@@ -1727,7 +2808,8 @@ async fn initialized_returns_before_background_configure_paths_completes() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -1765,31 +2847,31 @@ async fn initialized_returns_before_background_configure_paths_completes() {
 }
 
 #[test]
-fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
-    let analysis = verter_analysis::ScriptAnalysisSnapshot {
+fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
+    let analysis = verter_semantic::analysis::ScriptAnalysisSnapshot {
         imports: vec![
-            verter_analysis::AnalyzedImport {
+            verter_semantic::analysis::AnalyzedImport {
                 source: "./MyComp.vue".to_string(),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
                 resolved_canonical_id: Some("C:/project/src/MyComp.vue".to_string()),
             },
-            verter_analysis::AnalyzedImport {
+            verter_semantic::analysis::AnalyzedImport {
                 source: "./utils".to_string(),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
                 resolved_canonical_id: Some("C:/project/src/utils.ts".to_string()),
             },
-            verter_analysis::AnalyzedImport {
+            verter_semantic::analysis::AnalyzedImport {
                 source: "./Other.vue".to_string(),
                 is_type_only: false,
                 bindings: Vec::new(),
                 span: verter_span::Span::new(0, 0),
                 resolved_canonical_id: None,
             },
-            verter_analysis::AnalyzedImport {
+            verter_semantic::analysis::AnalyzedImport {
                 source: "./MyComp.vue".to_string(),
                 is_type_only: false,
                 bindings: Vec::new(),
@@ -1801,7 +2883,7 @@ fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
         bindings: Vec::new(),
         macros: Vec::new(),
         macro_type_deps: Vec::new(),
-        flags: verter_analysis::AnalysisFlags::empty(),
+        flags: verter_semantic::analysis::AnalysisFlags::empty(),
         exported_functions: Vec::new(),
         vue_api_calls: Vec::new(),
         dom_query_calls: Vec::new(),
@@ -1817,7 +2899,7 @@ fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
         declaration_entries: Vec::new(),
     };
 
-    let ids = collect_imported_vue_priority_ids(&analysis);
+    let ids = collect_imported_carrier_priority_ids(&analysis);
 
     assert_eq!(
         ids,
@@ -1831,16 +2913,16 @@ fn collect_imported_vue_priority_ids_keeps_only_resolved_vue_imports() {
 }
 
 #[test]
-fn collect_imported_vue_priority_ids_falls_back_to_relative_resolution() {
+fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
     let imports = vec![
-        verter_analysis::AnalyzedImport {
+        verter_semantic::analysis::AnalyzedImport {
             source: "./TypedSlotComp.vue".to_string(),
             is_type_only: false,
             bindings: Vec::new(),
             span: verter_span::Span::new(0, 0),
             resolved_canonical_id: None,
         },
-        verter_analysis::AnalyzedImport {
+        verter_semantic::analysis::AnalyzedImport {
             source: "./utils".to_string(),
             is_type_only: false,
             bindings: Vec::new(),
@@ -1849,7 +2931,7 @@ fn collect_imported_vue_priority_ids_falls_back_to_relative_resolution() {
         },
     ];
 
-    let ids = collect_imported_vue_priority_ids_from_imports_with_fallback(
+    let ids = collect_imported_carrier_priority_ids_from_imports_with_fallback(
         &imports,
         Some("/workspace/src/TemplateSlotCases.vue"),
         |parent, specifier| {
@@ -1886,7 +2968,7 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
         "/workspace/src/Bar.vue",
         "/workspace/src/util.ts",
     ]);
-    let targets = collect_priority_vue_targets_from_module_references(
+    let targets = collect_priority_carrier_public_api_targets_from_module_references(
         Some(&PublishedResolverSnapshot {
             resolver,
             ownership_ready: true,
@@ -1898,7 +2980,7 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
                 "'./Foo.vue'",
                 Some("./Foo.vue"),
                 &[],
-                verter_analysis::ModuleReferenceAnalyzability::Exact,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
                 0,
                 10,
             ),
@@ -1906,7 +2988,7 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
                 "`./${name}.vue`",
                 None,
                 &["./Bar.vue", "./util"],
-                verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
+                verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet,
                 11,
                 27,
             ),
@@ -1932,7 +3014,7 @@ fn unknown_dynamic_imports_sync_no_provider_dependencies() {
         ),
     ]);
     let reader = TestResolverReader::with_files(&["/workspace/src/Foo.vue"]);
-    let targets = collect_priority_vue_targets_from_module_references(
+    let targets = collect_priority_carrier_public_api_targets_from_module_references(
         Some(&PublishedResolverSnapshot {
             resolver,
             ownership_ready: true,
@@ -1943,7 +3025,7 @@ fn unknown_dynamic_imports_sync_no_provider_dependencies() {
             "`./${name}.vue`",
             None,
             &[],
-            verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic,
+            verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic,
             0,
             15,
         )],
@@ -1985,6 +3067,221 @@ async fn goto_definition_component_event_name_reaches_child_define_emits() {
         target.range.start.line,
         line_for_snippet(child_source, "custom: [payload: string]"),
         "definition should point to the child defineEmits declaration"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn dotted_component_auto_import_edit_is_valid_end_to_end() {
+    // DISCRIMINATING END-TO-END: drive the REAL synthesis path rather than
+    // handing `build_auto_import_edit` a pre-sanitized name. The dotted carrier
+    // `Model.Named.vue` goes through `build_workspace_components` (the single
+    // source of truth for the binding name) → the synthesized completion `data`
+    // → `build_auto_import_edit`, exactly as the live resolve handler does
+    // (`nav_features.rs::handle_completion_resolve` reads `data.component_name`).
+    //
+    // Pre-fix, `build_workspace_components` produced `component_name = "Model.Named"`,
+    // so the emitted statement was the syntax error
+    // `import Model.Named from './Model.Named.vue'`. This test FAILS on that
+    // behavior and PASSES only with the sanitizer in place.
+    let child_source = "<script setup lang=\"ts\"></script>\n<template><div /></template>\n";
+    // App has an existing `<script setup>` (required anchor) and does NOT yet
+    // import the component.
+    let parent_source =
+        "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template>\n  <div />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/Model.Named.vue", "vue", child_source),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let app_canonical = format!("{workspace_id}/src/App.vue");
+    let server = service.inner();
+
+    // 1. The REAL enumeration: derive the binding name + import path from disk.
+    let ws_components = build_workspace_components(&server.documents.host, &app_canonical);
+    let model = ws_components
+        .iter()
+        .find(|c| c.import_path.ends_with("Model.Named.vue"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the dotted carrier must be enumerated, got: {:?}",
+                ws_components
+                    .iter()
+                    .map(|c| (&c.name, &c.import_path))
+                    .collect::<Vec<_>>()
+            )
+        });
+
+    // The synthesized binding name must already be the sanitized identifier —
+    // this is the value the completion `data.component_name` carries.
+    assert_eq!(
+        model.name, "ModelNamed",
+        "the enumerated binding name must be the sanitized identifier (drives the import)"
+    );
+    assert!(
+        model.import_path.ends_with("Model.Named.vue"),
+        "the import PATH must keep the real on-disk `.Named.vue` stem, got: {:?}",
+        model.import_path
+    );
+
+    // 2. Feed the REAL synthesized name + path through the edit builder, exactly
+    //    as the resolve handler does.
+    let edit = server
+        .build_auto_import_edit(app_uri.as_str(), &model.name, &model.import_path)
+        .expect("auto-import edit should be produced for an existing <script setup>");
+
+    assert_eq!(
+        edit.new_text.trim_end(),
+        format!("import ModelNamed from '{}'", model.import_path),
+        "import must use the sanitized identifier with the real module path"
+    );
+    // Negative: must NOT emit the invalid dotted identifier form (the pre-fix bug).
+    assert!(
+        !edit.new_text.contains("import Model.Named "),
+        "import statement must NOT contain the invalid `Model.Named` identifier, got: {:?}",
+        edit.new_text
+    );
+    // The binding token must be a single valid identifier with no `.`.
+    let binding = edit
+        .new_text
+        .trim_start()
+        .strip_prefix("import ")
+        .and_then(|s| s.split_whitespace().next())
+        .expect("import statement shape");
+    assert!(
+        !binding.contains('.') && binding == "ModelNamed",
+        "the import binding must be the valid identifier `ModelNamed`, got: {binding:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn nested_dir_dotted_component_keeps_real_path_and_sanitized_binding() {
+    // GAP: a dotted component in a NESTED directory must keep its correct real
+    // relative import PATH while the binding is the sanitized identifier.
+    // `src/a/b/Dotted.Name.vue` imported into `src/App.vue` →
+    // `import DottedName from './a/b/Dotted.Name.vue'`.
+    let child_source = "<script setup lang=\"ts\"></script>\n<template><div /></template>\n";
+    let parent_source =
+        "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template>\n  <div />\n</template>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/a/b/Dotted.Name.vue", "vue", child_source),
+        ("src/App.vue", "vue", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let app_canonical = format!("{workspace_id}/src/App.vue");
+    let server = service.inner();
+
+    let ws_components = build_workspace_components(&server.documents.host, &app_canonical);
+    let nested = ws_components
+        .iter()
+        .find(|c| c.name == "DottedName")
+        .unwrap_or_else(|| {
+            panic!(
+                "nested dotted carrier must enumerate as `DottedName`, got: {:?}",
+                ws_components
+                    .iter()
+                    .map(|c| (&c.name, &c.import_path))
+                    .collect::<Vec<_>>()
+            )
+        });
+
+    // The PATH is never sanitized: it must be the correct nested relative path
+    // with the real dotted filename preserved.
+    assert_eq!(
+        nested.import_path, "./a/b/Dotted.Name.vue",
+        "nested dotted carrier must keep its real relative path"
+    );
+
+    let edit = server
+        .build_auto_import_edit(app_uri.as_str(), &nested.name, &nested.import_path)
+        .expect("auto-import edit for nested dotted component");
+    assert_eq!(
+        edit.new_text.trim_end(),
+        "import DottedName from './a/b/Dotted.Name.vue'",
+        "nested import must pair the sanitized binding with the real nested path"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test]
+async fn svelte_dotted_component_completion_is_sanitized_but_edit_placement_defers() {
+    // GAP (Svelte parity, honest): the SHARED completion path sanitizes a dotted
+    // `.svelte` carrier exactly like a `.vue` one — a valid tag + CLASS kind. The
+    // auto-import EDIT placement, however, is a PRE-EXISTING gap: it only targets
+    // a Vue `<script setup>`, so for a Svelte `<script>` block it returns `None`.
+    // This test pins BOTH facts so the Svelte completion stays covered and the
+    // placement deferral is explicit (not silently broken).
+    let child_source = "<script lang=\"ts\"></script>\n<div />\n";
+    // A Svelte component uses a plain `<script>` (NOT `<script setup>`).
+    let parent_source = "<script lang=\"ts\">\n  let x = 1;\n</script>\n<div />\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/Dotted.Svelte.Name.svelte", "svelte", child_source),
+        ("src/App.svelte", "svelte", parent_source),
+    ])
+    .await;
+
+    let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
+    let app_canonical = format!("{workspace_id}/src/App.svelte");
+    let server = service.inner();
+
+    // (1) SHARED completion path: the dotted Svelte carrier sanitizes to a valid
+    //     identifier with the real `.svelte` path preserved.
+    let ws_components = build_workspace_components(&server.documents.host, &app_canonical);
+    let svelte = ws_components
+        .iter()
+        .find(|c| c.import_path.ends_with("Dotted.Svelte.Name.svelte"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the dotted Svelte carrier must enumerate, got: {:?}",
+                ws_components
+                    .iter()
+                    .map(|c| (&c.name, &c.import_path))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        svelte.name, "DottedSvelteName",
+        "Svelte parity: a dotted `.svelte` stem must sanitize identically to Vue"
+    );
+
+    // The shared COMPLETION ITEM synthesis (tag insert + CLASS kind) is the
+    // user-visible shared surface — assert it produces a valid tag + CLASS.
+    let analysis = verter_session::FileAnalysisSnapshot::default();
+    let items = crate::features::completion::tag_name_completions(
+        &analysis,
+        Some(&ws_components),
+        Some(app_uri.as_str()),
+    );
+    let item = items
+        .iter()
+        .find(|i| i.label == "DottedSvelteName")
+        .expect("Svelte dotted component must appear as a sanitized tag completion");
+    assert_eq!(
+        item.kind,
+        Some(tower_lsp_server::ls_types::CompletionItemKind::CLASS),
+        "Svelte component tag item must use CLASS (shared with Vue)"
+    );
+
+    // (2) HONEST deferral: the auto-import EDIT placement only targets a Vue
+    //     `<script setup>`. For a Svelte plain `<script>` it returns `None` —
+    //     a SEPARATE, already-tracked placement gap, NOT a regression of this
+    //     fix. (The sanitized name + CLASS kind above already apply to Svelte.)
+    let edit = server.build_auto_import_edit(app_uri.as_str(), &svelte.name, &svelte.import_path);
+    assert!(
+        edit.is_none(),
+        "Svelte auto-import EDIT placement is a pre-existing deferral (no `<script setup>` anchor); \
+         got an unexpected edit: {edit:?}"
     );
 
     drain_handle.abort();
@@ -2169,7 +3466,7 @@ async fn resolve_component_document_for_usage_follows_barrel_reexports() {
     );
     assert!(
         child.analysis.macros.iter().any(|mac| {
-            mac.kind == verter_analysis::AnalyzedMacroKind::DefineEmits
+            mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
                 && mac.emit_fields.iter().any(|field| field.name == "custom")
         }),
         "resolved child analysis should expose the child's emit declaration"
@@ -2281,9 +3578,9 @@ async fn goto_definition_component_event_name_skips_type_provider_virtual_fallba
     let server = service.inner();
     let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
     let ctx = synced_type_provider_context(server, &app_uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -2902,9 +4199,9 @@ async fn barrel_import_binding_in_vue_script_skips_type_provider_barrel_result()
     let server = service.inner();
     let position = find_document_position(server, &app_uri, "{ Overlay, Button }", 2);
     let ctx = synced_type_provider_context(server, &app_uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -3105,7 +4402,8 @@ async fn goto_type_definition_returns_none_without_provider() {
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -3162,19 +4460,23 @@ async fn goto_type_definition_delegates_to_provider() {
     // Set up mock to return a type definition when queried
     {
         let ctx = synced_type_provider_context(server, &app_uri);
-        if let Some(tsx_offset) = merge::vue_position_to_tsx_offset_validated(
+        if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
             &position,
-            &ctx.vue_line_index,
+            &ctx.carrier_line_index,
             &ctx.mapper,
             &ctx.tsx_line_index,
         ) {
+            // Point the type-definition at the real `count` identifier in the generated TSX so
+            // its offsets map back to the `.vue` source. (Offsets in the synthetic preamble,
+            // e.g. 0..5, do not map and are correctly dropped fail-closed — they would have
+            // collapsed to a line-0 range under the old `.unwrap_or_default()` behavior.)
             provider.set_type_definitions(
                 &ctx.tsx_path,
                 tsx_offset,
                 vec![TypeLocation {
                     path: ctx.tsx_path.clone(),
-                    start: 0,
-                    end: 5,
+                    start: tsx_offset,
+                    end: tsx_offset + "count".len() as u32,
                 }],
             );
         }
@@ -3577,9 +4879,9 @@ const outerLabel = 'outer'
     let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
     let position = find_document_position(server, &slot_uri, "{{ sl }}", 5);
     let slot_ctx = synced_type_provider_context(server, &slot_uri);
-    let slot_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let slot_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &slot_ctx.vue_line_index,
+        &slot_ctx.carrier_line_index,
         &slot_ctx.mapper,
         &slot_ctx.tsx_line_index,
     )
@@ -3598,48 +4900,72 @@ const outerLabel = 'outer'
         &slot_uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "slotItem".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const slotItem: SlotItem".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "slotIndex".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const slotIndex: number".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "slotTotal".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const slotTotal: number".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "Set".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Class),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Class),
                 detail: Some("global".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
         ],
@@ -3716,9 +5042,9 @@ const outerLabel = 'outer'
     let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
     let position = find_document_position(server, &slot_uri, "slotItem.name", 9);
     let slot_ctx = synced_type_provider_context(server, &slot_uri);
-    let slot_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let slot_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &slot_ctx.vue_line_index,
+        &slot_ctx.carrier_line_index,
         &slot_ctx.mapper,
         &slot_ctx.tsx_line_index,
     )
@@ -3737,37 +5063,55 @@ const outerLabel = 'outer'
         &slot_uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "name".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) name: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "id".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) id: number".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "outerLabel".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const outerLabel: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
         ],
@@ -3794,6 +5138,167 @@ const outerLabel = 'outer'
     assert!(
         !labels.contains(&"outerLabel".to_string()),
         "member access should suppress outer scope identifiers, got: {labels:?}"
+    );
+}
+
+/// Incomplete member access in `<script setup>` (`a.`).
+///
+/// The recovery codegen keeps the virtual file valid TSX, and the completion handler
+/// classifies the SCRIPT dot boundary as `MemberAccess` so the dot-trigger + member-filtering
+/// machinery runs (it previously ran for template expressions only). The provider
+/// returns number members; the LSP surfaces them with NO `___VERTER___` recovery
+/// token leaking into a label.
+#[tokio::test]
+async fn script_member_access_completion_returns_number_members() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let source = "<script setup>\nlet a = 1;\na.\n</script>\n";
+    let uri = open_test_vue(server, "/workspace/src/Member.vue", source);
+
+    // The IDE virtual file must be VALID TSX — the recovery fix is what stops the
+    // whole-file language service from degrading to "No Suggestions".
+    let ide = server
+        .documents
+        .get_ide(&uri)
+        .expect("IDE TSX should exist");
+    {
+        let alloc = oxc_allocator::Allocator::new();
+        let parsed =
+            oxc_parser::Parser::new(&alloc, &ide.code, oxc_span::SourceType::tsx()).parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "the LSP must ship VALID TSX for `a.`, got {:?}\n--- TSX ---\n{}",
+            parsed
+                .errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>(),
+            ide.code
+        );
+    }
+
+    // Cursor right after the `a.` dot boundary.
+    let position = find_document_position(server, &uri, "a.", 2);
+
+    // Compute the TSX offset exactly as the completion handler does: the strict
+    // mapper is None at the zero-width member boundary by design, so fall back to
+    // the completion-boundary helper.
+    let ctx = synced_type_provider_context(server, &uri);
+    let vue_source = server.documents.get(&uri).unwrap().source.clone();
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .or_else(|| {
+        merge::carrier_completion_member_boundary_offset(
+            &position,
+            &ctx.carrier_line_index,
+            &ctx.mapper,
+            &ctx.tsx_line_index,
+            &ctx.tsx_content,
+            &vue_source,
+        )
+    })
+    .expect("the `a.` dot boundary must map to a TSX offset (strict or fallback)");
+
+    // The script position must classify as member access.
+    let expr_ctx =
+        classify_expression_context_with_trigger(&ctx.tsx_content, tsx_offset as usize, Some("."));
+    assert!(
+        matches!(expr_ctx, ExpressionContext::MemberAccess),
+        "script `a.` must classify as MemberAccess, got {expr_ctx:?}"
+    );
+
+    use crate::type_provider::protocol::CompletionKind;
+    provider.set_completions(
+        &ctx.tsx_path,
+        tsx_offset,
+        vec![
+            mock_completion("toFixed", CompletionKind::Method),
+            mock_completion("toString", CompletionKind::Method),
+            mock_completion("valueOf", CompletionKind::Method),
+            // A non-member global the provider would also offer — member filtering
+            // must drop it.
+            mock_completion("AbortController", CompletionKind::Variable),
+        ],
+    );
+
+    // Both WITH the explicit `.` trigger and WITHOUT it (Ctrl+Space) must work.
+    for trigger in [Some("."), None] {
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&uri, position, trigger))
+                .await
+                .expect("completion request should succeed"),
+        );
+        for member in ["toFixed", "toString", "valueOf"] {
+            assert!(
+                labels.contains(&member.to_string()),
+                "script member access (trigger={trigger:?}) must return `{member}`, got {labels:?}"
+            );
+        }
+        assert!(
+            labels.iter().all(|l| !l.contains("___VERTER___")),
+            "no completion label may leak a ___VERTER___ recovery token, got {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"AbortController".to_string()),
+            "member-access filtering must drop non-member globals, got {labels:?}"
+        );
+    }
+}
+
+/// NEGATIVE: an ordinary `<script setup>` IDENTIFIER position must NOT
+/// inherit the template-only `IdentifierExpected` TypeProvider suppression — TS
+/// globals and imports are valid in script, so the provider's results flow
+/// through. (In a template the same context skips the provider; in script it must
+/// not.)
+#[tokio::test]
+async fn script_identifier_completion_is_not_suppressed() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let source = "<script setup>\nconst myValue = 1;\nmyVal\n</script>\n";
+    let uri = open_test_vue(server, "/workspace/src/Ident.vue", source);
+    // Cursor INSIDE the partial reference `myVal` (after `myV`), a clearly-mapped
+    // identifier position with prefix `myV`.
+    let position = find_document_position(server, &uri, "myVal\n", 3);
+
+    let ctx = synced_type_provider_context(server, &uri);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("script identifier position should map to tsx");
+
+    use crate::type_provider::protocol::CompletionKind;
+    provider.set_completions(
+        &ctx.tsx_path,
+        tsx_offset,
+        vec![mock_completion("myValue", CompletionKind::Variable)],
+    );
+
+    let labels = completion_labels(
+        server
+            .completion(completion_params(&uri, position, None))
+            .await
+            .expect("completion request should succeed"),
+    );
+    assert!(
+        labels.contains(&"myValue".to_string()),
+        "ordinary script identifier completions must consult the TypeProvider \
+         (must NOT inherit template IdentifierExpected suppression), got {labels:?}"
     );
 }
 
@@ -3841,9 +5346,9 @@ const outerLabel = 'outer'
     let slot_uri = open_test_vue(server, "/workspace/src/TemplateSlotCases.vue", slot_source);
     let position = find_document_position(server, &slot_uri, "slotItem.na", 11);
     let slot_ctx = synced_type_provider_context(server, &slot_uri);
-    let slot_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let slot_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &slot_ctx.vue_line_index,
+        &slot_ctx.carrier_line_index,
         &slot_ctx.mapper,
         &slot_ctx.tsx_line_index,
     )
@@ -3862,37 +5367,55 @@ const outerLabel = 'outer'
         &slot_uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "name".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) name: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "id".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) id: number".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "outerLabel".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const outerLabel: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
         ],
@@ -3952,9 +5475,9 @@ const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
     let uri = open_test_vue(server, "/workspace/src/App.vue", source);
     let position = find_document_position(server, &uri, "action.di", 7);
     let ctx = synced_type_provider_context(server, &uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -3970,48 +5493,72 @@ const actions: Action[] = [{ label: 'ok', disabled: false, handler: () => {} }]
         &uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "disabled".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) disabled: boolean".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "label".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) label: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "handler".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Method),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Method),
                 detail: Some("(method) handler(): void".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "actions".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const actions: Action[]".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
         ],
@@ -4059,9 +5606,9 @@ async fn completion_queries_type_provider_for_fixture_vfor_member_access_after_b
     let uri = open_test_vue(server, "/workspace/src/App.vue", source);
     let position = find_document_position(server, &uri, "action.disabled", 7);
     let ctx = synced_type_provider_context(server, &uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
@@ -4077,37 +5624,55 @@ async fn completion_queries_type_provider_for_fixture_vfor_member_access_after_b
         &uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "disabled".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) disabled: boolean".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "label".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) label: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "handler".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Method),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Method),
                 detail: Some("(method) handler(): void".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
         ],
@@ -4192,37 +5757,55 @@ const outerLabel = 'outer'
         &slot_uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "name".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) name: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "id".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) id: number".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "outerLabel".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const outerLabel: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
         ],
@@ -4405,9 +5988,9 @@ const broken =
     );
     let position = find_document_position(server, &recovery_uri, "{{ cou }}", 6);
     let recovery_ctx = synced_type_provider_context(server, &recovery_uri);
-    let recovery_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let recovery_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &recovery_ctx.vue_line_index,
+        &recovery_ctx.carrier_line_index,
         &recovery_ctx.mapper,
         &recovery_ctx.tsx_line_index,
     )
@@ -4426,37 +6009,55 @@ const broken =
         &recovery_uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "count".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const count: Ref<number>".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "safeAction".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Function),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Function),
                 detail: Some("function safeAction(): void".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "console".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Module),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Module),
                 detail: Some("global".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
         ],
@@ -4521,9 +6122,9 @@ const broken =
     );
     let position = find_document_position(server, &recovery_uri, "{{ safeA }}", 8);
     let recovery_ctx = synced_type_provider_context(server, &recovery_uri);
-    let recovery_tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let recovery_tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &recovery_ctx.vue_line_index,
+        &recovery_ctx.carrier_line_index,
         &recovery_ctx.mapper,
         &recovery_ctx.tsx_line_index,
     )
@@ -4542,37 +6143,55 @@ const broken =
         &recovery_uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "safeAction".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Function),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Function),
                 detail: Some("function safeAction(): void".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "count".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Variable),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
                 detail: Some("const count: Ref<number>".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "console".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Module),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Module),
                 detail: Some("global".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
         ],
@@ -4651,26 +6270,38 @@ const summary = computed(() => `${person.value.name}: ${person.value.age}`)
         &uri,
         position,
         vec![
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "value".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) value: string".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
-            crate::tsgo::protocol::Completion {
+            crate::type_provider::protocol::Completion {
                 label: "count".to_string(),
-                kind: Some(crate::tsgo::protocol::CompletionKind::Property),
+                kind: Some(crate::type_provider::protocol::CompletionKind::Property),
                 detail: Some("(property) count: number".to_string()),
                 documentation: None,
                 edit_range_start: None,
                 edit_range_end: None,
+                text_edit_new_text: None,
                 insert_text: None,
                 sort_text: None,
+                insert_text_format: None,
+                commit_characters: None,
+                filter_text: None,
+                preselect: None,
+                label_details: None,
                 data: None,
             },
         ],
@@ -4789,6 +6420,8 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
         &pending_snapshot_provider_sync,
         false,
         None,
+        None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -4802,7 +6435,7 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
         .map(|entry| entry.clone())
         .expect("drained sync should commit owner-aware provider state");
     assert!(
-        !state.is_provisional(),
+        !state.is_unresolved(),
         "drain must set an owner-aware binding on provider state"
     );
 
@@ -4810,21 +6443,185 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::UpdateFile { path, .. } if path.ends_with(".vue.ts")
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path.ends_with(".vue.verter.ts")
         )),
-        "drain should sync the Vue public API through .vue.ts"
+        "drain should sync the Vue public API through .vue.verter.ts"
     );
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::UpdateFile { path, .. } if path.ends_with(".tsx")
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path.ends_with(".tsx")
         )),
         "drain should sync the open Vue IDE file through the synthetic TSX path"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn background_init_drain_removes_stale_provisional_state_when_ready_snapshot_has_no_owner() {
+async fn drain_owner_loss_retracts_carrier_membership_from_the_ledger() {
+    // Gap (a) — production-path coverage for the background-drain no-owner branch.
+    // `drain_pending_snapshot_provider_sync` →
+    // `sync_pending_snapshot_provider_file` → `sync_pending_carrier_provider_file`'s
+    // no-owner arm MUST route owner loss through the membership reconciler so a
+    // previously-advertised carrier is RETRACTED from the ledger-backed
+    // `getExternalFiles`. DISCRIMINATION: a drain arm that handled only the provider
+    // buffer (the pre-fix gap, where the store/ledger membership was never retracted
+    // on a drained owner loss) leaves the source advertised — the final assertion
+    // catches it. RED is reproduced by removing the `reconcile_membership` call from
+    // that no-owner arm.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let source = "/workspace/src/Gone.vue";
+    let uri: Uri = "file:///workspace/src/Gone.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div /></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    // A real coordinator over a real on-disk backend (the same store the plugin
+    // reads); its membership ledger is the advertisement authority under test.
+    let backend = Arc::new(crate::external_ts::TsserverEngineBackend::with_default_host_version());
+    let coordinator = crate::external_ts::CarrierPublishCoordinator::new(
+        Arc::clone(&backend),
+        Arc::clone(&type_provider),
+        "5.9.0",
+    );
+
+    // Pre-advertise the carrier in the ledger — the state owner loss must retract.
+    let ledger = backend.membership_ledger();
+    let canonical = crate::external_ts::CanonicalSource::from(source);
+    ledger
+        .commit(
+            &canonical,
+            crate::external_ts::MembershipRecord::Advertised {
+                project: crate::external_ts::ProjectUri::from("/workspace/tsconfig.json"),
+                companions: vec![crate::external_ts::LedgerCompanion {
+                    provider_uri: Arc::from("/workspace/src/Gone.vue.tsx"),
+                    role: verter_session::external_ts::SnapshotRole::CarrierIde,
+                    script_kind: verter_session::external_ts::ScriptKind::Tsx,
+                }],
+                lease: ledger.current_session(),
+            },
+        )
+        .expect("seed the prior advertisement");
+    assert!(
+        ledger.is_advertised(&canonical),
+        "the carrier must start advertised so the drain has something to retract"
+    );
+
+    // A READY snapshot rooted ELSEWHERE: ownership is resolved (ownership_ready) but
+    // does NOT own this source → authoritative owner loss (not a cold bootstrap).
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other_ws",
+        Some("/other_ws/tsconfig.json"),
+    );
+    let provider_sync_states = DashMap::new();
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert(source.to_string());
+
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+        Some(&coordinator),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    assert!(
+        !ledger.is_advertised(&canonical),
+        "owner loss through the background drain MUST retract the carrier from the \
+         ledger-backed getExternalFiles (the no-owner drain arm routes through the reconciler)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_keeps_partially_failed_vue_file_queued_for_retry() {
+    // R2-6: a per-file sync that PARTIALLY succeeds (one kind syncs, another
+    // fails and reverts) must NOT be dequeued — the failed kind would otherwise
+    // never be retried (permanent suppression). Here the API `.vue.ts` sync is
+    // injected to fail while the IDE `.tsx` succeeds; the file must STAY queued.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div /></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Fail ONLY the API `.vue.ts` sync; the IDE `.tsx` succeeds → PARTIAL.
+    provider.set_fail_sync_path("/workspace/src/App.vue.verter.ts");
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+    );
+    let provider_sync_states = DashMap::new();
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+        None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    // Discriminator (RED pre-fix): the partial success returned `true`, so the
+    // drain removed the file and the failed API kind was never retried.
+    assert!(
+        pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+        "a partially-failed Vue sync must STAY queued so the failed kind is retried"
+    );
+    // Positive: the IDE `.tsx` kind DID sync this pass (the partial success).
+    let calls = provider.file_sync_calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "the IDE TSX kind should have synced (the partial success), calls={calls:?}"
+    );
+    // Positive: the API `.vue.ts` was attempted (recorded before the injected Err).
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == "/workspace/src/App.vue.verter.ts"
+        )),
+        "the API `.vue.ts` kind should have been attempted (then failed), calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
+    // Editor-liveness invariant: an OPEN Vue document's provider state must
+    // NOT be removed (nor its TSX closed) merely because the ready ownership
+    // snapshot resolves no owner for it. The drain may keep it queued for a
+    // future owner, but it must preserve the open file's unresolved state and
+    // keep its IDE TSX live so hover/completion keep working.
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let documents = DocumentRegistry::new(Arc::clone(&host));
     let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
@@ -4837,6 +6634,8 @@ async fn background_init_drain_removes_stale_provisional_state_when_ready_snapsh
 
     let provider = Arc::new(MockTypeProvider::new());
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // Ready snapshot whose only project lives at `/other` — it does NOT own
+    // the open `/workspace/src/App.vue`, so owner resolution returns None.
     let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
         "/other",
         Some("/other/tsconfig.json"),
@@ -4845,13 +6644,17 @@ async fn background_init_drain_removes_stale_provisional_state_when_ready_snapsh
     provider_sync_states.insert(
         "/workspace/src/App.vue".to_string(),
         ProviderSyncState {
-            owner_binding: crate::provider_sync::ProviderOwnerBinding::Provisional,
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
             ide_background_loaded: true,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
     let pending_snapshot_provider_sync = DashSet::new();
@@ -4865,40 +6668,1581 @@ async fn background_init_drain_removes_stale_provisional_state_when_ready_snapsh
         &pending_snapshot_provider_sync,
         false,
         None,
+        None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
+    // Positive: the open file's provider state SURVIVES, still unresolved.
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("open Vue file must keep its provider sync state across an owner-None drain");
     assert!(
-        pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
-        "ready-but-unowned files should stay queued for future rebuilds"
+        state.is_unresolved(),
+        "ownership-None must not upgrade the binding; it stays unresolved, got {:?}",
+        state.owner_binding
     );
-    assert!(
-        provider_sync_states.get("/workspace/src/App.vue").is_none(),
-        "ready-but-unowned drain must remove stale provisional provider state"
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the open file's IDE TSX path must be preserved"
     );
 
+    // INV-3: the ready `/other` snapshot resolves `/workspace/src/App.vue` to a
+    // TERMINAL `NoProject`, so the drain DEQUEUES it — a terminal ownership decision
+    // is never retried into a provider on every drain. Editor-liveness is preserved
+    // above (the open file's state survives + its TSX stays live), and re-owning on a
+    // later config change is re-driven by the foreground sync's owner-mismatch
+    // reconcile, not a stale drain retry.
+    assert!(
+        !pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+        "a terminal NoProject carrier must be dequeued (never retried into a provider)"
+    );
+
+    let calls = provider.file_sync_calls();
+    // Negative: the drain must NOT close the open file's live IDE/API paths.
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path }
+                if path == "/workspace/src/App.vue.tsx" || path == "/workspace/src/App.vue.verter.ts"
+        )),
+        "owner-None drain must NOT close an open Vue file's live provider paths, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
+    // FIX-1 + R2-8: an OPEN Vue file that was previously `Owned` becomes unowned
+    // when a ready snapshot resolves no owner for it. The drain MUST convert the
+    // committed state to `Unresolved` (so `needs_owner_reconcile` can later
+    // re-bind it) — it must NOT reuse the stale `Owned` binding (which would
+    // panic the debug_assert and strand the file on a dead owner) and must NOT
+    // carry the stale owner-derived `.vue.ts` API path. The live IDE TSX is
+    // preserved and never closed; the dropped owner-derived `.vue.ts` IS closed
+    // (R2-8 — it is an orphaned provider artifact once unowned).
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // Ready snapshot at `/other` — it does NOT own the open `/workspace` file.
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other",
+        Some("/other/tsconfig.json"),
+    );
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state is OWNED (the FIX-1 trigger) with a stale API path.
+    provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    // No panic (pre-fix the debug_assert!(is_unresolved) fires on the Owned reuse).
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+        None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("owned→unowned open Vue file must keep provider sync state");
+    // Discriminator: pre-fix this would still be Owned("/old/tsconfig.json").
+    assert!(
+        state.is_unresolved(),
+        "owned→unowned open Vue file must be converted to Unresolved, got {:?}",
+        state.owner_binding
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the live IDE TSX path must be preserved across the conversion"
+    );
+    // Discriminator: the stale owner-derived API path must be dropped.
+    assert!(
+        state.api_path.is_none(),
+        "the stale owner-derived `.vue.ts` API path must be dropped, got {:?}",
+        state.api_path
+    );
+
+    let calls = provider.file_sync_calls();
+    // Negative: the owner-INDEPENDENT live IDE TSX must NOT be closed
+    // (editor-liveness keeps the open document's hover/completion working).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
+        )),
+        "owned→unowned conversion must NOT close the open file's live IDE TSX, calls={calls:?}"
+    );
+    // Positive (R2-8): the dropped owner-derived `.vue.ts` IS closed — once
+    // unowned no project provides it, so leaving it open leaks an orphan.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.verter.ts"
+        )),
+        "owned→unowned conversion must CLOSE the dropped owner-derived `.vue.ts`, calls={calls:?}"
+    );
+
+    // INV-3: under the ready `/other` snapshot the owner-lost carrier resolves to a
+    // TERMINAL `NoProject`, so the drain DEQUEUES it (a terminal ownership decision
+    // is never retried). The owner→unowned conversion + editor-liveness are asserted
+    // above; a later config change re-binds it through the foreground owner-mismatch
+    // reconcile, not a stale drain retry.
+    assert!(
+        !pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+        "a terminal owner-lost carrier must be dequeued (never retried into a provider)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding() {
+    // R2-1: the no-IDE branch of `sync_open_unresolved_carrier_provider_file` must
+    // still COMMIT the forced-`Unresolved` state when a prior committed state
+    // exists — never abandon the conversion and leave a stale `Owned` binding.
+    // An owned→unowned OPEN Vue file with a transient IDE compile miss (ide=None)
+    // would otherwise stay stuck on a dead owner: its committed binding stays
+    // `Owned` → `needs_owner_reconcile` (is_unresolved && ownership_ready) is
+    // false → the file can never re-bind. The fix converts the binding to
+    // `Unresolved` and drops the stale owner-derived `.vue.ts` API path while
+    // preserving the live IDE TSX path (and NEVER closing it — there is no new
+    // IDE code to re-sync this pass).
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state is OWNED with a live `.tsx` IDE path AND a stale
+    // owner-derived `.vue.ts` API path (the owned→unowned trigger).
+    provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    // Drive the no-IDE branch directly: no compiled IDE output this pass.
+    let synced = sync_open_unresolved_carrier_provider_file(
+        &sync,
+        &documents,
+        &provider_sync_states,
+        "/workspace/src/App.vue",
+        false,
+        None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+    assert!(
+        !synced,
+        "no-IDE preserve pass must return false so the file stays queued"
+    );
+
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("the open file's provider state must be preserved, not removed");
+    // Discriminator: pre-fix this branch returned WITHOUT committing, so the
+    // stale `Owned("/old/tsconfig.json")` binding survived.
+    assert!(
+        state.is_unresolved(),
+        "no-IDE owned→unowned pass must commit a forced-Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+    // The live IDE TSX path is preserved (owner-independent artifact).
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the live IDE TSX path must be preserved across the no-IDE conversion"
+    );
+    // The stale owner-derived API path must be dropped (no project provides it).
+    assert!(
+        state.api_path.is_none(),
+        "the stale owner-derived `.vue.ts` API path must be dropped, got {:?}",
+        state.api_path
+    );
+
+    // Negative: with no new IDE code, the live IDE TSX is NEITHER re-opened/
+    // updated NOR closed — the editor-liveness invariant keeps it alive and
+    // there is no fresh code to re-sync this pass.
+    let calls = provider.file_sync_calls();
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+                | MockCall::CloseFile { path }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "no-IDE preserve pass must not touch the live IDE TSX, calls={calls:?}"
+    );
+    // R2-8: but the stale owner-derived `.vue.ts` dropped by the conversion MUST
+    // be closed even on the no-IDE branch — the provider still holds it open and
+    // it is invalid once unowned.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.verter.ts"
+        )),
+        "no-IDE owned→unowned conversion must close the dropped `.vue.ts`, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
+    // R2-8: converting an OPEN Vue file owned→unowned drops the owner-derived
+    // `.vue.ts` API path from the committed state, but the provider still holds
+    // that `.vue.ts` open. The conversion MUST close the stale `.vue.ts`
+    // (orphaned artifact — no project provides it once unowned) while NEVER
+    // closing the owner-independent IDE `.vue.tsx` (the editor-liveness
+    // invariant keeps the open document's TSX live). Drives the IDE-present
+    // branch (fresh `Some(ide)` code) so the TSX is re-synced and the conversion
+    // commits.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state is OWNED with a live `.tsx` IDE path AND a stale
+    // owner-derived `.vue.ts` API path (both background-loaded → the provider
+    // genuinely holds both open).
+    provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    // Fresh IDE output this pass → the TSX is re-synced and the conversion
+    // commits the forced-Unresolved state.
+    let ide = verter_session::IdeResponse {
+        code: std::sync::Arc::from("export default {}"),
+        source_map: None,
+        is_jsx: false,
+        destructured_block: None,
+    };
+    let synced = sync_open_unresolved_carrier_provider_file(
+        &sync,
+        &documents,
+        &provider_sync_states,
+        "/workspace/src/App.vue",
+        false,
+        Some(&ide),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+    assert!(
+        !synced,
+        "open unresolved preserve pass returns false so the file stays queued"
+    );
+
+    // The committed state must be the converted Unresolved state: IDE TSX kept,
+    // owner-derived API dropped.
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("the open file's provider state must be preserved");
+    assert!(state.is_unresolved(), "binding must be forced Unresolved");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the live IDE TSX path must be preserved"
+    );
+    assert!(
+        state.api_path.is_none(),
+        "the owner-derived API path is dropped"
+    );
+
+    let calls = provider.file_sync_calls();
+    // Discriminator (RED pre-fix): the dropped owner-derived `.vue.ts` must be
+    // CLOSED in the provider — otherwise it leaks as an untracked artifact.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.verter.ts"
+        )),
+        "owned→unowned conversion must CLOSE the stale `.vue.ts`, calls={calls:?}"
+    );
+    // Discriminator: the owner-independent IDE `.vue.tsx` must NEVER be closed
+    // (closing it would kill the open document's hover/completion).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
+        )),
+        "owned→unowned conversion must NOT close the live IDE TSX, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_carrier_failed_first_open_commits_no_dead_ide_path() {
+    // R3-1 (a) [P0]: an OPEN unowned `.vue` with NO prior live IDE state whose
+    // first `open_tsx` FAILS must NOT commit a `ide_path` the provider never
+    // opened. A committed `ide_path = Some(p)` is a promise that hover/completion
+    // can route to `p` — `active_ide_path_for_uri` hands it to the type provider.
+    // Pre-fix the preserve helper committed `ide_path = Some(.tsx)` even though
+    // the open failed, so `active_ide_path_for_uri` returned an UNOPENED `.tsx`
+    // and queries routed to a dead TSX (the `no ide_context` failure class).
+    //
+    // Driven through the real foreground entry `ensure_current_file_synced`
+    // under a ready snapshot that does NOT own the file, so the owner-None
+    // preserve branch (which also queues the file) is exercised end to end.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    // Ready snapshot at `/other` — it does NOT own the open `/workspace` file.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // No prior committed provider state for this file (the open→unowned first
+    // pass). Force the IDE `.tsx` open to FAIL (records the call, returns Err).
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+
+    server.ensure_current_file_synced(&uri).await;
+
+    // Reach (R3-2 discipline): the pass MUST have ATTEMPTED to open the new
+    // `.tsx` (the failing mock records the open before erroring). A no-op impl
+    // that returned before syncing would vacuously pass the dead-path assertion.
     let calls = provider.file_sync_calls();
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
         )),
-        "drain should close the stale provisional IDE path, calls={calls:?}"
+        "preserve must ATTEMPT to open the unresolved `.tsx` before failing, calls={calls:?}"
     );
+
+    // The committed binding is forced Unresolved (it is an open unowned file)…
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the open file's provider state must be committed");
+    assert!(
+        state.is_unresolved(),
+        "an open unowned file must commit an Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+    // …and it must NOT advertise a dead IDE path: the failed open never went
+    // live, so the committed `ide_path` must be None (no dead TSX to route to).
+    assert!(
+        state.ide_path.is_none(),
+        "a failed first-open must NOT commit a dead `ide_path`, got {:?}",
+        state.ide_path
+    );
+
+    // Discriminator (RED pre-fix): `active_ide_path_for_uri` must return None —
+    // pre-fix it returned the unopened `/workspace/src/App.vue.tsx`.
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        None,
+        "active IDE path must be None when the provider never opened the TSX (no dead path)"
+    );
+
+    // The file stays queued for a future retry (a later snapshot owner upgrade
+    // or a successful re-open).
+    assert!(
+        server.pending_snapshot_provider_sync.contains(canonical_id),
+        "a failed preserve open must keep the file queued for retry"
+    );
+}
+
+/// Owner loss (production path) RETRACTS the carrier's store
+/// membership through the REAL production sync-transition entry
+/// `ensure_current_file_synced` (NOT `publish_carrier` directly). A carrier
+/// published while OWNED must DISAPPEAR from the on-disk carrier store (the
+/// `@verter/typescript-plugin`'s `getExternalFiles` source) once its owner is gone.
+///
+/// RED before the fix: the interactive `publish_carrier_to_external_ts` early-
+/// returned on the no-owner transition WITHOUT retracting — the retract inside
+/// `publish_carrier` was dead in production because the no-owner branch never
+/// reached it — so the stale carrier persisted in the store across owner loss. This
+/// test drives the production entry (the same coverage class the original
+/// BLOCKER-1's hermetic test missed by calling `publish_carrier` directly).
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_loss_retracts_carrier_through_production_ensure_synced() {
+    use crate::external_ts::{default_carrier_store_host_version, CarrierPublishStore};
+
+    // Unique workspace root so the per-(host_version, ws_root) carrier store dir is
+    // isolated from other tests. A unix-style absolute root round-trips cleanly
+    // through `open_test_vue`'s `file://{path}` URI (canonical_id == path).
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let ws_root = format!("/verter_b1_prod_{nanos}/ws");
+    let tsconfig = format!("{ws_root}/tsconfig.json");
+    let source = format!("{ws_root}/src/App.vue");
+
+    // A tsserver-kind server ⇒ a real `CarrierPublishCoordinator` (real backend +
+    // on-disk store, mock provider). The production interactive entry
+    // `ensure_current_file_synced` publishes the carrier into THIS store.
+    let provider = std::sync::Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service =
+        make_hover_test_service_with_kind(type_provider, crate::TypeProviderKind::Tsserver);
+    let server = service.inner();
+
+    // 1. Owner-ready snapshot owning the workspace (Configured project) → the
+    //    carrier resolves to a ProjectBinding and publishes.
+    install_test_resolver_for_root(server, &ws_root, Some(&tsconfig));
+    let uri = open_test_vue(
+        server,
+        &source,
+        "<script setup lang=\"ts\">\nconst msg: string = 'hi'\n</script>\n\
+         <template><div>{{ msg }}</div></template>\n",
+    );
+
+    server.ensure_current_file_synced(&uri).await;
+
+    // The carrier must now be a member of its configured project in the store.
+    // Capture the published provider paths so the post-retract check is path-exact
+    // without hardcoding the companion suffix.
+    let published_providers: Vec<String> = {
+        let store = CarrierPublishStore::open(default_carrier_store_host_version(), &ws_root);
+        let manifest = store.current_manifest();
+        let project = manifest
+            .projects
+            .get(&tsconfig)
+            .expect("the owning project must have a manifest entry after a publish");
+        let providers: Vec<String> = project
+            .owned_sources
+            .iter()
+            .filter(|o| o.source_uri == source)
+            .map(|o| o.provider_uri.clone())
+            .collect();
+        assert!(
+            !providers.is_empty(),
+            "after a publish under a configured owner the carrier source MUST be in \
+             the store's owned set"
+        );
+        assert!(
+            providers
+                .iter()
+                .any(|p| project.ready_files.contains_key(p)),
+            "the published companion MUST be in ready_files (the getExternalFiles set)"
+        );
+        providers
+    };
+
+    // The ledger-backed `getExternalFiles` authority must agree with the on-disk
+    // store: the reconciler is the single writer of BOTH, so a published source is
+    // advertised in the ledger.
+    assert!(
+        server
+            .membership_ledger()
+            .expect("a tsserver server has a membership ledger")
+            .is_advertised(&crate::external_ts::CanonicalSource::from(source.as_str())),
+        "after a publish the source must be advertised in the ledger-backed getExternalFiles"
+    );
+
+    // 2. The owner DISAPPEARS: install a ready snapshot rooted ELSEWHERE that does
+    //    NOT own this file (owner loss; ownership_ready = true).
+    let other_root = format!("/verter_b1_other_{nanos}/ws");
+    install_test_resolver_for_root(
+        server,
+        &other_root,
+        Some(&format!("{other_root}/tsconfig.json")),
+    );
+
+    // 3. Drive the SAME production entry again. Owner loss MUST retract the carrier.
+    server.ensure_current_file_synced(&uri).await;
+
+    let store = CarrierPublishStore::open(default_carrier_store_host_version(), &ws_root);
+    let manifest = store.current_manifest();
+    let still_owned = manifest
+        .projects
+        .get(&tsconfig)
+        .map(|p| p.owned_sources.iter().any(|o| o.source_uri == source))
+        .unwrap_or(false);
+    assert!(
+        !still_owned,
+        "owner loss through the production `ensure_current_file_synced` entry MUST \
+         retract the carrier source from the store's owned set (it was DEAD CODE in \
+         production before the fix)"
+    );
+    let still_ready = manifest
+        .projects
+        .get(&tsconfig)
+        .map(|p| {
+            published_providers
+                .iter()
+                .any(|pv| p.ready_files.contains_key(pv))
+        })
+        .unwrap_or(false);
+    assert!(
+        !still_ready,
+        "owner loss MUST remove the carrier's companions from ready_files so \
+         getExternalFiles stops serving them — the carrier must DISAPPEAR from the \
+         store manifest"
+    );
+    // …and the ledger-backed authority must agree: owner loss leaves the source
+    // NOT advertised (the reconciler tombstoned it as the single writer of both).
+    assert!(
+        !server
+            .membership_ledger()
+            .expect("a tsserver server has a membership ledger")
+            .is_advertised(&crate::external_ts::CanonicalSource::from(source.as_str())),
+        "owner loss through the production entry MUST leave the source NOT advertised \
+         in the ledger-backed getExternalFiles"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_carrier_failed_update_keeps_prior_live_ide_path() {
+    // R3-1 (b): an OPEN unowned `.vue` with a prior LIVE IDE path whose UPDATE
+    // fails must KEEP the prior live path — it is still open in the provider
+    // (only the in-place update failed; the document stays usable with its
+    // last-good content). The live path's loaded flag stays true, so the
+    // committed state and `active_ide_path_for_uri` both retain it.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // Seed a prior LIVE unresolved state: the `.tsx` is already background-loaded
+    // (the provider genuinely holds it open from a prior successful pass).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: None,
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    // Fail the in-place update of the live `.tsx`.
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+
+    server
+        .preserve_open_unresolved_carrier(
+            canonical_id,
+            false,
+            Some("export default { updated: true }"),
+        )
+        .await;
+
+    // Reach: the helper attempted the in-place UPDATE of the live `.tsx`.
+    let calls = provider.file_sync_calls();
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.ts"
+            MockCall::UpdateFile { path, .. } if path == "/workspace/src/App.vue.tsx"
         )),
-        "drain should close the stale provisional API path, calls={calls:?}"
+        "preserve must ATTEMPT to update the live `.tsx`, calls={calls:?}"
     );
+
+    // The prior LIVE path is preserved — it is still open in the provider.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the open file's provider state must survive");
+    assert!(state.is_unresolved(), "binding stays Unresolved");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "a prior live IDE path must be preserved across a failed update, got {:?}",
+        state.ide_path
+    );
+    assert!(
+        state.ide_background_loaded,
+        "the preserved live IDE path keeps its background-loaded flag"
+    );
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        Some("/workspace/src/App.vue.tsx".to_string()),
+        "a prior live IDE path stays the active IDE path after a failed update"
+    );
+
+    // The live `.tsx` must NEVER be closed (the document stays usable).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
+        )),
+        "a failed update must not close the live IDE TSX, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_carrier_jsx_flip_syncs_new_tsx_and_closes_old_jsx_after_success()
+{
+    // R3-4 [P1]: an OPEN unowned `.vue` with a prior LIVE `.jsx` that flips to TS
+    // (`is_jsx == false`) must sync the NEW code into the desired `.tsx`, NEVER
+    // into the stale `.jsx`, and close the old `.jsx` ONLY AFTER the new `.tsx`
+    // syncs (close-after-success). Pre-fix the preserve helper reused the prior
+    // `.jsx` path (ignoring `is_jsx`), so the new TS code was synced into the
+    // wrong (JSX) provider artifact and the `.tsx` was never opened.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // Seed a prior LIVE `.jsx` unresolved state (the document was previously JS).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: None,
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    // Flip to TS: is_jsx = false → desired path is `.tsx`. Fresh IDE code; the
+    // new `.tsx` open SUCCEEDS (no failure injection).
+    server
+        .preserve_open_unresolved_carrier(canonical_id, false, Some("export default { ts: true }"))
+        .await;
+
+    let calls = provider.file_sync_calls();
+
+    // Discriminator: the NEW `.tsx` must have been opened/synced…
+    let new_tsx_idx = calls.iter().position(|call| {
+        matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path == "/workspace/src/App.vue.tsx"
+        )
+    });
+    let new_tsx_idx = new_tsx_idx
+        .unwrap_or_else(|| panic!("the is_jsx flip must sync the new `.tsx`, calls={calls:?}"));
+
+    // Discriminator (RED pre-fix): the new TS code must NEVER be synced into the
+    // stale `.jsx` artifact (pre-fix it was, because the prior path was reused).
     assert!(
         !calls.iter().any(|call| matches!(
             call,
             MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
-                if path.ends_with(".vue.ts") || path.ends_with(".vue.tsx")
+                if path == "/workspace/src/App.vue.jsx"
         )),
-        "ready-but-unowned drain must not keep syncing guessed provider paths, calls={calls:?}"
+        "the flip must NOT sync new code into the stale `.jsx`, calls={calls:?}"
+    );
+
+    // The old `.jsx` is closed AFTER the new `.tsx` syncs (close-after-success).
+    let old_jsx_close_idx = calls.iter().position(|call| {
+        matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )
+    });
+    let old_jsx_close_idx = old_jsx_close_idx.unwrap_or_else(|| {
+        panic!("the flipped-away `.jsx` must be closed after the new `.tsx` syncs, calls={calls:?}")
+    });
+    assert!(
+        old_jsx_close_idx > new_tsx_idx,
+        "old `.jsx` must close AFTER the new `.tsx` syncs (close-after-success), \
+         tsx_idx={new_tsx_idx}, jsx_close_idx={old_jsx_close_idx}, calls={calls:?}"
+    );
+
+    // The committed state now points at the live `.tsx`.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("flip must commit the new `.tsx` state");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "committed IDE path must be the new `.tsx`, got {:?}",
+        state.ide_path
+    );
+    assert!(
+        state.ide_background_loaded,
+        "the new `.tsx` is live after a successful flip sync"
+    );
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        Some("/workspace/src/App.vue.tsx".to_string()),
+        "the active IDE path follows the flip to `.tsx`"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_carrier_jsx_flip_no_ide_output_retains_prior_live_jsx() {
+    // R5-1 ROW 7 (REGRESSION, P0): an OPEN unowned `.vue` with a prior LIVE
+    // `.jsx` that flips to TS (`is_jsx == false`) but has NO compiled IDE output
+    // this pass (a transient compile miss) must RETAIN the prior live `.jsx` —
+    // it is still physically open in the provider and is the ONLY usable TSX.
+    // The desired `.tsx` is queued for a later pass.
+    //
+    // Pre-unification the no-IDE branch ran `drop_unloaded_ide_path()` on the
+    // freshly-rebuilt `.tsx` (loaded=false, since the prior `.jsx` ≠ `.tsx`),
+    // committing `ide_path = None` while the `.jsx` stayed physically open →
+    // `active_ide_path_for_uri` returned None → hover died, even though a live
+    // `.jsx` was still serving the document.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // Seed a prior LIVE `.jsx` unresolved state (the document was previously JS).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: None,
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    // Flip to TS (is_jsx = false → desired `.tsx`) but with NO IDE code this pass.
+    server
+        .preserve_open_unresolved_carrier(canonical_id, false, None)
+        .await;
+
+    let calls = provider.file_sync_calls();
+
+    // The committed state RETAINS the prior live `.jsx`, still loaded.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the open file's provider state must survive a no-IDE flip pass");
+    assert!(state.is_unresolved(), "binding stays Unresolved");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.jsx"),
+        "a no-IDE flip must RETAIN the prior live `.jsx` (not drop to None), got {:?}",
+        state.ide_path
+    );
+    assert!(
+        state.ide_background_loaded,
+        "the retained prior live `.jsx` keeps its background-loaded flag"
+    );
+
+    // Discriminator (RED pre-fix): `active_ide_path_for_uri` must return the
+    // prior live `.jsx` — pre-fix it returned None (the committed `ide_path` was
+    // dropped while the `.jsx` stayed physically open → hover dead).
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        Some("/workspace/src/App.vue.jsx".to_string()),
+        "the prior live `.jsx` must stay the active IDE path through a no-IDE flip pass"
+    );
+
+    // The prior live `.jsx` must NEVER be closed (no successful new path synced).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )),
+        "a no-IDE flip must not close the prior live `.jsx`, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_carrier_jsx_flip_failed_tsx_sync_retains_prior_live_jsx() {
+    // R5-1 ROW 9 (REGRESSION, P0): an OPEN unowned `.vue` with a prior LIVE
+    // `.jsx` that flips to TS (`is_jsx == false`) whose new `.tsx` sync FAILS
+    // must RETAIN the prior live `.jsx` — it is still physically open in the
+    // provider and is the only usable TSX. The `.jsx` must NEVER be closed (no
+    // successful replacement), and the desired `.tsx` is queued.
+    //
+    // Pre-unification the failed-sync branch ran `drop_unloaded_ide_path()` on
+    // the failed `.tsx` (loaded=false), committing `ide_path = None` while the
+    // `.jsx` stayed physically open → `active_ide_path_for_uri` returned None →
+    // hover died. This is the exact regression this test pins.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // Seed a prior LIVE `.jsx` unresolved state (the document was previously JS).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: None,
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    server
+        .preserve_open_unresolved_carrier(canonical_id, false, Some("export default { ts: true }"))
+        .await;
+
+    let calls = provider.file_sync_calls();
+
+    // Reach: the pass MUST have ATTEMPTED to open the new `.tsx` (the failing
+    // mock records the open before erroring) — a no-op return would vacuously
+    // pass the retention assertion below.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "the flip must ATTEMPT to open the new `.tsx` before failing, calls={calls:?}"
+    );
+
+    // The committed state RETAINS the prior live `.jsx`, still loaded.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the open file's provider state must survive a failed flip");
+    assert!(state.is_unresolved(), "binding stays Unresolved");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.jsx"),
+        "a failed `.tsx` flip must RETAIN the prior live `.jsx` (not drop to None), got {:?}",
+        state.ide_path
+    );
+    assert!(
+        state.ide_background_loaded,
+        "the retained prior live `.jsx` keeps its background-loaded flag"
+    );
+
+    // Discriminator (RED pre-fix): `active_ide_path_for_uri` must return the
+    // prior live `.jsx` — pre-fix it returned None (committed `ide_path` dropped
+    // while the `.jsx` stayed physically open → hover dead).
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        Some("/workspace/src/App.vue.jsx".to_string()),
+        "the prior live `.jsx` must stay the active IDE path through a failed flip"
+    );
+
+    // The prior live `.jsx` must NEVER be closed when the replacement failed.
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )),
+        "a failed flip must not close the prior live `.jsx`, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_carrier_prior_owned_jsx_flip_failed_drops_api_retains_jsx() {
+    // R5-1 prior-Owned row (combined with row 9): when the prior binding was
+    // `Owned` and the new `.tsx` flip sync FAILS, the owner `.vue.ts` is dropped
+    // from state AND closed (R2-8, independent of the IDE outcome), while the
+    // owner-INDEPENDENT prior live `.jsx` IDE path is RETAINED (still the active
+    // path) and is NEVER closed.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // Seed a prior OWNED state with a LIVE `.jsx` IDE path + a LIVE owner-derived
+    // `.vue.ts` API path (the file was previously owned and JS).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    // Flip to TS with fresh IDE code, but FAIL the new `.tsx` first-open.
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    server
+        .preserve_open_unresolved_carrier(canonical_id, false, Some("export default { ts: true }"))
+        .await;
+
+    let calls = provider.file_sync_calls();
+
+    // Binding forced Unresolved; owner-derived API dropped from committed state.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the open file's provider state must survive");
+    assert!(
+        state.is_unresolved(),
+        "an owned→unowned open file must commit an Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+    assert!(
+        state.api_path.is_none(),
+        "the owner-derived API path must be dropped from the committed state, got {:?}",
+        state.api_path
+    );
+
+    // The owner-derived `.vue.ts` is CLOSED (R2-8, independent of the IDE failure).
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.verter.ts"
+        )),
+        "the dropped owner-derived `.vue.ts` must be CLOSED even on a failed flip, calls={calls:?}"
+    );
+
+    // The owner-INDEPENDENT prior live `.jsx` is RETAINED and is the active path.
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.jsx"),
+        "the owner-independent prior live `.jsx` must be retained on a failed flip, got {:?}",
+        state.ide_path
+    );
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        Some("/workspace/src/App.vue.jsx".to_string()),
+        "the prior live `.jsx` stays the active IDE path"
+    );
+
+    // The IDE `.jsx`/`.tsx` are NEVER closed (the failed `.tsx` never went live;
+    // the `.jsx` is the only usable TSX).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path }
+                if path == "/workspace/src/App.vue.jsx" || path == "/workspace/src/App.vue.tsx"
+        )),
+        "the IDE TSX/JSX must NEVER be closed on an owned→unowned failed flip, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolved() {
+    // R6-3 (row 1, drain caller): with NO prior committed state AND no IDE
+    // output this pass, the drain commits an EMPTY `Unresolved` state
+    // (ide_path=None, binding=Unresolved) — recording the open file's
+    // unresolved status (queued for retry), UNIFIED with the two
+    // `preserve_open_unresolved_carrier` callers (which already commit this).
+    //
+    // Discriminator (RED pre-fix): the drain guarded the commit behind
+    // `if previous.is_some()`, so row 1 committed NOTHING (state map empty) —
+    // an open file's unresolved status was untracked on this path while the
+    // preserve callers tracked it. The committed empty `Unresolved` advertises
+    // NO live path (so `active_ide_path_for_uri` stays None — nothing is open)
+    // and is `is_unresolved()` so `needs_owner_reconcile` picks it up.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+
+    let synced = sync_open_unresolved_carrier_provider_file(
+        &sync,
+        &documents,
+        &provider_sync_states,
+        "/workspace/src/App.vue",
+        false,
+        None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+    assert!(!synced, "no prior state + no IDE output must return false");
+
+    // UNIFIED: an empty `Unresolved` state is committed for the open file.
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("row 1 must commit an empty Unresolved state (unified with preserve callers)");
+    assert!(
+        state.is_unresolved(),
+        "row 1 commits a forced-Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+    assert!(
+        state.ide_path.is_none(),
+        "row 1 has no live IDE path to advertise, got {:?}",
+        state.ide_path
+    );
+    assert!(state.api_path.is_none(), "row 1 has no API path");
+    assert!(
+        !state.ide_background_loaded,
+        "row 1 advertises nothing as live in the provider"
+    );
+
+    // No prior + no IDE → nothing to open, update, or close.
+    assert!(
+        provider.file_sync_calls().is_empty(),
+        "no prior state + no IDE output must not touch any provider file path, calls={:?}",
+        provider.file_sync_calls()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolved() {
+    // R6-3 (row 1, server preserve caller): with NO prior committed state AND no
+    // IDE code (`ide_code = None`), `Server::preserve_open_unresolved_carrier`
+    // commits an EMPTY `Unresolved` state (ide_path=None, binding=Unresolved) —
+    // recording the open file's unresolved status. This pins the SAME row-1
+    // behavior as the drain + sync_coordinator callers (all three unified).
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+
+    // No prior committed state seeded; no IDE code this pass.
+    server
+        .preserve_open_unresolved_carrier(canonical_id, false, None)
+        .await;
+
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("row 1 must commit an empty Unresolved state");
+    assert!(
+        state.is_unresolved(),
+        "row 1 commits a forced-Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+    assert!(
+        state.ide_path.is_none(),
+        "row 1 has no live IDE path to advertise, got {:?}",
+        state.ide_path
+    );
+    assert!(state.api_path.is_none(), "row 1 has no API path");
+    assert!(!state.ide_background_loaded);
+    // Read-side gate agrees there is nothing live to serve.
+    assert_eq!(
+        server.active_ide_path_for_uri(&uri),
+        None,
+        "row 1 advertises no live IDE path"
+    );
+
+    // No prior + no IDE → nothing to open, update, or close in the provider.
+    assert!(
+        provider.file_sync_calls().is_empty(),
+        "row 1 must not touch any provider file path, calls={:?}",
+        provider.file_sync_calls()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() {
+    // FINAL DESIGN 7: owner reconciliation may move provider paths, but a
+    // FAILED reconciliation must leave the previous open path alive. The drain
+    // must sync the NEW owner's paths first and only close the stale paths
+    // AFTER a successful sync — never close-then-sync. Here every provider
+    // file-op fails, so nothing must be closed and the prior state must be
+    // retained unchanged.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // Resolver owns the file at `/workspace` → new owner-aware state with a
+    // `.tsx` IDE path (DIFFERENT from the seeded `.jsx`).
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+    );
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state from a stale owner: a DIFFERENT IDE path (.jsx)
+    // plus the same API path (.ts), both already background-loaded.
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/old/tsconfig.json".to_string(),
+        ),
+        ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+        api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+        decl_path: None,
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        decl_background_loaded: false,
+        shadow_path: None,
+        shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
+    };
+    provider_sync_states.insert("/workspace/src/App.vue".to_string(), prior_state.clone());
+
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    // Every provider file-op records its call AND fails.
+    provider.set_fail_file_ops(true);
+
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+        None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    // Reach (R3-2): the drain must have ATTEMPTED to sync the NEW owner's `.tsx`
+    // (the failing mock records the open/update BEFORE returning Err) before any
+    // no-close assertion. A no-op impl that returned before syncing would pass
+    // the absence-of-close + state-unchanged asserts vacuously.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "failed owner transition must REACH the sync and attempt the new `.tsx`, calls={calls:?}"
+    );
+    // Negative: the stale `.jsx` IDE path must NOT be closed, because the
+    // replacement `.tsx` sync FAILED. (Pre-fix the drain closed stale paths
+    // BEFORE syncing, so a CloseFile for the stale path was recorded.)
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )),
+        "failed owner transition must NOT close the prior IDE path, calls={calls:?}"
+    );
+    // Negative: nothing at all should be closed on a fully-failed transition.
+    assert!(
+        !calls
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { .. })),
+        "a fully-failed owner transition must not close any provider path, calls={calls:?}"
+    );
+
+    // Positive: the prior state is retained UNCHANGED (not committed/removed).
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("a failed owner transition must retain the prior provider state");
+    assert_eq!(
+        state, prior_state,
+        "failed owner transition must leave the prior state byte-for-byte unchanged, got {state:?}"
+    );
+
+    // Positive: stays queued for a future (successful) reconciliation.
+    assert!(
+        pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+        "a failed owner transition should stay queued for a future reconciliation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_owner_transition_closes_stale_path_only_after_successful_sync() {
+    // FINAL DESIGN 7: on a SUCCESSFUL owner transition the drain syncs the new
+    // paths first, commits, THEN closes genuinely-stale paths — and it skips
+    // any stale path the new committed state still uses (a same-path rebind of
+    // an owner-independent Vue artifact must never be closed).
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // Resolver owns the file at `/workspace` → new IDE path `.tsx`, API `.ts`.
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+    );
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state from a stale owner: IDE `.jsx` (DIFFERENT → genuinely
+    // stale), API `.ts` (SAME → owner-independent rebind, must NOT be closed).
+    provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+        None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    let calls = provider.calls();
+
+    // Negative: the API path `.ts` is owner-independent (same in old + new
+    // state) — a same-path rebind must NOT close it. (Pre-fix the stale-set
+    // included `.ts` on owner change and it was closed before sync.)
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.verter.ts"
+        )),
+        "a same-path API rebind must NOT close the live .ts path, calls={calls:?}"
+    );
+
+    // Find the ordering anchors: the new IDE `.tsx` sync (open or update) and
+    // the stale `.jsx` close.
+    let new_tsx_sync_idx = calls.iter().position(|call| {
+        matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path == "/workspace/src/App.vue.tsx"
+        )
+    });
+    let stale_jsx_close_idx = calls.iter().position(|call| {
+        matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )
+    });
+
+    let new_tsx_sync_idx = new_tsx_sync_idx.unwrap_or_else(|| {
+        panic!("drain must sync the new IDE .tsx path on a successful transition, calls={calls:?}")
+    });
+    let stale_jsx_close_idx = stale_jsx_close_idx.unwrap_or_else(|| {
+        panic!("drain must close the genuinely-stale .jsx IDE path, calls={calls:?}")
+    });
+
+    // Positive: the stale `.jsx` close happens AFTER the new `.tsx` sync.
+    // (Pre-fix close_stale ran BEFORE the sync, so this ordering was inverted.)
+    assert!(
+        stale_jsx_close_idx > new_tsx_sync_idx,
+        "stale .jsx must close AFTER the new .tsx sync (close-after-sync), \
+         tsx_sync_idx={new_tsx_sync_idx}, jsx_close_idx={stale_jsx_close_idx}, calls={calls:?}"
+    );
+
+    // Positive: the new owner-aware state is committed.
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("successful transition should commit the new owner-aware state");
+    assert!(
+        !state.is_unresolved(),
+        "successful transition should commit an owner-aware binding, got {:?}",
+        state.owner_binding
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "committed IDE path should be the new .tsx path"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_owner_transition_partial_failure_retains_stale_path_of_failed_kind() {
+    // FIX-2: on an owner transition where the IDE path genuinely changes
+    // (.jsx→.tsx), the API sync succeeds but the new IDE `.tsx` sync FAILS.
+    // The drain must NOT close the old live `.jsx` (its kind did not sync) and
+    // must NOT leave committed state pointing at the unsynced `.tsx`. Pre-fix
+    // `synced_any` was true (API synced) → it committed `.tsx` and closed the
+    // genuinely-stale `.jsx`, losing the file's only live TSX.
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div>{{ msg }}</div></template>".to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Fail ONLY the new IDE `.tsx` sync; the API `.ts` sync succeeds.
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // New owner at `/workspace` → IDE `.tsx`, API `.ts`.
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.app.json"),
+    );
+
+    let provider_sync_states = DashMap::new();
+    // Prior owner-aware state: IDE `.jsx` (DIFFERENT → genuinely stale on the
+    // owner change), API `.ts` (same), both live.
+    provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.jsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+    let pending_snapshot_provider_sync = DashSet::new();
+    pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
+
+    drain_pending_snapshot_provider_sync(
+        Some(&sync),
+        &documents,
+        &vfs_workspace,
+        &provider_sync_states,
+        &pending_snapshot_provider_sync,
+        false,
+        None,
+        None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    // Discriminator: the stale `.jsx` IDE path must NOT be closed because its
+    // replacement `.tsx` did not sync. (Pre-fix: closed because synced_any.)
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )),
+        "stale IDE `.jsx` must NOT close when the new `.tsx` sync failed, calls={calls:?}"
+    );
+
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("partial transition must retain a committed state");
+    // Discriminator: committed IDE path must NOT be the unsynced `.tsx`; it must
+    // revert to the previous live `.jsx`.
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.jsx"),
+        "failed IDE kind must keep the previous live `.jsx`, not the unsynced `.tsx`, got {:?}",
+        state.ide_path
+    );
+    assert!(
+        state.ide_background_loaded,
+        "the retained `.jsx` IDE path keeps its loaded flag"
+    );
+    // Positive: the API kind that DID sync advanced + is marked loaded.
+    assert_eq!(
+        state.api_path.as_deref(),
+        Some("/workspace/src/App.vue.verter.ts"),
+        "the synced API path is committed"
+    );
+    assert!(
+        state.api_background_loaded,
+        "the synced API path is marked loaded"
     );
 }
 
@@ -4974,7 +8318,7 @@ async fn background_init_drain_clears_stale_macro_type_diagnostic_for_package_ex
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_imported_vue_api_lightweight_uses_provisional_api_path_before_snapshot() {
+async fn sync_imported_carrier_api_lightweight_uses_unresolved_api_path_before_snapshot() {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
@@ -5003,7 +8347,8 @@ defineProps<{ msg: string }>()
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -5011,35 +8356,47 @@ defineProps<{ msg: string }>()
     let server = service.inner();
     let child_id = crate::test_utils::canonical_test_path(&workspace.join("src/Child.vue"));
 
-    server.sync_imported_vue_api_lightweight(&child_id).await;
+    server
+        .sync_imported_carrier_api_lightweight(&child_id)
+        .await;
 
     let calls = provider.file_sync_calls();
-    let expected_api_path = format!("{child_id}.ts");
+    let expected_api_path = format!("{child_id}.verter.ts");
+    // Publish-only contract: in the pre-snapshot bootstrap window the carrier has
+    // NO resolved configured project to be a member of yet, so under tsserver NO
+    // carrier-companion content open reaches the provider — the carrier becomes a
+    // member via the drain's re-publish once the snapshot resolves an owner.
+    // Opening the unresolved `.vue.verter.ts` into tsserver here would make a
+    // second content authority, which the publish-only contract forbids.
     assert!(
-            calls.iter().any(|call| matches!(
-                call,
-                MockCall::OpenFile { path, .. } if path == &expected_api_path
-            )),
-            "pre-snapshot imported Vue API sync should open the provisional .vue.ts path, calls={calls:?}"
-        );
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == &expected_api_path
+        )),
+        "tsserver pre-snapshot imported Vue API sync must NOT open the carrier companion \
+         (publish-only; membership comes from the drain re-publish); calls={calls:?}"
+    );
 
     let state = server
         .provider_sync_states
         .get(&child_id)
         .map(|entry| entry.clone())
-        .expect("provisional API sync should commit provider state");
+        .expect("unresolved API sync should commit provider state");
     assert!(
-        state.is_provisional(),
-        "pre-snapshot imported sync should mark the owner as provisional"
+        state.is_unresolved(),
+        "pre-snapshot imported sync should mark the owner as unresolved"
     );
     assert_eq!(
         state.api_path.as_deref(),
         Some(expected_api_path.as_str()),
-        "imported Vue API should use the canonical provisional .vue.ts path"
+        "imported Vue API should use the canonical unresolved .vue.ts path"
     );
     assert!(
         state.api_background_loaded,
-        "provisional imported API sync should mark the API path as loaded"
+        "unresolved imported API sync should mark the API path as loaded"
     );
     assert!(
         server.pending_snapshot_provider_sync.contains(&child_id),
@@ -5048,7 +8405,7 @@ defineProps<{ msg: string }>()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_imported_vue_api_lightweight_opens_snapshot_api_path_for_tsserver() {
+async fn sync_imported_carrier_api_lightweight_opens_snapshot_api_path_for_tsserver() {
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let service = make_hover_test_service(type_provider);
@@ -5066,7 +8423,7 @@ defineProps<{ msg: string }>()
 "#,
     );
 
-    server.sync_imported_vue_api_lightweight(child_id).await;
+    server.sync_imported_carrier_api_lightweight(child_id).await;
 
     let state = server
         .provider_sync_states
@@ -5079,28 +8436,623 @@ defineProps<{ msg: string }>()
         .expect("snapshot imported API sync should record the API path");
     let calls = provider.file_sync_calls();
 
+    // Publish-only contract: under tsserver the imported child carrier becomes a
+    // configured-project MEMBER via the publish store + plugin — the LSP must NOT
+    // open/update/load the synthetic companion as a second content authority. So
+    // NO carrier-companion content verb reaches the provider for the API path.
+    // Routing tsserver through the inferred open path would make the OpenFile
+    // reappear and this assertion fail — the discriminating signal.
     assert!(
-            calls.iter().any(|call| matches!(
-                call,
-                MockCall::OpenFile { path, .. } if path == &api_path
-            )),
-            "snapshot imported Vue API sync should open the provider-facing API path for tsserver, calls={calls:?}, api_path={api_path}"
-        );
-    assert!(
-            !calls.iter().any(|call| matches!(
-                call,
-                MockCall::LoadFile { path, .. } if path == &api_path
-            )),
-            "snapshot imported Vue API sync should not only cache the API path for tsserver, calls={calls:?}, api_path={api_path}"
-        );
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == &api_path
+        )),
+        "tsserver imported Vue API sync must NOT open/update/load the carrier companion \
+         (publish-only); calls={calls:?}, api_path={api_path}"
+    );
+    // The committed state still marks the API store-resident (the plugin serves
+    // it as a member), so the imported-carrier prewarm is observably complete.
     assert!(
         state.api_background_loaded,
-        "snapshot imported API sync should mark the API path as loaded"
+        "snapshot imported API sync should mark the API path as store-resident (loaded)"
+    );
+}
+
+/// open_dts is STORE-COORDINATED transport: a SUCCESSFUL provider dts open and the
+/// `record_carrier_api_snapshot` -> `ProviderSurfaceStore` record are COUPLED, and
+/// the store is the authority for the recorded surface. On a FAILED provider open
+/// the record is SKIPPED, so the store never tracks a surface the provider rejected
+/// (fail-closed coupling).
+///
+/// DISCRIMINATING: the positive half fails if the store record is decoupled from the
+/// provider verb (the surface would be untracked after a successful open); the
+/// negative half fails if a record were emitted regardless of the provider result
+/// (the surface would appear despite the failed open).
+#[tokio::test(flavor = "multi_thread")]
+async fn open_dts_success_records_store_surface_and_failure_does_not() {
+    let child_source = r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#;
+    let child_id = "/workspace/src/Child.vue";
+
+    // ── Positive: a successful open_dts records the carrier-API surface. ──
+    {
+        let provider = Arc::new(MockTypeProvider::new());
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_tsgo(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+        let _uri = open_test_vue(server, child_id, child_source);
+
+        server.sync_imported_carrier_api_lightweight(child_id).await;
+
+        let api_path = server
+            .provider_sync_states
+            .get(child_id)
+            .and_then(|entry| entry.api_path.clone())
+            .expect("the tsgo DirectOpen sync should commit the API path");
+
+        // The provider verb fired (tsgo opens the companion directly).
+        let calls = provider.file_sync_calls();
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path == &api_path
+            )),
+            "tsgo must open/update the carrier-API companion at {api_path}; calls={calls:?}"
+        );
+
+        // AND the store recorded the surface — the provider verb and the store record
+        // are COUPLED; the store is the authority.
+        let snapshot = server
+            .test_documents()
+            .provider_surfaces()
+            .current_snapshot(&api_path);
+        let snapshot = snapshot.expect(
+            "a successful open_dts MUST record the carrier-API surface in the store \
+             (the verb and the record are coupled — the store is the authority)",
+        );
+        assert_eq!(
+            snapshot.kind,
+            crate::provider_surface_store::ProviderSurfaceKind::CarrierApi,
+            "the recorded surface is the carrier-API kind"
+        );
+    }
+
+    // ── Negative: a FAILED open_dts records NOTHING (fail-closed coupling). ──
+    {
+        let provider = Arc::new(MockTypeProvider::new());
+        // Pre-fail the carrier-API companion open: open_dts -> provider.open_file
+        // returns Err for this path, so the record is skipped.
+        let api_path = format!("{child_id}.verter.ts");
+        provider.set_fail_sync_path(&api_path);
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service_tsgo(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+        let _uri = open_test_vue(server, child_id, child_source);
+
+        server.sync_imported_carrier_api_lightweight(child_id).await;
+
+        // The provider verb was ATTEMPTED for the API path...
+        let calls = provider.file_sync_calls();
+        assert!(
+            calls.iter().any(|call| matches!(
+                call,
+                MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path == &api_path
+            )),
+            "the failed open was still attempted at {api_path}; calls={calls:?}"
+        );
+        // ...but it FAILED, so the store records NOTHING for it — the surface is
+        // untracked (fail-closed coupling: no record without a successful verb).
+        assert!(
+            server
+                .test_documents()
+                .provider_surfaces()
+                .current_snapshot(&api_path)
+                .is_none(),
+            "a FAILED open_dts must NOT record a carrier-API surface in the store \
+             (the record is coupled to a SUCCESSFUL provider verb)"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_carrier_ide_unresolved_forces_unresolved_over_prior_owned() {
+    // R2-3: `sync_carrier_ide_unresolved` is a bootstrap "unresolved" sync — it is
+    // unresolved BY DEFINITION. It reuses a prior committed state (to keep the
+    // background-loaded bookkeeping) but must FORCE the binding to `Unresolved`.
+    // Pre-fix it only defaulted to `Unresolved` when NO state existed; a prior
+    // `Owned` state was reused with its `Owned` binding and committed, which is
+    // wrong for an unresolved bootstrap sync.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+
+    let canonical_id = "/workspace/src/App.vue";
+    // Seed a prior committed OWNED state (the R2-3 trigger).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some(format!("{canonical_id}.tsx")),
+            api_path: None,
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    server
+        .sync_carrier_ide_unresolved(canonical_id, "export const x = 1;", false)
+        .await;
+
+    let state = server
+        .provider_sync_states
+        .get(canonical_id)
+        .map(|entry| entry.clone())
+        .expect("bootstrap IDE sync should commit provider state");
+    // Discriminator: pre-fix the binding stays `Owned("/old/tsconfig.json")`.
+    assert!(
+        state.is_unresolved(),
+        "bootstrap sync_carrier_ide_unresolved must force an Unresolved binding, got {:?}",
+        state.owner_binding
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_imported_vue_api_lightweight_opens_snapshot_ide_path_for_tsgo() {
+async fn sync_carrier_api_unresolved_forces_unresolved_over_prior_owned() {
+    // R2-3: `sync_carrier_api_unresolved` mirror — a bootstrap unresolved API sync
+    // must force the binding to `Unresolved` even when reusing a prior `Owned`
+    // committed state.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+
+    let canonical_id = "/workspace/src/App.vue";
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/old/tsconfig.json".to_string(),
+            ),
+            ide_path: Some(format!("{canonical_id}.tsx")),
+            api_path: Some(format!("{canonical_id}.verter.ts")),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    server
+        .sync_carrier_api_unresolved(canonical_id, "export {};")
+        .await;
+
+    let state = server
+        .provider_sync_states
+        .get(canonical_id)
+        .map(|entry| entry.clone())
+        .expect("bootstrap API sync should commit provider state");
+    // Discriminator: pre-fix the binding stays `Owned("/old/tsconfig.json")`.
+    assert!(
+        state.is_unresolved(),
+        "bootstrap sync_carrier_api_unresolved must force an Unresolved binding, got {:?}",
+        state.owner_binding
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_api_sync_never_closes_the_live_ide_tsx_on_owner_change() {
+    // R2-2: the `_in_background` API twin manages ONLY the API kind. An owner-key
+    // change marks the (same-path) IDE `.tsx` stale via force-rebind. The pre-fix
+    // path looped EVERY stale path and closed it — including the live IDE `.tsx`
+    // — BEFORE syncing the API, killing hover even though it never re-syncs IDE.
+    // The fix routes through the per-kind close-after-successful-sync discipline
+    // with synced_kinds=[Api]: the IDE kind is reverted to its prior live path
+    // and is NEVER closed here; only a genuinely-stale API path is closed (and a
+    // same-path API rebind is not stale).
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
+    std::fs::write(
+        workspace.join("src/App.vue"),
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    )
+    .expect("write App.vue");
+
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
+    assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
+    let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
+    assert!(
+        host.get_public_api(&canonical_id).is_some(),
+        "compiled .vue must expose a public API for the background API sync"
+    );
+
+    let ide_path = format!("{canonical_id}.tsx");
+    let api_path = format!("{canonical_id}.verter.ts");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // A REAL resolver that owns the workspace: the background task now derives its
+    // transition through the carrier-sync gateway (which resolves the owner), so the
+    // owner-resolved `.vue.tsx`/`.vue.verter.ts` paths are produced internally.
+    let workspace_root = crate::test_utils::canonical_test_path(&workspace);
+    // A CONFIGURED owner (tsconfig): the carrier-sync gateway resolves ownership through
+    // the shared `WorkspaceProjectResolver` over this published vfs, so the owner key is
+    // the resolved tsconfig URI (never an inferred no-tsconfig config).
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let owner_vfs = configured_owner_vfs(&workspace_root, &tsconfig);
+    let snapshot = PublishedResolverSnapshot {
+        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                workspace_root.clone(),
+                workspace_root.clone(),
+                Some(tsconfig.clone()),
+            ),
+        ]),
+        ownership_ready: true,
+    };
+
+    let provider_sync_states = Arc::new(DashMap::new());
+    // Prior committed OWNED state under a DIFFERENT owner key, with the SAME IDE/API
+    // paths the gateway will re-derive → owner_changed force-rebind marks BOTH the
+    // IDE `.tsx` and API `.ts` stale.
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/old/tsconfig.json".to_string(),
+        ),
+        ide_path: Some(ide_path.clone()),
+        api_path: Some(api_path.clone()),
+        decl_path: None,
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        decl_background_loaded: false,
+        shadow_path: None,
+        shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
+    };
+    provider_sync_states.insert(canonical_id.clone(), prior_state.clone());
+
+    // Sanity: the gateway-equivalent transition marks the same-path IDE `.tsx` stale
+    // (the close trigger). The task re-derives this internally; this local
+    // computation only asserts the scenario is set up correctly. The re-derived owner
+    // key is the resolved tsconfig URI.
+    let sanity_next = crate::provider_sync::ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(tsconfig.clone()),
+        ide_path: Some(ide_path.clone()),
+        api_path: Some(api_path.clone()),
+        ..Default::default()
+    };
+    let sanity_transition = crate::provider_sync::prepare_sync_transition(
+        &provider_sync_states,
+        &canonical_id,
+        sanity_next,
+    );
+    assert!(
+        sanity_transition
+            .stale_paths
+            .iter()
+            .any(|(kind, path)| *kind == ProviderPathKind::Ide && path == &ide_path),
+        "owner-change force-rebind must mark the same-path IDE `.tsx` stale, stale={:?}",
+        sanity_transition.stale_paths
+    );
+    sync_api_to_provider_background_task(
+        sync,
+        snapshot,
+        Arc::clone(&host),
+        Some(Arc::clone(&owner_vfs)),
+        Arc::clone(&provider_sync_states),
+        crate::provider_surface_store::ProviderSurfaceStore::new(),
+        canonical_id.clone(),
+        false,
+        false,
+        std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
+        std::sync::Arc::new(dashmap::DashSet::new()),
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    // Discriminator: pre-fix the IDE `.tsx` was closed in the stale-paths loop.
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &ide_path
+        )),
+        "background API sync must NEVER close the live IDE `.tsx`, calls={calls:?}"
+    );
+    // The committed state retains the live IDE `.tsx` path (reverted to prior).
+    let state = provider_sync_states
+        .get(&canonical_id)
+        .map(|entry| entry.clone())
+        .expect("successful API sync must commit state");
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some(ide_path.as_str()),
+        "background API sync must retain the prior IDE `.tsx` path"
+    );
+    assert!(
+        state.ide_background_loaded,
+        "background API sync must retain the prior IDE loaded flag"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_api_sync_superseded_admit_requeues_and_never_closes() {
+    // Dropped-outcome + close-race: when the background API task's owned commit
+    // is REFUSED by the admission gate (a newer transaction already committed a strictly-newer
+    // stamp), the task must REQUEUE the source and close NOTHING — the computed stale paths may
+    // be the newer transaction's live buffers.
+    //
+    // DISCRIMINATING: the pre-fix `let _ = admit_owned(..)` dropped the `Superseded` outcome —
+    // it did NOT requeue and it ran the stale-path close UNCONDITIONALLY. This forces a stale
+    // admit via a strictly-newer committed stamp and asserts the requeue happened and the stale
+    // API path was NOT closed.
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
+    std::fs::write(
+        workspace.join("src/App.vue"),
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    )
+    .expect("write App.vue");
+
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
+    assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
+    let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
+    assert!(host.get_public_api(&canonical_id).is_some());
+
+    let ide_path = format!("{canonical_id}.tsx");
+    // A DIFFERENT (stale) prior API path so the task's transition yields a genuinely-stale API
+    // path that the pre-fix unconditional close would have closed.
+    let stale_api_path = format!("{canonical_id}.OLD.verter.ts");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let workspace_root = crate::test_utils::canonical_test_path(&workspace);
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let owner_vfs = configured_owner_vfs(&workspace_root, &tsconfig);
+    let snapshot = PublishedResolverSnapshot {
+        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                workspace_root.clone(),
+                workspace_root.clone(),
+                Some(tsconfig.clone()),
+            ),
+        ]),
+        ownership_ready: true,
+    };
+
+    let provider_sync_states = Arc::new(DashMap::new());
+    // Prior committed state carrying a STRICTLY-NEWER stamp (a newer transaction already
+    // committed) so the task's owned commit is refused (Superseded) at the admission gate.
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(tsconfig.clone()),
+        ide_path: Some(ide_path.clone()),
+        api_path: Some(stale_api_path.clone()),
+        decl_path: None,
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        decl_background_loaded: false,
+        shadow_path: None,
+        shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: Some(crate::provider_sync::CarrierCommitStamp {
+            ownership_generation: verter_workspace::workspace_snapshot::SnapshotGeneration(
+                u64::MAX,
+            ),
+            source_revision: u64::MAX,
+        }),
+    };
+    provider_sync_states.insert(canonical_id.clone(), prior_state);
+
+    let requeue = std::sync::Arc::new(dashmap::DashSet::new());
+    sync_api_to_provider_background_task(
+        sync,
+        snapshot,
+        Arc::clone(&host),
+        Some(Arc::clone(&owner_vfs)),
+        Arc::clone(&provider_sync_states),
+        crate::provider_surface_store::ProviderSurfaceStore::new(),
+        canonical_id.clone(),
+        false,
+        false,
+        std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
+        Arc::clone(&requeue),
+    )
+    .await;
+
+    // The refused (Superseded) commit re-queues the source for a fresh transaction (never a
+    // requeue-less drop) and does NOT overwrite the newer committed state.
+    assert!(
+        requeue.contains(&canonical_id),
+        "a Superseded background API commit must REQUEUE the source"
+    );
+    let surviving_rev = provider_sync_states
+        .get(&canonical_id)
+        .and_then(|s| s.commit_stamp.map(|c| c.source_revision));
+    assert_eq!(
+        surviving_rev,
+        Some(u64::MAX),
+        "a Superseded commit must NOT overwrite the strictly-newer committed state"
+    );
+    // No stale path was closed — the close is gated on Admitted.
+    let calls = provider.file_sync_calls();
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &stale_api_path || path == &ide_path
+        )),
+        "a Superseded commit must close NOTHING (the stale paths may be a newer transaction's \
+         live buffers), calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_api_sync_failure_retains_prior_api_path_and_state() {
+    // R2-2 (b): close-before-sync also meant an API sync failure left the old API
+    // path closed. The fix syncs first; on failure nothing is committed and
+    // nothing is closed — the prior state and prior API path are retained intact.
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
+    std::fs::write(
+        workspace.join("src/App.vue"),
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    )
+    .expect("write App.vue");
+
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
+    assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
+    let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
+
+    let ide_path = format!("{canonical_id}.tsx");
+    // Prior API path is DIFFERENT from the new one so a close-before-sync of the
+    // old path would be observable.
+    let prior_api_path = format!("{canonical_id}.old.ts");
+    let new_api_path = format!("{canonical_id}.verter.ts");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Fail the NEW API path sync only.
+    provider.set_fail_sync_path(&new_api_path);
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    // A REAL resolver owning the workspace: the background task derives the owner-
+    // resolved `.vue.verter.ts` API path (== `new_api_path`) through the gateway.
+    let workspace_root = crate::test_utils::canonical_test_path(&workspace);
+    // A CONFIGURED owner (tsconfig): the gateway resolves ownership over this published
+    // vfs through the shared `WorkspaceProjectResolver`.
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let owner_vfs = configured_owner_vfs(&workspace_root, &tsconfig);
+    let snapshot = PublishedResolverSnapshot {
+        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                workspace_root.clone(),
+                workspace_root.clone(),
+                Some(tsconfig.clone()),
+            ),
+        ]),
+        ownership_ready: true,
+    };
+
+    let provider_sync_states = Arc::new(DashMap::new());
+    // Prior committed state under a DIFFERENT owner key with a DIFFERENT API path
+    // (`.old.ts`) → the gateway-derived `.verter.ts` API rebind marks `.old.ts` stale.
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/old/tsconfig.json".to_string(),
+        ),
+        ide_path: Some(ide_path.clone()),
+        api_path: Some(prior_api_path.clone()),
+        decl_path: None,
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        decl_background_loaded: false,
+        shadow_path: None,
+        shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
+    };
+    provider_sync_states.insert(canonical_id.clone(), prior_state.clone());
+
+    sync_api_to_provider_background_task(
+        sync,
+        snapshot,
+        Arc::clone(&host),
+        Some(Arc::clone(&owner_vfs)),
+        Arc::clone(&provider_sync_states),
+        crate::provider_surface_store::ProviderSurfaceStore::new(),
+        canonical_id.clone(),
+        false,
+        false,
+        std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
+        std::sync::Arc::new(dashmap::DashSet::new()),
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    // Reach (R3-2): the background task must have ATTEMPTED to sync the NEW API
+    // path (the failing mock records the open/update before erroring) before the
+    // no-close assertion. A no-op impl that returned before syncing would pass
+    // the absence-of-close + state-unchanged asserts vacuously.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == &new_api_path
+        )),
+        "failed background API sync must REACH the sync and attempt the new API path, calls={calls:?}"
+    );
+    // Discriminator: the prior API path must NOT be closed (the new API sync
+    // failed). Pre-fix the stale-paths loop closed it BEFORE syncing.
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &prior_api_path
+        )),
+        "a failed background API sync must NOT close the prior API path, calls={calls:?}"
+    );
+    // And the IDE `.tsx` must never be closed either.
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &ide_path
+        )),
+        "a failed background API sync must NOT close the live IDE `.tsx`, calls={calls:?}"
+    );
+    // The prior state is retained UNCHANGED (not committed/removed).
+    let state = provider_sync_states
+        .get(&canonical_id)
+        .map(|entry| entry.clone())
+        .expect("a failed background API sync must retain the prior state");
+    assert_eq!(
+        state, prior_state,
+        "failed background API sync must leave the prior state byte-for-byte unchanged, got {state:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_imported_carrier_api_lightweight_opens_snapshot_ide_path_for_tsgo() {
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -5116,7 +9068,8 @@ async fn sync_imported_vue_api_lightweight_opens_snapshot_ide_path_for_tsgo() {
                 type_provider_kind: crate::TypeProviderKind::Tsgo,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -5135,7 +9088,7 @@ defineProps<{ msg: string }>()
 "#,
     );
 
-    server.sync_imported_vue_api_lightweight(child_id).await;
+    server.sync_imported_carrier_api_lightweight(child_id).await;
 
     let state = server
         .provider_sync_states
@@ -5158,7 +9111,159 @@ defineProps<{ msg: string }>()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ensure_current_file_synced_queues_provisional_ide_path_for_snapshot_reconciliation() {
+async fn barrel_eager_sync_follows_reexport_hops_and_is_provider_neutral() {
+    // Usage.vue -> `./components` (export *) -> `./Foo` (export {default as Foo} from './Foo.vue').
+    // Built on a Tsserver server: the single-hop body early-returns for non-Tsgo (the provider
+    // gate) AND only string-classifies the FIRST barrel's literal specifiers, so the nested
+    // re-export carrier never reaches the provider. A recursive, provider-neutral BFS that
+    // classifies by RESOLVED-target carrier-ness must sync `Foo.vue`'s surface. Discriminating
+    // on BOTH the dropped gate and the recursive hop.
+    let foo = "<script setup lang=\"ts\">\ndefineProps<{ foo: boolean; bar?: string }>()\n</script>\n<template><div>{{ foo }}</div></template>\n";
+    let mid_barrel = "export { default as Foo } from './Foo.vue'\n";
+    let top_barrel = "export * from './Foo'\n";
+    let usage = "<script setup lang=\"ts\">\nimport { Foo } from './components'\n</script>\n<template><Foo></Foo></template>\n";
+    // tsgo: the barrel BFS reach is engine-agnostic; tsgo makes the terminal-carrier
+    // sync an observable `open_file` (tsserver is publish-only for carriers).
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/components/Foo/Foo.vue", "vue", foo),
+                ("src/components/Foo/index.ts", "typescript", mid_barrel),
+                ("src/components/index.ts", "typescript", top_barrel),
+                ("src/Usage.vue", "vue", usage),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+
+    let server = service.inner();
+    let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
+
+    server.ensure_barrel_imports_synced(&usage_uri).await;
+
+    let calls = provider.file_sync_calls();
+    let opened: Vec<String> = calls
+        .iter()
+        .filter_map(|call| match call {
+            MockCall::OpenFile { path, .. } => Some(path.replace('\\', "/")),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        opened.iter().any(|p| p.contains("Foo.vue")),
+        "recursive provider-neutral barrel sync must sync the nested re-export carrier Foo.vue surface; opened={opened:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn barrel_eager_sync_terminates_on_reexport_cycle_and_still_syncs_terminal() {
+    // A re-export CYCLE: `a.ts` (`export * from './b'`) <-> `b.ts`
+    // (`export * from './a'`), with `a.ts` ALSO re-exporting a terminal carrier
+    // (`export { default as Cyc } from './Cyc.vue'`). The bounded level-BFS must
+    // TERMINATE on the cycle (an unbounded walk would spin / overflow) AND still
+    // reach the terminal `Cyc.vue` carrier. Discriminating on the cycle bound:
+    // the test would hang (or never sync Cyc.vue) without cycle/visited tracking.
+    let cyc = "<script setup lang=\"ts\">\ndefineProps<{ cyc: number }>()\n</script>\n<template><div>{{ cyc }}</div></template>\n";
+    let a_barrel = "export * from './b'\nexport { default as Cyc } from './Cyc.vue'\n";
+    let b_barrel = "export * from './a'\n";
+    let usage = "<script setup lang=\"ts\">\nimport { Cyc } from './a'\n</script>\n<template><Cyc></Cyc></template>\n";
+    // tsgo: the cycle-bounded BFS reach is engine-agnostic; tsgo makes the terminal-
+    // carrier sync an observable `open_file` (tsserver is publish-only for carriers).
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[
+                ("src/Cyc.vue", "vue", cyc),
+                ("src/a.ts", "typescript", a_barrel),
+                ("src/b.ts", "typescript", b_barrel),
+                ("src/Usage.vue", "vue", usage),
+            ],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+
+    let server = service.inner();
+    let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
+
+    // If the BFS did not bound the cycle this call would not return.
+    server.ensure_barrel_imports_synced(&usage_uri).await;
+
+    let calls = provider.file_sync_calls();
+    let opened: Vec<String> = calls
+        .iter()
+        .filter_map(|call| match call {
+            MockCall::OpenFile { path, .. } => Some(path.replace('\\', "/")),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        opened.iter().any(|p| p.contains("Cyc.vue")),
+        "a re-export cycle must still terminate and sync the terminal carrier Cyc.vue; opened={opened:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "install_test_resolver_for_root builds a ProjectPayload::Fallback that does not parse \
+            tsconfig `paths`, so an @/-alias seed cannot resolve in this harness. The production \
+            Configured-project resolver is alias-aware and the BFS routes @/ through it exactly \
+            like the proven relative case above; @/ is verified end-to-end via the real-provider \
+            suite / the live repro. Un-ignore once the unit harness supports a Configured project."]
+async fn barrel_eager_sync_follows_aliased_reexport_hops() {
+    // Same 2-hop barrel, imported through a tsconfig path alias (`@/components`). Resolution must
+    // go through the shared alias-aware workspace resolver; classify-by-resolved-target then
+    // follows the hops to the terminal carrier just as in the relative case.
+    let tsconfig =
+        "{ \"compilerOptions\": { \"baseUrl\": \".\", \"paths\": { \"@/*\": [\"src/*\"] } } }\n";
+    let foo = "<script setup lang=\"ts\">\ndefineProps<{ foo: boolean; bar?: string }>()\n</script>\n<template><div>{{ foo }}</div></template>\n";
+    let mid_barrel = "export { default as Foo } from './Foo.vue'\n";
+    let top_barrel = "export * from './Foo'\n";
+    let usage = "<script setup lang=\"ts\">\nimport { Foo } from '@/components'\n</script>\n<template><Foo></Foo></template>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
+        ("tsconfig.json", "json", tsconfig),
+        ("src/components/Foo/Foo.vue", "vue", foo),
+        ("src/components/Foo/index.ts", "typescript", mid_barrel),
+        ("src/components/index.ts", "typescript", top_barrel),
+        ("src/Usage.vue", "vue", usage),
+    ])
+    .await;
+
+    let server = service.inner();
+    let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
+
+    server.ensure_barrel_imports_synced(&usage_uri).await;
+
+    let opened: Vec<String> = provider
+        .file_sync_calls()
+        .iter()
+        .filter_map(|call| match call {
+            MockCall::OpenFile { path, .. } => Some(path.replace('\\', "/")),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        opened.iter().any(|p| p.contains("Foo.vue")),
+        "aliased (@/) barrel import must resolve through tsconfig paths and sync the terminal carrier; opened={opened:?}"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_imported_carrier_api_lightweight_preserves_open_unowned_state() {
+    // FIX-5: the ready-no-owner arm of sync_imported_carrier_api_lightweight must
+    // NOT clear+close+return for an OPEN `.vue` that is imported-by-an-open-file
+    // and unowned. Pre-fix it called clear_provider_sync_state (removing state +
+    // closing the live TSX) → re-triggered the no-ide_context bug on a sibling
+    // path. Post-fix: open → preserve Unresolved + keep the TSX live.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -5174,10 +9279,174 @@ async fn ensure_current_file_synced_queues_provisional_ide_path_for_snapshot_rec
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
+
+    let server = service.inner();
+    // Ready snapshot at `/other` — it does NOT own the open `/workspace` child.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+
+    let child_id = "/workspace/src/Child.vue";
+    let _child_uri = open_test_vue(
+        server,
+        child_id,
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+
+    // Seed a prior live state (as a bootstrap pass would have): unresolved with
+    // a live TSX + API. The buggy arm would close BOTH and remove the entry.
+    let child_tsx = format!("{child_id}.tsx");
+    let child_api = format!("{child_id}.verter.ts");
+    server.commit_provider_sync_state(
+        child_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some(child_tsx.clone()),
+            api_path: Some(child_api.clone()),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    server.sync_imported_carrier_api_lightweight(child_id).await;
+
+    // Discriminator: the open child's state must SURVIVE (pre-fix it was
+    // removed by clear_provider_sync_state).
+    let state = server
+        .provider_sync_states
+        .get(child_id)
+        .map(|entry| entry.clone())
+        .expect("open unowned imported Vue file must keep its provider sync state");
+    assert!(
+        state.is_unresolved(),
+        "open unowned imported Vue file must stay Unresolved, got {:?}",
+        state.owner_binding
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some(child_tsx.as_str()),
+        "the open child's live IDE TSX path must be preserved"
+    );
+
+    // Discriminator: the live TSX must NOT be closed.
+    let calls = provider.file_sync_calls();
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &child_tsx
+        )),
+        "open unowned imported Vue file must NOT close its live TSX, calls={calls:?}"
+    );
+
+    // Positive: stays queued for a future owner reconciliation.
+    assert!(
+        server.pending_snapshot_provider_sync.contains(child_id),
+        "open unowned imported Vue file must stay queued for future owner reconciliation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_api_to_provider_retains_prior_path_when_replacement_sync_fails() {
+    // Whole-class coverage: sync_api_to_provider (a live owner-resolved Vue sync
+    // path reachable for OPEN files via sync_carrier_public_api_by_canonical_id) must
+    // use close-AFTER-successful-sync. On an owner-key change that force-rebinds
+    // the owner-independent `{src}.vue.ts`, a FAILED replacement sync must not
+    // close the prior live path and must retain the prior state.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server); // owns /workspace via tsconfig.json
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+
+    let api_path = "/workspace/src/App.vue.verter.ts";
+    // Fail the API `.vue.ts` sync.
+    provider.set_fail_sync_path(api_path);
+    // Seed prior state from a STALE owner key: same owner-independent `.vue.ts`
+    // (force-rebind marks it stale on the owner change), already live.
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/stale/tsconfig.json".to_string(),
+        ),
+        ide_path: None,
+        api_path: Some(api_path.to_string()),
+        decl_path: None,
+        api_background_loaded: true,
+        decl_background_loaded: false,
+        ide_background_loaded: false,
+        shadow_path: None,
+        shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
+    };
+    server.commit_provider_sync_state("/workspace/src/App.vue", prior_state.clone());
+
+    server.sync_api_to_provider(&uri).await;
+
+    let calls = provider.file_sync_calls();
+    // Reach (R3-2): `sync_api_to_provider` must have ATTEMPTED to sync the
+    // `.vue.ts` (the failing mock records the open/update before erroring) before
+    // the no-close assertion. A no-op impl that returned before syncing would
+    // pass the absence-of-close + state-unchanged asserts vacuously.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == api_path
+        )),
+        "failed sync_api_to_provider must REACH the sync and attempt the `.vue.ts`, calls={calls:?}"
+    );
+    // Discriminator: the prior live `.vue.ts` must NOT be closed (its sync failed).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == api_path
+        )),
+        "failed sync_api_to_provider must NOT close the prior live `.vue.ts`, calls={calls:?}"
+    );
+    // Positive: the prior state is retained unchanged on a fully-failed sync.
+    let state = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("failed sync_api_to_provider must retain the prior state");
+    assert_eq!(
+        state, prior_state,
+        "failed sync_api_to_provider must leave the prior state unchanged, got {state:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_current_file_synced_queues_unresolved_ide_path_for_snapshot_reconciliation() {
+    // Engine-agnostic pre-snapshot unresolved-IDE state machine: route through the
+    // tsgo inferred-open engine so the unresolved `.tsx` open is observable. Under
+    // tsserver the carrier open is suppressed (publish-only; membership comes from
+    // the drain re-publish once the snapshot resolves an owner).
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
 
     let server = service.inner();
     let uri = open_test_vue(
@@ -5208,22 +9477,22 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
             call,
             MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.tsx"
         )),
-        "pre-snapshot current-file sync should open the provisional IDE path, calls={calls:?}"
+        "pre-snapshot current-file sync should open the unresolved IDE path, calls={calls:?}"
     );
 
     let state = server
         .provider_sync_states
         .get("/workspace/src/App.vue")
         .map(|entry| entry.clone())
-        .expect("provisional IDE sync should commit provider state");
+        .expect("unresolved IDE sync should commit provider state");
     assert!(
-        state.is_provisional(),
-        "pre-snapshot current-file sync should mark the IDE owner as provisional"
+        state.is_unresolved(),
+        "pre-snapshot current-file sync should mark the IDE owner as unresolved"
     );
     assert_eq!(
         state.ide_path.as_deref(),
         Some("/workspace/src/App.vue.tsx"),
-        "pre-snapshot current-file sync should use the provisional IDE path"
+        "pre-snapshot current-file sync should use the unresolved IDE path"
     );
     assert!(
         server
@@ -5234,7 +9503,12 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ensure_current_file_synced_clears_provisional_state_when_ready_snapshot_has_no_owner() {
+async fn ensure_current_file_synced_preserves_open_unresolved_carrier_state_when_ready_owner_is_none(
+) {
+    // Editor-liveness invariant on the FOREGROUND sync path: when the ready
+    // ownership snapshot resolves no owner for an OPEN Vue file, the sync must
+    // keep the file's TSX live in the provider (unresolved open-document
+    // state) and keep it queued — NOT clear the state and close the TSX.
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -5250,7 +9524,8 @@ async fn ensure_current_file_synced_clears_provisional_state_when_ready_snapshot
                 type_provider_kind: crate::TypeProviderKind::Tsserver,
                 suggest_tsgo: false,
                 mcp_port: None,
-                type_provider_none_reason: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
             },
         )
     });
@@ -5273,48 +9548,254 @@ const msg = 'hello'
     assert!(
         server
             .provider_sync_state_for_source("/workspace/src/App.vue")
-            .expect("bootstrap sync should commit provisional state")
-            .is_provisional(),
-        "bootstrap sync should start from provisional state"
+            .expect("bootstrap sync should commit unresolved state")
+            .is_unresolved(),
+        "bootstrap sync should start from unresolved state"
     );
 
     provider.clear_calls();
+    // Ready snapshot at `/other` — it does NOT own the open `/workspace` file.
     install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
 
     server.ensure_current_file_synced(&uri).await;
 
+    // Positive: the open file's provider state SURVIVES and stays unresolved.
+    let state = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("open Vue file must keep its provider sync state when ready owner is None");
     assert!(
-        server
-            .provider_sync_state_for_source("/workspace/src/App.vue")
-            .is_none(),
-        "ready-but-unowned current-file sync must remove stale provisional state"
+        state.is_unresolved(),
+        "ownership-None must keep the open file's binding unresolved, got {:?}",
+        state.owner_binding
     );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the open file's IDE TSX path must be preserved"
+    );
+
+    // Positive: stays queued for a future owner reconciliation.
     assert!(
         server
             .pending_snapshot_provider_sync
             .contains("/workspace/src/App.vue"),
-        "ready-but-unowned current-file sync should stay queued for future rebuilds"
+        "open unresolved current-file sync should stay queued for future owner reconciliation"
     );
+
+    // Positive: interactive type-provider lookups still resolve from committed
+    // state (hover keeps working).
     assert!(
-        server.type_provider_context(&uri).is_none(),
-        "interactive type-provider lookups must not synthesize a live path from the resolver alone"
+        server.type_provider_context(&uri).is_some(),
+        "open unresolved Vue file must keep a live type-provider context for hover"
     );
 
     let calls = provider.file_sync_calls();
-    assert!(
-        calls.iter().any(|call| matches!(
-            call,
-            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
-        )),
-        "ready-but-unowned current-file sync should close the stale provisional IDE path, calls={calls:?}"
-    );
+    // Negative: the foreground sync must NOT close the open file's live TSX.
     assert!(
         !calls.iter().any(|call| matches!(
             call,
-            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
-                if path == "/workspace/src/App.vue.tsx"
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
         )),
-        "ready-but-unowned current-file sync must not reopen or update the guessed IDE path, calls={calls:?}"
+        "ready-but-unowned current-file sync must NOT close the open file's live IDE path, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_current_file_synced_reconciles_owned_open_vue_on_owner_loss() {
+    // R2-5: the foreground freshness check computed
+    // `needs_owner_reconcile = is_unresolved() && ownership_ready`, which NEVER
+    // fires for a previously-`Owned` OPEN Vue that becomes owner-None (its
+    // binding is still `Owned`, not unresolved). With its IDE already synced and
+    // no dirty flag, it EARLY-RETURNED at the freshness check, keeping its stale
+    // `Owned` binding + owner-derived `.vue.ts`. The fix also forces reconcile on
+    // owner-loss/mismatch (ownership_ready AND committed `Owned` AND the live
+    // snapshot resolves no owner), preserving the open file as Unresolved.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+
+    let server = service.inner();
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+
+    // Ready snapshot at `/other` — does NOT own the open `/workspace` file, so
+    // its current owner resolves to None (the owner-loss arm).
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+    provider.clear_calls();
+
+    // Seed a STALE `Owned` committed state with the IDE TSX already background-
+    // loaded (so `ide_already_synced` is true) AND an owner-derived `.vue.ts`.
+    // No `needs_ide_sync` flag is set, so `needs_sync` is false — pre-fix the
+    // freshness check early-returns here.
+    server.needs_ide_sync.remove("/workspace/src/App.vue");
+    server.commit_provider_sync_state(
+        "/workspace/src/App.vue",
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/stale/tsconfig.json".to_string(),
+            ),
+            ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    server.ensure_current_file_synced(&uri).await;
+
+    // Discriminator (RED pre-fix): the stale `Owned` binding survived the
+    // early-return. Post-fix the owner-loss forces reconciliation to Unresolved.
+    let state = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("open Vue file must keep its provider sync state on owner loss");
+    assert!(
+        state.is_unresolved(),
+        "owner loss on an already-synced open `.vue` must reconcile to Unresolved \
+         (not early-return on a stale Owned binding), got {:?}",
+        state.owner_binding
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the open file's live IDE TSX path must be preserved"
+    );
+    assert!(
+        state.api_path.is_none(),
+        "the stale owner-derived `.vue.ts` must be dropped on owner loss, got {:?}",
+        state.api_path
+    );
+
+    let calls = provider.file_sync_calls();
+    // Negative: the live IDE TSX must NOT be closed (editor-liveness).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.tsx"
+        )),
+        "owner-loss reconcile must NOT close the open file's live TSX, calls={calls:?}"
+    );
+    // Positive: stays queued for a future owner reconciliation.
+    assert!(
+        server
+            .pending_snapshot_provider_sync
+            .contains("/workspace/src/App.vue"),
+        "owner-loss reconcile should keep the file queued for future owner reconciliation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ensure_current_file_synced_does_not_rechurn_steady_state_unowned_open_vue() {
+    // R3-3 [P1]: a steady-state OPEN unowned `.vue` (committed `Unresolved`, the
+    // current snapshot also resolves NO owner) is FRESH — its committed binding
+    // already matches the live resolution. A second foreground pass (hover /
+    // completion) with no change must NOT recompile + re-sync the TSX. Pre-fix
+    // `needs_owner_reconcile = state.is_unresolved() && ownership_ready` was true
+    // for EVERY unowned-but-synced file, so every interactive query re-opened/
+    // re-synced the provider artifact — a per-keystroke perf regression.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    // Ready snapshot at `/other` — does NOT own the open `/workspace` file.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+
+    // First pass: syncs the unresolved TSX and commits the `Unresolved` state.
+    server.ensure_current_file_synced(&uri).await;
+    let first = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("first pass must commit unresolved state");
+    assert!(
+        first.is_unresolved() && first.ide_background_loaded,
+        "first pass should leave a live Unresolved IDE state, got {first:?}"
+    );
+    let first_calls = provider.file_sync_calls();
+    assert!(
+        first_calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "first pass should sync the unresolved `.tsx`, calls={first_calls:?}"
+    );
+
+    // Second pass: NOTHING changed, owner still None. The committed `Unresolved`
+    // binding matches the current (still-None) resolution → FRESH → no re-sync.
+    provider.clear_calls();
+    server.ensure_current_file_synced(&uri).await;
+
+    // Discriminator (RED pre-fix): a second pass re-opened/re-synced the `.tsx`.
+    let second_calls = provider.file_sync_calls();
+    assert!(
+        !second_calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "a steady-state unowned open `.vue` must NOT re-sync its TSX on a second \
+         no-change pass (no churn), calls={second_calls:?}"
+    );
+    // And nothing else churns either.
+    assert!(
+        second_calls.is_empty(),
+        "a steady-state no-change pass must issue NO provider file ops, calls={second_calls:?}"
+    );
+
+    // The committed state is unchanged (still live Unresolved `.tsx`).
+    let second = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("state survives the second pass");
+    assert!(
+        second.is_unresolved(),
+        "steady-state binding stays Unresolved, got {:?}",
+        second.owner_binding
+    );
+    assert_eq!(
+        second.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "the live IDE path is unchanged across the no-churn pass"
     );
 }
 
@@ -5374,7 +9855,7 @@ const msg = 'updated'
 async fn current_file_sync_reopens_when_live_ide_path_changes() {
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    let service = make_hover_test_service_tsgo(type_provider);
     let server = service.inner();
     install_test_resolver(server);
 
@@ -5475,6 +9956,103 @@ const msg = 'updated'
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn current_file_sync_retains_old_ide_path_when_new_sync_fails() {
+    // FIX-7: the FOREGROUND ensure_current_file_synced must open/sync the NEW
+    // IDE path FIRST, commit on success, THEN close the old path. On a jsx→tsx
+    // transition whose new `.tsx` sync FAILS, the old `.jsx` must NOT be closed
+    // and committed state must not be left pointing at the unsynced `.tsx`.
+    // Pre-fix it closed the old path BEFORE the (failing) open.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // Open as JS → committed live `.jsx` IDE path.
+    let uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="js">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    server.ensure_current_file_synced(&uri).await;
+    assert_eq!(
+        server
+            .provider_sync_state_for_source("/workspace/src/App.vue")
+            .and_then(|state| state.ide_path),
+        Some("/workspace/src/App.vue.jsx".to_string()),
+        "initial JS sync should materialize the .jsx IDE path"
+    );
+
+    // Change to TS → desired IDE path becomes `.tsx`. Fail the `.tsx` sync.
+    provider.set_fail_sync_path("/workspace/src/App.vue.tsx");
+    provider.clear_calls();
+    tower_lsp_server::LanguageServer::did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri.clone(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: r#"<script setup lang="ts">
+const msg = 'updated'
+</script>
+<template><div>{{ msg }}</div></template>
+"#
+                .to_string(),
+            }],
+        },
+    )
+    .await;
+
+    server.ensure_current_file_synced(&uri).await;
+
+    let calls = provider.file_sync_calls();
+    // Reach (R3-2): the foreground pass must have ATTEMPTED to open the new
+    // `.tsx` (the failing mock records the open before erroring) before the
+    // no-close assertion. A no-op impl that returned before the open attempt
+    // would pass the absence-of-close + state-retention asserts vacuously.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+            if path == "/workspace/src/App.vue.tsx"
+        )),
+        "failed foreground IDE transition must REACH the open and attempt the new `.tsx`, calls={calls:?}"
+    );
+    // Discriminator: the old live `.jsx` must NOT be closed because the new
+    // `.tsx` sync failed. (Pre-fix the close ran BEFORE the open attempt.)
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == "/workspace/src/App.vue.jsx"
+        )),
+        "failed foreground IDE transition must NOT close the old .jsx path, calls={calls:?}"
+    );
+    // Discriminator: committed state must NOT be left on the unsynced `.tsx`.
+    let state = server
+        .provider_sync_state_for_source("/workspace/src/App.vue")
+        .expect("foreground sync should retain a committed state");
+    assert_ne!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.tsx"),
+        "committed IDE path must not be left on the unsynced .tsx, got {:?}",
+        state.ide_path
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some("/workspace/src/App.vue.jsx"),
+        "the old live .jsx path must be retained as committed on failure"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn current_file_needs_inline_type_provider_sync_when_matching_ide_path_is_not_loaded() {
     let provider = Arc::new(MockTypeProvider::new());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
@@ -5502,11 +10080,15 @@ const msg = 'hello'
                 "/workspace/tsconfig.json".to_string(),
             ),
             ide_path: Some("/workspace/src/App.vue.tsx".to_string()),
-            api_path: Some("/workspace/src/App.vue.ts".to_string()),
+            api_path: Some("/workspace/src/App.vue.verter.ts".to_string()),
+            decl_path: None,
             ide_background_loaded: false,
             api_background_loaded: true,
+            decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -5553,10 +10135,15 @@ const msg = 'hello'
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn completion_reopens_current_file_when_tsserver_lost_virtual_file_content() {
+async fn completion_reopens_current_file_when_open_buffer_provider_loses_virtual_file_content() {
     let provider = Arc::new(LostContentCompletionProvider::default());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    // The lost-content REOPEN recovery is the inferred-open-buffer mechanism
+    // (close+reopen the carrier TSX to refresh content). It is tsgo-specific: under
+    // tsserver the carrier content lives in the publish store (not an open buffer),
+    // so the carrier-companion open verbs are no-ops and this reopen path does not
+    // apply. Characterize it on the engine that uses it.
+    let service = make_hover_test_service_tsgo(type_provider);
     let server = service.inner();
     install_test_resolver(server);
 
@@ -5618,10 +10205,14 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn completion_syncs_current_file_api_when_tsserver_needs_self_public_api() {
+async fn completion_syncs_current_file_api_when_open_buffer_provider_needs_self_public_api() {
     let provider = Arc::new(LostContentCompletionProvider::requiring_current_api());
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
-    let service = make_hover_test_service(type_provider);
+    // The lost-content current-API re-SYNC recovery is the inferred-open-buffer
+    // mechanism (re-sync the carrier API content into an open buffer). It is
+    // tsgo-specific: under tsserver the carrier API lives in the publish store, so
+    // the carrier-companion sync verbs are no-ops. Characterize it on tsgo.
+    let service = make_hover_test_service_tsgo(type_provider);
     let server = service.inner();
     install_test_resolver(server);
 
@@ -5663,7 +10254,7 @@ const actions: Action[] = [{ label: 'ok', disabled: false }]
     assert!(
             calls.iter().any(|call| matches!(
                 call,
-                MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.ts"
+                MockCall::OpenFile { path, .. } if path == "/workspace/src/App.vue.verter.ts"
             )),
             "recovery should open the current file .vue.ts path when the provider requires it, calls={calls:?}"
         );
@@ -5689,11 +10280,24 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
         .join("../../packages/vue-vscode/node_modules")
         .to_string_lossy()
         .replace('\\', "/");
+    // Per-session carrier-store isolation: a UNIQUE host-version segment so this
+    // test's on-disk store does not leak into (or read from) another test sharing
+    // the same fixture workspace root. The matching `store_segment` override is
+    // installed around the server construction below so the LSP-side publish
+    // backend resolves the SAME dir the spawned plugin reads.
+    let store_segment = crate::test_harness::unique_store_segment();
+    let carrier_store_dir =
+        crate::external_ts::carrier_store_dir_for(&store_segment, &workspace_id)
+            .to_string_lossy()
+            .replace('\\', "/");
     let provider = match crate::tsserver::ipc::TsserverTypeProvider::spawn(
         &node_path,
         &tsserver_path.to_string_lossy().replace('\\', "/"),
         &workspace_id,
         Some(&plugin_path),
+        Some(&carrier_store_dir),
+        // verter_lsp-internal backend: the Rust merge layer maps responses.
+        false,
         None,
     )
     .await
@@ -5708,20 +10312,28 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
-        VerterLanguageServer::new(
-            client,
-            LspConfig {
-                host: Arc::clone(&host_for_server),
-                type_provider: Some(Arc::clone(&type_provider_for_server)),
-                project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
-                mcp_port: None,
-                type_provider_none_reason: None,
-            },
-        )
-    });
+    // Construct the server under this test's per-session store-dir override so the
+    // LSP-side publish backend resolves the SAME isolated dir the spawned plugin
+    // reads (`store_segment` derived above). The install lock is held across the
+    // synchronous construction only, so concurrent tests never share a segment.
+    let (service, _socket) =
+        crate::test_harness::with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |client| {
+                VerterLanguageServer::new(
+                    client,
+                    LspConfig {
+                        host: Arc::clone(&host_for_server),
+                        type_provider: Some(Arc::clone(&type_provider_for_server)),
+                        project_sync_mode: crate::ProjectSyncMode::FullProject,
+                        type_provider_kind: crate::TypeProviderKind::Tsserver,
+                        suggest_tsgo: false,
+                        mcp_port: None,
+                        type_provider_reason: None,
+                        suppress_imported_carrier_prewarm: false,
+                    },
+                )
+            })
+        });
 
     let server = service.inner();
     install_test_resolver_for_root(
@@ -5750,14 +10362,14 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
 
     let position = find_document_position(server, &uri, "action.disabled", 7);
     let ctx = synced_type_provider_context(server, &uri);
-    let tsx_offset = merge::vue_position_to_tsx_offset_validated(
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
         &position,
-        &ctx.vue_line_index,
+        &ctx.carrier_line_index,
         &ctx.mapper,
         &ctx.tsx_line_index,
     )
     .expect("fixture member access position should map to tsx");
-    let expr_context =
+    let _expr_context =
         classify_expression_context_with_trigger(&ctx.tsx_content, tsx_offset as usize, None);
     let Ok(direct_result) = provider
         .get_completions(&ctx.tsx_path, tsx_offset, Some("."))
@@ -5817,11 +10429,24 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
         .join("../../packages/vue-vscode/node_modules")
         .to_string_lossy()
         .replace('\\', "/");
+    // Per-session carrier-store isolation: a UNIQUE host-version segment so this
+    // test's on-disk store does not leak into (or read from) another test sharing
+    // the same fixture workspace root. The matching `store_segment` override is
+    // installed around the server construction below so the LSP-side publish
+    // backend resolves the SAME dir the spawned plugin reads.
+    let store_segment = crate::test_harness::unique_store_segment();
+    let carrier_store_dir =
+        crate::external_ts::carrier_store_dir_for(&store_segment, &workspace_id)
+            .to_string_lossy()
+            .replace('\\', "/");
     let provider = match crate::tsserver::ipc::TsserverTypeProvider::spawn(
         &node_path,
         &tsserver_path.to_string_lossy().replace('\\', "/"),
         &workspace_id,
         Some(&plugin_path),
+        Some(&carrier_store_dir),
+        // verter_lsp-internal backend: the Rust merge layer maps responses.
+        false,
         None,
     )
     .await
@@ -5836,20 +10461,28 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
-        VerterLanguageServer::new(
-            client,
-            LspConfig {
-                host: Arc::clone(&host_for_server),
-                type_provider: Some(Arc::clone(&type_provider_for_server)),
-                project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
-                mcp_port: None,
-                type_provider_none_reason: None,
-            },
-        )
-    });
+    // Construct the server under this test's per-session store-dir override so the
+    // LSP-side publish backend resolves the SAME isolated dir the spawned plugin
+    // reads (`store_segment` derived above). The install lock is held across the
+    // synchronous construction only, so concurrent tests never share a segment.
+    let (service, _socket) =
+        crate::test_harness::with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |client| {
+                VerterLanguageServer::new(
+                    client,
+                    LspConfig {
+                        host: Arc::clone(&host_for_server),
+                        type_provider: Some(Arc::clone(&type_provider_for_server)),
+                        project_sync_mode: crate::ProjectSyncMode::FullProject,
+                        type_provider_kind: crate::TypeProviderKind::Tsserver,
+                        suggest_tsgo: false,
+                        mcp_port: None,
+                        type_provider_reason: None,
+                        suppress_imported_carrier_prewarm: false,
+                    },
+                )
+            })
+        });
 
     let server = service.inner();
     install_test_resolver_for_root(
@@ -5918,11 +10551,24 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
         .join("../../packages/vue-vscode/node_modules")
         .to_string_lossy()
         .replace('\\', "/");
+    // Per-session carrier-store isolation: a UNIQUE host-version segment so this
+    // test's on-disk store does not leak into (or read from) another test sharing
+    // the same fixture workspace root. The matching `store_segment` override is
+    // installed around the server construction below so the LSP-side publish
+    // backend resolves the SAME dir the spawned plugin reads.
+    let store_segment = crate::test_harness::unique_store_segment();
+    let carrier_store_dir =
+        crate::external_ts::carrier_store_dir_for(&store_segment, &workspace_id)
+            .to_string_lossy()
+            .replace('\\', "/");
     let provider = match crate::tsserver::ipc::TsserverTypeProvider::spawn(
         &node_path,
         &tsserver_path.to_string_lossy().replace('\\', "/"),
         &workspace_id,
         Some(&plugin_path),
+        Some(&carrier_store_dir),
+        // verter_lsp-internal backend: the Rust merge layer maps responses.
+        false,
         None,
     )
     .await
@@ -5937,20 +10583,28 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
-        VerterLanguageServer::new(
-            client,
-            LspConfig {
-                host: Arc::clone(&host_for_server),
-                type_provider: Some(Arc::clone(&type_provider_for_server)),
-                project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
-                mcp_port: None,
-                type_provider_none_reason: None,
-            },
-        )
-    });
+    // Construct the server under this test's per-session store-dir override so the
+    // LSP-side publish backend resolves the SAME isolated dir the spawned plugin
+    // reads (`store_segment` derived above). The install lock is held across the
+    // synchronous construction only, so concurrent tests never share a segment.
+    let (service, _socket) =
+        crate::test_harness::with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |client| {
+                VerterLanguageServer::new(
+                    client,
+                    LspConfig {
+                        host: Arc::clone(&host_for_server),
+                        type_provider: Some(Arc::clone(&type_provider_for_server)),
+                        project_sync_mode: crate::ProjectSyncMode::FullProject,
+                        type_provider_kind: crate::TypeProviderKind::Tsserver,
+                        suggest_tsgo: false,
+                        mcp_port: None,
+                        type_provider_reason: None,
+                        suppress_imported_carrier_prewarm: false,
+                    },
+                )
+            })
+        });
 
     let server = service.inner();
     install_test_resolver_for_root(
@@ -6077,11 +10731,24 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
         .join("../../packages/vue-vscode/node_modules")
         .to_string_lossy()
         .replace('\\', "/");
+    // Per-session carrier-store isolation: a UNIQUE host-version segment so this
+    // test's on-disk store does not leak into (or read from) another test sharing
+    // the same fixture workspace root. The matching `store_segment` override is
+    // installed around the server construction below so the LSP-side publish
+    // backend resolves the SAME dir the spawned plugin reads.
+    let store_segment = crate::test_harness::unique_store_segment();
+    let carrier_store_dir =
+        crate::external_ts::carrier_store_dir_for(&store_segment, &workspace_id)
+            .to_string_lossy()
+            .replace('\\', "/");
     let provider = match crate::tsserver::ipc::TsserverTypeProvider::spawn(
         &node_path,
         &tsserver_path.to_string_lossy().replace('\\', "/"),
         &workspace_id,
         Some(&plugin_path),
+        Some(&carrier_store_dir),
+        // verter_lsp-internal backend: the Rust merge layer maps responses.
+        false,
         None,
     )
     .await
@@ -6096,20 +10763,28 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
-        VerterLanguageServer::new(
-            client,
-            LspConfig {
-                host: Arc::clone(&host_for_server),
-                type_provider: Some(Arc::clone(&type_provider_for_server)),
-                project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
-                mcp_port: None,
-                type_provider_none_reason: None,
-            },
-        )
-    });
+    // Construct the server under this test's per-session store-dir override so the
+    // LSP-side publish backend resolves the SAME isolated dir the spawned plugin
+    // reads (`store_segment` derived above). The install lock is held across the
+    // synchronous construction only, so concurrent tests never share a segment.
+    let (service, _socket) =
+        crate::test_harness::with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |client| {
+                VerterLanguageServer::new(
+                    client,
+                    LspConfig {
+                        host: Arc::clone(&host_for_server),
+                        type_provider: Some(Arc::clone(&type_provider_for_server)),
+                        project_sync_mode: crate::ProjectSyncMode::FullProject,
+                        type_provider_kind: crate::TypeProviderKind::Tsserver,
+                        suggest_tsgo: false,
+                        mcp_port: None,
+                        type_provider_reason: None,
+                        suppress_imported_carrier_prewarm: false,
+                    },
+                )
+            })
+        });
 
     let server = service.inner();
     install_test_resolver_for_root(
@@ -6169,11 +10844,24 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
         .join("../../packages/vue-vscode/node_modules")
         .to_string_lossy()
         .replace('\\', "/");
+    // Per-session carrier-store isolation: a UNIQUE host-version segment so this
+    // test's on-disk store does not leak into (or read from) another test sharing
+    // the same fixture workspace root. The matching `store_segment` override is
+    // installed around the server construction below so the LSP-side publish
+    // backend resolves the SAME dir the spawned plugin reads.
+    let store_segment = crate::test_harness::unique_store_segment();
+    let carrier_store_dir =
+        crate::external_ts::carrier_store_dir_for(&store_segment, &workspace_id)
+            .to_string_lossy()
+            .replace('\\', "/");
     let provider = match crate::tsserver::ipc::TsserverTypeProvider::spawn(
         &node_path,
         &tsserver_path.to_string_lossy().replace('\\', "/"),
         &workspace_id,
         Some(&plugin_path),
+        Some(&carrier_store_dir),
+        // verter_lsp-internal backend: the Rust merge layer maps responses.
+        false,
         None,
     )
     .await
@@ -6188,20 +10876,28 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
-        VerterLanguageServer::new(
-            client,
-            LspConfig {
-                host: Arc::clone(&host_for_server),
-                type_provider: Some(Arc::clone(&type_provider_for_server)),
-                project_sync_mode: crate::ProjectSyncMode::FullProject,
-                type_provider_kind: crate::TypeProviderKind::Tsserver,
-                suggest_tsgo: false,
-                mcp_port: None,
-                type_provider_none_reason: None,
-            },
-        )
-    });
+    // Construct the server under this test's per-session store-dir override so the
+    // LSP-side publish backend resolves the SAME isolated dir the spawned plugin
+    // reads (`store_segment` derived above). The install lock is held across the
+    // synchronous construction only, so concurrent tests never share a segment.
+    let (service, _socket) =
+        crate::test_harness::with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |client| {
+                VerterLanguageServer::new(
+                    client,
+                    LspConfig {
+                        host: Arc::clone(&host_for_server),
+                        type_provider: Some(Arc::clone(&type_provider_for_server)),
+                        project_sync_mode: crate::ProjectSyncMode::FullProject,
+                        type_provider_kind: crate::TypeProviderKind::Tsserver,
+                        suggest_tsgo: false,
+                        mcp_port: None,
+                        type_provider_reason: None,
+                        suppress_imported_carrier_prewarm: false,
+                    },
+                )
+            })
+        });
 
     let server = service.inner();
     install_test_resolver_for_root(
@@ -6268,9 +10964,9 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
     let direct_debug = Some(synced_type_provider_context(server, &parent_uri))
         .and_then(|ctx| {
             let tsx_path = ctx.tsx_path.clone();
-            merge::vue_position_to_tsx_offset_validated(
+            merge::carrier_position_to_tsx_offset_validated(
                 &member_position,
-                &ctx.vue_line_index,
+                &ctx.carrier_line_index,
                 &ctx.mapper,
                 &ctx.tsx_line_index,
             )
@@ -6292,15 +10988,15 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
                 })
                 .map_err(|error| (error.to_string(), tsx_path))
         });
-    let parent_state = server
+    let _parent_state = server
         .provider_sync_states
         .get(&parent_path)
         .map(|state| state.clone());
-    let child_state = server
+    let _child_state = server
         .provider_sync_states
         .get(&child_path)
         .map(|state| state.clone());
-    let (direct_labels, tsx_path, direct_error) = if let Some(fut) = direct_debug {
+    let (_direct_labels, _tsx_path, _direct_error) = if let Some(fut) = direct_debug {
         match fut.await {
             Ok((labels, tsx_path)) => (Some(labels), Some(tsx_path), None),
             Err((error, tsx_path)) => (None, Some(tsx_path), Some(error)),
@@ -6312,7 +11008,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
             Some("missing type provider context".to_string()),
         )
     };
-    let (literal_labels, literal_error) = if let Some((tsx_path, tsx_offset)) = literal_debug {
+    let (_literal_labels, _literal_error) = if let Some((tsx_path, tsx_offset)) = literal_debug {
         match provider
             .get_completions(&tsx_path, tsx_offset, Some("."))
             .await
@@ -6356,7 +11052,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() {
+async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_sync() {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src/partials")).expect("create partials dir");
@@ -6390,6 +11086,7 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
     project.compiler_options = crate::project_resolver::IdeProjectCompilerOptions {
         base_url: Some(workspace_id.clone()),
         paths: vec![("@/*".to_string(), vec!["src/*".to_string()])],
+        ..Default::default()
     };
     host.configure_projects(vec![project.clone()]);
 
@@ -6421,7 +11118,16 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![project]),
         ownership_ready: true,
     };
-    let ws = documents.host().workspace();
+    // The drain carries a `CarrierPublishCtx` with the published vfs (the single
+    // ownership-resolution source; `coordinator: None` ⇒ direct-open).
+    let owner_vfs =
+        configured_owner_vfs(&workspace_id, &format!("{workspace_id}/tsconfig.app.json"));
+    let carrier_publish = crate::server::background_drain::CarrierPublishCtx {
+        coordinator: None,
+        vfs: Arc::clone(&owner_vfs),
+        ownership_ready: true,
+    };
+    let ws = documents.host().workspace_read();
     let external_resolved = snapshot.resolver.resolve_with_reader(
         ws.as_ref(),
         &crate::project_resolver::ResolveRequest {
@@ -6448,16 +11154,22 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
     let provider_sync_states = DashMap::new();
 
-    let synced = sync_pending_vue_provider_file(
-        &sync,
+    let synced = sync_pending_carrier_provider_file(
+        Some(&sync),
         &documents,
         &snapshot,
         &provider_sync_states,
         &app_id,
         false,
+        Some(&carrier_publish),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
-    assert!(synced, "pending Vue sync should succeed with resolved deps");
+    assert_eq!(
+        synced,
+        SyncOutcome::FullyReconciled,
+        "pending Vue sync should fully reconcile with resolved deps (both kinds synced)"
+    );
 
     let profile = documents.tsx_profile.read().clone();
     assert!(
@@ -6469,21 +11181,23 @@ async fn sync_pending_vue_provider_file_hydrates_codegen_blockers_before_sync() 
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::UpdateFile { path, .. } if path.ends_with(".vue.ts")
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path.ends_with(".vue.verter.ts")
         )),
         "pending sync should push the provider-facing Vue API file"
     );
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::UpdateFile { path, .. } if path.ends_with(".tsx")
+            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
+                if path.ends_with(".tsx")
         )),
         "pending sync should push the hydrated TSX output"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_pending_vue_provider_file_syncs_ide_artifact_for_tsgo() {
+async fn sync_pending_carrier_provider_file_syncs_ide_artifact_for_tsgo() {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
@@ -6514,41 +11228,56 @@ defineProps<{ msg: string }>()
 </script>
 <template><div>{{ msg }}</div></template>"#,
         ),
-        file_kind: FileKind::VueSfc,
+        file_language: FileLanguage::vue(),
         aliases: Vec::new(),
     });
 
+    let tsconfig = format!("{workspace_id}/tsconfig.app.json");
     let snapshot = PublishedResolverSnapshot {
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![
             crate::project_resolver::IdeProjectConfig::new(
                 workspace_id.clone(),
                 workspace_id.clone(),
-                Some(format!("{workspace_id}/tsconfig.app.json")),
+                Some(tsconfig.clone()),
             ),
         ]),
+        ownership_ready: true,
+    };
+    // The tsgo drain always carries a `CarrierPublishCtx` with the published vfs (the
+    // single ownership-resolution source; its `coordinator` is `None` for tsgo).
+    let owner_vfs = configured_owner_vfs(&workspace_id, &tsconfig);
+    let carrier_publish = crate::server::background_drain::CarrierPublishCtx {
+        coordinator: None,
+        vfs: Arc::clone(&owner_vfs),
         ownership_ready: true,
     };
     let provider = Arc::new(MockTypeProvider::new());
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
     let provider_sync_states = DashMap::new();
 
-    let synced = sync_pending_vue_provider_file(
-        &sync,
+    let synced = sync_pending_carrier_provider_file(
+        Some(&sync),
         &documents,
         &snapshot,
         &provider_sync_states,
         &app_id,
         true,
+        Some(&carrier_publish),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
-    assert!(synced, "pending Vue sync should succeed for TSGO");
+    assert_eq!(
+        synced,
+        SyncOutcome::FullyReconciled,
+        "pending Vue sync should fully reconcile for TSGO (both kinds synced)"
+    );
 
     let calls = provider.file_sync_calls();
     assert!(
             calls.iter().any(|call| matches!(
                 call,
-                MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. } if path.ends_with(".vue.ts")
+                MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. } if path.ends_with(".vue.verter.ts")
             )),
             "TSGO pending sync should keep syncing the API artifact, calls={calls:?}"
         );
@@ -6790,10 +11519,18 @@ fn test_write_if_changed_overwrites_different() {
 #[test]
 fn test_materialize_first_call_creates_files() {
     let tmp = tempfile::tempdir().unwrap();
-    let nm = tmp.path().join("node_modules/@verter/types");
+    // Build the workspace-root URI cross-platform: the shared helper normalizes
+    // backslashes -> forward slashes and emits a valid `file:///C:/...` (Windows)
+    // / `file:///home/...` (Unix) URI, where naive `format!("file://{}", display)`
+    // produces a backslash path with no leading slash on Windows (a fake UNC
+    // authority that resolves to the wrong directory).
+    let root = crate::uri::path_to_file_uri_string(&tmp.path().to_string_lossy());
+    // Mirror exactly how `materialize_verter_types` derives the root path from the
+    // URI, so the expectation survives Windows drive-letter lowercasing / path
+    // canonicalization.
+    let nm = std::path::PathBuf::from(crate::documents::uri_to_canonical_id_from_str(&root))
+        .join("node_modules/@verter/types");
     assert!(!nm.exists());
-    // materialize_verter_types expects URI strings but falls back to path
-    let root = format!("file://{}", tmp.path().display());
     let result = materialize_verter_types(&[root]);
     assert!(!result.any_failed, "should not fail on first call");
     assert!(result.wrote_any, "should write stub files on first call");
@@ -6809,7 +11546,7 @@ fn test_materialize_first_call_creates_files() {
 #[test]
 fn test_materialize_second_call_is_noop() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = format!("file://{}", tmp.path().display());
+    let root = crate::uri::path_to_file_uri_string(&tmp.path().to_string_lossy());
     let first = materialize_verter_types(&[root.clone()]);
     assert!(!first.any_failed, "first materialization should succeed");
     assert!(first.wrote_any, "first materialization should write files");
@@ -6825,7 +11562,12 @@ fn test_materialize_second_call_is_noop() {
 #[test]
 fn test_materialize_skips_real_installed_package() {
     let tmp = tempfile::tempdir().unwrap();
-    let nm = tmp.path().join("node_modules/@verter/types");
+    let root = crate::uri::path_to_file_uri_string(&tmp.path().to_string_lossy());
+    // Pre-populate the real package at the SAME canonical directory the code
+    // derives from the URI, so `materialize_verter_types` sees the pre-installed
+    // package on Windows (drive-letter lowercasing / canonicalization match).
+    let nm = std::path::PathBuf::from(crate::documents::uri_to_canonical_id_from_str(&root))
+        .join("node_modules/@verter/types");
     let dist = nm.join("dist");
     std::fs::create_dir_all(&dist).unwrap();
     // Pre-populate with real package content (no marker, uses dist/index.d.ts).
@@ -6834,7 +11576,6 @@ fn test_materialize_skips_real_installed_package() {
     std::fs::write(dist.join("index.d.ts"), real_dts).unwrap();
     std::fs::write(nm.join("package.json"), real_pkg).unwrap();
 
-    let root = format!("file://{}", tmp.path().display());
     let result = materialize_verter_types(&[root]);
     assert!(
         !result.any_failed,
@@ -6863,18 +11604,1781 @@ fn test_materialize_skips_real_installed_package() {
 }
 
 #[test]
-fn test_is_vue_file() {
-    assert!(is_vue_file("file:///project/src/App.vue"));
-    assert!(is_vue_file("C:/project/src/App.vue"));
-    assert!(!is_vue_file("file:///project/src/utils.ts"));
-    assert!(!is_vue_file("file:///project/tsconfig.json"));
-    assert!(!is_vue_file("file:///project/vue.config.js"));
+fn test_materialize_root_uri_is_portable_three_slash_form() {
+    // Anti-regression for the materialize roots above: the URI fed to
+    // `materialize_verter_types` MUST be the valid 3-slash `file:///…` form on
+    // every OS. The old `format!("file://{}", path.display())` produced a
+    // malformed 2-slash / backslash URI on Windows; this test discriminates
+    // against that shape (it would FAIL on a 2-slash or backslash result).
+
+    // Unix-shaped absolute path.
+    let unix = crate::uri::path_to_file_uri_string("/tmp/verter-x/proj");
+    assert!(
+        unix.starts_with("file:///"),
+        "expected 3-slash file URI, got {unix}"
+    );
+    assert!(
+        !unix.starts_with("file:////"),
+        "must not have 4 slashes: {unix}"
+    );
+    assert_eq!(unix, "file:///tmp/verter-x/proj");
+
+    // Windows-shaped drive-letter path: backslashes must become forward slashes
+    // and the result must be `file:///C:/…` (NOT the malformed `file://C:\…`).
+    let win = crate::uri::path_to_file_uri_string(r"C:\Users\dev\proj");
+    assert!(
+        win.starts_with("file:///"),
+        "expected 3-slash file URI, got {win}"
+    );
+    assert!(
+        !win.starts_with("file:////"),
+        "must not have 4 slashes: {win}"
+    );
+    assert!(
+        !win.contains('\\'),
+        "backslashes must be normalized to forward slashes: {win}"
+    );
+    assert!(
+        win.contains("C:/"),
+        "drive letter must be preserved with a forward slash: {win}"
+    );
+    assert_eq!(win, "file:///C:/Users/dev/proj");
+}
+
+#[test]
+fn test_carrier_language_for() {
+    assert_eq!(
+        carrier_language_for("file:///project/src/App.vue"),
+        Some(verter_session::FileLanguage::vue())
+    );
+    assert_eq!(
+        carrier_language_for("C:/project/src/App.vue"),
+        Some(verter_session::FileLanguage::vue())
+    );
+    // `.svelte` is a KNOWN carrier row (no carrier implementation is
+    // registered behind it — watched events stay inert, requests
+    // surface the typed unsupported-language error).
+    assert_eq!(
+        carrier_language_for("file:///project/src/Box.svelte"),
+        Some(verter_session::FileLanguage::svelte())
+    );
+    assert!(carrier_language_for("file:///project/src/utils.ts").is_none());
+    assert!(carrier_language_for("file:///project/tsconfig.json").is_none());
+    assert!(carrier_language_for("file:///project/vue.config.js").is_none());
+}
+
+/// The watcher glob is registry-derived: it covers every carrier row,
+/// including `.svelte` (a registered carrier). The IDE TSX
+/// projection for `.svelte` is a separate vertical, so `resync` still
+/// produces no provider sync state for it — the watcher coverage is the
+/// load-bearing assertion here.
+#[test]
+fn test_carrier_watch_glob_covers_registry_carrier_rows() {
+    let glob = crate::capabilities::carrier_watch_glob();
+    assert_eq!(glob, "**/*.{svelte,vue}");
+}
+
+/// Guard `lifecycle_watch_globs_are_descriptor_derived`: the watcher globs are
+/// DESCRIPTOR-DERIVED, never hand-listed. The carrier glob comes from the
+/// registry's carrier rows; the adapter-module glob comes from
+/// `all_adapter_module_extensions()` (`**/*.{svelte.ts,svelte.js}`) — a rune
+/// module is NOT a carrier, so its coverage is the dedicated adapter-module
+/// glob, NOT the generic `**/*.{ts,tsx,…}` glob (which the assertion proves
+/// excludes the rune extensions). Without the dedicated glob the rune module
+/// would only be covered incidentally by the generic TS glob (the S2a P1 gap).
+#[test]
+fn lifecycle_watch_globs_are_descriptor_derived() {
+    // The adapter-module glob is built from the registry, covering the
+    // registered rune-module extensions in longest-suffix-first row order.
+    let adapter_glob = crate::capabilities::adapter_module_watch_glob()
+        .expect("the svelte adapter registers rune-module extensions");
+    // The adapter-module glob is built from the SAME registry source the
+    // descriptor authority exposes — not a hand-listed literal.
+    let from_registry = verter_session::LanguageRegistry::global().all_adapter_module_extensions();
+    assert_eq!(
+        adapter_glob,
+        format!("**/*.{{{}}}", from_registry.join(",")),
+        "the adapter-module glob is descriptor-derived from all_adapter_module_extensions()"
+    );
+    let mut sorted = from_registry.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        vec!["svelte.js", "svelte.ts"],
+        "the registry is the authority for the adapter-module extensions (svelte.ts + svelte.js)"
+    );
+
+    // The generic TS/JS glob does NOT carry rune-module coverage: `.svelte.ts`
+    // / `.svelte.js` are NOT among the bare TS/JS extensions. (The glob
+    // `**/*.{ts,...}` would match `foo.svelte.ts` by suffix, but the
+    // classification + the dedicated adapter-module glob are what make the
+    // rune-module coverage descriptor-driven and explicit.)
+    let generic = "ts,tsx,js,jsx,mts,mjs,cts,cjs";
+    assert!(
+        !generic
+            .split(',')
+            .any(|e| e == "svelte.ts" || e == "svelte.js"),
+        "rune-module extensions must not be hand-listed in the generic TS/JS glob"
+    );
+}
+
+/// Guard `provider_projection_context_serves_both_carrier_and_self_file`: the
+/// ONE generalized `provider_projection_context` serves BOTH a `.vue` carrier
+/// (carrier-IDE projection) AND a `.svelte.ts` rune module (self-file
+/// projection) — there is no parallel rune-only query path. The discriminating
+/// assertion is the self-file prelude offset: a user-source line maps to
+/// provider line `+ prelude_line_count`, and a provider position in the prelude
+/// region drops to no source line (off-by-prelude if the offset were unwired).
+#[tokio::test]
+async fn provider_projection_context_serves_both_carrier_and_self_file() {
+    use verter_span::TsPosition;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // (1) CARRIER: a `.vue` file projects through the carrier-IDE branch of the
+    // ONE generalized context.
+    let vue_uri: Uri = "file:///workspace/App.vue".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: vue_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">\nconst x = 1;\n</script>\n<template>{{ x }}</template>"
+            .to_string(),
+    });
+    server.ensure_current_file_synced(&vue_uri).await;
+    assert!(
+        matches!(
+            server.documents.get_projection(&vue_uri),
+            Some(
+                crate::documents::provider_projection::DocumentProviderProjection::CarrierIde { .. }
+            )
+        ),
+        "a `.vue` carrier builds the carrier-IDE projection"
+    );
+    let carrier_ctx = server
+        .provider_projection_context(&vue_uri)
+        .expect("the carrier projects through the generalized context");
+    assert!(
+        carrier_ctx.provider_path.ends_with(".tsx") || carrier_ctx.provider_path.ends_with(".jsx"),
+        "a carrier's provider path is an IDE TSX/JSX path, got {}",
+        carrier_ctx.provider_path
+    );
+
+    // (2) SELF-FILE: a `.svelte.ts` rune module projects through the self-file
+    // branch served by the SAME context — provider path IS the canonical id.
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const s = $state(0);\n".to_string(),
+    });
+    // The production `did_open` handler drives the eager shadow sync; this test
+    // opens through the registry directly, so drive it here (the query context
+    // serves the RECORDED synced surface, not an on-demand rebuild).
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the self-file shadow sync should succeed against the mock provider"
+    );
+    let rune_ctx = server
+        .provider_projection_context(&rune_uri)
+        .expect("the rune module projects through the SAME generalized context");
+    assert_eq!(
+        rune_ctx.provider_path, "/workspace/store.svelte.ts",
+        "a self-file rune module serves its provider buffer from its OWN canonical path"
+    );
+    // The provider content prepends the synthetic rune prelude.
+    assert!(
+        rune_ctx.provider_content.contains("$state"),
+        "the rune-module provider buffer carries the synthetic rune prelude declarations"
+    );
+
+    // Discriminating: the self-file mapper offsets the user-source line DOWN by
+    // the prelude line count. A provider position INSIDE the prelude region
+    // drops to no source line (never a fake source-line-0).
+    let drop_in_prelude = rune_ctx.mapper.tsx_to_carrier(TsPosition::new(0, 0));
+    assert!(
+        drop_in_prelude.is_none(),
+        "a provider position in the synthetic prelude region must drop, not surface a source line"
+    );
+    // A user-source position maps to a provider line strictly BELOW the prelude.
+    let mapped = rune_ctx
+        .mapper
+        .carrier_to_tsx(verter_span::LspPosition::new(0, 13))
+        .expect("a user-source position maps into the provider buffer");
+    assert!(
+        mapped.pos.line > 0,
+        "the user-source line must shift DOWN by the prelude line count (off-by-prelude if unwired)"
+    );
+
+    drain.abort();
+}
+
+/// Fail-closed auto-import completion-resolve for a self-file rune module.
+///
+/// The provider auto-import re-anchor (`resolve_provider_auto_import_edits`) maps a
+/// provider edit back through a Vue `<script setup>` carrier. A self-file rune
+/// module (Svelte `.svelte.ts` / `.svelte.js`) has NO `<script setup>` carrier
+/// to re-anchor into — its provider path reverse-maps to itself, not to a
+/// carrier source. Accepting such a completion must NOT error and must NOT
+/// synthesize a bogus Vue block: it returns `Ok(None)`, leaving the completion
+/// item unchanged (self-file auto-import placement is a separate capability).
+///
+/// Discriminating: this asserts `Ok(None)` for a NON-EMPTY provider-edit set on
+/// a `.svelte.ts` self-file projection. The pre-fix carrier-only resolver had no
+/// self-file gate — it either rejected the resolve with a structured error (no
+/// resolvable carrier URI) or drove the Vue-specific `resolve_script_import_anchor`
+/// over the rune-module source; neither yields the fail-closed `Ok(None)`. The
+/// companion assertion pins that a real `.vue` carrier is NOT classified as a
+/// self-file projection, so the Vue carrier re-anchor path stays reachable.
+#[tokio::test]
+async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
+    use crate::type_provider::auto_import::ProviderImportEdit;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // A self-file rune module: its provider buffer is served from its OWN
+    // canonical path, so the completion item's stored `tsx_path` IS the
+    // `.svelte.ts` path — not a Vue carrier IDE path.
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const s = $state(0);\n".to_string(),
+    });
+    assert!(
+        server.is_self_file_projection(&rune_uri),
+        "precondition: a `.svelte.ts` rune module is a self-file projection"
+    );
+
+    // A NON-EMPTY auto-import edit set (the only case the carrier re-anchor runs
+    // for). The bytes are a faithful new-import insertion as TSGO would emit.
+    let provider_edits = vec![ProviderImportEdit {
+        start: 0,
+        end: 0,
+        new_text: "import { foo } from './foo';\n".to_string(),
+    }];
+    let resolved = super::nav_features_completion_resolve::resolve_provider_auto_import_edits(
+        server,
+        "/workspace/store.svelte.ts",
+        &provider_edits,
+    );
+    assert_eq!(
+        resolved,
+        Ok(None),
+        "a self-file (`.svelte.ts`) auto-import resolve fails closed: no edits, no internal error"
+    );
+
+    // Companion: a real `.vue` carrier is a carrier-IDE projection, NOT a
+    // self-file one — so the fail-closed self-file gate never fires for it and
+    // the Vue carrier re-anchor path stays reachable.
+    let vue_uri: Uri = "file:///workspace/App.vue".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: vue_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">\nconst x = 1;\n</script>\n<template>{{ x }}</template>"
+            .to_string(),
+    });
+    server.ensure_current_file_synced(&vue_uri).await;
+    assert!(
+        !server.is_self_file_projection(&vue_uri),
+        "a `.vue` carrier is a carrier-IDE projection, never gated as self-file"
+    );
+
+    drain.abort();
+}
+
+/// A REAL Vue carrier whose IDE context is MISSING (stale / not committed) is a
+/// hard error on completion-resolve — never a dropped-edit success.
+///
+/// Contract: `resolve_provider_auto_import_edits` returns `Ok(None)` ONLY for the
+/// no-carrier / self-file cases. A path that DOES reverse-map to a `.vue`
+/// carrier (not self-file) but has no live IDE context (no committed provider
+/// sync state → `ide_context_by_path` is `None`) is a genuine carrier-resolve
+/// FAILURE: it must return `Err`, so the caller reports a structured resolve
+/// error rather than silently dropping the provider's non-empty auto-import
+/// edits (which recreates "accepted completion but no import").
+///
+/// Discriminating: the carrier reverse-map is PRESENT (the `.vue` is open +
+/// owned), the projection is NOT self-file, the edit set is NON-EMPTY, and only
+/// the IDE context is absent. The pre-fix code returned `Ok(None)` on that
+/// missing-context branch (dropping the edits); this asserts `Err`, so it FAILS
+/// on the pre-fix success and PASSES once the branch fails closed.
+#[tokio::test]
+async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
+    use crate::type_provider::auto_import::ProviderImportEdit;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // Open a real `.vue` carrier: the host now has the `.vue` source and the
+    // canonical↔uri mapping, so the carrier IDE path reverse-maps. We do NOT
+    // establish a committed provider sync state (`ensure_current_file_synced`),
+    // so `active_ide_path_for_uri` is None ⇒ `ide_context_by_path` is None: the
+    // IDE-context-missing branch the fix must fail closed on.
+    let vue_uri: Uri = open_test_vue(
+        server,
+        "/workspace/App.vue",
+        "<script setup lang=\"ts\">\nconst x = 1;\n</script>\n<template>{{ x }}</template>",
+    );
+    let tsx_path = "/workspace/App.vue.tsx";
+
+    // Precondition 1: the carrier reverse-map IS present (real carrier).
+    assert_eq!(
+        server.carrier_uri_from_ide_path(tsx_path).as_ref(),
+        Some(&vue_uri),
+        "precondition: the carrier IDE path reverse-maps to the open `.vue` URI"
+    );
+    // Precondition 2: it is NOT a self-file projection (so the `Ok(None)`
+    // self-file branch is not what fires).
+    assert!(
+        !server.is_self_file_projection(&vue_uri),
+        "precondition: a `.vue` carrier is not a self-file projection"
+    );
+    // Precondition 3: the request surface IS missing (no committed sync state).
+    assert!(
+        server.capture_provider_request_surface(&vue_uri).is_none(),
+        "precondition: with no committed provider sync state the carrier has no \
+         capturable request surface"
+    );
+
+    // A NON-EMPTY auto-import edit set — the only case the carrier re-anchor
+    // runs for. These MUST be placed or the resolve must fail; they may never be
+    // silently dropped.
+    let provider_edits = vec![ProviderImportEdit {
+        start: 0,
+        end: 0,
+        new_text: "import { foo } from './foo';\n".to_string(),
+    }];
+    let resolved = super::nav_features_completion_resolve::resolve_provider_auto_import_edits(
+        server,
+        tsx_path,
+        &provider_edits,
+    );
+    assert!(
+        resolved.is_err(),
+        "a missing IDE context for a REAL carrier must be a structured Err (the \
+         non-empty auto-import edits are NOT silently dropped); got {resolved:?}"
+    );
+
+    drain.abort();
+}
+
+/// A real `.svelte` carrier (NOT a `.svelte.ts` rune module) is a carrier-IDE
+/// projection that reverse-maps to its `.svelte` source and is NOT a self-file
+/// projection — so it slips past BOTH the no-carrier and the self-file gates on
+/// completion-resolve. The carrier `<script setup>` import re-anchor is a
+/// Vue-SFC-specific construct: a `.svelte` source has no Vue `<script setup>`,
+/// so driving `resolve_script_import_anchor` over it would synthesize a bogus
+/// Vue `<script setup>` block INTO the `.svelte` file. The resolve must instead
+/// fail closed through the typed carrier-kind authority (a non-Vue carrier is
+/// not re-anchorable), leaving the completion item unchanged — symmetric with
+/// the code-action `resolve_carrier_preamble_import_anchor` Vue gate.
+///
+/// Discriminating: the `.svelte` carrier reverse-map IS present, the projection
+/// is NOT self-file, and the provider-edit set is NON-EMPTY (the only case the
+/// carrier re-anchor runs for). The pre-gate code never returned `Ok(None)` for
+/// this real non-self-file carrier — it either errored on a missing IDE context
+/// or synthesized a `CreateScriptSetup` Vue block over the `.svelte` source.
+/// This asserts `Ok(None)` AND that no produced edit text contains a
+/// `<script setup>`, so it FAILS before the gate and PASSES once a non-Vue
+/// carrier fails closed.
+#[tokio::test]
+async fn non_vue_carrier_auto_import_resolve_fails_closed_no_script_setup_synthesis() {
+    use crate::type_provider::auto_import::ProviderImportEdit;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // A real `.svelte` carrier with NO `<script setup>` (Svelte uses a plain
+    // `<script>`). It is owned and open, so `Comp.svelte.tsx` reverse-maps to
+    // the `.svelte` source, and it projects through a carrier IDE TSX — not a
+    // self-file rune-module buffer.
+    let svelte_uri = open_test_svelte(
+        server,
+        "/workspace/Comp.svelte",
+        "<script lang=\"ts\">\nlet x = 1;\n</script>\n<p>{x}</p>",
+    );
+    server.ensure_current_file_synced(&svelte_uri).await;
+    let tsx_path = "/workspace/Comp.svelte.tsx";
+
+    // Precondition 1: the `.svelte` carrier reverse-map IS present.
+    assert_eq!(
+        server.carrier_uri_from_ide_path(tsx_path).as_ref(),
+        Some(&svelte_uri),
+        "precondition: the `.svelte.tsx` IDE path reverse-maps to the open `.svelte` carrier URI"
+    );
+    // Precondition 2: a `.svelte` carrier is NOT a self-file projection — so the
+    // existing self-file `Ok(None)` gate is NOT what would fire here.
+    assert!(
+        !server.is_self_file_projection(&svelte_uri),
+        "precondition: a `.svelte` carrier is a carrier-IDE projection, not self-file"
+    );
+
+    // A NON-EMPTY auto-import edit set — the only case the carrier re-anchor runs
+    // for. The bytes are a faithful new-import insertion as a provider would emit.
+    let provider_edits = vec![ProviderImportEdit {
+        start: 0,
+        end: 0,
+        new_text: "import { foo } from './foo';\n".to_string(),
+    }];
+    let resolved = super::nav_features_completion_resolve::resolve_provider_auto_import_edits(
+        server,
+        tsx_path,
+        &provider_edits,
+    );
+    // Negative assertion FIRST, so it stays load-bearing: whatever the resolve
+    // produced, no edit may carry a synthesized Vue `<script setup>` block into
+    // the `.svelte` source. Pre-gate, the resolve returned exactly such an edit
+    // (`Ok(Some([<script setup ...>]))`), so this fires before the gate lands.
+    if let Ok(Some(edits)) = &resolved {
+        assert!(
+            !edits.iter().any(|e| e.new_text.contains("<script setup")),
+            "a `.svelte` carrier resolve must never synthesize a Vue `<script setup>` block; \
+             got {edits:?}"
+        );
+    }
+    // Stronger property: a non-Vue carrier fails closed entirely (no edits, no
+    // error), leaving the completion item unchanged — symmetric with the
+    // code-action `resolve_carrier_preamble_import_anchor` Vue gate.
+    assert_eq!(
+        resolved,
+        Ok(None),
+        "a non-Vue (`.svelte`) carrier auto-import resolve fails closed via the typed \
+         carrier-kind authority: no edits, no error, no synthesized Vue block; got {resolved:?}"
+    );
+
+    drain.abort();
+}
+
+/// Build the LSP completion item a tsserver-family provider's resolve handle
+/// becomes after `merge_completions`: the provider-NEUTRAL `verter_resolve`
+/// envelope with a `TsserverEntry` resolve key.
+#[cfg(test)]
+fn tsserver_resolve_envelope_item(
+    provider_id: &str,
+    provider_path: &str,
+    entry_name: &str,
+) -> CompletionItem {
+    let provider_data = serde_json::to_value(
+        crate::type_provider::protocol::CompletionResolveData::TsserverEntry {
+            name: entry_name.to_string(),
+            source: Some("vue".to_string()),
+            data: Some(serde_json::json!({ "exportName": entry_name })),
+            offset: 0,
+        },
+    )
+    .expect("resolve key serializes");
+    CompletionItem {
+        label: entry_name.to_string(),
+        data: Some(serde_json::json!({
+            "verter_resolve": {
+                "kind": "type_provider",
+                "provider_id": provider_id,
+                "provider_path": provider_path,
+                "provider_data": provider_data,
+            }
+        })),
+        ..Default::default()
+    }
+}
+
+/// Build the LSP completion item a TSGO (upstream-LSP) provider's resolve handle
+/// becomes after `merge_completions`: the provider-NEUTRAL `verter_resolve`
+/// envelope with an `Lsp { label, data }` resolve key — the ONLY key shape real
+/// `TsgoTypeProvider::resolve_completion` accepts. Tests must model the real
+/// per-provider data shape, not feed `TsserverEntry` to a tsgo provider.
+#[cfg(test)]
+fn tsgo_resolve_envelope_item(
+    provider_id: &str,
+    provider_path: &str,
+    entry_name: &str,
+) -> CompletionItem {
+    let provider_data =
+        serde_json::to_value(crate::type_provider::protocol::CompletionResolveData::Lsp {
+            label: entry_name.to_string(),
+            data: serde_json::json!({ "exportName": entry_name }),
+        })
+        .expect("resolve key serializes");
+    CompletionItem {
+        label: entry_name.to_string(),
+        data: Some(serde_json::json!({
+            "verter_resolve": {
+                "kind": "type_provider",
+                "provider_id": provider_id,
+                "provider_path": provider_path,
+                "provider_data": provider_data,
+            }
+        })),
+        ..Default::default()
+    }
+}
+
+/// Dispatch reaches `resolve_completion` for the provider-NEUTRAL
+/// `verter_resolve` envelope — NOT the old provider-baked `data.tsgo` gate.
+///
+/// Discriminating: a tsserver-kind mock provider (NOT tsgo) carrying the neutral
+/// envelope MUST have `resolve_completion` invoked. The pre-fix code gated on
+/// `data.get("tsgo") == Some(true)`, so a tsserver item would never reach
+/// resolve — this asserts the call IS made, which fails on the old gate.
+#[tokio::test]
+async fn completion_resolve_dispatches_neutral_envelope_to_provider() {
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsserver");
+    // Configure a resolve response keyed on the exact resolve key the envelope carries.
+    let resolve_key = crate::type_provider::protocol::CompletionResolveData::TsserverEntry {
+        name: "computed".to_string(),
+        source: Some("vue".to_string()),
+        data: Some(serde_json::json!({ "exportName": "computed" })),
+        offset: 0,
+    };
+    provider.set_resolve_completion(
+        "/workspace/App.vue.tsx",
+        resolve_key,
+        Some(CompletionResolveResult {
+            additional_text_edits: vec![],
+            ..Default::default()
+        }),
+    );
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let item = tsserver_resolve_envelope_item("tsserver", "/workspace/App.vue.tsx", "computed");
+    let _ = super::nav_features::handle_completion_resolve(server, item).await;
+
+    assert!(
+        provider.calls().iter().any(|c| matches!(
+            c,
+            MockCall::ResolveCompletion { path, .. } if path == "/workspace/App.vue.tsx"
+        )),
+        "the neutral verter_resolve envelope must dispatch to the provider's resolve_completion \
+         (the old code gated on data.tsgo and never reached tsserver)"
+    );
+}
+
+/// Provider-id mismatch FAILS CLOSED: an item minted by one provider must never
+/// be resolved against a different active provider (mid-session swap safety).
+///
+/// Discriminating: the envelope says `provider_id: "tsgo"` but the active
+/// provider reports `"tsserver"`. `resolve_completion` must NOT be called. A
+/// dispatch that ignored provider identity would (wrongly) call it.
+#[tokio::test]
+async fn completion_resolve_fails_closed_on_provider_id_mismatch() {
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsserver");
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // Envelope stamped by a DIFFERENT provider ("tsgo") than the active one.
+    let item = tsserver_resolve_envelope_item("tsgo", "/workspace/App.vue.tsx", "computed");
+    let result = super::nav_features::handle_completion_resolve(server, item.clone()).await;
+
+    assert!(
+        result.is_ok(),
+        "a provider mismatch is a benign no-op (item returned unchanged), not an error"
+    );
+    assert!(
+        !provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::ResolveCompletion { .. })),
+        "a provider-id mismatch must FAIL CLOSED — resolve_completion must not be called against \
+         a foreign provider's item"
+    );
+}
+
+/// BOTH a tsgo-kind and a tsserver-kind provider resolve through the SAME neutral
+/// envelope dispatch — provider-agnostic (one path, validated by id), not a
+/// tsgo-only branch — each carrying its OWN real resolve-key shape.
+///
+/// This models the REAL per-provider data shapes (review finding T3): TSGO mints
+/// `CompletionResolveData::Lsp { label, data }` (the only key its
+/// `resolve_completion` accepts), while the tsserver family mints
+/// `TsserverEntry`. Feeding `TsserverEntry` to a tsgo provider (as the old test
+/// did) proved only generic mock dispatch, not that the dispatch routes the
+/// provider's real key shape. The dispatch must reach resolve AND carry the exact
+/// key the matching provider would accept.
+#[tokio::test]
+async fn completion_resolve_envelope_resolves_for_both_provider_kinds() {
+    // (provider kind, the resolve key that kind's real provider accepts, the
+    // matching envelope-item builder).
+    let tsgo_key = crate::type_provider::protocol::CompletionResolveData::Lsp {
+        label: "computed".to_string(),
+        data: serde_json::json!({ "exportName": "computed" }),
+    };
+    let tsserver_key = crate::type_provider::protocol::CompletionResolveData::TsserverEntry {
+        name: "computed".to_string(),
+        source: Some("vue".to_string()),
+        data: Some(serde_json::json!({ "exportName": "computed" })),
+        offset: 0,
+    };
+
+    for (kind, resolve_key, build_item) in [
+        (
+            "tsgo",
+            tsgo_key,
+            tsgo_resolve_envelope_item as fn(&str, &str, &str) -> CompletionItem,
+        ),
+        (
+            "tsserver",
+            tsserver_key,
+            tsserver_resolve_envelope_item as fn(&str, &str, &str) -> CompletionItem,
+        ),
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        provider.set_provider_id(kind);
+        provider.set_resolve_completion(
+            "/workspace/App.vue.tsx",
+            resolve_key.clone(),
+            Some(CompletionResolveResult::default()),
+        );
+        let type_provider: Arc<dyn TypeProvider> = provider.clone();
+        let service = make_hover_test_service(type_provider);
+        let server = service.inner();
+        install_test_resolver(server);
+
+        let item = build_item(kind, "/workspace/App.vue.tsx", "computed");
+        let _ = super::nav_features::handle_completion_resolve(server, item).await;
+
+        // Resolve was reached AND the dispatched key is exactly the one this
+        // provider's real `resolve_completion` accepts (the `Lsp`/`TsserverEntry`
+        // shape — not a generic stand-in).
+        let dispatched_key = provider.calls().into_iter().find_map(|c| match c {
+            MockCall::ResolveCompletion { data, .. } => Some(data),
+            _ => None,
+        });
+        assert_eq!(
+            dispatched_key.as_ref(),
+            Some(&resolve_key),
+            "provider kind '{kind}' must receive its own real resolve-key shape, \
+             routed unchanged through the neutral envelope"
+        );
+    }
+}
+
+/// F4: lazy `completionItem/resolve` enrichment is APPLIED — the resolved
+/// `detail` and `documentation` are folded onto the returned `CompletionItem`.
+///
+/// Discriminating: `CompletionResolveResult` carries `detail`/`documentation`
+/// and the tsserver mapper populates them, but the pre-fix
+/// `handle_completion_resolve` consumed only `additional_text_edits`, dropping
+/// the enrichment (a dishonest contract). This resolves an item whose result has
+/// ONLY detail/docs (no edits) and asserts both land on the item — which fails on
+/// the old edits-only dispatch.
+#[tokio::test]
+async fn completion_resolve_applies_detail_and_documentation() {
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsgo");
+    let resolve_key = crate::type_provider::protocol::CompletionResolveData::Lsp {
+        label: "computed".to_string(),
+        data: serde_json::json!({ "exportName": "computed" }),
+    };
+    provider.set_resolve_completion(
+        "/workspace/App.vue.tsx",
+        resolve_key,
+        Some(CompletionResolveResult {
+            additional_text_edits: vec![],
+            detail: Some("(alias) const computed: …".to_string()),
+            documentation: Some("Takes a getter function…".to_string()),
+            ..Default::default()
+        }),
+    );
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let item = tsgo_resolve_envelope_item("tsgo", "/workspace/App.vue.tsx", "computed");
+    let resolved = super::nav_features::handle_completion_resolve(server, item)
+        .await
+        .expect("resolve returns the enriched item");
+
+    assert_eq!(
+        resolved.detail.as_deref(),
+        Some("(alias) const computed: …"),
+        "the resolved detail/signature must be applied onto the item"
+    );
+    match resolved.documentation {
+        Some(Documentation::MarkupContent(MarkupContent { value, .. })) => {
+            assert_eq!(value, "Takes a getter function…");
+        }
+        other => panic!("expected markdown documentation, got {other:?}"),
+    }
+}
+
+/// Open-before-ownership: `did_open` on a `.svelte.ts` rune module makes
+/// `provider_projection_context` available at the module's OWN canonical path
+/// BEFORE any resolver ownership is published (no `install_test_resolver`). The
+/// self-file shadow path does NOT depend on `non_carrier_sync_state_for_source`
+/// (which requires ownership), so the own buffer is queryable immediately.
+#[tokio::test]
+async fn rune_module_queryable_before_resolver_ownership() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    // NO install_test_resolver — there is no published ownership snapshot.
+    assert!(
+        server.published_resolver().is_none(),
+        "precondition: no resolver ownership is published"
+    );
+
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const s = $state(0);\n".to_string(),
+    });
+    // The production `did_open` handler drives the eager shadow sync (which
+    // does NOT depend on resolver ownership); this test opens through the
+    // registry directly, so drive it here. The query context serves the
+    // RECORDED synced surface — a buffer the provider never received is not
+    // queryable (fail closed).
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the ownership-independent shadow sync should succeed against the mock provider"
+    );
+
+    // The own buffer is queryable at its OWN canonical path before ownership.
+    let ctx = server
+        .provider_projection_context(&rune_uri)
+        .expect("the rune module own buffer is queryable before resolver ownership");
+    assert_eq!(ctx.provider_path, "/workspace/store.svelte.ts");
+    assert!(ctx.provider_content.contains("$state"));
+
+    drain.abort();
+}
+
+/// An editor edit to an OPEN `.svelte.ts` rune module re-syncs its self-file
+/// own-buffer to the provider (the carrier eager-TSX path never fires for a
+/// non-carrier, and the coordinator routes diagnostics through carrier IDE
+/// state). After `handle_did_change`, `provider_projection_context` reflects
+/// the EDITED source — stale own-buffer content would leave the old text.
+#[tokio::test]
+async fn rune_module_own_buffer_resyncs_on_did_change() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const s = $state(0);\n".to_string(),
+    });
+    // The production `did_open` handler drives the eager shadow sync; this test
+    // opens through the registry directly, so drive it here.
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the self-file shadow sync should succeed against the mock provider"
+    );
+    let ctx0 = server.provider_projection_context(&rune_uri).unwrap();
+    assert!(ctx0.provider_content.contains("$state(0)"));
+
+    // Edit the document, then drive the did_change handler.
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: rune_uri.clone(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "export const count = $state(42);\n".to_string(),
+            }],
+        },
+    )
+    .await;
+
+    let ctx1 = server
+        .provider_projection_context(&rune_uri)
+        .expect("the rune module is still queryable after did_change");
+    assert!(
+        ctx1.provider_content.contains("$state(42)") && ctx1.provider_content.contains("count"),
+        "the own-buffer provider content must reflect the EDIT, got: {}",
+        ctx1.provider_content
+    );
+    assert!(
+        !ctx1.provider_content.contains("const s = $state(0)"),
+        "the stale pre-edit own-buffer content must NOT linger"
+    );
+
+    drain.abort();
+}
+
+/// Guard `rune_module_self_file_state_closed_on_did_close`: an OPEN rune
+/// module's self-file Shadow provider state is closed + removed on did_close.
+/// The existing did_close branch is carrier-oriented (gated on `get_ide(...)`),
+/// which never fires for a non-carrier rune module — this pins the explicit
+/// self-file branch.
+#[tokio::test]
+async fn rune_module_self_file_state_closed_on_did_close() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let canonical_id = "/workspace/store.svelte.ts";
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const s = $state(0);\n".to_string(),
+    });
+    // Sync the open-document self-file Shadow state.
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the open rune module syncs its self-file Shadow provider state"
+    );
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("the rune module has provider sync state after the shadow sync");
+    assert_eq!(
+        state.shadow_path.as_deref(),
+        Some(canonical_id),
+        "the self-file Shadow path is the module's OWN canonical id"
+    );
+    assert!(state.shadow_background_loaded);
+
+    // did_close must close + remove the self-file provider state.
+    super::lifecycle::handle_did_close(
+        server,
+        DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier {
+                uri: rune_uri.clone(),
+            },
+        },
+    )
+    .await;
+    assert!(
+        server
+            .provider_sync_state_for_source(canonical_id)
+            .is_none(),
+        "did_close must remove the rune module's self-file provider state"
+    );
+
+    drain.abort();
+}
+
+/// R1b close-lifecycle: deleting a carrier source CLOSES its companions in the
+/// provider (retracting the open diagnostics buffer + carrier→project route). The
+/// companion close is the buffer-side half of carrier retraction (the store-side
+/// half is `retract_carrier_from_external_ts`). DISCRIMINATING: with the
+/// `close_provider_state` call removed from the delete handler, no `CloseFile`
+/// reaches the provider and the assertions fail.
+#[tokio::test]
+async fn deleting_carrier_source_closes_its_companions_in_provider() {
+    use crate::provider_sync::ProviderOwnerBinding;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsserver");
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+
+    let vue_uri: Uri = "file:///workspace/src/Comp.vue".parse().unwrap();
+    let canonical_id = "/workspace/src/Comp.vue";
+    let ide_path = "/workspace/src/Comp.vue.tsx";
+    let api_path = "/workspace/src/Comp.vue.verter.ts";
+
+    // Open the carrier source and commit a provider sync state advertising both
+    // companions (the state the carrier-membership sync establishes).
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: vue_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">const a = 1;</script>\n".to_string(),
+    });
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: ProviderOwnerBinding::Owned("/workspace/tsconfig.json".to_string()),
+            ide_path: Some(ide_path.to_string()),
+            api_path: Some(api_path.to_string()),
+            decl_path: None,
+            ide_background_loaded: false,
+            api_background_loaded: false,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    // Delete the carrier source → the handler closes its companions.
+    super::lifecycle::handle_did_delete_files(
+        server,
+        DeleteFilesParams {
+            files: vec![FileDelete {
+                uri: vue_uri.as_str().to_string(),
+            }],
+        },
+    )
+    .await;
+
+    let closed: Vec<String> = provider
+        .calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            MockCall::CloseFile { path } => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        closed.iter().any(|p| p == ide_path),
+        "deleting the carrier must CLOSE its IDE companion ({ide_path}); closed: {closed:?}"
+    );
+    assert!(
+        closed.iter().any(|p| p == api_path),
+        "deleting the carrier must CLOSE its API companion ({api_path}); closed: {closed:?}"
+    );
+    // The provider sync state is gone (retracted).
+    assert!(
+        server
+            .provider_sync_state_for_source(canonical_id)
+            .is_none(),
+        "deleting the carrier removes its provider sync state"
+    );
+
+    drain.abort();
+}
+
+/// Guard `self_file_rename_and_code_actions_gated_off`: rename and code actions
+/// are DEFERRED for a SELF-FILE rune-module own buffer — their workspace-EDIT
+/// positions are not yet mapped through the self-file mapper, so an applied edit
+/// could land off by the prelude offset (or inside the prelude) and CORRUPT the
+/// module. The handlers must be a CLEAN no-op for a rune module (no rename, no
+/// actions), NEVER a wrong/unmapped edit, and must NOT query the TypeProvider
+/// for rename locations / code actions. (Carrier rename/code-actions unchanged —
+/// pinned elsewhere.)
+#[tokio::test]
+async fn self_file_rename_and_code_actions_gated_off() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsserver,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let canonical_id = "/workspace/store.svelte.ts";
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const count = $state(0);\n".to_string(),
+    });
+    // Sync the self-file Shadow state so the projection + provider path exist.
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the open rune module syncs its self-file Shadow provider state"
+    );
+    assert!(
+        server.is_self_file_projection(&rune_uri),
+        "the rune module must carry a SelfFile projection"
+    );
+
+    // Arm the provider with a rename location AND a code action at the rune's
+    // OWN canonical path — if the handlers were NOT gated, these would surface
+    // as an (unmapped, position-corrupting) workspace edit. Cover the whole
+    // buffer offset range so any forwarded request would match.
+    provider.set_rename_locations(
+        canonical_id,
+        0,
+        vec![RenameLocation {
+            path: canonical_id.to_string(),
+            start: 13,
+            end: 18,
+        }],
+    );
+    for off in 0..40u32 {
+        provider.set_rename_locations(
+            canonical_id,
+            off,
+            vec![RenameLocation {
+                path: canonical_id.to_string(),
+                start: 13,
+                end: 18,
+            }],
+        );
+    }
+    provider.set_code_actions(
+        canonical_id,
+        0,
+        u32::MAX,
+        vec![TypeCodeAction {
+            title: "Convert to named import".to_string(),
+            kind: Some("quickfix".to_string()),
+            edits: vec![crate::type_provider::protocol::TypeCodeEdit {
+                path: canonical_id.to_string(),
+                start: 0,
+                end: 5,
+                new_text: "let".to_string(),
+            }],
+        }],
+    );
+
+    // Rename: must be a CLEAN no-op (no edit), NOT a wrong/unmapped edit.
+    let rename = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: rune_uri.clone(),
+                },
+                position: Position::new(0, 13),
+            },
+            new_name: "renamed".to_string(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("rename returns Ok");
+    assert!(
+        rename.is_none(),
+        "rename on a rune-module own buffer must be a clean no-op, got {rename:?}"
+    );
+
+    // Code actions: must be a CLEAN no-op (no actions).
+    let actions = super::aux_features::handle_code_action(
+        server,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier {
+                uri: rune_uri.clone(),
+            },
+            range: Range {
+                start: Position::new(0, 13),
+                end: Position::new(0, 18),
+            },
+            context: CodeActionContext {
+                diagnostics: Vec::new(),
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    )
+    .await
+    .expect("code_action returns Ok");
+    assert!(
+        actions.as_ref().map(|a| a.is_empty()).unwrap_or(true),
+        "code actions on a rune-module own buffer must be a clean no-op, got {actions:?}"
+    );
+
+    // Discriminator: the TypeProvider must NOT have been queried for rename
+    // locations or code actions for the rune module — the gate short-circuits
+    // BEFORE any forwarded edit-producing request.
+    let calls = provider.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, MockCall::GetRenameLocations { .. })),
+        "rename must NOT forward to the TypeProvider for a rune module, calls={calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, MockCall::GetCodeActions { .. })),
+        "code actions must NOT forward to the TypeProvider for a rune module, calls={calls:?}"
+    );
+
+    drain.abort();
+}
+
+/// ISSUE-8 (TS6133 quick-fix threading): the code-action handler must parse the
+/// editor's `context.diagnostics` codes and forward them to the TypeProvider so a
+/// "Remove unused declaration" fix can be requested. Pressing CTRL+. on an unused
+/// `<script setup>` `const foo` sends the published TS6133 (`code:
+/// String("6133")`); the handler must thread the integer `6133` to
+/// `get_code_actions` AND map the provider's deletion edit back to the `.vue`
+/// source.
+///
+/// Discriminating: before this change the trait had no diagnostics channel and
+/// the handler forwarded none, so `MockCall::GetCodeActions.diagnostics` would be
+/// empty (the code never reaches the provider) and the keyed response would not
+/// fire.
+#[tokio::test]
+async fn code_action_threads_diagnostic_code_to_type_provider_and_maps_edit_back() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // An unused top-level binding: `const foo = 1` is referenced nowhere, so
+    // Block F surfaces TS6133 at this decl span and CTRL+. lands here.
+    let source = "<script setup lang=\"ts\">\nconst foo = 1\n</script>\n<template></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/Unused.vue", source);
+    // Establish the carrier IDE projection so the handler's
+    // `type_provider_context` resolves (the direct-handler call skips the
+    // implicit sync that `server.completion(...)` would perform).
+    server.test_ensure_synced(&uri).await;
+
+    // The carrier range of the unused binding identifier `foo` (a token that
+    // round-trips through the carrier↔TSX mapper). This stands in for the TS6133
+    // diagnostic span the editor sends on CTRL+. and the cursor selection.
+    let decl_start = find_document_position(server, &uri, "foo = 1", 0);
+    let decl_end = find_document_position(server, &uri, "foo = 1", "foo".len());
+
+    // Map that carrier range to TSX offsets so we can arm the keyed mock response
+    // exactly where the handler will query.
+    let ctx = synced_type_provider_context(server, &uri);
+    let tsx_start = merge::carrier_position_to_tsx_offset_validated(
+        &decl_start,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("decl start maps to tsx");
+    let tsx_end = merge::carrier_position_to_tsx_offset_validated(
+        &decl_end,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("decl end maps to tsx");
+
+    // The provider returns a "Remove unused declaration" action whose edit DELETES
+    // the `const foo = 1` TSX span (new_text empty). The carrier-IDE path maps it
+    // back to the `.vue` source range.
+    provider.set_code_actions(
+        &ctx.tsx_path,
+        tsx_start,
+        tsx_end,
+        vec![TypeCodeAction {
+            title: "Remove unused declaration".to_string(),
+            kind: Some("quickfix".to_string()),
+            edits: vec![crate::type_provider::protocol::TypeCodeEdit {
+                path: ctx.tsx_path.clone(),
+                start: tsx_start,
+                end: tsx_end,
+                new_text: String::new(),
+            }],
+        }],
+    );
+
+    // Drive the handler with the published TS6133 in context.diagnostics — exactly
+    // what the editor sends on CTRL+. over the faded decl.
+    let actions = super::aux_features::handle_code_action(
+        server,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range: Range {
+                start: decl_start,
+                end: decl_end,
+            },
+            context: CodeActionContext {
+                diagnostics: vec![Diagnostic {
+                    range: Range {
+                        start: decl_start,
+                        end: decl_end,
+                    },
+                    code: Some(NumberOrString::String("6133".to_string())),
+                    source: Some("ts".to_string()),
+                    message: "'foo' is declared but its value is never read.".to_string(),
+                    ..Default::default()
+                }],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    )
+    .await
+    .expect("code_action returns Ok");
+
+    // 1. The integer code 6133 reached the provider via the threaded context.
+    let calls = provider.calls();
+    let threaded = calls.iter().find_map(|c| match c {
+        MockCall::GetCodeActions { diagnostics, .. } => Some(diagnostics.clone()),
+        _ => None,
+    });
+    let threaded = threaded.expect("get_code_actions must have been called");
+    assert!(
+        threaded.iter().any(|d| d.code == 6133),
+        "the TS6133 code must be threaded to the provider, got {threaded:?}"
+    );
+
+    // 2. The provider's deletion action mapped back to the `.vue` source: a
+    //    workspace edit over the carrier with empty new_text covering `const foo`.
+    let actions = actions.expect("an action must be returned");
+    let remove = actions.iter().find_map(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) if ca.title == "Remove unused declaration" => Some(ca),
+        _ => None,
+    });
+    let remove = remove.expect("the remove-unused action must survive map-back");
+    let changes = remove
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("the remove action must carry workspace changes");
+    let (edit_uri, edits) = changes.iter().next().expect("one changed file");
+    assert_eq!(
+        edit_uri, &uri,
+        "the deletion must target the .vue carrier source, not the TSX"
+    );
+    assert_eq!(edits.len(), 1, "one deletion edit");
+    assert!(
+        edits[0].new_text.is_empty(),
+        "a remove-unused fix deletes (empty new_text), got {:?}",
+        edits[0].new_text
+    );
+    // The mapped-back range must cover the `const foo` decl in the .vue source
+    // (line 1, the `<script setup>` body), never a line-0 mis-map.
+    assert_eq!(
+        edits[0].range.start, decl_start,
+        "deletion start must map to the .vue decl, got {:?}",
+        edits[0].range.start
+    );
+    assert_ne!(
+        edits[0].range,
+        Range::default(),
+        "the deletion must never collapse to (0,0)"
+    );
+}
+
+/// F3 (review finding): the provider code-action gate must NOT fire for an
+/// `only=["refactor"]` or `only=["source.removeUnused"]` request. The provider's
+/// `get_code_actions` issues `getCodeFixes` only — it returns QUICKFIX-kind actions
+/// (the TS6133 remove-unused-declaration fix and its delete-all companion), never
+/// refactors and never source actions — so forwarding it on a refactor-only OR a
+/// `source.removeUnused`-only request returns actions the client explicitly did not
+/// ask for (an LSP `context.only` violation). The gate must fire ONLY for
+/// `["quickfix"]` and the implicit all-kinds (`None`) case. The `source.removeUnused`
+/// SOURCE action is a separate surface DEFERRED to the `source.*` backlog and is NOT
+/// wired into this gate.
+///
+/// Discriminating: before this fix the gate included a `source.removeUnused`
+/// arm, so the `only=["source.removeUnused"]` invocation recorded a
+/// `MockCall::GetCodeActions`; this test asserts NO such call is recorded for
+/// source.removeUnused-only (nor for the already-excluded refactor-only) while
+/// one IS recorded for quickfix-only, so it FAILS pre-fix and PASSES post-fix.
+#[tokio::test]
+async fn code_action_provider_gate_excludes_refactor_only_request() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let source = "<script setup lang=\"ts\">\nconst foo = 1\n</script>\n<template></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/RefactorGate.vue", source);
+    server.test_ensure_synced(&uri).await;
+
+    let decl_start = find_document_position(server, &uri, "foo = 1", 0);
+    let decl_end = find_document_position(server, &uri, "foo = 1", "foo".len());
+    let range = Range {
+        start: decl_start,
+        end: decl_end,
+    };
+
+    let make_params = |only: Option<Vec<CodeActionKind>>| CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        range,
+        context: CodeActionContext {
+            diagnostics: vec![Diagnostic {
+                range,
+                code: Some(NumberOrString::String("6133".to_string())),
+                source: Some("ts".to_string()),
+                message: "'foo' is declared but its value is never read.".to_string(),
+                ..Default::default()
+            }],
+            only,
+            trigger_kind: None,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let recorded_get_code_actions = |provider: &MockTypeProvider| {
+        provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::GetCodeActions { .. }))
+    };
+
+    // refactor-only: the provider gate must NOT fire (no quickfix forwarding).
+    super::aux_features::handle_code_action(
+        server,
+        make_params(Some(vec![CodeActionKind::REFACTOR])),
+    )
+    .await
+    .expect("code_action returns Ok");
+    assert!(
+        !recorded_get_code_actions(&provider),
+        "an only=[refactor] request must NOT forward to the provider quickfix path, \
+         got calls={:?}",
+        provider.calls()
+    );
+
+    // quickfix-only: the provider gate MUST fire.
+    provider.clear_calls();
+    super::aux_features::handle_code_action(
+        server,
+        make_params(Some(vec![CodeActionKind::QUICKFIX])),
+    )
+    .await
+    .expect("code_action returns Ok");
+    assert!(
+        recorded_get_code_actions(&provider),
+        "an only=[quickfix] request MUST forward to the provider, got calls={:?}",
+        provider.calls()
+    );
+
+    // source.removeUnused-only: the provider gate must NOT fire. The provider
+    // returns `quickfix`-kind actions, so forwarding a `source.removeUnused`-only
+    // request would leak quickfixes the client did not ask for (a `context.only`
+    // violation). The `source.removeUnused` SOURCE action is deferred to the
+    // `source.*` backlog and is not wired into this gate.
+    provider.clear_calls();
+    let source_only_result = super::aux_features::handle_code_action(
+        server,
+        make_params(Some(vec![CodeActionKind::new("source.removeUnused")])),
+    )
+    .await
+    .expect("code_action returns Ok");
+    assert!(
+        !recorded_get_code_actions(&provider),
+        "an only=[source.removeUnused] request must NOT forward to the provider \
+         quickfix path, got calls={:?}",
+        provider.calls()
+    );
+    // And no `quickfix`-kinded provider action leaks back to the client.
+    let leaked_quickfix =
+        source_only_result
+            .unwrap_or_default()
+            .into_iter()
+            .any(|item| match item {
+                CodeActionOrCommand::CodeAction(action) => action.kind.as_ref().is_some_and(|k| {
+                    k.as_str() == "quickfix" || k.as_str().starts_with("quickfix.")
+                }),
+                CodeActionOrCommand::Command(_) => false,
+            });
+    assert!(
+        !leaked_quickfix,
+        "an only=[source.removeUnused] request must not leak quickfix-kinded \
+         provider actions"
+    );
+
+    // No `only` filter (implicit all-kinds): the provider gate MUST fire.
+    provider.clear_calls();
+    super::aux_features::handle_code_action(server, make_params(None))
+        .await
+        .expect("code_action returns Ok");
+    assert!(
+        recorded_get_code_actions(&provider),
+        "an unfiltered (only=None) request MUST forward to the provider, got calls={:?}",
+        provider.calls()
+    );
+}
+
+/// The `source.removeUnused` source-action kind must NOT leak provider quickfixes
+/// into the response. This proves the scope-creep fix end-to-end at the RESULT
+/// layer (distinct from the call-recording layer the gate test above asserts on):
+/// the provider is armed to return a real `quickfix`-kind "Remove unused
+/// declaration" action over the unused-decl span, and an `only=["source.removeUnused"]`
+/// request must come back with NO quickfix-kind action — `source.removeUnused` is a
+/// SOURCE action deferred to the `source.*` backlog and is out of scope for this
+/// QUICKFIX-only carrier path.
+///
+/// Discriminating: before the fix the gate forwarded `source.removeUnused`-only
+/// requests, so the armed `quickfix` action mapped back into the response and the
+/// assertion FAILS; after the fix the gate does not fire, no provider call is made,
+/// the response carries no quickfix, and the assertion PASSES.
+#[tokio::test]
+async fn code_action_source_only_request_does_not_leak_provider_quickfix() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let source = "<script setup lang=\"ts\">\nconst foo = 1\n</script>\n<template></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/SourceOnlyLeak.vue", source);
+    server.test_ensure_synced(&uri).await;
+
+    let decl_start = find_document_position(server, &uri, "foo = 1", 0);
+    let decl_end = find_document_position(server, &uri, "foo = 1", "foo".len());
+
+    // Arm the provider with a real `quickfix`-kind action exactly where the handler
+    // would query (the carrier range mapped to TSX offsets). If the gate forwards a
+    // source-only request, this action maps back and leaks into the response.
+    let ctx = synced_type_provider_context(server, &uri);
+    let tsx_start = merge::carrier_position_to_tsx_offset_validated(
+        &decl_start,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("decl start maps to tsx");
+    let tsx_end = merge::carrier_position_to_tsx_offset_validated(
+        &decl_end,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("decl end maps to tsx");
+    provider.set_code_actions(
+        &ctx.tsx_path,
+        tsx_start,
+        tsx_end,
+        vec![TypeCodeAction {
+            title: "Remove unused declaration".to_string(),
+            kind: Some("quickfix".to_string()),
+            edits: vec![crate::type_provider::protocol::TypeCodeEdit {
+                path: ctx.tsx_path.clone(),
+                start: tsx_start,
+                end: tsx_end,
+                new_text: String::new(),
+            }],
+        }],
+    );
+
+    let range = Range {
+        start: decl_start,
+        end: decl_end,
+    };
+    let response = super::aux_features::handle_code_action(
+        server,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range,
+            context: CodeActionContext {
+                diagnostics: vec![Diagnostic {
+                    range,
+                    code: Some(NumberOrString::String("6133".to_string())),
+                    source: Some("ts".to_string()),
+                    message: "'foo' is declared but its value is never read.".to_string(),
+                    ..Default::default()
+                }],
+                only: Some(vec![CodeActionKind::new("source.removeUnused")]),
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    )
+    .await
+    .expect("code_action returns Ok");
+
+    // The provider quickfix path must not have run for a source-only request.
+    assert!(
+        !provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::GetCodeActions { .. })),
+        "an only=[source.removeUnused] request must NOT forward to the provider \
+         quickfix path, got calls={:?}",
+        provider.calls()
+    );
+    // And no quickfix-kinded action may surface in the response — the armed action
+    // would have leaked here pre-fix.
+    let leaked_quickfix = response
+        .unwrap_or_default()
+        .into_iter()
+        .any(|item| match item {
+            CodeActionOrCommand::CodeAction(action) => action
+                .kind
+                .as_ref()
+                .is_some_and(|k| k.as_str() == "quickfix" || k.as_str().starts_with("quickfix.")),
+            CodeActionOrCommand::Command(_) => false,
+        });
+    assert!(
+        !leaked_quickfix,
+        "an only=[source.removeUnused] request must not leak a quickfix-kind action \
+         into the response"
+    );
+}
+
+/// A `source.removeUnused`-only request carrying a NON-unused numeric TS diagnostic
+/// (here TS2304 "Cannot find name") must likewise not forward to the quickfix
+/// provider path. The source-only kind is out of scope for this carrier path
+/// regardless of the diagnostic code, so the gate must never fire for it — proving
+/// the fix does not merely special-case the TS6133 code.
+///
+/// Discriminating: before the fix the gate's `source.removeUnused` arm forwarded
+/// unconditionally (it never inspected the diagnostic code), so a `GetCodeActions`
+/// call WAS recorded and the assertion FAILS; after the fix the gate does not fire
+/// and the assertion PASSES.
+#[tokio::test]
+async fn code_action_source_only_request_does_not_forward_non_unused_diagnostic() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // Reuse the proven-mappable `const foo = 1` decl span (the `foo` identifier
+    // round-trips carrier↔TSX), so the ONLY reason the provider is not queried is
+    // the gate refusing a source-only request — not an unmappable range. The
+    // diagnostic carried here is a non-unused TS code (2304), not TS6133.
+    let source = "<script setup lang=\"ts\">\nconst foo = 1\n</script>\n<template></template>\n";
+    let uri = open_test_vue(server, "/workspace/src/SourceOnlyNonUnused.vue", source);
+    server.test_ensure_synced(&uri).await;
+
+    let diag_start = find_document_position(server, &uri, "foo = 1", 0);
+    let diag_end = find_document_position(server, &uri, "foo = 1", "foo".len());
+    let range = Range {
+        start: diag_start,
+        end: diag_end,
+    };
+
+    super::aux_features::handle_code_action(
+        server,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range,
+            context: CodeActionContext {
+                diagnostics: vec![Diagnostic {
+                    range,
+                    // A non-unused numeric TS code (TS2304), not TS6133. The handler
+                    // keys only on `code`/`range`, so the message text is immaterial.
+                    code: Some(NumberOrString::String("2304".to_string())),
+                    source: Some("ts".to_string()),
+                    message: "Cannot find name 'Foo'.".to_string(),
+                    ..Default::default()
+                }],
+                only: Some(vec![CodeActionKind::new("source.removeUnused")]),
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    )
+    .await
+    .expect("code_action returns Ok");
+
+    assert!(
+        !provider
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::GetCodeActions { .. })),
+        "an only=[source.removeUnused] request must NOT forward to the provider \
+         quickfix path even for a non-unused diagnostic, got calls={:?}",
+        provider.calls()
+    );
 }
 
 #[test]
 fn compute_verter_diagnostics_ignores_plain_typescript_files() {
     let host = Arc::new(VerterHost::new_standalone(
-        verter_host::HostConfig::default(),
+        verter_session::HostConfig::default(),
     ));
     let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
 
@@ -6917,16 +13421,67 @@ fn compute_verter_diagnostics_ignores_plain_typescript_files() {
     );
 }
 
+#[test]
+fn compute_verter_diagnostics_surfaces_one_projection_budget_failure_at_macro_span() {
+    let host = Arc::new(VerterHost::new_standalone(verter_session::HostConfig {
+        analysis_level: verter_session::AnalysisLevel::Full,
+        projection_op_budget: 1,
+        ..verter_session::HostConfig::default()
+    }));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/src/Limited.vue".parse().unwrap();
+    let source = r#"<script setup lang="ts">
+type Box<T> = { value: T }
+type Props<T> = { first: Box<T>; second: Box<T> }
+const props = defineProps<Props<string>>()
+</script>
+<template>{{ props.first.value }}</template>
+"#;
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let diagnostics =
+        compute_verter_diagnostics_for_with_views(&documents, &uri, &DashMap::new(), None);
+    let limited: Vec<_> = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code
+                == Some(NumberOrString::String(
+                    crate::features::diagnostics::TYPE_EXPANSION_BUDGET_CODE.to_string(),
+                ))
+        })
+        .collect();
+
+    assert_eq!(
+        limited.len(),
+        1,
+        "public diagnostics must deduplicate the root limit"
+    );
+    assert_eq!(
+        limited[0].message,
+        "Type expansion exceeded Verter's safe evaluation budget."
+    );
+    assert_eq!(limited[0].severity, Some(DiagnosticSeverity::WARNING));
+    assert_eq!(
+        limited[0].range.start.line, 3,
+        "the failure must point at the defineProps root demand"
+    );
+}
+
 /// Proves that `compute_verter_diagnostics_for` bypasses its cache when the
 /// host's `diagnostics_generation` changes (even if the document version hasn't).
 #[test]
 fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
-    use verter_host::{CompileErrorPolicy, FileKind, UpsertRequest};
+    use verter_session::{CompileErrorPolicy, FileLanguage, UpsertRequest};
 
-    let host = Arc::new(VerterHost::new_standalone(verter_host::HostConfig {
+    let host = Arc::new(VerterHost::new_standalone(verter_session::HostConfig {
         dev_mode: false,
         compile_error_policy: CompileErrorPolicy::StrictError,
-        ..verter_host::HostConfig::default()
+        ..verter_session::HostConfig::default()
     }));
     let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
 
@@ -6958,7 +13513,7 @@ fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
         canonical_id: None,
         input_id: "/workspace/src/types.ts".to_string(),
         source: Arc::from("export interface Props { msg: string }"),
-        file_kind: FileKind::NonSfc,
+        file_language: FileLanguage::script_ts(),
         aliases: vec![],
     });
 
@@ -7023,15 +13578,14 @@ defineProps<{ msg: string }>()
     let child_id = format!("{workspace_id}/src/components/Child.vue");
 
     // App.vue imports Child via alias
-    let app_source = format!(
-        r#"<script setup lang="ts">
+    let app_source = r#"<script setup lang="ts">
 import Child from '@/components/Child.vue'
 </script>
 <template><Child msg="hello" /></template>"#
-    );
+        .to_string();
 
-    let vfs_workspace: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(
-        verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default()),
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
     );
     let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
     let documents = DocumentRegistry::new(Arc::clone(&host));
@@ -7045,7 +13599,7 @@ import Child from '@/components/Child.vue'
 
     // Phase 1: before VFS snapshot is built — aliased import should NOT resolve
     let analysis = host.get_analysis(&app_id).expect("analysis for App.vue");
-    let ids_before = collect_imported_vue_priority_ids_from_imports_with_fallback(
+    let ids_before = collect_imported_carrier_priority_ids_from_imports_with_fallback(
         &analysis.imports,
         Some(&app_id),
         |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
@@ -7057,9 +13611,14 @@ import Child from '@/components/Child.vue'
 
     // Phase 2: Build and populate project registry with tsconfig alias
     let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
-    let vite_opts = crate::vite_config::ViteConfigOptions::default();
-    let build_result =
-        crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
     let registry = build_result.registry;
 
     host.configure_projects(
@@ -7072,7 +13631,7 @@ import Child from '@/components/Child.vue'
     let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
 
     // Now aliased import should resolve
-    let ids_after = collect_imported_vue_priority_ids_from_imports_with_fallback(
+    let ids_after = collect_imported_carrier_priority_ids_from_imports_with_fallback(
         &analysis.imports,
         Some(&app_id),
         |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
@@ -7097,6 +13656,10 @@ import Child from '@/components/Child.vue'
         &vfs_workspace,
         &provider_sync_states,
         false,
+        None,
+        &DeclOverlayOwner::default(),
+        1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -7105,9 +13668,9 @@ import Child from '@/components/Child.vue'
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            MockCall::OpenFile { path, .. } if path.contains("Child.vue.ts")
+            MockCall::OpenFile { path, .. } if path.contains("Child.vue.verter.ts")
         )),
-        "resync should open Child.vue.ts in the type provider, calls={calls:?}"
+        "resync should open the Child API carrier (Child.vue.verter.ts) in the type provider, calls={calls:?}"
     );
 
     // Positive: provider_sync_states should have the child entry
@@ -7123,12 +13686,2242 @@ import Child from '@/components/Child.vue'
     assert!(
         !calls.iter().any(|call| matches!(
             call,
-            MockCall::OpenFile { path, .. } if path.ends_with(".ts") && !path.ends_with(".vue.ts")
+            MockCall::OpenFile { path, .. } if path.ends_with(".ts") && !path.ends_with(".vue.verter.ts")
         )),
         "resync should NOT sync non-.vue files, calls={calls:?}"
     );
 
     // Cleanup
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[test]
+fn declaration_overlay_refcount_release_closes_only_unreferenced_overlays() {
+    // `DeclOverlayOwner` is glob-imported from `background_drain_decl_closure` via
+    // `use super::*`. This pins the slot-surgery contract of `release_root`:
+    // WHICH overlays drain to empty (and are returned for close) when a root closes.
+
+    // Two open roots reach a SHARED declaration overlay; root A also reaches a
+    // PRIVATE overlay only it uses. Seed each slot directly (mirroring what a real
+    // open records) at a non-zero generation.
+    let owner = DeclOverlayOwner::default();
+    owner.test_seed_slot("/ws/Shared.d.vue.ts", &["/ws/A.vue", "/ws/B.vue"], 1);
+    owner.test_seed_slot("/ws/OnlyA.d.vue.ts", &["/ws/A.vue"], 1);
+
+    // The release returns `DeclCloseTarget` records; the subject under test is WHICH
+    // overlays drain — project the returned targets to their paths.
+    let close_paths = |targets: Vec<DeclCloseTarget>| -> Vec<String> {
+        targets.into_iter().map(|t| t.decl_path).collect()
+    };
+
+    // Closing root A: its PRIVATE overlay is now unreferenced (must close); the
+    // SHARED overlay is still reached by B (must be retained, NOT returned).
+    let to_close = close_paths(owner.release_root("/ws/A.vue"));
+    assert_eq!(
+        to_close,
+        vec!["/ws/OnlyA.d.vue.ts".to_string()],
+        "only A's private overlay is unreferenced after A closes, got: {to_close:?}"
+    );
+    // The shared overlay slot survives, now referenced only by B.
+    let shared_roots: Vec<String> = owner
+        .test_slot_roots("/ws/Shared.d.vue.ts")
+        .expect("shared overlay still tracked")
+        .into_iter()
+        .collect();
+    assert_eq!(
+        shared_roots,
+        vec!["/ws/B.vue".to_string()],
+        "shared overlay now reached only by B"
+    );
+    // The drained private overlay is kept as a generation TOMBSTONE (empty roots) —
+    // the slot is GC'd only when the guarded close confirms the provider close, so a
+    // re-open racing the pending close is never lost. Its roots are empty.
+    assert_eq!(
+        owner.test_slot_roots("/ws/OnlyA.d.vue.ts"),
+        Some(HashSet::new()),
+        "the drained overlay is kept as an empty tombstone until the close confirms"
+    );
+
+    // Closing root B drains the shared overlay → it is now unreferenced.
+    let to_close = close_paths(owner.release_root("/ws/B.vue"));
+    assert_eq!(
+        to_close,
+        vec!["/ws/Shared.d.vue.ts".to_string()],
+        "the shared overlay closes once its last reaching root (B) closes, got: {to_close:?}"
+    );
+    // Every slot has drained to an empty tombstone (no live root reaches anything).
+    assert!(
+        owner
+            .test_slots_snapshot()
+            .iter()
+            .all(|(_, roots)| roots.is_empty()),
+        "every overlay slot has drained to empty once all roots close, slots={:?}",
+        owner.test_slots_snapshot()
+    );
+
+    // Releasing a root that never reached anything closes nothing (no panic). The
+    // empty tombstones are not re-returned (their roots were already empty before
+    // this release, so this release removed nothing from them).
+    let to_close = close_paths(owner.release_root("/ws/Never.vue"));
+    assert!(
+        to_close.is_empty(),
+        "releasing an unknown root closes nothing, got: {to_close:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn declaration_closure_proactively_opens_transitive_decl_overlays() {
+    // The proactive declaration-closure pass (tsgo) must open the `.d.<ext>.ts`
+    // declaration overlay for EVERY carrier in the transitive closure reachable
+    // from an open root, so a bare `import B from "./B.vue"` resolves with no
+    // TS2307. Cover the TRANSITIVE case: A imports B imports C — opening A opens
+    // B.d.vue.ts AND C.d.vue.ts. Also pin that a cycle (C imports A) terminates.
+    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_transitive");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    // A -> B -> C -> A (cycle back to A exercises the visited-set termination).
+    std::fs::write(
+        workspace.join("src/C.vue"),
+        "<script setup lang=\"ts\">\nimport A from './A.vue'\ndefineProps<{ c: string }>()\n</script>\n<template><A/></template>",
+    )
+    .expect("write C.vue");
+    std::fs::write(
+        workspace.join("src/B.vue"),
+        "<script setup lang=\"ts\">\nimport C from './C.vue'\ndefineProps<{ b: string }>()\n</script>\n<template><C/></template>",
+    )
+    .expect("write B.vue");
+    std::fs::write(
+        workspace.join("src/A.vue"),
+        "<script setup lang=\"ts\">\nimport B from './B.vue'\ndefineProps<{ a: string }>()\n</script>\n<template><B/></template>",
+    )
+    .expect("write A.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let a_id = format!("{workspace_id}/src/A.vue");
+
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri = crate::uri::path_to_file_uri(&a_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: std::fs::read_to_string(workspace.join("src/A.vue")).unwrap(),
+    });
+
+    // Build + populate the project registry so imports resolve.
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry);
+
+    // Run the drain as the tsgo engine so the closure pass fires.
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+    let decl_overlay_owner = DeclOverlayOwner::default();
+
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true, // is_tsgo — the closure pass is tsgo-scoped
+        None,
+        &decl_overlay_owner,
+        1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    let opened_decl = |needle: &str| {
+        calls
+            .iter()
+            .any(|call| matches!(call, MockCall::OpenFile { path, .. } if path.contains(needle)))
+    };
+
+    // TRANSITIVE: both the direct dependency B AND the deep dependency C have
+    // their declaration overlays opened by the closure walk from A.
+    assert!(
+        opened_decl("B.d.vue.ts"),
+        "closure opens the direct dependency's declaration overlay (B.d.vue.ts), calls={calls:?}"
+    );
+    assert!(
+        opened_decl("C.d.vue.ts"),
+        "closure opens the TRANSITIVE dependency's declaration overlay (C.d.vue.ts), calls={calls:?}"
+    );
+
+    // Reachability recorded: both overlays are tracked as reached from root A.
+    // The recorded root is A's canonical (matched by suffix — the host normalizes
+    // the drive-letter case, so an exact-string compare against `a_id` would be a
+    // path-normalization false negative, not a logic failure). `a_id` is used to
+    // anchor the expectation; the recorded reaching-root set must be non-empty and
+    // name A.
+    let _ = &a_id;
+    let reaches_a = |key_needle: &str| {
+        decl_overlay_owner
+            .test_slots_snapshot()
+            .iter()
+            .any(|(key, roots)| {
+                key.contains(key_needle)
+                    && !roots.is_empty()
+                    && roots.iter().all(|root| root.ends_with("/A.vue"))
+            })
+    };
+    assert!(
+        reaches_a("B.d.vue.ts") && reaches_a("C.d.vue.ts"),
+        "both B and C declaration overlays are recorded as reached from root A, slots={:?}",
+        decl_overlay_owner.test_slots_snapshot()
+    );
+
+    // The cycle (C -> A) did not infinite-loop: we reached this assertion. A's own
+    // declaration overlay IS opened (the per-root emission — every open carrier root
+    // emits its own `.d.<ext>.ts`), but A is NOT re-walked as a DEPENDENCY through
+    // the cycle (the visited set seeds with A so the C -> A edge is a no-op).
+    assert!(
+        opened_decl("A.d.vue.ts"),
+        "the open root A emits its OWN declaration overlay (A.d.vue.ts), calls={calls:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lone_leaf_carrier_opens_its_own_declaration_overlay() {
+    // P1 #1 (root-emission): a SINGLE open leaf carrier — one that NOTHING imports
+    // and that imports nothing — must still get its OWN `.d.<ext>.ts` declaration
+    // overlay opened. tsgo resolves a bare `import Leaf from "./Leaf.vue"` (from any
+    // future importer, or a same-file self-reference) to the virtual declaration via
+    // its native probe, so the declaration must be live whenever the carrier is open
+    // — independent of any OTHER open file reaching it through the closure.
+    //
+    // RED-before: the closure pass only opened DEPENDENCIES' declarations (it seeded
+    // `visited` with the root and skipped it), and the main per-document sync only
+    // opened the IDE `.vue.tsx` + API `.vue.verter.ts`. So a lone leaf got neither —
+    // its `Leaf.d.vue.ts` was never opened.
+    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_lone_leaf");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    // A lone leaf — imports nothing, imported by nothing.
+    std::fs::write(
+        workspace.join("src/Leaf.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ leaf: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write Leaf.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let leaf_id = format!("{workspace_id}/src/Leaf.vue");
+
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri = crate::uri::path_to_file_uri(&leaf_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: std::fs::read_to_string(workspace.join("src/Leaf.vue")).unwrap(),
+    });
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+    let decl_overlay_owner = DeclOverlayOwner::default();
+
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true, // is_tsgo — the closure pass is tsgo-scoped
+        None,
+        &decl_overlay_owner,
+        1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    let opened_decl = |needle: &str| {
+        calls
+            .iter()
+            .any(|call| matches!(call, MockCall::OpenFile { path, .. } if path.contains(needle)))
+    };
+
+    assert!(
+        opened_decl("Leaf.d.vue.ts"),
+        "a lone leaf carrier opens its OWN declaration overlay (Leaf.d.vue.ts), calls={calls:?}"
+    );
+
+    // The lone leaf's own declaration overlay is recorded as reached from itself
+    // (a self-edge), so the `did_close` lifecycle retires it when the leaf closes.
+    let _ = &leaf_id;
+    let self_reached = decl_overlay_owner
+        .test_slots_snapshot()
+        .iter()
+        .any(|(key, roots)| {
+            key.contains("Leaf.d.vue.ts")
+                && !roots.is_empty()
+                && roots.iter().all(|root| root.ends_with("/Leaf.vue"))
+        });
+    assert!(
+        self_reached,
+        "the lone leaf's declaration overlay records a self-edge (reached from Leaf.vue), slots={:?}",
+        decl_overlay_owner.test_slots_snapshot()
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_pass_does_not_reopen_a_declaration_overlay_a_newer_pass_closed() {
+    // The SYMMETRIC ADD gate at the PRODUCTION OPEN site (`open_overlay`): a STALE
+    // closure pass must NOT re-open a declaration overlay once a NEWER pass has
+    // authoritatively reconciled the root. Two overlapping `background_init` passes
+    // (an older, in-flight pass + a newer pass) race on one shared owner; the older
+    // pass's `open_overlay` could otherwise resurrect a `.d.<ext>.ts` overlay the
+    // newer pass already determined unreachable and CLOSED, leaving it provider-
+    // visible until the next reconcile of that root (potentially never).
+    //
+    // Driven deterministically through the REAL pass entry point
+    // (`resync_aliased_imports_for_open_files` → `open_declaration_closure_for_open_files`):
+    // the root's authoritative high-water mark is pre-advanced to model "a newer pass
+    // already reconciled this root", then the pass is run at an OLDER generation. The
+    // older pass's `open_overlay` for the root's own overlay must be GATED.
+    //
+    // RED-before (no ADD gate): the older pass re-opens the overlay (the open is
+    // ungated and monotonic-max re-records the edge). Post-fix: the per-root
+    // high-water gate rejects it.
+    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_stale_reopen");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+    std::fs::write(
+        workspace.join("src/Root.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ root: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write Root.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let root_id = format!("{workspace_id}/src/Root.vue");
+
+    let vfs_for_host: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_for_host));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri = crate::uri::path_to_file_uri(&root_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: std::fs::read_to_string(workspace.join("src/Root.vue")).unwrap(),
+    });
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+    let decl_overlay_owner = DeclOverlayOwner::default();
+
+    let opened_root_decl = |calls: &[MockCall]| {
+        calls
+            .iter()
+            .any(|call| matches!(call, MockCall::OpenFile { path, .. } if path.contains("Root.d.vue.ts")))
+    };
+
+    // Model "a NEWER pass already authoritatively reconciled Root": advance its
+    // per-root high-water mark to 100. A pass OLDER than 100 is now stale for Root.
+    // Seed under the EXACT canonical id the closure pass walks (the
+    // `DocumentRegistry`'s id), not a hand-built path — the gate keys on it.
+    let root_canonical = documents
+        .get_canonical_id(&uri)
+        .expect("canonical id for the open Root.vue");
+    decl_overlay_owner.test_advance_root_authoritative_epoch(&root_canonical, 100);
+
+    // The STALE pass (gen 5) must NOT (re-)open Root's declaration overlay — the
+    // `open_overlay` ADD gate rejects it.
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true, // is_tsgo — the closure pass is tsgo-scoped
+        None,
+        &decl_overlay_owner,
+        5,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+    let calls_after_stale = provider.file_sync_calls();
+    assert!(
+        !opened_root_decl(&calls_after_stale),
+        "a STALE pass (gen 5, below Root's high-water 100) must NOT open Root.d.vue.ts — \
+         the open_overlay ADD gate; calls={calls_after_stale:?}"
+    );
+    assert!(
+        !decl_overlay_owner
+            .test_slots_snapshot()
+            .iter()
+            .any(|(key, roots)| key.contains("Root.d.vue.ts") && !roots.is_empty()),
+        "a STALE pass must not record a reaching edge for the gated overlay either; slots={:?}",
+        decl_overlay_owner.test_slots_snapshot()
+    );
+
+    // INVERSE: a CURRENT pass (gen 101, at/over the high-water) DOES open the overlay
+    // — the gate is not a blanket skip.
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true,
+        None,
+        &decl_overlay_owner,
+        101,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+    let calls_after_current = provider.file_sync_calls();
+    assert!(
+        opened_root_decl(&calls_after_current),
+        "a CURRENT pass (gen 101, at/over the high-water) DOES open Root.d.vue.ts — the \
+         ADD gate admits authoritative opens; calls={calls_after_current:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_open_gated_when_high_water_advances_between_its_gate_and_record() {
+    // The ATOMICITY of the `open_overlay` ADD gate: the high-water READ and the slot
+    // RECORD must be one critical section, so a newer reconcile advancing the per-root
+    // high-water cannot land BETWEEN an older open's gate and its record. If it could,
+    // the older open would slip the gate (read the pre-advance value) and then
+    // re-record/re-open a `.d.<ext>.ts` overlay the newer pass already reconciled away
+    // and closed — a lingering re-opened overlay with no future closer.
+    //
+    // Driven through the REAL pass entry (`resync_aliased_imports_for_open_files` →
+    // `open_declaration_closure_for_open_files` → `open_overlay`), with the interleave
+    // FORCED deterministically: the older pass (gen 5) blocks at the add-gate seam, the
+    // test then advances Root's authoritative high-water to 100 (modelling the newer
+    // pass), and only then releases the older open. The atomic gate-and-record observes
+    // the advanced high-water under its shared entry guard and GATES the open.
+    //
+    // RED-before (gate read + record NOT under one guard, i.e. the gate dropped from
+    // `gate_and_record_root_edge`): the older open records and `open_dts` re-opens
+    // Root.d.vue.ts after the advance. GREEN-after: the shared guard gates it.
+    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_stale_open_interleave");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+    std::fs::write(
+        workspace.join("src/Root.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ root: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write Root.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let root_id = format!("{workspace_id}/src/Root.vue");
+
+    let vfs_for_host: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_for_host));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri = crate::uri::path_to_file_uri(&root_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: std::fs::read_to_string(workspace.join("src/Root.vue")).unwrap(),
+    });
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+    let decl_overlay_owner = DeclOverlayOwner::default();
+
+    let opened_root_decl = |calls: &[MockCall]| {
+        calls
+            .iter()
+            .any(|call| matches!(call, MockCall::OpenFile { path, .. } if path.contains("Root.d.vue.ts")))
+    };
+
+    let root_canonical = documents
+        .get_canonical_id(&uri)
+        .expect("canonical id for the open Root.vue");
+
+    // Arm the add-gate interleave seam, then run the OLDER pass (gen 5) CONCURRENTLY
+    // with an interleave task that advances Root's high-water to 100 in the exact
+    // window between the open's gate and its record. The high-water starts at 0, so the
+    // older open passes any pre-seam state and is only gated by the atomic re-read.
+    let interleave = decl_overlay_owner.arm_add_gate_interleave_for_test(&root_canonical);
+    let carrier_coordinator = crate::external_ts::CarrierTransactionCoordinator::new();
+    let pass = resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true,
+        None,
+        &decl_overlay_owner,
+        5,
+        &carrier_coordinator,
+    );
+    let advance_between_gate_and_record = async {
+        // Wait until the older open reaches the add-gate seam (after its path-lock +
+        // root-open revalidation, before the atomic gate-record)...
+        interleave.reached.notified().await;
+        // ...model a NEWER pass authoritatively reconciling Root, advancing the
+        // per-root high-water to 100 — landing strictly between the older open's gate
+        // and its record...
+        decl_overlay_owner.test_advance_root_authoritative_epoch(&root_canonical, 100);
+        // ...then release the older open into its atomic gate-and-record.
+        interleave.proceed.notify_one();
+    };
+    tokio::join!(pass, advance_between_gate_and_record);
+
+    let calls_after_stale = provider.file_sync_calls();
+    assert!(
+        !opened_root_decl(&calls_after_stale),
+        "a newer pass that advanced Root's high-water (100) BETWEEN the older open's \
+         (gen 5) gate and its record must leave the older open GATED — Root.d.vue.ts \
+         must NOT be (re-)opened; calls={calls_after_stale:?}"
+    );
+    assert!(
+        !decl_overlay_owner
+            .test_slots_snapshot()
+            .iter()
+            .any(|(key, roots)| key.contains("Root.d.vue.ts") && !roots.is_empty()),
+        "the gated open must not record a reaching edge either; slots={:?}",
+        decl_overlay_owner.test_slots_snapshot()
+    );
+
+    // INVERSE: a CURRENT pass (gen 101, at/over the advanced high-water 100) DOES open
+    // the overlay — the atomic gate admits authoritative opens, it is not a blanket
+    // skip. The seam is one-shot (consumed by the gen-5 pass), so this pass is unblocked.
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true,
+        None,
+        &decl_overlay_owner,
+        101,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+    let calls_after_current = provider.file_sync_calls();
+    assert!(
+        opened_root_decl(&calls_after_current),
+        "a CURRENT pass (gen 101, at/over the high-water) DOES open Root.d.vue.ts — the \
+         atomic gate admits authoritative opens; calls={calls_after_current:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[test]
+fn stale_reconcile_add_gated_when_high_water_advances_in_decide_record_window() {
+    // The ATOMICITY of the `reconcile_root_reachability` ADD LOOP: each edge's high-water
+    // RE-READ and its slot record must share one critical section (routed through
+    // `gate_and_record_root_edge`), so a newer reconcile advancing the per-root high-water
+    // BETWEEN this pass's authoritative decide and its add-loop record cannot let the now-
+    // stale add re-record an overlay the newer pass already reconciled away and closed.
+    //
+    // This is the CONCURRENT peer of the sequential
+    // `stale_pass_does_not_re_add_an_edge_a_newer_pass_reconciled_away` (in
+    // `background_drain_decl_closure::overlay_epoch_tests`): that test advances the
+    // high-water BEFORE the stale pass runs, so the stale pass is gated at its DECIDE and
+    // never exercises the decide→record WINDOW. Here the stale pass DECIDES it is
+    // authoritative (high-water 5 ≤ its gen 5), then BLOCKS at the seam while a newer pass
+    // (gen 10) advances the high-water to 10 and drains the slot, then resumes its add loop
+    // — the exact reconcile-add-loop TOCTOU the single-edge `open_overlay` interleave test
+    // (`stale_open_gated_when_high_water_advances_between_its_gate_and_record`) does not
+    // reach.
+    //
+    // RED-before (the add loop records via `record_root`, NOT the per-edge gate): the stale
+    // pass re-records R → OVERLAY at gen 5 after the newer pass closed it — resurrection.
+    // GREEN-after (per-edge `gate_and_record_root_edge`): the re-read of the advanced
+    // high-water (10 > 5) refuses the stale add and the overlay stays closed.
+    const OVERLAY: &str = "/ws/Shared.d.vue.ts";
+
+    let owner = Arc::new(DeclOverlayOwner::default());
+    // OVERLAY is reached by root R, edge established by an EARLIER real open (pass gen 2).
+    owner.test_seed_slot_with_pass(OVERLAY, &[("R", 2)], 1);
+
+    // Arm the one-shot reconcile add-loop interleave seam for R.
+    let interleave = owner.arm_reconcile_add_interleave_for_test("R");
+
+    // Drive the STALE pass (gen 5) on its own thread: it advances R's high-water to 5,
+    // decides it is authoritative for the ADD (5 ≥ 5), then BLOCKS at the seam — between
+    // the authoritative decide and its add-loop record.
+    let owner_stale = Arc::clone(&owner);
+    let stale_pass = std::thread::spawn(move || {
+        owner_stale.reconcile_root_reachability("R", &[OVERLAY.to_string()], 5)
+    });
+
+    // Wait until the stale pass has reached the seam (decided authoritative, about to
+    // record). The seam is one-shot — it removed its arming on arrival, so the newer pass
+    // below sails straight through it.
+    interleave.wait_reached();
+
+    // In the decide→record window: a NEWER pass (gen 10) authoritatively reconciles R to a
+    // closure that NO LONGER reaches OVERLAY — advancing R's high-water to 10 and draining
+    // the slot to an empty tombstone (the "concurrent reconcile advances + closes in the
+    // window").
+    let drained = owner.reconcile_root_reachability("R", &[], 10);
+    assert_eq!(drained.len(), 1, "the newer pass (gen 10) drained OVERLAY");
+    assert_eq!(drained[0].decl_path, OVERLAY);
+    assert!(
+        owner
+            .test_slot_roots(OVERLAY)
+            .unwrap_or_default()
+            .is_empty(),
+        "the newer pass left OVERLAY's reaching set empty"
+    );
+    assert_eq!(
+        owner.test_root_authoritative_epoch("R"),
+        10,
+        "the newer pass advanced R's authoritative high-water to 10"
+    );
+
+    // Release the stale pass into its add-loop record.
+    interleave.signal_proceed();
+    let stale = stale_pass.join().expect("stale reconcile pass");
+
+    // THE DISCRIMINATOR: the stale pass's add loop must NOT resurrect OVERLAY. The per-edge
+    // gate re-reads the high-water (now 10 > 5) and refuses the record, so the slot stays
+    // an empty tombstone and the overlay stays closed.
+    assert!(
+        stale.is_empty(),
+        "a stale reconcile decides no closes — got {stale:?}"
+    );
+    assert!(
+        owner
+            .test_slot_roots(OVERLAY)
+            .unwrap_or_default()
+            .is_empty(),
+        "the stale pass (gen 5) must NOT re-record R into OVERLAY after a newer pass \
+         (gen 10) reconciled it away in the decide→record window — roots={:?}",
+        owner.test_slot_roots(OVERLAY)
+    );
+
+    // POSITIVE control: a genuinely-CURRENT reconcile (gen 11, at/over the high-water 10)
+    // DOES record the edge — the per-edge gate admits authoritative adds, it is not a
+    // blanket skip.
+    let current = owner.reconcile_root_reachability("R", &[OVERLAY.to_string()], 11);
+    assert!(current.is_empty(), "an add does not drain the slot");
+    assert!(
+        owner
+            .test_slot_roots(OVERLAY)
+            .unwrap_or_default()
+            .contains("R"),
+        "a current pass (gen 11, at/over the high-water) re-records R — the per-edge gate \
+         admits authoritative adds; roots={:?}",
+        owner.test_slot_roots(OVERLAY)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closure_final_reconcile_drops_root_that_closed_mid_pass() {
+    // P1 #2 (did_close-vs-pass race) at the PRODUCTION CALL SITE — NOT just the
+    // pure primitive. The closure pass snapshots the open carrier roots at its
+    // START, then `.await`s the overlay opens, then reconciles the refcount against
+    // a re-read of the open set. If a root closes DURING the pass (after the
+    // snapshot, while its overlay is being opened), its `did_close` releases its
+    // edges, the per-root reconcile RE-records them, and the final reconcile must
+    // drop it — otherwise the re-added edges + overlay leak permanently (no future
+    // close event exists for a root that is no longer open).
+    //
+    // This drives the real async pass (`open_declaration_closure_for_open_files` via
+    // `resync_aliased_imports_for_open_files`) and interleaves the close
+    // DETERMINISTICALLY: the mock fires a one-shot callback the moment A's own
+    // declaration overlay (`A.d.vue.ts`) is opened, and that callback closes A in
+    // the `DocumentRegistry`. So by the time the pass reaches its final reconcile,
+    // A is no longer open.
+    //
+    // The invariant: the final reconcile must NOT use the START-of-pass snapshot
+    // (which still contains A), or A's re-recorded self-edge is KEPT and the overlay
+    // is never closed — a permanent leak. Instead the call site
+    // RE-READS the open set after the async work, so the now-closed A is dropped
+    // and its solely-A overlay is returned for close.
+    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_close_mid_pass");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    // A lone carrier — its own declaration is the only overlay the pass opens, so
+    // the interleave point (the open of `A.d.vue.ts`) is unambiguous and the
+    // refcount holds exactly one slot (A's self-edge).
+    std::fs::write(
+        workspace.join("src/A.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ a: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write A.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let a_id = format!("{workspace_id}/src/A.vue");
+
+    let vfs_workspace_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace_access));
+    // `documents` is shared into the mock's open-file callback so the callback can
+    // close A mid-pass through the SAME registry the pass re-reads.
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri = crate::uri::path_to_file_uri(&a_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: std::fs::read_to_string(workspace.join("src/A.vue")).unwrap(),
+    });
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+    let decl_overlay_owner = DeclOverlayOwner::default();
+
+    // The exact declaration-overlay path the pass opens for A (computed the same
+    // way production does), so the interleave callback is armed for that precise
+    // open. The pass SEEDS the root itself, so this is the FIRST overlay open.
+    let a_decl_path = host
+        .declaration_carrier_path(&a_id)
+        .expect("A.vue projects a declaration carrier path");
+    assert!(
+        a_decl_path.contains("A.d.vue.ts"),
+        "sanity: A's declaration overlay path is A.d.vue.ts, got {a_decl_path}"
+    );
+
+    // Deterministic mid-pass close: when `A.d.vue.ts` is opened (after the pass has
+    // already snapshotted A as a live root), close A in the registry. The pass then
+    // re-records A's self-edge in its per-root reconcile; only a final reconcile
+    // against a FRESH (now-A-absent) open set removes it again.
+    {
+        let documents_for_cb = Arc::clone(&documents);
+        let uri_for_cb = uri.clone();
+        provider.set_on_open_file(
+            &a_decl_path,
+            Box::new(move || {
+                documents_for_cb.did_close(&uri_for_cb);
+            }),
+        );
+    }
+
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true, // is_tsgo — the closure pass is tsgo-scoped
+        None,
+        &decl_overlay_owner,
+        1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    // The interleave actually happened: A's overlay open fired (so the callback ran
+    // and A was closed mid-pass), and A is no longer open afterwards.
+    let calls = provider.file_sync_calls();
+    let opened_a_decl = calls
+        .iter()
+        .any(|call| matches!(call, MockCall::OpenFile { path, .. } if path == &a_decl_path));
+    assert!(
+        opened_a_decl,
+        "the pass opened A's declaration overlay (arming the mid-pass close), calls={calls:?}"
+    );
+    assert!(
+        !documents.open_uris().iter().any(|u| u == uri.as_str()),
+        "A was closed mid-pass via the open-file callback"
+    );
+
+    // INVARIANT (the fix): after the pass, NO refcount edge exists for the
+    // now-closed root A. RED-before this would still hold `A.d.vue.ts -> {A}`.
+    let a_edge_remains = decl_overlay_owner
+        .test_slots_snapshot()
+        .iter()
+        .any(|(_, roots)| roots.iter().any(|root| root.ends_with("/A.vue")));
+    assert!(
+        !a_edge_remains,
+        "a root closed mid-pass leaves NO reaching-root edge — the stale start-of-pass \
+         snapshot must NOT keep A; slots={:?}",
+        decl_overlay_owner.test_slots_snapshot()
+    );
+
+    // INVARIANT (the fix): the overlay attributable SOLELY to the closed root A is
+    // CLOSED by the final reconcile. RED-before this CloseFile never happened.
+    let closed_a_decl = calls
+        .iter()
+        .any(|call| matches!(call, MockCall::CloseFile { path } if path == &a_decl_path));
+    assert!(
+        closed_a_decl,
+        "A's solely-reached declaration overlay is CLOSED once A closes mid-pass, calls={calls:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+/// D1 (overlay LEAK — `handle_did_close` ordering) at the REAL handler. The
+/// `did_close` handler captures the canonical id, then runs TWO halves whose
+/// relative order is the bug under test: `[RELEASE]`
+/// (`release_declaration_overlays_for_closed_root` — drops the closing root's
+/// reachability edges and closes any solely-its overlay) and `[DIDCLOSE]`
+/// (`documents.did_close` — removes the root from the open set the closure pass
+/// reads). If `[RELEASE]` runs BEFORE `[DIDCLOSE]`, a closure pass whose
+/// per-root + final reconcile lands in the `[RELEASE]..[DIDCLOSE]` window
+/// RE-RECORDS the just-released edge while the root is STILL in `open_uris()`,
+/// so the final reconcile KEEPS it — a permanent overlay leak (no future close
+/// event exists for a root that is no longer open). The fix orders `[DIDCLOSE]`
+/// before `[RELEASE]`: the pass then observes the root as closed and drops the
+/// re-recorded edge.
+///
+/// This drives the REAL `handle_did_close` (not just `documents.did_close`)
+/// racing the REAL `open_declaration_closure_for_open_files` on the server's ONE
+/// shared `decl_overlay_refcount`. The interleave is DETERMINISTIC, not a timing
+/// race: the mock pauses the closing task INSIDE `[RELEASE]`'s overlay close
+/// (`block_close_file`), and the closure pass's re-record is run precisely in
+/// that paused window via `tokio::join!`-driven gate coordination. All three
+/// futures share `&server` (no spawn / no `'static` server handle needed); the
+/// join polls the closure-pass future while the handler is suspended on the
+/// close gate.
+///
+/// RED-before (pre-reorder, `[RELEASE]` then `[DIDCLOSE]`): the re-record lands
+/// while A is still open → `A.d.vue.ts -> {A}` is KEPT → the leak assertion
+/// FAILS. GREEN-after (`[DIDCLOSE]` then `[RELEASE]`): A leaves the open set
+/// before the pass re-reads it → the edge is dropped → no leak.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn did_close_orders_didclose_before_release_so_no_overlay_leak_at_real_handler() {
+    let temp_base = std::env::temp_dir().join("verter_test_did_close_release_order_leak");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    // A lone carrier — its own declaration is the only overlay the pass opens, so
+    // the refcount holds exactly one slot (A's self-edge) and the close gate fires
+    // on exactly that one overlay.
+    std::fs::write(
+        workspace.join("src/A.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ a: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write A.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let a_id = format!("{workspace_id}/src/A.vue");
+
+    let vfs_workspace_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace_access));
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry)
+        .into_inner()
+        .expect("the test VFS workspace publishes a snapshot");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                // The proactive declaration-overlay graph is a tsgo-only concern.
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    server.install_vfs_workspace(vfs_workspace);
+
+    let uri = crate::uri::path_to_file_uri(&a_id).expect("file uri");
+    let _ = server.test_documents().did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: std::fs::read_to_string(workspace.join("src/A.vue")).unwrap(),
+    });
+
+    // Re-bind `a_id` to the EXACT canonical id the registry assigns this URI — the
+    // same string the closure pass records into the refcount — so every later
+    // comparison is exact (the host normalises drive-letter case on Windows, so a
+    // `canonicalize`-derived id can differ in case from the registry's).
+    let a_id = server
+        .test_documents()
+        .get_canonical_id(&uri)
+        .expect("A.vue has a canonical id after did_open");
+
+    let a_decl_path = host
+        .declaration_carrier_path(&a_id)
+        .expect("A.vue projects a declaration carrier path");
+    assert!(
+        a_decl_path.contains("A.d.vue.ts"),
+        "sanity: A's declaration overlay path is A.d.vue.ts, got {a_decl_path}"
+    );
+
+    // PRIME the refcount: one real closure pass with A open records A's self-edge
+    // (`A.d.vue.ts -> {A}`) so the racing `[RELEASE]` actually has an overlay to
+    // close — that close is the deterministic interleave point.
+    server.test_run_declaration_closure_pass(1).await;
+    let primed = server
+        .test_decl_overlay_owner()
+        .test_slot_roots(&a_decl_path)
+        .is_some_and(|roots| roots.iter().any(|r| r == &a_id));
+    assert!(
+        primed,
+        "priming pass records A's self-edge A.d.vue.ts -> {{A}}, slots={:?}",
+        server.test_decl_overlay_owner().test_slots_snapshot()
+    );
+
+    // Arm the deterministic interleave: `[RELEASE]`'s close of A.d.vue.ts pauses
+    // INSIDE the provider (signals `arrived`, awaits `release`).
+    let (arrived, release) = provider.block_close_file(&a_decl_path);
+    let pass_done = Arc::new(tokio::sync::Notify::new());
+
+    // H — the REAL did_close handler. Pre-fix it runs [RELEASE] then [DIDCLOSE];
+    // post-fix [DIDCLOSE] then [RELEASE]. Borrows `&server`.
+    let handler = super::lifecycle::handle_did_close(
+        server,
+        DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+        },
+    );
+
+    // P — the REAL closure pass, run PRECISELY in the [RELEASE]'s-close window:
+    // it waits until the handler is paused in the overlay close, then re-records
+    // against whatever open set exists at that instant. Borrows `&server`.
+    let pass_done_for_p = Arc::clone(&pass_done);
+    let pass = async {
+        arrived.notified().await;
+        server.test_run_declaration_closure_pass(1).await;
+        pass_done_for_p.notify_one();
+    };
+
+    // R — release the handler's paused close only AFTER the pass re-record has
+    // landed, so the re-record is guaranteed to fall inside the window. Touches
+    // only the notifies (no server borrow).
+    let releaser = async {
+        pass_done.notified().await;
+        release.notify_one();
+    };
+
+    tokio::join!(handler, pass, releaser);
+
+    // The handler ran to completion: A is closed in the registry.
+    assert!(
+        !server
+            .test_documents()
+            .open_uris()
+            .iter()
+            .any(|u| u == uri.as_str()),
+        "the real did_close handler closed A"
+    );
+
+    // INVARIANT (the fix): after the real handler + the interleaved closure pass,
+    // NO refcount edge for the now-closed root A remains — its solely-A overlay is
+    // not leaked. RED-before (pre-reorder) this FAILS: the re-record landed while
+    // A was still in open_uris(), so A.d.vue.ts -> {A} was KEPT.
+    let leaked = server
+        .test_decl_overlay_owner()
+        .test_slots_snapshot()
+        .iter()
+        .any(|(_, roots)| roots.iter().any(|root| root == &a_id));
+    assert!(
+        !leaked,
+        "a root closed by the REAL did_close handler must leave NO reaching-root edge — \
+         [RELEASE] before [DIDCLOSE] re-records + KEEPS the edge (leak); \
+         slots={:?}",
+        server.test_decl_overlay_owner().test_slots_snapshot()
+    );
+
+    drain.abort();
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+/// DECLARATION-OVERLAY CLOSE-VS-REOPEN serialization: a provider `close_dts` of a
+/// shared overlay, decided when one root drains it, must NOT strand a DIFFERENT
+/// still-open root that reaches the same overlay. The owner serializes the close
+/// and a concurrent reopen of the same overlay path behind that path's lock, so the
+/// reopen waits for the close to finish and then re-establishes the overlay — the
+/// provider and the reachability graph end in agreement, never with the overlay
+/// closed while a live root reaches it (TS2307 stranding).
+///
+/// EXACT interleave (engineered so the stale close's open-set REMOVAL is sequenced
+/// strictly AFTER S's reopen of the same overlay):
+///   * R is the SOLE root reaching `Shared.d.vue.ts` at release time.
+///   * R closes via the REAL `handle_did_close`: `release_…_for_closed_root` drops
+///     R, computes `now_unreferenced = [Shared.d.vue.ts, R.d.vue.ts]`, and the
+///     owner's guarded close acquires `Shared.d.vue.ts`'s path lock and issues the
+///     provider close — which PAUSES inside the close, HOLDING the lock (the
+///     open-set removal has NOT applied yet).
+///   * Concurrently the closure pass for the still-open S re-opens `Shared.d.vue.ts`
+///     (S's bare `import Shared from "./Shared.vue"` needs the overlay).
+///   * R's paused close is released ONLY after S's reopen of `Shared.d.vue.ts` has
+///     landed (signalled by the provider open EFFECT) — or, when S is lock-blocked
+///     and cannot reopen until R frees the lock, after a bounded fallback. R then
+///     APPLIES its open-set removal and frees the lock.
+///
+/// ASSERT (no stranding): the provider STILL has `Shared.d.vue.ts` open AND the
+/// owner records `{Shared.d.vue.ts -> S}` — the graph and the provider AGREE.
+///
+/// The provider is the FAITHFUL [`GatedDeclOverlayProvider`] (open/close EFFECT at
+/// await-COMPLETION, mirroring the real `ExtensionTypeProvider`), NOT
+/// `MockTypeProvider` (records at call-ENTRY, masking the ordering).
+///
+/// FORCED DISCRIMINATOR (no timeout): R's gated close is released by the FIRST of
+/// exactly TWO mutually-exclusive owner observations — a `select!` with no sleep
+/// arm. On a tree WITHOUT the owner's per-path serialization, S's reopen is not
+/// lock-gated, so it lands WHILE R's close is paused and fires `shared_reopened`
+/// FIRST (reason `ReopenedBeforeCloseReleased`); R's removal then lands AFTER S
+/// re-opened `Shared.d.vue.ts`, leaving it closed in the provider though the graph
+/// says `{Shared -> S}` → both the `reason` assertion AND the stranding assertion
+/// FAIL. On the serialized owner S's `open_overlay` for Shared finds R's path lock
+/// HELD and fires `shared_open_contended` FIRST (reason `BlockedOnPathLock`); S then
+/// re-establishes the overlay only after the close completes and drops the lock, so
+/// the provider keeps `Shared.d.vue.ts` and the asserted reason is
+/// `BlockedOnPathLock` → both assertions PASS. The release rides the forced lock
+/// ordering, never a clock — there is no timing race and no fallback that could go
+/// green despite the bug. The contention probe is `#[cfg(test)]`-gated on the owner,
+/// so production carries no probe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarded_decl_close_does_not_strand_concurrently_reopened_overlay() {
+    let temp_base = std::env::temp_dir().join("verter_test_decl_close_supersession");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    // Shared is a leaf carrier imported by BOTH R and S — the shared declaration
+    // overlay `Shared.d.vue.ts` is reached from each of them. R and S also seed
+    // their own self-overlays, but the race is on the SHARED one.
+    std::fs::write(
+        workspace.join("src/Shared.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ s: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write Shared.vue");
+    let r_src = "<script setup lang=\"ts\">\nimport Shared from './Shared.vue'\ndefineProps<{ r: string }>()\n</script>\n<template><Shared/></template>";
+    std::fs::write(workspace.join("src/R.vue"), r_src).expect("write R.vue");
+    let s_src = "<script setup lang=\"ts\">\nimport Shared from './Shared.vue'\ndefineProps<{ q: string }>()\n</script>\n<template><Shared/></template>";
+    std::fs::write(workspace.join("src/S.vue"), s_src).expect("write S.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+
+    let vfs_workspace_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace_access));
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry)
+        .into_inner()
+        .expect("the test VFS workspace publishes a snapshot");
+
+    let provider = Arc::new(GatedDeclOverlayProvider::default());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                // The proactive declaration-overlay graph is a tsgo-only concern.
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    server.install_vfs_workspace(vfs_workspace);
+
+    // Open R first (S is opened later, AFTER R's priming pass, so that at R's
+    // release time R is the SOLE referencer of Shared.d.vue.ts).
+    let r_uri = crate::uri::path_to_file_uri(&format!("{workspace_id}/src/R.vue")).expect("r uri");
+    let _ = server.test_documents().did_open(&TextDocumentItem {
+        uri: r_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r_src.to_string(),
+    });
+    let r_id = server
+        .test_documents()
+        .get_canonical_id(&r_uri)
+        .expect("R.vue has a canonical id");
+    let shared_id = format!("{workspace_id}/src/Shared.vue");
+    let shared_decl_path = host
+        .declaration_carrier_path(&shared_id)
+        .expect("Shared.vue projects a declaration carrier path");
+    assert!(
+        shared_decl_path.contains("Shared.d.vue.ts"),
+        "sanity: Shared's declaration overlay path is Shared.d.vue.ts, got {shared_decl_path}"
+    );
+
+    // PRIME with only R open: the closure pass records `{Shared.d.vue.ts -> R}`
+    // (R imports Shared) and opens the overlay in the provider.
+    server.test_run_declaration_closure_pass(1).await;
+    let primed_shared_by_r = server
+        .test_decl_overlay_owner()
+        .test_slot_roots(&shared_decl_path)
+        .is_some_and(|roots| roots.iter().any(|r| r == &r_id));
+    assert!(
+        primed_shared_by_r,
+        "priming pass (R open) records Shared.d.vue.ts -> {{R}}, slots={:?}",
+        server.test_decl_overlay_owner().test_slots_snapshot()
+    );
+    assert!(
+        provider.open_paths_snapshot().contains(&shared_decl_path),
+        "priming pass opened Shared.d.vue.ts in the provider, open_paths={:?}",
+        provider.open_paths_snapshot()
+    );
+
+    // Now open S (imports Shared too) — but DO NOT run a pass for S yet. At R's
+    // release time the refcount still says `{Shared -> R}` only, so R's release
+    // computes Shared as now-unreferenced (the precondition for the stale close).
+    let s_uri = crate::uri::path_to_file_uri(&format!("{workspace_id}/src/S.vue")).expect("s uri");
+    let _ = server.test_documents().did_open(&TextDocumentItem {
+        uri: s_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: s_src.to_string(),
+    });
+    let s_id = server
+        .test_documents()
+        .get_canonical_id(&s_uri)
+        .expect("S.vue has a canonical id");
+
+    // Arm the deterministic interleave. R's release close of Shared.d.vue.ts pauses
+    // INSIDE the provider close (signals `arrived`, awaits `release`) BEFORE the
+    // open-set removal applies — and, in the lifecycle owner, R's guarded close
+    // holds Shared's per-path serialization lock across that paused provider close.
+    //
+    // Two mutually-exclusive owner observations drive a deterministic release with NO
+    // timeout — the discrimination rides a FORCED ordering, never a clock:
+    //   * `shared_open_contended` fires the instant S's `open_overlay` for
+    //     Shared.d.vue.ts finds the path's serialization lock already HELD (by R's
+    //     in-flight close) and is about to await it. This is the POST-FIX signal: it
+    //     proves S's open genuinely BLOCKED behind R's close instead of racing it.
+    //   * `shared_reopened` fires the instant S's RE-OPEN of Shared.d.vue.ts lands its
+    //     provider open EFFECT (the overlay is resolvable again). This is the PRE-FIX
+    //     signal: WITHOUT serialization S's open is not lock-gated, so it re-opens
+    //     Shared while R's close is still paused and signals here FIRST.
+    let (arrived, release) = provider.block_close_path(&shared_decl_path);
+    let shared_reopened = provider.signal_open_path(&shared_decl_path);
+    let shared_open_contended = server
+        .test_decl_overlay_owner()
+        .signal_open_lock_contended_for_test(&shared_decl_path);
+
+    // H — the REAL did_close handler for R: [DIDCLOSE](R) then [RELEASE](R). The
+    // release drops R from Shared's set → Shared now-unreferenced → the owner's
+    // guarded close acquires Shared's path lock and issues the gated provider close
+    // of Shared.d.vue.ts (which pauses, holding the lock). Borrows `&server`.
+    let handler = super::lifecycle::handle_did_close(
+        server,
+        DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: r_uri.clone() },
+        },
+    );
+
+    /// Which of the two FORCED owner observations released R's gated close — the
+    /// FORCED discriminator of the per-path serialization. There is no third
+    /// (timeout) outcome: exactly one of these fires in each world.
+    #[derive(Debug)]
+    enum ReleaseReason {
+        /// POST-FIX: S's `open_overlay` hit R's HELD path lock (it blocked on the
+        /// serialization instead of racing R's close).
+        BlockedOnPathLock,
+        /// PRE-FIX: S re-opened Shared BEFORE R's close was released (no
+        /// serialization — S's open raced R's in-flight close).
+        ReopenedBeforeCloseReleased,
+    }
+
+    // P — once R's close is gated (a SINGLE `arrived` awaiter, so the one-shot notify
+    // is never split between two futures), drive S's reopen and R's release
+    // CONCURRENTLY. The releaser waits on the FIRST of the two owner observations and
+    // frees R only then — a `select!` over exactly two outcomes, NO sleep:
+    //   * post-fix (serialized owner): S's `open_overlay` for Shared finds R's path
+    //     lock held → `shared_open_contended` fires → reason = BlockedOnPathLock →
+    //     release R → R's close completes + drops the lock → S acquires it,
+    //     revalidates S is open, records S, and re-opens Shared → no strand.
+    //   * pre-fix (no serialization): S's open is not lock-gated, so it re-opens
+    //     Shared while R's close is still paused → `shared_reopened` fires FIRST →
+    //     reason = ReopenedBeforeCloseReleased → release R → R's stale close applies
+    //     its open-set REMOVAL strictly AFTER S re-opened Shared → Shared stranded.
+    // Both the `reason` assertion and the strand assertion below then discriminate
+    // deterministically, with no timing dependence.
+    let pass_and_release = async {
+        arrived.notified().await;
+        let pass = server.test_run_declaration_closure_pass(1);
+        let releaser = async {
+            let reason = tokio::select! {
+                _ = shared_open_contended.notified() => ReleaseReason::BlockedOnPathLock,
+                _ = shared_reopened.notified() => ReleaseReason::ReopenedBeforeCloseReleased,
+            };
+            release.notify_one();
+            reason
+        };
+        let (synced, reason) = tokio::join!(pass, releaser);
+        (synced, reason)
+    };
+
+    let (_, (_synced, reason)) = tokio::join!(handler, pass_and_release);
+
+    // The handler ran to completion: R is closed in the registry.
+    assert!(
+        !server
+            .test_documents()
+            .open_uris()
+            .iter()
+            .any(|u| u == r_uri.as_str()),
+        "the real did_close handler closed R"
+    );
+
+    // FORCED DISCRIMINATOR (no timeout): post-fix, S's open must have BLOCKED behind
+    // R's held path lock — so the release reason is `BlockedOnPathLock`. Pre-fix (no
+    // serialization) S re-opens Shared while R's close is paused, so `shared_reopened`
+    // fires first and the reason is `ReopenedBeforeCloseReleased` → this FAILS
+    // deterministically (the discrimination rides the forced lock ordering, never a
+    // clock).
+    assert!(
+        matches!(reason, ReleaseReason::BlockedOnPathLock),
+        "the serialized owner must make S's reopen BLOCK on R's held path lock (release \
+         reason = BlockedOnPathLock); a non-serialized tree lets S re-open Shared before \
+         R is released (reason = ReopenedBeforeCloseReleased). Got {reason:?}, calls={:?}",
+        provider.calls()
+    );
+
+    // INVARIANT 1 (the fix): the owner records S still reaches Shared.d.vue.ts.
+    let shared_reached_by_s = server
+        .test_decl_overlay_owner()
+        .test_slot_roots(&shared_decl_path)
+        .is_some_and(|roots| roots.iter().any(|r| r == &s_id));
+    assert!(
+        shared_reached_by_s,
+        "after the race the owner records S as reaching Shared.d.vue.ts, slots={:?}",
+        server.test_decl_overlay_owner().test_slots_snapshot()
+    );
+
+    // INVARIANT 2 (the fix — the STRANDING assertion): the provider STILL has
+    // Shared.d.vue.ts open, so S's bare `import Shared from "./Shared.vue"`
+    // resolves (no TS2307). RED-before: R's stale close removed it from the
+    // provider open-set AFTER S re-opened it → open_paths is missing Shared (it
+    // typically contains only S's self-overlay S.d.vue.ts) → this FAILS, exactly
+    // the stranding the refcount cannot see.
+    let open_paths = provider.open_paths_snapshot();
+    assert!(
+        open_paths.contains(&shared_decl_path),
+        "the provider must STILL have Shared.d.vue.ts open after the race (the \
+         refcount says S reaches it) — a stale close that strands S on TS2307 is \
+         the bug; provider open_paths={open_paths:?}, calls={:?}",
+        provider.calls()
+    );
+
+    drain.abort();
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+/// D3 (atomic / linearizable remove-if-empty) + D2 (over-close root cause). The
+/// refcount's remove-if-empty MUST decide emptiness and remove the slot under a
+/// SINGLE held shard lock, so a concurrent insert of ANOTHER still-open root's
+/// edge into the SAME shared overlay slot is never clobbered (the D3 lost
+/// update). D2 is the consequence: if root S's edge is lost when root R is
+/// released, S's shared overlay is wrongly closed and S's bare carrier import
+/// strands on TS2307 — so the D2 ROOT CAUSE is exactly "S's edge survives R's
+/// release", asserted here at the refcount level.
+///
+/// DISCRIMINATING via a stress loop: two tasks race per iteration — one
+/// RELEASES R from a shared slot (`DeclOverlayOwner::release_root`), the other
+/// RE-RECORDS S into the SAME slot (`DeclOverlayOwner::reconcile_root_reachability`)
+/// starting from a slot reached by R ALONE (`{R}`), exactly the setup where R
+/// closes while S is FIRST recording its edge into the same overlay.
+///
+/// With the atomic remove-if-empty, S's edge ALWAYS survives: either the
+/// reconcile lands first (`{R,S}` → release removes R → `{S}`, non-empty, kept),
+/// or the release lands first (`{R}` → atomically removed) and the reconcile
+/// re-creates `{S}`. The release's emptiness-check-and-remove is ONE held-lock
+/// critical section, so it can never delete a slot that the reconcile
+/// concurrently populated. The non-atomic pre-fix pattern (snapshot keys →
+/// get_mut/check-empty with the guard DROPPED → SEPARATE unconditional `remove`)
+/// loses S when: release's get_mut sees `{R}`, removes R → empty → decides
+/// drained, then — in the gap before its `remove` — the reconcile inserts S
+/// (`{S}`), and release's unconditional `remove` then deletes the now-`{S}` slot.
+///
+/// DISCRIMINATING via a high-contention stress loop on REAL OS threads aligned by
+/// a `Barrier` (so both enter their critical section together), repeated many
+/// times. RED-before: the pre-fix non-atomic `remove` loses S in ≥1 race (the
+/// test fails reporting the loss count). GREEN-after: zero losses across every
+/// iteration. This is a STRESS discriminator (not a single deterministic
+/// interleave — the production functions expose no yield point between the
+/// emptiness decision and the remove to pin a deterministic interleave), so it is
+/// run with enough contention/iterations to make the pre-fix loss reliably
+/// observable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn decl_refcount_remove_if_empty_never_clobbers_concurrent_record() {
+    use std::sync::Barrier;
+
+    let shared_overlay = "/ws/Shared.d.vue.ts".to_string();
+    let r_root = "/ws/R.vue".to_string();
+    let s_root = "/ws/S.vue".to_string();
+
+    let iterations = 300_000usize;
+    let s_edge_lost = Arc::new(AtomicUsize::new(0));
+
+    // Real OS threads + a 3-phase barrier per iteration: (1) align both critical
+    // sections, (2) both done → measure, (3) measurement done → reset for next
+    // iteration. The reset + measure both run on the release thread, bracketed by
+    // barriers, so the record thread cannot run during reset/measure and the reset
+    // cannot run during measure — the only concurrency is release || record.
+    std::thread::scope(|scope| {
+        let owner: Arc<DeclOverlayOwner> = Arc::new(DeclOverlayOwner::default());
+        let barrier = Arc::new(Barrier::new(2));
+        let lost = Arc::clone(&s_edge_lost);
+
+        let owner_a = Arc::clone(&owner);
+        let barrier_a = Arc::clone(&barrier);
+        let shared_a = shared_overlay.clone();
+        let r_a = r_root.clone();
+        let s_a = s_root.clone();
+        let release_thread = scope.spawn(move || {
+            for _ in 0..iterations {
+                // Reset the slot to {R} ALONE (the D2 setup).
+                owner_a.test_replace_slot(&shared_a, &[r_a.as_str()], 1);
+                // Phase (1): aligned start of the concurrent section.
+                barrier_a.wait();
+                // R closes: drop R from every overlay it reaches.
+                owner_a.release_root(&r_a);
+                // Phase (2): both critical sections complete — now MEASURE that S
+                // still reaches the overlay (R's release must not have clobbered
+                // S's concurrent first-time record).
+                barrier_a.wait();
+                let s_present = owner_a
+                    .test_slot_roots(&shared_a)
+                    .map(|set| set.contains(&s_a))
+                    .unwrap_or(false);
+                if !s_present {
+                    lost.fetch_add(1, Ordering::Relaxed);
+                }
+                // Phase (3): measured — safe to reset the slot next iteration.
+                barrier_a.wait();
+            }
+        });
+
+        let owner_b = Arc::clone(&owner);
+        let barrier_b = Arc::clone(&barrier);
+        let shared_b = shared_overlay.clone();
+        let s_b = s_root.clone();
+        let record_thread = scope.spawn(move || {
+            for _ in 0..iterations {
+                // Phase (1): aligned start.
+                barrier_b.wait();
+                // S records (FIRST time) that it reaches the shared overlay,
+                // concurrently with R's release.
+                owner_b.reconcile_root_reachability(&s_b, std::slice::from_ref(&shared_b), 1);
+                // Phase (2): both complete — the release thread measures.
+                barrier_b.wait();
+                // Phase (3): next iteration.
+                barrier_b.wait();
+            }
+        });
+
+        release_thread.join().expect("release thread");
+        record_thread.join().expect("record thread");
+    });
+
+    let lost = s_edge_lost.load(Ordering::Relaxed);
+    assert_eq!(
+        lost, 0,
+        "the atomic remove-if-empty must NEVER clobber a concurrent re-record of a \
+         still-open root's edge (D3 lost update → D2 over-close → TS2307); S's edge \
+         to the shared overlay vanished in {lost}/{iterations} races"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closure_reconciles_dropped_import_releases_overlay() {
+    // P1 #3 (reconcile): the refcount is NOT append-only. When a root STOPS
+    // importing a carrier, the next closure pass must REMOVE that root from the
+    // dropped dependency's reachability set — and CLOSE the overlay if its set
+    // drains empty. The invariant: a root's recorded reachability edges EQUAL its
+    // CURRENT declaration closure each pass (add new, drop dropped), never an
+    // ever-growing union.
+    //
+    // RED-before: the closure only ever INSERTED; removal happened ONLY on
+    // did_close. So `B.d.vue.ts` stayed attributed to A (and stayed open) after A
+    // stopped importing B.
+    let temp_base = std::env::temp_dir().join("verter_test_decl_closure_reconcile");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    std::fs::write(
+        workspace.join("src/B.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ b: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write B.vue");
+    // A initially imports B.
+    let a_with_import = "<script setup lang=\"ts\">\nimport B from './B.vue'\ndefineProps<{ a: string }>()\n</script>\n<template><B/></template>";
+    std::fs::write(workspace.join("src/A.vue"), a_with_import).expect("write A.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let a_id = format!("{workspace_id}/src/A.vue");
+
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri = crate::uri::path_to_file_uri(&a_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: a_with_import.to_string(),
+    });
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+    let decl_overlay_owner = DeclOverlayOwner::default();
+
+    // Pass 1: A imports B → B.d opened + recorded as reached from A.
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true,
+        None,
+        &decl_overlay_owner,
+        1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    let b_reached_by_a = || {
+        decl_overlay_owner
+            .test_slots_snapshot()
+            .iter()
+            .any(|(key, roots)| {
+                key.contains("B.d.vue.ts") && roots.iter().any(|root| root.ends_with("/A.vue"))
+            })
+    };
+    assert!(
+        b_reached_by_a(),
+        "pass 1: B.d.vue.ts is recorded as reached from A, slots={:?}",
+        decl_overlay_owner.test_slots_snapshot()
+    );
+
+    // Edit A to DROP the `import B` (now imports nothing).
+    let a_no_import = "<script setup lang=\"ts\">\ndefineProps<{ a: string }>()\n</script>\n<template><div/></template>";
+    let _ = documents.did_change(&uri, 2, a_no_import);
+    provider.clear_calls();
+
+    // Pass 2: A no longer imports B → reconcile must drop A from B.d's set and,
+    // since A was the only reaching root, CLOSE B.d.vue.ts.
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true,
+        None,
+        &decl_overlay_owner,
+        1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    assert!(
+        !b_reached_by_a(),
+        "pass 2: A is dropped from B.d.vue.ts's reachability after A stops importing B, slots={:?}",
+        decl_overlay_owner.test_slots_snapshot()
+    );
+
+    let calls = provider.file_sync_calls();
+    let closed_b_decl = calls
+        .iter()
+        .any(|call| matches!(call, MockCall::CloseFile { path } if path.contains("B.d.vue.ts")));
+    assert!(
+        closed_b_decl,
+        "pass 2: B.d.vue.ts is CLOSED once its last reaching root (A) drops the import, calls={calls:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[test]
+fn declaration_refcount_record_for_released_root_is_reconciled_away() {
+    // P1 #2 (race-safe record): if a root closes between the closure snapshot and
+    // the per-overlay record, `DeclOverlayOwner::release_root` has ALREADY run for
+    // that root — a naive late `insert(root)` would re-add the now-closed
+    // root, stranding the overlay with no future close event (a permanent leak).
+    //
+    // The fix's invariant, exercised here directly on the pure map logic: after a
+    // root is released, reconciling the live open-root set down to a set that does
+    // NOT contain the released root removes it again, leaving the overlay
+    // unreferenced (slot drained → returned for close). I.e. a closed root leaves
+    // NOTHING behind even if its record raced the release.
+    let owner = DeclOverlayOwner::default();
+
+    // Root A had recorded reachability to an overlay, then closed (released).
+    owner.test_seed_slot("/ws/Dep.d.vue.ts", &["/ws/A.vue"], 1);
+    let released = owner.release_root("/ws/A.vue");
+    // The release returns `DeclCloseTarget` records; assert on the path.
+    assert_eq!(
+        released
+            .iter()
+            .map(|t| t.decl_path.clone())
+            .collect::<Vec<_>>(),
+        vec!["/ws/Dep.d.vue.ts".to_string()],
+        "releasing A drains the overlay it solely reached"
+    );
+    // The drained slot is kept as an empty tombstone (GC'd on a confirmed close),
+    // so the reaching-root set is empty even though the slot key persists.
+    assert_eq!(
+        owner.test_slot_roots("/ws/Dep.d.vue.ts"),
+        Some(HashSet::new()),
+        "the drained slot is an empty tombstone until the close confirms"
+    );
+
+    // RACE: the in-flight closure pass — which snapshotted A as a root BEFORE the
+    // close — now performs its late record, re-adding A.
+    owner.reconcile_root_reachability("/ws/A.vue", &["/ws/Dep.d.vue.ts".to_string()], 1);
+    // Without the race fix this would leave `Dep.d.vue.ts -> {A}` permanently. The
+    // reconcile against the LIVE open-root set (A is no longer open ⇒ empty live
+    // set) drops A again and returns the overlay for close.
+    let now_unreferenced = owner.reconcile_open_roots(&HashSet::new(), 1);
+    assert!(
+        now_unreferenced
+            .iter()
+            .any(|t| t.decl_path == "/ws/Dep.d.vue.ts"),
+        "a closed root that raced the record leaves NOTHING behind — the overlay is \
+         returned for close, got: {now_unreferenced:?}"
+    );
+    assert!(
+        owner
+            .test_slots_snapshot()
+            .iter()
+            .all(|(_, roots)| roots.is_empty()),
+        "no stale reaching-root edge remains for the closed root A, slots={:?}",
+        owner.test_slots_snapshot()
+    );
+}
+
+/// CLOSE-SIDE RECOVERABILITY: a close-side orphan — a drained overlay whose
+/// provider `close_dts` did NOT complete (the close failed, or the close future
+/// was interrupted before its await landed) — leaves the provider overlay STILL
+/// OPEN with the slot reduced to an empty tombstone and NO live root reaching it.
+/// A later sweep MUST re-examine that tombstone and re-issue the close, so the
+/// orphaned provider overlay is eventually closed. The owner GCs a slot ONLY on a
+/// CONFIRMED close, so a SURVIVING tombstone is exactly the "close not confirmed"
+/// signal a later `reconcile_open_roots` must act on.
+///
+/// DISCRIMINATING: `reconcile_open_roots` (the post-pass sweep) must RE-RETURN a
+/// surviving tombstone whose provider close never confirmed. RED-before: the sweep
+/// only returned a slot it drained from non-empty to empty, so an already-empty
+/// tombstone was permanently dropped — the orphan had no future closer (the
+/// provider overlay leaked open forever). GREEN-after: the sweep re-returns the
+/// unconfirmed tombstone, and the re-issued close finally closes the provider
+/// overlay and GCs the slot.
+#[tokio::test(flavor = "multi_thread")]
+async fn unconfirmed_close_tombstone_is_recovered_by_a_later_reconcile() {
+    let decl_path = "/ws/Dep.d.vue.ts";
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let states: DashMap<String, crate::provider_sync::ProviderSyncState> = DashMap::new();
+    // The carrier owner state that carries the live Decl overlay (so guarded_close
+    // has a committed provider state to strip + a path to close).
+    states.insert(
+        "/ws/Dep.vue".to_string(),
+        crate::provider_sync::ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/ws/tsconfig.json".into(),
+            ),
+            decl_path: Some(decl_path.to_string()),
+            decl_background_loaded: true,
+            ..Default::default()
+        },
+    );
+    let owner = DeclOverlayOwner::default();
+
+    // The overlay is reached by a single root A at generation 1.
+    owner.test_seed_slot(decl_path, &["/ws/A.vue"], 1);
+
+    // A closes → the overlay drains to an empty tombstone; the close is decided at
+    // generation 1.
+    let decision = owner.release_root("/ws/A.vue");
+    assert_eq!(decision.len(), 1, "releasing A drains exactly one overlay");
+    assert_eq!(
+        decision[0].decl_path, decl_path,
+        "releasing A drains the overlay it solely reached"
+    );
+    assert_eq!(
+        decision[0].close_generation, 1,
+        "the close is decided at the slot's generation 1"
+    );
+
+    // The provider close FAILS this time (a crashed/slow provider, or an interrupted
+    // close). guarded_close keeps the tombstone (fail closed) and does NOT GC it.
+    provider.set_fail_file_ops(true);
+    owner.guarded_close(&sync, &states, &decision).await;
+    provider.set_fail_file_ops(false);
+
+    let close_attempts_after_fail = provider
+        .file_sync_calls()
+        .iter()
+        .filter(|c| matches!(c, MockCall::CloseFile { path } if path == decl_path))
+        .count();
+    assert_eq!(
+        close_attempts_after_fail,
+        1,
+        "the first close was attempted (and failed), calls={:?}",
+        provider.file_sync_calls()
+    );
+    // The tombstone SURVIVES (the failed close did not GC it) — this is the
+    // "close not confirmed" signal the sweep must recover from.
+    assert_eq!(
+        owner.test_slot_roots(decl_path),
+        Some(HashSet::new()),
+        "a failed close keeps the empty tombstone (fail closed, no GC)"
+    );
+
+    // A later sweep against the live open-root set (A is closed ⇒ empty) MUST
+    // re-return the unconfirmed tombstone so its orphaned provider overlay is closed.
+    // RED-before: the sweep skipped already-empty tombstones, so this is empty and
+    // the orphan leaks forever.
+    let resweep = owner.reconcile_open_roots(&HashSet::new(), 1);
+    assert!(
+        resweep.iter().any(|t| t.decl_path == decl_path),
+        "a later reconcile must RE-RETURN the unconfirmed-close tombstone (provider \
+         overlay still open, no live root reaches it) so it gets a future closer; \
+         got: {resweep:?}"
+    );
+
+    // The re-issued close now succeeds → the provider overlay is closed and the slot
+    // is GC'd (the orphan is recovered).
+    owner.guarded_close(&sync, &states, &resweep).await;
+    let close_attempts_total = provider
+        .file_sync_calls()
+        .iter()
+        .filter(|c| matches!(c, MockCall::CloseFile { path } if path == decl_path))
+        .count();
+    assert_eq!(
+        close_attempts_total,
+        2,
+        "the recovered close was re-issued (second attempt), calls={:?}",
+        provider.file_sync_calls()
+    );
+    assert_eq!(
+        owner.test_slot_roots(decl_path),
+        None,
+        "the confirmed re-close GCs the recovered tombstone"
+    );
+
+    // NEGATIVE CONTROL: with the orphan recovered (slot GC'd), a further sweep must
+    // NOT manufacture a phantom close target — the recovery is bounded to genuine
+    // unconfirmed tombstones, not an unconditional re-close of every path.
+    let after_recovery = owner.reconcile_open_roots(&HashSet::new(), 1);
+    assert!(
+        after_recovery.is_empty(),
+        "once the orphan is recovered (slot gone) the sweep returns nothing, got: {after_recovery:?}"
+    );
+}
+
+/// CLOSE-SIDE RECOVERY IS IN-FLIGHT-AWARE: a sweep must NOT re-issue a close for a
+/// tombstone whose close is CURRENTLY in-flight. The guarded close marks the slot
+/// `close_pending` and holds the overlay's path lock across its provider await; a
+/// redundant close issued by a racing `reconcile_open_roots` would only block on
+/// that held lock (and, under a paused/gated close, DEADLOCK the very task that
+/// would release it). So the recovery is gated on "close NOT in-flight": only a
+/// tombstone whose close already finished UNCONFIRMED is re-returned.
+///
+/// DISCRIMINATING: with the provider close GATED (paused inside `close_dts`, the
+/// path lock held and `close_pending` set), `reconcile_open_roots` against an empty
+/// live set must return NOTHING for the in-flight overlay. RED-before (a sweep that
+/// re-returns every empty tombstone regardless of the in-flight mark): it re-returns
+/// the in-flight tombstone; releasing the gate then lets the in-flight close GC the
+/// slot and the sweep's redundant target double-closes / contends. GREEN-after: the
+/// in-flight tombstone is skipped, and once the gated close completes it GCs the
+/// slot, leaving nothing for a later sweep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconcile_does_not_reissue_close_for_an_in_flight_tombstone() {
+    let decl_path = "/ws/Dep.d.vue.ts";
+
+    let provider = Arc::new(GatedDeclOverlayProvider::default());
+    // Make the overlay resolvable so there is an open path for the close to act on.
+    provider
+        .open_paths
+        .lock()
+        .unwrap()
+        .insert(decl_path.to_string());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let states: DashMap<String, crate::provider_sync::ProviderSyncState> = DashMap::new();
+    states.insert(
+        "/ws/Dep.vue".to_string(),
+        crate::provider_sync::ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/ws/tsconfig.json".into(),
+            ),
+            decl_path: Some(decl_path.to_string()),
+            decl_background_loaded: true,
+            ..Default::default()
+        },
+    );
+    let owner = Arc::new(DeclOverlayOwner::default());
+
+    // The overlay drains to an empty tombstone; the close is decided at generation 1.
+    owner.test_seed_slot(decl_path, &["/ws/A.vue"], 1);
+    let decision = owner.release_root("/ws/A.vue");
+    assert_eq!(decision.len(), 1);
+    assert_eq!(decision[0].decl_path, decl_path);
+    assert_eq!(decision[0].close_generation, 1);
+
+    // Gate the provider close so it pauses INSIDE `close_dts` — at which point the
+    // guarded close holds the path lock AND has marked the slot `close_pending`.
+    let (arrived, release) = provider.block_close_path(decl_path);
+
+    let owner_for_close = Arc::clone(&owner);
+    let states_ref = &states;
+    let close = async {
+        owner_for_close
+            .guarded_close(&sync, states_ref, &decision)
+            .await;
+    };
+
+    let probe = async {
+        // Wait until the close is paused inside the provider (path lock held,
+        // close_pending set), then sweep with an empty live set.
+        arrived.notified().await;
+        let swept = owner.reconcile_open_roots(&HashSet::new(), 1);
+        // INVARIANT: the in-flight tombstone is NOT re-returned.
+        assert!(
+            swept.iter().all(|t| t.decl_path != decl_path),
+            "a sweep must NOT re-issue a close for a tombstone whose close is in-flight \
+             (close_pending) — re-issuing contends on the held path lock; got: {swept:?}"
+        );
+        // Release the gated close so it completes and GCs the slot.
+        release.notify_one();
+    };
+
+    tokio::join!(close, probe);
+
+    // The in-flight close completed and GC'd the slot; a redundant close was never
+    // issued (exactly one provider close for the overlay).
+    let closes = provider
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, MockCall::CloseFile { path } if path == decl_path))
+        .count();
+    assert_eq!(
+        closes,
+        1,
+        "exactly one provider close was issued for the in-flight overlay (no redundant \
+         re-close), calls={:?}",
+        provider.calls()
+    );
+    assert_eq!(
+        owner.test_slot_roots(decl_path),
+        None,
+        "the completed in-flight close GC'd the slot"
+    );
+}
+
+#[test]
+fn carrier_dependency_ids_resolves_carriers_and_filters_non_carriers() {
+    // P2 #4: `carrier_dependency_ids` resolves each script import through the
+    // engine's workspace resolver (analysis-time `resolved_canonical_id`, with the
+    // `resolve_import_specifier_standalone` → `host.resolve_import_via_workspace`
+    // fallback rail) and returns ONLY the carrier→carrier edges — a non-carrier
+    // (`.ts`) dependency is dropped (handled by the other passes), per the
+    // documented contract. (The fallback rail itself is a timing safety net for the
+    // registry-bootstrap window where analysis ran before the project registry was
+    // configured; its discriminating coverage is the aliased-import resync flow.
+    // The analysis-time id and the workspace resolver are architecturally coupled —
+    // both bottom out in the same resolver — so they cannot be split in a single-
+    // state unit test. This test pins the contract the closure depends on: resolve
+    // + carrier-filter.)
+    //
+    // Discriminates against (a) dropping resolution entirely (empty result), and
+    // (b) failing to carrier-filter (a `.ts` dep leaking into the declaration
+    // closure, which would open a `.d.ts` for a non-carrier).
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let host = VerterHost::new(HostConfig::default(), ws);
+    host.upsert(UpsertRequest {
+        canonical_id: None,
+        input_id: "/src/A.vue".to_string(),
+        source: Arc::from(
+            "<script setup lang=\"ts\">\nimport B from './B.vue'\nimport { util } from './util'\n</script>\n<template><B>{{ util }}</B></template>",
+        ),
+        file_language: FileLanguage::vue(),
+        aliases: Vec::new(),
+    })
+    .expect("upsert A.vue");
+    host.set_exact_resolutions(
+        "/src/A.vue",
+        vec![
+            verter_workspace::ExactResolution {
+                specifier: "./B.vue".to_string(),
+                phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                kind: verter_workspace::ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some("/src/B.vue".to_string()),
+                possible_canonical_ids: vec!["/src/B.vue".to_string()],
+            },
+            verter_workspace::ExactResolution {
+                specifier: "./util".to_string(),
+                phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                kind: verter_workspace::ResolveRequestKind::EsmImport,
+                resolved_canonical_id: Some("/src/util.ts".to_string()),
+                possible_canonical_ids: vec!["/src/util.ts".to_string()],
+            },
+        ],
+    );
+
+    let deps = carrier_dependency_ids(&host, "/src/A.vue");
+
+    // POSITIVE: the carrier dependency `./B.vue` is resolved and returned.
+    assert!(
+        deps.iter().any(|d| d == "/src/B.vue"),
+        "carrier_dependency_ids resolves and returns the carrier dependency ./B.vue, got: {deps:?}"
+    );
+    // NEGATIVE (discriminating): the non-carrier `./util` (a `.ts`) is FILTERED —
+    // the closure follows only carrier→carrier edges, so a `.ts` dep must never be
+    // opened as a declaration overlay.
+    assert!(
+        !deps.iter().any(|d| d == "/src/util.ts"),
+        "carrier_dependency_ids must FILTER the non-carrier ./util.ts dependency, got: {deps:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_aliased_imports_retains_prior_path_when_replacement_sync_fails() {
+    // FIX-3: the aliased-import resync pass must use close-AFTER-successful-sync
+    // (skip-active, per-kind), NOT close-before-sync. An open imported `.vue`
+    // undergoing an owner-key change has its owner-INDEPENDENT `{src}.vue.ts`
+    // marked stale by the force-rebind clause; pre-fix the pass closed it BEFORE
+    // syncing, so a failed sync left the artifact gone. Post-fix: a failed sync
+    // closes nothing and retains the prior state.
+    let temp_base = std::env::temp_dir().join("verter_test_resync_aliased_retain");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }"#,
+    )
+    .expect("write tsconfig");
+    let child_source = r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#;
+    std::fs::write(workspace.join("src/components/Child.vue"), child_source)
+        .expect("write Child.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id_stripped = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    // Normalize through the production `CanonicalPath` (lowercases the Windows
+    // drive letter) so the seeded state key matches the import-resolver-derived
+    // `import_id` the aliased pass uses — otherwise the transition sees no prior
+    // state and the close-before-sync regression is not exercised.
+    let workspace_id = verter_workspace::CanonicalPath::new(&workspace_id_stripped)
+        .as_str()
+        .to_string();
+    let app_id = format!("{workspace_id}/src/App.vue");
+    let child_id = format!("{workspace_id}/src/components/Child.vue");
+    let child_api_path = format!("{child_id}.verter.ts");
+
+    let app_source = r#"<script setup lang="ts">
+import Child from '@/components/Child.vue'
+</script>
+<template><Child msg="hello" /></template>"#
+        .to_string();
+
+    let vfs_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_access));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: app_source,
+    });
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    let registry = build_result.registry;
+    host.configure_projects(
+        registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Fail ONLY the child's API sync; everything else succeeds.
+    provider.set_fail_sync_path(&child_api_path);
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state from a STALE owner key: same owner-independent
+    // `{child}.vue.ts` API path. The owner change marks that same path stale
+    // (the force-rebind clause). Pre-fix the pass closed it BEFORE the sync;
+    // the sync then FAILS, leaving the artifact gone. `api_background_loaded`
+    // is false so the aliased pass actually processes the file (it skips files
+    // already fully background-loaded).
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/stale/tsconfig.json".to_string(),
+        ),
+        ide_path: None,
+        api_path: Some(child_api_path.clone()),
+        decl_path: None,
+        api_background_loaded: false,
+        decl_background_loaded: false,
+        ide_background_loaded: false,
+        shadow_path: None,
+        shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
+    };
+    provider_sync_states.insert(child_id.clone(), prior_state.clone());
+
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        false,
+        None,
+        &DeclOverlayOwner::default(),
+        1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    // R2-7 reach assertion (DISCRIMINATES a no-op discovery regression): the
+    // aliased pass must actually REACH the child and ATTEMPT to sync its
+    // `{child}.vue.ts` despite the injected failure (`set_fail_sync_path` records
+    // the open/update call BEFORE returning Err). If the alias-collection
+    // pipeline regressed to a no-op, no such attempt is recorded and the
+    // absence-of-close + state-survival asserts below would PASS vacuously.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::OpenFile { path, .. }
+                | MockCall::UpdateFile { path, .. }
+                | MockCall::LoadFile { path, .. }
+            if path == &child_api_path
+        )),
+        "aliased resync must REACH the child and attempt its `.vue.ts` sync, calls={calls:?}"
+    );
+    // Discriminator: the prior live `{child}.vue.ts` must NOT be closed, because
+    // its replacement sync FAILED. (Pre-fix: closed before the sync attempt.)
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &child_api_path
+        )),
+        "failed aliased resync must NOT close the prior live API path, calls={calls:?}"
+    );
+    // Positive: the prior state is retained unchanged on a fully-failed sync.
+    let state = provider_sync_states
+        .get(&child_id)
+        .map(|entry| entry.clone())
+        .expect("failed aliased resync must retain the prior state");
+    assert_eq!(
+        state, prior_state,
+        "failed aliased resync must leave the prior state unchanged, got {state:?}"
+    );
+
     let _ = std::fs::remove_dir_all(&temp_base);
 }
 
@@ -7178,10 +15971,15 @@ import Child from '@/components/Child.vue'
             .to_string(),
     });
 
-    let vite_opts = crate::vite_config::ViteConfigOptions::default();
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
     let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
-    let build_result =
-        crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
     let registry = build_result.registry;
     let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
     host.configure_projects(
@@ -7202,6 +16000,10 @@ import Child from '@/components/Child.vue'
         &vfs_workspace,
         &provider_sync_states,
         true,
+        None,
+        &DeclOverlayOwner::default(),
+        1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -7267,8 +16069,8 @@ defineProps<{ show: boolean }>()
         .to_string();
     let app_id = format!("{workspace_id}/src/App.vue");
 
-    let vfs_workspace: Arc<dyn verter_vfs::WorkspaceAccess> = Arc::new(
-        verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions::default()),
+    let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
     );
     let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
     let documents = DocumentRegistry::new(Arc::clone(&host));
@@ -7284,10 +16086,15 @@ import { Overlay } from './components'
             .to_string(),
     });
 
-    let vite_opts = crate::vite_config::ViteConfigOptions::default();
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
     let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
-    let build_result =
-        crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
     let registry = build_result.registry;
     let vfs_workspace = make_test_vfs_workspace_from_registry(&registry);
     host.configure_projects(
@@ -7308,6 +16115,10 @@ import { Overlay } from './components'
         &vfs_workspace,
         &provider_sync_states,
         true,
+        None,
+        &DeclOverlayOwner::default(),
+        1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -7323,8 +16134,10 @@ import { Overlay } from './components'
     );
 
     // Positive: Barrel file should be synced to provider (via sync_file → update_file)
-    // Note: rewrite_vue_imports_for_tsgo happens inside the real TSGO provider, not the mock.
-    // The mock records raw content; in production TSGO rewrites .vue → .vue.ts.
+    // Note: carrier import specifiers are already resolvable before reaching the
+    // provider — the compiler emits `.vue.tsx` for in-project carrier imports and
+    // the resolver emits `.verter.ts` for non-carrier importer specifiers — so the
+    // provider sends content unmodified (the mock records that raw content).
     assert!(
         calls.iter().any(|call| matches!(
             call,
@@ -7351,11 +16164,816 @@ import { Overlay } from './components'
     let _ = std::fs::remove_dir_all(&temp_base);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_aliased_already_loaded_open_vue_reconciled_when_owner_lost() {
+    // R2-4: the aliased-import resync skips a fully-background-loaded import
+    // BEFORE resolving its current owner. A stale-`Owned` OPEN `.vue` whose owner
+    // disappeared (snapshot now resolves None) must still be RECONCILED — pre-fix
+    // the `already_loaded` skip short-circuited it, leaving it stranded on the
+    // dead owner (the `no ide_context` class). Post-fix: the skip is gated on the
+    // committed binding still matching the live resolution, so an owner-lost open
+    // file falls through to `reconcile_unowned_carrier_provider_file` → converts to
+    // Unresolved + closes the dropped owner-derived `.vue.ts`.
+    let temp_base = std::env::temp_dir().join("verter_test_r24_aliased_owner_lost");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }"#,
+    )
+    .expect("write tsconfig");
+    std::fs::write(
+        workspace.join("src/components/Child.vue"),
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    )
+    .expect("write Child.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id_stripped = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    let workspace_id = verter_workspace::CanonicalPath::new(&workspace_id_stripped)
+        .as_str()
+        .to_string();
+    let app_id = format!("{workspace_id}/src/App.vue");
+    let child_id = format!("{workspace_id}/src/components/Child.vue");
+    let child_tsx = format!("{child_id}.tsx");
+    let child_api_path = format!("{child_id}.verter.ts");
+
+    let vfs_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_access));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let app_uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: app_uri,
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r#"<script setup lang="ts">
+import Child from '@/components/Child.vue'
+</script>
+<template><Child msg="hello" /></template>"#
+            .to_string(),
+    });
+    // Open Child.vue: it is the already-loaded OPEN import whose owner was lost.
+    let child_uri = crate::uri::path_to_file_uri(&child_id).expect("child uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: child_uri,
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#
+            .to_string(),
+    });
+
+    // Host registry owns the workspace (so the aliased import resolves Child).
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    // Ready snapshot rooted at `/other` — does NOT own the workspace's Child.vue,
+    // so its current owner resolves to None (the owner-loss arm).
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other",
+        Some("/other/tsconfig.json"),
+    );
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+    let provider_sync_states = DashMap::new();
+    // Prior state: STALE `Owned` binding, BOTH kinds background-loaded so the
+    // `already_loaded` skip fires pre-fix. Carries the owner-derived `.vue.ts`.
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/stale/tsconfig.json".to_string(),
+        ),
+        ide_path: Some(child_tsx.clone()),
+        api_path: Some(child_api_path.clone()),
+        decl_path: None,
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        decl_background_loaded: false,
+        shadow_path: None,
+        shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
+    };
+    provider_sync_states.insert(child_id.clone(), prior_state);
+
+    // Non-tsgo aliased pass: the skip checks `api_background_loaded` (true here).
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        false,
+        None,
+        &DeclOverlayOwner::default(),
+        1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    // Discriminator (RED pre-fix): the already-loaded open Child was skipped, so
+    // its stale `Owned` binding survived. Post-fix it is reconciled to Unresolved.
+    let state = provider_sync_states
+        .get(&child_id)
+        .map(|entry| entry.clone())
+        .expect("open Child.vue must keep a provider sync state");
+    assert!(
+        state.is_unresolved(),
+        "an already-loaded open `.vue` whose owner was lost must be reconciled to \
+         Unresolved (not skipped on a stale Owned binding), got {:?}",
+        state.owner_binding
+    );
+    // The owner-derived `.vue.ts` dropped by the conversion must be closed.
+    let calls = provider.file_sync_calls();
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &child_api_path
+        )),
+        "owner-loss reconciliation must close the dropped `.vue.ts`, calls={calls:?}"
+    );
+    // The live IDE TSX must NOT be closed (editor-liveness for the open file).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &child_tsx
+        )),
+        "owner-loss reconciliation must NOT close the open file's live TSX, calls={calls:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_barrel_vue_dep_reconciles_open_owned_overlay_on_owner_loss() {
+    // FIX-4 + R2-7: an OPEN `.vue` reached as a barrel dependency whose owner
+    // resolves to None must NOT have its provider state removed nor its IDE TSX
+    // closed (the barrel pass previously called
+    // remove_provider_sync_state_and_close_paths unconditionally for an
+    // owner-None `.vue`). It must be reconciled in place: a prior `Owned` binding
+    // is converted to `Unresolved` (R2-4 barrel-pass gate + the open-document
+    // editor-liveness path) and the dropped owner-derived `.vue.ts` is closed
+    // (R2-8), while the live IDE TSX is preserved.
+    //
+    // The binding flip Owned→Unresolved + the `.vue.ts` close are the R2-7
+    // DISCRIMINATING reach signals: they only happen if the barrel→Vue-re-export
+    // discovery actually REACHED Overlay. If discovery regressed to a no-op, the
+    // seeded `Owned` binding would survive unchanged and nothing would close, so
+    // a pure state-survival + absence-of-close assertion would pass vacuously.
+    let temp_base = std::env::temp_dir().join("verter_test_barrel_open_unowned");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src/components")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }"#,
+    )
+    .expect("write tsconfig");
+    std::fs::write(
+        workspace.join("src/components/index.ts"),
+        r#"export { default as Overlay } from './Overlay.vue'"#,
+    )
+    .expect("write barrel");
+    std::fs::write(
+        workspace.join("src/components/Overlay.vue"),
+        r#"<script setup lang="ts">
+defineProps<{ show: boolean }>()
+</script>
+<template><div v-if="show">overlay</div></template>"#,
+    )
+    .expect("write Overlay.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id_stripped = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+    // Verter's canonical-path normalization lowercases the Windows drive letter
+    // (the import resolver emits `c:/...`), whereas `std::fs::canonicalize`
+    // uppercases it (`C:/...`). Run it through the production `CanonicalPath`
+    // normalizer so the open-document key, the seeded state key, and the
+    // drain-discovered barrel-dep id all agree — otherwise the owner-None arm
+    // runs against a different key.
+    let workspace_id = verter_workspace::CanonicalPath::new(&workspace_id_stripped)
+        .as_str()
+        .to_string();
+    let app_id = format!("{workspace_id}/src/App.vue");
+    let overlay_id = format!("{workspace_id}/src/components/Overlay.vue");
+    let overlay_tsx = format!("{overlay_id}.tsx");
+    let overlay_api = format!("{overlay_id}.verter.ts");
+
+    let vfs_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_access));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let app_uri = crate::uri::path_to_file_uri(&app_id).expect("file uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: app_uri,
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r#"<script setup lang="ts">
+import { Overlay } from './components'
+</script>
+<template><Overlay :show="true" /></template>"#
+            .to_string(),
+    });
+    // Open Overlay.vue too: it is the OPEN barrel-dep whose state must survive.
+    let overlay_uri = crate::uri::path_to_file_uri(&overlay_id).expect("overlay uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: overlay_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r#"<script setup lang="ts">
+defineProps<{ show: boolean }>()
+</script>
+<template><div v-if="show">overlay</div></template>"#
+            .to_string(),
+    });
+
+    // Host registry owns everything (so the barrel resolves Overlay). The
+    // SNAPSHOT resolver below is rooted at `/other`, so ownership of Overlay
+    // resolves to None — that is the owner-None barrel arm under test.
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    // Ready snapshot at `/other` — does NOT own the workspace's Overlay.vue.
+    let vfs_workspace = crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other",
+        Some("/other/tsconfig.json"),
+    );
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+
+    let provider_sync_states = DashMap::new();
+    // Prior committed state: STALE `Owned` binding with the live IDE TSX AND a
+    // stale owner-derived `.vue.ts` API path (as if a prior owner had synced it).
+    // The barrel pass must reconcile this owner-loss in place.
+    provider_sync_states.insert(
+        overlay_id.clone(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/stale/tsconfig.json".to_string(),
+            ),
+            ide_path: Some(overlay_tsx.clone()),
+            api_path: Some(overlay_api.clone()),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    // TSGO barrel pass (is_tsgo = true) reaches the owner-None arm for Overlay.
+    resync_aliased_imports_for_open_files(
+        &documents,
+        Some(&sync),
+        &vfs_workspace,
+        &provider_sync_states,
+        true,
+        None,
+        &DeclOverlayOwner::default(),
+        1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    // Discriminator: the open Overlay's state must SURVIVE (pre-fix it was
+    // removed by remove_provider_sync_state_and_close_paths) AND its stale
+    // `Owned` binding must be RECONCILED to Unresolved. The binding flip only
+    // happens if the barrel pass actually reached Overlay (R2-7 reach signal #1).
+    let state = provider_sync_states
+        .get(&overlay_id)
+        .map(|entry| entry.clone())
+        .expect("open barrel-dep Overlay.vue must keep its provider sync state when unowned");
+    assert!(
+        state.is_unresolved(),
+        "open barrel-dep must be RECONCILED to Unresolved on owner loss (proves the \
+         barrel pass reached it), got {:?}",
+        state.owner_binding
+    );
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some(overlay_tsx.as_str()),
+        "open barrel-dep must preserve its live IDE TSX path"
+    );
+    assert!(
+        state.api_path.is_none(),
+        "the stale owner-derived `.vue.ts` must be dropped on owner loss, got {:?}",
+        state.api_path
+    );
+
+    let calls = provider.file_sync_calls();
+    // R2-7 reach signal #2 (DISCRIMINATES a no-op barrel-discovery regression):
+    // the dropped owner-derived `.vue.ts` must be CLOSED (R2-8). This only occurs
+    // if the barrel → Vue-re-export discovery actually REACHED Overlay; a no-op
+    // regression would leave the seeded `Owned`+`.vue.ts` state untouched and
+    // close nothing, so the assertions would NOT pass vacuously.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &overlay_api
+        )),
+        "barrel pass must REACH Overlay and close the dropped `.vue.ts`, calls={calls:?}"
+    );
+    // Discriminator: the open Overlay's live IDE TSX must NOT be closed.
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &overlay_tsx
+        )),
+        "open barrel-dep must NOT close its live IDE TSX, calls={calls:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_background_vue_reconciles_owner_loss_when_ide_output_is_absent() {
+    // R3-5 [P1]: the owner-None preserve/convert on the background resync path
+    // must NOT be gated behind fresh compile (`get_ide`) output. Pre-fix the sync
+    // body did `let Some(ide) = host.get_ide(..) else { return; }` BEFORE the
+    // owner check, so a transient IDE compile miss (`ide == None`) left a
+    // previously-`Owned` OPEN `.vue` stranded on its stale owner (the `no
+    // ide_context` class). The fix detects owner-None and reconciles the BINDING
+    // (force `Unresolved`, drop+close the owner-derived `.vue.ts`) before
+    // requiring IDE output.
+    //
+    // Driven through `sync_compiled_carrier_to_provider` (the post-compile sync
+    // decision, separated from the destructive disk reload) with `ide = None` —
+    // the exact absent-IDE-output condition — under an owner-None snapshot for an
+    // OPEN document.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    // Ready snapshot at `/other` — does NOT own the open `/workspace` file.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+
+    let _uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+    let app_tsx = "/workspace/src/App.vue.tsx";
+    let app_api = "/workspace/src/App.vue.verter.ts";
+
+    // Seed a STALE `Owned` committed state with the IDE TSX live AND an owner-
+    // derived `.vue.ts`. The owner is now None and the IDE output is absent —
+    // pre-fix the binding stays stale (early return on the absent-IDE gate).
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/stale/tsconfig.json".to_string(),
+            ),
+            ide_path: Some(app_tsx.to_string()),
+            api_path: Some(app_api.to_string()),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    // Absent IDE output: pass `ide = None` (the transient compile-miss condition).
+    server
+        .sync_compiled_carrier_to_provider(canonical_id, None)
+        .await;
+
+    // Discriminator (RED pre-fix): the stale `Owned` binding survived because the
+    // body returned on the absent-IDE gate before the owner check.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("open Vue file must keep its provider sync state on owner loss");
+    assert!(
+        state.is_unresolved(),
+        "owner loss with absent IDE output must reconcile the binding to Unresolved \
+         (not return early on the IDE gate), got {:?}",
+        state.owner_binding
+    );
+    // The live IDE TSX path is preserved (owner-independent artifact).
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some(app_tsx),
+        "the open file's live IDE TSX path must be preserved across the conversion"
+    );
+    // The stale owner-derived `.vue.ts` is dropped from the committed state…
+    assert!(
+        state.api_path.is_none(),
+        "the stale owner-derived `.vue.ts` must be dropped on owner loss, got {:?}",
+        state.api_path
+    );
+
+    let calls = provider.file_sync_calls();
+    // …and CLOSED in the provider (R2-8), proving the conversion actually ran.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == app_api
+        )),
+        "owner-loss reconcile must close the dropped `.vue.ts` even with absent IDE output, calls={calls:?}"
+    );
+    // The live IDE TSX must NEVER be closed (editor-liveness).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == app_tsx
+        )),
+        "owner-loss reconcile must NOT close the live IDE TSX, calls={calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_background_vue_reconciles_owner_loss_before_compile_gate() {
+    // R5-2 [P1]: the owner-None reconcile must run BEFORE the destructive disk
+    // reload + compile gate in `resync_background_carrier_file`. R3-5 moved the
+    // reconcile before the IDE-output requirement INSIDE
+    // `sync_compiled_carrier_to_provider`, but the OUTER compile gate in
+    // `resync_background_carrier_file` (`host.remove` then `ensure_loaded` then
+    // `ensure_compiled`, with an early `return` on failure) still short-circuits
+    // BEFORE `sync_compiled_carrier_to_provider` is ever called. A COMPILE FAILURE
+    // (here: `host.remove` drops the in-memory source and the test harness has no
+    // disk file to reload, so the load/compile gate fails) therefore left a
+    // previously-`Owned` OPEN `.vue` stranded on its stale owner.
+    //
+    // The fix detects owner-None via the published resolver (a pure resolver
+    // query, no compile) and reconciles the binding before the destructive
+    // reload. Driven through `resync_background_carrier_file` (the entry that owns
+    // the compile gate) under an owner-None snapshot for an OPEN document.
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    // Ready snapshot at `/other` — does NOT own the open `/workspace` file.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+
+    let _uri = open_test_vue(
+        server,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    );
+    let canonical_id = "/workspace/src/App.vue";
+    let app_tsx = "/workspace/src/App.vue.tsx";
+    let app_api = "/workspace/src/App.vue.verter.ts";
+
+    // Seed a STALE `Owned` committed state with the IDE TSX live AND an owner-
+    // derived `.vue.ts`. The owner is now None; the destructive reload below
+    // will fail to recompile (no disk file) — pre-fix the binding stays stale
+    // because the compile gate returns before the owner-None reconcile.
+    server.commit_provider_sync_state(
+        canonical_id,
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+                "/stale/tsconfig.json".to_string(),
+            ),
+            ide_path: Some(app_tsx.to_string()),
+            api_path: Some(app_api.to_string()),
+            decl_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: true,
+            decl_background_loaded: false,
+            shadow_path: None,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+
+    server.resync_background_carrier_file(canonical_id).await;
+
+    // Discriminator (RED pre-fix): the stale `Owned` binding survived because the
+    // compile gate returned before the owner-None reconcile ran.
+    let state = server
+        .provider_sync_state_for_source(canonical_id)
+        .expect("open Vue file must keep its provider sync state on owner loss");
+    assert!(
+        state.is_unresolved(),
+        "owner loss with a failing compile gate must reconcile the binding to \
+         Unresolved (not return early on the compile gate), got {:?}",
+        state.owner_binding
+    );
+    // The live IDE TSX path is preserved (owner-independent artifact).
+    assert_eq!(
+        state.ide_path.as_deref(),
+        Some(app_tsx),
+        "the open file's live IDE TSX path must be preserved across the conversion"
+    );
+    // The stale owner-derived `.vue.ts` is dropped from the committed state…
+    assert!(
+        state.api_path.is_none(),
+        "the stale owner-derived `.vue.ts` must be dropped on owner loss, got {:?}",
+        state.api_path
+    );
+
+    let calls = provider.file_sync_calls();
+    // …and CLOSED in the provider (R2-8), proving the conversion actually ran
+    // even though the compile gate would have failed.
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == app_api
+        )),
+        "owner-loss reconcile must close the dropped `.vue.ts` even when the compile \
+         gate fails, calls={calls:?}"
+    );
+    // The live IDE TSX must NEVER be closed (editor-liveness).
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == app_tsx
+        )),
+        "owner-loss reconcile must NOT close the live IDE TSX, calls={calls:?}"
+    );
+}
+
+// ── external-TS membership reconciler: production-path coverage ──
+
+/// A small `.vue` carrier source used by the membership production-path tests.
+const MEMBERSHIP_TEST_VUE: &str =
+    "<script setup lang=\"ts\">\nconst msg: string = 'hi'\n</script>\n\
+     <template><div>{{ msg }}</div></template>\n";
+
+/// A→B atomic swap through the PRODUCTION interactive entry
+/// `ensure_current_file_synced`: a source that moves from owner A to owner B must
+/// leave NOTHING advertised under A in the ledger-backed `getExternalFiles` (the
+/// source-indexed single-entry swap). DISCRIMINATING: a publish-then-prune impl
+/// that added B without removing the A entry would leave `advertised_under(A)`
+/// non-empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_change_a_to_b_through_production_leaves_nothing_under_a() {
+    use crate::external_ts::{CanonicalSource, ProjectUri};
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+
+    // Two configs at the SAME root, each owning `{root}/src/App.vue` via `**/*`.
+    let tsconfig_a = "/workspace/tsconfig.json";
+    let tsconfig_b = "/workspace/tsconfig.app.json";
+    let canonical_id = "/workspace/src/App.vue";
+
+    install_test_resolver_for_root(server, "/workspace", Some(tsconfig_a));
+    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+    server.ensure_current_file_synced(&uri).await;
+
+    assert_eq!(
+        server
+            .membership_ledger()
+            .expect("tsserver has a ledger")
+            .advertised_under(&ProjectUri::from(tsconfig_a)),
+        vec![CanonicalSource::from(canonical_id)],
+        "after the A publish the source is advertised under A"
+    );
+
+    // The owner CHANGES to B (same root, new tsconfig).
+    install_test_resolver_for_root(server, "/workspace", Some(tsconfig_b));
+    server.ensure_current_file_synced(&uri).await;
+
+    let ledger = server.membership_ledger().expect("tsserver has a ledger");
+    assert!(
+        ledger
+            .advertised_under(&ProjectUri::from(tsconfig_a))
+            .is_empty(),
+        "the A→B swap MUST leave NOTHING advertised under the old project A, got {:?}",
+        ledger.advertised_under(&ProjectUri::from(tsconfig_a))
+    );
+    assert_eq!(
+        ledger.advertised_under(&ProjectUri::from(tsconfig_b)),
+        vec![CanonicalSource::from(canonical_id)],
+        "the source must be advertised under the new project B after the swap"
+    );
+}
+
+/// Gap (d) — `resync_background_carrier_file` owner loss must RETRACT the
+/// ledger-backed `getExternalFiles` membership, not only reconcile the provider
+/// buffer binding. DISCRIMINATING: pre-change the resync owner-loss path corrected
+/// the binding (preserve/clear) but left the STORE/ledger membership advertised.
+#[tokio::test(flavor = "multi_thread")]
+async fn resync_background_owner_loss_retracts_ledger_membership() {
+    use crate::external_ts::CanonicalSource;
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    let tsconfig = "/workspace/tsconfig.json";
+    let canonical_id = "/workspace/src/App.vue";
+    install_test_resolver_for_root(server, "/workspace", Some(tsconfig));
+    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+
+    // Publish under the resolved owner (the carrier is advertised).
+    server.ensure_current_file_synced(&uri).await;
+    assert!(
+        server
+            .membership_ledger()
+            .expect("ledger")
+            .is_advertised(&CanonicalSource::from(canonical_id)),
+        "precondition: the carrier is advertised after the owned publish"
+    );
+
+    // Owner loss: a ready snapshot rooted ELSEWHERE that does not own the file.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+    server.resync_background_carrier_file(canonical_id).await;
+
+    assert!(
+        !server
+            .membership_ledger()
+            .expect("ledger")
+            .is_advertised(&CanonicalSource::from(canonical_id)),
+        "resync owner-loss MUST retract the ledger-backed getExternalFiles membership"
+    );
+}
+
+/// Gap (d) defect 2 — an OWNER-RESOLVED tsserver carrier reaches the store/ledger
+/// through the reconciler, NOT the no-op ProjectSync content verbs. Driven through
+/// `sync_compiled_carrier_to_provider` (the post-compile sync decision
+/// `resync_background_carrier_file` calls). DISCRIMINATING: pre-change the
+/// owner-resolved branch ran `sync_tsx`/`sync_dts` (tsserver NO-OPS), so the ledger
+/// stayed empty; the publish gap meant background/file-watch updates never reached
+/// the store.
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_compiled_owner_resolved_publishes_ledger_via_reconciler() {
+    use crate::external_ts::CanonicalSource;
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    let tsconfig = "/workspace/tsconfig.json";
+    let canonical_id = "/workspace/src/App.vue";
+    install_test_resolver_for_root(server, "/workspace", Some(tsconfig));
+    open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+
+    assert!(
+        !server
+            .membership_ledger()
+            .expect("ledger")
+            .is_advertised(&CanonicalSource::from(canonical_id)),
+        "precondition: not advertised before the resync publish"
+    );
+
+    // The post-compile sync decision for an owner-resolved tsserver carrier. The
+    // tsserver owned branch publishes through `publish_carrier_to_external_ts`
+    // (which compiles internally), so the ledger advertises regardless of the
+    // passed IDE output.
+    server
+        .sync_compiled_carrier_to_provider(canonical_id, None)
+        .await;
+
+    assert!(
+        server
+            .membership_ledger()
+            .expect("ledger")
+            .is_advertised(&CanonicalSource::from(canonical_id)),
+        "an owner-resolved tsserver carrier MUST be advertised in the ledger via the \
+         reconciler (not the no-op ProjectSync verbs)"
+    );
+    // The ledger-backed advertised set for the project includes the carrier's
+    // companion provider paths.
+    let advertised = server.external_ts_advertised_for_project(tsconfig);
+    assert!(
+        advertised.iter().any(|p| p.starts_with(canonical_id)),
+        "the project's ledger-backed getExternalFiles set must include the carrier's \
+         companions, got {advertised:?}"
+    );
+}
+
+/// Gap (c) — `sync_imported_carrier_api_lightweight` owner loss must retract the
+/// ledger membership of an imported child carrier whose owner is gone.
+/// DISCRIMINATING: pre-change the imported-child owner-loss branch corrected the
+/// binding but left the STORE/ledger membership advertised.
+#[tokio::test(flavor = "multi_thread")]
+async fn imported_child_owner_loss_retracts_ledger_membership() {
+    use crate::external_ts::CanonicalSource;
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    let tsconfig = "/workspace/tsconfig.json";
+    let canonical_id = "/workspace/src/Child.vue";
+    install_test_resolver_for_root(server, "/workspace", Some(tsconfig));
+    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+
+    // Publish under the resolved owner.
+    server.ensure_current_file_synced(&uri).await;
+    assert!(
+        server
+            .membership_ledger()
+            .expect("ledger")
+            .is_advertised(&CanonicalSource::from(canonical_id)),
+        "precondition: the imported child carrier is advertised after the owned publish"
+    );
+
+    // Owner loss, then drive the imported-child lightweight sync.
+    install_test_resolver_for_root(server, "/other", Some("/other/tsconfig.json"));
+    server
+        .sync_imported_carrier_api_lightweight(canonical_id)
+        .await;
+
+    assert!(
+        !server
+            .membership_ledger()
+            .expect("ledger")
+            .is_advertised(&CanonicalSource::from(canonical_id)),
+        "imported-child owner-loss MUST retract the ledger-backed getExternalFiles membership"
+    );
+}
+
+/// Gap (b) — for tsserver, the background API sync routes the carrier to the drain
+/// (which reconciles through the membership reconciler) instead of running the
+/// `ProjectSync` content task whose `.vue.ts` verbs are tsserver NO-OPS.
+/// DISCRIMINATING: pre-change, with a ready snapshot + owner, it spawned the
+/// background task (which never queued and never reached the store), so the carrier
+/// was NOT in the pending-snapshot drain set.
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_api_background_queues_carrier_for_drain_on_tsserver() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    let tsconfig = "/workspace/tsconfig.json";
+    let canonical_id = "/workspace/src/App.vue";
+    install_test_resolver_for_root(server, "/workspace", Some(tsconfig));
+    let uri = open_test_vue(server, canonical_id, MEMBERSHIP_TEST_VUE);
+
+    // Clear any queue entry seeded by `did_open` so the assertion is discriminating.
+    server.pending_snapshot_provider_sync.remove(canonical_id);
+    server.sync_api_to_provider_in_background(uri);
+
+    assert!(
+        server.pending_snapshot_provider_sync.contains(canonical_id),
+        "the tsserver background API sync MUST queue the carrier for the drain (the \
+         single membership reconciler), not run the no-op ProjectSync content task"
+    );
+}
+
 // ── VFS workspace integration ──
 
 #[test]
 fn vfs_workspace_rwlock_initially_none() {
-    let vfs: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>> =
+    let vfs: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>> =
         Arc::new(parking_lot::RwLock::new(None));
 
     // Before background_init, the workspace is None
@@ -7367,12 +16985,12 @@ fn vfs_workspace_rwlock_initially_none() {
 
 #[test]
 fn vfs_workspace_rwlock_install_and_access() {
-    let vfs: Arc<parking_lot::RwLock<Option<Arc<verter_vfs::FilesystemWorkspace>>>> =
+    let vfs: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>> =
         Arc::new(parking_lot::RwLock::new(None));
 
     // Simulate what background_init does: build workspace and store it
-    let workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
-        verter_vfs::FilesystemOptions {
+    let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions {
             roots: vec!["/test-project".to_string()],
             eager_preload: false,
         },
@@ -7393,53 +17011,62 @@ fn vfs_workspace_rwlock_install_and_access() {
 
 #[test]
 fn vfs_workspace_with_project_graph() {
-    let workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
-        verter_vfs::FilesystemOptions {
+    let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions {
             roots: vec!["/my-project".to_string()],
             eager_preload: false,
         },
     ));
 
-    // Before setting a project graph, owner_for_file returns None
-    use verter_vfs::WorkspaceAccess;
+    // Before setting a project graph, no fallback owner resolves.
+    use verter_workspace::WorkspaceRead;
     assert!(
         workspace
-            .owner_for_file("/my-project/src/App.vue")
+            .published_root()
+            .and_then(|root| root
+                .snapshot
+                .single_fallback_owner_for_file("/my-project/src/App.vue"))
             .is_none(),
         "empty project graph should have no owner"
     );
 
     // Set a simple project graph
-    let graph = verter_vfs::ProjectGraph::from_configs(vec![verter_vfs::VfsProjectConfig {
-        root: "/my-project".to_string(),
-        rank: verter_vfs::ProjectRank::Inferred,
-        tsconfig_path: None,
-        root_files: vec![],
-        extensions: vec![".vue".to_string()],
-        workspace_root: "/my-project".to_string(),
-        workspace_aliases: vec![],
-        compiler_options: Default::default(),
-        references: vec![],
-        membership: verter_vfs::ProjectMembership::MatchAll,
-    }]);
+    let graph =
+        verter_workspace::ProjectGraph::from_configs(vec![verter_workspace::VfsProjectConfig {
+            root: "/my-project".to_string(),
+            rank: verter_workspace::ProjectRank::Inferred,
+            tsconfig_path: None,
+            root_files: vec![],
+            extensions: vec![".vue".to_string()],
+            workspace_root: "/my-project".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: Default::default(),
+            references: vec![],
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/my-project"),
+            ),
+        }]);
     workspace.set_project_graph(graph);
 
-    // Now owner_for_file should return the project
-    let owner = workspace.owner_for_file("/my-project/src/App.vue");
+    // Now the fallback resolution should return the project.
+    let root = workspace.published_root().expect("published snapshot");
+    let owner = root
+        .snapshot
+        .single_fallback_owner_for_file("/my-project/src/App.vue");
     assert!(
         owner.is_some(),
         "file under project root should have an owner after graph set"
     );
     assert_eq!(
-        owner.unwrap().project_root,
+        root.snapshot.project(owner.unwrap()).root.as_str(),
         "/my-project",
         "owner should be the correct project root"
     );
 
     // Negative: file outside project root should have no owner
     assert!(
-        workspace
-            .owner_for_file("/other-project/src/App.vue")
+        root.snapshot
+            .single_fallback_owner_for_file("/other-project/src/App.vue")
             .is_none(),
         "file outside project root should have no owner"
     );
@@ -7447,7 +17074,7 @@ fn vfs_workspace_with_project_graph() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn on_file_changed_invalidates_vfs_negative_cache_for_created_file() {
-    use verter_vfs::WorkspaceAccess;
+    use verter_workspace::WorkspaceRead;
 
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
@@ -7461,8 +17088,8 @@ async fn on_file_changed_invalidates_vfs_negative_cache_for_created_file() {
     let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
     let service = make_hover_test_service(provider);
     let server = service.inner();
-    let vfs_workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
-        verter_vfs::FilesystemOptions {
+    let vfs_workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions {
             roots: vec![root_id.clone()],
             eager_preload: false,
         },
@@ -7495,7 +17122,7 @@ async fn on_file_changed_invalidates_vfs_negative_cache_for_created_file() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn on_watcher_state_changed_invalidates_vfs_negative_cache_under_workspace_root() {
-    use verter_vfs::WorkspaceAccess;
+    use verter_workspace::WorkspaceRead;
 
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
@@ -7509,8 +17136,8 @@ async fn on_watcher_state_changed_invalidates_vfs_negative_cache_under_workspace
     let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
     let service = make_hover_test_service(provider);
     let server = service.inner();
-    let vfs_workspace = Arc::new(verter_vfs::FilesystemWorkspace::new(
-        verter_vfs::FilesystemOptions {
+    let vfs_workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions {
             roots: vec![root_id.clone()],
             eager_preload: false,
         },
@@ -7549,7 +17176,7 @@ fn standalone_host_cannot_resolve_disk_files() {
     std::fs::write(ws.join("App.vue"), "<template><div/></template>").unwrap();
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    let file_id = verter_vfs::resolver::normalize_canonical_id(
+    let file_id = verter_workspace::resolver::normalize_canonical_id(
         &ws.join("App.vue").to_string_lossy().replace('\\', "/"),
     );
     // Positive: standalone host cannot load disk files (documents the limitation)
@@ -7561,5 +17188,2417 @@ fn standalone_host_cannot_resolve_disk_files() {
     assert!(
         host.get_analysis(&file_id).is_none(),
         "standalone host should have no analysis for disk-only files"
+    );
+}
+
+/// A watched `.svelte` change routes through the SAME carrier resync path as
+/// `.vue` (the watcher glob includes every registered carrier extension, and
+/// the lifecycle batch no longer Vue-gates the inner branch). The watched
+/// `.svelte` here is never opened/compiled, so its resync finds no IDE
+/// virtual-file output and creates no provider sync state and issues no
+/// provider sync calls — the carrier resync is a no-op for provider state on
+/// an uncompiled carrier.
+#[tokio::test]
+async fn watched_svelte_change_produces_no_provider_sync_state() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(mock.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let canonical = "/workspace/src/Box.svelte";
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: format!("file://{canonical}").parse().expect("valid uri"),
+                typ: FileChangeType::CHANGED,
+            }],
+        },
+    )
+    .await;
+
+    assert!(
+        server.provider_sync_state_for_source(canonical).is_none(),
+        "a watched .svelte change must create no provider sync state"
+    );
+    assert!(
+        mock.file_sync_calls().is_empty(),
+        "a watched .svelte change must sync nothing to the type provider"
+    );
+    let profile = server.documents.tsx_profile.read().clone();
+    assert!(
+        server
+            .documents
+            .host()
+            .get_ide(canonical, &profile)
+            .is_none(),
+        "a watched .svelte change must leave no IDE virtual-file state"
+    );
+}
+
+/// A closed-file `.svelte.ts` rune-module edit is classified EXPLICITLY as an
+/// adapter module (the descriptor-derived `adapter_module_language_for`
+/// predicate the `did_change_watched_files` branch uses) and routes through the
+/// non-carrier resync — NOT the carrier path and NOT silently dropped. The
+/// rune module is covered by its descriptor-derived watch glob (the S2a P1 gap,
+/// closed server-side). The watched file is never opened, so the standalone
+/// resync produces no provider state — the discriminating fact is the explicit
+/// adapter-module classification (a carrier predicate would reject it).
+#[tokio::test]
+async fn did_change_watched_files_resyncs_rune_module_via_adapter_module_glob() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(mock.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let canonical = "/workspace/src/store.svelte.ts";
+    // The rune module is classified as an ADAPTER MODULE, not a carrier — the
+    // exact predicate the watched-files branch uses to route it.
+    assert!(
+        super::server_utils::adapter_module_language_for(canonical).is_some(),
+        "a `.svelte.ts` is an adapter module (the descriptor-derived watch branch predicate)"
+    );
+    assert!(
+        super::server_utils::carrier_language_for(canonical).is_none(),
+        "a rune module is NOT a carrier — it must not route through the carrier resync"
+    );
+
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: format!("file://{canonical}").parse().expect("valid uri"),
+                typ: FileChangeType::CHANGED,
+            }],
+        },
+    )
+    .await;
+
+    // No carrier IDE state is produced for a rune module (it has no IDE TSX).
+    let profile = server.documents.tsx_profile.read().clone();
+    assert!(
+        server
+            .documents
+            .host()
+            .get_ide(canonical, &profile)
+            .is_none(),
+        "a rune module produces no carrier IDE virtual-file state"
+    );
+}
+
+/// The `did_change_watched_files` batch routes EVERY carrier
+/// (`.vue`, `.svelte`, …) through the shared resync/delete queues — the
+/// inner `language.is_vue()` gate is gone. A watched `.svelte` change whose
+/// canonical falls outside every project root (owner-unresolved) enters the
+/// carrier resync's unresolved-owner reconciliation EXACTLY like `.vue`,
+/// queuing a snapshot provider sync for later drain. DISCRIMINATING: under
+/// the pre-change Vue-only inner gate, the `.svelte` event was dropped at
+/// the routing layer and nothing was queued; now it flows through.
+#[tokio::test]
+async fn did_change_watched_files_resyncs_svelte() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(mock.clone());
+    let server = service.inner();
+    // Resolver rooted elsewhere: the watched file is owner-unresolved.
+    install_test_resolver_for_root(server, "/elsewhere", Some("/elsewhere/tsconfig.json"));
+
+    let canonical = "/workspace/src/Box.svelte";
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: format!("file://{canonical}").parse().expect("valid uri"),
+                typ: FileChangeType::CHANGED,
+            }],
+        },
+    )
+    .await;
+
+    // The de-gated batch admits the `.svelte` carrier into the resync queue,
+    // which (owner-unresolved) queues a snapshot provider sync — parity with
+    // the `.vue` carrier (see
+    // `background_init_drains_pending_snapshot_provider_sync_for_open_vue_file`).
+    assert!(
+        server.pending_snapshot_provider_sync.contains(canonical),
+        "a watched .svelte carrier must flow through the carrier resync queue \
+         (parity with .vue), queuing a snapshot provider sync"
+    );
+    // The synchronous handler itself opens no provider sync state and issues no
+    // provider calls for the uncompiled carrier (the queued sync drains later
+    // and is a no-op while no IDE virtual file exists).
+    assert!(
+        server.provider_sync_state_for_source(canonical).is_none(),
+        "the synchronous watcher handler creates no provider sync state for an \
+         uncompiled .svelte carrier"
+    );
+    assert!(
+        mock.calls().is_empty(),
+        "the synchronous watcher handler issues no provider calls, got {:?}",
+        mock.calls()
+    );
+
+    // Discrimination control: a plain `.ts` source (NOT a carrier) takes the
+    // TS/JS branch, never the carrier resync queue.
+    let ts_canonical = "/workspace/src/util.ts";
+    crate::server::lifecycle::handle_did_change_watched_files(
+        server,
+        DidChangeWatchedFilesParams {
+            changes: vec![FileEvent {
+                uri: format!("file://{ts_canonical}").parse().expect("valid uri"),
+                typ: FileChangeType::CHANGED,
+            }],
+        },
+    )
+    .await;
+    assert!(
+        !server.pending_snapshot_provider_sync.contains(ts_canonical),
+        "a non-carrier .ts file must not enter the carrier resync queue"
+    );
+}
+
+/// Open a `.svelte` carrier document into the server's host. The path's
+/// `.svelte` extension classifies it as the Svelte carrier row (the editor
+/// `language_id` is only authoritative for the Vue carrier).
+fn open_test_svelte(server: &VerterLanguageServer, path: &str, source: &str) -> Uri {
+    let uri: Uri = format!("file://{path}").parse().expect("valid test uri");
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    uri
+}
+
+/// `$/verter/getProjectOverview` counts `.svelte` carriers in the
+/// component graph and the carrier-neutral `totalComponentFiles` stat, with
+/// the per-file kind discriminant `"component"`. DISCRIMINATING: under the
+/// pre-change `is_vue()` gates the Svelte file was neither counted nor kinded
+/// as a component.
+#[tokio::test]
+async fn project_overview_counts_svelte_in_component_graph() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(mock.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let child = "<script>let x = 1;</script>";
+    let parent = r#"<script>import Child from './Child.svelte';</script>
+<Child />
+"#;
+    open_test_svelte(server, "/workspace/src/Child.svelte", child);
+    let parent_uri = open_test_svelte(server, "/workspace/src/App.svelte", parent);
+    // A plain .ts is NOT a component carrier.
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: "file:///workspace/src/util.ts".parse().unwrap(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const x = 1;".to_string(),
+    });
+
+    let overview = server
+        .get_project_overview(serde_json::Value::Null)
+        .await
+        .expect("overview");
+
+    assert!(
+        overview.stats.total_component_files >= 2,
+        "both .svelte carriers must be counted, got {}",
+        overview.stats.total_component_files
+    );
+    // Every .svelte file kinds as a component; the .ts file does not.
+    let svelte_kinds: Vec<&str> = overview
+        .files
+        .iter()
+        .filter(|f| f.path.ends_with(".svelte"))
+        .map(|f| f.kind)
+        .collect();
+    assert!(
+        !svelte_kinds.is_empty() && svelte_kinds.iter().all(|k| *k == "component"),
+        "every .svelte file must kind as `component`, got {svelte_kinds:?}"
+    );
+    assert!(
+        overview
+            .files
+            .iter()
+            .any(|f| f.path.ends_with("util.ts") && f.kind == "ts"),
+        "the plain .ts file must kind as `ts`, not `component`"
+    );
+    // The parent's template-component edge for the Svelte child appears in the
+    // component graph.
+    let _ = parent_uri;
+    assert!(
+        overview
+            .component_graph
+            .iter()
+            .any(|e| e.file.ends_with("App.svelte")),
+        "the Svelte parent's component-usage edge must appear in the graph"
+    );
+}
+
+/// `$/onFileChanged` for a `.svelte` carrier routes through the
+/// carrier cleanup (delete) path. DISCRIMINATING: the pre-change
+/// `params.uri.ends_with(".vue")` gate dropped the `.svelte` delete event
+/// entirely, so a closed-file `.svelte` delete would NOT clean up host state;
+/// the de-gated handler enters the carrier branch and removes the carrier
+/// from the host. A plain `.ts` delete never enters the carrier branch (its
+/// host state is unaffected by this handler).
+#[tokio::test]
+async fn on_file_changed_resyncs_and_cleans_svelte() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(mock.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // Open the carrier so the host holds its source (the watched delete must
+    // then clean it up through the carrier branch).
+    let canonical = "/workspace/src/Box.svelte";
+    open_test_svelte(server, canonical, "<script>let x = 1;</script>");
+    assert!(
+        server.documents.host.get_source(canonical).is_some(),
+        "precondition: the opened .svelte carrier is in the host"
+    );
+
+    // A control non-carrier `.ts` file is also present.
+    let ts_canonical = "/workspace/src/util.ts";
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: format!("file://{ts_canonical}").parse().unwrap(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const x = 1;".to_string(),
+    });
+
+    // delete: the de-gated carrier branch removes the .svelte from the host.
+    server
+        .on_file_changed(OnFileChangedParams {
+            uri: format!("file://{canonical}"),
+            change_type: "delete".to_string(),
+        })
+        .await;
+    assert!(
+        server.documents.host.get_source(canonical).is_none(),
+        "a watched .svelte delete must enter the carrier branch and remove the \
+         carrier from the host (pre-change the .vue gate dropped this event)"
+    );
+
+    // The .ts delete does NOT take the carrier branch (the carrier branch is
+    // the only place this handler removes host source); its own ingress is
+    // unaffected here.
+    server
+        .on_file_changed(OnFileChangedParams {
+            uri: format!("file://{ts_canonical}"),
+            change_type: "delete".to_string(),
+        })
+        .await;
+    assert!(
+        server.documents.host.get_source(ts_canonical).is_some(),
+        "a non-carrier .ts file must not be removed by the carrier branch"
+    );
+}
+
+/// A default import of a `.svelte` child component resolves to the
+/// child carrier through the carrier-generic `is_default_export_component_carrier`
+/// gate — exactly like a `.vue` child. DISCRIMINATING: the pre-change
+/// `ends_with(".vue")` gate would skip the `.svelte` resolved target and the
+/// component would not resolve.
+#[tokio::test]
+async fn component_resolve_targets_svelte_carrier() {
+    let mock = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(mock.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+
+    open_test_svelte(
+        server,
+        "/workspace/src/Child.svelte",
+        "<script>let x = 1;</script>",
+    );
+    let parent_uri = open_test_svelte(
+        server,
+        "/workspace/src/App.svelte",
+        "<script>import Child from './Child.svelte';</script>\n<Child />\n",
+    );
+    let parent_analysis = server
+        .documents
+        .get_analysis(&parent_uri)
+        .expect("parent analysis");
+
+    let resolved = server.resolve_component_document_for_import_binding(
+        &parent_uri,
+        &parent_analysis,
+        "./Child.svelte",
+        "Child",
+    );
+    let resolved =
+        resolved.expect("a default import of a .svelte child must resolve to the carrier");
+    assert!(
+        resolved.uri.as_str().ends_with("Child.svelte"),
+        "the resolved component-target must be the .svelte carrier, got {}",
+        resolved.uri.as_str()
+    );
+}
+
+/// F1 (virtual-file completion routing) discriminating regression test.
+///
+/// `handle_completion` has TWO provider-completion paths:
+///   * the CARRIER path (`merge_completions`) for a real `.vue` URI, and
+///   * the `verter-virtual://` path (`nav_features.rs` virtual-file branch),
+///     which routes through `merge::provider_completion_to_lsp_item`.
+///
+/// The F1 fix was on the SECOND path: it previously stripped `Completion.data`,
+/// so a provider auto-import returned on the virtual-file branch could never
+/// carry its actionable `verter_resolve` envelope and could never resolve into
+/// an import edit. The shipped VS Code E2E "auto-import" test opens a real
+/// `.vue` URI — it exercises the CARRIER path, NOT this branch — so it does NOT
+/// discriminate the F1 fix (reverting the virtual-file branch to the
+/// `data`-stripping form leaves the whole corpus green).
+///
+/// This test drives `handle_completion` over a `verter-virtual://` URI with a
+/// mock provider returning an ACTIONABLE `TsserverEntry` (a `source`-bearing
+/// auto-import handle) and asserts the emitted LSP item carries the
+/// provider-neutral `verter_resolve` envelope (kind + provider id + carrier
+/// path + serialized provider key). Reverting the virtual-file branch to strip
+/// `data` (e.g. mapping each item to a bare `CompletionItem { label, ... }`
+/// with `data: None`) makes this assertion RED while the rest of the suite
+/// stays green — the discriminator the §1a verification found missing.
+#[tokio::test]
+async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
+    // tsserver-kind mock so the envelope's `provider_id` is "tsserver" — proving
+    // the path is provider-neutral, not a tsgo-only branch.
+    let provider = Arc::new(MockTypeProvider::new());
+    provider.set_provider_id("tsserver");
+
+    // The virtual file routes completions to the source `.vue`'s generated TSX.
+    let tsx_path = "/workspace/src/App.vue.tsx";
+    // Virtual document content (already in generated-TSX coordinates). The
+    // completion request lands at the end of `computed` on line 0.
+    let virtual_content = "computed\n";
+    let request_offset = "computed".len() as u32; // byte offset 8
+
+    // An ACTIONABLE auto-import handle: a `TsserverEntry` carrying a module
+    // `source` (the auto-import key). This is exactly the shape a real tsserver/
+    // extension completion for an unimported `computed` from `vue` produces.
+    let actionable = crate::type_provider::protocol::Completion {
+        label: "computed".to_string(),
+        kind: Some(crate::type_provider::protocol::CompletionKind::Function),
+        detail: None,
+        documentation: None,
+        edit_range_start: None,
+        edit_range_end: None,
+        text_edit_new_text: None,
+        insert_text: None,
+        sort_text: None,
+        insert_text_format: None,
+        commit_characters: None,
+        filter_text: None,
+        preselect: None,
+        label_details: None,
+        data: Some(
+            crate::type_provider::protocol::CompletionResolveData::TsserverEntry {
+                name: "computed".to_string(),
+                source: Some("vue".to_string()),
+                data: None,
+                offset: 0,
+            },
+        ),
+    };
+    // A NON-actionable local handle (no source/data) — must NOT earn an envelope.
+    let local = crate::type_provider::protocol::Completion {
+        label: "localVar".to_string(),
+        kind: Some(crate::type_provider::protocol::CompletionKind::Variable),
+        detail: None,
+        documentation: None,
+        edit_range_start: None,
+        edit_range_end: None,
+        text_edit_new_text: None,
+        insert_text: None,
+        sort_text: None,
+        insert_text_format: None,
+        commit_characters: None,
+        filter_text: None,
+        preselect: None,
+        label_details: None,
+        data: Some(
+            crate::type_provider::protocol::CompletionResolveData::TsserverEntry {
+                name: "localVar".to_string(),
+                source: None,
+                data: None,
+                offset: 0,
+            },
+        ),
+    };
+    // The provider answers the virtual file's TSX path at the request offset.
+    provider.set_completions(tsx_path, request_offset, vec![actionable, local]);
+
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    // Open the backing `.vue` source so `get_canonical_id`/`active_ide_path_for_uri`
+    // can resolve the source URI to its generated-TSX path.
+    let source_uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: source_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div/></template>".to_string(),
+    });
+
+    // Mark the source's provider sync state as IDE-loaded at the TSX path, so
+    // `active_ide_path_for_uri(source)` returns the carrier path the virtual-file
+    // branch routes completion + resolve against.
+    server.provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some(tsx_path.to_string()),
+            api_path: None,
+            decl_path: None,
+            shadow_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            decl_background_loaded: false,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+    // Record the surface a successful IDE sync would have recorded — the
+    // virtual-file routing context resolves the TSX path through the CAPTURED
+    // surface, not an independent committed-path read.
+    server.record_carrier_ide_snapshot("/workspace/src/App.vue", tsx_path, virtual_content, None);
+
+    // Open the virtual document (`verter-virtual://...?sourceUri=<vue-uri>`).
+    let virtual_uri_str = format!(
+        "verter-virtual://generated/App.vue.tsx?sourceUri={}",
+        source_uri.as_str()
+    );
+    let virtual_uri: Uri = virtual_uri_str.parse().expect("virtual uri parses");
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: virtual_uri.clone(),
+        language_id: "typescriptreact".to_string(),
+        version: 1,
+        text: virtual_content.to_string(),
+    });
+
+    // Sanity: the virtual-file context resolves to the carrier TSX path (so we
+    // know the branch under test is actually entered, not silently fallen
+    // through to the normal completion path).
+    let vf_ctx = server
+        .virtual_file_context(&virtual_uri)
+        .expect("virtual-file context must resolve to the source TSX path");
+    assert_eq!(
+        vf_ctx.tsx_path, tsx_path,
+        "virtual-file context must route to the backing .vue's generated TSX"
+    );
+
+    // Completion at byte offset 8 (end of `computed`) on line 0.
+    let position = Position {
+        line: 0,
+        character: request_offset,
+    };
+    let response = super::nav_features::handle_completion(
+        server,
+        completion_params(&virtual_uri, position, None),
+    )
+    .await
+    .expect("handle_completion succeeds");
+
+    let items = match response {
+        Some(CompletionResponse::List(list)) => list.items,
+        Some(CompletionResponse::Array(items)) => items,
+        None => panic!("virtual-file completion must return items"),
+    };
+
+    // The provider went through the virtual-file branch (keyed on the TSX path).
+    assert!(
+        provider.calls().iter().any(|c| matches!(
+            c,
+            MockCall::GetCompletions { path, offset }
+                if path == tsx_path && *offset == request_offset
+        )),
+        "completion must query the provider on the carrier TSX path via the virtual-file branch, \
+         calls={:?}",
+        provider.calls()
+    );
+
+    // The actionable auto-import item carries the neutral `verter_resolve` envelope.
+    let computed = items
+        .iter()
+        .find(|i| i.label == "computed")
+        .expect("the auto-import `computed` item must survive the virtual-file branch");
+    let envelope = computed
+        .data
+        .as_ref()
+        .and_then(|d| d.get("verter_resolve"))
+        .unwrap_or_else(|| {
+            panic!(
+                "F1: the virtual-file branch must preserve the actionable resolve handle as a \
+                 `verter_resolve` envelope (reverting the fix strips `data` and this is absent); \
+                 got data={:?}",
+                computed.data
+            )
+        });
+    assert_eq!(
+        envelope.get("kind").and_then(|v| v.as_str()),
+        Some("type_provider"),
+        "envelope kind must be type_provider"
+    );
+    assert_eq!(
+        envelope.get("provider_id").and_then(|v| v.as_str()),
+        Some("tsserver"),
+        "envelope must carry the active provider id"
+    );
+    assert_eq!(
+        envelope.get("provider_path").and_then(|v| v.as_str()),
+        Some(tsx_path),
+        "envelope must route resolve back to the carrier TSX path"
+    );
+    let provider_data = envelope
+        .get("provider_data")
+        .expect("envelope carries the serialized provider resolve key");
+    assert_eq!(
+        provider_data.get("source").and_then(|v| v.as_str()),
+        Some("vue"),
+        "the serialized handle must preserve the auto-import `source` key"
+    );
+
+    // Negative: the NON-actionable local item must NOT carry an envelope (no
+    // per-keystroke payload bloat for a no-op resolve — review finding F3).
+    let local = items
+        .iter()
+        .find(|i| i.label == "localVar")
+        .expect("the local item must also pass through the virtual-file branch");
+    assert!(
+        local
+            .data
+            .as_ref()
+            .and_then(|d| d.get("verter_resolve"))
+            .is_none(),
+        "a non-actionable local handle must NOT be stamped with a resolve envelope, got data={:?}",
+        local.data
+    );
+}
+
+/// F1 (type split — `active_non_decl_paths` EXCLUDES the declaration overlay). The
+/// generic stale-path closers consume the close-target set this method returns; a
+/// declaration overlay (`Decl`) must never appear in it, because a `Decl` overlay's
+/// lifecycle is owned exclusively by `DeclOverlayOwner` and must never be closed by
+/// a generic stale-path close (closing it while an open carrier root still reaches
+/// it strands that root on TS2307).
+///
+/// Discriminates directly: a state carrying ALL FOUR provider paths yields exactly
+/// the three non-decl kinds from `active_non_decl_paths()` (Decl absent) while
+/// `active_paths()` still yields all four — so the generic closers, which take the
+/// `NonDeclProviderPathKind` slice, are structurally unable to receive the decl
+/// path. RED-before (the method does not exist on the pre-fix tree — a compile
+/// error); GREEN-after.
+#[test]
+fn active_non_decl_paths_excludes_the_declaration_overlay() {
+    use crate::provider_sync::{NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState};
+
+    let state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/ws/tsconfig.json".into(),
+        ),
+        ide_path: Some("/ws/App.vue.tsx".to_string()),
+        api_path: Some("/ws/App.vue.verter.ts".to_string()),
+        decl_path: Some("/ws/App.d.vue.ts".to_string()),
+        shadow_path: Some("/ws/App.shadow".to_string()),
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        decl_background_loaded: true,
+        shadow_background_loaded: true,
+        committed_ide_surface: None,
+        commit_stamp: None,
+    };
+
+    // The full active set still includes the declaration overlay.
+    let all: Vec<ProviderPathKind> = state.active_paths().into_iter().map(|(k, _)| k).collect();
+    assert!(
+        all.contains(&ProviderPathKind::Decl),
+        "active_paths() still includes the Decl overlay, got {all:?}"
+    );
+
+    // The generic-closer input EXCLUDES the declaration overlay entirely.
+    let non_decl = state.active_non_decl_paths();
+    let kinds: Vec<NonDeclProviderPathKind> = non_decl.iter().map(|(k, _)| *k).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            NonDeclProviderPathKind::Ide,
+            NonDeclProviderPathKind::Api,
+            NonDeclProviderPathKind::Shadow,
+        ],
+        "active_non_decl_paths() returns exactly Ide/Api/Shadow (no Decl), got {kinds:?}"
+    );
+    assert!(
+        !non_decl.iter().any(|(_, path)| path == "/ws/App.d.vue.ts"),
+        "the declaration overlay path must NEVER appear in the generic-closer input, got {non_decl:?}"
+    );
+}
+
+/// F1 (the generic stale closer never issues a `close_dts` for a declaration
+/// overlay). Drive the production `close_stale_provider_paths` with a state that
+/// carries a live declaration overlay and assert the provider received NO close for
+/// the decl path — only the non-decl artifacts close.
+///
+/// `close_stale_provider_paths` takes the `NonDeclProviderPathKind` slice, so it is
+/// fed exactly what a removal path feeds it: `state.active_non_decl_paths()`. The
+/// declaration overlay is structurally excluded, so the faithful provider records a
+/// `CloseFile` for the API surface but never for `App.d.vue.ts`. RED-before (the
+/// pre-fix closer took `active_paths()` — which includes `Decl` — and matched
+/// `Api | Decl => close_dts`, closing the overlay; here it cannot). GREEN-after.
+#[tokio::test(flavor = "multi_thread")]
+async fn generic_stale_closer_never_closes_declaration_overlay() {
+    use crate::provider_sync::ProviderSyncState;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_surfaces = crate::provider_surface_store::ProviderSurfaceStore::new();
+
+    let state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(
+            "/ws/tsconfig.json".into(),
+        ),
+        ide_path: Some("/ws/App.vue.tsx".to_string()),
+        api_path: Some("/ws/App.vue.verter.ts".to_string()),
+        decl_path: Some("/ws/App.d.vue.ts".to_string()),
+        shadow_path: None,
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        decl_background_loaded: true,
+        shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
+    };
+
+    // Exactly the call shape the removal paths use: the generic closer over the
+    // NON-DECL active set.
+    super::close_stale_provider_paths(
+        &sync,
+        &provider_surfaces,
+        &state.active_non_decl_paths(),
+        "decl_close_guard_test",
+    )
+    .await;
+
+    let calls = provider.file_sync_calls();
+    // The declaration overlay was NEVER closed by the generic closer.
+    assert!(
+        !calls
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == "/ws/App.d.vue.ts")),
+        "the generic stale closer must NEVER issue a close for the declaration overlay \
+         (App.d.vue.ts) — its lifecycle is owned by DeclOverlayOwner; calls={calls:?}"
+    );
+    // The non-decl artifacts WERE closed (positive control — the closer ran and is
+    // not a no-op): the API `.verter.ts` and IDE `.tsx` both closed.
+    assert!(
+        calls
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == "/ws/App.vue.verter.ts")),
+        "the generic stale closer DOES close the non-decl API surface (positive control), calls={calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == "/ws/App.vue.tsx")),
+        "the generic stale closer DOES close the non-decl IDE surface (positive control), calls={calls:?}"
+    );
+}
+
+/// F3 (ABA supersession — generation FOLDED with the reaching-root set). A guarded
+/// close decided when a slot drained at generation `G` must be SKIPPED once any open
+/// has bumped the slot's generation past `G`, EVEN IF the reaching-root set looks
+/// empty again at the close-time gate. The folded `DeclOverlaySlot { generation,
+/// roots }` makes `(generation, roots)` one critical section, so the gate can never
+/// observe a half-applied pair and a transient drain-then-refill (or a drain whose
+/// generation advanced) is recognised as a superseded close.
+///
+/// Two cases, both deterministic on the owner:
+///   1. A reference REAPPEARED (set non-empty): skip.
+///   2. The set is EMPTY again but the generation ADVANCED past the decision
+///      baseline: skip — the ABA hole the bare set cannot catch.
+///
+/// In both, the provider receives NO `close_dts` (a destructive close would strand
+/// the reappearing/just-opened root on TS2307). The faithful provider records every
+/// close, so the assertion is exact. RED-before (the owner — folded slot,
+/// `guarded_close`, the generation gate — does not exist on the pre-fix tree; the
+/// pre-fix sibling generation map is read/written outside the slot's critical
+/// section, the false-invariant ABA hole this folds shut). GREEN-after.
+#[tokio::test(flavor = "multi_thread")]
+async fn guarded_close_is_superseded_when_generation_advanced_even_if_set_looks_empty() {
+    let decl_path = "/ws/Shared.d.vue.ts";
+
+    // CASE 1: a reaching root reappeared after the close was decided.
+    {
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let states: DashMap<String, crate::provider_sync::ProviderSyncState> = DashMap::new();
+        let owner = DeclOverlayOwner::default();
+
+        // The slot drained at generation 5 → close decided with baseline gen 5.
+        owner.test_seed_slot(decl_path, &["/ws/R.vue"], 5);
+        let decision = owner.release_root("/ws/R.vue");
+        assert_eq!(decision.len(), 1);
+        assert_eq!(
+            decision[0].decl_path, decl_path,
+            "the close decision targets the drained overlay"
+        );
+        assert_eq!(
+            decision[0].close_generation, 5,
+            "the close decision captures the slot's generation (5) at the drain"
+        );
+
+        // A racing open re-referenced the overlay (set now {S}) and bumped the
+        // generation (6). (test_replace_slot mirrors what open_overlay records.)
+        owner.test_replace_slot(decl_path, &["/ws/S.vue"], 6);
+
+        owner.guarded_close(&sync, &states, &decision).await;
+
+        let closed = provider
+            .file_sync_calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == decl_path));
+        assert!(
+            !closed,
+            "a close decided at gen 5 must be SKIPPED once a reference reappeared (set \
+             {{S}}, gen 6) — closing would strand S on TS2307; calls={:?}",
+            provider.file_sync_calls()
+        );
+        // The slot survives (the live reference is intact).
+        assert_eq!(
+            owner.test_slot_roots(decl_path),
+            Some(["/ws/S.vue".to_string()].into_iter().collect()),
+            "the superseded close leaves the re-referenced slot intact"
+        );
+    }
+
+    // CASE 2 (the ABA the bare set cannot catch): the set is EMPTY again at the gate,
+    // but the generation advanced past the decision baseline.
+    {
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let states: DashMap<String, crate::provider_sync::ProviderSyncState> = DashMap::new();
+        let owner = DeclOverlayOwner::default();
+
+        owner.test_seed_slot(decl_path, &["/ws/R.vue"], 5);
+        let decision = owner.release_root("/ws/R.vue");
+        assert_eq!(decision.len(), 1);
+        assert_eq!(decision[0].decl_path, decl_path);
+        assert_eq!(decision[0].close_generation, 5);
+
+        // ABA: a root opened (bump → 6) and closed again (set drains to empty), so the
+        // set LOOKS like the decision saw it ({}), but the generation has advanced.
+        owner.test_replace_slot(decl_path, &[], 6);
+        assert_eq!(
+            owner.test_slot_generation(decl_path),
+            6,
+            "the slot generation advanced to 6 despite the empty set"
+        );
+
+        owner.guarded_close(&sync, &states, &decision).await;
+
+        let closed = provider
+            .file_sync_calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == decl_path));
+        assert!(
+            !closed,
+            "a close decided at gen 5 must be SKIPPED once the generation advanced to 6, \
+             EVEN with an empty set (the ABA case the bare reaching-root set cannot \
+             catch); calls={:?}",
+            provider.file_sync_calls()
+        );
+    }
+
+    // POSITIVE CONTROL: an un-superseded close (set empty, generation UNCHANGED from
+    // the decision) DOES issue the provider close — the gate is not a blanket skip.
+    {
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let states: DashMap<String, crate::provider_sync::ProviderSyncState> = DashMap::new();
+        let owner = DeclOverlayOwner::default();
+
+        owner.test_seed_slot(decl_path, &["/ws/R.vue"], 5);
+        let decision = owner.release_root("/ws/R.vue");
+        // No racing open: the tombstone stays empty at gen 5 (unchanged).
+        owner.guarded_close(&sync, &states, &decision).await;
+
+        let closed = provider
+            .file_sync_calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == decl_path));
+        assert!(
+            closed,
+            "an un-superseded close (empty set, generation unchanged) DOES close the \
+             overlay (positive control); calls={:?}",
+            provider.file_sync_calls()
+        );
+        // The confirmed close GC'd the slot.
+        assert_eq!(
+            owner.test_slot_roots(decl_path),
+            None,
+            "a confirmed close GCs the empty tombstone slot"
+        );
+    }
+}
+
+/// SUPERSESSION GATE (the replacement invariant for the deleted post-await repair):
+/// a close decided when an overlay drained at generation `G` must be SKIPPED once a
+/// reaching root REOPENS the overlay in the decision→close window (re-referencing it
+/// and advancing the generation past `G`). The owner has NO compensate-after-close
+/// re-open; instead the guarded close's supersession gate refuses the now-stale
+/// close, so a live root's overlay is never clobbered (which would strand that root
+/// on TS2307) and a drained overlay is never resurrected for a root that is no
+/// longer there.
+///
+/// This drives the EXACT decision→reopen→gate window through the REAL owner methods
+/// against the FAITHFUL gated provider — distinct from the unit-level
+/// `guarded_close_is_superseded_*` test (which sets slot state via `test_replace_slot`):
+/// here the reopen runs through the REAL closure pass / `open_overlay`, so a
+/// regression in the open path's record-and-bump is also caught, and the assertion
+/// is on the PROVIDER end-state (the overlay stays open), not merely "no close call".
+///   * R primes `Shared.d.vue.ts` (`{Shared -> R}` at generation `G`, Shared open).
+///   * R's close is DECIDED: `release_root(R)` drains Shared to an empty tombstone
+///     and captures the close baseline generation `G`.
+///   * S (a still-open root that also imports Shared) RE-OPENS `Shared.d.vue.ts`
+///     through the REAL closure pass — re-recording `{Shared -> S}` and advancing the
+///     generation to `G+1`, with Shared re-synced in the provider.
+///   * R's STALE close (baseline `G`) is issued LAST: the gate sees a non-empty set
+///     AND `G+1 != G`, so it is SUPERSEDED and SKIPPED.
+///
+/// ASSERT: R's superseded close issues NO provider `close_dts` for Shared, Shared
+/// STAYS OPEN in the provider, and the owner records `{Shared -> S}` (the live root
+/// keeps it). DISCRIMINATING: locally weakening the supersession gate (so the close
+/// is never recognised as superseded) makes R's stale close fire — closing Shared in
+/// the provider and dropping S's edge — so the "stays open" assertion FAILS. With
+/// the gate intact it PASSES. The sibling
+/// `guarded_decl_close_does_not_strand_concurrently_reopened_overlay` discriminates
+/// the orthogonal defense (the per-path SERIALIZATION) under true close-vs-reopen
+/// concurrency; this one discriminates the GENERATION/REACHABILITY gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_close_is_superseded_when_a_reaching_root_reopens_the_overlay() {
+    let temp_base = std::env::temp_dir().join("verter_test_decl_close_no_resurrect");
+    let _ = std::fs::remove_dir_all(&temp_base);
+    let workspace = temp_base.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create dirs");
+    std::fs::write(
+        workspace.join("tsconfig.json"),
+        r#"{ "compilerOptions": { "baseUrl": "." } }"#,
+    )
+    .expect("write tsconfig");
+
+    // Shared is a leaf carrier imported by BOTH R and S.
+    std::fs::write(
+        workspace.join("src/Shared.vue"),
+        "<script setup lang=\"ts\">\ndefineProps<{ s: string }>()\n</script>\n<template><div/></template>",
+    )
+    .expect("write Shared.vue");
+    let r_src = "<script setup lang=\"ts\">\nimport Shared from './Shared.vue'\ndefineProps<{ r: string }>()\n</script>\n<template><Shared/></template>";
+    std::fs::write(workspace.join("src/R.vue"), r_src).expect("write R.vue");
+    let s_src = "<script setup lang=\"ts\">\nimport Shared from './Shared.vue'\ndefineProps<{ q: string }>()\n</script>\n<template><Shared/></template>";
+    std::fs::write(workspace.join("src/S.vue"), s_src).expect("write S.vue");
+
+    let workspace_id_raw = std::fs::canonicalize(&workspace)
+        .expect("canonical workspace")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let workspace_id = workspace_id_raw
+        .strip_prefix("//?/")
+        .unwrap_or(&workspace_id_raw)
+        .to_string();
+
+    let vfs_workspace_access: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),
+    );
+    let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace_access));
+
+    let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
+    let registry_ws =
+        verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
+    let build_result = crate::config::ProjectRegistry::from_workspace_roots(
+        &registry_ws,
+        &[workspace_uri],
+        &vite_opts,
+    );
+    host.configure_projects(
+        build_result
+            .registry
+            .projects()
+            .iter()
+            .map(|p| p.to_ide_project_config())
+            .collect(),
+    );
+    let vfs_workspace = make_test_vfs_workspace_from_registry(&build_result.registry)
+        .into_inner()
+        .expect("the test VFS workspace publishes a snapshot");
+
+    let provider = Arc::new(GatedDeclOverlayProvider::default());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let host_for_server = Arc::clone(&host);
+    let type_provider_for_server = Arc::clone(&type_provider);
+    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        VerterLanguageServer::new(
+            client,
+            LspConfig {
+                host: Arc::clone(&host_for_server),
+                type_provider: Some(Arc::clone(&type_provider_for_server)),
+                project_sync_mode: crate::ProjectSyncMode::FullProject,
+                type_provider_kind: crate::TypeProviderKind::Tsgo,
+                suggest_tsgo: false,
+                mcp_port: None,
+                type_provider_reason: None,
+                suppress_imported_carrier_prewarm: false,
+            },
+        )
+    });
+    let drain = tokio::spawn(async move {
+        let mut socket = socket;
+        while socket.next().await.is_some() {}
+    });
+    let server = service.inner();
+    server.install_vfs_workspace(vfs_workspace);
+
+    // Open R, then prime so Shared is recorded `{Shared -> R}` and open in provider.
+    let r_uri = crate::uri::path_to_file_uri(&format!("{workspace_id}/src/R.vue")).expect("r uri");
+    let _ = server.test_documents().did_open(&TextDocumentItem {
+        uri: r_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: r_src.to_string(),
+    });
+    let r_id = server
+        .test_documents()
+        .get_canonical_id(&r_uri)
+        .expect("R.vue has a canonical id");
+    let shared_id = format!("{workspace_id}/src/Shared.vue");
+    let shared_decl_path = host
+        .declaration_carrier_path(&shared_id)
+        .expect("Shared.vue projects a declaration carrier path");
+    assert!(
+        shared_decl_path.contains("Shared.d.vue.ts"),
+        "sanity: Shared's declaration overlay path is Shared.d.vue.ts, got {shared_decl_path}"
+    );
+
+    // PRIME with only R open: records `{Shared.d.vue.ts -> R}` at some generation G
+    // and opens Shared in the provider.
+    server.test_run_declaration_closure_pass(1).await;
+    assert!(
+        provider.open_paths_snapshot().contains(&shared_decl_path),
+        "priming pass opened Shared.d.vue.ts in the provider, open_paths={:?}",
+        provider.open_paths_snapshot()
+    );
+    let r_reaches_shared = server
+        .test_decl_overlay_owner()
+        .test_slot_roots(&shared_decl_path)
+        .is_some_and(|roots| roots.iter().any(|r| r == &r_id));
+    assert!(
+        r_reaches_shared,
+        "priming pass records Shared.d.vue.ts -> {{R}}, slots={:?}",
+        server.test_decl_overlay_owner().test_slots_snapshot()
+    );
+
+    // Open S (imports Shared too) — a still-open root. Its edge is recorded by the
+    // REAL reopen pass below, not yet.
+    let s_uri = crate::uri::path_to_file_uri(&format!("{workspace_id}/src/S.vue")).expect("s uri");
+    let _ = server.test_documents().did_open(&TextDocumentItem {
+        uri: s_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: s_src.to_string(),
+    });
+    let s_id = server
+        .test_documents()
+        .get_canonical_id(&s_uri)
+        .expect("S.vue has a canonical id");
+
+    let owner = server.test_decl_overlay_owner();
+
+    // STEP 1 — R's close DECISION: drain R from Shared. With S not yet recorded the
+    // slot drains to an empty tombstone, and the returned target carries the close
+    // baseline generation G (captured under the slot lock at the drain).
+    let decision = owner.release_root(&r_id);
+    let shared_decision: Vec<&DeclCloseTarget> = decision
+        .iter()
+        .filter(|t| t.decl_path == shared_decl_path)
+        .collect();
+    assert_eq!(
+        shared_decision.len(),
+        1,
+        "releasing R decides a close for Shared.d.vue.ts, decision={decision:?}"
+    );
+    let baseline_gen = shared_decision[0].close_generation;
+
+    // STEP 2 — S RE-OPENS Shared through the REAL closure pass BEFORE R's stale close
+    // is issued: `open_overlay` re-records `{Shared -> S}`, advances the generation
+    // past the baseline, and re-syncs Shared in the provider (the decision→close
+    // window the gate must defend).
+    server.test_run_declaration_closure_pass(1).await;
+    assert!(
+        owner
+            .test_slot_roots(&shared_decl_path)
+            .is_some_and(|roots| roots.iter().any(|r| r == &s_id)),
+        "S's reopen pass re-records Shared.d.vue.ts -> {{S}}, slots={:?}",
+        owner.test_slots_snapshot()
+    );
+    assert!(
+        owner.test_slot_generation(&shared_decl_path) > baseline_gen,
+        "S's reopen advances the generation past the close baseline ({baseline_gen}), \
+         got {}",
+        owner.test_slot_generation(&shared_decl_path)
+    );
+
+    // STEP 3 — R's STALE close is issued LAST with the baseline-G decision. The
+    // guarded close's gate sees a non-empty set ({S}) AND the advanced generation, so
+    // it is SUPERSEDED and must NOT touch the provider.
+    let Some(sync) = server.project_sync.as_ref() else {
+        panic!("the tsgo server has a project sync");
+    };
+    owner
+        .guarded_close(sync, &server.provider_sync_states, &decision)
+        .await;
+
+    // INVARIANT 1 (gate skip): R's superseded close issued NO provider close for
+    // Shared. RED if the gate is weakened (the stale close fires and closes Shared).
+    let shared_closed = provider
+        .calls()
+        .iter()
+        .any(|c| matches!(c, MockCall::CloseFile { path } if path == &shared_decl_path));
+    assert!(
+        !shared_closed,
+        "R's stale close (baseline gen {baseline_gen}) must be SUPERSEDED by S's reopen \
+         and issue NO provider close for Shared.d.vue.ts; calls={:?}",
+        provider.calls()
+    );
+
+    // INVARIANT 2 (no clobber): Shared.d.vue.ts STAYS OPEN in the provider, so S's
+    // bare `import Shared from "./Shared.vue"` still resolves (no TS2307), and the
+    // owner still records the live root S reaching it.
+    assert!(
+        provider.open_paths_snapshot().contains(&shared_decl_path),
+        "Shared.d.vue.ts must STAY OPEN after R's superseded close (S reaches it); \
+         open_paths={:?}, calls={:?}",
+        provider.open_paths_snapshot(),
+        provider.calls()
+    );
+    assert!(
+        owner
+            .test_slot_roots(&shared_decl_path)
+            .is_some_and(|roots| roots.iter().any(|r| r == &s_id)),
+        "the superseded close leaves S's edge to Shared.d.vue.ts intact, slots={:?}",
+        owner.test_slots_snapshot()
+    );
+
+    drain.abort();
+    let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+// ─── Request-scoped provider-surface snapshot: fail-closed interactive queries ───
+//
+// Interactive provider-backed queries (hover/completion/definition/…) must be
+// built from ONE immutable, generation-stamped `ProviderSurfaceSnapshot` and
+// re-validated after the provider await — a concurrent re-sync or close must
+// never let a handler serve a result mapped through a torn
+// (path, content, mapper) tuple assembled from independent live reads.
+
+/// Shared carrier fixture for the request-surface tests.
+const REQUEST_SURFACE_APP: &str = r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#;
+
+/// Build a tsgo-kind mock service with an owner-resolved, provider-synced
+/// carrier: the IDE surface has been delivered to the provider through the
+/// direct-open path, so interactive queries can route to it.
+async fn make_request_surface_carrier() -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    Arc<MockTypeProvider>,
+    Uri,
+) {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(server, "/workspace/src/App.vue", REQUEST_SURFACE_APP);
+    server.sync_ide_to_provider(&uri).await;
+    (service, provider, uri)
+}
+
+/// A successful direct (tsgo) IDE sync must record a `CarrierIde` surface at
+/// the IDE provider path: the exact bytes delivered to the provider, plus the
+/// carrier source they were compiled from. Without this producer, interactive
+/// queries have no consistent surface to capture.
+#[tokio::test(flavor = "multi_thread")]
+async fn successful_direct_ide_sync_records_carrier_ide_surface() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("the direct IDE sync must commit a live IDE path");
+    let snapshot = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("a successful direct IDE sync must record a CarrierIde surface");
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+        "the recorded surface must carry the CarrierIde role"
+    );
+    let ide = server
+        .documents
+        .get_ide(&uri)
+        .expect("IDE output should exist");
+    assert_eq!(
+        snapshot.provider_content.as_ref(),
+        ide.code.as_ref(),
+        "the recorded surface must pin the EXACT bytes synced to the provider"
+    );
+    let doc = server.documents.get(&uri).expect("document is open");
+    assert_eq!(
+        snapshot.carrier_source.as_ref(),
+        doc.source.as_ref(),
+        "the recorded surface must pin the carrier source the bytes were compiled from"
+    );
+    assert!(
+        snapshot.source_map.is_some(),
+        "the recorded CarrierIde surface must carry its source map"
+    );
+}
+
+/// A FAILED direct IDE sync must record NOTHING: the provider never received
+/// the content, so no surface generation may pretend it did (fail closed).
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_direct_ide_sync_records_no_carrier_ide_surface() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(server, "/workspace/src/App.vue", REQUEST_SURFACE_APP);
+
+    let target_ide_path = server
+        .target_ide_path_for_uri(&uri)
+        .expect("owner-resolved carrier has a target IDE path");
+    provider.set_fail_sync_path(&target_ide_path);
+
+    server.sync_ide_to_provider(&uri).await;
+
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&target_ide_path)
+            .is_none(),
+        "a failed IDE sync must not record a provider surface"
+    );
+}
+
+/// A successful self-file (rune module) shadow sync records a `Shadow` surface
+/// at the module's OWN canonical path — the provider buffer bytes plus the
+/// rewrite-aware mapper; a failed shadow sync records nothing.
+#[tokio::test]
+async fn self_file_shadow_sync_records_shadow_surface_on_success_only() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const s = $state(0);\n".to_string(),
+    });
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the shadow sync should succeed against the mock provider"
+    );
+    let snapshot = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot("/workspace/store.svelte.ts")
+        .expect("a successful shadow sync must record a Shadow surface");
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::Shadow,
+        "the recorded surface must carry the Shadow role"
+    );
+    assert!(
+        snapshot.provider_content.contains("$state"),
+        "the recorded surface must pin the provider buffer bytes"
+    );
+    assert!(
+        snapshot.source_map.is_some(),
+        "the recorded Shadow surface must carry the rewrite-aware mapper"
+    );
+    // The Shadow surface must stamp a REAL map identity derived from its
+    // rewrite-aware mapper — a zeroed identity would let a mapper-changing
+    // re-sync pass the byte-match honored gate and map through a stale mapper.
+    assert_ne!(
+        snapshot.stamp.map_hash, [0u8; 16],
+        "the recorded Shadow surface must stamp a real (mapper-derived) map identity"
+    );
+    // Identity is deterministic: an identical re-sync stamps the SAME identity
+    // (so a byte-identical re-record stays honored, no over-drop).
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the identical shadow re-sync should succeed"
+    );
+    let resynced = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot("/workspace/store.svelte.ts")
+        .expect("the re-sync must record a fresh Shadow generation");
+    assert_ne!(
+        resynced.stamp.generation, snapshot.stamp.generation,
+        "the re-sync must mint a fresh generation"
+    );
+    assert_eq!(
+        resynced.stamp.map_hash, snapshot.stamp.map_hash,
+        "an identical shadow re-sync must stamp the SAME map identity"
+    );
+
+    // A FAILED shadow sync records nothing.
+    let other_uri: Uri = "file:///workspace/other.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: other_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const t = $state(1);\n".to_string(),
+    });
+    provider.set_fail_sync_path("/workspace/other.svelte.ts");
+    assert!(
+        !server.sync_self_file_shadow_unresolved(&other_uri).await,
+        "the shadow sync should fail for the failure-injected path"
+    );
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot("/workspace/other.svelte.ts")
+            .is_none(),
+        "a failed shadow sync must not record a provider surface"
+    );
+}
+
+/// The interactive query context must serve the RECORDED provider surface —
+/// never a torn pair of the committed provider path with fresher live-compiled
+/// content the provider has not received. After an edit that has NOT been
+/// re-synced, the context either fails closed (`None`) or still serves the
+/// recorded surface byte-exactly.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_query_context_serves_recorded_surface_never_torn_live_pair() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let store = server.documents.provider_surfaces().clone();
+
+    // Stable state: the context serves the recorded surface (anti-over-drop).
+    let ctx = server
+        .type_provider_context(&uri)
+        .expect("a synced, unedited carrier must yield a provider query context");
+    let recorded = store
+        .current_snapshot(&ctx.tsx_path)
+        .expect("the context's provider path must resolve to a recorded surface");
+    assert_eq!(
+        ctx.tsx_content.as_ref(),
+        recorded.provider_content.as_ref(),
+        "the stable-state context must serve the recorded surface content"
+    );
+
+    // Edit WITHOUT a re-sync: the live artifacts advance while the provider
+    // still holds the previously-synced surface.
+    let _ = server.documents.did_change(
+        &uri,
+        2,
+        r#"<script setup lang="ts">
+const msg = 'hello'
+const extra = 'drift'
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#,
+    );
+
+    match server.type_provider_context(&uri) {
+        // Fail closed: no consistent captured surface for the edited document.
+        None => {}
+        Some(ctx) => {
+            let snapshot = store
+                .current_snapshot(&ctx.tsx_path)
+                .expect("a served query context must be backed by a recorded provider surface");
+            assert_eq!(
+                ctx.tsx_content.as_ref(),
+                snapshot.provider_content.as_ref(),
+                "the query context must serve the recorded provider surface content, \
+                 never live-compiled bytes the provider has not received"
+            );
+            assert!(
+                !ctx.tsx_content.contains("extra"),
+                "the un-synced edit must not leak into the provider query context"
+            );
+        }
+    }
+}
+
+/// A provider re-sync landing a FRESH surface generation while a hover request
+/// is awaiting the provider must cause the provider contribution to be DROPPED
+/// (fail closed): the response was produced against a surface that no longer
+/// matches, and mapping it through the fresh state would be wrong, not stale.
+#[tokio::test(flavor = "multi_thread")]
+async fn hover_drops_provider_result_when_surface_regenerates_mid_request() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    set_type_hover_at_vue_position(server, &provider, &uri, position, "PROVIDER_HOVER_SENTINEL");
+
+    let ide_path = server.active_ide_path_for_uri(&uri).expect("live IDE path");
+    let store = server.documents.provider_surfaces().clone();
+    let raced_path = ide_path.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            // A concurrent re-sync lands a NEW generation with drifted content
+            // between the handler's capture and its merge of the response.
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_path,
+                    "/workspace/src/App.vue".to_string(),
+                    Arc::from("// drifted ide content"),
+                    None,
+                    Arc::from("// drifted carrier source"),
+                ),
+            );
+        }),
+    );
+
+    let text = hover_text(
+        server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        !text.contains("PROVIDER_HOVER_SENTINEL"),
+        "a provider hover produced against a superseded surface generation must be \
+         DROPPED, got: {text}"
+    );
+}
+
+/// A surface retirement (the `did_close` path forgetting the provider surface)
+/// while a hover request is awaiting the provider must fail closed: no provider
+/// contribution, no panic.
+#[tokio::test(flavor = "multi_thread")]
+async fn hover_fails_closed_when_surface_retired_mid_request() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    set_type_hover_at_vue_position(server, &provider, &uri, position, "PROVIDER_HOVER_SENTINEL");
+
+    let ide_path = server.active_ide_path_for_uri(&uri).expect("live IDE path");
+    let store = server.documents.provider_surfaces().clone();
+    let raced_path = ide_path.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            // The surface is retired mid-request (a racing close began); the
+            // close is not yet confirmed, so the token is deliberately kept.
+            let _token = store.forget(&raced_path);
+        }),
+    );
+
+    let text = hover_text(
+        server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        !text.contains("PROVIDER_HOVER_SENTINEL"),
+        "a provider hover racing a surface retirement must be DROPPED, got: {text}"
+    );
+}
+
+/// BOOTSTRAP-DRAIN reproduction: the editor opens a carrier during bootstrap so
+/// the file is queued (never interactively synced); the background drain then
+/// direct-opens its IDE surface (tsgo). The drain MUST record the `CarrierIde`
+/// surface it delivered to the provider — without the record, the interactive
+/// request-surface capture misses and EVERY provider-backed feature silently
+/// drops its provider contribution until the next `did_change`.
+#[tokio::test(flavor = "multi_thread")]
+async fn bootstrap_drained_carrier_records_surface_and_serves_provider_hover() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(server, "/workspace/src/App.vue", REQUEST_SURFACE_APP);
+
+    // Opened during bootstrap: queued for the drain, no interactive sync ran.
+    server
+        .pending_snapshot_provider_sync
+        .insert("/workspace/src/App.vue".to_string());
+    drain_pending_snapshot_provider_sync(
+        server.project_sync.as_ref(),
+        &server.documents,
+        &server.vfs_workspace,
+        &server.provider_sync_states,
+        &server.pending_snapshot_provider_sync,
+        true,
+        None,
+        None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("the drain must commit a live IDE path for the queued carrier");
+    let snapshot = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("the drain's direct IDE open must record a CarrierIde surface");
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+        "the drain-recorded surface must carry the CarrierIde role"
+    );
+    let ide = server
+        .documents
+        .get_ide(&uri)
+        .expect("IDE output should exist");
+    assert_eq!(
+        snapshot.provider_content.as_ref(),
+        ide.code.as_ref(),
+        "the drain-recorded surface must pin the EXACT bytes delivered to the provider"
+    );
+
+    // End-to-end: hover captures the drain-recorded surface and serves the
+    // provider contribution (no silent drop before the next did_change).
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        position,
+        "```typescript\nconst msg: string\n```",
+    );
+    let text = hover_text(
+        server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        text.contains("const msg: string"),
+        "a drain-synced carrier must serve the provider hover, got: {text}"
+    );
+}
+
+/// The OPEN-UNRESOLVED drain path (owner not yet resolved, editor-liveness IDE
+/// open) must ALSO record the `CarrierIde` surface it delivers: the unresolved
+/// carrier is queryable (hover/completion work through the unresolved IDE
+/// path), so the request-surface capture needs a recorded surface here too.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_unresolved_drain_ide_sync_records_carrier_ide_surface() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let source = "<script setup lang=\"ts\">\nconst msg = 'hello'\n</script>\n\
+                  <template><div>{{ msg }}</div></template>\n";
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    let profile = documents.tsx_profile.read().clone();
+    let ide = host
+        .get_ide("/workspace/src/App.vue", &profile)
+        .expect("IDE output should exist for the open carrier");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+
+    let synced = sync_open_unresolved_carrier_provider_file(
+        &sync,
+        &documents,
+        &provider_sync_states,
+        "/workspace/src/App.vue",
+        false,
+        Some(&ide),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+    assert!(
+        !synced,
+        "the unresolved preserve pass keeps the file queued (returns false)"
+    );
+
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("the open unresolved carrier must commit provider state");
+    let ide_path = state
+        .ide_path
+        .clone()
+        .expect("the unresolved carrier must commit a live IDE path");
+    let snapshot = documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("a successful open-unresolved IDE sync must record a CarrierIde surface");
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+        "the recorded surface must carry the CarrierIde role"
+    );
+    assert_eq!(
+        snapshot.provider_content.as_ref(),
+        ide.code.as_ref(),
+        "the recorded surface must pin the EXACT bytes delivered to the provider"
+    );
+
+    // A FAILED open-unresolved IDE sync records NOTHING (fail closed).
+    let other_uri: Uri = "file:///workspace/src/Other.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: other_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    let other_ide = host
+        .get_ide("/workspace/src/Other.vue", &profile)
+        .expect("IDE output should exist for the second carrier");
+    provider.set_fail_sync_path("/workspace/src/Other.vue.tsx");
+    let _ = sync_open_unresolved_carrier_provider_file(
+        &sync,
+        &documents,
+        &provider_sync_states,
+        "/workspace/src/Other.vue",
+        false,
+        Some(&other_ide),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
+    )
+    .await;
+    assert!(
+        documents
+            .provider_surfaces()
+            .current_snapshot("/workspace/src/Other.vue.tsx")
+            .is_none(),
+        "a failed open-unresolved IDE sync must not record a provider surface"
+    );
+}
+
+/// The PRODUCTION `did_close` path must retire the carrier's `CarrierIde`
+/// surface from the store, not only close the provider buffer. Without the
+/// retire, reopening the same text BEFORE any successful re-sync lets the
+/// interactive capture resolve the stale surface (source bytes match) and
+/// serve a query against a provider buffer that is CLOSED.
+#[tokio::test(flavor = "multi_thread")]
+async fn did_close_retires_carrier_ide_surface_so_reopen_fails_closed_until_resync() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let ide_path = server.active_ide_path_for_uri(&uri).expect("live IDE path");
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&ide_path)
+            .is_some(),
+        "precondition: the synced carrier has a recorded CarrierIde surface"
+    );
+
+    // PRODUCTION close: the did_close handler closes the tsgo IDE buffer.
+    server
+        .did_close(DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+        })
+        .await;
+    assert!(
+        provider
+            .file_sync_calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == &ide_path)),
+        "the did_close handler must close the tsgo IDE buffer"
+    );
+
+    // Reopen the SAME text; no successful re-sync has happened yet.
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 2,
+        text: REQUEST_SURFACE_APP.to_string(),
+    });
+
+    // The closed surface must NOT be capturable: the provider buffer is closed,
+    // so serving a query against the stale snapshot would be torn.
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&ide_path)
+            .is_none(),
+        "did_close must retire the CarrierIde surface's active generation"
+    );
+    assert!(
+        server.capture_provider_request_surface(&uri).is_none(),
+        "a reopened, not-yet-resynced carrier must fail closed at capture — the \
+         provider no longer holds the closed IDE buffer"
+    );
+
+    // A fresh successful sync restores capture (no permanent over-drop).
+    server.sync_ide_to_provider(&uri).await;
+    assert!(
+        server.capture_provider_request_surface(&uri).is_some(),
+        "a successful re-sync must restore the capturable surface"
+    );
+}
+
+/// The PRODUCTION self-file `did_close` path must retire the rune module's
+/// `Shadow` surface: the SelfFile capture arm resolves by canonical path with
+/// no committed-state gate, so a lingering `Current` Shadow surface would be
+/// captured for a reopened module whose provider buffer is CLOSED.
+#[tokio::test(flavor = "multi_thread")]
+async fn did_close_retires_shadow_surface_so_reopen_fails_closed_until_resync() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let rune_text = "export const s = $state(0);\n";
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: rune_text.to_string(),
+    });
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the shadow sync should succeed"
+    );
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot("/workspace/store.svelte.ts")
+            .is_some(),
+        "precondition: the synced rune module has a recorded Shadow surface"
+    );
+
+    // PRODUCTION close: the did_close handler clears the self-file state and
+    // closes the own-path provider buffer.
+    server
+        .did_close(DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier {
+                uri: rune_uri.clone(),
+            },
+        })
+        .await;
+
+    // Reopen the SAME text; no successful re-sync has happened yet.
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 2,
+        text: rune_text.to_string(),
+    });
+
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot("/workspace/store.svelte.ts")
+            .is_none(),
+        "did_close must retire the Shadow surface's active generation"
+    );
+    assert!(
+        server.capture_provider_request_surface(&rune_uri).is_none(),
+        "a reopened, not-yet-resynced rune module must fail closed at capture — \
+         the provider no longer holds the closed shadow buffer"
+    );
+}
+
+/// Shared setup for the virtual-file request-surface tests: a synced carrier
+/// with a recorded CarrierIde surface, plus a `verter-virtual://` document
+/// opened over `virtual_content` (which may deliberately differ from the
+/// recorded surface to model a stale tab).
+async fn make_virtual_file_fixture(
+    recorded_content: &str,
+    virtual_content: &str,
+) -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    Arc<MockTypeProvider>,
+    Uri,
+    String,
+) {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let tsx_path = "/workspace/src/App.vue.tsx".to_string();
+    let source_uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: source_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div/></template>".to_string(),
+    });
+    server.provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some(tsx_path.clone()),
+            api_path: None,
+            decl_path: None,
+            shadow_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            decl_background_loaded: false,
+            shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
+        },
+    );
+    server.record_carrier_ide_snapshot("/workspace/src/App.vue", &tsx_path, recorded_content, None);
+
+    let virtual_uri_str = format!(
+        "verter-virtual://generated/App.vue.tsx?sourceUri={}",
+        source_uri.as_str()
+    );
+    let virtual_uri: Uri = virtual_uri_str.parse().expect("virtual uri parses");
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: virtual_uri.clone(),
+        language_id: "typescriptreact".to_string(),
+        version: 1,
+        text: virtual_content.to_string(),
+    });
+    (service, provider, virtual_uri, tsx_path)
+}
+
+/// A STALE virtual tab (its bytes hold a generation the provider no longer
+/// serves) must FAIL CLOSED at context capture: offsets computed against the
+/// drifted virtual buffer would index content the provider does not hold, so
+/// no provider query may be issued and no provider result served.
+#[tokio::test(flavor = "multi_thread")]
+async fn virtual_file_query_fails_closed_when_virtual_buffer_is_stale() {
+    // The recorded (provider-held) surface DIFFERS from the virtual tab bytes.
+    let recorded = "const fresh = 1;\ncomputed\n";
+    let stale_virtual = "computed\n";
+    let (service, provider, virtual_uri, tsx_path) =
+        make_virtual_file_fixture(recorded, stale_virtual).await;
+    let server = service.inner();
+
+    // A hover the PRE-GATE path would have served: keyed at the offset the
+    // stale virtual buffer computes.
+    let stale_offset = "computed".len() as u32;
+    provider.set_hover(
+        &tsx_path,
+        stale_offset,
+        Some(crate::type_provider::protocol::HoverInfo {
+            contents: "VIRTUAL_HOVER_SENTINEL".to_string(),
+            range_start: None,
+            range_end: None,
+        }),
+    );
+
+    assert!(
+        server.virtual_file_context(&virtual_uri).is_none(),
+        "a virtual tab whose bytes do not match the captured surface must fail \
+         closed at context capture"
+    );
+
+    let hover = server
+        .hover(hover_params(
+            &virtual_uri,
+            Position {
+                line: 0,
+                character: stale_offset,
+            },
+        ))
+        .await
+        .expect("hover request should succeed");
+    let text = hover
+        .map(|h| match h.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => String::new(),
+        })
+        .unwrap_or_default();
+    assert!(
+        !text.contains("VIRTUAL_HOVER_SENTINEL"),
+        "a stale virtual tab must not serve a provider hover computed against \
+         drifted bytes, got: {text}"
+    );
+}
+
+/// A provider re-sync advancing the surface generation while a virtual-file
+/// query is awaiting the provider must cause the provider result to be
+/// DROPPED (fail closed): the response was produced against a surface the
+/// virtual tab no longer matches.
+#[tokio::test(flavor = "multi_thread")]
+async fn virtual_file_query_drops_provider_result_when_surface_advances_mid_request() {
+    let content = "computed\n";
+    let (service, provider, virtual_uri, tsx_path) =
+        make_virtual_file_fixture(content, content).await;
+    let server = service.inner();
+
+    let offset = "computed".len() as u32;
+    provider.set_hover(
+        &tsx_path,
+        offset,
+        Some(crate::type_provider::protocol::HoverInfo {
+            contents: "VIRTUAL_HOVER_SENTINEL".to_string(),
+            range_start: None,
+            range_end: None,
+        }),
+    );
+
+    // Mid-request seam: a concurrent re-sync lands a NEW generation with
+    // drifted content between the capture and the response handling.
+    let store = server.documents.provider_surfaces().clone();
+    let raced_path = tsx_path.clone();
+    provider.set_on_query(
+        &tsx_path,
+        Box::new(move || {
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_path,
+                    "/workspace/src/App.vue".to_string(),
+                    Arc::from("// drifted ide content"),
+                    None,
+                    Arc::from("// drifted carrier source"),
+                ),
+            );
+        }),
+    );
+
+    let hover = server
+        .hover(hover_params(
+            &virtual_uri,
+            Position {
+                line: 0,
+                character: offset,
+            },
+        ))
+        .await
+        .expect("hover request should succeed");
+    let text = hover
+        .map(|h| match h.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => String::new(),
+        })
+        .unwrap_or_default();
+    assert!(
+        !text.contains("VIRTUAL_HOVER_SENTINEL"),
+        "a virtual-file hover produced against a superseded surface generation \
+         must be DROPPED, got: {text}"
+    );
+}
+
+/// With a byte-matched virtual tab and a stable surface, the virtual-file
+/// branch DOES serve the provider result — guards against an over-eager
+/// fail-closed gate breaking healthy virtual-file queries.
+#[tokio::test(flavor = "multi_thread")]
+async fn virtual_file_query_serves_provider_result_from_stable_matched_surface() {
+    let content = "computed\n";
+    let (service, provider, virtual_uri, tsx_path) =
+        make_virtual_file_fixture(content, content).await;
+    let server = service.inner();
+
+    let offset = "computed".len() as u32;
+    provider.set_hover(
+        &tsx_path,
+        offset,
+        Some(crate::type_provider::protocol::HoverInfo {
+            contents: "VIRTUAL_HOVER_SENTINEL".to_string(),
+            range_start: None,
+            range_end: None,
+        }),
+    );
+
+    let text = hover_text(
+        server
+            .hover(hover_params(
+                &virtual_uri,
+                Position {
+                    line: 0,
+                    character: offset,
+                },
+            ))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        text.contains("VIRTUAL_HOVER_SENTINEL"),
+        "a byte-matched virtual tab over a stable surface must serve the provider \
+         hover, got: {text}"
+    );
+}
+
+/// Shared setup for the FOREIGN-carrier mapping tests: parent + child carriers
+/// synced (both CarrierIde surfaces recorded), with the mock provider primed to
+/// return a definition location inside the CHILD's IDE surface for a query at
+/// the parent's mapped `msg` position.
+async fn make_foreign_mapping_fixture() -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    Arc<MockTypeProvider>,
+    Uri,
+    Position,
+    String,
+) {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let parent_uri = open_test_vue(server, "/workspace/src/App.vue", REQUEST_SURFACE_APP);
+    let child_uri = open_test_vue(server, "/workspace/src/Child.vue", REQUEST_SURFACE_APP);
+    server.sync_ide_to_provider(&parent_uri).await;
+    server.sync_ide_to_provider(&child_uri).await;
+
+    let child_ide_path = server
+        .active_ide_path_for_uri(&child_uri)
+        .expect("child IDE path is live");
+    let child_snapshot = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&child_ide_path)
+        .expect("child CarrierIde surface recorded");
+    // A definition target inside the CHILD's IDE surface: the mapped `msg`
+    // declaration token.
+    let child_target = child_snapshot
+        .provider_content
+        .find("msg")
+        .expect("token present in child IDE content") as u32;
+
+    // The parent query position + the tsx offset the handler will compute.
+    // A STRING LITERAL position: Verter's own definition resolution yields
+    // nothing there, so the merge consumes the PROVIDER locations (a Verter
+    // same-file definition would short-circuit the merge and never reach the
+    // foreign-mapping path under test).
+    let position = find_document_position(server, &parent_uri, "'hello'", 1);
+    let parent_ctx = synced_type_provider_context(server, &parent_uri);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &parent_ctx.carrier_line_index,
+        &parent_ctx.mapper,
+        &parent_ctx.tsx_line_index,
+    )
+    .expect("parent position maps to tsx");
+    provider.set_definitions(
+        &parent_ctx.tsx_path,
+        tsx_offset,
+        vec![crate::type_provider::protocol::TypeLocation {
+            path: child_ide_path.clone(),
+            start: child_target,
+            end: child_target + 3,
+        }],
+    );
+    (service, provider, parent_uri, position, child_ide_path)
+}
+
+/// STABLE foreign surface: a provider definition landing in a FOREIGN carrier's
+/// IDE surface maps back onto the foreign `.vue` through the surface pinned at
+/// request start — guards against the pinned-set resolver over-dropping.
+#[tokio::test(flavor = "multi_thread")]
+async fn definition_maps_foreign_carrier_location_through_pinned_surface() {
+    let (service, _provider, parent_uri, position, _child_ide_path) =
+        make_foreign_mapping_fixture().await;
+    let server = service.inner();
+
+    let response = server
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: parent_uri.clone(),
+                },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .expect("definition request should succeed");
+    let locations = match response {
+        Some(GotoDefinitionResponse::Array(locs)) => locs,
+        Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+        other => panic!("expected definition locations, got {other:?}"),
+    };
+    assert!(
+        locations
+            .iter()
+            .any(|l| l.uri.as_str().ends_with("/Child.vue")),
+        "a stable foreign surface must map the child location onto Child.vue, got {locations:?}"
+    );
+}
+
+/// A FOREIGN carrier re-sync landing a fresh generation with drifted content
+/// while the request is awaiting the provider must cause the foreign location
+/// to be DROPPED: the provider answered against the surface pinned at request
+/// start, and mapping its offsets through the merge-time current surface would
+/// land on wrong `.vue` positions (torn, not stale).
+#[tokio::test(flavor = "multi_thread")]
+async fn definition_drops_foreign_carrier_location_when_foreign_surface_advances_mid_request() {
+    let (service, provider, parent_uri, position, child_ide_path) =
+        make_foreign_mapping_fixture().await;
+    let server = service.inner();
+
+    // Mid-request seam: a concurrent CHILD re-sync lands a fresh generation
+    // with DIFFERENT provider content between the request-start pin and the
+    // merge. The racing surface's carrier source byte-matches the live child
+    // document and carries a usable mapper — exactly the shape a merge-time
+    // live-current resolver would ACCEPT and mis-map the provider's
+    // request-start offsets through.
+    let parent_ctx = synced_type_provider_context(server, &parent_uri);
+    let store = server.documents.provider_surfaces().clone();
+    let raced_child_path = child_ide_path.clone();
+    let pinned_child = store
+        .current_snapshot(&child_ide_path)
+        .expect("child surface current");
+    let raced_mapper = pinned_child.source_map.as_ref().map(|m| (**m).clone());
+    // Same prefix + trailing drift: the request-start offsets still MAP through
+    // the racing surface (a merge-time live-current resolver would serve them),
+    // but the content hash differs — the pinned-set resolver must drop.
+    let raced_content: String = format!("{}\n// trailing drift", pinned_child.provider_content);
+    provider.set_on_query(
+        &parent_ctx.tsx_path,
+        Box::new(move || {
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_child_path,
+                    "/workspace/src/Child.vue".to_string(),
+                    Arc::from(raced_content.as_str()),
+                    raced_mapper,
+                    Arc::from(REQUEST_SURFACE_APP),
+                ),
+            );
+        }),
+    );
+
+    let response = server
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: parent_uri.clone(),
+                },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .expect("definition request should succeed");
+    let locations = match response {
+        Some(GotoDefinitionResponse::Array(locs)) => locs,
+        Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+        None => Vec::new(),
+        other => panic!("unexpected definition response shape: {other:?}"),
+    };
+    assert!(
+        !locations
+            .iter()
+            .any(|l| l.uri.as_str().ends_with("/Child.vue")),
+        "a foreign location must be DROPPED when the foreign surface advanced \
+         mid-request — mapping through the merge-time surface would be wrong, \
+         got {locations:?}"
+    );
+}
+
+/// The tsserver PUBLISH path (the store-membership route, distinct from the
+/// tsgo direct-open the sibling tests model): the carrier-sync gateway records
+/// both companion surfaces at publish time (`record_and_version_carrier_
+/// companions` in `external_ts/carrier_sync.rs`) and commits a `Published`
+/// store-resident provider state. The interactive request-surface capture must
+/// resolve THAT surface — a key mismatch between the recorded companion path
+/// and `active_ide_path_for_uri`, a missing `ide_background_loaded` flag, or a
+/// carrier-source byte-gate miss here would silently drop EVERY provider
+/// result on the live tsserver engine. A genuinely torn surface (an edit after
+/// the publish) must still fail closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn tsserver_published_carrier_surface_is_captured_and_serves_hover() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let root = format!("/verter_reqsurf_pub_{nanos}/ws");
+    let tsconfig = format!("{root}/tsconfig.json");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    // Tsserver-kind service: the server constructs the carrier-publish
+    // coordinator, so the gateway takes the PUBLISH (membership) route.
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver_for_root(server, &root, Some(&tsconfig));
+
+    let uri = open_test_vue(server, &format!("{root}/src/App.vue"), REQUEST_SURFACE_APP);
+    server.sync_ide_to_provider(&uri).await;
+
+    // The PUBLISH route ran (membership advertised) — not a direct buffer open.
+    let canonical = format!("{root}/src/App.vue");
+    let advertised = server
+        .membership_ledger()
+        .expect("tsserver kind constructs the coordinator")
+        .is_advertised(&crate::external_ts::CanonicalSource::from(
+            canonical.as_str(),
+        ));
+    assert!(
+        advertised,
+        "the tsserver publish must advertise the carrier's store membership"
+    );
+
+    // CAPTURE the published surface (no over-drop): the companion recorded at
+    // publish time is keyed exactly at the committed live IDE path.
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("the Published commit must mark the IDE path store-resident");
+    let snapshot = server.capture_provider_request_surface(&uri).expect(
+        "a published-and-current tsserver carrier surface must be CAPTURED — \
+         dropping it silently drops every provider result on the live engine",
+    );
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+        "the captured surface must be the publish-recorded CarrierIde companion"
+    );
+    assert_eq!(
+        snapshot.stamp.provider_path.as_ref(),
+        ide_path.as_str(),
+        "the recorded companion key must equal the committed live IDE path"
+    );
+
+    // And it SERVES end-to-end (hover through the captured surface).
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        position,
+        "```typescript\nconst msg: string\n```",
+    );
+    let text = hover_text(
+        server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        text.contains("const msg: string"),
+        "a published tsserver carrier must serve the provider hover, got: {text}"
+    );
+
+    // A genuinely TORN surface still drops: an edit lands AFTER the publish
+    // (the store still serves the old surface) — capture must fail closed.
+    let _ = server.documents.did_change(
+        &uri,
+        2,
+        "<script setup lang=\"ts\">\nconst msg = 'edited'\n</script>\n\
+         <template><div>{{ msg }}</div></template>\n",
+    );
+    assert!(
+        server.capture_provider_request_surface(&uri).is_none(),
+        "an edit after the publish must fail the capture closed — the provider \
+         still holds the pre-edit surface"
+    );
+}
+
+/// REFERENCES runtime drop coverage (representative of the navigation class):
+/// a re-sync landing a fresh surface generation while the references request
+/// awaits the provider must drop the provider locations (fail closed).
+#[tokio::test(flavor = "multi_thread")]
+async fn references_drop_provider_locations_when_surface_regenerates_mid_request() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    // A provider references response at the mapped `msg` position, pointing at
+    // the carrier's own IDE surface (would map back into the source).
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let ctx = synced_type_provider_context(server, &uri);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("position maps to tsx");
+    // The provider's reference points at the STRING LITERAL — a location
+    // Verter's own reference analysis never emits, so its presence/absence in
+    // the response discriminates the PROVIDER contribution specifically.
+    let target = ctx.tsx_content.find("'hello'").expect("token in tsx") as u32;
+    provider.set_references(
+        &ctx.tsx_path,
+        tsx_offset,
+        vec![crate::type_provider::protocol::TypeLocation {
+            path: ctx.tsx_path.clone(),
+            start: target,
+            end: target + 7,
+        }],
+    );
+
+    let ide_path = server.active_ide_path_for_uri(&uri).expect("live IDE path");
+    let store = server.documents.provider_surfaces().clone();
+    let raced_path = ide_path.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_path,
+                    "/workspace/src/App.vue".to_string(),
+                    Arc::from("// drifted ide content"),
+                    None,
+                    Arc::from("// drifted carrier source"),
+                ),
+            );
+        }),
+    );
+
+    let response = server
+        .references(ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .expect("references request should succeed");
+    // The provider's literal-position location must not survive; Verter-native
+    // `msg` references (from its own analysis) may still be present — the
+    // invariant is the PROVIDER contribution dropped.
+    let literal_pos = find_document_position(server, &uri, "'hello'", 0);
+    let has_provider_ref = response.iter().flatten().any(|l| {
+        l.uri == uri
+            && l.range.start.line == literal_pos.line
+            && l.range.start.character == literal_pos.character
+    });
+    assert!(
+        !has_provider_ref,
+        "provider references produced against a superseded surface must be DROPPED, \
+         got {response:?}"
+    );
+}
+
+/// SIGNATURE-HELP runtime drop coverage (representative of the aux class): a
+/// re-sync landing a fresh surface generation while the request awaits the
+/// provider must drop the provider signature (fail closed).
+#[tokio::test(flavor = "multi_thread")]
+async fn signature_help_drops_provider_result_when_surface_regenerates_mid_request() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let ctx = synced_type_provider_context(server, &uri);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("position maps to tsx");
+    provider.set_signature_help(
+        &ctx.tsx_path,
+        tsx_offset,
+        Some(crate::type_provider::protocol::SignatureHelp {
+            signatures: vec![crate::type_provider::protocol::SignatureInfo {
+                label: "SIGNATURE_SENTINEL(msg: string): void".to_string(),
+                documentation: None,
+                parameters: Vec::new(),
+                active_parameter: None,
+            }],
+            active_signature: Some(0),
+            active_parameter: None,
+        }),
+    );
+
+    let ide_path = server.active_ide_path_for_uri(&uri).expect("live IDE path");
+    let store = server.documents.provider_surfaces().clone();
+    let raced_path = ide_path.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_path,
+                    "/workspace/src/App.vue".to_string(),
+                    Arc::from("// drifted ide content"),
+                    None,
+                    Arc::from("// drifted carrier source"),
+                ),
+            );
+        }),
+    );
+
+    let response = server
+        .signature_help(SignatureHelpParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+            context: None,
+        })
+        .await
+        .expect("signature help request should succeed");
+    assert!(
+        !response
+            .iter()
+            .flat_map(|s| s.signatures.iter())
+            .any(|sig| sig.label.contains("SIGNATURE_SENTINEL")),
+        "a provider signature produced against a superseded surface must be DROPPED, \
+         got {response:?}"
+    );
+}
+
+/// With a STABLE captured surface (no concurrent mutation) the provider
+/// contribution IS served and mapped — guards against an over-eager
+/// fail-closed gate dropping healthy results.
+#[tokio::test(flavor = "multi_thread")]
+async fn hover_serves_provider_result_from_stable_captured_surface() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        position,
+        "```typescript\nconst msg: string\n```",
+    );
+
+    let text = hover_text(
+        server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        text.contains("const msg: string"),
+        "a stable captured surface must serve the provider hover, got: {text}"
     );
 }

@@ -1,0 +1,38 @@
+{
+  "slug": "lifecycle/spread_lifecycle.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "spread_lifecycle",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes"
+  ],
+  "helperCounts": {
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

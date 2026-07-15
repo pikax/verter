@@ -1,7 +1,7 @@
 //! Vue SFC diagnostic engine for Verter.
 //!
 //! `verter_diagnostics` is a pure function: analysis data in, diagnostics out.
-//! It depends only on `verter_analysis` and can be used:
+//! It depends only on `verter_semantic::analysis` and can be used:
 //! - By `verter_lsp` for real-time diagnostics
 //! - As a standalone CLI tool for CI/CD
 //! - By third-party tools consuming analysis snapshots

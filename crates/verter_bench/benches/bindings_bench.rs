@@ -3,7 +3,7 @@ use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use std::hint::black_box;
-use verter_core::utils::oxc::{
+use verter_parser::utils::oxc::{
     extract_bindings_from_expression, extract_bindings_from_program, BindingContext,
 };
 
@@ -309,11 +309,8 @@ fn bench_program_extraction(c: &mut Criterion) {
                     let result = parser.parse();
                     if result.errors.is_empty() {
                         let ctx = BindingContext::new(0);
-                        let extraction = extract_bindings_from_program(
-                            black_box(&result.program),
-                            program,
-                            &ctx,
-                        );
+                        let extraction =
+                            extract_bindings_from_program(black_box(&result.program), program, ctx);
                         black_box(extraction);
                     }
                 });
@@ -336,11 +333,8 @@ fn bench_program_extraction(c: &mut Criterion) {
                     let result = parser.parse();
                     if result.errors.is_empty() {
                         let ctx = BindingContext::new(0);
-                        let extraction = extract_bindings_from_program(
-                            black_box(&result.program),
-                            program,
-                            &ctx,
-                        );
+                        let extraction =
+                            extract_bindings_from_program(black_box(&result.program), program, ctx);
                         black_box(extraction);
                     }
                 });
@@ -363,11 +357,8 @@ fn bench_program_extraction(c: &mut Criterion) {
                     let result = parser.parse();
                     if result.errors.is_empty() {
                         let ctx = BindingContext::new(0);
-                        let extraction = extract_bindings_from_program(
-                            black_box(&result.program),
-                            program,
-                            &ctx,
-                        );
+                        let extraction =
+                            extract_bindings_from_program(black_box(&result.program), program, ctx);
                         black_box(extraction);
                     }
                 });

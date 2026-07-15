@@ -1,0 +1,39 @@
+{
+  "slug": "cls-named-lit-attr-uq-slot-ext-plain-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_named_lit_attr_uq_slot_ext_plain_n",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot"
+  ],
+  "helperSet": [
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) .zz {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

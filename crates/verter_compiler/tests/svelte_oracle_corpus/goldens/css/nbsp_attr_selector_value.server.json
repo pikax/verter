@@ -1,0 +1,32 @@
+{
+  "slug": "css/nbsp_attr_selector_value.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "nbsp_attr_selector_value",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-4mtge3",
+    "code": "\n\t[data-x=a b].svelte-<scoped> {\n\t\tcolor: red;\n\t}\n\n\t/* (unused) [data-x=z b] {\n\t\tcolor: blue;\n\t}*/\n"
+  }
+}

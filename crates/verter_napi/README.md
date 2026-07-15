@@ -3,7 +3,7 @@
 > [!WARNING]
 > This project is **experimental and under active development**. APIs, architecture, and package boundaries may change without notice.
 
-NAPI-RS native binding crate that exposes [`verter_core`](../verter_core/) to Node.js. This is a thin FFI layer that compiles to a platform-specific `.node` binary (cdylib), consumed by the [`@verter/native`](../../packages/native/) npm package.
+NAPI-RS native binding crate that exposes [`verter_compiler`](../verter_compiler/) to Node.js. This is a thin FFI layer that compiles to a platform-specific `.node` binary (cdylib), consumed by the [`@verter/native`](../../packages/native/) npm package.
 
 ## Architecture
 
@@ -15,7 +15,7 @@ graph LR
 
     subgraph "Rust FFI Boundary"
         B -->|"#[napi] functions"| C["verter_napi<br/>(this crate)"]
-        C -->|delegates to| D["verter_core<br/>(Rust compiler)"]
+        C -->|delegates to| D["verter_compiler<br/>(Rust compiler)"]
     end
 
     subgraph "Consumers"
@@ -29,7 +29,7 @@ graph LR
 sequenceDiagram
     participant JS as Node.js (JavaScript)
     participant NAPI as verter_napi (FFI)
-    participant Core as verter_core (Rust)
+    participant Core as verter_compiler (Rust)
 
     JS->>NAPI: compile(input, options)
     Note over NAPI: Create OXC Allocator
@@ -200,7 +200,7 @@ The build script calls `napi_build::setup()` to configure NAPI-RS code generatio
 
 | Crate           | Purpose                                           |
 | --------------- | ------------------------------------------------- |
-| `verter_core`   | Core Rust template compiler                       |
+| `verter_compiler`   | Core Rust template compiler                       |
 | `oxc_allocator` | Memory allocator for OXC AST (created per-call)   |
 | `napi` (v2)     | NAPI-RS runtime (features: `napi8`, `serde-json`) |
 | `napi-derive`   | Procedural macros for `#[napi]` annotations       |

@@ -16,12 +16,12 @@ use clap::Parser;
 use rmcp::ServiceExt;
 
 use verter_diagnostics::Linter;
-use verter_host::{HostConfig, VerterHost};
 use verter_mcp::config::{Cli, McpServerConfig, Transport};
 use verter_mcp::scanner;
 use verter_mcp::tools;
 use verter_mcp::VerterMcpServer;
-use verter_vfs::{FilesystemOptions, FilesystemWorkspace};
+use verter_session::{HostConfig, VerterHost};
+use verter_workspace::{FilesystemOptions, FilesystemWorkspace};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,10 +47,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create host backed by the filesystem workspace
     let host = Arc::new(VerterHost::new(
-        HostConfig {
-            analysis_scope: Some(verter_analysis::AnalysisScope::LSP),
-            dev_mode: true,
-            ..Default::default()
+        {
+            let mut config =
+                HostConfig::from_query_profile(verter_semantic::profile::QueryProfile::Mcp);
+            config.dev_mode = true;
+            config
         },
         workspace,
     ));

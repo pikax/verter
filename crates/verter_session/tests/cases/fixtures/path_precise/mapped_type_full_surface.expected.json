@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "archetype": "mapped_type_full_surface",
+  "consumer_published_surface": {
+    "kind": "mapped",
+    "modifier": "readonly",
+    "key_source": "keyof Foo",
+    "members": [
+      { "name": "a", "type": "number", "readonly": true },
+      { "name": "b", "type": "string", "readonly": true },
+      { "name": "c", "type": "boolean", "readonly": true }
+    ]
+  },
+  "fact_dep_signature_observed_by_consumer": [
+    "Export(\"ReadonlyFoo\", Type)",
+    "Export(\"Foo\", Type)",
+    "MemberShape(Foo, Type)",
+    "Member(Foo, \"a\", Type)",
+    "Member(Foo, \"b\", Type)",
+    "Member(Foo, \"c\", Type)"
+  ],
+  "invalidation_matrix": [
+    {
+      "edit": "edit Foo.a from number to bigint",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: Member(Foo, \"a\") body observed via Foo[K] projection"
+    },
+    {
+      "edit": "add Foo.d",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": true,
+      "rule": "R28: MemberShape gains an entry; mapped type body grows"
+    },
+    {
+      "edit": "reformat Foo (whitespace + JSDoc only)",
+      "stage_0_today_invalidates_consumer": true,
+      "stage_6d_target_invalidates_consumer": false,
+      "rule": "R13: cosmetic edit — parse_stable_hash invariant; MemberShape unchanged"
+    }
+  ]
+}

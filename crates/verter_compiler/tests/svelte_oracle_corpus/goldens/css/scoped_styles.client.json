@@ -1,0 +1,55 @@
+{
+  "slug": "css/scoped_styles.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "scoped_styles",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "set_class",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "set_class"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "set_class": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div><h2 class=\"svelte-<scoped>\">title</h2> <p>body</p></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div><h2 class=\"svelte-<scoped>\">title</h2> <p>body</p></div>`); export default function scoped_styles($$anchor) {let active = false; var div = root(); $.set_class(div, 1, 'card svelte-<scoped>', null, {}, {active}); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-c4vjvh",
+    "code": "\n\t.card.svelte-<scoped> {\n\t\tcolor: blue;\n\t\tpadding: 1rem;\n\t}\n\n\t.card.active.svelte-<scoped> {\n\t\tcolor: green;\n\t}\n\n\th2.svelte-<scoped> {\n\t\tfont-weight: bold;\n\t}\n"
+  }
+}

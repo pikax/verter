@@ -1,0 +1,92 @@
+{
+  "slug": "attributes/class_directives.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "class_directives",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "first_child",
+    "sibling",
+    "template_effect",
+    "set_class",
+    "get",
+    "set_class",
+    "clsx",
+    "get",
+    "get",
+    "delegated",
+    "set",
+    "get",
+    "delegated",
+    "set",
+    "get",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "clsx",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "set",
+    "set_class",
+    "sibling",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "first_child": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_class": 2,
+    "get": 5,
+    "clsx": 1,
+    "delegated": 2,
+    "set": 2,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button></button> <button></button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button></button> <button></button>`, 1); export default function class_directives($$anchor) {let on = $.state(false); let off = $.state(false); let c = 'a'; var fragment = root(); var button = $.first_child(fragment); let classes; var button_1 = $.sibling(button, 2); let classes_1; $.template_effect(() => {classes = $.set_class(button, 1, 'base', null, classes, {foo: $.get(on)}); classes_1 = $.set_class(button_1, 1, $.clsx(c), null, classes_1, {foo: $.get(on), bar: !$.get(off)});}); $.delegated('click', button, () => $.set(on, !$.get(on))); $.delegated('click', button_1, () => $.set(off, !$.get(off))); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

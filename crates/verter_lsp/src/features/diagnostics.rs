@@ -1,18 +1,73 @@
-// Phase 2: Diagnostics — parse errors, macro validation from verter_host.
-// Phase 3: Enhanced with type errors, unused variables, strict null checks from TypeProvider.
+// Diagnostics — parse errors, macro validation from verter_session.
+// Enhanced with type errors, unused variables, strict null checks from TypeProvider.
 
 use tower_lsp_server::ls_types::*;
-use verter_host::{DiagnosticsSnapshot, HostDiagnostic, HostSeverity};
+use verter_session::{DiagnosticsSnapshot, HostDiagnostic, HostSeverity};
 
 use crate::documents::line_index::LineIndex;
 
-/// Convert a `DiagnosticsSnapshot` from verter_host into LSP `Diagnostic` items.
+pub(crate) const TYPE_EXPANSION_BUDGET_CODE: &str = "verter/type-expansion-budget";
+pub(crate) const TYPE_QUERY_DEPTH_LIMIT_CODE: &str = "verter/type-query-depth-limit";
+
+/// Convert a `DiagnosticsSnapshot` from verter_session into LSP `Diagnostic` items.
 pub fn map_diagnostics(snapshot: &DiagnosticsSnapshot, line_index: &LineIndex) -> Vec<Diagnostic> {
     snapshot
         .diagnostics
         .iter()
         .map(|d| map_single_diagnostic(d, line_index))
         .collect()
+}
+
+/// Map the two operational type-evaluation limits from component-meta's
+/// typed expansion diagnostics into the editor diagnostic stream. Diagnostics
+/// are deduplicated by `(macro_index, reason)`, which is the public root-demand
+/// identity available at this boundary.
+pub(crate) fn map_projection_limit_diagnostics(
+    macro_spans: &[verter_span::Span],
+    expansions: &[verter_semantic::analysis::component_meta::MacroExpansionDiagnostics],
+    line_index: &LineIndex,
+) -> Vec<Diagnostic> {
+    use std::collections::HashSet;
+    use verter_semantic::analysis::type_expand::ExpansionStopReason;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum OperationalLimit {
+        ProjectionWork,
+        ConnectedQueryDepth,
+    }
+
+    let mut seen = HashSet::new();
+    let mut diagnostics = Vec::new();
+    for envelope in expansions {
+        for diagnostic in &envelope.diagnostics {
+            let (kind, code, message) = match diagnostic.reason {
+                ExpansionStopReason::ProjectionWorkLimit => (
+                    OperationalLimit::ProjectionWork,
+                    TYPE_EXPANSION_BUDGET_CODE,
+                    "Type expansion exceeded Verter's safe evaluation budget.",
+                ),
+                ExpansionStopReason::ConnectedQueryDepthLimit => (
+                    OperationalLimit::ConnectedQueryDepth,
+                    TYPE_QUERY_DEPTH_LIMIT_CODE,
+                    "Type evaluation exceeded Verter's safe connected-query depth limit.",
+                ),
+                _ => continue,
+            };
+            if !seen.insert((envelope.macro_index, kind)) {
+                continue;
+            }
+            diagnostics.push(map_single_diagnostic(
+                &HostDiagnostic {
+                    severity: HostSeverity::Warning,
+                    code: code.to_string(),
+                    message: message.to_string(),
+                    span: macro_spans.get(envelope.macro_index).copied(),
+                },
+                line_index,
+            ));
+        }
+    }
+    diagnostics
 }
 
 fn map_single_diagnostic(diag: &HostDiagnostic, line_index: &LineIndex) -> Diagnostic {
@@ -188,5 +243,63 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].range.start.line, 0);
         assert_eq!(result[1].range.start.line, 1);
+    }
+
+    #[test]
+    fn operational_projection_limits_map_to_stable_deduplicated_editor_diagnostics() {
+        use verter_semantic::analysis::component_meta::{
+            MacroExpansionDiagnostics, MacroExpansionKind,
+        };
+        use verter_semantic::analysis::type_expand::{
+            ExpansionDiagnostic, ExpansionExactness, ExpansionExecutionStatus, ExpansionStopReason,
+        };
+
+        let envelope = |reason| MacroExpansionDiagnostics {
+            macro_kind: MacroExpansionKind::DefineProps,
+            macro_index: 0,
+            diagnostics: vec![ExpansionDiagnostic {
+                reason,
+                context: "typed-test".to_string(),
+                property_name: None,
+            }],
+            exactness: ExpansionExactness::Incomplete,
+            execution_status: ExpansionExecutionStatus::Interrupted,
+        };
+        let expansions = vec![
+            envelope(ExpansionStopReason::ProjectionWorkLimit),
+            envelope(ExpansionStopReason::ProjectionWorkLimit),
+            envelope(ExpansionStopReason::ConnectedQueryDepthLimit),
+            envelope(ExpansionStopReason::UnresolvedReference),
+        ];
+        let source = "head\ndefineProps<Props>()\ntail";
+        let line_index = make_line_index(source);
+        let diagnostics = map_projection_limit_diagnostics(
+            &[verter_span::Span::new(5, 25)],
+            &expansions,
+            &line_index,
+        );
+
+        assert_eq!(diagnostics.len(), 2, "one diagnostic per root/reason");
+        assert_eq!(
+            diagnostics[0].code,
+            Some(NumberOrString::String(
+                TYPE_EXPANSION_BUDGET_CODE.to_string()
+            ))
+        );
+        assert_eq!(
+            diagnostics[0].message,
+            "Type expansion exceeded Verter's safe evaluation budget."
+        );
+        assert_eq!(
+            diagnostics[1].code,
+            Some(NumberOrString::String(
+                TYPE_QUERY_DEPTH_LIMIT_CODE.to_string()
+            ))
+        );
+        assert_eq!(diagnostics[0].range.start.line, 1);
+        assert_eq!(diagnostics[1].range, diagnostics[0].range);
+        assert!(diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::WARNING)));
     }
 }

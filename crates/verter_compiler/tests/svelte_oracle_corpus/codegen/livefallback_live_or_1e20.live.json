@@ -1,0 +1,9 @@
+{
+  "slug": "livefallback_live_or_1e20",
+  "bucket": "live-fallback",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "reason": "large-to-int32",
+  "officialFolds": true,
+  "officialModuleHasInterpolation": false
+}

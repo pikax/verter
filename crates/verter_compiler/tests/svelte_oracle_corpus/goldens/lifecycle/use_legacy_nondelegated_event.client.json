@@ -1,0 +1,67 @@
+{
+  "slug": "lifecycle/use_legacy_nondelegated_event.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "use_legacy_nondelegated_event",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "action",
+    "effect",
+    "event",
+    "update",
+    "append"
+  ],
+  "helperSet": [
+    "action",
+    "append",
+    "effect",
+    "event",
+    "from_html",
+    "state",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "action": 1,
+    "effect": 1,
+    "event": 1,
+    "update": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); export default function use_legacy_nondelegated_event($$anchor) {let c = $.state(0); var div = root(); $.action(div, ($$node) => foo?.($$node)); $.effect(() => $.event('mouseenter', div, () => $.update(c))); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

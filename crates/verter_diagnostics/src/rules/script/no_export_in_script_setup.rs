@@ -34,7 +34,7 @@ impl LintRule for NoExportInScriptSetup {
 
         if !script
             .flags
-            .contains(verter_analysis::types::AnalysisFlags::ASYNC_SETUP)
+            .contains(verter_semantic::analysis::types::AnalysisFlags::ASYNC_SETUP)
             && script.macros.is_empty()
             && script.vue_api_calls.is_empty()
         {

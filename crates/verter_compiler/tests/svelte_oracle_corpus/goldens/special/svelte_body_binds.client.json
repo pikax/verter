@@ -1,0 +1,64 @@
+{
+  "slug": "special/svelte_body_binds.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_body_binds",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "state",
+    "state",
+    "state",
+    "event",
+    "document",
+    "update",
+    "bind_element_size",
+    "document",
+    "set",
+    "bind_element_size",
+    "document",
+    "set"
+  ],
+  "helperSet": [
+    "bind_element_size",
+    "document",
+    "event",
+    "set",
+    "state",
+    "update"
+  ],
+  "helperCounts": {
+    "state": 3,
+    "event": 1,
+    "document": 3,
+    "update": 1,
+    "bind_element_size": 2,
+    "set": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_body_binds($$anchor) {let n = $.state(0); let cw = $.state(0); let ch = $.state(0); $.event('click', $.document.body, () => $.update(n)); $.bind_element_size($.document.body, 'clientWidth', ($$value) => $.set(cw, $$value, true)); $.bind_element_size($.document.body, 'clientHeight', ($$value) => $.set(ch, $$value, true));}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

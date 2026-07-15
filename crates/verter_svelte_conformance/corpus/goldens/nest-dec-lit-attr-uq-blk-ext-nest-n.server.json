@@ -1,0 +1,32 @@
+{
+  "slug": "nest-dec-lit-attr-uq-blk-ext-nest-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "nest_dec_lit_attr_uq_blk_ext_nest_n",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (empty) [data-x=\"zz\"] {\n\t\t& {\n\t\t\tcolor: red;\n\t\t}\n\t}*/\n"
+  }
+}

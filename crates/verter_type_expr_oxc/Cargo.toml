@@ -1,0 +1,18 @@
+[package]
+name = "verter_type_expr_oxc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "OXC-bound lowering for Verter — TSType<'_> → verter_type_expr::TypeExpr"
+publish = false
+
+[dependencies]
+verter_type_expr = { path = "../verter_type_expr" }
+verter_span = { path = "../verter_span" }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }

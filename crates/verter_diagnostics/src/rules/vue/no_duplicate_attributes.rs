@@ -6,7 +6,7 @@ use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
 use rustc_hash::FxHashSet;
-use verter_analysis::template::TemplateElement;
+use verter_semantic::analysis::template::TemplateElement;
 
 /// Disallow duplicate attributes on elements.
 pub struct NoDuplicateAttributes;
@@ -46,7 +46,7 @@ impl LintRule for NoDuplicateAttributes {
 mod tests {
     use super::*;
 
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
 
     fn run_rule(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
         crate::test_support::run_template_rule(NoDuplicateAttributes, template)

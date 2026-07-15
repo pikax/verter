@@ -8,7 +8,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::types::{ScriptAnalysisSnapshot, VueApiClassification};
+use verter_semantic::analysis::types::{ScriptAnalysisSnapshot, VueApiClassification};
 
 pub struct RequireSymbolProvide;
 
@@ -51,7 +51,7 @@ impl LintRule for RequireSymbolProvide {
 mod tests {
     use super::*;
 
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

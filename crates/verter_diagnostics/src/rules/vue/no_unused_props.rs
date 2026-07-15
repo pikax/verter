@@ -5,7 +5,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::TemplateAnalysisSnapshot;
+use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
 
 /// Disallow declared props that are unused by both script and template.
 ///
@@ -51,7 +51,7 @@ impl LintRule for NoUnusedProps {
 mod tests {
     use super::*;
 
-    use verter_analysis::template::{AnalyzedPropDefinition, TemplateAnalysisSnapshot};
+    use verter_semantic::analysis::template::{AnalyzedPropDefinition, TemplateAnalysisSnapshot};
 
     fn run_rule(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
         crate::test_support::run_template_rule(NoUnusedProps, template)

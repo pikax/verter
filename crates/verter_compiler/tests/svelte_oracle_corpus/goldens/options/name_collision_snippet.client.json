@@ -1,0 +1,64 @@
+{
+  "slug": "options/name_collision_snippet.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "Foo_1",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "append",
+    "from_html",
+    "from_html",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html"
+  ],
+  "helperCounts": {
+    "append": 2,
+    "from_html": 2
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<span></span>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<div>hi</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; const Foo = ($$anchor) => {var span = root(); $.append($$anchor, span);}; var root = $.from_html(`<span></span>`); var root_1 = $.from_html(`<div>hi</div>`); export default function Foo_1($$anchor) {var div = root_1(); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

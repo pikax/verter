@@ -1,0 +1,32 @@
+{
+  "svelte_oracle_version": "5.56.3",
+  "total": 247,
+  "accepted": 81,
+  "rejected": 166,
+  "required_axes": [
+    "nth_of",
+    "read_style",
+    "options_ce",
+    "dup_timing",
+    "script_lang_enum"
+  ],
+  "axis_counts": {
+    "arbitration": 8,
+    "attribute": 10,
+    "close_tag": 8,
+    "comment": 3,
+    "dup_timing": 9,
+    "nth_of": 43,
+    "open_tag": 9,
+    "options": 30,
+    "options_ce": 36,
+    "read_style": 27,
+    "script": 5,
+    "script_grammar": 4,
+    "script_lang": 8,
+    "script_lang_enum": 16,
+    "style": 11,
+    "style_body": 11,
+    "text": 9
+  }
+}

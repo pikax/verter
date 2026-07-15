@@ -1,0 +1,38 @@
+{
+  "slug": "css/scoped_styles.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "scoped_styles",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr_class"
+  ],
+  "helperSet": [
+    "attr_class"
+  ],
+  "helperCounts": {
+    "attr_class": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-c4vjvh",
+    "code": "\n\t.card.svelte-<scoped> {\n\t\tcolor: blue;\n\t\tpadding: 1rem;\n\t}\n\n\t.card.active.svelte-<scoped> {\n\t\tcolor: green;\n\t}\n\n\th2.svelte-<scoped> {\n\t\tfont-weight: bold;\n\t}\n"
+  }
+}

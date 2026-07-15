@@ -8,7 +8,7 @@
 //! `(line, col)` in generated space to get the original `.vue` position.
 
 use base64::prelude::*;
-use oxc_sourcemap::SourceMap;
+use oxc_sourcemap::OwnedSourceMap;
 
 /// A position in a file (0-indexed line and column).
 #[derive(Debug, Clone, Copy)]
@@ -43,11 +43,11 @@ pub fn map_tsc_position(
 }
 
 /// Extract and decode the inline `//# sourceMappingURL=data:...` from tsc output.
-fn extract_inline_source_map(code: &str) -> Option<SourceMap> {
+fn extract_inline_source_map(code: &str) -> Option<OwnedSourceMap> {
     const PREFIX: &str = "//# sourceMappingURL=data:application/json;base64,";
     let line = code.lines().rev().find(|l| l.starts_with(PREFIX))?;
     let b64 = &line[PREFIX.len()..];
     let bytes = BASE64_STANDARD.decode(b64.trim()).ok()?;
     let json = std::str::from_utf8(&bytes).ok()?;
-    SourceMap::from_json_string(json).ok()
+    OwnedSourceMap::from_json_string(json).ok()
 }

@@ -1,4 +1,4 @@
-//! Rule: no-duplicate-model-modifiers
+﻿//! Rule: no-duplicate-model-modifiers
 //!
 //! Multiple `defineModel()` calls with the same model name are not allowed.
 //! Each model name must be unique within a component.
@@ -26,7 +26,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
+use verter_semantic::analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
 
 pub struct NoDuplicateModelModifiers;
 
@@ -57,7 +57,7 @@ impl LintRule for NoDuplicateModelModifiers {
         // Group by model_name (None = default "modelValue")
         let mut seen: std::collections::HashMap<
             Option<&str>,
-            &verter_analysis::types::AnalyzedMacro,
+            &verter_semantic::analysis::types::AnalyzedMacro,
         > = std::collections::HashMap::new();
 
         for mac in &models {
@@ -92,7 +92,7 @@ impl LintRule for NoDuplicateModelModifiers {
 mod tests {
     use super::*;
 
-    use verter_analysis::types::*;
+    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
@@ -114,6 +114,8 @@ mod tests {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span: Span::new(span_start, span_end),
         }
     }
@@ -236,6 +238,8 @@ mod tests {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(10, 30),
             }],
             ..Default::default()

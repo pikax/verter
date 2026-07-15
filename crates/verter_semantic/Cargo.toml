@@ -1,0 +1,45 @@
+[package]
+name = "verter_semantic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Semantic authority for Verter — revision-tracked query engine, component surface, binding analysis, reactivity provenance"
+publish = false
+
+[features]
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+
+[dependencies]
+verter_span = { path = "../verter_span" }
+verter_parser = { path = "../verter_parser" }
+verter_workspace = { path = "../verter_workspace" }
+# The stage-1 framework script-fact trait names the framework adapter / language
+# ids and the carrier-language syntax gate. `verter_language` is a
+# `verter_span`-only leaf, so this edge introduces no cycle (verter_semantic
+# already depends on parser/workspace/span; verter_language depends on none of
+# them).
+verter_language = { path = "../verter_language" }
+verter_no_typeexpr = { workspace = true }
+verter_type_expr = { workspace = true }
+verter_type_expr_oxc = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+smallvec = "1.15"
+hotpath = { version = "0.16", optional = true }
+oxc_allocator = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_span = { workspace = true }
+sha2 = { workspace = true }
+bitflags = "2.11"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1"
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+static_assertions = "1.1.0"

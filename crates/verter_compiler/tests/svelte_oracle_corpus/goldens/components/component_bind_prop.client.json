@@ -1,0 +1,56 @@
+{
+  "slug": "components/component_bind_prop.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "component_bind_prop",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "state",
+    "get",
+    "set"
+  ],
+  "helperSet": [
+    "get",
+    "set",
+    "state"
+  ],
+  "helperCounts": {
+    "state": 1,
+    "get": 1,
+    "set": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; export default function component_bind_prop($$anchor) {let value = $.state(''); Child($$anchor, {get value() {return $.get(value);}, set value($$value) {$.set(value, $$value, true);}});}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

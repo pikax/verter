@@ -1,0 +1,55 @@
+{
+  "slug": "attributes/call_expr_property_demoted.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "call_expr_property_demoted",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "template_effect",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "template_effect": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/>`); export default function call_expr_property_demoted($$anchor) {let v = false; var input = root(); $.template_effect(($0) => input.readOnly = $0, [() => Boolean(v)]); $.append($$anchor, input);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

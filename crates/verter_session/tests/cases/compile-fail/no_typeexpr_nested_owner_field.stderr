@@ -1,0 +1,17 @@
+error[E0277]: the trait bound `ValueRef: verter_no_typeexpr::__private::NoTypeExprWitness` is not satisfied
+ --> tests/cases/compile-fail/no_typeexpr_nested_owner_field.rs:9:10
+  |
+9 | #[derive(verter_no_typeexpr::NoTypeExpr)]
+  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `verter_no_typeexpr::__private::NoTypeExprWitness` is not implemented for `ValueRef`
+  |
+  = help: the following other types implement trait `verter_no_typeexpr::__private::NoTypeExprWitness`:
+            ()
+            (A, B)
+            (A, B, C)
+            (A,)
+            AnalyzedEmitFieldFact
+            AnalyzedExposeFieldFact
+            AnalyzedMacroFact
+            AnalyzedMacroKindFact
+          and $N others
+  = note: this error originates in the derive macro `verter_no_typeexpr::NoTypeExpr` (in Nightly builds, run with -Z macro-backtrace for more info)

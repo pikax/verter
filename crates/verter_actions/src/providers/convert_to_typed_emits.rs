@@ -1,4 +1,4 @@
-//! Quick fix: convert a runtime `defineEmits(...)` to type-based `defineEmits<{...}>()`.
+﻿//! Quick fix: convert a runtime `defineEmits(...)` to type-based `defineEmits<{...}>()`.
 //!
 //! Handles: `define-emits-declaration`
 //!
@@ -13,8 +13,8 @@
 
 use crate::provider::{ActionContext, ActionProvider};
 use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
-use verter_analysis::types::AnalyzedMacroKind;
 use verter_diagnostics::LintDiagnostic;
+use verter_semantic::analysis::types::AnalyzedMacroKind;
 
 pub struct ConvertToTypedEmits;
 
@@ -76,11 +76,11 @@ impl ActionProvider for ConvertToTypedEmits {
 mod tests {
     use super::*;
     use crate::provider::ActionContext;
-    use verter_analysis::types::{
-        AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, ScriptAnalysisSnapshot,
-    };
     use verter_diagnostics::{
         Certainty, DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity,
+    };
+    use verter_semantic::analysis::types::{
+        AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, ScriptAnalysisSnapshot,
     };
     use verter_span::Span;
 
@@ -106,6 +106,8 @@ mod tests {
             payload_type: None,
             description: None,
             tags: vec![],
+            payload: None,
+            payload_expr_scope: None,
         }
     }
 
@@ -124,6 +126,8 @@ mod tests {
             expose_fields: vec![],
             default_values: vec![],
             resolved_local_types: vec![],
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
             span,
         }
     }

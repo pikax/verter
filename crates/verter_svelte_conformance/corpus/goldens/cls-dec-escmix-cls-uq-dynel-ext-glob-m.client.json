@@ -1,0 +1,59 @@
+{
+  "slug": "cls-dec-escmix-cls-uq-dynel-ext-glob-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_dec_escmix_cls_uq_dynel_ext_glob_m",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "element",
+    "set_class",
+    "text",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "element",
+    "first_child",
+    "set_class",
+    "text"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "element": 1,
+    "set_class": 1,
+    "text": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function cls_dec_escmix_cls_uq_dynel_ext_glob_m($$anchor) {let tag = 'div'; var fragment = $.comment(); var node = $.first_child(fragment); $.element(node, () => tag, false, ($$element, $$anchor) => {$.set_class($$element, 0, 'a&b&c'); var text = $.text('x'); $.append($$anchor, text);}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t.a\\26 b\\&c {\n\t\tcolor: red;\n\t}\n"
+  }
+}

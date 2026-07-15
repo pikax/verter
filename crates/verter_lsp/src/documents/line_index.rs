@@ -76,6 +76,15 @@ impl LineIndex {
     pub fn line_end(&self, line: usize) -> Option<u32> {
         self.inner.line_end(line)
     }
+
+    /// The negotiated position encoding this index was built with.
+    pub fn encoding(&self) -> PositionEncodingKind {
+        match self.inner.encoding() {
+            codec::PositionEncoding::Utf8 => PositionEncodingKind::UTF8,
+            codec::PositionEncoding::Utf32 => PositionEncodingKind::UTF32,
+            codec::PositionEncoding::Utf16 => PositionEncodingKind::UTF16,
+        }
+    }
 }
 
 #[cfg(test)]

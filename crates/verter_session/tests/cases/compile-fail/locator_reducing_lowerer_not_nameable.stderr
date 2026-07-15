@@ -1,0 +1,11 @@
+error[E0603]: module `project_semantic_dispatch` is private
+ --> tests/cases/compile-fail/locator_reducing_lowerer_not_nameable.rs:8:21
+  |
+8 | use verter_session::project_semantic_dispatch::ProjectSemanticDispatch;
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^ private module
+  |
+note: the module `project_semantic_dispatch` is defined here
+ --> src/lib.rs
+  |
+  | pub(crate) mod project_semantic_dispatch;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,5 +1,5 @@
 use oxc_span::GetSpan;
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::sfc_scanner::{classify_cursor, SfcBlock, SfcCursorContext};
 
@@ -194,9 +194,9 @@ fn classify_template_context(
 /// Find the deepest (most nested) element whose span contains the offset.
 fn find_deepest_element(
     offset: u32,
-    elements: &[verter_analysis::template::TemplateElement],
-) -> Option<&verter_analysis::template::TemplateElement> {
-    let mut best: Option<&verter_analysis::template::TemplateElement> = None;
+    elements: &[verter_semantic::analysis::template::TemplateElement],
+) -> Option<&verter_semantic::analysis::template::TemplateElement> {
+    let mut best: Option<&verter_semantic::analysis::template::TemplateElement> = None;
     let mut best_size = u32::MAX;
 
     for el in elements {
@@ -215,8 +215,8 @@ fn find_deepest_element(
 fn classify_within_element(
     offset: u32,
     source: &str,
-    el: &verter_analysis::template::TemplateElement,
-    all_elements: &[verter_analysis::template::TemplateElement],
+    el: &verter_semantic::analysis::template::TemplateElement,
+    all_elements: &[verter_semantic::analysis::template::TemplateElement],
 ) -> CursorContext {
     // Case A: cursor is in the opening tag (before tag_span_end)
     if offset < el.tag_span_end {
@@ -237,7 +237,7 @@ fn classify_within_element(
 fn classify_in_opening_tag(
     offset: u32,
     source: &str,
-    el: &verter_analysis::template::TemplateElement,
+    el: &verter_semantic::analysis::template::TemplateElement,
 ) -> CursorContext {
     // Check if cursor is on the tag name itself
     // Tag name starts right after '<' (el.span.start + 1)
@@ -301,21 +301,17 @@ fn classify_in_opening_tag(
             };
 
             let after_name = dir_text.get(modifier_region_start..).unwrap_or("");
-            if after_name.contains('.') {
-                let existing: Vec<String> = dir.modifiers.clone();
-                if dir.name == "model" {
-                    return CursorContext::Template(TemplateCursorContext::VModelModifier {
-                        existing_modifiers: existing,
-                    });
-                } else {
-                    return CursorContext::Template(TemplateCursorContext::EventModifier {
-                        event_name: dir.argument.clone().unwrap_or_default(),
-                        existing_modifiers: existing,
-                    });
-                }
-            }
-            // Also check if the byte right at cursor is a dot (just typed)
-            if source.as_bytes().get(offset as usize) == Some(&b'.') {
+            // Modifiers live strictly between the argument/name and the `=` value
+            // assignment (`@click.stop="…"`). Once the cursor is inside the value a
+            // `.` is member access in the handler expression
+            // (`@click="handle($event.x)"`), NOT a modifier separator — clipping the
+            // scan at `=` keeps the value routed to expression/member completion
+            // instead of leaking event-modifier completions.
+            let in_modifier_region = !after_name.contains('=');
+            let at_modifier_dot = in_modifier_region
+                && (after_name.contains('.')
+                    || source.as_bytes().get(offset as usize) == Some(&b'.'));
+            if at_modifier_dot {
                 let existing: Vec<String> = dir.modifiers.clone();
                 if dir.name == "model" {
                     return CursorContext::Template(TemplateCursorContext::VModelModifier {
@@ -425,13 +421,13 @@ fn classify_in_opening_tag(
 /// Classify cursor within element content (between opening and closing tags).
 fn classify_in_content(
     offset: u32,
-    el: &verter_analysis::template::TemplateElement,
-    all_elements: &[verter_analysis::template::TemplateElement],
+    el: &verter_semantic::analysis::template::TemplateElement,
+    all_elements: &[verter_semantic::analysis::template::TemplateElement],
 ) -> CursorContext {
     // Check text children for interpolations and text
     for segment in &el.text_children {
         match segment {
-            verter_analysis::template::TemplateTextSegment::Interpolation {
+            verter_semantic::analysis::template::TemplateTextSegment::Interpolation {
                 span,
                 expression_span,
             } => {
@@ -443,7 +439,7 @@ fn classify_in_content(
                     return CursorContext::Template(TemplateCursorContext::Interpolation);
                 }
             }
-            verter_analysis::template::TemplateTextSegment::Text { span, .. } => {
+            verter_semantic::analysis::template::TemplateTextSegment::Text { span, .. } => {
                 if offset >= span.start && offset < span.end {
                     return CursorContext::Template(TemplateCursorContext::TextContent);
                 }
@@ -470,7 +466,7 @@ fn classify_in_content(
 
 /// Convert a directive to an ExpressionKind.
 fn directive_to_expression_kind(
-    dir: &verter_analysis::template::TemplateDirective,
+    dir: &verter_semantic::analysis::template::TemplateDirective,
 ) -> ExpressionKind {
     match dir.name.as_str() {
         "if" | "else-if" => ExpressionKind::VIf,
@@ -498,7 +494,9 @@ fn directive_to_expression_kind(
 }
 
 /// Collect existing attribute/directive names on an element for dedup.
-fn collect_existing_attrs(el: &verter_analysis::template::TemplateElement) -> Vec<String> {
+fn collect_existing_attrs(
+    el: &verter_semantic::analysis::template::TemplateElement,
+) -> Vec<String> {
     let mut names = Vec::new();
     for attr in &el.attributes {
         names.push(attr.name.clone());

@@ -1,0 +1,48 @@
+{
+  "component_name": "C",
+  "props": [
+    {
+      "name": "count",
+      "type_signature": "number",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "modelValue",
+      "type_signature": "string",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    }
+  ],
+  "events": [
+    {
+      "name": "update:count",
+      "params_signature": "[value: number | undefined]"
+    },
+    {
+      "name": "update:modelValue",
+      "params_signature": "[value: string | undefined]"
+    }
+  ],
+  "slots": [],
+  "models": [
+    {
+      "name": "count",
+      "type_signature": "number"
+    },
+    {
+      "name": "modelValue",
+      "type_signature": "string"
+    }
+  ],
+  "exposed": [],
+  "fallthrough": null,
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}

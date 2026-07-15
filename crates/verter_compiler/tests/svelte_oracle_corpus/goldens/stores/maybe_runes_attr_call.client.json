@@ -1,0 +1,86 @@
+{
+  "slug": "stores/maybe_runes_attr_call.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "maybe_runes_attr_call",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "store_get",
+    "setup_stores",
+    "init",
+    "template_effect",
+    "set_attribute",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "init",
+    "pop",
+    "push",
+    "set_attribute",
+    "setup_stores",
+    "store_get",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "store_get": 1,
+    "setup_stores": 1,
+    "init": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import {writable} from 'svelte/store'; var root = $.from_html(`<div></div>`); export default function maybe_runes_attr_call($$anchor, $$props) {$.push($$props, false); const $s = () => $.store_get(s, '$s', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); const s = writable({}); $.init(); var div = root(); $.template_effect(($0) => $.set_attribute(div, 'title', $0), [() => $s().m()]); $.append($$anchor, div); $.pop(); $$cleanup();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

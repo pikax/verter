@@ -1,4 +1,4 @@
-//! Rule: conditional-root-complex
+﻿//! Rule: conditional-root-complex
 //!
 //! Warns when a root `v-if`/`v-else-if` condition is too complex for generic
 //! narrowing. Only active when `conditional_root_narrowing` is enabled in config.
@@ -11,7 +11,7 @@ use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{FileContext, LintRule, RuleCategory};
 use rustc_hash::FxHashSet;
-use verter_analysis::types::AnalyzedMacroKind;
+use verter_semantic::analysis::types::AnalyzedMacroKind;
 
 pub struct ConditionalRootComplex;
 
@@ -194,11 +194,11 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_analysis::template::*;
-    use verter_analysis::types::{
+    use verter_semantic::analysis::template::*;
+    use verter_semantic::analysis::types::{
         AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, TypeResolutionSource,
     };
-    use verter_analysis::ScriptAnalysisSnapshot;
+    use verter_semantic::analysis::ScriptAnalysisSnapshot;
     use verter_span::Span;
 
     fn make_script_with_props(prop_names: &[&str]) -> ScriptAnalysisSnapshot {
@@ -221,6 +221,9 @@ mod tests {
                         tags: vec![],
                         resolution_source: TypeResolutionSource::Rust,
                         resolution_error: None,
+                        payload: None,
+                        type_expr_scope: None,
+                        declared_in_macro_type_arg: false,
                     })
                     .collect(),
                 emit_fields: vec![],
@@ -229,6 +232,8 @@ mod tests {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: Span::new(0, 50),
             }],
             ..Default::default()
@@ -242,8 +247,10 @@ mod tests {
     ) -> Vec<crate::diagnostic::LintDiagnostic> {
         let rules: Vec<Box<dyn LintRule>> = vec![Box::new(ConditionalRootComplex)];
         let visitor = LintVisitor::new(&rules);
-        let mut config = LintConfig::default();
-        config.conditional_root_narrowing = narrowing_enabled;
+        let config = LintConfig {
+            conditional_root_narrowing: narrowing_enabled,
+            ..LintConfig::default()
+        };
         let mut ctx = LintContext::new(&config);
         let file = crate::rules::FileContext {
             template: Some(template),

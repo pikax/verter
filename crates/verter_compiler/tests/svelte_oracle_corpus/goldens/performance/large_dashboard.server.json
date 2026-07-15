@@ -1,0 +1,107 @@
+{
+  "slug": "performance/large_dashboard.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "large_dashboard",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape",
+    "attr_class",
+    "escape"
+  ],
+  "helperSet": [
+    "attr",
+    "attr_class",
+    "escape"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "escape": 33,
+    "attr_class": 32
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-16m3q3v",
+    "code": "\n  .toolbar.svelte-<scoped> {\n    display: grid;\n    gap: 0.75rem;\n    grid-template-columns: minmax(16rem, 1fr) auto auto;\n    align-items: end;\n    padding: 1rem;\n  }\n\n  .dashboard.svelte-<scoped> {\n    display: grid;\n    grid-template-columns: repeat(4, minmax(12rem, 1fr));\n    gap: 1rem;\n    padding: 1rem;\n  }\n\n  .panel.svelte-<scoped> {\n    border: 1px solid #cbd5e1;\n    border-radius: 0.5rem;\n    padding: 1rem;\n  }\n\n  .panel.active.svelte-<scoped> {\n    border-color: #2563eb;\n    background: #eff6ff;\n  }\n\n  .disabled.svelte-<scoped> {\n    color: #64748b;\n    padding: 2rem;\n  }\n"
+  }
+}

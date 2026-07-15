@@ -1,0 +1,4 @@
+{
+  "rule": "DeclarationDuplicate",
+  "official_code": "declaration_duplicate_module_import"
+}

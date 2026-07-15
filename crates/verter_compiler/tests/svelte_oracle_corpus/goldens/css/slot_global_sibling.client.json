@@ -1,0 +1,70 @@
+{
+  "slug": "css/slot_global_sibling.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_global_sibling",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "child",
+    "slot",
+    "next",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "next",
+    "reset",
+    "slot"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "child": 1,
+    "slot": 1,
+    "next": 1,
+    "reset": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div><!><p class=\"svelte-<scoped>\">y</p></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div><!><p class=\"svelte-<scoped>\">y</p></div>`); export default function slot_global_sibling($$anchor, $$props) {var div = root(); var node = $.child(div); $.slot(node, $$props, 'default', {}, null); $.next(); $.reset(div); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-lwsoul",
+    "code": "\n\t.x + p.svelte-<scoped> { color: red; }\n\t/* (unused) .x + p { color: blue; }*/\n"
+  }
+}

@@ -1,1 +1,1 @@
-pub use verter_analysis::project_resolver::*;
+pub use verter_semantic::analysis::project_resolver::*;

@@ -1,0 +1,45 @@
+{
+  "slug": "declaration_tags/decl_derived.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "decl_derived",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "ensure_array_like",
+    "derived",
+    "escape"
+  ],
+  "helperSet": [
+    "derived",
+    "ensure_array_like",
+    "escape"
+  ],
+  "helperCounts": {
+    "ensure_array_like": 1,
+    "derived": 1,
+    "escape": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

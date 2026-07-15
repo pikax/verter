@@ -1,0 +1,97 @@
+{
+  "slug": "blocks/key_reactive.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "key_reactive",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "state",
+    "first_child",
+    "sibling",
+    "key",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "key",
+    "reset",
+    "set_text",
+    "sibling",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 2,
+    "state": 1,
+    "first_child": 1,
+    "sibling": 1,
+    "key": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "append": 2,
+    "delegated": 1,
+    "update": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<button>inc</button> <!>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); var root_1 = $.from_html(`<button>inc</button> <!>`, 1); export default function key_reactive($$anchor) {let selected = 0; let count = $.state(5); var fragment = root_1(); var button = $.first_child(fragment); var node = $.sibling(button, 2); $.key(node, () => selected, ($$anchor) => {var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $.get(count))); $.append($$anchor, p);}); $.delegated('click', button, () => $.update(count)); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

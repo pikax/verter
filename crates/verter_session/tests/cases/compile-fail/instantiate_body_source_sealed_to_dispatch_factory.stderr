@@ -1,0 +1,46 @@
+error[E0624]: associated function `non_file` is private
+  --> tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs:25:41
+   |
+25 |       let _non_file = InstantiateContext::non_file(prc, Default::default());
+   |                                           ^^^^^^^^ private associated function
+   |
+  ::: src/semantic_query.rs
+   |
+   | /     pub(crate) const fn non_file(
+   | |         projection_reduction: ProjectionReductionContext,
+   | |         resolve_env_hash: HashValue,
+   | |         _witness: crate::project_semantic_dispatch::BodySourceWitness,
+   | |     ) -> Self {
+   | |_____________- private associated function defined here
+
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+  --> tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs:25:21
+   |
+25 |     let _non_file = InstantiateContext::non_file(prc, Default::default());
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^------------------------- argument #3 of type `verter_session::project_semantic_dispatch::body_source_witness::BodySourceWitness` is missing
+   |
+note: associated function defined here
+  --> src/semantic_query.rs
+   |
+   |     pub(crate) const fn non_file(
+   |                         ^^^^^^^^
+help: provide the argument
+   |
+25 |     let _non_file = InstantiateContext::non_file(prc, Default::default(), /* verter_session::project_semantic_dispatch::body_source_witness::BodySourceWitness */);
+   |                                                                         +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+error[E0624]: associated function `file_backed` is private
+  --> tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs:26:44
+   |
+26 |       let _file_backed = InstantiateContext::file_backed;
+   |                                              ^^^^^^^^^^^ private associated function
+   |
+  ::: src/semantic_query.rs
+   |
+   | /     pub(crate) const fn file_backed(
+   | |         projection_reduction: ProjectionReductionContext,
+   | |         resolve_env_hash: HashValue,
+   | |         parse_env_hash: ParseEnvHash,
+   | |         _witness: crate::project_semantic_dispatch::BodySourceWitness,
+   | |     ) -> Self {
+   | |_____________- private associated function defined here

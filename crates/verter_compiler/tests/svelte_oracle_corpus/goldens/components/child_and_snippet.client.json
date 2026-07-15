@@ -1,0 +1,100 @@
+{
+  "slug": "components/child_and_snippet.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "child_and_snippet",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "noop",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append",
+    "from_html",
+    "from_html",
+    "proxy",
+    "first_child",
+    "sibling",
+    "each",
+    "index",
+    "get",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "each",
+    "first_child",
+    "from_html",
+    "get",
+    "index",
+    "noop",
+    "proxy",
+    "reset",
+    "set_text",
+    "sibling",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "noop": 1,
+    "child": 1,
+    "reset": 2,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 2,
+    "from_html": 2,
+    "proxy": 1,
+    "first_child": 1,
+    "sibling": 1,
+    "each": 1,
+    "index": 1,
+    "get": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<li> </li>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<!> <ul></ul>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; const row = ($$anchor, n = $.noop) => {var li = root(); var text = $.child(li); $.reset(li); $.template_effect(() => $.set_text(text, `row ${n() ?? ''}`)); $.append($$anchor, li);}; var root = $.from_html(`<li> </li>`); var root_1 = $.from_html(`<!> <ul></ul>`, 1); export default function child_and_snippet($$anchor) {let rows = $.proxy([1, 2, 3]); var fragment = root_1(); var node = $.first_child(fragment); Child(node, {label: 'hi'}); var ul = $.sibling(node, 2); $.each(ul, 21, () => rows, $.index, ($$anchor, n) => {row($$anchor, () => $.get(n));}); $.reset(ul); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "slug": "special/svelte_boundary_conflict_attr_snippet.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_boundary_conflict_attr_snippet",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "comment",
+    "first_child",
+    "noop",
+    "noop",
+    "append",
+    "boundary",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "boundary",
+    "comment",
+    "first_child",
+    "from_html",
+    "noop"
+  ],
+  "helperCounts": {
+    "from_html": 2,
+    "comment": 1,
+    "first_child": 1,
+    "noop": 2,
+    "append": 3,
+    "boundary": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p>oops</p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<p>content</p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p>oops</p>`); var root_1 = $.from_html(`<p>content</p>`); export default function svelte_boundary_conflict_attr_snippet($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); {const failed = ($$anchor, error = $.noop, reset = $.noop) => {var p = root(); $.append($$anchor, p);}; $.boundary(node, {get failed() {return $$props.failedProp;}, failed}, ($$anchor) => {var p_1 = root_1(); $.append($$anchor, p_1);});} $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

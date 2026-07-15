@@ -1,0 +1,38 @@
+[package]
+name = "verter_macro_dto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Dependency-neutral, span-free macro-codegen DTO vocabulary — the semantic hand-off between the shared resolution engine and SFC macro codegen"
+publish = false
+
+# Dependency closure is a FIREWALL contract: this crate is the neutral
+# hand-off vocabulary between the shared resolution engine and the compiler's
+# macro codegen, so BOTH sides must be able to depend on it without either
+# pulling in the other. The production dependency set is EXACTLY the two
+# structural marker crates (`verter_no_typeexpr` + `verter_no_storedspan`) —
+# no parser, no compiler, no session, no semantic, no protocol, no typed IR,
+# no serde, and no direct `oxc_*`. The only sanctioned `oxc` reach is the
+# span-primitive subtree entered via `verter_no_typeexpr -> verter_span ->
+# oxc_span`. Enforced structurally by the resolve-graph closure guard in
+# `tests/cases/dependency_closure_guard.rs`.
+[dependencies]
+verter_no_typeexpr = { workspace = true }
+verter_no_storedspan = { workspace = true }
+
+[dev-dependencies]
+# `serde_json` parses the `cargo metadata` resolve graph in the
+# dependency-closure firewall guard.
+serde_json = { workspace = true }
+static_assertions = "1.1.0"
+# Dev-only: the NEGATIVE marker witnesses in
+# `tests/cases/marker_witnesses.rs` must NAME `verter_span::Span` and
+# `verter_type_expr::TypeExpr` to assert a carrier owning one does NOT
+# satisfy the markers. Dev-dependencies never enter the production closure
+# the firewall guard walks.
+verter_span = { path = "../verter_span" }
+verter_type_expr = { workspace = true }

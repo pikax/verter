@@ -1,0 +1,4 @@
+{
+  "rule": "PropsInvalidPattern",
+  "official_code": "props_duplicate"
+}

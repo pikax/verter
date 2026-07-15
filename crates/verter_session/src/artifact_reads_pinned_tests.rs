@@ -1,0 +1,742 @@
+//! Content-pinned artifact-read discriminators.
+//!
+//! Root diagnosis: some production reads used the permissive
+//! `get_any` instead of a current-content-pinned lookup. Fact
+//! validation cannot work if the validator reads a stale artifact as
+//! 'current.'
+//!
+//! `current_derived_fact_hash(Route)` / `current_cached_import_route_hash`
+//! are the Route / ImportRoute fact-validation oracles. Pre-fix they
+//! read `FileArtifactStore::get_any` — which returns ANY cached
+//! `IndexedReady` for a canonical regardless of content hash. Once
+//! eager `evict_canonical` is retired a stale `IndexedReady`
+//! can linger past a content change, and the oracle would surface its
+//! stale `route_hash` / `import_route_hash` as the "current" derived
+//! fact — confirming a stale dependent cache entry as valid.
+//!
+//! Post-fix the oracle reads `current_content_pinned_indexed`, which
+//! resolves the canonical's authoritative current content hash from
+//! the scheduler and reads the artifact store **pinned to that hash**
+//! (`FileArtifactStore::get_for_current_content`). A stale candidate
+//! yields `None`, so the oracle recomputes the truly-current route
+//! surface hash instead.
+//!
+//! Discriminating fixture: a real `IndexedReady` is materialised, then
+//! a synthetic STALE `IndexedReady` (doctored `whole_hash` +
+//! `route_hash` + `import_route_hash`) is planted into
+//! `FileArtifactStore` while the scheduler's authoritative content
+//! hash stays at the real value — the lingering-stale store-entry
+//! scenario. The test then asserts the pinned read and the two derived
+//! fact oracles all reject the stale artifact. A pre-fix `get_any`
+//! tree returns the planted stale hashes and the assertions FAIL.
+use std::sync::Arc;
+
+use crate::resolver_core::DerivedFactKind;
+use crate::{HostConfig, VerterHost};
+
+/// Doctored hash that no real content ever produces — the planted
+/// stale artifact carries this so a permissive `get_any` read is
+/// trivially distinguishable from a content-pinned read.
+const STALE_HASH: [u8; 16] = [0xEE; 16];
+
+/// Build a host with a single `.ts` file resolvable through the
+/// workspace, materialise its `IndexedReady`, and return the host plus
+/// the real (current-content) whole hash.
+fn host_with_materialized_ts(path: &str, source: &str) -> (VerterHost, [u8; 16]) {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some(path.to_string()),
+            input_id: path.to_string(),
+            source: Arc::from(source),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(path)
+                .static_resolution(),
+            aliases: Vec::new(),
+        })
+        .expect("seed upsert succeeds");
+    let indexed = host
+        .ensure_indexed_ready(path)
+        .expect("IndexedReady must materialise for an upserted file");
+    (host, indexed.whole_hash)
+}
+
+/// Plant a synthetic STALE `IndexedReady` for `canonical` into
+/// `FileArtifactStore`. The planted entry clones the real artifact's
+/// shape but overwrites every content-derived hash with a value no
+/// real content produces. `FileArtifactStore::insert` drains prior
+/// versions, so afterwards the store holds ONLY the stale entry while
+/// the scheduler still reports the real `whole_hash` — exactly the
+/// lingering-stale state that removing eager eviction would create.
+fn plant_stale_indexed(host: &VerterHost, canonical: &str) {
+    let real = host
+        .project_type_store()
+        .indexed()
+        .get_any(canonical)
+        .expect("real IndexedReady must exist before planting the stale one");
+    let mut stale = (*real).clone();
+    stale.whole_hash = STALE_HASH;
+    // Drop the cached route-surface / import-route hashes to a sentinel
+    // so a `get_any`-based oracle would observe THESE as "current".
+    stale.route_hash = Some(STALE_HASH);
+    stale.import_route_hash = Some(STALE_HASH);
+    host.project_type_store()
+        .indexed()
+        .insert(Arc::from(canonical), Arc::new(stale));
+}
+
+/// The pinned read rejects a stale artifact; the permissive `get_any`
+/// returns it. This is the substrate-level discriminator for item 1.
+#[test]
+fn current_content_pinned_indexed_rejects_stale_artifact() {
+    let canonical = "/pinned/probe.ts";
+    let (host, real_hash) = host_with_materialized_ts(
+        canonical,
+        "export interface Probe { a: number; }\nexport const probe = 1;\n",
+    );
+    assert_ne!(
+        real_hash, STALE_HASH,
+        "fixture invariant: the real content hash must differ from the planted stale hash",
+    );
+
+    plant_stale_indexed(&host, canonical);
+
+    // The permissive `get_any` surfaces the planted stale artifact —
+    // this is the pre-fix read shape.
+    let permissive = host
+        .project_type_store()
+        .indexed()
+        .get_any(canonical)
+        .expect("get_any must still return the (stale) entry");
+    assert_eq!(
+        permissive.whole_hash, STALE_HASH,
+        "fixture invariant: get_any returns the planted stale artifact — \
+         that is exactly the read shape the pre-fix oracle used",
+    );
+
+    // The content-pinned read resolves the scheduler's authoritative
+    // current hash (the real hash) and finds NO artifact at that hash
+    // (only the stale one is stored). Post-fix it returns `None`.
+    let pinned = host.current_content_pinned_indexed(canonical);
+    assert!(
+        pinned.is_none(),
+        "current_content_pinned_indexed MUST return None: the only cached \
+         artifact is a stale candidate ({STALE_HASH:?}) while the scheduler's \
+         authoritative content hash is the real value ({real_hash:?}). A \
+         non-None result means the read is not content-pinned.",
+    );
+}
+
+/// Discriminator — a content-pinned read MUST NOT resolve a
+/// stale artifact via a `get_any`-derived hash.
+///
+/// When a file is evicted (`VerterHost::evict` sets the
+/// `DerivedRawState.evicted` flag) its `IndexedReady` is NOT removed
+/// from `FileArtifactStore` — the artifact lingers. The pre-fix
+/// `current_content_pinned_indexed` derived its pin from
+/// `get_whole_hash`, which — once the scheduler branch is gated off by
+/// the eviction flag — falls back to `FileArtifactStore::get_any`. That
+/// `get_any` returns the lingering artifact and surfaces *its own*
+/// `whole_hash`; feeding that hash straight back into
+/// `get_for_current_content` re-resolves the very same stale artifact.
+/// The "pin" then confirms the stale artifact as current.
+///
+/// Post-fix the pin is resolved by `authoritative_current_content_hash`,
+/// which is scheduler-only and returns `None` for an evicted canonical.
+/// The content-pinned read therefore returns `None` (a genuine miss →
+/// recompute) instead of the lingering stale artifact.
+///
+/// Discriminator: pre-fix this returns `Some(<lingering artifact>)`;
+/// post-fix it returns `None`.
+#[test]
+fn current_content_pinned_indexed_returns_none_after_eviction() {
+    let canonical = "/pinned/evicted_owner.ts";
+    let (host, real_hash) = host_with_materialized_ts(
+        canonical,
+        "export type Exported = string;\nexport interface Surface { x: number; }\n",
+    );
+
+    // Before eviction the content-pinned read HITS the genuine current
+    // artifact — this anchors the discriminator (the assertion below is
+    // not vacuously satisfied by a systematically-missing read).
+    assert!(
+        host.current_content_pinned_indexed(canonical).is_some(),
+        "fixture invariant: the content-pinned read must HIT the genuine \
+         current artifact before eviction",
+    );
+
+    // Evict the file. `evict` flips `DerivedRawState.evicted` but leaves
+    // the `IndexedReady` in `FileArtifactStore` — the exact
+    // lingering-stale state.
+    host.evict(canonical);
+
+    // Fixture invariant: the artifact still lingers in the store under
+    // its real content hash, so `get_any` (the pre-fix hash source)
+    // still returns it.
+    let lingering = host
+        .project_type_store()
+        .indexed()
+        .get_any(canonical)
+        .expect("evict must NOT remove the IndexedReady from FileArtifactStore");
+    assert_eq!(
+        lingering.whole_hash, real_hash,
+        "fixture invariant: the lingering artifact keeps its real content \
+         hash — a pre-fix `get_whole_hash` would surface THIS hash via \
+         `get_any` and re-resolve the same artifact",
+    );
+
+    // Post-fix: the authoritative hash source is scheduler-only and
+    // gated on the eviction flag, so it reports no current hash for an
+    // evicted canonical.
+    assert!(
+        host.authoritative_current_content_hash(canonical).is_none(),
+        "authoritative_current_content_hash MUST return None for an evicted \
+         canonical — it must not fall back to a `get_any`-derived hash",
+    );
+
+    // The discriminating assertion: the content-pinned read returns
+    // `None` (miss → recompute), NOT the lingering stale artifact. A
+    // pre-fix tree returns `Some(lingering)` here.
+    let pinned = host.current_content_pinned_indexed(canonical);
+    assert!(
+        pinned.is_none(),
+        "current_content_pinned_indexed MUST return None after eviction: a \
+         non-None result means the pin was derived from the lingering \
+         artifact's own `get_any` hash, which re-resolves the stale artifact \
+         and confirms it as current — exactly that defect.",
+    );
+}
+
+/// `current_derived_fact_hash(Route)` is the Route fact-validation
+/// oracle. With a stale artifact planted, a `get_any`-based oracle
+/// would return the planted stale `route_hash`; the content-pinned
+/// observe-only oracle DECLINES (`None`) instead — fact capture never
+/// rebuilds a surface to sign it, so a dependent rooted on the prior
+/// Route fact fails warm validation and recomputes itself.
+#[test]
+fn route_derived_fact_hash_ignores_stale_artifact_route_hash() {
+    let canonical = "/pinned/route_owner.ts";
+    let (host, real_hash) = host_with_materialized_ts(
+        canonical,
+        "export type Exported = string;\nexport interface Surface { x: number; }\n",
+    );
+
+    // Baseline: the Route fact hash from the freshly-materialised
+    // (current-content) artifact.
+    let route_fresh = host.current_derived_fact_hash(canonical, DerivedFactKind::Route);
+
+    plant_stale_indexed(&host, canonical);
+
+    let route_after_plant = host.current_derived_fact_hash(canonical, DerivedFactKind::Route);
+
+    // Discriminating assertion: the oracle must NOT return the planted
+    // stale `route_hash`. A `get_any`-based oracle returns
+    // `Some(STALE_HASH)` here, confirming a stale dependent cache entry
+    // as valid — the exact stale-artifact-served-as-valid defect.
+    assert_ne!(
+        route_after_plant,
+        Some(STALE_HASH),
+        "current_derived_fact_hash(Route) MUST NOT surface the planted stale \
+         artifact's route_hash.",
+    );
+    // Observe-only contract: with ONLY the content-stale candidate in
+    // the store the content-pinned read misses, and fact capture must
+    // DECLINE (None) rather than rebuild the surface itself to sign it
+    // (capture is side-effect-free; the dependent rooted on the prior
+    // Route fact fails warm validation and recomputes through its own
+    // cold path).
+    assert_eq!(
+        route_after_plant, None,
+        "the observe-only Route oracle must decline when no current \
+         artifact is observable — never recompute (build) at capture time",
+    );
+    assert!(
+        route_fresh.is_some(),
+        "fixture invariant: the owner declares a resolvable route surface, so \
+         the Route fact hash must be Some — otherwise the assertion above is \
+         vacuous",
+    );
+    let _ = real_hash;
+}
+
+/// `current_cached_import_route_hash` is the ImportRoute fact oracle.
+/// Same discrimination as the Route oracle: a stale artifact's
+/// `import_route_hash` must not be served as the current ImportRoute
+/// fact.
+#[test]
+fn import_route_derived_fact_hash_ignores_stale_artifact_hash() {
+    let canonical = "/pinned/import_owner.ts";
+    // A file with an import edge so `import_route_hash` is populated on
+    // the real artifact.
+    let (host, _real_hash) = host_with_materialized_ts(
+        canonical,
+        "import { dep } from './dep';\nexport const reexport = dep;\n",
+    );
+
+    plant_stale_indexed(&host, canonical);
+
+    // With ONLY the stale artifact in the store, the pinned read misses
+    // (its content hash is the doctored sentinel). Pre-fix the `get_any`
+    // oracle returns the planted stale `import_route_hash`
+    // (`Some(STALE_HASH)`); post-fix the content-pinned read misses and
+    // the oracle answers from the genuine `DerivedRawState` import-route
+    // table instead.
+    let import_route_after_plant =
+        host.current_derived_fact_hash(canonical, DerivedFactKind::ImportRoute);
+    assert_ne!(
+        import_route_after_plant,
+        Some(STALE_HASH),
+        "current_derived_fact_hash(ImportRoute) MUST NOT surface the planted \
+         stale artifact's import_route_hash. Pre-fix the `get_any` oracle \
+         returns the stale hash, confirming a stale dependent cache entry as \
+         valid — the exact stale-artifact-served-as-valid defect.",
+    );
+
+    // Now re-materialise the genuine current `IndexedReady` (the stale
+    // entry is overwritten by the real-hash artifact). The content-pinned
+    // read now HITS the current artifact and the oracle returns its
+    // genuine `import_route_hash` — proving the pinned read serves the
+    // current content rather than systematically falling through.
+    host.project_type_store().indexed().remove(canonical);
+    let fresh = host
+        .ensure_indexed_ready(canonical)
+        .expect("IndexedReady must re-materialise");
+    let import_route_fresh =
+        host.current_derived_fact_hash(canonical, DerivedFactKind::ImportRoute);
+    assert_eq!(
+        import_route_fresh, fresh.import_route_hash,
+        "after the genuine current artifact is materialised, the content-pinned \
+         ImportRoute oracle must return that artifact's import_route_hash",
+    );
+    assert_ne!(
+        import_route_fresh,
+        Some(STALE_HASH),
+        "the genuine current ImportRoute hash must never equal the planted \
+         stale sentinel",
+    );
+}
+
+/// Discriminator — a content-pinned read through
+/// `SessionResolverContext` MUST pin against the overlay content hash,
+/// not the base host's hash.
+///
+/// When an overlay covers a file that also exists on the base host,
+/// `materialize_overlay_indexed_ready` publishes the overlay
+/// `IndexedReady` into `FileArtifactStore` under the *overlay* content
+/// hash, as a multi-candidate sibling of the base artifact (which lives
+/// under the *base* content hash).
+///
+/// The pre-fix `indexed_for_current_content` derived its pin from
+/// `get_whole_hash`. `SessionResolverContext::get_whole_hash` delegates
+/// straight to the base host, so it returns the BASE content hash — and
+/// the pinned read resolves the BASE artifact (or misses the overlay
+/// entirely) while the session is computing overlay component-meta /
+/// proof data.
+///
+/// Post-fix the pin is resolved by `authoritative_current_content_hash`,
+/// which `SessionResolverContext` overrides to consult the active
+/// `SessionView`: an overlay-covered canonical resolves to the overlay
+/// hash, so the content-pinned read returns the OVERLAY artifact.
+///
+/// Discriminator: pre-fix `indexed_for_current_content` returns the
+/// artifact whose `whole_hash == base_hash`; post-fix it returns the
+/// artifact whose `whole_hash == overlay_hash`.
+#[test]
+fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
+    use crate::resolver_core::{ResolverContext, SessionResolverContext};
+    use crate::session_view::{OverlaidView, SessionView};
+    use rustc_hash::FxHashMap;
+
+    let canonical = "/overlay/probe.ts";
+    // Base file: materialised on the host under the base content hash.
+    let (host, base_hash) = host_with_materialized_ts(
+        canonical,
+        "export interface Probe { base: number; }\nexport const probe = 1;\n",
+    );
+    let host = Arc::new(host);
+
+    // Overlay source: deliberately different bytes → different content
+    // hash, so the base and overlay artifacts are distinguishable by
+    // `whole_hash`.
+    let overlay_source: Arc<str> =
+        Arc::from("export interface Probe { overlay: string; }\nexport const probe = 2;\n");
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+
+    // The overlay hash is the view's authoritative overlay-content hash.
+    let overlay_hash = view
+        .overlay_content_hash_for(canonical)
+        .expect("OverlaidView must report an overlay content hash for the masked canonical");
+    assert_ne!(
+        overlay_hash, base_hash,
+        "fixture invariant: the overlay source differs from the base, so its \
+         content hash must differ — otherwise base/overlay are indistinguishable",
+    );
+
+    // Publish the overlay `IndexedReady` candidate under the
+    // overlay-scoped key (multi-candidate sibling of the base
+    // artifact).
+    let overlay_indexed = host
+        .materialize_overlay_indexed_ready_with_view(canonical, &view)
+        .expect("overlay IndexedReady must materialise");
+    assert_eq!(
+        overlay_indexed.whole_hash, overlay_hash,
+        "fixture invariant: the overlay artifact is keyed by the overlay hash",
+    );
+
+    // Sanity: the base artifact is still in the store under the base
+    // hash — both candidates coexist.
+    let base_indexed = host
+        .project_type_store()
+        .indexed()
+        .get(canonical, base_hash)
+        .expect("base artifact must still be cached under the base hash");
+    assert_eq!(base_indexed.whole_hash, base_hash);
+
+    // Drive the content-pinned read through the session context.
+    let store_view = host
+        .resolver_store_view_read()
+        .into_owned_view()
+        .with_session_overlay(&host, &view);
+    let ctx = SessionResolverContext::new(
+        &host,
+        &view,
+        &store_view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+
+    // The session view's authoritative current-content hash must be the
+    // OVERLAY hash, not the base hash.
+    assert_eq!(
+        ctx.authoritative_current_content_hash(canonical),
+        Some(overlay_hash),
+        "SessionResolverContext::authoritative_current_content_hash MUST \
+         resolve the overlay hash for an overlay-covered canonical, not the \
+         base host's hash",
+    );
+
+    // The discriminating assertion: the content-pinned read returns the
+    // OVERLAY artifact. Pre-fix it returns the base artifact (pinned by
+    // the base host's hash).
+    let pinned = ctx
+        .indexed_for_current_content(canonical)
+        .expect("the content-pinned read must HIT a candidate");
+    assert_eq!(
+        pinned.whole_hash, overlay_hash,
+        "indexed_for_current_content through SessionResolverContext MUST \
+         return the OVERLAY artifact (whole_hash == overlay_hash). A result \
+         keyed by base_hash means the pin was derived from the base host's \
+         hash rather than the session view — exactly that defect.",
+    );
+    assert_ne!(
+        pinned.whole_hash, base_hash,
+        "the overlay-pinned read must NOT surface the base artifact",
+    );
+}
+
+/// `HostStoreView::build` route-fact provenance — a STALE `IndexedReady`
+/// retained for a canonical MUST NOT publish its stale `Route` derived
+/// hash, and MUST NOT suppress the `Route` fact derived from the
+/// canonical's CURRENT-content shallow surface.
+///
+/// `HostStoreView::build` snapshots `FileArtifactStore::snapshot_all()`,
+/// which returns every retained `IndexedReady` regardless of content
+/// hash. A stale older-content `IndexedReady` planted for a canonical
+/// must never end up as the canonical's `Route` derived fact: the
+/// content-pinned `ensure_indexed_ready` read gates on the scheduler's
+/// current whole hash, MISSES the stale candidate, and re-materialises
+/// the CURRENT artifact — whose route surface the view then publishes,
+/// agreeing with `current_route_surface_hash()` (the production
+/// route-fact oracle, which is content-pinned).
+///
+/// Discriminating fixture: `probe.ts` is materialised (real
+/// `IndexedReady` at the real content hash), then a synthetic STALE
+/// `IndexedReady` carrying a DIFFERENT file's shallow route surface is
+/// planted for it (`FileArtifactStore::insert` drains the real entry, so
+/// the store holds ONLY the stale candidate). `ensure_indexed_ready` for
+/// `probe.ts` then re-materialises the current artifact at the real
+/// current hash. The scheduler's content for `probe.ts` is never
+/// touched, so the tracked current whole hash stays at the real value.
+///
+/// A permissive (`get_any`-style, non-hash-pinned) read regression would
+/// return the planted stale candidate instead of re-materialising; the
+/// view's `Route` hash would then be the STALE donor surface and
+/// disagree with `current_route_surface_hash()` — this test FAILS on
+/// that regression.
+#[test]
+fn host_store_view_route_fact_ignores_stale_indexed_after_current_rematerialization() {
+    let probe = "/pinned/route_provenance_probe.ts";
+    // The current content of `probe.ts` — a resolvable route surface.
+    let (host, real_hash) = host_with_materialized_ts(
+        probe,
+        "export interface Current { current: number; }\nexport const current = 1;\n",
+    );
+    assert_ne!(
+        real_hash, STALE_HASH,
+        "fixture invariant: the real content hash must differ from the stale sentinel",
+    );
+
+    // The authoritative current route surface for `probe.ts` — derived
+    // from the live (current-content) shallow state. This is the hash a
+    // correct `HostStoreView` build must publish.
+    let current_route_surface = host
+        .current_route_surface_hash(probe)
+        .expect("probe declares a resolvable route surface → current_route_surface_hash is Some");
+
+    // A DONOR file with a DIFFERENT export surface. Its shallow state is
+    // harvested to give the planted stale `IndexedReady` a route surface
+    // that genuinely differs from `probe.ts`'s current one.
+    let donor = "/pinned/route_provenance_donor.ts";
+    upsert_donor_with_distinct_surface(&host, donor);
+    let donor_indexed = host
+        .project_type_store()
+        .indexed()
+        .get_any(donor)
+        .expect("donor IndexedReady must materialise");
+    let stale_route_surface =
+        crate::resolver_store::hash_route_surface(donor_indexed.shallow_state.as_ref());
+    assert_ne!(
+        stale_route_surface, current_route_surface,
+        "fixture invariant: the donor's route surface must differ from probe's current \
+         surface — otherwise the stale-vs-current Route hashes are indistinguishable",
+    );
+
+    // Plant a STALE `IndexedReady` for `probe.ts`: the real artifact's
+    // shape, but doctored to a content hash no real content produces AND
+    // carrying the DONOR's shallow route surface. `FileArtifactStore::insert`
+    // drains probe's real artifact, so the store retains ONLY this stale
+    // candidate while the scheduler still reports the real content hash.
+    let real_probe_indexed = host
+        .project_type_store()
+        .indexed()
+        .get_any(probe)
+        .expect("real probe IndexedReady must exist before planting the stale one");
+    let mut stale = (*real_probe_indexed).clone();
+    stale.whole_hash = STALE_HASH;
+    stale.route_hash = Some(STALE_HASH);
+    stale.import_route_hash = Some(STALE_HASH);
+    stale.shallow_state = Arc::clone(&donor_indexed.shallow_state);
+    host.project_type_store()
+        .indexed()
+        .insert(Arc::from(probe), Arc::new(stale));
+
+    // Re-materialise the canonical artifact for `probe.ts` through the
+    // content-pinned read. The hash-pinned lookup must MISS the planted
+    // stale candidate (its whole_hash is the stale sentinel, not the
+    // scheduler's current hash) and rebuild the CURRENT artifact.
+    let indexed = host
+        .ensure_indexed_ready(probe)
+        .expect("IndexedReady must re-materialise for probe at the current hash");
+    assert_eq!(
+        indexed.whole_hash, real_hash,
+        "fixture invariant: the re-materialised IndexedReady is pinned to probe's real \
+         current content hash — a permissive (non-hash-pinned) read would have returned \
+         the planted stale candidate instead",
+    );
+
+    // Build the production `HostStoreView`.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let view_route_hash = view.derived_hash(probe, crate::resolver_core::DerivedFactKind::Route);
+
+    // Discriminating assertion: the view's `Route` derived hash must be
+    // the CURRENT route surface (from the re-materialised current
+    // `IndexedReady`), NOT the planted stale artifact's surface.
+    assert_eq!(
+        view_route_hash,
+        Some(current_route_surface),
+        "HostStoreView::build MUST publish the CURRENT route surface for the canonical \
+         — the content-pinned `ensure_indexed_ready` read rejected the planted stale \
+         candidate and re-materialised the current artifact. A permissive read \
+         regression keeps the stale artifact, so the view's Route hash would be the \
+         stale donor surface.",
+    );
+    assert_ne!(
+        view_route_hash,
+        Some(stale_route_surface),
+        "HostStoreView::build MUST NOT publish the STALE `IndexedReady`'s route surface \
+         as the canonical's `Route` derived fact",
+    );
+    // The view's Route fact must agree with the production route-fact
+    // oracle — both must read the current route surface, not the stale
+    // artifact. A disagreement is a false stale miss for every
+    // route-dependent cache entry.
+    assert_eq!(
+        view_route_hash,
+        host.current_route_surface_hash(probe),
+        "HostStoreView::build's `Route` derived hash MUST agree with \
+         `current_route_surface_hash()` — the producer and the validator must observe \
+         one route surface for the canonical",
+    );
+}
+
+/// Upsert a route-only `.ts` donor whose export surface is deliberately
+/// distinct from the other fixtures in this file, so its hashed route
+/// surface differs from any current-content probe surface.
+fn upsert_donor_with_distinct_surface(host: &VerterHost, path: &str) {
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some(path.to_string()),
+            input_id: path.to_string(),
+            source: Arc::from(
+                "export interface DonorAlpha { donorAlpha: string; }\n\
+                 export interface DonorBeta { donorBeta: boolean; }\n\
+                 export type DonorGamma = DonorAlpha | DonorBeta;\n\
+                 export const donorValue = 99;\n",
+            ),
+            file_language: crate::LanguageRegistry::global()
+                .classify_static(path)
+                .static_resolution(),
+            aliases: Vec::new(),
+        })
+        .expect("donor upsert succeeds");
+    let _ = host
+        .ensure_indexed_ready(path)
+        .expect("donor IndexedReady must materialise");
+}
+
+/// `component_meta_audit_store_snapshot`'s `imported_dependency_entries`
+/// and `imported_dependency_bytes` MUST be drawn from the SAME
+/// `FileArtifactStore` population.
+///
+/// Pre-fix the entry count came from `FileArtifactStore::len()` (every
+/// keyed artifact — base + overlay-scoped) while the byte sum was taken
+/// over `snapshot_all()`, which filters to base
+/// (`FileArtifactKey::is_base`) keys only. In a session that
+/// materialised an overlay artifact the two figures describe different
+/// populations: the count includes the overlay candidate, the byte sum
+/// excludes it.
+///
+/// Post-fix both numbers route through `snapshot_artifacts()` (the full
+/// keyed set), so the audit's byte sum equals an independent
+/// all-population byte sum and the count equals
+/// `snapshot_artifacts().len()`.
+///
+/// Discriminating fixture: a base `.ts` artifact is materialised, then
+/// an overlay `IndexedReady` with deliberately different (longer) source
+/// is published as a multi-candidate sibling under the overlay-scoped
+/// key. The independent all-population byte sum is then strictly larger
+/// than the base-only sum.
+///
+/// - **Pre-fix tree** (`362eeb0b5`): `imported_dependency_bytes` is the
+///   base-only sum and is strictly LESS than the all-population sum →
+///   the equality assertion FAILS.
+/// - **Post-fix tree**: `imported_dependency_bytes` is the
+///   all-population sum → the assertion PASSES.
+#[test]
+fn audit_store_snapshot_entry_and_byte_counts_share_one_population() {
+    use crate::session_view::{OverlaidView, SessionView};
+    use rustc_hash::FxHashMap;
+
+    let canonical = "/audit/store_snapshot_probe.ts";
+    // Base artifact: materialised on the host under the base content
+    // hash.
+    let (host, base_hash) = host_with_materialized_ts(
+        canonical,
+        "export interface Probe { base: number; }\nexport const probe = 1;\n",
+    );
+    let host = Arc::new(host);
+
+    // Overlay source: deliberately LONGER than the base so the overlay
+    // artifact contributes a strictly positive, distinguishable byte
+    // count — the base-only and all-population sums must genuinely
+    // differ for the assertion to discriminate.
+    let overlay_source: Arc<str> = Arc::from(
+        "export interface Probe { overlay: string; overlayExtra: boolean; }\n\
+         export const probe = 2;\n\
+         export const overlayOnlyConstant = 'a deliberately long overlay-only value';\n",
+    );
+    assert!(
+        overlay_source.len()
+            > "export interface Probe { base: number; }\nexport const probe = 1;\n".len(),
+        "fixture invariant: the overlay source must be longer than the base so the \
+         overlay artifact contributes a distinguishable positive byte count",
+    );
+    let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
+    overlays.insert(canonical.to_string(), Arc::clone(&overlay_source));
+    let view = OverlaidView::new(Arc::clone(&host), overlays);
+
+    let overlay_hash = view
+        .overlay_content_hash_for(canonical)
+        .expect("OverlaidView must report an overlay content hash for the masked canonical");
+    assert_ne!(
+        overlay_hash, base_hash,
+        "fixture invariant: the overlay source differs from the base, so the overlay \
+         artifact is keyed by a distinct content hash and coexists with the base",
+    );
+
+    // Publish the overlay `IndexedReady` candidate under the
+    // overlay-scoped key — a multi-candidate sibling of the base
+    // artifact.
+    let overlay_indexed = host
+        .materialize_overlay_indexed_ready_with_view(canonical, &view)
+        .expect("overlay IndexedReady must materialise");
+    assert_eq!(
+        overlay_indexed.whole_hash, overlay_hash,
+        "fixture invariant: the overlay artifact is keyed by the overlay hash",
+    );
+
+    // Independent oracle: the full keyed-population entry count + byte
+    // sum, computed directly from `snapshot_artifacts()` (every keyed
+    // artifact — base + overlay-scoped).
+    let all_artifacts = host.project_type_store().indexed().snapshot_artifacts();
+    let all_population_entries = all_artifacts.len() as u32;
+    let all_population_bytes: u64 = all_artifacts
+        .iter()
+        .map(|(key, file_artifacts)| {
+            key.canonical.len() as u64
+                + file_artifacts.indexed.raw_source.len() as u64
+                + file_artifacts.indexed.eval_source.len() as u64
+        })
+        .sum();
+
+    // The base-only oracle: the byte sum over `snapshot_all()` (base
+    // keys only). This is the population the PRE-FIX audit byte sum was
+    // drawn from.
+    let base_only_bytes: u64 = host
+        .project_type_store()
+        .indexed()
+        .snapshot_all()
+        .iter()
+        .map(|(id, indexed)| {
+            id.len() as u64 + indexed.raw_source.len() as u64 + indexed.eval_source.len() as u64
+        })
+        .sum();
+
+    // Fixture invariant: with an overlay artifact present the two
+    // populations genuinely differ — otherwise the equality assertion
+    // below would pass vacuously even on the pre-fix tree.
+    assert!(
+        all_population_bytes > base_only_bytes,
+        "fixture invariant: an overlay artifact is keyed alongside the base, so the \
+         all-population byte sum ({all_population_bytes}) must exceed the base-only \
+         byte sum ({base_only_bytes}) — the two populations must be distinguishable",
+    );
+
+    // The audit snapshot under test.
+    let (store_audit, _counters) = host.component_meta_audit_store_snapshot(None);
+
+    // Discriminating assertion 1: the audit byte sum equals the
+    // all-population sum. Pre-fix it equals the strictly-smaller
+    // base-only sum, so this FAILS.
+    assert_eq!(
+        store_audit.imported_dependency_bytes, all_population_bytes,
+        "component_meta_audit_store_snapshot's imported_dependency_bytes MUST be summed \
+         over the SAME population its entry count is drawn from (all keyed artifacts via \
+         snapshot_artifacts()). A pre-fix tree sums bytes over base-only snapshot_all() \
+         ({base_only_bytes}) while counting entries over the full set — two populations.",
+    );
+    assert_ne!(
+        store_audit.imported_dependency_bytes, base_only_bytes,
+        "with an overlay artifact present, the audit byte sum MUST NOT equal the \
+         base-only snapshot_all() sum — that is the pre-fix population mismatch",
+    );
+
+    // Discriminating assertion 2: the entry count is the full keyed
+    // population — consistent with the byte sum's population.
+    assert_eq!(
+        store_audit.imported_dependency_entries, all_population_entries,
+        "imported_dependency_entries MUST count the full keyed artifact population \
+         (snapshot_artifacts()), consistent with imported_dependency_bytes",
+    );
+}

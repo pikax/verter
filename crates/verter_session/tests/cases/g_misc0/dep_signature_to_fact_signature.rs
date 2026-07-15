@@ -1,0 +1,128 @@
+//! `dep_signature_to_fact_signature` maps `DepVersion::WholeHash` →
+//! `FactVersionRef::FileWholeHash` and `DepVersion::ProjectGeneration`
+//! → `FactVersionRef::ProjectGeneration`. `DepVersion::RouteGeneration`
+//! has no `FactVersionRef` equivalent and is the sole dropped variant
+//! (route generation has no authoritative validating source; entry
+//! producers refuse it via the legacy `DepSignature` rail).
+
+use std::sync::Arc;
+
+use verter_session::for_tests::dep_signature_to_fact_signature_for_tests;
+use verter_session::resolver_core::FactVersionRef;
+use verter_session::semantic_query::{DepSignature, DepVersion};
+
+fn make_dep_sig(entries: Vec<(&str, DepVersion)>) -> DepSignature {
+    Arc::from(
+        entries
+            .into_iter()
+            .map(|(canon, ver)| (Arc::from(canon), ver))
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[test]
+fn whole_hash_converts_to_file_whole_hash() {
+    let hash = [7u8; 16];
+    let sig = make_dep_sig(vec![("src/foo.ts", DepVersion::WholeHash(hash))]);
+
+    let result = dep_signature_to_fact_signature_for_tests(&sig);
+
+    assert_eq!(
+        result.len(),
+        1,
+        "one WholeHash entry must produce one FactVersionRef"
+    );
+    assert_eq!(
+        result[0],
+        FactVersionRef::FileWholeHash {
+            canonical_id: "src/foo.ts".to_string(),
+            hash,
+        },
+        "converted fact must carry the canonical_id and hash from the DepSignature entry"
+    );
+}
+
+#[test]
+fn route_generation_is_dropped() {
+    let sig = make_dep_sig(vec![
+        ("a.ts", DepVersion::RouteGeneration(42)),
+        ("b.ts", DepVersion::WholeHash([1u8; 16])),
+    ]);
+
+    let result = dep_signature_to_fact_signature_for_tests(&sig);
+
+    assert_eq!(
+        result.len(),
+        1,
+        "RouteGeneration must be dropped; only WholeHash survives"
+    );
+    match &result[0] {
+        FactVersionRef::FileWholeHash { canonical_id, .. } => {
+            assert_eq!(
+                canonical_id, "b.ts",
+                "must keep the WholeHash entry for b.ts"
+            );
+        }
+        other => panic!("unexpected variant: {other:?}"),
+    }
+}
+
+#[test]
+fn project_generation_converts_to_project_generation_fact() {
+    // `ProjectGeneration` carries a real validating fact — the
+    // project-wide generation a sub-result depended on. The bridge
+    // MUST convert it (not drop it) so an outer entry observing this
+    // sub-result through the fact tracer roots the project generation
+    // and rejects the entry on a project-shape change.
+    let sig = make_dep_sig(vec![("x.ts", DepVersion::ProjectGeneration(99))]);
+
+    let result = dep_signature_to_fact_signature_for_tests(&sig);
+
+    assert_eq!(
+        result.len(),
+        1,
+        "ProjectGeneration must convert to one FactVersionRef, not be dropped"
+    );
+    assert_eq!(
+        result[0],
+        FactVersionRef::ProjectGeneration { generation: 99 },
+        "ProjectGeneration(99) must convert to a FactVersionRef::ProjectGeneration with generation 99"
+    );
+}
+
+#[test]
+fn empty_dep_sig_produces_empty_result() {
+    let sig: DepSignature = Arc::from(vec![]);
+    let result = dep_signature_to_fact_signature_for_tests(&sig);
+    assert!(
+        result.is_empty(),
+        "empty DepSignature must produce empty Vec"
+    );
+}
+
+#[test]
+fn multiple_whole_hashes_all_convert() {
+    let entries: Vec<(&str, DepVersion)> = (0u8..5)
+        .map(|i| {
+            let canon: &'static str = Box::leak(format!("file_{i}.ts").into_boxed_str());
+            (canon, DepVersion::WholeHash([i; 16]))
+        })
+        .collect();
+
+    let sig = make_dep_sig(entries);
+    let result = dep_signature_to_fact_signature_for_tests(&sig);
+
+    assert_eq!(result.len(), 5, "all 5 WholeHash entries must convert");
+    for (i, fact) in result.iter().enumerate() {
+        match fact {
+            FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                assert!(canonical_id.starts_with("file_"), "canonical_id must match");
+                assert_eq!(
+                    hash[0], i as u8,
+                    "hash must match DepVersion::WholeHash value"
+                );
+            }
+            other => panic!("unexpected variant at index {i}: {other:?}"),
+        }
+    }
+}

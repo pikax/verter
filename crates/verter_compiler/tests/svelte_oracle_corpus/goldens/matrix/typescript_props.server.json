@@ -1,0 +1,44 @@
+{
+  "slug": "matrix/typescript_props.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "typescript_props",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "props_id",
+    "escape",
+    "escape",
+    "escape"
+  ],
+  "helperSet": [
+    "escape",
+    "props_id"
+  ],
+  "helperCounts": {
+    "props_id": 1,
+    "escape": 3
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

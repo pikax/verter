@@ -18,26 +18,28 @@ name = "verter-mcp"
 path = "src/main.rs"
 
 [dependencies]
-verter_host = { path = "../verter_host" }
-verter_vfs = { path = "../verter_vfs" }
-verter_analysis = { path = "../verter_analysis" }
+verter_audit = { path = "../verter_audit" }
+verter_session = { path = "../verter_session" }
+verter_semantic = { path = "../verter_semantic" }
+verter_workspace = { path = "../verter_workspace" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
-rmcp = { version = "1", features = [
+verter_protocol = { path = "../verter_protocol" }
+rmcp = { version = "1.7", features = [
   "server",
   "macros",
   "transport-io",
   "transport-streamable-http-server",
 ] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-schemars = "1"
-clap = { version = "4", features = ["derive"] }
-walkdir = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-axum = "0.8"
+schemars = "1.2"
+clap = { version = "4.6", features = ["derive"] }
+walkdir = "2.5"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+axum = "0.8.9"
 
 [dev-dependencies]
 verter_span = { path = "../verter_span" }

@@ -1,0 +1,50 @@
+[package]
+name = "verter_audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Leaf observability substrate for Verter — audit record DTOs, observer trait, no-op observer, RequestKind/RequestKindPayload"
+publish = false
+
+[features]
+default = []
+
+[[bin]]
+name = "verter-audit-inspect"
+path = "src/bin/verter-audit-inspect/main.rs"
+
+[dependencies]
+verter_span = { path = "../verter_span" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = "0.12.5"
+ts-rs = "12"
+clap = { version = "4.6", features = ["derive"] }
+
+# Windows process-RSS reporting in `current_process_rss`. Requires
+# `K32GetProcessMemoryInfo` (kernel32.dll, exposed by
+# `Win32_System_ProcessStatus`) and `GetCurrentProcess` (kernel32.dll,
+# exposed by `Win32_System_Threading`).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1"
+
+# OXC is the established Rust-side TypeScript parser. The
+# `published_surface_constants_match_ts_port` cross-language drift
+# guard uses OXC to extract the TS port's array literal payloads
+# from `packages/component-meta/src/published-surface.ts` — see
+# [[oxc-is-the-ts-parser]]. Dev-only: production audit code has
+# no parser dependency.
+[dev-dependencies]
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }

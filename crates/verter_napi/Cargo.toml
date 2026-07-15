@@ -13,30 +13,34 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-host_metrics = ["verter_host/host_metrics"]
-scheduler = ["verter_host/scheduler", "verter_scheduler"]
+session_metrics = ["verter_session/session_metrics"]
 
 [dependencies]
-verter_core = { path = "../verter_core", version = "0.0.1-beta.1" }
-verter_host = { path = "../verter_host", version = "0.0.1-beta.1" }
-verter_resolver = { path = "../verter_resolver", version = "0.0.1-beta.1", features = [
-  "type-runtime",
-] }
+verter_audit = { path = "../verter_audit" }
+verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
+verter_session = { path = "../verter_session", version = "0.0.1-beta.1" }
 verter_type_runtime = { path = "../verter_type_runtime", version = "0.0.1-beta.1" }
-verter_vfs = { path = "../verter_vfs", version = "0.0.1-beta.1" }
+verter_workspace = { path = "../verter_workspace", version = "0.0.1-beta.1" }
 verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
 verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }
-verter_analysis = { path = "../verter_analysis", version = "0.0.1-beta.1" }
-verter_proto = { path = "../verter_proto", version = "0.0.1-beta.1" }
+verter_semantic = { path = "../verter_semantic" }
+verter_type_expr = { workspace = true }
+verter_protocol = { path = "../verter_protocol", version = "0.0.1-beta.1" }
+prost = "0.14.3"
 verter_span = { path = "../verter_span" }
-verter_scheduler = { path = "../verter_scheduler", optional = true }
-napi = { version = "2", default-features = false, features = ["napi8", "serde-json", "async"] }
-napi-derive = "2"
+verter_scheduler = { path = "../verter_scheduler" }
+napi = { version = "3", default-features = false, features = ["napi8", "serde-json", "async", "dyn-symbols"] }
+napi-derive = "3"
+# Runtime-gated memory audit (src/memory_audit.rs): unresolved stack
+# capture at sampled allocation sites, resolved lazily at
+# memoryAuditSites() read time. Zero-cost while the runtime gate is off.
+backtrace = "0.3.76"
+rustc-hash = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-rayon = "1.8"
 oxc_allocator = { workspace = true }
-tokio = { version = "1", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
+tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
 
 [build-dependencies]
-napi-build = "2"
+napi-build = "2.3"

@@ -1,0 +1,39 @@
+{
+  "slug": "attr-spread-escmix-cls-q-el-ext-prune-u",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_spread_escmix_cls_q_el_ext_prune_u",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes"
+  ],
+  "helperCounts": {
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-1vf9dyz",
+    "code": "\n\t[data-x=\"a\\26 b\\&c\"].svelte-<scoped> {\n\t\tcolor: red;\n\t}\n\n\t.unused-prune.svelte-<scoped> {\n\t\tcolor: blue;\n\t}\n"
+  }
+}

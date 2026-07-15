@@ -1,0 +1,70 @@
+{
+  "slug": "blocks/await_pending_catch.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "await_pending_catch",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "comment",
+    "first_child",
+    "await",
+    "append",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "await",
+    "comment",
+    "first_child",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 2,
+    "comment": 1,
+    "first_child": 1,
+    "await": 1,
+    "append": 3
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p>failed</p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<p>loading</p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p>failed</p>`); var root_1 = $.from_html(`<p>loading</p>`); export default function await_pending_catch($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); $.await(node, () => $$props.promise, ($$anchor) => {var p_1 = root_1(); $.append($$anchor, p_1);}, void 0, ($$anchor, error) => {var p = root(); $.append($$anchor, p);}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

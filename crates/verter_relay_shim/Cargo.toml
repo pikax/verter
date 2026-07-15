@@ -1,0 +1,105 @@
+[package]
+name = "verter_relay_shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "The Verter tsgo relay shim: the editor spawns it as its `tsgo`; it relays the editor↔tsgo `--lsp` stdio to the REAL tsgo, owns the carrier egress taint, and exposes a versioned control endpoint a separate `verter_lsp` process drives to inject compiled carriers. Stays DUMB — relay + egress + control + injection only."
+publish = false
+# The crate's binaries are EXACTLY the explicit `[[bin]]` entries below — Cargo's auto-discovery of
+# `src/bin/*.rs` files AND `src/bin/<name>/main.rs` directories is OFF, so no source-tree file can
+# silently become an unguarded production binary alongside the one shipped shim.
+autobins = false
+
+[[bin]]
+name = "verter-relay-shim"
+path = "src/main.rs"
+
+# A TEST-SUPPORT fake `tsgo` child spawned by the relay-shim lifecycle tests
+# (`tests/shim_live.rs`) via `CARGO_BIN_EXE_fake_tsgo_heartbeat`. It stands in
+# for the real `tsgo` so the child-ownership/orphan tests run on every platform
+# without a real engine. It lives under `tests/support/` (a test subdir, NOT an
+# auto-discovered `tests/*.rs` target) and is NEVER shipped — this crate is
+# `publish = false`, and packaging stages ONLY `verter-relay-shim` while hard-
+# refusing any `*tsgo*`-named artifact (`packages/vue-vscode/stage-bin.mjs`). The
+# explicit `[[bin]]` keeps the bin name stable so the integration test's `env!`
+# resolves. Its test-support classification is guarded statically by
+# `tests/bin_targets_guard.rs`.
+#
+# TODO(follow-up D-15): this bin is UNCONDITIONAL, so a production
+# `cargo build --release -p verter_relay_shim` also PRODUCES `fake_tsgo_heartbeat`
+# in `target/release/` (a wasted, unshipped artifact). No stable-cargo mechanism
+# excludes a test-support bin from `cargo build --release` while keeping it built
+# for the fixed no-features gate `cargo nextest run --workspace`: both use default
+# features, so `required-features` toggles them identically — and with the feature
+# OFF the fake bin is absent under the gate, silently VOIDING the orphan tests
+# (their child-spawn fails, so the exit-non-zero + no-heartbeat-growth assertions
+# pass vacuously — empirically confirmed, worse than a compile error). A DEFAULT
+# feature re-pollutes the release build; artifact-dependencies (`-Z bindeps`) that
+# would let a test declare a bin dependency are unstable. Full gate coverage is
+# kept here by leaving the bin unconditional; the clean exclusion awaits a stable
+# cargo mechanism (or a gate-command change) — do NOT gate it behind
+# `required-features` without first re-proving the orphan tests stay non-vacuous.
+[[bin]]
+name = "fake_tsgo_heartbeat"
+path = "tests/support/fake_tsgo_heartbeat.rs"
+
+[dependencies]
+verter_tsgo_api = { path = "../verter_tsgo_api" }
+# OS CSPRNG for the rendezvous nonce (already in the workspace dependency tree).
+getrandom = "0.2"
+# Async runtime for the stdio relay, the child process, the control endpoint,
+# and the shutdown select. `io-std` supplies the editor-side stdin/stdout the
+# relay pumps; `net` supplies the control endpoint (named pipe / UDS).
+tokio = { version = "1.52", features = [
+    "io-util",
+    "io-std",
+    "process",
+    "sync",
+    "time",
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "net",
+    # Unix SIGINT/SIGTERM/SIGHUP/SIGQUIT handlers for faithful signal-exit teardown
+    # (the shim kills + reaps its OWNED tsgo child, then re-raises the signal).
+    "signal",
+] }
+
+# The signal re-raise (restore SIG_DFL + raise), the child's Unix signal-exit
+# fidelity, and the `setsid` + Linux `PR_SET_PDEATHSIG` child containment armed in
+# `pre_exec` are Unix-only, so `libc` is a Unix-only dependency.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The Windows kill-on-close Job Object that contains the spawned real-tsgo child, so a
+# HARD-killed shim (`TerminateProcess` — no Drop, no signal handler) still takes the child
+# down with it. `windows-sys 0.61` is already resolved transitively in the workspace
+# lockfile, so this adds no new package version. `Win32_Security` is required because
+# `CreateJobObjectW`'s signature references `SECURITY_ATTRIBUTES`; `Win32_System_Threading`
+# because `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` embeds `IO_COUNTERS`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# The headless mechanics e2e drives the shim over a fake-editor LSP stdio + the
+# control client, and connects the minted `--api` pipe with the crate's attach
+# client against a REAL spawned tsgo.
+tokio = { version = "1.52", features = [
+    "io-util",
+    "process",
+    "sync",
+    "time",
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "net",
+] }
+serde_json = { workspace = true }

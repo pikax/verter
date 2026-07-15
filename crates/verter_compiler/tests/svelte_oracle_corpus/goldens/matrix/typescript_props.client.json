@@ -1,0 +1,85 @@
+{
+  "slug": "matrix/typescript_props.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "typescript_props",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "props_id",
+    "prop",
+    "prop",
+    "first_child",
+    "child",
+    "reset",
+    "sibling",
+    "child",
+    "reset",
+    "sibling",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "set_text",
+    "set_text",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "first_child",
+    "from_html",
+    "prop",
+    "props_id",
+    "reset",
+    "set_text",
+    "sibling",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "props_id": 1,
+    "prop": 2,
+    "first_child": 1,
+    "child": 3,
+    "reset": 3,
+    "sibling": 2,
+    "template_effect": 1,
+    "set_text": 3,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p> <p> </p> <p> </p>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p> <p> </p> <p> </p>`, 1); export default function typescript_props($$anchor, $$props) {const uid = $.props_id(); const local = 1; let count = $.prop($$props, 'count', 3, 1), enabled = $.prop($$props, 'enabled', 3, true); var fragment = root(); var p = $.first_child(fragment); var text = $.child(p, true); $.reset(p); var p_1 = $.sibling(p, 2); var text_1 = $.child(p_1, true); $.reset(p_1); var p_2 = $.sibling(p_1, 2); var text_2 = $.child(p_2, true); $.reset(p_2); $.template_effect(() => {$.set_text(text, uid); $.set_text(text_1, count()); $.set_text(text_2, enabled());}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

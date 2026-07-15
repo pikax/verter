@@ -1,0 +1,1207 @@
+//! Tests for the control endpoint: a REAL platform pipe/socket round-trip
+//! through the shim-side [`ControlListener`] + the client-side connect, plus
+//! the portable endpoint-path minting and a discriminating connect failure.
+
+use super::*;
+use crate::jsonrpc::framing::{encode_message, MessageFramer};
+use crate::jsonrpc::JsonRpcConnection;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+fn unique_disamb() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )
+}
+
+#[test]
+fn endpoint_path_is_portable_and_platform_selected() {
+    let dir = std::env::temp_dir();
+    let endpoint = control_endpoint_path(&dir, r"C:\weird:session", 4242, "abc");
+    #[cfg(windows)]
+    {
+        assert!(
+            endpoint.starts_with(r"\\.\pipe\"),
+            "a Windows control endpoint is a named pipe: {endpoint:?}"
+        );
+        // The name segment (after the pipe prefix) carries no NTFS-illegal chars.
+        let name = endpoint.strip_prefix(r"\\.\pipe\").unwrap();
+        for bad in ['<', '>', ':', '"', '|', '?', '*'] {
+            assert!(!name.contains(bad), "pipe name must not contain {bad:?}");
+        }
+    }
+    #[cfg(unix)]
+    {
+        assert!(
+            endpoint.ends_with(".sock"),
+            "a Unix control endpoint is a UDS path: {endpoint:?}"
+        );
+        assert!(
+            endpoint.len() <= 108,
+            "the UDS path must fit the sockaddr_un budget: {endpoint:?}"
+        );
+        // The socket's IMMEDIATE parent is a PRIVATE per-session subdir (created 0o700 at
+        // bind), never control_dir directly — so control_dir may stay a shared dir.
+        assert!(
+            endpoint.contains("/vr-ctl-"),
+            "the socket nests in a private per-session subdir: {endpoint:?}"
+        );
+    }
+    // The pid keys the endpoint (Windows: literal in the pipe name; Unix: via the subdir
+    // hash) — a different pid mints a DISTINCT endpoint.
+    let other_pid = control_endpoint_path(&dir, r"C:\weird:session", 9999, "abc");
+    assert_ne!(endpoint, other_pid, "the pid keys the endpoint");
+}
+
+/// A REAL control endpoint accepts the client connect and a JSON-RPC round-trip
+/// crosses the actual OS transport — the net-new SERVER (listener) side proven
+/// end-to-end (not just the codec).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn control_endpoint_round_trips_over_real_transport() {
+    // The control_dir. The bind nests the socket in a PRIVATE per-session subdir it creates
+    // 0o700 under this dir (control_dir itself only needs to exist + be traversable). On
+    // Windows `dir` is ignored (the endpoint is a named pipe).
+    let dir = std::env::temp_dir().join(format!("vr-rt-{}", unique_disamb()));
+    let endpoint = control_endpoint_path(&dir, "rt", std::process::id(), &unique_disamb());
+    let mut listener = ControlListener::bind(&endpoint).expect("bind control endpoint");
+    let server_endpoint = listener.endpoint().to_string();
+
+    // Server: accept one control connection, echo a framed request as `{ ok: method }`.
+    let server_task = tokio::spawn(async move {
+        let (mut read, mut write) = listener.accept().await.expect("accept control connection");
+        let mut framer = MessageFramer::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = match read.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            framer.push(&chunk[..n]);
+            while let Ok(Some(msg)) = framer.next_message() {
+                if let (Some(id), Some(method)) = (
+                    msg.get("id").cloned(),
+                    msg.get("method").and_then(|m| m.as_str()),
+                ) {
+                    let reply = serde_json::json!({
+                        "jsonrpc": "2.0", "id": id, "result": { "ok": method }
+                    });
+                    let _ = write.write_all(&encode_message(&reply)).await;
+                    let _ = write.flush().await;
+                    return;
+                }
+            }
+        }
+    });
+
+    let (read, write) = connect_control_endpoint(&server_endpoint)
+        .await
+        .expect("client connect");
+    let conn = JsonRpcConnection::connect(read, write);
+    let result = conn
+        .request("verter/hello", serde_json::json!({ "probe": true }))
+        .await
+        .expect("round-trip over the control endpoint");
+    assert_eq!(result["ok"], serde_json::json!("verter/hello"));
+    conn.close().await.unwrap();
+    let _ = server_task.await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// I2 — the Unix bind creates + control-binds the socket's PRIVATE parent directory
+/// (`0o700`, a real dir, euid-owned, no group/other bits) BEFORE binding, and locks the
+/// bound socket down to `0o600`. Its grandparent (here the temp base) is created with default
+/// perms. UNIX-ONLY (POSIX permissions + UDS); cfg-compiled-out on Windows.
+///
+/// RED before the fix: `bind` did a best-effort `remove_file` then `UnixListener::bind`
+/// with NO parent-dir creation, so binding at a path whose parent directory does not exist
+/// fails (`ENOENT`). GREEN: `prepare_unix_socket_parent` creates the parent `0o700`, the
+/// bind succeeds, the socket is chmod'd `0o600`, and a real round-trip crosses it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bind_creates_private_parent_dir_before_unix_socket_bind() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // An endpoint whose PARENT directory does NOT exist yet.
+    let base = std::env::temp_dir().join(format!("vr-i2-{}", unique_disamb()));
+    let parent = base.join("private");
+    let endpoint = parent.join("ctl.sock");
+    let endpoint_str = endpoint.to_string_lossy().into_owned();
+    assert!(
+        !parent.exists(),
+        "the parent dir must not exist before bind"
+    );
+
+    // Post-fix: bind creates the private parent, binds, and chmods the socket 0o600.
+    // Pre-fix: `UnixListener::bind` fails because the parent directory is missing.
+    let mut listener = ControlListener::bind(&endpoint_str)
+        .expect("bind must create the private parent dir + bind the socket");
+    let server_endpoint = listener.endpoint().to_string();
+
+    // The parent exists, is a REAL directory, and is private 0o700 (no group/other bits).
+    let parent_meta = std::fs::symlink_metadata(&parent).expect("parent stat");
+    assert!(
+        parent_meta.file_type().is_dir(),
+        "the socket parent must be a real directory, not a symlink"
+    );
+    assert_eq!(
+        parent_meta.permissions().mode() & 0o777,
+        0o700,
+        "the socket parent must be private 0o700"
+    );
+
+    // The bound socket is owner-only 0o600.
+    let sock_meta = std::fs::symlink_metadata(&endpoint).expect("socket stat");
+    assert_eq!(
+        sock_meta.permissions().mode() & 0o777,
+        0o600,
+        "the control socket must be locked down to 0o600"
+    );
+
+    // A real round-trip proves the listener is FUNCTIONAL, not merely created.
+    let server = tokio::spawn(async move {
+        let (mut read, mut write) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 64];
+        let n = read.read(&mut buf).await.unwrap_or(0);
+        let _ = write.write_all(&buf[..n]).await;
+        let _ = write.flush().await;
+    });
+    let (mut read, mut write) = connect_control_endpoint(&server_endpoint)
+        .await
+        .expect("connect the created control socket");
+    write.write_all(b"ping").await.unwrap();
+    write.flush().await.unwrap();
+    let mut buf = [0u8; 64];
+    let n = read.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"ping", "the created socket must round-trip");
+    let _ = server.await;
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// F3 — a legitimate PRE-EXISTING `--control-dir` at a shared `0o755` mode STILL binds: the
+/// socket nests in a PRIVATE per-session subdir the bind creates `0o700`, while control_dir
+/// itself is left UNTOUCHED (never tightened to 0o700 — the user may legitimately share it).
+/// UNIX-ONLY.
+///
+/// RED before the fix: `prepare_unix_socket_parent` created + validated `control_dir` itself
+/// (the socket's direct parent) at `0o700`, so a pre-existing `0o755` control_dir failed the
+/// no-group/other-bits check and the bind failed CLOSED. GREEN: the private subdir carries the
+/// privacy guarantee, so a shared control_dir binds and stays 0o755.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legitimate_shared_control_dir_still_binds_and_stays_untightened() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    // A pre-existing, legitimately-shared control_dir at 0o755 (forced, umask-independent).
+    let control_dir = std::env::temp_dir().join(format!("vr-shared-{}", unique_disamb()));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(&control_dir)
+        .expect("create shared control dir");
+    std::fs::set_permissions(&control_dir, std::fs::Permissions::from_mode(0o755))
+        .expect("force control_dir to a shared 0o755");
+
+    // The socket's immediate parent is a private per-session subdir UNDER the shared dir.
+    let subdir = control_dir.join("priv");
+    let endpoint = subdir.join("ctl.sock");
+    let endpoint_str = endpoint.to_string_lossy().into_owned();
+
+    let mut listener = ControlListener::bind(&endpoint_str)
+        .expect("a shared 0o755 control_dir must still bind (socket nests in a private subdir)");
+    let server_endpoint = listener.endpoint().to_string();
+
+    // control_dir was NOT tightened — still 0o755.
+    assert_eq!(
+        std::fs::symlink_metadata(&control_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755,
+        "control_dir must be left untouched (never forced to 0o700)"
+    );
+    // The socket's private per-session subdir IS 0o700, and the socket is 0o600.
+    assert_eq!(
+        std::fs::symlink_metadata(&subdir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "the per-session socket subdir must be private 0o700"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&endpoint)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "the control socket must be locked down to 0o600"
+    );
+
+    // A real round-trip proves the listener is FUNCTIONAL, not merely created.
+    let server = tokio::spawn(async move {
+        let (mut read, mut write) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 64];
+        let n = read.read(&mut buf).await.unwrap_or(0);
+        let _ = write.write_all(&buf[..n]).await;
+        let _ = write.flush().await;
+    });
+    let (mut read, mut write) = connect_control_endpoint(&server_endpoint)
+        .await
+        .expect("connect the created control socket");
+    write.write_all(b"ping").await.unwrap();
+    write.flush().await.unwrap();
+    let mut buf = [0u8; 64];
+    let n = read.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"ping", "the created socket must round-trip");
+    let _ = server.await;
+
+    let _ = std::fs::remove_dir_all(&control_dir);
+}
+
+/// F3 — a HOSTILE pre-existing socket-parent subdir fails the bind CLOSED. The bind does NOT
+/// trust a pre-created parent: it re-validates the private perms (and, not exercised here, the
+/// euid ownership — staging a foreign-owned dir needs root). A same-owner subdir left with
+/// group/other bits is rejected. UNIX-ONLY.
+///
+/// RED against a bind that trusts a pre-existing parent (or only creates-if-missing without
+/// re-validating): it would bind under the loose-perm parent. GREEN: the mode re-validation
+/// rejects it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_preexisting_socket_parent_fails_closed() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let control_dir = std::env::temp_dir().join(format!("vr-hostile-{}", unique_disamb()));
+    let subdir = control_dir.join("priv");
+    // Pre-create the socket's private subdir with LOOSE (group/other-accessible) perms —
+    // exactly what a hostile pre-create would leave behind.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(&subdir)
+        .expect("pre-create the loose-perm subdir");
+    std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o755))
+        .expect("force the hostile subdir to loose 0o755");
+    let endpoint = subdir.join("ctl.sock");
+    let endpoint_str = endpoint.to_string_lossy().into_owned();
+
+    // `ControlListener` is not `Debug`, so match rather than format the `Ok` arm.
+    match ControlListener::bind(&endpoint_str) {
+        Err(crate::error::TsgoApiError::Transport(_)) => {}
+        Ok(_) => {
+            panic!("a pre-existing socket parent with group/other perms must fail the bind CLOSED")
+        }
+        Err(other) => panic!("expected a Transport bind failure, got {other:?}"),
+    }
+    // No socket was bound under the rejected parent.
+    assert!(
+        !endpoint.exists(),
+        "no socket must be bound under a rejected parent"
+    );
+
+    let _ = std::fs::remove_dir_all(&control_dir);
+}
+
+/// The grandparent secure-permissions ceiling (`grandparent_ceiling_ok`) encodes the (A)/(B) rule
+/// exactly. It is a PURE predicate over `(owner uid, st_mode, euid)`, so this test runs — and
+/// discriminates — on EVERY platform without needing root or a real other-user-owned directory.
+///
+/// The `sticky + owned-by-another-non-root-user => REJECTED` case is the RED->GREEN discriminator:
+/// it FAILS against the superseded `sticky`-alone ceiling (which accepted any sticky dir regardless
+/// of its owner) and PASSES under the (A)/(B) ceiling. `euid` is fixed at 1000, root at 0.
+#[test]
+fn grandparent_ceiling_ok_encodes_owned_or_sticky_trusted_owner() {
+    const EUID: u32 = 1000;
+    const ROOT: u32 = 0;
+    const OTHER: u32 = 1234;
+
+    // (B) sticky AND owned by a trusted owner (us or root) => ACCEPTED.
+    assert!(
+        grandparent_ceiling_ok(EUID, 0o1777, EUID),
+        "sticky + owned-by-euid must be ACCEPTED"
+    );
+    assert!(
+        grandparent_ceiling_ok(ROOT, 0o1777, EUID),
+        "sticky + owned-by-root (the /tmp 0o1777 case) must be ACCEPTED"
+    );
+
+    // (B) violated: sticky but owned by ANOTHER non-root user => REJECTED. THE discriminator — the
+    // superseded `sticky`-alone ceiling accepted this (its owner can still swap our subdir under
+    // the sticky bit); the (A)/(B) ceiling fails it closed.
+    assert!(
+        !grandparent_ceiling_ok(OTHER, 0o1777, EUID),
+        "sticky + owned-by-another-non-root-user must be REJECTED (the sticky-alone discriminator)"
+    );
+    assert!(
+        !grandparent_ceiling_ok(OTHER, 0o1755, EUID),
+        "sticky + owned-by-another-non-root-user is REJECTED even with no group/other WRITE bits"
+    );
+
+    // (A) owned by the euid with no group/other WRITE bits => ACCEPTED (sticky bit irrelevant).
+    assert!(
+        grandparent_ceiling_ok(EUID, 0o700, EUID),
+        "non-sticky + owned-by-euid + 0o700 must be ACCEPTED"
+    );
+    assert!(
+        grandparent_ceiling_ok(EUID, 0o755, EUID),
+        "non-sticky + owned-by-euid + 0o755 (no group/other WRITE) must be ACCEPTED"
+    );
+
+    // (A) violated: owned by the euid but group/other-writable and non-sticky => REJECTED.
+    assert!(
+        !grandparent_ceiling_ok(EUID, 0o777, EUID),
+        "non-sticky + owned-by-euid + group/other write (0o777) must be REJECTED"
+    );
+    assert!(
+        !grandparent_ceiling_ok(EUID, 0o775, EUID),
+        "non-sticky + owned-by-euid + group write (0o775) must be REJECTED"
+    );
+    assert!(
+        !grandparent_ceiling_ok(EUID, 0o702, EUID),
+        "non-sticky + owned-by-euid + other write (0o702) must be REJECTED"
+    );
+
+    // Neither (A) nor (B): non-sticky and not owned by the euid => REJECTED (fail closed), whether
+    // the owner is another non-root user or even root (a non-sticky root-owned dir is not ours).
+    assert!(
+        !grandparent_ceiling_ok(OTHER, 0o755, EUID),
+        "non-sticky + owned-by-another-user must be REJECTED"
+    );
+    assert!(
+        !grandparent_ceiling_ok(ROOT, 0o755, EUID),
+        "non-sticky + owned-by-root (not ours, no sticky bit) must be REJECTED (fail closed)"
+    );
+}
+
+/// A group/other-writable, NON-sticky control_dir (the socket's GRANDPARENT) is rejected: such a
+/// dir lets another local user rename/swap our validated `0o700` subdir between validate and bind,
+/// so the bind fails CLOSED under the standard secure-permissions ceiling. UNIX-ONLY.
+///
+/// RED against a bind that creates/traverses control_dir with no permission ceiling: it binds
+/// under the world-writable grandparent. GREEN: the sticky/owned-safe ceiling rejects it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn writable_nonsticky_control_dir_grandparent_fails_closed() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    // A world-writable, NON-sticky control_dir (forced 0o777, umask-independent).
+    let control_dir = std::env::temp_dir().join(format!("vr-gpw-{}", unique_disamb()));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o777)
+        .create(&control_dir)
+        .expect("create the world-writable control dir");
+    std::fs::set_permissions(&control_dir, std::fs::Permissions::from_mode(0o777))
+        .expect("force control_dir world-writable non-sticky 0o777");
+
+    let subdir = control_dir.join("priv");
+    let endpoint = subdir.join("ctl.sock");
+    let endpoint_str = endpoint.to_string_lossy().into_owned();
+
+    match ControlListener::bind(&endpoint_str) {
+        Err(crate::error::TsgoApiError::Transport(msg)) => {
+            assert!(
+                msg.contains("unsafe") || msg.contains("sticky"),
+                "the rejection must be the secure-permissions ceiling, not an unrelated error: {msg}"
+            );
+        }
+        Ok(_) => panic!("a world-writable non-sticky control_dir must fail the bind CLOSED"),
+        Err(other) => panic!("expected a Transport bind failure, got {other:?}"),
+    }
+    assert!(
+        !endpoint.exists(),
+        "no socket must be bound under a rejected grandparent"
+    );
+    let _ = std::fs::remove_dir_all(&control_dir);
+}
+
+/// A sticky, world-writable control_dir (like `/tmp` at `0o1777`) is ACCEPTED: the sticky bit
+/// means only an entry's owner may rename/delete it, so our `0o700` subdir cannot be swapped. The
+/// owned-safe (`0o755`) accept case is covered by `legitimate_shared_control_dir_still_binds…`.
+/// UNIX-ONLY.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sticky_world_writable_control_dir_grandparent_is_accepted() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let control_dir = std::env::temp_dir().join(format!("vr-gps-{}", unique_disamb()));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o1777)
+        .create(&control_dir)
+        .expect("create the sticky control dir");
+    std::fs::set_permissions(&control_dir, std::fs::Permissions::from_mode(0o1777))
+        .expect("force control_dir sticky world-writable 0o1777");
+
+    let subdir = control_dir.join("priv");
+    let endpoint = subdir.join("ctl.sock");
+    let endpoint_str = endpoint.to_string_lossy().into_owned();
+
+    let mut listener = ControlListener::bind(&endpoint_str)
+        .expect("a sticky (0o1777) control_dir must bind — the sticky bit protects the subdir");
+    let server_endpoint = listener.endpoint().to_string();
+
+    // A real round-trip proves the listener is FUNCTIONAL, not merely created.
+    let server = tokio::spawn(async move {
+        let (mut read, mut write) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 64];
+        let n = read.read(&mut buf).await.unwrap_or(0);
+        let _ = write.write_all(&buf[..n]).await;
+        let _ = write.flush().await;
+    });
+    let (mut read, mut write) = connect_control_endpoint(&server_endpoint)
+        .await
+        .expect("connect the created control socket");
+    write.write_all(b"ping").await.unwrap();
+    write.flush().await.unwrap();
+    let mut buf = [0u8; 64];
+    let n = read.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"ping", "the created socket must round-trip");
+    let _ = server.await;
+    let _ = std::fs::remove_dir_all(&control_dir);
+}
+
+/// An over-budget control socket path fails closed on the `sockaddr_un` budget with a CLEAR error
+/// — covering the temp-dir fallback overflow class (a very long TMPDIR would blow the budget).
+/// UNIX-ONLY.
+///
+/// RED against a bind that hands the overlong path straight to `UnixListener::bind`: the failure is
+/// an opaque OS error (or a dir is created under the giant path first), never a clear budget
+/// message. GREEN: the pre-bind budget gate rejects it up front with an actionable error.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overlong_unix_socket_path_fails_closed_on_the_budget() {
+    // A socket path deliberately well past the ~108-byte sockaddr_un budget.
+    let overlong = format!("/tmp/{}/ctl.sock", "d".repeat(140));
+    assert!(
+        overlong.len() > 108,
+        "the probe path must exceed the budget"
+    );
+    match ControlListener::bind(&overlong) {
+        Err(crate::error::TsgoApiError::Transport(msg)) => {
+            assert!(
+                msg.contains("sockaddr_un") || msg.contains("budget"),
+                "an over-budget path must be a clear budget error, not an opaque one: {msg}"
+            );
+        }
+        Ok(_) => panic!("an over-budget socket path must fail closed"),
+        Err(other) => panic!("expected a Transport budget error, got {other:?}"),
+    }
+    // The budget gate runs BEFORE any directory is created, so nothing was left on disk.
+    assert!(
+        !std::path::Path::new(&overlong).parent().unwrap().exists(),
+        "the budget gate must reject before creating any directory"
+    );
+}
+
+/// A pre-existing same-user socket-parent subdir at an owner-only but non-`0o700` mode (`0o600` —
+/// no execute, so NOT a traversable private dir) is rejected: `mode & 0o077 == 0` alone would
+/// wrongly accept it, but the promised invariant is EXACTLY `0o700`. UNIX-ONLY.
+///
+/// RED against the `mode & 0o077` check: `0o600` passes it, so the bind proceeds and fails later
+/// with an opaque permission error (never the private-mode message). GREEN: the exact-`0o700`
+/// check rejects it up front.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preexisting_owner_only_non_0o700_subdir_fails_closed() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let control_dir = std::env::temp_dir().join(format!("vr-mode-{}", unique_disamb()));
+    let subdir = control_dir.join("priv");
+    // An owned-safe grandparent (0o700), then a same-user pre-created subdir at 0o600.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&control_dir)
+        .expect("create the owned-safe control dir");
+    std::fs::DirBuilder::new()
+        .mode(0o600)
+        .create(&subdir)
+        .expect("pre-create the 0o600 subdir");
+    std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o600))
+        .expect("force the subdir to owner-only 0o600");
+    let endpoint = subdir.join("ctl.sock");
+    let endpoint_str = endpoint.to_string_lossy().into_owned();
+
+    match ControlListener::bind(&endpoint_str) {
+        Err(crate::error::TsgoApiError::Transport(msg)) => {
+            assert!(
+                msg.contains("0o700"),
+                "the rejection must be the exact-0o700 private-mode check, not an opaque error: {msg}"
+            );
+        }
+        Ok(_) => panic!("a 0o600 subdir must fail closed (it is not the promised 0o700)"),
+        Err(other) => panic!("expected a Transport error, got {other:?}"),
+    }
+    assert!(
+        !endpoint.exists(),
+        "no socket must be bound under a rejected parent"
+    );
+    // Restore owner-traversable perms so the temp-dir cleanup can recurse.
+    let _ = std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o700));
+    let _ = std::fs::remove_dir_all(&control_dir);
+}
+
+/// Finding 4 — a `--control-dir` that is ITSELF a symlink is rejected up front, so a swappable
+/// symlinked control_dir cannot redirect the bind to an unchecked target. Even a symlink to a SAFE,
+/// owned target fails the bind CLOSED (the immediate control_dir symlink is refused regardless of
+/// where it currently points). UNIX-ONLY.
+///
+/// RED before the fix: the ceiling check used `metadata`, which FOLLOWS the symlink, so a symlinked
+/// control_dir pointing at a safe owned dir passed the ceiling and the bind SUCCEEDED — binding
+/// through the swappable symlink. GREEN: the symlinked control_dir is rejected before any create.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn symlinked_control_dir_is_rejected_or_canonicalized_before_bind() {
+    use std::os::unix::fs::DirBuilderExt;
+
+    // A REAL, safe, owned target dir (0o700), and a symlink standing in as the control_dir.
+    let base = std::env::temp_dir().join(format!("vr-symlink-{}", unique_disamb()));
+    std::fs::create_dir_all(&base).expect("create the test base");
+    let real_target = base.join("real-target");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&real_target)
+        .expect("create the safe owned target dir");
+    let control_dir = base.join("control-link");
+    std::os::unix::fs::symlink(&real_target, &control_dir).expect("symlink control_dir -> target");
+
+    // The endpoint nests under the SYMLINKED control_dir.
+    let endpoint = control_dir.join("priv").join("ctl.sock");
+    let endpoint_str = endpoint.to_string_lossy().into_owned();
+
+    match ControlListener::bind(&endpoint_str) {
+        Err(crate::error::TsgoApiError::Transport(msg)) => {
+            assert!(
+                msg.contains("symlink"),
+                "the rejection must be the symlinked-control-dir guard, not an unrelated error: \
+                 {msg}"
+            );
+        }
+        Ok(_) => panic!("a symlinked control_dir must fail the bind CLOSED, never bind through it"),
+        Err(other) => panic!("expected a Transport bind failure, got {other:?}"),
+    }
+    // No socket was bound under (or through) the symlinked control_dir.
+    assert!(
+        !endpoint.exists(),
+        "no socket must be bound under a rejected symlinked control_dir"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Finding 5 — the stale-endpoint cleanup removes ONLY a socket. A regular file sitting at the
+/// endpoint path is never `remove_file`d: the bind fails CLOSED and the file (and its contents)
+/// survive. UNIX-ONLY (UDS + POSIX file types).
+///
+/// RED before the fix: `unlink_stale_control_socket` did an unconditional `remove_file(endpoint)`,
+/// so the regular file was DELETED and `UnixListener::bind` then created a socket in its place —
+/// the bind returned Ok and the original file was gone. GREEN: a non-socket endpoint fails the
+/// bind closed and is left untouched.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_endpoint_regular_file_is_not_unlinked() {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
+
+    // An owned-safe grandparent (0o700) and a private 0o700 subdir, then a REGULAR file at the
+    // endpoint path inside the subdir (as if some other tool had left a file there).
+    let control_dir = std::env::temp_dir().join(format!("vr-nonsock-{}", unique_disamb()));
+    let subdir = control_dir.join("priv");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&control_dir)
+        .expect("create the owned-safe control dir");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&subdir)
+        .expect("create the private subdir");
+    let endpoint = subdir.join("ctl.sock");
+    let endpoint_str = endpoint.to_string_lossy().into_owned();
+    let mut file = std::fs::File::create(&endpoint).expect("create a regular file at the endpoint");
+    file.write_all(b"not-a-socket-sentinel")
+        .expect("write sentinel");
+    drop(file);
+
+    // Post-fix: the non-socket endpoint fails the bind CLOSED.
+    match ControlListener::bind(&endpoint_str) {
+        Err(crate::error::TsgoApiError::Transport(msg)) => {
+            assert!(
+                msg.contains("not a socket"),
+                "the rejection must be the non-socket guard, not an unrelated error: {msg}"
+            );
+        }
+        Ok(_) => {
+            panic!("a regular file at the endpoint must fail the bind CLOSED, never be unlinked")
+        }
+        Err(other) => panic!("expected a Transport bind failure, got {other:?}"),
+    }
+
+    // The regular file is UNTOUCHED — still a regular file (not replaced by a socket) with its
+    // original contents.
+    let meta = std::fs::symlink_metadata(&endpoint).expect("the endpoint file must still exist");
+    assert!(
+        meta.file_type().is_file() && !meta.file_type().is_socket(),
+        "the endpoint must still be the original regular file, never unlinked/replaced by a socket"
+    );
+    assert_eq!(
+        std::fs::read(&endpoint).expect("read back the endpoint file"),
+        b"not-a-socket-sentinel",
+        "the original file contents must be preserved"
+    );
+
+    let _ = std::fs::remove_dir_all(&control_dir);
+}
+
+/// The listener's `Drop` removes not only the socket file but the now-empty PRIVATE per-session
+/// subdir it created (`vr-ctl-<hash>`), so a long-lived control_dir does not accumulate one empty
+/// `0o700` dir per shim start. UNIX-ONLY.
+///
+/// RED against a `Drop` that removes only the socket: the empty private subdir persists after the
+/// listener drops. GREEN: the empty subdir is removed too.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listener_drop_removes_the_empty_private_subdir() {
+    let control_dir = std::env::temp_dir().join(format!("vr-drop-{}", unique_disamb()));
+    std::fs::create_dir_all(&control_dir).expect("create control dir");
+    // Mint a REAL endpoint — it nests in a `vr-ctl-<hash>` private subdir.
+    let endpoint =
+        control_endpoint_path(&control_dir, "drop", std::process::id(), &unique_disamb());
+    let subdir = std::path::Path::new(&endpoint)
+        .parent()
+        .expect("the socket has a private-subdir parent")
+        .to_path_buf();
+    assert!(
+        subdir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("vr-ctl-")),
+        "the minted endpoint must nest in a vr-ctl-<hash> private subdir: {endpoint:?}"
+    );
+
+    {
+        let _listener = ControlListener::bind(&endpoint).expect("bind the control endpoint");
+        assert!(
+            subdir.exists(),
+            "the private subdir exists while the listener is bound"
+        );
+    } // the listener drops here
+
+    assert!(
+        !std::path::Path::new(&endpoint).exists(),
+        "the socket file is removed on listener drop"
+    );
+    assert!(
+        !subdir.exists(),
+        "the empty private per-session subdir is removed on listener drop"
+    );
+    let _ = std::fs::remove_dir_all(&control_dir);
+}
+
+/// Finding 6 — the listener's `Drop` removes ONLY the private subdir THIS bind created, keyed on
+/// recorded ownership, never on a name prefix. A PRE-EXISTING `vr-ctl-…`-named directory (as if a
+/// user created it) is reused for the bind but left in place on drop. UNIX-ONLY.
+///
+/// RED before the fix: `Drop` removed the parent whenever its basename started with `vr-ctl-`, so
+/// a pre-existing user directory matching that shape was `remove_dir`'d once the socket was
+/// unlinked. GREEN: only a listener-CREATED subdir (recorded at bind) is removed, so the reused
+/// directory survives.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_does_not_remove_preexisting_vr_ctl_directory() {
+    use std::os::unix::fs::DirBuilderExt;
+
+    // An owned-safe grandparent, then a PRE-EXISTING `vr-ctl-…` subdir a user might have created,
+    // at the exact private 0o700 mode the bind validates (so it is REUSED, not recreated).
+    let control_dir = std::env::temp_dir().join(format!("vr-preexist-{}", unique_disamb()));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&control_dir)
+        .expect("create the owned-safe control dir");
+    let subdir = control_dir.join("vr-ctl-preexisting");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&subdir)
+        .expect("pre-create the vr-ctl- named user directory");
+    let endpoint = subdir.join("ctl.sock");
+    let endpoint_str = endpoint.to_string_lossy().into_owned();
+
+    {
+        let _listener =
+            ControlListener::bind(&endpoint_str).expect("bind reuses the pre-existing subdir");
+        assert!(subdir.exists(), "the reused subdir exists while bound");
+    } // the listener drops here
+
+    // The socket is cleaned up, but the PRE-EXISTING user directory (which the bind only reused,
+    // recording no ownership) is left in place.
+    assert!(
+        !endpoint.exists(),
+        "the socket file is removed on listener drop"
+    );
+    assert!(
+        subdir.exists(),
+        "a pre-existing vr-ctl- directory the bind only reused must NOT be removed on drop"
+    );
+
+    let _ = std::fs::remove_dir_all(&control_dir);
+}
+
+/// F4 — a chmod failure AFTER a successful bind must unlink the just-bound socket before
+/// returning `Err`: no `ControlListener` is constructed yet, so its `Drop` cleanup never runs
+/// and the socket would otherwise leak. Forcing `set_permissions` to fail after a successful
+/// `UnixListener::bind` is not portably inducible (it needs the socket to become unwritable
+/// mid-bind), so this is a source-structure guard on the cleanup ordering. Reads the raw
+/// source, so it runs (and discriminates) on every platform.
+#[test]
+fn chmod_failure_after_bind_unlinks_the_socket() {
+    let src = include_str!("transport.rs");
+    let chmod = src
+        .find("if let Err(e) = set_control_socket_permissions(endpoint)")
+        .expect("the bind chmods the bound socket and handles the failure");
+    let after = &src[chmod..];
+    let unlink = after
+        .find("std::fs::remove_file(endpoint)")
+        .expect("the chmod-failure branch unlinks the just-bound socket");
+    let return_err = after
+        .find("return Err(e)")
+        .expect("the chmod-failure branch returns the error");
+    assert!(
+        unlink < return_err,
+        "the chmod-failure branch must remove_file the socket BEFORE returning Err (no leak); \
+         unlink@{unlink} return@{return_err}"
+    );
+}
+
+/// The Windows control named pipe carries an EXPLICIT owner-only DACL — the current-user SID
+/// only, matching the Unix `0o600` socket bar — instead of inheriting the process token's
+/// broader ambient default DACL. Reads the bound pipe's DACL back via `GetSecurityInfo` and
+/// asserts EXACTLY one allow ACE, granting the current user and NO broader principal (Everyone /
+/// Authenticated Users / BUILTIN\Administrators). WINDOWS-ONLY; runs on the Windows gate.
+///
+/// RED before the fix (the pipe created with a NULL security descriptor, so it inherits the
+/// token's default DACL): the default DACL carries SEVERAL allow ACEs (e.g. SYSTEM + the user),
+/// so the exactly-one-allow-ACE owner-only assertion FAILS. GREEN: the explicit DACL grants the
+/// current user alone.
+#[cfg(windows)]
+#[test]
+fn named_pipe_dacl_is_owner_only() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows_sys::Win32::Security::{
+        AclSizeInformation, CreateWellKnownSid, EqualSid, GetAce, GetAclInformation,
+        GetTokenInformation, TokenUser, WinAuthenticatedUserSid, WinBuiltinAdministratorsSid,
+        WinWorldSid, ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION,
+        PSID, SECURITY_MAX_SID_SIZE, TOKEN_QUERY, TOKEN_USER, WELL_KNOWN_SID_TYPE,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    // `ACCESS_ALLOWED_ACE_TYPE` (0): windows-sys names it only under `Win32_System_SystemServices`,
+    // a module this crate otherwise does not pull; the frozen ABI ACE-type is named locally.
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+    // `FILE_ALL_ACCESS` (0x1F01FF): the full-control mask a file / named-pipe object grants
+    // (`STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1FF`). The DACL is built with `GENERIC_ALL`, and
+    // the kernel MAPS that generic right to exactly this specific mask when the security descriptor
+    // is assigned to the pipe object — so the ACE read back from the kernel object carries
+    // `FILE_ALL_ACCESS`. windows-sys names it only under `Win32_Storage_FileSystem` (a module this
+    // crate does not otherwise pull), so the frozen ABI value is named locally.
+    const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
+
+    // `ControlListener::bind` registers the named-pipe server with the tokio reactor, so it must
+    // run inside a runtime context; the DACL read itself is synchronous, so an enter-guard on a
+    // current-thread runtime is enough (no `.await`).
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build a tokio runtime");
+    let _guard = rt.enter();
+
+    let endpoint = format!(
+        r"\\.\pipe\verter-relay-ctl-dacl-{}-{}",
+        std::process::id(),
+        unique_disamb()
+    );
+    let listener = ControlListener::bind(&endpoint).expect("bind the control named pipe");
+    let handle: HANDLE = listener
+        .server
+        .as_ref()
+        .expect("a bound listener holds a pending pipe instance")
+        .as_raw_handle();
+
+    // Materialize a well-known SID into an owned byte buffer for the negative comparisons.
+    let well_known_sid = |kind: WELL_KNOWN_SID_TYPE| -> Vec<u8> {
+        let mut buf = vec![0u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut cb = SECURITY_MAX_SID_SIZE;
+        let ok = unsafe {
+            CreateWellKnownSid(
+                kind,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr().cast::<std::ffi::c_void>(),
+                &mut cb,
+            )
+        };
+        assert_ne!(
+            ok, 0,
+            "CreateWellKnownSid must succeed for well-known SID {kind}"
+        );
+        buf.truncate(cb as usize);
+        buf
+    };
+
+    // SAFETY: a standard read-back of the kernel object's DACL; every fallible Win32 call is
+    // checked, and all raw pointers (`pdacl`/ACE SIDs alias `psd`; `current_user` aliases
+    // `token_user`) stay valid until `psd`/the token buffer are released at the end of the block.
+    unsafe {
+        let mut pdacl: *mut ACL = std::ptr::null_mut();
+        let mut psd: *mut std::ffi::c_void = std::ptr::null_mut();
+        let rc = GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut pdacl,
+            std::ptr::null_mut(),
+            &mut psd,
+        );
+        assert_eq!(rc, ERROR_SUCCESS, "GetSecurityInfo must read the pipe DACL");
+        assert!(
+            !pdacl.is_null(),
+            "the pipe must carry a real DACL, not a null/allow-all DACL"
+        );
+
+        let mut info = ACL_SIZE_INFORMATION::default();
+        assert_ne!(
+            GetAclInformation(
+                pdacl,
+                std::ptr::addr_of_mut!(info).cast::<std::ffi::c_void>(),
+                std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            ),
+            0,
+            "GetAclInformation must succeed"
+        );
+
+        // Collect the SID *and access MASK* of every ACCESS_ALLOWED ACE in the DACL.
+        let mut allow_sids: Vec<PSID> = Vec::new();
+        let mut allow_masks: Vec<u32> = Vec::new();
+        for i in 0..info.AceCount {
+            let mut pace: *mut std::ffi::c_void = std::ptr::null_mut();
+            assert_ne!(GetAce(pdacl, i, &mut pace), 0, "GetAce must succeed");
+            let ace = pace.cast::<ACCESS_ALLOWED_ACE>();
+            if (*ace).Header.AceType == ACCESS_ALLOWED_ACE_TYPE {
+                allow_sids.push(std::ptr::addr_of_mut!((*ace).SidStart).cast::<std::ffi::c_void>());
+                allow_masks.push((*ace).Mask);
+            }
+        }
+
+        // The current user's SID (retained via the token buffer for the comparisons below).
+        let mut token: HANDLE = std::ptr::null_mut();
+        assert_ne!(
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token),
+            0,
+            "OpenProcessToken must succeed"
+        );
+        let mut needed: u32 = 0;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        let mut token_user = vec![0u8; needed as usize];
+        assert_ne!(
+            GetTokenInformation(
+                token,
+                TokenUser,
+                token_user.as_mut_ptr().cast::<std::ffi::c_void>(),
+                needed,
+                &mut needed,
+            ),
+            0,
+            "GetTokenInformation must succeed"
+        );
+        // SAFETY: `token_user` is a `Vec<u8>` (align-1) buffer; projecting `.User.Sid` off a
+        // `&TOKEN_USER` place would read the `PSID` through an under-aligned reference (UB). Take the
+        // field address with `addr_of!` (no reference formed) and `read_unaligned` the pointer value
+        // — identical `PSID`, no misaligned reference.
+        let tu = token_user.as_ptr().cast::<TOKEN_USER>();
+        let current_user: PSID = core::ptr::read_unaligned(core::ptr::addr_of!((*tu).User.Sid));
+
+        let world = well_known_sid(WinWorldSid);
+        let auth = well_known_sid(WinAuthenticatedUserSid);
+        let admins = well_known_sid(WinBuiltinAdministratorsSid);
+        let grants = |target: PSID| allow_sids.iter().any(|&s| EqualSid(s, target) != 0);
+
+        assert!(
+            grants(current_user),
+            "the owner-only DACL must grant the current user"
+        );
+        assert!(
+            !grants(world.as_ptr() as PSID),
+            "the owner-only DACL must NOT grant Everyone/World"
+        );
+        assert!(
+            !grants(auth.as_ptr() as PSID),
+            "the owner-only DACL must NOT grant Authenticated Users"
+        );
+        assert!(
+            !grants(admins.as_ptr() as PSID),
+            "the owner-only DACL must NOT grant BUILTIN\\Administrators"
+        );
+        assert_eq!(
+            allow_sids.len(),
+            1,
+            "an owner-only DACL has EXACTLY one allow ACE — the ambient default DACL has several"
+        );
+        assert_ne!(
+            EqualSid(allow_sids[0], current_user),
+            0,
+            "the sole allow ACE must be the current user (the 0o600 parity)"
+        );
+        // ...and that sole ACE must grant FULL control — not merely be present for the right SID. A
+        // regression narrowing the grant (e.g. GENERIC_READ) would keep the owner-only SID shape but
+        // silently drop write/connect rights; assert the exact mapped full-control mask.
+        assert_eq!(
+            allow_masks.len(),
+            1,
+            "an owner-only DACL has EXACTLY one allow ACE mask"
+        );
+        assert_eq!(
+            allow_masks[0], FILE_ALL_ACCESS,
+            "the sole allow ACE must grant FULL control (FILE_ALL_ACCESS, the kernel-mapped \
+             GENERIC_ALL), not a partial-rights subset; got 0x{:08X}",
+            allow_masks[0]
+        );
+
+        let _ = CloseHandle(token);
+        let _ = LocalFree(psd);
+    }
+
+    // The listener (and its pipe handle) must outlive the DACL read above.
+    drop(listener);
+}
+
+/// The Windows control named pipe PINS its OWNER to the current-user SID (`SetSecurityDescriptorOwner`
+/// in `OwnerOnlyPipeSecurity::build`), not the token's default owner. Reads the bound pipe's OWNER
+/// back via `GetSecurityInfo(..., OWNER_SECURITY_INFORMATION, ...)` and asserts `EqualSid` against the
+/// process token's current-user SID. WINDOWS-ONLY; runs on the Windows gate.
+///
+/// This is the RUNTIME CORRECTNESS check, NOT the discriminating rail: on a NON-ELEVATED gate the
+/// pipe's DEFAULT owner is ALREADY the current user, so the readback passes even WITHOUT the explicit
+/// owner pin — it would only catch a regression under an ELEVATED token (where the default owner is
+/// `BUILTIN\Administrators`). The elevation-INDEPENDENT discriminator is the source-structure guard
+/// `owner_only_pipe_security_pins_the_owner_sid`, which goes RED the instant the pin is removed.
+#[cfg(windows)]
+#[test]
+fn named_pipe_owner_is_current_user() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows_sys::Win32::Security::{
+        EqualSid, GetTokenInformation, TokenUser, OWNER_SECURITY_INFORMATION, PSID, TOKEN_QUERY,
+        TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    // `ControlListener::bind` registers the named-pipe server with the tokio reactor, so it must run
+    // inside a runtime context; the OWNER read itself is synchronous (no `.await`).
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build a tokio runtime");
+    let _guard = rt.enter();
+
+    let endpoint = format!(
+        r"\\.\pipe\verter-relay-ctl-owner-{}-{}",
+        std::process::id(),
+        unique_disamb()
+    );
+    let listener = ControlListener::bind(&endpoint).expect("bind the control named pipe");
+    let handle: HANDLE = listener
+        .server
+        .as_ref()
+        .expect("a bound listener holds a pending pipe instance")
+        .as_raw_handle();
+
+    // SAFETY: a standard read-back of the kernel object's OWNER; every fallible Win32 call is
+    // checked, and the raw SIDs (`owner_sid` aliases `psd`; `current_user` aliases `token_user`)
+    // stay valid until `psd` / the token buffer are released at the end of the block.
+    unsafe {
+        let mut owner_sid: PSID = std::ptr::null_mut();
+        let mut psd: *mut std::ffi::c_void = std::ptr::null_mut();
+        let rc = GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner_sid,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut psd,
+        );
+        assert_eq!(
+            rc, ERROR_SUCCESS,
+            "GetSecurityInfo must read the pipe OWNER"
+        );
+        assert!(!owner_sid.is_null(), "the pipe must carry a real owner SID");
+
+        // The current user's SID (retained via the token buffer for the comparison below).
+        let mut token: HANDLE = std::ptr::null_mut();
+        assert_ne!(
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token),
+            0,
+            "OpenProcessToken must succeed"
+        );
+        let mut needed: u32 = 0;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        let mut token_user = vec![0u8; needed as usize];
+        assert_ne!(
+            GetTokenInformation(
+                token,
+                TokenUser,
+                token_user.as_mut_ptr().cast::<std::ffi::c_void>(),
+                needed,
+                &mut needed,
+            ),
+            0,
+            "GetTokenInformation must succeed"
+        );
+        // SAFETY: `token_user` is a `Vec<u8>` (align-1) buffer; projecting `.User.Sid` off a
+        // `&TOKEN_USER` place would read the `PSID` through an under-aligned reference (UB). Take the
+        // field address with `addr_of!` (no reference formed) and `read_unaligned` the pointer value
+        // — identical `PSID`, no misaligned reference.
+        let tu = token_user.as_ptr().cast::<TOKEN_USER>();
+        let current_user: PSID = core::ptr::read_unaligned(core::ptr::addr_of!((*tu).User.Sid));
+
+        assert_ne!(
+            EqualSid(owner_sid, current_user),
+            0,
+            "the control pipe's OWNER must be the current-user SID (the 0o600 parity under any \
+             token), not the token's default owner"
+        );
+
+        let _ = CloseHandle(token);
+        let _ = LocalFree(psd);
+    }
+
+    // The listener (and its pipe handle) must outlive the OWNER read above.
+    drop(listener);
+}
+
+/// F7 — EVERY named-pipe create site in `transport.rs` must apply the owner-only security attributes
+/// (`create_with_security_attributes_raw`), never the default-DACL `ServerOptions::create`. The DACL
+/// readback test above only inspects the BIND instance, but `accept()` provisions each NEXT instance
+/// with its own create — that create must be owner-only too. This source-structure guard bounds each
+/// `ServerOptions::new()` chain to its terminating `;` and asserts it calls
+/// `create_with_security_attributes_raw` and never a bare `.create(`, so a future edit can't regress
+/// an accept (or any new instance) to the ambient default DACL. Reads `transport.rs` (production
+/// source only — the test file is a separate `#[path]` module, so this guard's own literals are not
+/// scanned) and runs on every platform.
+#[test]
+fn every_named_pipe_create_uses_owner_only_security() {
+    let src = include_str!("transport.rs");
+    let mut count = 0usize;
+    let mut rest = src;
+    while let Some(idx) = rest.find("ServerOptions::new()") {
+        let after = &rest[idx..];
+        let stmt_end = after.find(';').unwrap_or(after.len());
+        let chain = &after[..stmt_end];
+        assert!(
+            chain.contains("create_with_security_attributes_raw"),
+            "a ServerOptions pipe-create chain does NOT apply the owner-only security attributes \
+             (create_with_security_attributes_raw); it would inherit the token's default DACL. \
+             Chain: {chain:?}"
+        );
+        assert!(
+            !chain.contains(".create("),
+            "a ServerOptions pipe-create chain uses the bare default-DACL `.create(` instead of \
+             create_with_security_attributes_raw. Chain: {chain:?}"
+        );
+        count += 1;
+        rest = &after[stmt_end..];
+    }
+    assert!(
+        count >= 2,
+        "expected at least the bind + accept ServerOptions pipe-create sites in transport.rs; \
+         found {count} — has the pipe-create path moved?"
+    );
+}
+
+/// `OwnerOnlyPipeSecurity::build` must PIN the security descriptor's OWNER to the current-user SID
+/// (`SetSecurityDescriptorOwner`), not only its DACL. Without the owner pin, under an ELEVATED token
+/// the pipe owner defaults to `BUILTIN\Administrators`, who hold implicit `WRITE_DAC` and can rewrite
+/// the very owner-only DACL — breaking the current-user-only / `0o600` parity claim under elevated
+/// tokens.
+///
+/// This SOURCE-STRUCTURE guard is the ELEVATION-INDEPENDENT discriminating rail: it goes RED the
+/// instant the owner pin is removed, on ANY platform/elevation. The runtime `named_pipe_owner_is_
+/// current_user` readback CANNOT discriminate on a non-elevated gate — there the pipe's DEFAULT owner
+/// is ALREADY the current user, so the readback passes even without the explicit set — so the source
+/// guard is the discriminator and the readback is the runtime correctness check. Reads `transport.rs`
+/// (production source only — the test file is a separate `#[path]` module, so this guard's own
+/// `SetSecurityDescriptorOwner` literal is never scanned) with line comments stripped, so the
+/// SAFETY-comment prose mentioning the owner pin can never satisfy the check — only the live CALL
+/// counts. It further pins the EXACT owner arguments — `SetSecurityDescriptorOwner(sd_ptr, sid,
+/// FALSE)` after whitespace-stripping — so it also goes RED if the owner is pinned to the WRONG SID
+/// or defaulted (`TRUE`), not only when the whole call is removed. Runs on every platform.
+#[test]
+fn owner_only_pipe_security_pins_the_owner_sid() {
+    let src = include_str!("transport.rs");
+    let build = src
+        .find("fn build() -> TsgoApiResult<Self>")
+        .expect("OwnerOnlyPipeSecurity::build is present");
+    let end = src[build..]
+        .find("fn security_attributes")
+        .map(|off| build + off)
+        .expect("security_attributes follows build");
+    // Strip line comments so the SAFETY-comment prose can never satisfy the CALL checks below.
+    let body: String = src[build..end]
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let dacl = body
+        .find("SetSecurityDescriptorDacl(")
+        .expect("build sets the DACL via SetSecurityDescriptorDacl(...)");
+    let owner = body.find("SetSecurityDescriptorOwner(").expect(
+        "OwnerOnlyPipeSecurity::build must PIN the descriptor OWNER to the current-user SID via \
+         SetSecurityDescriptorOwner(...); without it an elevated token defaults the pipe owner to \
+         BUILTIN\\Administrators (implicit WRITE_DAC), who could rewrite the owner-only DACL",
+    );
+    assert!(
+        dacl < owner,
+        "the OWNER pin (byte {owner}) must follow the DACL set (byte {dacl}) in build()"
+    );
+    // Pin the EXACT owner call: the SID must be `sid` (the current-user SID) and the defaulted flag
+    // must be `FALSE` (explicitly set, NOT defaulted). Space-strip so argument spacing is irrelevant;
+    // a wrong SID or a `TRUE` (defaulted) owner then fails this exact-form check.
+    let body_nospace = body.replace(' ', "");
+    assert!(
+        body_nospace.contains("SetSecurityDescriptorOwner(sd_ptr,sid,FALSE)"),
+        "build() must pin the OWNER with the exact call SetSecurityDescriptorOwner(sd_ptr, sid, \
+         FALSE) — the current-user `sid` with `FALSE` = explicitly set (not defaulted); a wrong SID \
+         or a defaulted `TRUE` owner breaks the current-user-only / 0o600 parity"
+    );
+}
+
+/// A connect to a non-existent control endpoint is a typed error, never a panic
+/// or a false success (fail closed).
+#[tokio::test]
+async fn connect_to_missing_control_endpoint_is_a_typed_error() {
+    #[cfg(windows)]
+    let bogus = format!(r"\\.\pipe\verter-relay-ctl-missing-{}", std::process::id());
+    #[cfg(unix)]
+    let bogus = format!("/tmp/verter-relay-ctl-missing-{}.sock", std::process::id());
+
+    match connect_control_endpoint(&bogus).await {
+        Ok(_) => panic!("connecting to a missing control endpoint must not succeed"),
+        Err(crate::error::TsgoApiError::Transport(_)) => {}
+        Err(other) => panic!("a missing endpoint must be a typed Transport error, got {other:?}"),
+    }
+}

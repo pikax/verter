@@ -64,7 +64,7 @@ pub struct VerterReadyParams {
 }
 
 /// Server → client notification: workspace scanner has finished syncing all files
-/// (Phase 1 `.vue` + Phase 2 non-Vue source) to the type provider.
+/// to the type provider.
 /// Cross-file type resolution (barrel re-exports, imported types) is now reliable.
 pub enum TypeProviderSyncComplete {}
 
@@ -122,11 +122,39 @@ impl tower_lsp_server::ls_types::notification::Notification for TypeProviderStat
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TypeProviderStatusParams {
-    /// Which type provider is active: "tsgo", "tsserver", or "none".
+    /// Which type provider route is active: "tsgo", "tsserver",
+    /// "editor-tsserver", or "none".
     pub kind: String,
-    /// Why no type provider is available (only set when kind is "none").
+    /// Stable provenance for the selected route, or the failure reason for "none".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Server → client notification: the resolved per-workspace carrier-store
+/// directory the LSP publishes compiled `.vue`/`.svelte` carriers into.
+///
+/// The extension forwards this dir to VS Code's OWN TypeScript server via
+/// `configurePlugin`, so a plain `.ts` opened in VS Code (served by VS Code's TS
+/// service, not the LSP-spawned tsserver) reads the same store and gets real types
+/// for imported carriers. The LSP is the single source of the
+/// `<temp>/verter-carrier-store/<host-version>/<workspace-hash>/` path derivation,
+/// which the extension cannot reproduce without mirroring that exact recipe. Mirrors
+/// `$/verter/carrierStoreReady` in `packages/language-shared/src/notifications.ts`.
+pub enum CarrierStoreReady {}
+
+impl tower_lsp_server::ls_types::notification::Notification for CarrierStoreReady {
+    type Params = CarrierStoreReadyParams;
+    const METHOD: &'static str = "$/verter/carrierStoreReady";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CarrierStoreReadyParams {
+    /// The absolute, forward-slash-normalized per-workspace carrier-store dir the
+    /// LSP publishes carriers into (and the dir the `@verter/typescript-plugin`
+    /// reads). Identical to the dir the LSP delivers to its own spawned tsserver
+    /// through `VERTER_CARRIER_STORE_DIR`.
+    pub carrier_store_dir: String,
 }
 
 /// Server → client request: forward a TypeScript query to the extension's
@@ -353,7 +381,8 @@ pub struct ProjectOverviewComponentEdge {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectOverviewStats {
-    pub total_vue_files: usize,
+    /// Count of framework CARRIER component files (`.vue`, `.svelte`, …).
+    pub total_component_files: usize,
     pub total_components: usize,
     pub total_provide_keys: usize,
     pub total_inject_keys: usize,
@@ -364,3 +393,183 @@ pub struct ProjectOverviewStats {
 /// The `diagnostics_generation` comes from `VerterHost::get_diagnostics_generation()` and
 /// detects host-driven recompiles (e.g., dependency hydration) without a document version change.
 pub(crate) type CachedVerterDiagEntry = (i32, u64, Vec<Diagnostic>);
+
+// ─────────────────────────────────────────────────────────────────
+// Component-meta selective API (D32 / D102 / D104 / D113)
+// ─────────────────────────────────────────────────────────────────
+
+/// Params for `$/verter/getComponentMeta` request — full Volar-shape payload.
+#[derive(Debug, Deserialize)]
+pub struct GetComponentMetaParams {
+    /// Document URI of the Vue SFC whose component metadata is being requested.
+    pub uri: String,
+}
+
+/// Params for `$/verter/getComponentMetaSurface` request — selective surface
+/// envelope (D102).
+#[derive(Debug, Deserialize)]
+pub struct GetComponentMetaSurfaceParams {
+    pub uri: String,
+}
+
+/// Params for `$/verter/getComponentMetaTypeExpansion` request — one-layer
+/// `TypeHandle` resolution (D104).
+///
+/// `handle_bytes` carries the protobuf-encoded `TypeHandle` (D100 wire format).
+/// `depth` is accepted and forwarded but currently ignored — the resolver
+/// always performs a one-layer expansion.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetComponentMetaTypeExpansionParams {
+    pub handle_bytes: Vec<u8>,
+    #[serde(default)]
+    pub depth: Option<u32>,
+}
+
+/// Response envelope for `$/verter/getComponentMetaTypeExpansion`.
+///
+/// `expansion_bytes` is the protobuf-encoded `TypeExpansion` on success.
+/// `error` carries the structured `TypeHandleError` on failure (D104 + D114).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetComponentMetaTypeExpansionResponse {
+    /// Encoded `TypeExpansion` proto bytes. Empty on error.
+    pub expansion_bytes: Vec<u8>,
+    /// Structured handle error (e.g. `projectMismatch`, `staleHandle`).
+    /// `None` on success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<TypeHandleErrorPayload>,
+}
+
+/// JSON-side projection of `TypeHandleError`. The wire form keeps a discriminator
+/// `kind` to mirror the proto union shape so the TS-side switch can stay typed.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum TypeHandleErrorPayload {
+    ProjectMismatch { expected: String, actual: String },
+    StaleHandle { reason: String },
+    DepthExceeded { cap: u32 },
+    Other { message: String },
+}
+
+/// Params for `$/verter/audit/getRecord` request.
+///
+/// `request_id` is encoded as a string because JSON cannot losslessly
+/// round-trip 64-bit integers in JavaScript clients. Producers stringify
+/// the `u64` request id; the handler parses it back via
+/// [`u64::from_str`].
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAuditRecordParams {
+    /// String-encoded `u64` request id.
+    pub request_id: String,
+}
+
+/// Params for `$/verter/audit/getRecent` request.
+///
+/// Both fields are optional. `kind` filters records by `RequestKind`
+/// variant tag (e.g. `"Lsp"`, `"ComponentMeta"`, `"Compile"`); the
+/// matcher is [`verter_audit::RequestKind::matches_filter`]. `limit`
+/// caps the number of returned records (default 50, capped at 1024
+/// to keep the response payload bounded).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAuditRecentParams {
+    /// Optional kind filter — variant-name string match.
+    pub kind: Option<String>,
+    /// Optional cap on returned records.
+    pub limit: Option<u32>,
+}
+
+#[cfg(test)]
+mod component_meta_protocol_tests {
+    //! D113 / Tier 5b W7 review: JSON round-trip checks for the three new
+    //! component-meta protocol types. These tests guard the wire format
+    //! shared with `packages/language-shared/src/request.ts` (the TS LSP
+    //! client-side bindings) — any field rename or shape drift breaks JSON
+    //! interop with the VS Code extension.
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn get_component_meta_params_decodes_camel_case_uri() {
+        let p: GetComponentMetaParams = serde_json::from_value(json!({
+            "uri": "file:///test/Comp.vue"
+        }))
+        .expect("camelCase uri must decode");
+        assert_eq!(p.uri, "file:///test/Comp.vue");
+    }
+
+    #[test]
+    fn get_component_meta_surface_params_decodes_camel_case_uri() {
+        let p: GetComponentMetaSurfaceParams = serde_json::from_value(json!({
+            "uri": "file:///test/Comp.vue"
+        }))
+        .expect("camelCase uri must decode");
+        assert_eq!(p.uri, "file:///test/Comp.vue");
+    }
+
+    #[test]
+    fn get_component_meta_type_expansion_params_uses_camel_case_handle_bytes() {
+        let p: GetComponentMetaTypeExpansionParams = serde_json::from_value(json!({
+            "handleBytes": [10, 0, 18, 9, 47, 116, 101, 115, 116, 46, 118, 117, 101],
+            "depth": 2
+        }))
+        .expect("camelCase handleBytes + depth must decode");
+        assert_eq!(p.handle_bytes.len(), 13);
+        assert_eq!(p.depth, Some(2));
+    }
+
+    #[test]
+    fn get_component_meta_type_expansion_params_depth_optional() {
+        let p: GetComponentMetaTypeExpansionParams =
+            serde_json::from_value(json!({ "handleBytes": [] })).expect("depth must be optional");
+        assert!(p.depth.is_none());
+    }
+
+    #[test]
+    fn type_expansion_response_serializes_with_camel_case_and_skips_none_error() {
+        let response = GetComponentMetaTypeExpansionResponse {
+            expansion_bytes: vec![1, 2, 3],
+            error: None,
+        };
+        let json = serde_json::to_value(&response).expect("must serialize");
+        // expansionBytes camelCase
+        assert_eq!(json["expansionBytes"], json!([1, 2, 3]));
+        // error skipped on None
+        assert!(
+            json.get("error").is_none(),
+            "error: None must be skipped from JSON"
+        );
+    }
+
+    #[test]
+    fn type_expansion_response_error_project_mismatch_serializes_with_kind_discriminator() {
+        let response = GetComponentMetaTypeExpansionResponse {
+            expansion_bytes: vec![],
+            error: Some(TypeHandleErrorPayload::ProjectMismatch {
+                expected: String::new(),
+                actual: "foreign-project".to_string(),
+            }),
+        };
+        let json = serde_json::to_value(&response).expect("must serialize");
+        let err = &json["error"];
+        assert_eq!(err["kind"], "projectMismatch");
+        assert_eq!(err["actual"], "foreign-project");
+    }
+
+    #[test]
+    fn type_expansion_response_error_stale_handle_serializes_with_kind_discriminator() {
+        let response = GetComponentMetaTypeExpansionResponse {
+            expansion_bytes: vec![],
+            error: Some(TypeHandleErrorPayload::StaleHandle {
+                reason: "FileDeleted".to_string(),
+            }),
+        };
+        let json = serde_json::to_value(&response).expect("must serialize");
+        let err = &json["error"];
+        assert_eq!(err["kind"], "staleHandle");
+        assert_eq!(err["reason"], "FileDeleted");
+    }
+}

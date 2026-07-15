@@ -1,4 +1,4 @@
-// Cross-file edit support for code actions.
+﻿// Cross-file edit support for code actions.
 //
 // Provides `ChildComponentContext` — a bundle of resolved child component data
 // (URI, source, analysis, blocks, line_index) with helper methods for generating
@@ -7,10 +7,10 @@
 use std::collections::HashSet;
 
 use tower_lsp_server::ls_types::*;
-use verter_analysis::types::{
+use verter_semantic::analysis::types::{
     AnalysisFlags, AnalyzedMacro, AnalyzedMacroKind, VueApiClassification,
 };
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
@@ -149,7 +149,7 @@ impl ChildComponentContext {
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
-    use verter_analysis::template::{AnalyzedEmitDefinition, AnalyzedPropDefinition};
+    use verter_semantic::analysis::template::{AnalyzedEmitDefinition, AnalyzedPropDefinition};
 
     fn make_child_context(source: &str, analysis: FileAnalysisSnapshot) -> ChildComponentContext {
         let blocks = scan_sfc_blocks(source);
@@ -184,7 +184,7 @@ mod tests {
         let source =
             "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst x = 1\n</script>";
         let analysis = FileAnalysisSnapshot {
-            imports: vec![verter_analysis::AnalyzedImport {
+            imports: vec![verter_semantic::analysis::AnalyzedImport {
                 source: "vue".into(),
                 is_type_only: false,
                 bindings: vec![],
@@ -232,6 +232,8 @@ mod tests {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(24, 60),
             }])
             .into(),
@@ -255,7 +257,7 @@ mod tests {
     fn prop_names_returns_all_defined_props() {
         let analysis = FileAnalysisSnapshot {
             template: Some(
-                (verter_analysis::template::TemplateAnalysisSnapshot {
+                (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
                     prop_definitions: vec![
                         AnalyzedPropDefinition {
                             name: "msg".into(),
@@ -298,7 +300,7 @@ mod tests {
     fn emit_names_returns_declared_emits() {
         let analysis = FileAnalysisSnapshot {
             template: Some(
-                (verter_analysis::template::TemplateAnalysisSnapshot {
+                (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
                     emit_definitions: vec![
                         AnalyzedEmitDefinition {
                             event_name: "save".into(),
@@ -336,7 +338,7 @@ mod tests {
     #[test]
     fn has_use_attrs_detects_call() {
         let analysis = FileAnalysisSnapshot {
-            vue_api_calls: (vec![verter_analysis::types::VueApiCallSite {
+            vue_api_calls: (vec![verter_semantic::analysis::types::VueApiCallSite {
                 api: VueApiClassification::UseAttrs,
                 span: verter_span::Span::new(30, 42),
                 arg_value: None,
@@ -364,7 +366,7 @@ mod tests {
         let source =
             "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst x = 1\n</script>";
         let analysis = FileAnalysisSnapshot {
-            imports: vec![verter_analysis::AnalyzedImport {
+            imports: vec![verter_semantic::analysis::AnalyzedImport {
                 source: "vue".into(),
                 is_type_only: false,
                 bindings: vec![],
@@ -413,6 +415,8 @@ mod tests {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(24, 57), // past the closing `)`
             }])
             .into(),
@@ -450,6 +454,8 @@ mod tests {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(15, 35),
             }])
             .into(),

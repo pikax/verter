@@ -91,7 +91,7 @@ real_provider_test!(
         let uri_path = RealProviderTestSession::uri_to_path(&uri);
         assert_ne!(def_path, uri_path, "<MyComp should NOT go to same file");
 
-        // B1b: <WrappedButton → WrappedButton.vue
+        // <WrappedButton → WrappedButton.vue
         let pos = session.find_position(&uri, "<WrappedButton", 1);
         let locs = session.definition_locations(&uri, pos).await;
         assert!(!locs.is_empty(), "<WrappedButton should have definitions");

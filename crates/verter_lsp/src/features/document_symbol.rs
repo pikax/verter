@@ -1,7 +1,7 @@
-// Document symbols from SFC structure + verter_host analysis.
+﻿// Document symbols from SFC structure + verter_session analysis.
 
 use tower_lsp_server::ls_types::*;
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
@@ -245,28 +245,29 @@ fn span_to_range(span_start: u32, span_end: u32, line_index: &LineIndex, fallbac
     Range { start, end }
 }
 
-fn binding_symbol_kind(kind: &verter_analysis::AnalyzedBindingKind) -> SymbolKind {
+fn binding_symbol_kind(kind: &verter_semantic::analysis::AnalyzedBindingKind) -> SymbolKind {
     match kind {
-        verter_analysis::AnalyzedBindingKind::Const => SymbolKind::CONSTANT,
-        verter_analysis::AnalyzedBindingKind::Let | verter_analysis::AnalyzedBindingKind::Var => {
-            SymbolKind::VARIABLE
-        }
-        verter_analysis::AnalyzedBindingKind::Function
-        | verter_analysis::AnalyzedBindingKind::AsyncFunction => SymbolKind::FUNCTION,
-        verter_analysis::AnalyzedBindingKind::Class => SymbolKind::CLASS,
+        verter_semantic::analysis::AnalyzedBindingKind::Const => SymbolKind::CONSTANT,
+        verter_semantic::analysis::AnalyzedBindingKind::Let
+        | verter_semantic::analysis::AnalyzedBindingKind::Var => SymbolKind::VARIABLE,
+        verter_semantic::analysis::AnalyzedBindingKind::Function
+        | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => SymbolKind::FUNCTION,
+        verter_semantic::analysis::AnalyzedBindingKind::Class => SymbolKind::CLASS,
     }
 }
 
-fn build_binding_detail(binding: &verter_analysis::AnalyzedBinding) -> Option<String> {
+fn build_binding_detail(binding: &verter_semantic::analysis::AnalyzedBinding) -> Option<String> {
     let mut parts = Vec::new();
 
     match binding.kind {
-        verter_analysis::AnalyzedBindingKind::Const => parts.push("const"),
-        verter_analysis::AnalyzedBindingKind::Let => parts.push("let"),
-        verter_analysis::AnalyzedBindingKind::Var => parts.push("var"),
-        verter_analysis::AnalyzedBindingKind::Function => parts.push("function"),
-        verter_analysis::AnalyzedBindingKind::AsyncFunction => parts.push("async function"),
-        verter_analysis::AnalyzedBindingKind::Class => parts.push("class"),
+        verter_semantic::analysis::AnalyzedBindingKind::Const => parts.push("const"),
+        verter_semantic::analysis::AnalyzedBindingKind::Let => parts.push("let"),
+        verter_semantic::analysis::AnalyzedBindingKind::Var => parts.push("var"),
+        verter_semantic::analysis::AnalyzedBindingKind::Function => parts.push("function"),
+        verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+            parts.push("async function")
+        }
+        verter_semantic::analysis::AnalyzedBindingKind::Class => parts.push("class"),
     }
 
     if binding.is_reactive {
@@ -432,15 +433,15 @@ fn build_style_children(
     }
 }
 
-fn macro_kind_display(kind: &verter_analysis::AnalyzedMacroKind) -> &'static str {
+fn macro_kind_display(kind: &verter_semantic::analysis::AnalyzedMacroKind) -> &'static str {
     match kind {
-        verter_analysis::AnalyzedMacroKind::DefineProps => "defineProps",
-        verter_analysis::AnalyzedMacroKind::DefineEmits => "defineEmits",
-        verter_analysis::AnalyzedMacroKind::DefineModel => "defineModel",
-        verter_analysis::AnalyzedMacroKind::DefineExpose => "defineExpose",
-        verter_analysis::AnalyzedMacroKind::DefineOptions => "defineOptions",
-        verter_analysis::AnalyzedMacroKind::DefineSlots => "defineSlots",
-        verter_analysis::AnalyzedMacroKind::WithDefaults => "withDefaults",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineProps => "defineProps",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => "defineEmits",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineModel => "defineModel",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => "defineExpose",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => "defineOptions",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => "defineSlots",
+        verter_semantic::analysis::AnalyzedMacroKind::WithDefaults => "withDefaults",
     }
 }
 
@@ -448,9 +449,9 @@ fn macro_kind_display(kind: &verter_analysis::AnalyzedMacroKind) -> &'static str
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
-    use verter_analysis::style::{AnalyzedCssClass, CssAnalysis, StyleBlockAnalysis};
-    use verter_analysis::types::ImportBindingKind;
-    use verter_analysis::*;
+    use verter_semantic::analysis::style::{AnalyzedCssClass, CssAnalysis, StyleBlockAnalysis};
+    use verter_semantic::analysis::types::ImportBindingKind;
+    use verter_semantic::analysis::*;
 
     fn make_analysis(
         bindings: Vec<AnalyzedBinding>,
@@ -496,6 +497,7 @@ mod tests {
                     callee: "ref".to_string(),
                     callee_import_source: Some("vue".to_string()),
                     vue_api: Some(VueApiClassification::Ref),
+                    async_component_source: None,
                 }),
                 span: verter_span::Span::new(0, 0),
                 used_in_script: false,
@@ -552,6 +554,8 @@ mod tests {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
+                parsed_type_argument_scope: None,
                 span: verter_span::Span::new(0, 0),
             }],
         );
@@ -608,6 +612,8 @@ mod tests {
                         has_dynamic_class: false,
                         dynamic_classes: vec![],
                         v_models: vec![],
+                        bindings: vec![],
+                        events: vec![],
                         span: verter_span::Span::new(11, 52),
                     }],
                     ..Default::default()

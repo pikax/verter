@@ -1,0 +1,97 @@
+{
+  "slug": "legacy/reactive_prop_only.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "reactive_prop_only",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "mutable_source",
+    "prop",
+    "legacy_pre_effect",
+    "deep_read_state",
+    "set",
+    "legacy_pre_effect_reset",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "deep_read_state",
+    "from_html",
+    "get",
+    "legacy_pre_effect",
+    "legacy_pre_effect_reset",
+    "mutable_source",
+    "pop",
+    "prop",
+    "push",
+    "reset",
+    "set",
+    "set_text",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "mutable_source": 1,
+    "prop": 1,
+    "legacy_pre_effect": 1,
+    "deep_read_state": 1,
+    "set": 1,
+    "legacy_pre_effect_reset": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); export default function reactive_prop_only($$anchor, $$props) {$.push($$props, false); const y = $.mutable_source(); let p = $.prop($$props, 'p', 8); $.legacy_pre_effect(() => ($.deep_read_state(p())), () => {$.set(y, p() + 1);}); $.legacy_pre_effect_reset(); var p_1 = root(); var text = $.child(p_1, true); $.reset(p_1); $.template_effect(() => $.set_text(text, $.get(y))); $.append($$anchor, p_1); $.pop();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

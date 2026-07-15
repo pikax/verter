@@ -7,7 +7,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::TemplateElement;
+use verter_semantic::analysis::template::TemplateElement;
 
 /// Components that have limited or no Vapor support.
 const LIMITED_VAPOR_COMPONENTS: &[&str] = &[
@@ -64,7 +64,7 @@ mod tests {
     use super::*;
     use crate::config::{LintConfig, LintPreset};
     use crate::visitor::LintVisitor;
-    use verter_analysis::template::*;
+    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn run_rule(

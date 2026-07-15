@@ -1,0 +1,62 @@
+{
+  "slug": "blocks/if_debug_text.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "if_debug_text",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "text",
+    "template_effect",
+    "snapshot",
+    "append",
+    "if",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "first_child",
+    "if",
+    "snapshot",
+    "template_effect",
+    "text"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "text": 1,
+    "template_effect": 1,
+    "snapshot": 1,
+    "append": 2,
+    "if": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function if_debug_text($$anchor) {let show = true; let a = 0; var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var text = $.text('shown'); $.template_effect(() => {console.log({a: $.snapshot(a)}); debugger;}); $.append($$anchor, text);}; $.if(node, ($$render) => {if (show) $$render(consequent);});} $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

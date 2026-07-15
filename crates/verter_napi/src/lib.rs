@@ -3,7 +3,7 @@
 
 //! # verter_napi — Node.js bindings for Verter
 //!
-//! NAPI-RS binding layer that exposes [`verter_host::VerterHost`] and
+//! NAPI-RS binding layer that exposes [`verter_session::VerterHost`] and
 //! `processStyle` to Node.js.
 //!
 //! ## API parity
@@ -31,9 +31,13 @@ use napi::{Error, Status};
 use napi_derive::napi;
 use verter_ffi::convert::*;
 use verter_ffi::types::*;
-use verter_host as host;
+use verter_session as host;
+use verter_type_expr::TypeExpr;
 
+mod audit;
+mod memory_audit;
 mod meta;
+mod typeinfo;
 
 // Re-imports for code actions and diagnostics (parity with verter_wasm)
 use verter_actions::{ActionContext, ActionEngine};
@@ -77,7 +81,15 @@ fn host_error(err: host::HostError) -> Error {
         host::HostError::InvalidQuery
         | host::HostError::MissingSource { .. }
         | host::HostError::MissingVirtualNode { .. } => Status::InvalidArg,
-        host::HostError::CompileError { .. } => Status::GenericFailure,
+        // Typed unsupported-language failure: the request named a
+        // language row with no registered implementation — same status
+        // family as the classify errors (the caller's input names a
+        // language the host cannot serve), distinguishable from a
+        // generic internal failure.
+        host::HostError::Scheduler(
+            verter_scheduler::job::SchedulerError::UnsupportedLanguage { .. },
+        ) => Status::InvalidArg,
+        host::HostError::CompileError(_) => Status::GenericFailure,
         #[allow(unreachable_patterns)]
         _ => Status::GenericFailure,
     };
@@ -142,7 +154,7 @@ pub struct ProcessStyleResult {
 pub fn process_style(css: Buffer, options: ProcessStyleOptions) -> Result<ProcessStyleResult> {
     let css = buffer_to_string(css)?;
     catch_panic(std::panic::AssertUnwindSafe(|| {
-        let core_options = verter_core::css::ProcessStyleOptions {
+        let core_options = verter_compiler::css::ProcessStyleOptions {
             scope_id: &options.scopeId,
             scoped: options.scoped.unwrap_or(false),
             is_module: options.isModule.unwrap_or(false),
@@ -151,11 +163,11 @@ pub fn process_style(css: Buffer, options: ProcessStyleOptions) -> Result<Proces
             sourcemap: options.sourcemap.unwrap_or(false),
         };
 
-        verter_core::css::process_style(&css, &core_options)
+        verter_compiler::css::process_style(&css, &core_options)
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
     }))?
     .map(|result| ProcessStyleResult {
-        code: result.code,
+        code: result.code.into_owned(),
         sourceMap: result.source_map,
         moduleClasses: result
             .module_classes
@@ -190,8 +202,27 @@ pub struct NapiHostConfig {
     pub maxProfilesPerFile: Option<u32>,
     pub resolveExtensions: Option<Vec<String>>,
     pub analysisLevel: Option<String>,
-    /// Type expansion backend: `"verter"` (default), `"tsserver"`, `"tsgo"`, `"auto"`.
-    pub typeExpansionBackend: Option<String>,
+    /// Enable Rust-first native audit for component-meta requests.
+    /// When true, timing/memory/store data is captured per request.
+    pub auditEnabled: Option<bool>,
+    /// Enable per-request semantic footprint capture. Requires
+    /// `auditEnabled = true` — necessary for
+    /// `getComponentMetaWithAudit` to return a populated bundle.
+    pub footprintCapture: Option<bool>,
+    /// Capacity of the host-owned typeinfo scratch cache used by
+    /// `evaluateTypeExpressionWithAudit`. `None` (default) selects
+    /// 64 entries; `Some(0)` disables the cache; other values cap
+    /// the LRU at the chosen size.
+    pub typeinfoScratchCacheCapacity: Option<u32>,
+    /// Worker count for the host-owned CPU pool used by every host batch
+    /// API's outer coordinator — `compile_many` and the component-meta
+    /// batch. `None` (default) resolves to
+    /// `std::thread::available_parallelism` at host-construction time;
+    /// `Some(0)` is treated as `None`; other positive values cap the
+    /// pool's worker count. The host pool is built once at host
+    /// construction and reused across every batch call — to
+    /// change the pool size, construct a new host.
+    pub hostCpuThreads: Option<u32>,
 }
 
 impl From<NapiHostConfig> for FfiHostConfig {
@@ -203,7 +234,10 @@ impl From<NapiHostConfig> for FfiHostConfig {
             max_profiles_per_file: n.maxProfilesPerFile,
             resolve_extensions: n.resolveExtensions,
             analysis_level: n.analysisLevel,
-            type_expansion_backend: n.typeExpansionBackend,
+            audit_enabled: n.auditEnabled,
+            footprint_capture: n.footprintCapture,
+            typeinfo_scratch_cache_capacity: n.typeinfoScratchCacheCapacity,
+            host_cpu_threads: n.hostCpuThreads,
         }
     }
 }
@@ -228,6 +262,9 @@ pub struct NapiCompileProfile {
     pub target: Option<String>,
     /// Experimental: strict slot children type checking.
     pub strictSlots: Option<bool>,
+    /// Requested compile cache mode: "stateless", "content", or
+    /// "session" (default).
+    pub requestedMode: Option<String>,
 }
 
 impl From<NapiCompileProfile> for FfiCompileProfile {
@@ -248,6 +285,7 @@ impl From<NapiCompileProfile> for FfiCompileProfile {
             source_map: n.sourceMap,
             target: n.target,
             strict_slots: n.strictSlots,
+            requested_mode: n.requestedMode,
         }
     }
 }
@@ -500,6 +538,15 @@ pub struct NapiVirtualFileResponse {
     pub stale: bool,
     pub diagnostics: NapiDiagnosticsSnapshot,
     pub meta: NapiVirtualMeta,
+    /// `true` iff this response was served from a warm cache slot (the
+    /// fact-validated session slot OR the content-addressed store).
+    pub cacheHit: bool,
+    /// Requested compile cache mode ("stateless" / "content" / "session").
+    pub requestedMode: String,
+    /// Actual compile cache mode the runtime ran under.
+    pub actualMode: String,
+    /// Highest-priority downgrade reason, or `None` when none fired.
+    pub downgradeReason: Option<String>,
 }
 
 /// A single destructured binding's source mapping (UTF-16 for JS).
@@ -681,7 +728,7 @@ pub struct NapiLintDiagnostic {
 
 /// Point-in-time snapshot of host performance metrics.
 ///
-/// Only populated when built with the `host_metrics` feature.
+/// Only populated when built with the `session_metrics` feature.
 /// Obtain via [`NapiVerterHost::getMetrics`].
 #[napi(object)]
 pub struct NapiHostMetrics {
@@ -757,6 +804,41 @@ fn host_diagnostics_to_napi(
     }
 }
 
+/// Map a JS HMR-strategy string to the host [`host::HmrStrategy`]. Mirrors
+/// the `verter_ffi` profile conversion (`"vite"` / `"webpack"` / `"none"`,
+/// case-insensitive). Faithful mapping — an unknown value is an error, not
+/// a silent drop to `None`.
+fn ffi_hmr_strategy_to_host(s: &str) -> std::result::Result<host::HmrStrategy, String> {
+    if s.eq_ignore_ascii_case("vite") {
+        Ok(host::HmrStrategy::Vite)
+    } else if s.eq_ignore_ascii_case("webpack") {
+        Ok(host::HmrStrategy::Webpack)
+    } else if s.eq_ignore_ascii_case("none") {
+        Ok(host::HmrStrategy::None)
+    } else {
+        Err(format!(
+            "invalid hmrStrategy '{s}', expected 'vite', 'webpack', or 'none'"
+        ))
+    }
+}
+
+/// Convert a single host [`host::HostDiagnostic`] into its NAPI wire
+/// shape. Used to surface the RuntimeRender soft-macro warnings on
+/// [`NapiCompileBatchEntry::diagnostics`].
+fn napi_diagnostic_from_host(d: &host::HostDiagnostic) -> NapiDiagnostic {
+    NapiDiagnostic {
+        severity: match d.severity {
+            host::HostSeverity::Error => "error".to_string(),
+            host::HostSeverity::Warning => "warning".to_string(),
+            host::HostSeverity::Info => "info".to_string(),
+        },
+        code: d.code.clone(),
+        message: d.message.clone(),
+        spanStart: d.span.map(|s| s.start),
+        spanEnd: d.span.map(|s| s.end),
+    }
+}
+
 fn host_block_kind_to_str(kind: &host::ExternalBlockKind) -> &'static str {
     match kind {
         host::ExternalBlockKind::Script => "script",
@@ -767,53 +849,53 @@ fn host_block_kind_to_str(kind: &host::ExternalBlockKind) -> &'static str {
 }
 
 fn host_module_reference_syntax_to_str(
-    syntax: verter_analysis::ModuleReferenceSyntax,
+    syntax: verter_semantic::analysis::ModuleReferenceSyntax,
 ) -> &'static str {
     match syntax {
-        verter_analysis::ModuleReferenceSyntax::StaticImport => "staticImport",
-        verter_analysis::ModuleReferenceSyntax::ExportFrom => "exportFrom",
-        verter_analysis::ModuleReferenceSyntax::DynamicImport => "dynamicImport",
-        verter_analysis::ModuleReferenceSyntax::RequireCall => "requireCall",
+        verter_semantic::analysis::ModuleReferenceSyntax::StaticImport => "staticImport",
+        verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom => "exportFrom",
+        verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport => "dynamicImport",
+        verter_semantic::analysis::ModuleReferenceSyntax::RequireCall => "requireCall",
     }
 }
 
 fn host_module_reference_semantics_to_str(
-    semantics: verter_analysis::ModuleReferenceSemantics,
+    semantics: verter_semantic::analysis::ModuleReferenceSemantics,
 ) -> &'static str {
     match semantics {
-        verter_analysis::ModuleReferenceSemantics::Import => "import",
-        verter_analysis::ModuleReferenceSemantics::Require => "require",
+        verter_semantic::analysis::ModuleReferenceSemantics::Import => "import",
+        verter_semantic::analysis::ModuleReferenceSemantics::Require => "require",
     }
 }
 
 fn host_module_reference_analyzability_to_str(
-    analyzability: verter_analysis::ModuleReferenceAnalyzability,
+    analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
 ) -> &'static str {
     match analyzability {
-        verter_analysis::ModuleReferenceAnalyzability::Exact => "exact",
-        verter_analysis::ModuleReferenceAnalyzability::FiniteSet => "finiteSet",
-        verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic => "unknownDynamic",
+        verter_semantic::analysis::ModuleReferenceAnalyzability::Exact => "exact",
+        verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet => "finiteSet",
+        verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic => "unknownDynamic",
     }
 }
 
 fn napi_module_reference_syntax_from_str(
     syntax: &str,
-) -> Result<verter_analysis::ModuleReferenceSyntax> {
+) -> Result<verter_semantic::analysis::ModuleReferenceSyntax> {
     match syntax {
-        "staticImport" => Ok(verter_analysis::ModuleReferenceSyntax::StaticImport),
-        "exportFrom" => Ok(verter_analysis::ModuleReferenceSyntax::ExportFrom),
-        "dynamicImport" => Ok(verter_analysis::ModuleReferenceSyntax::DynamicImport),
-        "requireCall" => Ok(verter_analysis::ModuleReferenceSyntax::RequireCall),
+        "staticImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::StaticImport),
+        "exportFrom" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom),
+        "dynamicImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport),
+        "requireCall" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::RequireCall),
         other => Err(ffi_err(format!("unknown module reference syntax: {other}"))),
     }
 }
 
 fn napi_module_reference_semantics_from_str(
     semantics: &str,
-) -> Result<verter_analysis::ModuleReferenceSemantics> {
+) -> Result<verter_semantic::analysis::ModuleReferenceSemantics> {
     match semantics {
-        "import" => Ok(verter_analysis::ModuleReferenceSemantics::Import),
-        "require" => Ok(verter_analysis::ModuleReferenceSemantics::Require),
+        "import" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Import),
+        "require" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Require),
         other => Err(ffi_err(format!(
             "unknown module reference semantics: {other}"
         ))),
@@ -822,11 +904,13 @@ fn napi_module_reference_semantics_from_str(
 
 fn napi_module_reference_analyzability_from_str(
     analyzability: &str,
-) -> Result<verter_analysis::ModuleReferenceAnalyzability> {
+) -> Result<verter_semantic::analysis::ModuleReferenceAnalyzability> {
     match analyzability {
-        "exact" => Ok(verter_analysis::ModuleReferenceAnalyzability::Exact),
-        "finiteSet" => Ok(verter_analysis::ModuleReferenceAnalyzability::FiniteSet),
-        "unknownDynamic" => Ok(verter_analysis::ModuleReferenceAnalyzability::UnknownDynamic),
+        "exact" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::Exact),
+        "finiteSet" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet),
+        "unknownDynamic" => {
+            Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic)
+        }
         other => Err(ffi_err(format!(
             "unknown module reference analyzability: {other}"
         ))),
@@ -835,8 +919,8 @@ fn napi_module_reference_analyzability_from_str(
 
 fn napi_module_reference_to_analysis(
     input: NapiModuleReference,
-) -> Result<verter_analysis::AnalyzedModuleReference> {
-    Ok(verter_analysis::AnalyzedModuleReference {
+) -> Result<verter_semantic::analysis::AnalyzedModuleReference> {
+    Ok(verter_semantic::analysis::AnalyzedModuleReference {
         syntax: napi_module_reference_syntax_from_str(&input.syntax)?,
         semantics: napi_module_reference_semantics_from_str(&input.semantics)?,
         is_type_only: input.isTypeOnly,
@@ -862,6 +946,7 @@ fn default_known_dependency_extensions() -> Vec<String> {
         ".cts".to_string(),
         ".cjs".to_string(),
         ".vue".to_string(),
+        ".svelte".to_string(),
     ]
 }
 
@@ -990,13 +1075,17 @@ fn host_virtual_file_to_napi(
             styleIndex: input.meta.style_index.map(|i| i as u32),
             customIndex: input.meta.custom_index.map(|i| i as u32),
         },
+        cacheHit: input.cache_hit,
+        requestedMode: input.requested_mode.to_string(),
+        actualMode: input.actual_mode.to_string(),
+        downgradeReason: input.downgrade_reason.map(|r| r.to_string()),
     }
 }
 
 fn napi_project_config_to_ide(
     config: NapiIdeProjectConfig,
-) -> verter_analysis::project_resolver::IdeProjectConfig {
-    let mut ide = verter_analysis::project_resolver::IdeProjectConfig::new(
+) -> verter_semantic::analysis::project_resolver::IdeProjectConfig {
+    let mut ide = verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
         config.root.clone(),
         config.workspaceRoot,
         config.tsconfigPath,
@@ -1007,10 +1096,12 @@ fn napi_project_config_to_ide(
     if let Some(aliases) = config.workspaceAliases {
         ide.workspace_aliases = aliases
             .into_iter()
-            .map(|a| verter_analysis::project_resolver::WorkspaceAlias {
-                find: a.find,
-                replacement: a.replacement,
-            })
+            .map(
+                |a| verter_semantic::analysis::project_resolver::WorkspaceAlias {
+                    find: a.find,
+                    replacement: a.replacement,
+                },
+            )
             .collect();
     }
     if let Some(opts) = config.compilerOptions {
@@ -1044,7 +1135,7 @@ fn host_resolved_id_to_napi(input: host::ResolvedId) -> NapiResolvedId {
 //         getVirtualFile, listVirtualFiles, remove, setImportDependencies,
 //         getAnalysis, getTsx, lint, getCodeActions, getLintRuleMetadata,
 //         getDocumentSymbols, matchCssSelectors, computeCrossFileOptimizations
-// - NAPI-only: processStyle (requires Node.js), getTsc, compileBatch, getMetrics
+// - NAPI-only: processStyle (requires Node.js), getTsc, compileMany, getMetrics
 // =============================================================================
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1064,18 +1155,13 @@ pub struct NapiDirEntry {
 /// Construct first, then pass to `VerterHost.withWorkspace()`.
 #[napi(js_name = "Workspace")]
 pub struct NapiWorkspace {
-    inner: std::sync::Arc<verter_vfs::FilesystemWorkspace>,
+    inner: std::sync::Arc<verter_workspace::FilesystemWorkspace>,
 }
 
 impl NapiWorkspace {
     /// Get the underlying workspace as a trait object.
-    pub(crate) fn workspace(&self) -> std::sync::Arc<dyn verter_vfs::WorkspaceAccess> {
-        std::sync::Arc::clone(&self.inner) as std::sync::Arc<dyn verter_vfs::WorkspaceAccess>
-    }
-
-    /// Get the filesystem workspace roots for runtime-backed integrations.
-    pub(crate) fn roots(&self) -> Vec<String> {
-        self.inner.options().roots.clone()
+    pub(crate) fn workspace(&self) -> std::sync::Arc<dyn verter_workspace::WorkspaceAccess> {
+        std::sync::Arc::clone(&self.inner) as std::sync::Arc<dyn verter_workspace::WorkspaceAccess>
     }
 }
 
@@ -1083,11 +1169,24 @@ impl NapiWorkspace {
 impl NapiWorkspace {
     /// Create a new workspace rooted at the given directories.
     ///
-    /// The workspace auto-discovers tsconfigs, builds the project graph,
-    /// and populates the resolver.
+    /// **Lazy by design.** The constructor stores the roots and the
+    /// backing `FilesystemWorkspace` only — it does NOT auto-discover
+    /// tsconfigs or build a project graph. Until a caller invokes
+    /// [`Self::configure_projects`] (`workspace.configureProjects(...)`
+    /// in JS), `Engine::resolve_import` walks an empty `ProjectGraph`
+    /// and falls through to the bare-VFS resolver.
+    ///
+    /// JS consumers that need a configured workspace MUST call
+    /// `configureProjects` after construction, supplying the alias map
+    /// derived from the project's tsconfig chain. The canonical pattern
+    /// lives in `packages/component-meta/src/compat/checker.ts`:
+    /// `extractPathAliases(parsedTsconfig, projectRoot)` produces the
+    /// `NapiIdeProjectConfig` shape, which is passed to
+    /// `workspace.configureProjects([aliases])`. Bench and audit
+    /// harnesses mirror the same shape.
     #[napi(constructor)]
     pub fn new(roots: Vec<String>) -> Self {
-        let ws = verter_vfs::FilesystemWorkspace::new(verter_vfs::FilesystemOptions {
+        let ws = verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions {
             roots,
             eager_preload: false,
         });
@@ -1104,28 +1203,28 @@ impl NapiWorkspace {
     /// Read a file from the workspace (overlay → snapshot → disk).
     #[napi(js_name = "readFile")]
     pub async fn read_file(&self, path: String) -> Result<Option<String>> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         Ok(self.inner.read_file(&path).map(|s| s.to_string()))
     }
 
     /// Check if a file exists in the workspace.
     #[napi(js_name = "fileExists")]
     pub async fn file_exists(&self, path: String) -> Result<bool> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         Ok(self.inner.file_exists(&path))
     }
 
     /// Check if a path is a directory.
     #[napi(js_name = "isDir")]
     pub async fn is_dir(&self, path: String) -> Result<bool> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         Ok(self.inner.is_dir(&path))
     }
 
     /// Write file content. Creates parent directories as needed.
     #[napi(js_name = "writeFile")]
     pub async fn write_file(&self, path: String, content: String) -> Result<()> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner
             .write_file(&path, &content)
             .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
@@ -1134,7 +1233,7 @@ impl NapiWorkspace {
     /// Read directory entries. Returns array of { path, isDir }.
     #[napi(js_name = "readDir")]
     pub async fn read_dir(&self, dir: String) -> Result<Vec<NapiDirEntry>> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         self.inner
             .read_dir(&dir)
             .map(|entries| {
@@ -1157,7 +1256,7 @@ impl NapiWorkspace {
         exclude_dirs: Vec<String>,
         extensions: Option<Vec<String>>,
     ) -> Result<Vec<String>> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         let exts = extensions;
         self.inner
             .walk(
@@ -1177,7 +1276,7 @@ impl NapiWorkspace {
     /// Delete a file.
     #[napi(js_name = "deleteFile")]
     pub async fn delete_file(&self, path: String) -> Result<()> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner
             .delete_file(&path)
             .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
@@ -1186,7 +1285,7 @@ impl NapiWorkspace {
     /// Create a directory and all parent directories.
     #[napi(js_name = "createDirAll")]
     pub async fn create_dir_all(&self, path: String) -> Result<()> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner
             .create_dir_all(&path)
             .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
@@ -1195,7 +1294,7 @@ impl NapiWorkspace {
     /// Delete a directory and all its contents.
     #[napi(js_name = "deleteDirAll")]
     pub async fn delete_dir_all(&self, path: String) -> Result<()> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner
             .delete_dir_all(&path)
             .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
@@ -1204,7 +1303,7 @@ impl NapiWorkspace {
     /// Copy a file from src to dst.
     #[napi(js_name = "copyFile")]
     pub async fn copy_file(&self, src: String, dst: String) -> Result<()> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner
             .copy_file(&src, &dst)
             .map_err(|e| Error::new(Status::GenericFailure, format!("{e}")))
@@ -1213,7 +1312,7 @@ impl NapiWorkspace {
     /// Resolve symlinks to real path. Returns null if not found.
     #[napi(js_name = "realpath")]
     pub async fn realpath(&self, path: String) -> Result<Option<String>> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         Ok(self.inner.realpath(&path))
     }
 
@@ -1226,18 +1325,18 @@ impl NapiWorkspace {
         phase: Option<String>,
         kind: Option<String>,
     ) -> Result<Option<String>> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceRead;
         let phase = match phase.as_deref() {
-            Some("provider") => verter_vfs::ResolvePhase::ProviderGraph,
-            _ => verter_vfs::ResolvePhase::CodegenBlocker,
+            Some("provider") => verter_workspace::ResolvePhase::ProviderGraph,
+            _ => verter_workspace::ResolvePhase::CodegenBlocker,
         };
         let kind = match kind.as_deref() {
-            Some("type") => verter_vfs::ResolveRequestKind::TypeImport,
-            Some("require") => verter_vfs::ResolveRequestKind::RequireCall,
-            Some("src") => verter_vfs::ResolveRequestKind::SfcSrcAttr,
-            _ => verter_vfs::ResolveRequestKind::EsmImport,
+            Some("type") => verter_workspace::ResolveRequestKind::TypeImport,
+            Some("require") => verter_workspace::ResolveRequestKind::RequireCall,
+            Some("src") => verter_workspace::ResolveRequestKind::SfcSrcAttr,
+            _ => verter_workspace::ResolveRequestKind::EsmImport,
         };
-        let ctx = verter_vfs::ResolutionContext { phase, kind };
+        let ctx = verter_workspace::ResolutionContext { phase, kind };
         Ok(self
             .inner
             .resolve_import(&importer, &specifier, ctx)
@@ -1249,11 +1348,12 @@ impl NapiWorkspace {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let configs: Vec<verter_analysis::project_resolver::IdeProjectConfig> = projects
-                .into_iter()
-                .map(napi_project_config_to_ide)
-                .collect();
-            use verter_vfs::WorkspaceAccess;
+            let configs: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig> =
+                projects
+                    .into_iter()
+                    .map(napi_project_config_to_ide)
+                    .collect();
+            use verter_workspace::WorkspaceAccess;
             self.inner.configure_resolver(configs);
         }))
     }
@@ -1261,7 +1361,7 @@ impl NapiWorkspace {
     /// Notify workspace that an editor buffer is open/changed.
     #[napi(js_name = "notifyUpsert")]
     pub fn notify_upsert(&self, canonical_id: String, source: Buffer) -> Result<()> {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         let source_str = std::str::from_utf8(&source)
             .map_err(|e| Error::new(Status::InvalidArg, format!("invalid UTF-8: {e}")))?;
         self.inner
@@ -1272,14 +1372,14 @@ impl NapiWorkspace {
     /// Notify workspace that an editor buffer was closed.
     #[napi(js_name = "notifyClose")]
     pub fn notify_close(&self, canonical_id: String) {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner.notify_close(&canonical_id);
     }
 
     /// Notify workspace that a file was deleted.
     #[napi(js_name = "notifyDelete")]
     pub fn notify_delete(&self, canonical_id: String) {
-        use verter_vfs::WorkspaceAccess;
+        use verter_workspace::WorkspaceAccess;
         self.inner.notify_delete(&canonical_id);
     }
 }
@@ -1293,7 +1393,7 @@ impl NapiWorkspace {
 /// virtual outputs that a bundler or LSP can request individually.
 #[napi(js_name = "VerterHost")]
 pub struct NapiVerterHost {
-    inner: host::VerterHost,
+    inner: std::sync::Arc<host::VerterHost>,
 }
 
 #[napi]
@@ -1309,9 +1409,9 @@ impl NapiVerterHost {
     pub fn new(config: Option<NapiHostConfig>) -> Result<Self> {
         let ffi_config: FfiHostConfig = config.unwrap_or_default().into();
         Ok(Self {
-            inner: host::VerterHost::new_standalone(
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
                 ffi_config_to_host(ffi_config).map_err(ffi_err)?,
-            ),
+            )),
         })
     }
 
@@ -1328,7 +1428,7 @@ impl NapiVerterHost {
         let ffi_config: FfiHostConfig = config.unwrap_or_default().into();
         let host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
         Ok(Self {
-            inner: host::VerterHost::new(host_config, workspace.inner.clone()),
+            inner: std::sync::Arc::new(host::VerterHost::new(host_config, workspace.inner.clone())),
         })
     }
 
@@ -1352,8 +1452,9 @@ impl NapiVerterHost {
     ///
     /// - `request.inputId` — the file path used for import resolution.
     /// - `request.source` — SFC source as a UTF-8 `Buffer`.
-    /// - `request.fileKind` — optional override (`"vue"` or `"ts"`); inferred
-    ///   from extension when `None`.
+    /// - `request.fileKind` — optional explicit kind (`"vue"`/`"sfc"`/
+    ///   `"vue_sfc"`, `"svelte"`, or `"non_sfc"`/`"text"`/`"file"`);
+    ///   classified from the canonical path when `None`.
     ///
     /// Returns an error if the source is not valid UTF-8 or if the file kind
     /// is unrecognised.
@@ -1496,7 +1597,7 @@ impl NapiVerterHost {
     /// **Note:** Returns a JSON *string* — the caller must `JSON.parse()`.
     /// The WASM variant (`verter_wasm`) returns a native JS object instead
     /// (via `serde_wasm_bindgen`). This inconsistency is intentional:
-    /// defining NAPI structs for all `verter_analysis` types is high effort
+    /// defining NAPI structs for all `verter_semantic::analysis` types is high effort
     /// for low value since `getAnalysis` is primarily used by the playground.
     #[napi(js_name = "getAnalysis")]
     pub fn get_analysis(&self, canonical_or_alias: String) -> Result<Option<String>> {
@@ -1621,12 +1722,47 @@ impl NapiVerterHost {
         }))
     }
 
+    /// Ensure the IDE (`CachedTsx`) projection exists for a file + profile.
+    ///
+    /// The explicit IDE-ensure path: it compiles the carrier's IDE surface
+    /// (never requesting the runtime `Main` node), so a Main-less carrier
+    /// (Svelte) populates its `CachedTsx` and a subsequent `getIde` succeeds.
+    /// `getIde` itself stays a pure cached read.
+    ///
+    /// The caller profile is OPTIONAL and is normalized to an IDE/TSX-bearing
+    /// target INTERNALLY, so a default / bundler profile (no TSX bit) still
+    /// produces the IDE surface. Returns `true` whenever the carrier HAS an IDE
+    /// surface — regardless of the caller's runtime target — and `false` ONLY
+    /// for a genuine no-IDE-surface file (a non-carrier / plain script). A real
+    /// failure (missing source / compile error) rejects.
+    #[napi(js_name = "ensureIdeCompiled")]
+    pub fn ensure_ide_compiled(
+        &self,
+        canonical_id: String,
+        profile: Option<NapiCompileProfile>,
+    ) -> Result<bool> {
+        let ffi_profile: Option<FfiCompileProfile> = profile.map(Into::into);
+        let host_profile = ffi_profile_to_host(ffi_profile)
+            .map_err(|e| Error::new(Status::InvalidArg, format!("invalid profile: {e}")))?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.ensure_ide_compiled(&canonical_id, &host_profile)
+        }))?
+        .map_err(host_error)
+    }
+
     /// Generates TSC output (minimal TypeScript declarations) for a Vue SFC.
     ///
     /// Unlike `getTsx`, this does NOT require a prior `getVirtualFile` call.
     /// It performs macro-only extraction (defineProps, defineEmits, defineModel,
     /// defineOptions) and generates a `ComponentPublicInstance`-based declaration
     /// with inline source map. This is the fast path for IDE type checking.
+    ///
+    /// `mode` selects the served surface: `"public"` (default when absent) —
+    /// the application-facing instance shape; `"testing"` — the Vue Test
+    /// Utils-like debug surface exposing `<script setup>` bindings;
+    /// `"declaration"` — the declaration-only (`.d.<ext>.ts`) public surface
+    /// (a valid `.d.ts` with no runtime/value code). An unknown mode string
+    /// is rejected with `InvalidArg`.
     ///
     /// Returns `{ code, sourceMap? }` or `null` if no TSC output is available.
     #[napi(js_name = "getPublicApi")]
@@ -1635,15 +1771,7 @@ impl NapiVerterHost {
         canonical_id: String,
         mode: Option<String>,
     ) -> Result<Option<NapiTscResponse>> {
-        let mode = match mode.as_deref() {
-            None | Some("public") => host::PublicApiMode::Public,
-            Some("testing") => host::PublicApiMode::Testing,
-            Some(other) => {
-                return Err(ffi_err(format!(
-                    "invalid public api mode '{other}', expected 'public' or 'testing'"
-                )));
-            }
-        };
+        let mode = ffi_public_api_mode_to_host(mode.as_deref()).map_err(ffi_err)?;
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner
                 .get_public_api_with_mode(&canonical_id, mode, None)
@@ -1697,7 +1825,7 @@ impl NapiVerterHost {
             .map(napi_module_reference_to_analysis)
             .collect::<Result<Vec<_>>>()?;
         Ok(
-            verter_analysis::project_resolver::collect_resolvable_module_reference_specifiers(
+            verter_semantic::analysis::project_resolver::collect_resolvable_module_reference_specifiers(
                 &module_references,
             ),
         )
@@ -1719,7 +1847,7 @@ impl NapiVerterHost {
             .collect::<Result<Vec<_>>>()?;
         let extensions = extensions.unwrap_or_else(default_known_dependency_extensions);
         Ok(
-            verter_analysis::project_resolver::resolve_known_module_reference_dependencies(
+            verter_semantic::analysis::project_resolver::resolve_known_module_reference_dependencies(
                 &owner_id,
                 &module_references,
                 &known_ids,
@@ -1766,10 +1894,11 @@ impl NapiVerterHost {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let configs: Vec<verter_analysis::project_resolver::IdeProjectConfig> = projects
-                .into_iter()
-                .map(napi_project_config_to_ide)
-                .collect();
+            let configs: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig> =
+                projects
+                    .into_iter()
+                    .map(napi_project_config_to_ide)
+                    .collect();
             self.inner.configure_projects(configs);
         }))
     }
@@ -1800,11 +1929,11 @@ impl NapiVerterHost {
 
     /// Returns a snapshot of host performance metrics.
     ///
-    /// Only available when built with the `host_metrics` feature.
+    /// Only available when built with the `session_metrics` feature.
     /// Returns `null` when the feature is disabled.
     #[napi(js_name = "getMetrics")]
     pub fn get_metrics(&self) -> Option<NapiHostMetrics> {
-        #[cfg(feature = "host_metrics")]
+        #[cfg(feature = "session_metrics")]
         {
             let m = self.inner.metrics_snapshot();
             Some(NapiHostMetrics {
@@ -1820,7 +1949,7 @@ impl NapiVerterHost {
                 compileTimeUsTotal: m.compile_time_us_total as f64,
             })
         }
-        #[cfg(not(feature = "host_metrics"))]
+        #[cfg(not(feature = "session_metrics"))]
         {
             None
         }
@@ -2020,6 +2149,542 @@ impl NapiVerterHost {
 
         Ok(results)
     }
+
+    /// host-backed batch compile.
+    ///
+    /// Compiles a batch of Vue SFC inputs through the production host
+    /// path (scheduler + dispatch + compile_cache). Returns one
+    /// [`NapiCompileBatchEntry`] per input, in the original input
+    /// order.
+    ///
+    /// Per-input panic isolation: if codegen panics for one input,
+    /// only that input's entry receives a `compiler panic: ...`
+    /// error message; the rest of the batch completes normally.
+    ///
+    /// `options.priority` is `"interactive"` or `"background"`;
+    /// invalid strings return a NAPI error. Default is `"background"`.
+    #[napi(js_name = "compileMany")]
+    pub fn compile_many(
+        &self,
+        files: Vec<NapiCompileBatchInput>,
+        options: Option<NapiCompileBatchOptions>,
+    ) -> Result<Vec<NapiCompileBatchEntry>> {
+        use verter_scheduler::stage::Priority;
+        let opts = options.unwrap_or_default();
+        let priority = match opts.priority.as_deref() {
+            None | Some("background") => Some(Priority::Background),
+            Some("interactive") => Some(Priority::Interactive),
+            Some(other) => {
+                return Err(ffi_err(format!(
+                    "invalid priority '{other}', expected 'interactive' or 'background'"
+                )));
+            }
+        };
+        let inputs: Vec<host_compile::CompileBatchInput> = files
+            .into_iter()
+            .map(|f| {
+                let requested_mode = f
+                    .requestedMode
+                    .map(|m| ffi_compile_cache_mode_to_host(&m))
+                    .transpose()
+                    .map_err(ffi_err)?;
+                Ok(host_compile::CompileBatchInput {
+                    canonical_id: f.canonicalId,
+                    source: std::sync::Arc::from(buffer_to_string(f.source)?),
+                    requested_mode,
+                    component_id: f.componentId,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let default_mode = opts
+            .defaultMode
+            .map(|m| ffi_compile_cache_mode_to_host(&m))
+            .transpose()
+            .map_err(ffi_err)?;
+        // The compile lane. Default `host-backed`. FAIL-CLOSED: the
+        // RuntimeRender lane REQUIRES an explicit render profile carried on
+        // the variant — the host must never substitute production/client
+        // defaults for a bundler render. Every output-affecting field of the
+        // JS `compileProfile` is threaded so the render output reproduces the
+        // `getVirtualFile` path byte-for-byte; an unknown `hmrStrategy` is an
+        // error, never a silent drop. HostBacked ignores the profile (its
+        // profile is the frozen bundler preset).
+        let target = match opts.target.as_deref() {
+            None | Some("host-backed") => host_compile::CompileManyTarget::HostBacked,
+            Some("runtime-render") => {
+                let p = opts.compileProfile.ok_or_else(|| {
+                    ffi_err(
+                        "compileProfile is required for target 'runtime-render' \
+                         (the output-affecting build profile must be explicit; \
+                         the host does not substitute defaults)"
+                            .to_string(),
+                    )
+                })?;
+                let delimiters =
+                    match (p.delimiterOpen, p.delimiterClose) {
+                        (Some(open), Some(close)) => Some((open, close)),
+                        (None, None) => None,
+                        _ => return Err(ffi_err(
+                            "compileProfile.delimiterOpen and delimiterClose must be set together"
+                                .to_string(),
+                        )),
+                    };
+                host_compile::CompileManyTarget::RuntimeRender {
+                    profile: host_compile::CompileBatchRenderProfile {
+                        filename: p.filename,
+                        is_production: p.isProduction,
+                        ssr: p.ssr,
+                        force_js: p.forceJs,
+                        force_vapor: p.forceVapor,
+                        source_map: p.sourceMap,
+                        // Tri-state pass-through: an omitted `comments`
+                        // stays `None` (compiler default `!isProduction`).
+                        comments: p.comments,
+                        hmr_strategy: ffi_hmr_strategy_to_host(&p.hmrStrategy).map_err(ffi_err)?,
+                        runtime_module_name: p.runtimeModuleName,
+                        types_module_name: p.typesModuleName,
+                        delimiters,
+                        custom_elements: p.customElements,
+                    },
+                }
+            }
+            Some(other) => {
+                return Err(ffi_err(format!(
+                    "invalid target '{other}', expected 'host-backed' or 'runtime-render'"
+                )));
+            }
+        };
+        let entries = catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.compile_many(
+                inputs,
+                host_compile::CompileBatchOptions {
+                    priority,
+                    default_mode,
+                },
+                target,
+            )
+        }))?;
+        Ok(entries
+            .into_iter()
+            .map(|e| NapiCompileBatchEntry {
+                canonicalId: e.canonical_id,
+                code: e.code.to_string(),
+                sourceMap: e.source_map.map(|s| s.to_string()),
+                lang: e.lang,
+                errors: e.errors,
+                diagnostics: e
+                    .diagnostics
+                    .iter()
+                    .map(napi_diagnostic_from_host)
+                    .collect(),
+                durationMs: e.duration_ms,
+                cacheHit: e.cache_hit,
+                requestedMode: e.requested_mode.to_string(),
+                actualMode: e.actual_mode.to_string(),
+                downgradeReason: e.downgrade_reason.map(|r| r.to_string()),
+            })
+            .collect())
+    }
+
+    // =========================================================================
+    // Typed audit entry-points
+    //
+    // Each entry-point wraps a `VerterHost::*_with_audit` Rust producer
+    // and returns the produced `RequestAuditRecord` as a JSON Buffer.
+    // Helper types and parsing free functions live in `crate::audit`.
+    //
+    // The methods MUST live in this `impl NapiVerterHost` block (not a
+    // sibling module) so the napi-derive class registration picks up
+    // the `js_name = "VerterHost"` rename declared on the struct in
+    // this same file.
+    // =========================================================================
+
+    /// Run a single type-resolution query through the shared dispatch
+    /// and return the produced `RequestAuditRecord` as a JSON
+    /// `Buffer`. The query resolves `decl_name` in the top-level
+    /// scope of `canonical_id`. Returns `null` when audit is
+    /// disabled.
+    #[napi(js_name = "resolveTypeWithAudit")]
+    pub fn resolve_type_with_audit(
+        &self,
+        canonical_id: String,
+        decl_name: String,
+    ) -> Result<Option<Buffer>> {
+        use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                scope: ScopeId {
+                    canonical_id: std::sync::Arc::<str>::from(canonical_id.as_str()),
+                    local_scope: None,
+                },
+                name: std::sync::Arc::<str>::from(decl_name.as_str()),
+            });
+            let record = host
+                .resolve_type_with_audit(key, &canonical_id)
+                .audit()
+                .clone();
+            audit::encode_stored_record(&record)
+        }))?
+    }
+
+    /// Compile `canonical_id` for the requested codegen target and
+    /// return the produced `RequestAuditRecord` as a JSON `Buffer`.
+    /// Accepted target names: `BUNDLER`, `IDE`, `ANALYSIS`, `META`,
+    /// `TSX`, `TSC`. Returns `null` when audit is disabled.
+    #[napi(js_name = "compileWithAudit")]
+    pub fn compile_with_audit(
+        &self,
+        canonical_id: String,
+        target: String,
+    ) -> Result<Option<Buffer>> {
+        let target = audit::parse_compile_target(&target)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let record = host
+                .compile_with_audit(&canonical_id, target)
+                .audit()
+                .clone();
+            audit::encode_stored_record(&record)
+        }))?
+    }
+
+    /// Materialise the `AnalysisReady` artifact for `canonical_id`
+    /// under audit and return the produced `RequestAuditRecord` as a
+    /// JSON `Buffer`. Returns `null` when audit is disabled or the
+    /// canonical does not exist.
+    #[napi(js_name = "analyzeWithAudit")]
+    pub fn analyze_with_audit(&self, canonical_id: String) -> Result<Option<Buffer>> {
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let record = host.analyze_with_audit(&canonical_id).audit().clone();
+            audit::encode_stored_record(&record)
+        }))?
+    }
+
+    /// Drive a workspace operation under audit and return the
+    /// produced `RequestAuditRecord` as a JSON `Buffer`. The `op`
+    /// argument is shaped as `{ type: "AuditResolve", specifier, from
+    /// }` / `{ type: "DepGraphTraverse", root }` / `{ type:
+    /// "ResolverWalk", specifier }`. Always returns a record.
+    #[napi(js_name = "auditWorkspaceOp")]
+    pub fn audit_workspace_op(&self, op: audit::NapiWorkspaceOp) -> Result<Buffer> {
+        let arg = op.try_into_workspace_op()?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let record = host.audit_workspace_op(arg);
+            audit::encode_record(&record)
+        }))?
+    }
+
+    /// Drain the most-recent `RequestAuditRecord` from the host's
+    /// audit store. Returns `null` when the store is empty. Drains
+    /// the entry: a second call after a single insert returns null.
+    #[napi(js_name = "getLastAuditRecord")]
+    pub fn get_last_audit_record(&self) -> Result<Option<Buffer>> {
+        use verter_audit::batch::AuditRecordSource;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let store = host.host_audit_runtime().audit_records_store();
+            let mut latest_id: Option<u64> = None;
+            let mut latest_at: Option<std::time::Instant> = None;
+            store.for_each_record(&mut |inserted_at, record| {
+                let is_newer = match latest_at {
+                    None => true,
+                    Some(prev) => inserted_at > prev,
+                };
+                if is_newer {
+                    latest_at = Some(inserted_at);
+                    latest_id = Some(record.request_id);
+                }
+            });
+            let Some(id) = latest_id else {
+                return Ok(None);
+            };
+            match store.take(id) {
+                Some(rec) => audit::encode_record(&rec).map(Some),
+                None => Ok(None),
+            }
+        }))?
+    }
+
+    /// Non-destructive filtered query over the host's audit store.
+    /// Returns a JSON-serialised array of records (`Buffer`).
+    #[napi(js_name = "getAuditRecords")]
+    pub fn get_audit_records(
+        &self,
+        filter: Option<audit::NapiAuditRecordFilter>,
+    ) -> Result<Buffer> {
+        use verter_audit::batch::AuditRecordSource;
+        let filter = filter.unwrap_or_default();
+        let kind_filter = filter.kind;
+        let since = match filter.since_request_id.as_deref() {
+            Some(s) => Some(audit::parse_request_id_str(s)?),
+            None => None,
+        };
+        let limit = filter.limit.map(|n| n as usize);
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let store = host.host_audit_runtime().audit_records_store();
+            let mut collected: Vec<verter_audit::RequestAuditRecord> = Vec::new();
+            store.for_each_record(&mut |_inserted_at, record| {
+                if let Some(filter_kind) = kind_filter.as_deref() {
+                    if !audit::kind_matches(filter_kind, &record.kind) {
+                        return;
+                    }
+                }
+                if let Some(since_id) = since {
+                    if record.request_id <= since_id {
+                        return;
+                    }
+                }
+                collected.push(record.clone());
+            });
+            if let Some(n) = limit {
+                collected.truncate(n);
+            }
+            audit::encode_record_list(&collected)
+        }))?
+    }
+
+    /// Run the bundler-batch aggregator over the host's audit store
+    /// and return the produced `BundlerBatchPayload` as a JSON
+    /// `Buffer`. The summary tags the payload with the requested
+    /// bundler kind (defaults to `Vite`).
+    #[napi(js_name = "getBundlerBatchSummary")]
+    pub fn get_bundler_batch_summary(
+        &self,
+        args: Option<audit::NapiBundlerBatchSummaryArgs>,
+    ) -> Result<Buffer> {
+        use verter_audit::batch::{AuditRecordSource, BatchAuditAggregator};
+        let args = args.unwrap_or_default();
+        let kind = audit::parse_bundler_kind(args.kind.as_deref());
+        let since_id = match args.since_request_id.as_deref() {
+            Some(s) => Some(audit::parse_request_id_str(s)?),
+            None => None,
+        };
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let store = host.host_audit_runtime().audit_records_store();
+            // The aggregator keys its `since` filter by `Instant`,
+            // but we accept a request-id watermark from JS callers
+            // (instants do not survive a JSON round-trip). Walk the
+            // store once to find the most-recent `inserted_at` whose
+            // request_id is `<= since_id`; an unmatched watermark
+            // (id newer than anything in the store) yields `None` —
+            // equivalent to "no records pass the filter".
+            let since_instant: Option<std::time::Instant> = match since_id {
+                None => None,
+                Some(target_id) => {
+                    let mut best: Option<std::time::Instant> = None;
+                    store.for_each_record(&mut |inserted_at, record| {
+                        if record.request_id <= target_id {
+                            best = match best {
+                                None => Some(inserted_at),
+                                Some(prev) if inserted_at > prev => Some(inserted_at),
+                                Some(prev) => Some(prev),
+                            };
+                        }
+                    });
+                    best
+                }
+            };
+            let aggregator = BatchAuditAggregator::new(store.as_ref(), kind);
+            let payload = aggregator.summarize(since_instant);
+            let bytes = serde_json::to_vec(&payload).map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("bundler batch summary serialization error: {e}"),
+                )
+            })?;
+            Ok(Buffer::from(bytes))
+        }))?
+    }
+
+    // =========================================================================
+    // Typeinfo entry-points (typeinfo public host substrate)
+    //
+    // Wrap the host substrate methods
+    // (`list_file_symbols`, `resolve_named_symbol_with_audit`,
+    // `evaluate_type_expression_with_audit`) and project the host
+    // outputs back across the FFI boundary.
+    //
+    // - `listSymbols` returns a JSON Buffer carrying a `Vec<FfiSymbolEntry>`.
+    // - `resolveSymbolWithAudit` and `evaluateTypeExpressionWithAudit`
+    //   return a `NapiTypeInfoResolveResult { typeExpr, auditRecord }`
+    //   — both are JSON Buffers; consumers decode whichever they need.
+    //
+    // Audit emission follows the typeinfo contract: when
+    // `auditEnabled = true` the underlying host method publishes
+    // exactly one `RequestAuditRecord` to the host's audit store and
+    // also returns the cloned record on the call stack. The
+    // `auditRecord` field on `NapiTypeInfoResolveResult` carries that
+    // record without polling the audit store; the store-based
+    // `getLastAuditRecord` continues to work too.
+    // =========================================================================
+
+    /// Return the top-level symbol inventory for `canonical_id`.
+    ///
+    /// JSON Buffer carrying a `Vec<FfiSymbolEntry>` per the FFI mirror
+    /// in `verter_protocol::typeinfo`. The call is bounded by the
+    /// shallow-state size and does not emit an audit record (per §17
+    /// "no audit; pure shallow read").
+    #[napi(js_name = "listSymbols")]
+    pub fn list_symbols(&self, canonical_id: String) -> Result<Buffer> {
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let entries = host.list_file_symbols(&canonical_id);
+            let ffi: Vec<verter_protocol::typeinfo::FfiSymbolEntry> = entries
+                .into_iter()
+                .map(verter_ffi::convert::host_to_ffi_symbol_entry)
+                .collect();
+            typeinfo::encode_symbol_list(&ffi)
+        }))?
+    }
+
+    /// Resolve `name` in `canonical_id`'s top-level scope and return
+    /// the raised `TypeExpr` plus the produced `RequestAuditRecord`.
+    ///
+    /// `type_args` is an optional JSON Buffer carrying an array of
+    /// `TypeExpr` values (the wire form of `TypeExprList`). Empty /
+    /// missing means "no generic instantiation".
+    ///
+    /// `mode` is one of the canonical projection-mode tags
+    /// (`"identity" | "navigate" | "shallow" | "expanded" |
+    /// "skeleton"`). Pass `null` to take the host's default per §5.2.
+    ///
+    /// `typeExpr` is `null` when the symbol could not be resolved
+    /// (unknown decl, boundary lowering miss, suppressed by host
+    /// policy). `auditRecord` is `null` when `auditEnabled = false`;
+    /// a boundary lowering miss resolves INSIDE the audited request,
+    /// so it still carries the audit record — an absent record is
+    /// reserved for failures before a semantic request exists (a
+    /// malformed wire payload fails decoding and surfaces as an
+    /// error, not a result).
+    #[napi(js_name = "resolveSymbolWithAudit")]
+    pub fn resolve_symbol_with_audit(
+        &self,
+        canonical_id: String,
+        name: String,
+        type_args: Option<Buffer>,
+        mode: Option<String>,
+    ) -> Result<typeinfo::NapiTypeInfoResolveResult> {
+        let exprs = typeinfo::decode_type_expr_list(type_args)?;
+        let resolve_mode = typeinfo::parse_resolve_mode(mode)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let arc_args: Vec<std::sync::Arc<TypeExpr>> =
+                exprs.into_iter().map(std::sync::Arc::new).collect();
+            // Wire-boundary resolution: the symbolic `TypeExpr` payloads
+            // lower to semantic-graph node ids INSIDE the audited request,
+            // under the SAME store view the resolution runs against (the
+            // transient symbolic IR stops at this boundary). A lowering miss
+            // surfaces as a `null` typeExpr WITH its audit record.
+            let (outcome, record) = host
+                .resolve_named_symbol_wire_with_audit(&canonical_id, &name, &arc_args, resolve_mode)
+                .into_parts();
+            let (resolved, error) = typeinfo::split_resolve_outcome(outcome);
+            // The session-owned bytes facade encodes the `TypeExpr` to wire
+            // JSON internally (the reverse materialization runs through the
+            // sealed output capability inside `verter_session`); the FFI
+            // adapter only wraps the bytes in a `Buffer`.
+            let type_expr_buf = match resolved {
+                Some(node_id) => host
+                    .project_node_to_type_expr_json_bytes(node_id)
+                    .map(Buffer::from),
+                None => None,
+            };
+            let audit_buf = typeinfo::encode_stored_audit_record(&record)?;
+            Ok(typeinfo::NapiTypeInfoResolveResult {
+                typeExpr: type_expr_buf,
+                auditRecord: audit_buf,
+                error,
+            })
+        }))?
+    }
+
+    /// Evaluate a synthetic type expression in a file scope and return
+    /// the raised `TypeExpr` plus the produced `RequestAuditRecord`.
+    ///
+    /// `request` is a JSON Buffer carrying a
+    /// `verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest`.
+    /// See `EvaluateTypeExpressionRequest` for the host shape.
+    ///
+    /// `typeExpr` is `null` when the expression could not be resolved.
+    /// `auditRecord` is `null` when audit is disabled.
+    #[napi(js_name = "evaluateTypeExpressionWithAudit")]
+    pub fn evaluate_type_expression_with_audit(
+        &self,
+        request: Buffer,
+    ) -> Result<typeinfo::NapiTypeInfoResolveResult> {
+        let req = typeinfo::decode_evaluate_request(request)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let (outcome, record) = host.evaluate_type_expression_with_audit(req).into_parts();
+            let (resolved, error) = typeinfo::split_resolve_outcome(outcome);
+            // Bytes facade: the `TypeExpr` is wire-encoded inside
+            // `verter_session` through the sealed output capability; the FFI
+            // adapter only wraps the bytes in a `Buffer`.
+            let type_expr_buf = match resolved {
+                Some(node_id) => host
+                    .project_node_to_type_expr_json_bytes(node_id)
+                    .map(Buffer::from),
+                None => None,
+            };
+            let audit_buf = typeinfo::encode_stored_audit_record(&record)?;
+            Ok(typeinfo::NapiTypeInfoResolveResult {
+                typeExpr: type_expr_buf,
+                auditRecord: audit_buf,
+                error,
+            })
+        }))?
+    }
+
+    /// Resolve a component's framework surfaces and return the wire
+    /// `TypeInfoGraphResponse` plus the per-request audit record.
+    ///
+    /// `request` is a protobuf-encoded
+    /// `verter_protocol::typeinfo::graph::TypeInfoGraphRequest` envelope
+    /// carrying the `GRAPH_OPERATION_FRAMEWORK_SURFACES` operation (the
+    /// framework-surface operation rides the existing graph envelope — no
+    /// dedicated request type). The host runs the envelope validator FIRST,
+    /// so a malformed envelope returns the typed wire `error` arm in
+    /// `response` BEFORE any registry lookup or semantic dispatch.
+    ///
+    /// `response` is the protobuf-encoded `TypeInfoGraphResponse` — the
+    /// `framework_surface` arm on success, the `error` arm on a typed
+    /// rejection — and is ALWAYS present (the validation-first executor
+    /// always produces a typed response). `auditRecord` is `null` when
+    /// audit is disabled / filtered; the audit envelope rides BOTH the
+    /// success AND the rejection outcome.
+    #[napi(js_name = "resolveFrameworkSurfaceWithAudit")]
+    pub fn resolve_framework_surface_with_audit(
+        &self,
+        request: Buffer,
+    ) -> Result<typeinfo::NapiFrameworkSurfaceResult> {
+        let envelope = typeinfo::decode_type_info_graph_request(request)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            let (outcome, record) = host
+                .resolve_framework_surface_with_audit(envelope)
+                .into_parts();
+            // The validation-first executor always yields a typed wire
+            // response: the `framework_surface` arm on success, the
+            // `error` arm on a typed rejection. The `AuditedResult` Err
+            // arm drops the (error-arm) response, so re-form it here so
+            // the JS side always decodes a `TypeInfoGraphResponse`.
+            let response = match outcome {
+                Ok(response) => response,
+                Err(error) => typeinfo::framework_error_response(error),
+            };
+            let response_buf = typeinfo::encode_type_info_graph_response(&response);
+            let audit_buf = typeinfo::encode_stored_audit_record(&record)?;
+            Ok(typeinfo::NapiFrameworkSurfaceResult {
+                response: response_buf,
+                auditRecord: audit_buf,
+            })
+        }))?
+    }
 }
 
 // =============================================================================
@@ -2032,14 +2697,16 @@ impl NapiVerterHost {
 /// `dom_query_calls` from the snapshot.
 fn build_script_snapshot(
     snapshot: &host::FileAnalysisSnapshot,
-) -> verter_analysis::types::ScriptAnalysisSnapshot {
-    verter_analysis::types::ScriptAnalysisSnapshot {
+) -> verter_semantic::analysis::types::ScriptAnalysisSnapshot {
+    verter_semantic::analysis::types::ScriptAnalysisSnapshot {
         imports: snapshot.imports.clone(),
         module_references: snapshot.module_references.to_vec(),
         bindings: snapshot.bindings.clone(),
         macros: snapshot.macros.to_vec(),
         macro_type_deps: snapshot.macro_type_deps.to_vec(),
-        flags: verter_analysis::types::AnalysisFlags::from_bits_truncate(snapshot.script_flags),
+        flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+            snapshot.script_flags,
+        ),
         exported_functions: Vec::new(),
         vue_api_calls: snapshot.vue_api_calls.to_vec(),
         dom_query_calls: snapshot.dom_query_calls.to_vec(),
@@ -2107,9 +2774,11 @@ fn build_document_symbols_from_analysis(
 
         for binding in &snapshot.bindings {
             let kind = match binding.kind {
-                verter_analysis::AnalyzedBindingKind::Function
-                | verter_analysis::AnalyzedBindingKind::AsyncFunction => symbol_kind::FUNCTION,
-                verter_analysis::AnalyzedBindingKind::Class => symbol_kind::CLASS,
+                verter_semantic::analysis::AnalyzedBindingKind::Function
+                | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+                    symbol_kind::FUNCTION
+                }
+                verter_semantic::analysis::AnalyzedBindingKind::Class => symbol_kind::CLASS,
                 _ => symbol_kind::VARIABLE,
             };
             children.push(FfiDocumentSymbol {
@@ -2247,7 +2916,7 @@ fn build_selector_match_results(
         for selector in &css.selectors {
             let parsed = match &selector.structure {
                 Some(s) => s.clone(),
-                None => match verter_analysis::style::parse_selector(&selector.text) {
+                None => match verter_semantic::analysis::style::parse_selector(&selector.text) {
                     Some(s) => s,
                     None => continue,
                 },
@@ -2255,7 +2924,7 @@ fn build_selector_match_results(
 
             let mut matches = Vec::new();
             for (idx, element) in template.elements.iter().enumerate() {
-                let result = verter_analysis::selector_match::match_selector(
+                let result = verter_semantic::analysis::selector_match::match_selector(
                     &parsed,
                     idx,
                     &template.elements,
@@ -2265,13 +2934,15 @@ fn build_selector_match_results(
                     span_start: byte_offset_to_utf16_safe(source, element.span.start),
                     span_end: byte_offset_to_utf16_safe(source, element.span.end),
                     result: match result {
-                        verter_analysis::selector_match::MatchResult::Matches => {
+                        verter_semantic::analysis::selector_match::MatchResult::Matches => {
                             "match".to_string()
                         }
-                        verter_analysis::selector_match::MatchResult::MaybeMatches => {
+                        verter_semantic::analysis::selector_match::MatchResult::MaybeMatches => {
                             "maybe".to_string()
                         }
-                        verter_analysis::selector_match::MatchResult::NoMatch => "no".to_string(),
+                        verter_semantic::analysis::selector_match::MatchResult::NoMatch => {
+                            "no".to_string()
+                        }
                     },
                 });
             }
@@ -2289,106 +2960,122 @@ fn build_selector_match_results(
 }
 
 // =============================================================================
-// Batch Compilation (Rayon parallel)
+// host-backed batch compile (NAPI surface)
 //
-// compile_batch() is a pure stateless parallel compiler: no VerterHost, no
-// caching. Each file gets its own bumpalo Allocator per Rayon thread.
-// This matches Vize's compileSfcBatch() API for a fair benchmark comparison.
+// `NapiVerterHost::compile_many` is the canonical batch-compile
+// entry point. It routes through the host's scheduler + dispatch +
+// compile_cache and preserves the read/parse/process-once
+// invariant.
 // =============================================================================
 
-use oxc_allocator::Allocator;
-use rayon::prelude::*;
-use verter_core::compile::{compile as compile_sfc, CodegenOptions, VerterCompileOptions};
+use verter_session::host_compile;
 
-/// A single file to compile in a batch.
+/// One file in a batch compile call.
 #[napi(object)]
-#[derive(Default)]
-pub struct BatchFile {
-    pub filename: String,
-    pub source: String,
+pub struct NapiCompileBatchInput {
+    pub canonicalId: String,
+    pub source: Buffer,
+    /// Requested compile cache mode ("stateless" / "content" /
+    /// "session"). `None` inherits the batch `defaultMode`.
+    pub requestedMode: Option<String>,
+    /// Explicit per-component scoped-style / HMR id. Threaded into this
+    /// input's compile profile ONLY on the RuntimeRender lane (scoped-style
+    /// / HMR identity is per-component, not per-build). `None` lets codegen
+    /// auto-generate the id.
+    pub componentId: Option<String>,
 }
 
-/// Options for batch compilation.
+/// The batch-level render profile for the RuntimeRender lane (JS mirror of
+/// [`host_compile::CompileBatchRenderProfile`]). Every field is
+/// output-affecting and uniform across a single bundler build. This carries
+/// the full output-affecting projection of the JS `HostCompileProfile` so
+/// the render lane reproduces the `getVirtualFile` path byte-for-byte.
 #[napi(object)]
-#[derive(Default)]
-pub struct BatchOptions {
-    /// Number of Rayon threads (0 or None = all logical CPUs).
-    pub threads: Option<u32>,
+pub struct NapiCompileBatchRenderProfile {
+    /// Codegen filename override (component-name extraction, scope-id
+    /// derivation, source-map `source`/`file`). Absent falls back to the
+    /// canonical id — same semantics as `HostCompileProfile.filename`.
+    pub filename: Option<String>,
+    pub isProduction: bool,
+    pub ssr: bool,
+    pub forceJs: bool,
+    pub forceVapor: bool,
+    pub sourceMap: bool,
+    /// Preserve template comments. TRI-STATE: absent keeps the compiler
+    /// default (`!isProduction` — dev preserves, prod strips), same
+    /// semantics as an absent `HostCompileProfile.comments`. Do NOT
+    /// collapse an omitted value to `false`.
+    pub comments: Option<bool>,
+    /// HMR strategy: "none" | "vite" | "webpack".
+    pub hmrStrategy: String,
+    /// Runtime module import specifier (e.g. "vue").
+    pub runtimeModuleName: Option<String>,
+    /// Types module import specifier.
+    pub typesModuleName: Option<String>,
+    /// Custom interpolation delimiters — open. Must be set together with
+    /// `delimiterClose`.
+    pub delimiterOpen: Option<String>,
+    /// Custom interpolation delimiters — close.
+    pub delimiterClose: Option<String>,
+    /// Custom-element tag names (affect template codegen).
+    pub customElements: Option<Vec<String>>,
 }
 
-/// Result for a single file in a batch compilation.
+/// Caller-configurable options for [`NapiVerterHost::compile_many`].
 #[napi(object)]
-pub struct BatchResult {
-    pub filename: String,
-    /// Combined script + template code.
+#[derive(Default)]
+pub struct NapiCompileBatchOptions {
+    /// Scheduler priority for batch upserts. Default: `"background"`.
+    /// Use `"interactive"` when there is no concurrent interactive
+    /// work (benchmarks / CI cold-start measurement).
+    pub priority: Option<String>,
+    /// Default compile cache mode for inputs whose `requestedMode` is
+    /// unset. `None` resolves to "session" (the host default).
+    pub defaultMode: Option<String>,
+    /// The compile lane: `"host-backed"` (default) runs the full session
+    /// wrapper; `"runtime-render"` runs the render-only bundler lane. The
+    /// render lane REQUIRES `compileProfile` (fail-closed).
+    pub target: Option<String>,
+    /// The batch-level render profile for the `"runtime-render"` lane. It
+    /// is REQUIRED for that lane (the NAPI conversion fails closed when it
+    /// is absent) — every output-affecting field must be explicit; the
+    /// host must not substitute production/client defaults. Ignored by the
+    /// `"host-backed"` lane.
+    pub compileProfile: Option<NapiCompileBatchRenderProfile>,
+}
+
+/// Result for a single original input position.
+#[napi(object)]
+pub struct NapiCompileBatchEntry {
+    pub canonicalId: String,
     pub code: String,
-    /// First error message if compilation failed, otherwise None.
-    pub error: Option<String>,
+    pub sourceMap: Option<String>,
+    /// The compiled `Main` module language ("ts" / "js" / "jsx"), or
+    /// `None` on an error/panic outcome. Bundler consumers (vite
+    /// sub-request routing) read it.
+    pub lang: Option<String>,
+    /// All compilation errors for this file. Empty on success.
+    pub errors: Vec<String>,
+    /// Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
+    /// compile, separate from the fatal `errors`. Populated by the
+    /// RuntimeRender lane's soft-macro contract (an unresolved imported
+    /// macro type renders successfully and reports a warning here). Always
+    /// empty on the HostBacked lane and on any fatal outcome.
+    pub diagnostics: Vec<NapiDiagnostic>,
     pub durationMs: f64,
-}
-
-/// Internal helper: compile a slice of (filename, source) pairs using Rayon.
-/// Pure Rust types — no NAPI, testable with `cargo test`.
-fn compile_batch_files(files: &[(String, String)], skip_source_map: bool) -> Vec<BatchResult> {
-    files
-        .par_iter()
-        .map(|(filename, source)| {
-            let start = std::time::Instant::now();
-            let allocator = Allocator::default();
-            let codegen_opts = CodegenOptions {
-                filename: Some(filename.clone()),
-                skip_source_map,
-                ..CodegenOptions::default()
-            };
-            let verter_opts = VerterCompileOptions {
-                source_map: false,
-                ..Default::default()
-            };
-            let result = compile_sfc(source, &codegen_opts, &verter_opts, &allocator);
-            let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
-            let error = result.errors.first().map(|e| e.message.clone());
-            let mut code = String::new();
-            if let Some(script) = result.script {
-                code.push_str(&script.code);
-            }
-            if let Some(tmpl) = result.template {
-                code.push_str(&tmpl.code);
-            }
-            BatchResult {
-                filename: filename.clone(),
-                code,
-                error,
-                durationMs: duration_ms,
-            }
-        })
-        .collect()
-}
-
-/// Compile a batch of Vue SFC files in parallel using Rayon.
-///
-/// Each file is compiled independently with its own allocator — no shared
-/// mutable state. No caching, no analysis — compile-only for maximum throughput.
-///
-/// Equivalent to Vize's `compileSfcBatch` for fair benchmark comparison.
-#[napi]
-pub fn compile_batch(
-    files: Vec<BatchFile>,
-    options: Option<BatchOptions>,
-) -> Result<Vec<BatchResult>> {
-    let threads = options.and_then(|o| o.threads).unwrap_or(0) as usize;
-    catch_panic(std::panic::AssertUnwindSafe(move || {
-        let file_pairs: Vec<(String, String)> =
-            files.into_iter().map(|f| (f.filename, f.source)).collect();
-        if threads > 0 {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .expect("failed to build Rayon thread pool");
-            pool.install(|| compile_batch_files(&file_pairs, true))
-        } else {
-            compile_batch_files(&file_pairs, true)
-        }
-    }))
+    /// `true` iff this input was served from a warm cache entry under its
+    /// classified mode — the fact-validated session slot (`Session`) or
+    /// the content-addressed store (`Content`) — as decided by the single
+    /// mode classifier. A request that a reason downgraded to `Stateless`
+    /// never warm-hits and reports `false`. Sourced directly from the
+    /// Rust `CompileBatchEntry.cache_hit` on the compile response.
+    pub cacheHit: bool,
+    /// Requested compile cache mode ("stateless" / "content" / "session").
+    pub requestedMode: String,
+    /// Actual compile cache mode the runtime ran under.
+    pub actualMode: String,
+    /// Highest-priority downgrade reason, or `None` when none fired.
+    pub downgradeReason: Option<String>,
 }
 
 #[cfg(test)]
@@ -2396,18 +3083,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_dependency_resolution_extensions_include_svelte_carriers_once() {
+        let extensions = default_known_dependency_extensions();
+        assert_eq!(
+            extensions
+                .iter()
+                .filter(|ext| ext.as_str() == ".svelte")
+                .count(),
+            1
+        );
+    }
+
+    /// The typed unsupported-language failure surfaces at the NAPI
+    /// boundary in the SAME status family as the classify errors
+    /// (`InvalidArg` — the request named a language the host cannot
+    /// serve), not as a generic failure. DISCRIMINATING: the catch-all
+    /// arm maps it to `GenericFailure`.
+    #[test]
+    fn unsupported_language_maps_to_invalid_arg_status() {
+        let err = host_error(host::HostError::Scheduler(
+            verter_scheduler::job::SchedulerError::UnsupportedLanguage {
+                file_id: "/src/Box.svelte".to_string(),
+                adapter_id: verter_session::FrameworkAdapterId::svelte(),
+            },
+        ));
+        assert_eq!(err.status, Status::InvalidArg);
+        assert!(
+            err.reason.contains("svelte"),
+            "the message names the adapter: {}",
+            err.reason
+        );
+    }
+
+    #[test]
     fn host_update_to_napi_exposes_module_references() {
         let result = host_update_to_napi(
             host::HostUpdateResult {
                 module_references: vec![host::ScriptModuleReference {
-                    syntax: verter_analysis::ModuleReferenceSyntax::DynamicImport,
-                    semantics: verter_analysis::ModuleReferenceSemantics::Import,
+                    syntax: verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport,
+                    semantics: verter_semantic::analysis::ModuleReferenceSemantics::Import,
                     is_type_only: false,
                     raw_text: "`./${name}.vue`".to_string(),
                     literal_specifier: None,
                     finite_specifiers: vec!["./Foo.vue".to_string()],
                     static_prefix: Some("./".to_string()),
-                    analyzability: verter_analysis::ModuleReferenceAnalyzability::FiniteSet,
+                    analyzability:
+                        verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet,
                     span: verter_span::Span::new(4, 22),
                     expr_span: verter_span::Span::new(11, 21),
                 }],
@@ -2437,7 +3158,7 @@ mod tests {
                 source: std::sync::Arc::from(
                     "export { default as Button } from './Button.vue';\nexport type { Props } from './types';",
                 ),
-                file_kind: host::FileKind::NonSfc,
+                file_language: host::FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
             .unwrap();
@@ -2472,7 +3193,7 @@ mod tests {
                 source: std::sync::Arc::from(
                     "export function greet() {}\nexport type Color = string;",
                 ),
-                file_kind: host::FileKind::NonSfc,
+                file_language: host::FileLanguage::script_ts(),
                 aliases: Vec::new(),
             })
             .unwrap();
@@ -2502,66 +3223,146 @@ mod tests {
         );
     }
 
-    // @ai-generated — Tests compile_batch_files() helper: multi-file parallel compilation
+    // the inline `compile_batch_files` helper smoke tests
+    // were deleted along with the helper itself (host-bypassing
+    // free-fn `compileBatch` is now `host.compileMany`). The
+    // host-backed batch path is fully exercised by the host_compile
+    // tests in verter_session and the JS-side E2E tests in
+    // packages/native/index.spec.ts.
 
-    #[test]
-    fn test_compile_batch_files_basic() {
-        let files = vec![
-            (
-                "test1.vue".to_string(),
-                "<template><div>hello</div></template>".to_string(),
-            ),
-            (
-                "test2.vue".to_string(),
-                "<template><span>world</span></template>".to_string(),
-            ),
-        ];
-        let results = compile_batch_files(&files, true);
-        assert_eq!(results.len(), 2);
-        // Positive: output contains compiled code
-        assert!(!results[0].code.is_empty(), "file 1 should produce code");
-        assert!(!results[1].code.is_empty(), "file 2 should produce code");
-        // Negative: raw Vue template syntax must not leak into output
-        assert!(
-            !results[0].code.contains("<template>"),
-            "template tag must not appear in output"
-        );
-        assert!(
-            !results[1].code.contains("<template>"),
-            "template tag must not appear in output"
-        );
-    }
-
-    #[test]
-    fn test_compile_batch_files_empty_input() {
-        let files: Vec<(String, String)> = vec![];
-        let results = compile_batch_files(&files, true);
-        assert_eq!(results.len(), 0, "empty input returns empty output");
-    }
-
-    #[test]
-    fn test_compile_batch_files_parallel_independence() {
-        // 50 files compiled in parallel must not share allocator state
-        let files: Vec<(String, String)> = (0..50)
-            .map(|i| {
-                (
-                    format!("comp{i}.vue"),
-                    format!(
-                        "<template><div>{{{{ msg }}}}</div></template>\
-                         <script setup>const msg = 'hello{i}'</script>"
-                    ),
-                )
+    /// A NAPI host preloaded with a Vue SFC whose props type lives in a
+    /// sibling `.ts` file — the same fixture shape the verter_session
+    /// public-API mode pins use, exercised here THROUGH the NAPI binding.
+    fn public_api_mode_fixture_host() -> NapiVerterHost {
+        let napi_host = NapiVerterHost {
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
+                host::HostConfig::default(),
+            )),
+        };
+        let _ = napi_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/Cap.vue".to_string(),
+                source: std::sync::Arc::from(
+                    "<script setup lang=\"ts\">\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n</script>\n<template><div>{{ count }}</div></template>",
+                ),
+                file_language: host::FileLanguage::vue(),
+                aliases: Vec::new(),
             })
-            .collect();
-        let results = compile_batch_files(&files, true);
-        assert_eq!(results.len(), 50);
-        for (i, r) in results.iter().enumerate() {
-            assert!(!r.code.is_empty(), "file {i} must produce code");
-            // Negative: no raw template tags should appear in output
-            assert!(
-                !r.code.contains("<template>"),
-                "file {i} must not contain raw template tag"
-            );
-        }
+            .expect("upsert Cap.vue");
+        let _ = napi_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/cap-types.ts".to_string(),
+                source: std::sync::Arc::from(
+                    "export interface CapProps { label: string; n: number }\n",
+                ),
+                file_language: host::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert cap-types.ts");
+        napi_host
+    }
+
+    /// The `getPublicApi` NAPI binding accepts `"declaration"` and routes
+    /// it to `PublicApiMode::Declaration` — the declaration-only
+    /// `.d.<ext>.ts` surface — while `"public"` keeps the runtime-instance
+    /// surface. DISCRIMINATING: the pre-change allow-list rejected
+    /// `"declaration"` at the binding boundary (InvalidArg), so this test
+    /// fails RED on the old binding even though the host already serves
+    /// `PublicApiMode::Declaration`.
+    #[test]
+    fn get_public_api_declaration_mode_is_accepted_and_distinct_from_public() {
+        let napi_host = public_api_mode_fixture_host();
+
+        let decl = napi_host
+            .get_public_api("/src/Cap.vue".to_string(), Some("declaration".to_string()))
+            .expect("the NAPI binding must accept mode 'declaration'")
+            .expect("declaration-mode output for a Vue SFC");
+        let public = napi_host
+            .get_public_api("/src/Cap.vue".to_string(), Some("public".to_string()))
+            .expect("mode 'public' stays accepted")
+            .expect("public-mode output for a Vue SFC");
+
+        // Declaration-specific shape: a valid `.d.ts` — declares the
+        // component value, carries NO runtime/value code.
+        assert!(
+            decl.code.contains("declare const Cap"),
+            "declaration output declares the component value, got:\n{}",
+            decl.code
+        );
+        assert!(
+            decl.code.contains("export default Cap"),
+            "declaration output default-exports the component, got:\n{}",
+            decl.code
+        );
+        assert!(
+            !decl.code.contains("const __comp"),
+            "declaration output must not carry the runtime __comp const, got:\n{}",
+            decl.code
+        );
+        assert!(
+            !decl.code.contains("defineComponent("),
+            "declaration output must not call defineComponent, got:\n{}",
+            decl.code
+        );
+        // Control: the public surface DOES carry the runtime const, so the
+        // negative assertions above discriminate mode routing (a binding
+        // that silently served Public for "declaration" fails here).
+        assert!(
+            public.code.contains("const __comp = defineComponent"),
+            "public output keeps the runtime __comp const (control), got:\n{}",
+            public.code
+        );
+        assert_ne!(
+            decl.code, public.code,
+            "declaration-mode output must differ from public-mode output"
+        );
+    }
+
+    /// Absent mode stays the Public surface (backward-compatible with the
+    /// existing modeless callers) and an unknown mode string is still a
+    /// typed `InvalidArg` rejection — never a silent default.
+    #[test]
+    fn get_public_api_mode_defaults_to_public_and_rejects_unknown() {
+        let napi_host = public_api_mode_fixture_host();
+
+        let absent = napi_host
+            .get_public_api("/src/Cap.vue".to_string(), None)
+            .expect("absent mode stays accepted")
+            .expect("default-mode output for a Vue SFC");
+        let public = napi_host
+            .get_public_api("/src/Cap.vue".to_string(), Some("public".to_string()))
+            .expect("mode 'public' stays accepted")
+            .expect("public-mode output for a Vue SFC");
+        assert_eq!(
+            absent.code, public.code,
+            "absent mode must serve the Public surface (backward-compatible)"
+        );
+
+        let err =
+            match napi_host.get_public_api("/src/Cap.vue".to_string(), Some("bogus".to_string())) {
+                Err(e) => e,
+                Ok(_) => panic!("an unknown mode must be rejected, not silently defaulted"),
+            };
+        assert_eq!(
+            err.status,
+            Status::InvalidArg,
+            "unknown mode maps to InvalidArg, got {:?}: {}",
+            err.status,
+            err.reason
+        );
+        assert!(
+            err.reason.contains("bogus"),
+            "the rejection names the offending mode string: {}",
+            err.reason
+        );
+        assert!(
+            err.reason.contains("declaration"),
+            "the rejection lists 'declaration' among the accepted modes: {}",
+            err.reason
+        );
     }
 }

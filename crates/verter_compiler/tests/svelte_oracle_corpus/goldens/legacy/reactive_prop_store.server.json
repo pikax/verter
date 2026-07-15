@@ -1,0 +1,55 @@
+{
+  "slug": "legacy/reactive_prop_store.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "reactive_prop_store",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "store_get",
+    "escape",
+    "unsubscribe_stores",
+    "bind_props"
+  ],
+  "helperSet": [
+    "bind_props",
+    "escape",
+    "store_get",
+    "unsubscribe_stores"
+  ],
+  "helperCounts": {
+    "store_get": 1,
+    "escape": 1,
+    "unsubscribe_stores": 1,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

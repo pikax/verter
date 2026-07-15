@@ -1,0 +1,35 @@
+{
+  "component_name": "Tabs",
+  "props": [
+    {
+      "name": "items",
+      "type_signature": "TabItem[]",
+      "required": true,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "modelValue",
+      "type_signature": "number",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    }
+  ],
+  "events": [
+    {
+      "name": "update:modelValue",
+      "params_signature": "[value: number]"
+    }
+  ],
+  "slots": [],
+  "models": [],
+  "exposed": [],
+  "fallthrough": null,
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}

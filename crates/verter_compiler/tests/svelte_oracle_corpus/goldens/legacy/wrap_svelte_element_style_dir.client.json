@@ -1,0 +1,84 @@
+{
+  "slug": "legacy/wrap_svelte_element_style_dir.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "wrap_svelte_element_style_dir",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "push",
+    "prop",
+    "init",
+    "comment",
+    "first_child",
+    "element",
+    "attribute_effect",
+    "STYLE",
+    "deep_read_state",
+    "untrack",
+    "deep_read_state",
+    "untrack",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "STYLE",
+    "append",
+    "attribute_effect",
+    "comment",
+    "deep_read_state",
+    "element",
+    "first_child",
+    "init",
+    "pop",
+    "prop",
+    "push",
+    "untrack"
+  ],
+  "helperCounts": {
+    "push": 1,
+    "prop": 1,
+    "init": 1,
+    "comment": 1,
+    "first_child": 1,
+    "element": 1,
+    "attribute_effect": 1,
+    "STYLE": 1,
+    "deep_read_state": 2,
+    "untrack": 2,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; export default function wrap_svelte_element_style_dir($$anchor, $$props) {$.push($$props, false); let obj = $.prop($$props, 'obj', 8); $.init(); var fragment = $.comment(); var node = $.first_child(fragment); $.element(node, () => 'div', false, ($$element, $$anchor) => {$.attribute_effect($$element, ($0, $1) => ({title: $0, style: '', [$.STYLE]: $1}), [() => ($.deep_read_state(obj()), $.untrack(() => obj().m())), () => ({color: ($.deep_read_state(obj()), $.untrack(() => obj().f()))})]);}); $.append($$anchor, fragment); $.pop();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

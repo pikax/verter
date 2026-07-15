@@ -1,0 +1,91 @@
+{
+  "slug": "legacy/slot_prop_call.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_prop_call",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "prop",
+    "init",
+    "child",
+    "derived_safe_equal",
+    "deep_read_state",
+    "untrack",
+    "slot",
+    "get",
+    "reset",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "deep_read_state",
+    "derived_safe_equal",
+    "from_html",
+    "get",
+    "init",
+    "pop",
+    "prop",
+    "push",
+    "reset",
+    "slot",
+    "untrack"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "prop": 1,
+    "init": 1,
+    "child": 1,
+    "derived_safe_equal": 1,
+    "deep_read_state": 1,
+    "untrack": 1,
+    "slot": 1,
+    "get": 1,
+    "reset": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div><!></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div><!></div>`); export default function slot_prop_call($$anchor, $$props) {$.push($$props, false); let obj = $.prop($$props, 'obj', 8); $.init(); var div = root(); var node = $.child(div); {let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))); $.slot(node, $$props, 'default', {get foo() {return $.get($0);}}, null);} $.reset(div); $.append($$anchor, div); $.pop();}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "slug": "spread_fold__styledir_expr",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "spread_fold__styledir_expr",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "attribute_effect",
+    "STYLE",
+    "append"
+  ],
+  "helperSet": [
+    "STYLE",
+    "append",
+    "attribute_effect",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "attribute_effect": 1,
+    "STYLE": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function spread_fold__styledir_expr($$anchor) {let __rune = 0; var div = root(); $.attribute_effect(div, () => ({...props, [$.STYLE]: {color: c}})); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

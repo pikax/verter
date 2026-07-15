@@ -1,0 +1,64 @@
+{
+  "slug": "special/svelte_window_element_sibling.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_window_element_sibling",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "event",
+    "window",
+    "update",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "event",
+    "from_html",
+    "state",
+    "update",
+    "window"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "event": 1,
+    "window": 1,
+    "update": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p>hi</p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p>hi</p>`); export default function svelte_window_element_sibling($$anchor) {let count = $.state(0); var p = root(); $.event('resize', $.window, () => $.update(count)); $.append($$anchor, p);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

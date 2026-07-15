@@ -1,0 +1,66 @@
+{
+  "slug": "blocks/each_else_lone_text.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "each_else_lone_text",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "each",
+    "index",
+    "next",
+    "text",
+    "append",
+    "next",
+    "text",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "each",
+    "first_child",
+    "index",
+    "next",
+    "text"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "each": 1,
+    "index": 1,
+    "next": 2,
+    "text": 2,
+    "append": 3
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function each_else_lone_text($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); $.each(node, 17, () => $$props.rows, $.index, ($$anchor, row) => {$.next(); var text = $.text('x'); $.append($$anchor, text);}, ($$anchor) => {$.next(); var text_1 = $.text('empty'); $.append($$anchor, text_1);}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

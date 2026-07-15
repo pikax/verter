@@ -1,0 +1,58 @@
+{
+  "slug": "array__class__demoted",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "array__class__demoted",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "set_class",
+    "clsx",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "clsx",
+    "from_html",
+    "set_class"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "set_class": 1,
+    "clsx": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function array__class__demoted($$anchor) {let d = 0; var div = root(); $.set_class(div, 1, $.clsx([d, 'b'])); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

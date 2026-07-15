@@ -9,7 +9,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::Severity;
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::types::ScriptAnalysisSnapshot;
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
 
 pub struct PreferDefineOptions;
 

@@ -1,0 +1,67 @@
+{
+  "slug": "lifecycle/use_bind_this.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "use_bind_this",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "action",
+    "bind_this",
+    "set",
+    "get",
+    "append"
+  ],
+  "helperSet": [
+    "action",
+    "append",
+    "bind_this",
+    "from_html",
+    "get",
+    "set",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "action": 1,
+    "bind_this": 1,
+    "set": 1,
+    "get": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); export default function use_bind_this($$anchor) {let el = $.state(null); var div = root(); $.action(div, ($$node) => foo?.($$node)); $.bind_this(div, ($$value) => $.set(el, $$value), () => $.get(el)); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

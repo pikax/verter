@@ -1,0 +1,60 @@
+{
+  "slug": "id-hex-eschex-id-q-el-inj-prune-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "id_hex_eschex_id_q_el_inj_prune_m",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div id=\"a&amp;b\" class=\"svelte-<scoped>\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div id=\"a&amp;b\" class=\"svelte-<scoped>\">x</div>`); const $$css = {hash: 'svelte-<scoped>', code: '#a\\\\26 b.svelte-<scoped> {color:red;}'}; export default function id_hex_eschex_id_q_el_inj_prune_m($$anchor) {$.append_styles($$anchor, $$css); var div = root(); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

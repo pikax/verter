@@ -1,0 +1,20 @@
+import { defineComponent } from "vue"
+type __OmitNew<T> = { [K in keyof T]: T[K] }
+
+const __comp = defineComponent({
+})
+
+declare const Slots: __OmitNew<typeof __comp> & {
+  new(props?: import("vue").PublicProps & {}): {
+    $props: import("vue").PublicProps & {},
+    $emit: (event: string, ...args: unknown[]) => void,
+    $slots: {
+  default(props: { item: number }): any
+},
+    $data: {},
+    $attrs: import("vue").HTMLAttributes,
+    $refs: {},
+  }
+}
+export default Slots
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3Byb2ovU2xvdHMudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5kZWZpbmVTbG90czx7XG4gIGRlZmF1bHQocHJvcHM6IHsgaXRlbTogbnVtYmVyIH0pOiBhbnlcbn0+KClcbjwvc2NyaXB0PlxuPHRlbXBsYXRlPjxkaXYgLz48L3RlbXBsYXRlPlxuIl0sIm1hcHBpbmdzIjoiIn0=

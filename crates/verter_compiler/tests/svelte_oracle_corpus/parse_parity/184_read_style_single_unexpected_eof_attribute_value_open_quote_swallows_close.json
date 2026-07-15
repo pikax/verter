@@ -1,0 +1,6 @@
+{
+  "disposition": "rejected",
+  "official_code": "unexpected_eof",
+  "core": false,
+  "axis": "read_style"
+}

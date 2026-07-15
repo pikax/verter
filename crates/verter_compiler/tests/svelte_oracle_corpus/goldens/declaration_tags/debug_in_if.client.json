@@ -1,0 +1,86 @@
+{
+  "slug": "declaration_tags/debug_in_if.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "debug_in_if",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "comment",
+    "first_child",
+    "template_effect",
+    "snapshot",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "if",
+    "get",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "if",
+    "snapshot",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "comment": 1,
+    "first_child": 1,
+    "template_effect": 1,
+    "snapshot": 1,
+    "get": 2,
+    "delegated": 1,
+    "update": 1,
+    "append": 2,
+    "if": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button>x</button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button>x</button>`); export default function debug_in_if($$anchor) {let a = $.state(0); var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var button = root(); $.template_effect(() => {console.log({a: $.snapshot($.get(a))}); debugger;}); $.delegated('click', button, () => $.update(a)); $.append($$anchor, button);}; $.if(node, ($$render) => {if ($.get(a)) $$render(consequent);});} $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

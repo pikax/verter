@@ -1,0 +1,40 @@
+{
+  "slug": "generated/089_pair_root_if_block__attr_mixed.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "_89_pair_root_if_block__attr_mixed",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr_class",
+    "stringify"
+  ],
+  "helperSet": [
+    "attr_class",
+    "stringify"
+  ],
+  "helperCounts": {
+    "attr_class": 1,
+    "stringify": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

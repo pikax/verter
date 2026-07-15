@@ -1,0 +1,4 @@
+{
+  "rule": "AttributeDuplicate",
+  "official_code": "attribute_duplicate"
+}

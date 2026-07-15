@@ -1,0 +1,42 @@
+{
+  "slug": "attr-spread-lit-cls-q-dynel-inj-comb-u",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_spread_lit_cls_q_dynel_inj_comb_u",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "element",
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes",
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1,
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,20 @@
+error[E0277]: the trait bound `shadow::Arc<[Recipe]>: __private::recursive_self_sealed::Sealed<Recipe>` is not satisfied
+  --> tests/cases/compile-fail/recursive_self_hand_impl_sealed_typeexpr.rs:35:66
+   |
+35 | impl verter_no_typeexpr::__private::RecursiveSelfArc<Recipe> for shadow::Arc<[Recipe]> {}
+   |                                                                  ^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `__private::recursive_self_sealed::Sealed<Recipe>` is not implemented for `shadow::Arc<[Recipe]>`
+  --> tests/cases/compile-fail/recursive_self_hand_impl_sealed_typeexpr.rs:29:5
+   |
+29 |     pub struct Arc<T: ?Sized>(pub PhantomData<*const T>);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: the trait `__private::recursive_self_sealed::Sealed<Owner>` is implemented for `std::sync::Arc<[Owner]>`
+note: required by a bound in `RecursiveSelfArc`
+  --> $WORKSPACE/crates/verter_no_typeexpr/src/lib.rs
+   |
+   |     pub trait RecursiveSelfArc<Owner: ?Sized>: recursive_self_sealed::Sealed<Owner> {}
+   |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `RecursiveSelfArc`
+   = note: `RecursiveSelfArc` is a "sealed trait", because to implement it you also need to implement `verter_no_typeexpr::__private::recursive_self_sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+   = help: the following type implements the trait:
+             std::sync::Arc<[Owner]>

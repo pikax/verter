@@ -1,0 +1,8 @@
+error[E0277]: the trait bound `HotTypeRef: Hash` is not satisfied
+  --> tests/cases/compile-fail/dto_names_session_hot_handle.rs:12:5
+   |
+10 | #[derive(PartialEq, Eq, Hash)]
+   |                         ---- in this derive macro expansion
+11 | struct Dto {
+12 |     handle: HotTypeRef,
+   |     ^^^^^^^^^^^^^^^^^^ the trait `Hash` is not implemented for `HotTypeRef`

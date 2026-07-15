@@ -1,7 +1,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
+use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
 
 /// Warns when known client-only components are used without a `<ClientOnly>` wrapper.
 /// These components use browser APIs and will fail during SSR.
@@ -103,7 +103,7 @@ impl LintRule for RequireClientOnlyWrapper {
 mod tests {
     use super::*;
     use crate::test_support::{run_template_rule, run_template_rule_ssr};
-    use verter_analysis::template::TemplateAnalysisSnapshot;
+    use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
     use verter_span::Span;
 
     fn component(tag: &str, parent_index: Option<u32>) -> TemplateElement {

@@ -1,0 +1,56 @@
+{
+  "slug": "id-spread-lit-id-q-el-ext-plain-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "id_spread_lit_id_q_el_ext_plain_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "attribute_effect",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "attribute_effect": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); export default function id_spread_lit_id_q_el_ext_plain_u($$anchor, $$props) {var div = root(); $.attribute_effect(div, () => ({...$$props.rest}), void 0, void 0, void 0, 'svelte-<scoped>'); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": "svelte-mlxcc",
+    "code": "\n\t#b.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

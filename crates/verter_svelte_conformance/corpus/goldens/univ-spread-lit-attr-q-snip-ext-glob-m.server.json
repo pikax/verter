@@ -1,0 +1,39 @@
+{
+  "slug": "univ-spread-lit-attr-q-snip-ext-glob-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "univ_spread_lit_attr_q_snip_ext_glob_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes"
+  ],
+  "helperCounts": {
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "semanticCommentSignature": [],
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t* {\n\t\tcolor: red;\n\t}\n"
+  }
+}

@@ -1,0 +1,366 @@
+//! Telemetry — atomic counters and the diagnosis-instrumented
+//! entries-mutex guard.
+//!
+//! `AtomicSemanticGraphStats` holds the lock-free counter set updated on
+//! the hot path. `SampleCollector` is the bounded reservoir backing
+//! histogram-style metrics (path length, projection depth).
+//! `InFlightStatsGuard` is a panic-safe RAII guard that decrements the
+//! in-flight presence counter. `EntriesLockGuard` wraps the entries
+//! mutex with wait/hold timing for the diagnosis benchmark.
+
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+use parking_lot::Mutex;
+use rustc_hash::FxHashMap;
+
+use super::derivation::sorted_percentile;
+use super::SemanticGraphStore;
+// Only the (gated) `EntriesLockGuard::hold_start` timing field uses
+// `Instant`; gate the import to match so release does not see it unused.
+#[cfg(any(test, feature = "test-support"))]
+use crate::instant::Instant;
+use crate::semantic_query::{SemanticGraphStats, SemanticNodeId};
+
+/// Bounded sample reservoir for histogram-style metrics (path length /
+/// projection depth). Cap = 8192 samples per metric; once full, new
+/// samples replace at a round-robin index so later samples have a chance
+/// to land in the reservoir without unbounded memory growth.
+///
+/// Percentiles are computed at snapshot time by sorting a clone of the
+/// reservoir — O(N log N) per snapshot where N <= cap, which is fine for
+/// observational reads.
+pub(super) struct SampleCollector {
+    samples: Vec<u32>,
+    cap: usize,
+    inserts: u64,
+}
+
+impl SampleCollector {
+    pub(super) fn with_cap(cap: usize) -> Self {
+        Self {
+            samples: Vec::new(),
+            cap,
+            inserts: 0,
+        }
+    }
+
+    pub(super) fn push(&mut self, value: u32) {
+        self.inserts = self.inserts.saturating_add(1);
+        if self.samples.len() < self.cap {
+            self.samples.push(value);
+        } else if self.cap > 0 {
+            let idx = (self.inserts as usize) % self.cap;
+            self.samples[idx] = value;
+        }
+    }
+
+    pub(super) fn percentile(&self, p: f64) -> u32 {
+        if self.samples.is_empty() {
+            return 0;
+        }
+        let mut sorted = self.samples.clone();
+        sorted.sort_unstable();
+        let idx = (((sorted.len() - 1) as f64) * p).round() as usize;
+        sorted[idx]
+    }
+}
+
+pub(super) const SAMPLE_RESERVOIR_CAP: usize = 8192;
+
+/// Lock-free counter set updated on the hot path. Read into the immutable
+/// [`SemanticGraphStats`](crate::semantic_query::SemanticGraphStats)
+/// snapshot via [`super::SemanticGraphStore::stats_snapshot`].
+///
+/// Visibility: `pub(crate)` is the narrowest workable level. The
+/// type is reachable at `pub(crate)` through the public
+/// `SemanticGraphStore::stats` field's signature (`SemanticGraphStore`
+/// itself is `pub`); narrowing the type to `pub(super)` triggers
+/// the `private_interfaces` warning. Production callers outside
+/// `semantic_query_memo` do not name the type — only the parent
+/// module reaches it — so the broader visibility is documentation-
+/// only in practice.
+pub(crate) struct AtomicSemanticGraphStats {
+    pub(super) hits: AtomicU64,
+    pub(super) misses: AtomicU64,
+    pub(super) same_path_sentinel_returns: AtomicU64,
+    pub(super) in_flight_current: AtomicU32,
+    pub(super) in_flight_peak: AtomicU32,
+    pub(super) waits_ms: AtomicU64,
+    pub(super) joined_waits: AtomicU64,
+    pub(super) inflight_aborted_retries: AtomicU64,
+    /// Number of cooperative joiners that woke from the condvar and
+    /// forked to a cold recompute rather than reusing the winner's
+    /// result. A fork happens in two cases: the winner's carrier did
+    /// NOT validate against the joiner's own `ctx` (the winner ran
+    /// under a different overlay / view); or the winner was
+    /// `cache_suppress` and its carrier carries no view-discriminating
+    /// self-root (a tracer-overflow synthetic empty-fact carrier or an
+    /// unrootable build with an empty self-root set), so its carrier
+    /// could only ever validate vacuously and is unsafe to reuse
+    /// cross-view. A view-validated coalesce does not bump this
+    /// counter; only a fork does.
+    pub(super) joiner_view_mismatch_forks: AtomicU64,
+    pub(super) cold_aborts_swept: AtomicU64,
+    pub(super) origin_edges_emitted: AtomicU64,
+    pub(super) instantiate_count: AtomicU64,
+    pub(super) conditional_decided_count: AtomicU64,
+    pub(super) conditional_deferred_count: AtomicU64,
+    pub(super) branch_selections_true: AtomicU64,
+    pub(super) branch_selections_false: AtomicU64,
+    pub(super) budget_fallback_count: AtomicU64,
+    pub(super) path_length_samples: Mutex<SampleCollector>,
+    pub(super) projection_depth_samples: Mutex<SampleCollector>,
+    pub(super) decl_subexpression_lowering_count: AtomicU64,
+    pub(super) relation_check_count: AtomicU64,
+    /// Number of `intern_preserving_scope` calls observed by the
+    /// store. The substitute helper's change-tracking optimisation
+    /// short-circuits no-op arms and skips the rebuild +
+    /// `intern_preserving_scope` call entirely, so a substitution
+    /// that does not change anything must not increment this
+    /// counter — it is the discriminating signal for the
+    /// optimisation in tests.
+    pub(super) intern_preserving_scope_calls: AtomicU64,
+    /// Per-K mapped-type materialiser invocations observed by the
+    /// store. Increments once per call to either
+    /// `materialize_mapped_member_value_for_key` (the
+    /// `build_mapped_type` per-K path) or
+    /// `materialize_selected_key_mapped_value` (the Shallow walker's
+    /// `synthesise_mapped_surface` per-K path).
+    ///
+    /// Discriminating signal for the key-space-independent value
+    /// hoist: a K-independent value expression collapses the per-K
+    /// loop to ONE shared evaluation (not registered here because the
+    /// hoist routes through evaluate_deferred + Instantiate directly,
+    /// bypassing the per-K materialiser), so the counter should be
+    /// `0` for hoist-eligible mapped types and `N = key_count` for
+    /// K-dependent mapped types.
+    pub(super) mapped_per_k_materializations: AtomicU64,
+    /// Hash-cons memo hits on
+    /// `substitute_semantic_type_param`. Discriminating signal for
+    /// the substitute hash-cons: a second call with the same
+    /// `(value_expr, parameter_node, arg)` triple short-circuits
+    /// the recursive walk and bumps this counter.
+    pub(super) substitute_memo_hits: AtomicU64,
+    /// Hash-cons memo misses on
+    /// `substitute_semantic_type_param`. Increments when the cache
+    /// has no entry for the queried triple — the recursive walk
+    /// runs and the result is published into the memo.
+    pub(super) substitute_memo_misses: AtomicU64,
+    /// Hash-cons memo hits on
+    /// `evaluate_deferred_semantic_node_with_context`. Bumped when
+    /// a `(node, context)` pair is served from the memo, skipping
+    /// the recursive fix-point walk.
+    pub(super) evaluate_deferred_memo_hits: AtomicU64,
+    /// Hash-cons memo misses on
+    /// `evaluate_deferred_semantic_node_with_context`. Bumped when
+    /// the cache has no entry for the queried pair and a fresh
+    /// fix-point walk runs.
+    pub(super) evaluate_deferred_memo_misses: AtomicU64,
+}
+
+impl Default for AtomicSemanticGraphStats {
+    fn default() -> Self {
+        Self {
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            same_path_sentinel_returns: AtomicU64::new(0),
+            in_flight_current: AtomicU32::new(0),
+            in_flight_peak: AtomicU32::new(0),
+            waits_ms: AtomicU64::new(0),
+            joined_waits: AtomicU64::new(0),
+            inflight_aborted_retries: AtomicU64::new(0),
+            joiner_view_mismatch_forks: AtomicU64::new(0),
+            cold_aborts_swept: AtomicU64::new(0),
+            origin_edges_emitted: AtomicU64::new(0),
+            instantiate_count: AtomicU64::new(0),
+            conditional_decided_count: AtomicU64::new(0),
+            conditional_deferred_count: AtomicU64::new(0),
+            branch_selections_true: AtomicU64::new(0),
+            branch_selections_false: AtomicU64::new(0),
+            budget_fallback_count: AtomicU64::new(0),
+            path_length_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
+            projection_depth_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
+            decl_subexpression_lowering_count: AtomicU64::new(0),
+            relation_check_count: AtomicU64::new(0),
+            intern_preserving_scope_calls: AtomicU64::new(0),
+            mapped_per_k_materializations: AtomicU64::new(0),
+            substitute_memo_hits: AtomicU64::new(0),
+            substitute_memo_misses: AtomicU64::new(0),
+            evaluate_deferred_memo_hits: AtomicU64::new(0),
+            evaluate_deferred_memo_misses: AtomicU64::new(0),
+        }
+    }
+}
+
+impl AtomicSemanticGraphStats {
+    pub(super) fn record_in_flight_enter(&self) {
+        let now = self.in_flight_current.fetch_add(1, Ordering::Relaxed) + 1;
+        // Compare-exchange peak forward; relaxed ordering is fine because
+        // the peak is purely observational.
+        let mut peak = self.in_flight_peak.load(Ordering::Relaxed);
+        while now > peak {
+            match self.in_flight_peak.compare_exchange_weak(
+                peak,
+                now,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => peak = observed,
+            }
+        }
+    }
+
+    pub(super) fn record_in_flight_exit(&self) {
+        self.in_flight_current.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// RAII guard that decrements the in-flight presence counter on drop —
+/// fires whether the cold-build closure returns normally or panics.
+/// Without this guard a panic in the build closure would leak the
+/// in-flight counter, biasing `in_flight_peak` upward across the
+/// remaining lifetime of the store.
+pub(super) struct InFlightStatsGuard<'a> {
+    pub(super) stats: &'a AtomicSemanticGraphStats,
+}
+
+impl Drop for InFlightStatsGuard<'_> {
+    fn drop(&mut self) {
+        self.stats.record_in_flight_exit();
+    }
+}
+
+/// RAII wrapper around a `parking_lot::MutexGuard` for the
+/// `SemanticGraphStore::entries` mutex. Records the wait time
+/// observed at acquisition and the hold time observed at drop on the
+/// active [`crate::capture_token::CaptureToken`]. diagnosis
+/// instrumentation only — the production hot path pays one extra
+/// `Instant::now()` read per acquisition (constant-time) and the
+/// Drop is a single `Instant::elapsed()` plus the no-op
+/// `with_active_capture` hook when no token is bound.
+pub(super) struct EntriesLockGuard<'a, T> {
+    pub(super) guard: Option<parking_lot::MutexGuard<'a, T>>,
+    // Timing fields feed the capture-token entries-mutex hook only;
+    // gated to match the instrumentation module (absent in release).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) hold_start: Instant,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) wait_ns: u128,
+}
+
+impl<'a, T> std::ops::Deref for EntriesLockGuard<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.guard
+            .as_ref()
+            .expect("guard taken before Drop")
+            .deref()
+    }
+}
+
+impl<'a, T> std::ops::DerefMut for EntriesLockGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.guard
+            .as_mut()
+            .expect("guard taken before Drop")
+            .deref_mut()
+    }
+}
+
+impl<'a, T> Drop for EntriesLockGuard<'a, T> {
+    fn drop(&mut self) {
+        // Drop the inner guard FIRST so the mutex is released before
+        // we record the hold time. Releasing the lock before the
+        // capture-token hook keeps the hold-time measurement honest:
+        // the hook itself runs outside the critical section. We use
+        // `Option::take` + explicit `drop` (the `let _ = ...` form
+        // is a clippy `let_underscore_lock` violation because it
+        // could otherwise be read as a no-op binding).
+        if let Some(guard) = self.guard.take() {
+            std::mem::drop(guard);
+        }
+        // Entries-mutex timing recording — test/debug instrumentation
+        // only; gated to match the capture-token module (absent in
+        // release).
+        #[cfg(any(test, feature = "test-support"))]
+        let hold_ns = self.hold_start.elapsed().as_nanos();
+        #[cfg(any(test, feature = "test-support"))]
+        let wait_ns = self.wait_ns;
+        #[cfg(any(test, feature = "test-support"))]
+        crate::capture_token::with_active_capture(|t| {
+            t.record_entries_mutex_timing(wait_ns, hold_ns);
+        });
+    }
+}
+
+impl SemanticGraphStore {
+    /// Read an immutable snapshot of every counter the store maintains.
+    /// Safe to call mid-request; counters are atomic and percentile
+    /// computation locks-and-clones the sample reservoir so no torn
+    /// reads.
+    #[must_use]
+    pub fn stats_snapshot(&self) -> SemanticGraphStats {
+        let derivation = self.derivation.lock();
+        let origin_edge_count = derivation.edge_count() as u64;
+        let mut by_node: FxHashMap<SemanticNodeId, u32> = FxHashMap::default();
+        for (node, _kind, edges) in derivation.iter_edges() {
+            let cell = by_node.entry(*node).or_insert(0);
+            *cell = cell.saturating_add(edges.len() as u32);
+        }
+        drop(derivation);
+        let mut per_node_counts: Vec<u32> = by_node.into_values().collect();
+        per_node_counts.sort_unstable();
+        let origin_edges_per_node_p50 = sorted_percentile(&per_node_counts, 0.5);
+        let origin_edges_per_node_p95 = sorted_percentile(&per_node_counts, 0.95);
+
+        let stats = &self.stats;
+        let path_samples = stats.path_length_samples.lock();
+        let path_length_p50 = path_samples.percentile(0.5);
+        let path_length_p95 = path_samples.percentile(0.95);
+        drop(path_samples);
+        let proj_samples = stats.projection_depth_samples.lock();
+        let projection_depth_p50 = proj_samples.percentile(0.5);
+        let projection_depth_p95 = proj_samples.percentile(0.95);
+        drop(proj_samples);
+
+        SemanticGraphStats {
+            hits: stats.hits.load(Ordering::Relaxed),
+            misses: stats.misses.load(Ordering::Relaxed),
+            same_path_sentinel_returns: stats.same_path_sentinel_returns.load(Ordering::Relaxed),
+            in_flight_peak: stats.in_flight_peak.load(Ordering::Relaxed),
+            waits_ms: stats.waits_ms.load(Ordering::Relaxed),
+            memo_entry_count: self.memo_entry_count() as u64,
+            joined_waits: stats.joined_waits.load(Ordering::Relaxed),
+            inflight_aborted_retries: stats.inflight_aborted_retries.load(Ordering::Relaxed),
+            cold_aborts_swept: stats.cold_aborts_swept.load(Ordering::Relaxed),
+            origin_edge_count,
+            origin_edges_emitted: stats.origin_edges_emitted.load(Ordering::Relaxed),
+            origin_edges_per_node_p50,
+            origin_edges_per_node_p95,
+            instantiate_count: stats.instantiate_count.load(Ordering::Relaxed),
+            conditional_decided_count: stats.conditional_decided_count.load(Ordering::Relaxed),
+            conditional_deferred_count: stats.conditional_deferred_count.load(Ordering::Relaxed),
+            branch_selections_true: stats.branch_selections_true.load(Ordering::Relaxed),
+            branch_selections_false: stats.branch_selections_false.load(Ordering::Relaxed),
+            budget_fallback_count: stats.budget_fallback_count.load(Ordering::Relaxed),
+            path_length_p50,
+            path_length_p95,
+            projection_depth_p50,
+            projection_depth_p95,
+            decl_subexpression_lowering_count: stats
+                .decl_subexpression_lowering_count
+                .load(Ordering::Relaxed),
+            relation_check_count: stats.relation_check_count.load(Ordering::Relaxed),
+            mapped_per_k_materializations: stats
+                .mapped_per_k_materializations
+                .load(Ordering::Relaxed),
+            substitute_memo_hits: stats.substitute_memo_hits.load(Ordering::Relaxed),
+            substitute_memo_misses: stats.substitute_memo_misses.load(Ordering::Relaxed),
+            evaluate_deferred_memo_hits: stats.evaluate_deferred_memo_hits.load(Ordering::Relaxed),
+            evaluate_deferred_memo_misses: stats
+                .evaluate_deferred_memo_misses
+                .load(Ordering::Relaxed),
+        }
+    }
+}

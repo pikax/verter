@@ -1,0 +1,19 @@
+[package]
+name = "verter-editor-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Shared, pure launch-contract logic for Verter's editor clients (Lapce, Zed): verter-lsp argv, LSP initializationOptions, platform matrix, and server-discovery precedence"
+keywords = ["vue", "svelte", "lsp", "editor", "verter"]
+categories = ["development-tools"]
+
+[dependencies]
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# Parses the shipped editors/helix/languages.toml in the helix_config_contract
+# integration test. Pinned to the same 1.1 line verter_session uses.
+toml = "1.1"

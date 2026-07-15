@@ -1,0 +1,89 @@
+{
+  "slug": "matrix/bind_group_radio_dynamic.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_group_radio_dynamic",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "first_child",
+    "remove_input_defaults",
+    "sibling",
+    "template_effect",
+    "get",
+    "get",
+    "bind_group",
+    "get",
+    "get",
+    "set",
+    "delegated",
+    "set",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "bind_group",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "remove_input_defaults",
+    "set",
+    "sibling",
+    "state",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "first_child": 1,
+    "remove_input_defaults": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "get": 4,
+    "bind_group": 1,
+    "set": 2,
+    "delegated": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input type=\"radio\"/> <button>x</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input type=\"radio\"/> <button>x</button>`, 1); export default function bind_group_radio_dynamic($$anchor) {const binding_group = []; let selected = $.state(\"a\"); let label = $.state(\"a\"); var fragment = root(); var input = $.first_child(fragment); $.remove_input_defaults(input); var input_value; var button = $.sibling(input, 2); $.template_effect(() => {if (input_value !== (input_value = $.get(label))) {input.value = (input.__value = $.get(label)) ?? '';}}); $.bind_group(binding_group, [], input, () => {$.get(label); return $.get(selected);}, ($$value) => $.set(selected, $$value)); $.delegated('click', button, () => $.set(label, \"b\")); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

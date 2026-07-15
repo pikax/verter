@@ -1,9 +1,9 @@
-// Phase 2: Completion — template bindings, component names, props from verter_host analysis.
-// Phase 3: Enhanced with typed member access, generic inference from TypeProvider.
-// Phase 4: AST-based cursor context detection via cursor_context module.
+// Completion — template bindings, component names, props from verter_session analysis.
+// Enhanced with typed member access, generic inference from TypeProvider.
+// AST-based cursor context detection via cursor_context module.
 
 use tower_lsp_server::ls_types::*;
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::{parse_opening_tag, SfcBlock};
@@ -55,7 +55,7 @@ pub fn completions_at_position(
 
     match context {
         CursorContext::RootLevel => Some(CompletionResult {
-            items: sfc_root_completions(source, blocks),
+            items: sfc_root_completions(source, blocks, offset, line_index),
             is_incomplete: false,
         }),
         CursorContext::BlockOpeningTag { ref tag_name } => {
@@ -206,7 +206,17 @@ pub fn completions_at_position(
 // =============================================================================
 
 /// Completions at root level (outside all blocks): tag snippets + scaffold snippets.
-fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem> {
+///
+/// Every snippet emitted here begins with `<`. To avoid a doubled `<` when the
+/// user has already typed a leading `<` (e.g. `<script|`), each snippet carries an
+/// explicit `<`-anchored `text_edit` computed from the cursor `offset`. See
+/// [`snippet_item`] for the replace-range walk-back rule.
+fn sfc_root_completions(
+    source: &str,
+    blocks: &[SfcBlock],
+    offset: u32,
+    line_index: &LineIndex,
+) -> Vec<CompletionItem> {
     let mut items = Vec::new();
     let has_template = blocks.iter().any(|b| b.tag_name == "template");
     let has_script = blocks.iter().any(|b| b.tag_name == "script");
@@ -220,6 +230,9 @@ fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem
             "<template>\n\t$0\n</template>",
             "Add <template> block",
             1,
+            source,
+            offset,
+            line_index,
         ));
     }
     if !has_script {
@@ -228,12 +241,18 @@ fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem
             "<script setup lang=\"ts\">\n$0\n</script>",
             "Add <script setup> block",
             2,
+            source,
+            offset,
+            line_index,
         ));
         items.push(snippet_item(
             "script",
             "<script lang=\"ts\">\n$0\n</script>",
             "Add <script> block",
             3,
+            source,
+            offset,
+            line_index,
         ));
     }
     if !has_style {
@@ -242,12 +261,18 @@ fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem
             "<style scoped>\n$0\n</style>",
             "Add <style scoped> block",
             4,
+            source,
+            offset,
+            line_index,
         ));
         items.push(snippet_item(
             "style",
             "<style>\n$0\n</style>",
             "Add <style> block",
             5,
+            source,
+            offset,
+            line_index,
         ));
     }
 
@@ -258,18 +283,27 @@ fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem
             "<script setup lang=\"ts\">\n$0\n</script>\n\n<template>\n\t\n</template>",
             "Vue SFC scaffold (TypeScript)",
             0,
+            source,
+            offset,
+            line_index,
         ));
         items.push(snippet_item(
             "vue",
             "<script setup>\n$0\n</script>\n\n<template>\n\t\n</template>",
             "Vue SFC scaffold (JavaScript)",
             0,
+            source,
+            offset,
+            line_index,
         ));
         items.push(snippet_item(
             "vue-options",
             "<script lang=\"ts\">\nimport { defineComponent } from 'vue'\n\nexport default defineComponent({\n\t$0\n})\n</script>\n\n<template>\n\t\n</template>",
             "Vue SFC scaffold (Options API)",
             0,
+            source,
+            offset,
+            line_index,
         ));
     }
 
@@ -279,6 +313,9 @@ fn sfc_root_completions(source: &str, blocks: &[SfcBlock]) -> Vec<CompletionItem
         "<i18n lang=\"${1:json}\">\n$0\n</i18n>",
         "Add <i18n> block",
         6,
+        source,
+        offset,
+        line_index,
     ));
 
     items
@@ -350,12 +387,25 @@ fn sfc_attribute_completions(source: &str, block: &SfcBlock) -> Vec<CompletionIt
     items
 }
 
+/// Build a root-level SFC snippet completion item.
+///
+/// Root SFC snippets all begin with `<` (e.g. `<script setup lang="ts">…`), so each
+/// carries a `<`-anchored `text_edit` whose replace range absorbs an already-typed
+/// `<` (see [`sfc_snippet_text_edit`] for the walk-back contract) — the
+/// leading-`<` accounting is explicit and provider-neutral rather than left to a
+/// client word heuristic. `insert_text` stays set as a fallback for clients that
+/// ignore `text_edit`, and the item stays a SNIPPET with tab-stops preserved.
+#[allow(clippy::too_many_arguments)]
 fn snippet_item(
     label: &str,
     insert_text: &str,
     detail: &str,
     sort_priority: u32,
+    source: &str,
+    offset: u32,
+    line_index: &LineIndex,
 ) -> CompletionItem {
+    let text_edit = sfc_snippet_text_edit(insert_text, source, offset, line_index);
     CompletionItem {
         label: label.to_string(),
         kind: Some(CompletionItemKind::SNIPPET),
@@ -363,8 +413,62 @@ fn snippet_item(
         insert_text: Some(insert_text.to_string()),
         insert_text_format: Some(InsertTextFormat::SNIPPET),
         sort_text: Some(format!("{:04}", sort_priority)),
+        text_edit,
         ..Default::default()
     }
+}
+
+/// Compute the `<`-anchored replace edit for a root SFC tag snippet.
+///
+/// Root tag snippets (`insert_text` beginning with `<`) must supply an explicit
+/// replace range that includes an immediately-preceding typed `<`, so accepting
+/// the item yields a single `<`. The range walks back from the cursor over the
+/// partial tag-name word (a pure cursor-range computation over ASCII tag bytes,
+/// not source-text semantic inspection) and absorbs a leading `<` when present;
+/// with no typed `<` the range starts at the word boundary so the snippet's own
+/// `<` is the only one. Returns `None` for non-`<` snippets and `None`
+/// (fail-closed) when a byte offset cannot be mapped to a `Position`.
+fn sfc_snippet_text_edit(
+    insert_text: &str,
+    source: &str,
+    offset: u32,
+    line_index: &LineIndex,
+) -> Option<CompletionTextEdit> {
+    if !insert_text.starts_with('<') {
+        return None;
+    }
+
+    let bytes = source.as_bytes();
+    let cursor = offset as usize;
+    if cursor > bytes.len() {
+        return None;
+    }
+
+    // Walk back over the partial tag-name word (ASCII alphanumeric / `-` / `_`).
+    let mut i = cursor;
+    while i > 0 {
+        let b = bytes[i - 1];
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+
+    // If a typed `<` immediately precedes the partial word, absorb it; otherwise
+    // start at the word start so the snippet's own `<` is the only one.
+    let start_byte = if i > 0 && bytes[i - 1] == b'<' {
+        i - 1
+    } else {
+        i
+    };
+
+    let start = line_index.offset_to_position(start_byte as u32)?;
+    let end = line_index.offset_to_position(cursor as u32)?;
+    Some(CompletionTextEdit::Edit(TextEdit {
+        range: Range { start, end },
+        new_text: insert_text.to_string(),
+    }))
 }
 
 fn attr_item(name: &str, value_snippet: Option<&str>, detail: &str) -> CompletionItem {
@@ -458,7 +562,7 @@ const VUE_BUILTINS: &[&str] = &[
 ];
 
 /// Build tag name completions: HTML elements + Vue built-ins + imported components + workspace components.
-fn tag_name_completions(
+pub(crate) fn tag_name_completions(
     analysis: &FileAnalysisSnapshot,
     workspace_components: Option<&[WorkspaceComponent]>,
     doc_uri: Option<&str>,
@@ -491,8 +595,10 @@ fn tag_name_completions(
     if let Some(template) = &analysis.template {
         for comp in &template.components {
             items.push(CompletionItem {
+                // Confirmed component used in the template, offered in tag position:
+                // CLASS (component icon).
                 label: comp.name.clone(),
-                kind: Some(CompletionItemKind::MODULE),
+                kind: Some(CompletionItemKind::CLASS),
                 detail: comp.import_source.as_ref().map(|s| format!("from '{}'", s)),
                 sort_text: Some(format!("0{}", comp.name)),
                 ..Default::default()
@@ -512,6 +618,10 @@ fn tag_name_completions(
             if !items.iter().any(|i| i.label == binding.name) {
                 items.push(CompletionItem {
                     label: binding.name.clone(),
+                    // Heuristic uppercase-name binding (may NOT be a component): keep
+                    // MODULE, not CLASS — only confirmed component tags earn the
+                    // component (CLASS) icon, so an arbitrary `const Foo = ...` does
+                    // not get a misleading component glyph.
                     kind: Some(CompletionItemKind::MODULE),
                     detail: Some("component binding".to_string()),
                     sort_text: Some(format!("0{}", binding.name)),
@@ -539,6 +649,9 @@ fn tag_name_completions(
             {
                 items.push(CompletionItem {
                     label: binding.name.clone(),
+                    // Heuristic uppercase-name import (may NOT be a component): keep
+                    // MODULE, not CLASS — the uppercase-first-char guess is not a
+                    // confirmed component, so it must not claim the component icon.
                     kind: Some(CompletionItemKind::MODULE),
                     detail: Some(format!("from '{}'", import.source)),
                     sort_text: Some(format!("0{}", binding.name)),
@@ -550,10 +663,17 @@ fn tag_name_completions(
 
     // Workspace components (auto-import)
     if let Some(ws_components) = workspace_components {
-        let existing: std::collections::HashSet<String> =
+        let mut existing: std::collections::HashSet<String> =
             items.iter().map(|i| i.label.clone()).collect();
         for comp in ws_components {
-            if existing.contains(&comp.name) {
+            // Skip names already declared/imported in this file AND dedup
+            // workspace-vs-workspace label collisions: two carriers can sanitize
+            // to the same identifier (e.g. `Model.Named.vue` and `ModelNamed.vue`
+            // both → `ModelNamed`). `build_workspace_components` sorts candidates
+            // by canonical path, so the first-inserted label wins (the
+            // lexicographically-first carrier); later collisions are dropped so the
+            // user never sees two indistinguishable items.
+            if !existing.insert(comp.name.clone()) {
                 continue;
             }
             let mut data = serde_json::json!({
@@ -566,7 +686,9 @@ fn tag_name_completions(
             }
             items.push(CompletionItem {
                 label: comp.name.clone(),
-                kind: Some(CompletionItemKind::MODULE),
+                // Confirmed workspace component file, offered in tag position
+                // (auto-import on accept): CLASS (component icon).
+                kind: Some(CompletionItemKind::CLASS),
                 detail: Some(format!("Auto import from '{}'", comp.import_path)),
                 sort_text: Some(format!("3{}", comp.name)),
                 data: Some(data),
@@ -918,12 +1040,12 @@ fn template_completions(
 
         // Add reactivity indicator
         let reactivity_tag = match binding.reactivity_kind {
-            verter_analysis::ReactivityKind::Ref => Some("ref"),
-            verter_analysis::ReactivityKind::Computed => Some("computed"),
-            verter_analysis::ReactivityKind::Reactive => Some("reactive"),
-            verter_analysis::ReactivityKind::MaybeRef => Some("maybe-ref"),
-            verter_analysis::ReactivityKind::Mutable => Some("mutable"),
-            verter_analysis::ReactivityKind::None => {
+            verter_semantic::analysis::ReactivityKind::Ref => Some("ref"),
+            verter_semantic::analysis::ReactivityKind::Computed => Some("computed"),
+            verter_semantic::analysis::ReactivityKind::Reactive => Some("reactive"),
+            verter_semantic::analysis::ReactivityKind::MaybeRef => Some("maybe-ref"),
+            verter_semantic::analysis::ReactivityKind::Mutable => Some("mutable"),
+            verter_semantic::analysis::ReactivityKind::None => {
                 if binding.is_reactive {
                     Some("reactive")
                 } else {
@@ -971,10 +1093,14 @@ fn template_completions(
     // Workspace components available for auto-import.
     // Only add components not already imported/declared in this file.
     if let Some(ws_components) = workspace_components {
-        let existing_labels: std::collections::HashSet<String> =
+        let mut existing_labels: std::collections::HashSet<String> =
             items.iter().map(|i| i.label.clone()).collect();
         for comp in ws_components {
-            if existing_labels.contains(&comp.name) {
+            // Skip names already in scope AND dedup workspace-vs-workspace label
+            // collisions first-wins (lex-first carrier, since
+            // `build_workspace_components` sorts by canonical path) — same contract
+            // as `tag_name_completions`.
+            if !existing_labels.insert(comp.name.clone()) {
                 continue;
             }
             let mut data = serde_json::json!({
@@ -987,6 +1113,11 @@ fn template_completions(
             }
             items.push(CompletionItem {
                 label: comp.name.clone(),
+                // This auto-import item is offered in EXPRESSION / INTERPOLATION
+                // scope ({{ }} / bound attr value), NOT a component-tag position, so
+                // it is referenced as a value binding, not inserted as a `<Tag>`.
+                // Keep MODULE — CLASS is reserved for genuine tag-position component
+                // completions (see `tag_name_completions`).
                 kind: Some(CompletionItemKind::MODULE),
                 detail: Some(format!("Auto import from '{}'", comp.import_path)),
                 sort_text: Some(format!("z{}", comp.name)), // Sort after local items
@@ -1055,26 +1186,29 @@ fn extract_vfor_variable_names(pattern: &str) -> Vec<&str> {
     }
 }
 
-fn binding_completion_kind(kind: &verter_analysis::AnalyzedBindingKind) -> CompletionItemKind {
+fn binding_completion_kind(
+    kind: &verter_semantic::analysis::AnalyzedBindingKind,
+) -> CompletionItemKind {
     match kind {
-        verter_analysis::AnalyzedBindingKind::Const => CompletionItemKind::VARIABLE,
-        verter_analysis::AnalyzedBindingKind::Let | verter_analysis::AnalyzedBindingKind::Var => {
-            CompletionItemKind::VARIABLE
+        verter_semantic::analysis::AnalyzedBindingKind::Const => CompletionItemKind::VARIABLE,
+        verter_semantic::analysis::AnalyzedBindingKind::Let
+        | verter_semantic::analysis::AnalyzedBindingKind::Var => CompletionItemKind::VARIABLE,
+        verter_semantic::analysis::AnalyzedBindingKind::Function
+        | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+            CompletionItemKind::FUNCTION
         }
-        verter_analysis::AnalyzedBindingKind::Function
-        | verter_analysis::AnalyzedBindingKind::AsyncFunction => CompletionItemKind::FUNCTION,
-        verter_analysis::AnalyzedBindingKind::Class => CompletionItemKind::CLASS,
+        verter_semantic::analysis::AnalyzedBindingKind::Class => CompletionItemKind::CLASS,
     }
 }
 
-fn binding_detail(binding: &verter_analysis::AnalyzedBinding) -> String {
+fn binding_detail(binding: &verter_semantic::analysis::AnalyzedBinding) -> String {
     let kind = match binding.kind {
-        verter_analysis::AnalyzedBindingKind::Const => "const",
-        verter_analysis::AnalyzedBindingKind::Let => "let",
-        verter_analysis::AnalyzedBindingKind::Var => "var",
-        verter_analysis::AnalyzedBindingKind::Function => "function",
-        verter_analysis::AnalyzedBindingKind::AsyncFunction => "async function",
-        verter_analysis::AnalyzedBindingKind::Class => "class",
+        verter_semantic::analysis::AnalyzedBindingKind::Const => "const",
+        verter_semantic::analysis::AnalyzedBindingKind::Let => "let",
+        verter_semantic::analysis::AnalyzedBindingKind::Var => "var",
+        verter_semantic::analysis::AnalyzedBindingKind::Function => "function",
+        verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => "async function",
+        verter_semantic::analysis::AnalyzedBindingKind::Class => "class",
     };
     kind.to_string()
 }
@@ -1083,57 +1217,18 @@ fn binding_detail(binding: &verter_analysis::AnalyzedBinding) -> String {
 // Event Modifier Completions
 // =============================================================================
 
-/// Runtime modifiers available for all events.
-const RUNTIME_MODIFIERS: &[(&str, &str)] = &[
-    ("stop", "Call event.stopPropagation()"),
-    ("prevent", "Call event.preventDefault()"),
-    ("self", "Only trigger if event.target is the element itself"),
-    ("once", "Trigger at most once"),
-    ("capture", "Use capture mode for addEventListener"),
-    ("passive", "Mark addEventListener as passive"),
-];
-
-/// System modifier keys (available for all events).
-const SYSTEM_MODIFIERS: &[(&str, &str)] = &[
-    ("ctrl", "Require Ctrl key"),
-    ("shift", "Require Shift key"),
-    ("alt", "Require Alt key"),
-    ("meta", "Require Meta/Command key"),
-    ("exact", "Require exact modifier combination"),
-];
-
-/// Key modifiers for keyboard events (keydown, keyup, keypress).
-const KEY_MODIFIERS: &[(&str, &str)] = &[
-    ("enter", "Enter key"),
-    ("tab", "Tab key"),
-    ("delete", "Delete or Backspace key"),
-    ("esc", "Escape key"),
-    ("space", "Space key"),
-    ("up", "Arrow Up"),
-    ("down", "Arrow Down"),
-    ("left", "Arrow Left (key)"),
-    ("right", "Arrow Right (key)"),
-    ("page-down", "Page Down"),
-    ("page-up", "Page Up"),
-    ("home", "Home key"),
-    ("end", "End key"),
-];
-
-/// Mouse button modifiers (for click, mousedown, mouseup).
-const MOUSE_BUTTON_MODIFIERS: &[(&str, &str)] = &[
-    ("left", "Left mouse button"),
-    ("right", "Right mouse button"),
-    ("middle", "Middle mouse button"),
-];
+use crate::features::event_modifiers::{
+    is_keyboard_event, is_mouse_button_event, KEY_MODIFIERS, MOUSE_BUTTON_MODIFIERS,
+    RUNTIME_MODIFIERS, SYSTEM_MODIFIERS,
+};
 
 /// Provide event modifier completions for a given event name.
 /// The event name is determined by the cursor context module.
 fn event_modifier_completions_for(event_name: &str) -> CompletionResult {
-    let is_keyboard = event_name.starts_with("key");
-    let is_mouse_button = matches!(
-        event_name,
-        "click" | "dblclick" | "mousedown" | "mouseup" | "contextmenu"
-    );
+    // Event-family classification is shared with hover (see `event_modifiers`) so the
+    // two surfaces never disagree on which modifiers apply to which events.
+    let is_keyboard = is_keyboard_event(event_name);
+    let is_mouse_button = is_mouse_button_event(event_name);
 
     let mut items = Vec::new();
 
@@ -1278,7 +1373,7 @@ fn component_prop_completions(
     } else {
         // Fall back to macro prop_fields
         for m in child_analysis.macros.iter() {
-            if m.kind == verter_analysis::AnalyzedMacroKind::DefineProps {
+            if m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps {
                 for field in &m.prop_fields {
                     let label = to_kebab_case(&field.name);
                     if used_props.contains(field.name.as_str())
@@ -1323,7 +1418,7 @@ fn component_prop_completions(
     } else {
         // Fall back to macro emit_fields
         for m in child_analysis.macros.iter() {
-            if m.kind == verter_analysis::AnalyzedMacroKind::DefineEmits {
+            if m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits {
                 for field in &m.emit_fields {
                     let label = format!("@{}", to_kebab_case(&field.name));
                     let insert_text = Some(format!("@{}=\"$1\"", to_kebab_case(&field.name)));
@@ -1356,7 +1451,7 @@ fn component_prop_completions(
 fn find_component_at_cursor(
     offset: usize,
     source: &str,
-    template: &verter_analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
 ) -> Option<String> {
     let bytes = source.as_bytes();
 
@@ -1450,7 +1545,22 @@ fn to_kebab_case(s: &str) -> String {
     result
 }
 
-/// Convert kebab-case to PascalCase.
+/// Convert kebab-case to PascalCase for tag-name MATCHING (`my-comp` ↔ `MyComp`).
+///
+/// Intentionally narrower than `server_utils::to_pascal_case`: it splits ONLY on
+/// `-`/`_` and applies no identifier sanitization (no `.`/non-ident separator,
+/// no leading-digit guard). This is a kebab↔name casing normalizer for matching
+/// an existing tag against a binding name, NOT a filename→import-binding
+/// synthesizer, so it must not rewrite `.` or guard digits (that would change
+/// match keys).
+//
+// TODO(follow-up): consolidating the three `to_pascal_case` copies
+// (server_utils.rs — the sanitizing import-binding synthesizer; here and
+// definition.rs — the narrower kebab↔name matchers) onto one shared helper is a
+// nice cleanup but NOT low-risk: the matchers deliberately have different
+// separator/digit semantics, so a naive merge would alter match keys. Defer
+// until a shared helper can express both modes (e.g. a `sanitize: bool` axis)
+// without entangling matching with import synthesis.
 fn to_pascal_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut capitalize_next = true;
@@ -1475,15 +1585,15 @@ fn is_internal_dunder(label: &str) -> bool {
     )
 }
 
-fn macro_kind_label(kind: &verter_analysis::AnalyzedMacroKind) -> &'static str {
+fn macro_kind_label(kind: &verter_semantic::analysis::AnalyzedMacroKind) -> &'static str {
     match kind {
-        verter_analysis::AnalyzedMacroKind::DefineProps => "defineProps",
-        verter_analysis::AnalyzedMacroKind::DefineEmits => "defineEmits",
-        verter_analysis::AnalyzedMacroKind::DefineModel => "defineModel",
-        verter_analysis::AnalyzedMacroKind::DefineExpose => "defineExpose",
-        verter_analysis::AnalyzedMacroKind::DefineOptions => "defineOptions",
-        verter_analysis::AnalyzedMacroKind::DefineSlots => "defineSlots",
-        verter_analysis::AnalyzedMacroKind::WithDefaults => "withDefaults",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineProps => "defineProps",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => "defineEmits",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineModel => "defineModel",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => "defineExpose",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => "defineOptions",
+        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => "defineSlots",
+        verter_semantic::analysis::AnalyzedMacroKind::WithDefaults => "withDefaults",
     }
 }
 
@@ -1536,5 +1646,6 @@ pub(crate) fn is_member_access_in_tsx(tsx_content: &str, tsx_offset: u32) -> boo
 }
 
 #[cfg(test)]
+#[allow(clippy::type_complexity)]
 #[path = "completion_tests.rs"]
 mod completion_tests;

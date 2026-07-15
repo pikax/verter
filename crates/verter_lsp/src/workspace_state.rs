@@ -15,12 +15,10 @@
 //! existing `Arc<WorkspaceSnapshot>` is reused and only `LspViews` is
 //! rebuilt.
 
-use std::path::Path;
-
 use verter_diagnostics::{Linter, ResolvedLintConfig};
-use verter_vfs::workspace_snapshot::ProjectId;
+use verter_workspace::workspace_snapshot::ProjectId;
 
-use crate::vite_config::ViteConfigTrustInfo;
+use verter_workspace::{ViteConfigTrustInfo, WorkspaceRead};
 
 /// LSP-specific per-project view.
 ///
@@ -86,12 +84,10 @@ impl LspViews {
     /// ambiguously owned.
     pub fn linter_view_for_file(
         &self,
-        snapshot: &verter_vfs::WorkspaceSnapshot,
+        snapshot: &verter_workspace::WorkspaceSnapshot,
         canonical_id: &str,
     ) -> Option<&LspProjectView> {
-        snapshot
-            .single_owner_for_file(canonical_id)
-            .map(|id| self.view(id))
+        view_owner_for_file(snapshot, canonical_id).map(|id| self.view(id))
     }
 
     /// Find the project root for a file (for tsserver `projectRootPath`).
@@ -100,12 +96,10 @@ impl LspViews {
     /// is unowned or ambiguously owned.
     pub fn find_project_root<'a>(
         &self,
-        snapshot: &'a verter_vfs::WorkspaceSnapshot,
+        snapshot: &'a verter_workspace::WorkspaceSnapshot,
         canonical_id: &str,
     ) -> Option<&'a str> {
-        snapshot
-            .single_owner_for_file(canonical_id)
-            .map(|id| snapshot.project(id).root.as_str())
+        view_owner_for_file(snapshot, canonical_id).map(|id| snapshot.project(id).root.as_str())
     }
 
     /// Check if a file is in an SSR context.
@@ -115,7 +109,7 @@ impl LspViews {
     /// Tier 3: Inherit from project `ssr_enabled`
     pub fn is_ssr_context(
         &self,
-        snapshot: &verter_vfs::WorkspaceSnapshot,
+        snapshot: &verter_workspace::WorkspaceSnapshot,
         canonical_id: &str,
     ) -> bool {
         // Tier 1/2: filename suffix override
@@ -127,33 +121,53 @@ impl LspViews {
         }
 
         // Tier 3: inherit from project
-        snapshot
-            .single_owner_for_file(canonical_id)
+        view_owner_for_file(snapshot, canonical_id)
             .map(|id| self.view(id).ssr_enabled)
             .unwrap_or(false)
+    }
+}
+
+/// The single view-owner project for a file: the unique configured owner, else — only
+/// on an authoritative configured-`None` — the single fallback owner. A genuine
+/// configured overlap (`Ambiguous`) fails closed to `None` and NEVER falls through to
+/// a fallback (and a fallback never becomes a configured owner). This is the
+/// per-project VIEW lookup (linter / `projectRootPath` / SSR), kept DISTINCT from the
+/// carrier-ownership authority (`external_ts::CarrierOwnershipResolution`) — it is not
+/// a generic path→singleton selector and never invents a winner for an overlap.
+fn view_owner_for_file(
+    snapshot: &verter_workspace::WorkspaceSnapshot,
+    canonical_id: &str,
+) -> Option<ProjectId> {
+    use verter_workspace::workspace_snapshot::ConfiguredOwnerResolution;
+    match snapshot.configured_owner_resolution_for_file(canonical_id) {
+        ConfiguredOwnerResolution::Unique(id) => Some(id),
+        ConfiguredOwnerResolution::Ambiguous(_) => None,
+        ConfiguredOwnerResolution::None => snapshot.single_fallback_owner_for_file(canonical_id),
     }
 }
 
 /// Build `LspProjectView` entries for all projects in a snapshot.
 ///
 /// For each `OwnershipProject`, discovers lint config from the project root
-/// and detects SSR projects.
+/// and detects SSR projects. All file reads route through the supplied
+/// [`WorkspaceRead`] authority so overlays and snapshot caches are honored.
 pub fn build_lsp_views(
-    snapshot: &verter_vfs::WorkspaceSnapshot,
+    workspace: &dyn WorkspaceRead,
+    snapshot: &verter_workspace::WorkspaceSnapshot,
     trust_required: Vec<ViteConfigTrustInfo>,
 ) -> LspViews {
     let mut project_views = Vec::with_capacity(snapshot.projects.len());
 
     for project in &snapshot.projects {
-        let root_path = Path::new(project.root.as_str());
+        let root = project.root.as_str();
 
         // Discover lint config
-        let lint_config = verter_diagnostics::discover_lint_config(root_path);
+        let lint_config = verter_diagnostics::discover_lint_config(workspace, root);
         let lint_explicitly_configured = lint_config.explicitly_configured;
         let linter = Linter::new(lint_config.config.clone());
 
         // Detect SSR
-        let ssr_enabled = detect_ssr_project(root_path, &lint_config);
+        let ssr_enabled = detect_ssr_project(workspace, root, &lint_config);
 
         // Vite config metadata (fallback projects only)
         let (vite_config_path, vite_config_deps) = if project.is_fallback() {
@@ -183,18 +197,25 @@ pub fn build_lsp_views(
 /// Detect whether a project root is an SSR project.
 ///
 /// Checks Nuxt config, `.nuxt/` directory, and `.verterrc.json` ssr_mode.
-fn detect_ssr_project(root: &Path, lint_config: &ResolvedLintConfig) -> bool {
+/// File-system probes route through `workspace` so overlays and snapshot
+/// caches are honored.
+fn detect_ssr_project(
+    workspace: &dyn WorkspaceRead,
+    root: &str,
+    lint_config: &ResolvedLintConfig,
+) -> bool {
     if lint_config.config.ssr_mode {
         return true;
     }
 
+    let trimmed = root.trim_end_matches('/');
     for ext in &["ts", "js", "mjs", "mts"] {
-        if root.join(format!("nuxt.config.{ext}")).exists() {
+        if workspace.file_exists(&format!("{trimmed}/nuxt.config.{ext}")) {
             return true;
         }
     }
 
-    if root.join(".nuxt").is_dir() {
+    if workspace.is_dir(&format!("{trimmed}/.nuxt")) {
         return true;
     }
 
@@ -225,11 +246,18 @@ pub fn set_conditional_root_narrowing(views: &mut LspViews, enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vite_config::ViteConfigTrustInfo;
-    use verter_vfs::workspace_snapshot::{
+    use verter_workspace::workspace_snapshot::{
         OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
     };
-    use verter_vfs::{CanonicalPath, FallbackMembership, NormalizedGlob, ProjectResolver};
+    use verter_workspace::ViteConfigTrustInfo;
+    use verter_workspace::{
+        CanonicalPath, CompiledGlob, FallbackMembership, MemoryOptions, MemoryWorkspace,
+        NormalizedGlob, ProjectResolver,
+    };
+
+    fn empty_workspace() -> MemoryWorkspace {
+        MemoryWorkspace::new(MemoryOptions::default())
+    }
 
     fn fallback_project(id: u32, root: &str) -> OwnershipProject {
         let root_cp = CanonicalPath::new(root);
@@ -240,7 +268,11 @@ mod tests {
             payload: ProjectPayload::Fallback {
                 membership: FallbackMembership {
                     root: root_cp,
-                    exclude: vec![NormalizedGlob::new(&format!("{}/node_modules/**", root))],
+                    exclude: vec![CompiledGlob::new(NormalizedGlob::new(&format!(
+                        "{}/node_modules/**",
+                        root
+                    )))]
+                    .into(),
                 },
             },
         }
@@ -248,6 +280,7 @@ mod tests {
 
     fn empty_snapshot(projects: Vec<OwnershipProject>) -> WorkspaceSnapshot {
         WorkspaceSnapshot {
+            owners_memo: Default::default(),
             projects,
             resolver: ProjectResolver::default(),
             generation: SnapshotGeneration(1),
@@ -262,11 +295,11 @@ mod tests {
             workspace_root: root_cp.clone(),
             payload: ProjectPayload::Configured {
                 tsconfig_path: CanonicalPath::new(tsconfig),
-                membership: verter_vfs::ConfiguredMembership {
-                    spec: verter_vfs::StaticMembershipSpec {
+                membership: verter_workspace::ConfiguredMembership {
+                    spec: verter_workspace::StaticMembershipSpec {
                         files: files.iter().map(|f| CanonicalPath::new(f)).collect(),
                         include: Vec::new(),
-                        exclude: Vec::new(),
+                        exclude: Vec::new().into(),
                     },
                     materialized_files: files.iter().map(|f| CanonicalPath::new(f)).collect(),
                 },
@@ -284,14 +317,16 @@ mod tests {
             fallback_project(1, "d:/other"),
         ]);
 
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
         assert_eq!(views.project_views.len(), 2);
     }
 
     #[test]
     fn linter_view_for_file_finds_owner() {
         let snap = empty_snapshot(vec![fallback_project(0, "d:/project")]);
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
 
         let view = views.linter_view_for_file(&snap, "d:/project/src/foo.vue");
         assert!(view.is_some());
@@ -300,7 +335,8 @@ mod tests {
     #[test]
     fn linter_view_for_file_returns_none_outside_projects() {
         let snap = empty_snapshot(vec![fallback_project(0, "d:/project")]);
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
 
         let view = views.linter_view_for_file(&snap, "d:/other/foo.vue");
         assert!(view.is_none());
@@ -318,7 +354,8 @@ mod tests {
                 &[shared],
             ),
         ]);
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
 
         assert!(
             views.linter_view_for_file(&snap, shared).is_none(),
@@ -337,7 +374,8 @@ mod tests {
     #[test]
     fn ssr_context_server_vue_always_true() {
         let snap = empty_snapshot(vec![fallback_project(0, "d:/project")]);
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
 
         assert!(views.is_ssr_context(&snap, "d:/project/pages/index.server.vue"));
     }
@@ -345,7 +383,8 @@ mod tests {
     #[test]
     fn ssr_context_client_vue_always_false() {
         let snap = empty_snapshot(vec![fallback_project(0, "d:/project")]);
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
 
         assert!(!views.is_ssr_context(&snap, "d:/project/pages/index.client.vue"));
     }
@@ -353,7 +392,8 @@ mod tests {
     #[test]
     fn ssr_context_inherits_from_project() {
         let snap = empty_snapshot(vec![fallback_project(0, "d:/project")]);
-        let views = build_lsp_views(&snap, vec![]);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, vec![]);
 
         // Default project is not SSR
         assert!(!views.is_ssr_context(&snap, "d:/project/pages/index.vue"));
@@ -368,7 +408,8 @@ mod tests {
             reason: "function export".to_string(),
         }];
 
-        let views = build_lsp_views(&snap, trust);
+        let ws = empty_workspace();
+        let views = build_lsp_views(&ws, &snap, trust);
         assert_eq!(views.trust_required.len(), 1);
         assert_eq!(
             views.trust_required[0].config_path,

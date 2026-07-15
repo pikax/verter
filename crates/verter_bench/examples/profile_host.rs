@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(clippy::cloned_ref_to_slice_refs)]
 //! Full host pipeline profiler.
 //!
 //! Runs the full Verter host pipeline (upsert → compile → lint) on real-world
@@ -18,12 +20,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use verter_analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
 use verter_diagnostics::{LintConfig, Linter};
-use verter_host::{
+use verter_semantic::analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
+use verter_session::{
     CompileProfile, CompileTarget, FileAnalysisSnapshot, HostConfig, UpsertRequest, VerterHost,
 };
-use verter_vfs::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
+use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
 
 struct VueFile {
     canonical_id: String,
@@ -235,7 +237,7 @@ fn main() {
                 canonical_id: Some(file.canonical_id.clone()),
                 input_id: file.canonical_id.clone(),
                 source: Arc::from(file.content.as_str()),
-                file_kind: verter_host::FileKind::VueSfc,
+                file_language: verter_session::FileLanguage::vue(),
                 aliases: Vec::new(),
             };
             if host.upsert(req).is_ok() {
@@ -302,7 +304,7 @@ fn main() {
 mod tests {
     use super::*;
 
-    use verter_analysis::types::{
+    use verter_semantic::analysis::types::{
         AnalyzedModuleReference, AnalyzedOptionsApi, CssVarManipulation, CssVarManipulationKind,
         DomQueryCallSite, DomQueryKind, ModuleReferenceAnalyzability, ModuleReferenceSemantics,
         ModuleReferenceSyntax, ScriptBindingOccurrence, ScriptUsageKind, StoreApiClassification,

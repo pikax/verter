@@ -1,0 +1,77 @@
+{
+  "slug": "css/injected_slot_fallback_scoped.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "injected_slot_fallback_scoped",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "append_styles",
+    "child",
+    "slot",
+    "append",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "child",
+    "from_html",
+    "reset",
+    "slot"
+  ],
+  "helperCounts": {
+    "from_html": 2,
+    "append_styles": 1,
+    "child": 1,
+    "slot": 1,
+    "append": 2,
+    "reset": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p class=\"fb svelte-<scoped>\">x</p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<div><!></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p class=\"fb svelte-<scoped>\">x</p>`); var root_1 = $.from_html(`<div><!></div>`); const $$css = {hash: 'svelte-<scoped>', code: '.fb.svelte-<scoped> {color:red;}'}; export default function injected_slot_fallback_scoped($$anchor, $$props) {$.append_styles($$anchor, $$css); var div = root_1(); var node = $.child(div); $.slot(node, $$props, 'default', {}, ($$anchor) => {var p = root(); $.append($$anchor, p);}); $.reset(div); $.append($$anchor, div);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

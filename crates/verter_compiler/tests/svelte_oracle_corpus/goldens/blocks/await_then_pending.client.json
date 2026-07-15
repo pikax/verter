@@ -1,0 +1,85 @@
+{
+  "slug": "blocks/await_then_pending.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "await_then_pending",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "comment",
+    "first_child",
+    "await",
+    "append",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "await",
+    "child",
+    "comment",
+    "first_child",
+    "from_html",
+    "get",
+    "reset",
+    "set_text",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 2,
+    "comment": 1,
+    "first_child": 1,
+    "await": 1,
+    "append": 3,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<p>loading</p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); var root_1 = $.from_html(`<p>loading</p>`); export default function await_then_pending($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); $.await(node, () => $$props.promise, ($$anchor) => {var p_1 = root_1(); $.append($$anchor, p_1);}, ($$anchor, value) => {var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $.get(value))); $.append($$anchor, p);}); $.append($$anchor, fragment);}",
+  "semanticCommentSignature": [],
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

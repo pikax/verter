@@ -1,7 +1,7 @@
 // Linked editing ranges: auto-rename matching open/close HTML tags.
 
 use tower_lsp_server::ls_types::*;
-use verter_host::FileAnalysisSnapshot;
+use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::SfcBlock;
@@ -140,7 +140,7 @@ fn find_close_tag_name(source: &str, span_end: u32, tag: &str) -> Option<(u32, u
 mod tests {
     use super::*;
     use crate::documents::sfc_scanner::scan_sfc_blocks;
-    use verter_analysis::*;
+    use verter_semantic::analysis::*;
 
     fn make_template_analysis(elements: Vec<TemplateElement>) -> FileAnalysisSnapshot {
         FileAnalysisSnapshot {
