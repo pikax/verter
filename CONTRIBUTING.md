@@ -8,6 +8,7 @@ Thank you for your interest in contributing to Verter! This guide will help you 
 
 - Node.js 18+
 - pnpm 10+
+- Rust stable toolchain with `rustfmt`, `clippy`, and `cargo-nextest`
 - VS Code (for extension development)
 
 ### Setup
@@ -32,8 +33,8 @@ pnpm build
 # Build all packages (respects dependency order)
 pnpm build
 
-# Build specific package
-pnpm --filter @verter/core build
+# Build a specific package
+pnpm --filter @verter/typescript-plugin build
 
 # Watch mode
 pnpm watch
@@ -44,38 +45,35 @@ pnpm dev-extension
 
 ### Testing
 
-Verter uses **Vitest** for testing.
+Verter uses Vitest for JavaScript/TypeScript packages and Cargo tests for the
+Rust workspace. The canonical Rust gate is a pair: Nextest covers every
+workspace test target, while the second command preserves the shared-process
+`verter_session` integration surface.
 
 ```bash
-# Run all tests
-pnpm vitest --run
+# Run every package-owned JS/TS test script
+pnpm test
 
-# Run specific test file
-pnpm vitest --run macros.spec.ts
+# Run one package or test file during iteration
+pnpm --filter @verter/typescript-plugin test
+pnpm exec vitest run path/to/file.spec.ts
 
-# Run tests for a package
-cd packages/core && pnpm test
+# Canonical Rust pair
+cargo nextest run --workspace
+cargo test -p verter_session --tests
 
-# Run with coverage
-pnpm vitest --run --coverage
+# Targeted Rust iteration
+cargo test -p verter_compiler test_name
 ```
 
 ### Test Patterns
 
-Tests are co-located with source files as `*.spec.ts`:
-
-```
-src/
-├── parser/
-│   ├── parser.ts
-│   └── parser.spec.ts    # Tests for parser.ts
-└── process/
-    └── script/
-        └── plugins/
-            └── macros/
-                ├── macros.ts
-                └── macros.spec.ts
-```
+JavaScript/TypeScript tests are normally co-located as `*.spec.ts`. Rust unit
+tests live beside their owner; larger behavioral surfaces use the owning
+crate's integration-test layout. Start with a failing behavioral or typed
+assertion, implement the smallest complete fix, then rerun the affected suite
+before refactoring. Do not use source-text checks as substitutes for product
+behavior when a typed or executable assertion is possible.
 
 ## Project Architecture
 
@@ -84,16 +82,17 @@ src/
 ```
 crates/
 ├── verter_lsp/            # Rust LSP server binary (stdio)
-├── verter_core/           # Core template compiler (Rust)
+├── verter_compiler/       # Runtime and IDE code generation
+├── verter_session/        # Host, semantic graph, caches, and sessions
 └── ...
 
 packages/
-├── @verter/core           # SFC → TSX transformation
-├── @verter/types          # TypeScript utilities
-├── @verter/language-shared # Shared protocol types
-├── @verter/typescript-plugin # TS plugin
-├── @verter/oxc-bindings   # OXC parser helper
-└── verter-vscode          # VS Code extension
+├── native/                # @verter/native bindings and loader
+├── types/                 # @verter/types declarations
+├── language-shared/       # Shared client/server protocol types
+├── typescript-plugin/     # Editor-owned TypeScript integration
+├── unplugin/              # Universal bundler integration
+└── vue-vscode/            # VS Code extension
 ```
 
 ### Dependency Graph
@@ -103,79 +102,39 @@ verter-vscode
 ├── verter-lsp (Rust LSP binary, stdio)
 ├── @verter/language-shared
 └── @verter/typescript-plugin
-    └── @verter/core
-        └── @verter/types
+    ├── @verter/language-shared
+    └── @verter/native
 ```
 
-### Core Transformation Pipeline
+### Compiler and IDE Pipeline
 
 ```
-Vue SFC → parser/ → process/script/plugins/ → TSX output
+Vue SFC → verter_compiler + verter_session ┬→ runtime JavaScript/CSS
+                                            └→ IDE TSX → TSGO/tsserver
 ```
 
-1. **Parser** - Parses SFC into typed blocks
-2. **Plugins** - Transform specific patterns
-3. **Output** - Valid TSX with sourcemaps
+Rust owns parsing, semantic resolution, runtime code generation, and IDE TSX generation. TypeScript packages own editor/provider integration, protocol bindings, and bundler orchestration.
 
 ## Code Patterns
 
-### Defining Script Plugins
-
-```typescript
-import { definePlugin, ScriptContext } from "../../types";
-
-export const MyPlugin = definePlugin({
-  name: "my-plugin",
-  enforce: "pre", // or "post"
-
-  pre(s, ctx) {
-    // Runs before transforms
-  },
-
-  transformFunctionCall(item, s, context) {
-    // Transform function calls
-  },
-
-  post(s, context) {
-    // Runs after transforms
-  },
-});
-```
-
 ### Type Helper Prefixes
 
-All the types that Verter uses in the templates are prefixed with `___VERTER___` this is arbitrary but allows the removal of those helpers when providing information to the user
+Generated IDE helpers use reserved Verter prefixes so user-facing output can distinguish or hide implementation-only declarations.
 
-- `___VERTER___` - Internal helpers in core
+- `___VERTER___` - Internal IDE-codegen helpers
+- `$V_` - Collision-resistant identifiers in string-exported type declarations
 
-### MagicString Usage
+### Source mappings
 
-Always use `MagicString` for source manipulation to preserve sourcemaps:
-
-```typescript
-import { MagicString } from "@vue/compiler-sfc";
-
-function transform(code: string) {
-  const s = new MagicString(code);
-
-  // Use methods that preserve sourcemaps
-  s.overwrite(start, end, newContent);
-  s.prepend(header);
-  s.append(footer);
-
-  return {
-    code: s.toString(),
-    map: s.generateMap({ source: "file.vue" }),
-  };
-}
-```
+Use the owning Rust `CodeTransform`/source-map APIs for compiler output and the existing package-local mapping utilities for TypeScript adapters. Every generated-code change needs behavioral syntax validation and source-map assertions.
 
 ## Pull Request Process
 
 1. **Fork** the repository
 2. **Create** a feature branch: `git checkout -b feature/my-feature`
 3. **Make** your changes
-4. **Test** your changes: `pnpm vitest --run`
+4. **Test** the affected packages/crates, then run the canonical gates relevant
+   to the change
 5. **Commit** with clear messages
 6. **Push** to your fork
 7. **Open** a Pull Request
@@ -185,8 +144,8 @@ function transform(code: string) {
 Use clear, descriptive commit messages:
 
 ```
-feat(core): add support for defineModel macro
-fix(language-server): resolve completion for template refs
+feat(compiler): add support for a template transform
+fix(lsp): resolve completion for template refs
 docs(readme): update installation instructions
 test(macros): add tests for withDefaults
 ```
@@ -196,6 +155,8 @@ test(macros): add tests for withDefaults
 - [ ] Tests added/updated
 - [ ] Documentation updated
 - [ ] No TypeScript errors
+- [ ] Rust format and warning-denied Clippy pass for affected crates
+- [ ] Required package and Rust behavioral tests pass
 - [ ] Follows existing code style
 
 ## Debugging

@@ -14,7 +14,7 @@ Runs on push to `main` and on pull requests. Uses [dorny/paths-filter](https://g
 
 - **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-test`
 - **JS changes** (`packages/**`, `package.json`, etc.) -- `js-build-test`
-- **WASM changes** (`crates/verter_core/**`, `crates/verter_wasm/**`) -- `wasm-build`
+- **WASM changes** (`crates/verter_compiler/**`, `crates/verter_wasm/**`) -- `wasm-build`
 
 All jobs run independently -- one failing does not block others.
 
@@ -45,11 +45,14 @@ Vuetify, PrimeVue, Element Plus, Shadcn-vue, and other popular Vue projects.
 2. **Verter** -- replace `vue()` with `verter()` in Vite config, rebuild and retest
 3. **Compare** -- generate performance and compatibility comparison report
 
-Tests run in **non-blocking comparison mode** during alpha: failures are recorded but do not fail the workflow.
+Per-project steps retain both baseline and Verter results even when a build or
+test command fails, so the aggregate report remains useful. The aggregate PR
+check fails when Verter introduces a project failure and reports neutral when
+only warnings remain.
 
 ### Release (`release.yml`)
 
-Triggered on push of tags matching `v*` (e.g., `v0.0.1-alpha.1`, `v1.0.0`).
+Triggered on push of tags matching `v*` (e.g., `v0.0.1-beta.1`, `v1.0.0`).
 
 **Job graph:**
 
@@ -80,7 +83,7 @@ validate
 
 **Publishing process:**
 
-1. **Rust crates** -- only `verter_core` is published to crates.io (binding crates are consumed via npm)
+1. **Rust crates** -- only `verter_compiler` is published to crates.io (binding crates are consumed via npm)
 2. **npm platform packages** -- published first (e.g., `@verter/native-darwin-arm64`)
 3. **npm packages** -- published in topological order via `scripts/check-versions.mjs`
 4. **GitHub Release** -- created with changelog (via git-cliff) and all binary assets
@@ -89,7 +92,7 @@ validate
 
 Triggered on push to `main` when `crates/**`, `packages/wasm/**`, or `packages/playground/**` change.
 
-1. Builds WASM via `wasm-pack`
+1. Builds WASM via `cargo build --target wasm32-unknown-unknown`, `wasm-bindgen`, and a `wasm-opt` size pass
 2. Smoke tests the WASM binary
 3. Uploads commit-specific WASM assets to the `nightly` GitHub Release
 4. Updates `nightly-manifest.json` (keeps last 50 commits)
@@ -116,9 +119,9 @@ Pre-releases are published with `--tag <channel>` to avoid polluting the `latest
 ### Publishing a Release
 
 1. Update versions in relevant `package.json` files and `Cargo.toml`
-2. Commit: `release(all): v0.0.1-alpha.3`
-3. Tag: `git tag v0.0.1-alpha.3`
-4. Push: `git push origin v0.0.1-alpha.3`
+2. Commit: `release(all): v0.0.1-beta.1`
+3. Tag: `git tag v0.0.1-beta.1`
+4. Push: `git push origin v0.0.1-beta.1`
 5. The release workflow handles everything else
 
 ### Version Checking
@@ -142,7 +145,7 @@ native -> lsp -> wasm -> ts packages
 
 | What changed                   | Rebuild commands                                          |
 | ------------------------------ | --------------------------------------------------------- |
-| Rust crate (`verter_core`)     | `pnpm run build:native` then rebuild downstream consumers |
+| Rust crate (`verter_compiler`)     | `pnpm run build:native` then rebuild downstream consumers |
 | Rust LSP (`verter_lsp`)        | `pnpm run build:lsp` then restart VS Code extension host  |
 | Unplugin (`packages/unplugin`) | `pnpm run build:ts`                                       |
 | WASM (for playground)          | `pnpm run build:wasm`                                     |

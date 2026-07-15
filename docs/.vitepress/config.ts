@@ -74,7 +74,6 @@ export default withMermaid(
               { text: "@verter/unplugin", link: "/api/unplugin" },
               { text: "@verter/native", link: "/api/native" },
               { text: "@verter/wasm", link: "/api/wasm" },
-              { text: "@verter/core", link: "/api/core" },
               { text: "@verter/types", link: "/api/types" },
               { text: "@verter/component-meta", link: "/api/component-meta" },
             ],
@@ -85,6 +84,7 @@ export default withMermaid(
             text: "Editor Support",
             items: [
               { text: "VS Code Extension", link: "/editor/vscode" },
+              { text: "Other Editors (Lapce/Zed/Helix/Neovim)", link: "/editor/other-editors" },
               { text: "LSP Features", link: "/editor/lsp-features" },
               { text: "MCP Server", link: "/editor/mcp-server" },
               { text: "Settings Reference", link: "/editor/settings" },

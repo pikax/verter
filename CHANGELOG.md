@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+### Component-meta cold-path long-tail track
+
+Plan §1 / §10 / §11 / §12 — sixteen-commit refactor track on
+`refactor/semantic-db-overhaul`. Introduced the session-layer
+structural materialiser (`materialize_component_meta_structure`,
+`MaterializeStructureDb`, per-shape Object handler with
+`MaterializeOutcome` cacheability matrix) and atomically cut the
+legacy `walk_component_meta_member_surface_expr` shim over to
+the new entry (plan §11.2 / §11.4). Added Phase 1 audit-surface
+observability (six new `RustStoreAudit` u64 counters —
+`materialize_structure_calls`, `materialize_structure_cache_hits`,
+`node_arena_lock_acquisitions`, `family_map_lock_acquisitions`,
+`dep_signature_merges`, `dep_signature_intern_hits` — plus five
+new `StructuredComponentMetaEvent` variants and the
+`CacheOutcomeKind::Tainted` / `MaterializeSkipReason` enums per
+plan §3.2 / §3.3). Hardened the cache cluster with the Γ.A
+NodeArena per-canonical shard (plan §11.5 Γ.A), Γ.B family-map
+reverse-index (Γ.B), Γ.C `DepSignatureInterner` with sweep (Γ.C),
+and the Fix-D substitute change-tracking. Deleted the dead
+`MaterializedMemberSurfaceDb` family with zero callers
+post-cutover (plan §11.2). Stabilised
+`cooperative_admission_panic_wakes_waiters` via
+`mpsc::sync_channel(0)` rendezvous and refreshed the audit-
+footprint docs to reflect the post-cutover surface (plan §11.6).
+
 ### Bug Fixes
 
 - V-for sort resolve keys (db36584)
@@ -124,7 +149,7 @@ All notable changes to this project will be documented in this file.
 - Resolve macro types through barrel chains ending at .vue SFCs (9498ede)
 - Isolate style preprocessor in child process to prevent exit hang (65871c0)
 - Stabilize preprocessor worker lifecycle (a1ce19d)
-- Nexus-ui pipeline fixes — slots, bind shorthand, CSS scoping, tsc declarations (a142c79)
+- A private component library pipeline fixes — slots, bind shorthand, CSS scoping, tsc declarations (a142c79)
 - Fix integration test runner infrastructure issues (96aecec)
 - Eliminate .verter/ide/ directory and fix TypeProvider regressions (0429e0d)
 - Use analysis.imports for Vue priority IDs and add host-backed collision guard (0c1e029)

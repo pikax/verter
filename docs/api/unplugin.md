@@ -4,7 +4,7 @@
 Verter is pre-release software. APIs may change between releases — see the [API Stability](/api-stability) document.
 :::
 
-Universal bundler plugin for Vue SFC compilation. Drop-in replacement for `@vitejs/plugin-vue`.
+Universal bundler plugin for Verter framework carriers. The existing default and per-bundler entry points remain Vue-pinned drop-in replacements for `@vitejs/plugin-vue`; additive named and framework subpath exports enable Svelte or mixed projects.
 
 ## Installation
 
@@ -12,9 +12,46 @@ Universal bundler plugin for Vue SFC compilation. Drop-in replacement for `@vite
 pnpm add -D @verter/unplugin
 ```
 
+## Framework entry points
+
+Existing imports such as `@verter/unplugin/vite`, `@verter/unplugin/rollup`, and the package default remain Vue-only for backward compatibility. The root package also exports three unplugin instances:
+
+- `VerterVue` — pinned to `.vue`;
+- `VerterSvelte` — pinned to `.svelte`;
+- `Verter` — auto-detects `.vue` and `.svelte` per file, or accepts `lang` to pin one framework.
+
+The framework subpaths re-export the corresponding pinned instance. For a Svelte Vite project:
+
+```ts
+// vite.config.ts
+import { defineConfig } from "vite";
+import VerterSvelte from "@verter/unplugin/sveltejs";
+
+export default defineConfig({
+  plugins: [VerterSvelte.vite()],
+});
+```
+
+Install and pin `svelte@5.56.3` in the application; emitted `svelte/internal/client` imports are deliberately resolved from the application's Svelte package.
+
+For a mixed Vue/Svelte project:
+
+```ts
+import { defineConfig } from "vite";
+import { Verter } from "@verter/unplugin";
+
+export default defineConfig({
+  plugins: [Verter.vite({ lang: "auto" })],
+});
+```
+
+::: warning Experimental Svelte support
+Svelte support is **experimental — not yet validated in real-world use**. The client compiler, external scoped CSS, dependency routing, and preview mount path are integrated. Unsupported runtime surfaces, including unavailable server output, fail closed with typed diagnostics rather than producing successful empty modules.
+:::
+
 ## Bundler Setup
 
-Each bundler has a dedicated entry point that exports a default plugin factory function.
+Each bundler has a dedicated entry point that exports the corresponding unplugin instance.
 
 ### Vite
 
@@ -131,19 +168,20 @@ export default defineConfig({
 import type { VerterPluginOptions } from "@verter/unplugin";
 ```
 
-| Option              | Type                                                            | Default      | Description                                                         |
-| ------------------- | --------------------------------------------------------------- | ------------ | ------------------------------------------------------------------- |
-| `include`           | `string \| RegExp \| (string \| RegExp)[]`                      | `[/\.vue$/]` | File patterns to include                                            |
-| `componentId`       | `(filename: string, source: string, isProd: boolean) => string` | hash-based   | Custom component ID generator                                       |
-| `preCompile`        | `boolean`                                                       | `false`      | Pre-compile all `.vue` files during `buildStart` for cache warming  |
-| `crossFileOptimize` | `boolean`                                                       | `false`      | Cross-file prop constness optimization. Requires `preCompile: true` |
-| `template`          | `object`                                                        | --           | Template compiler options (compat with `@vitejs/plugin-vue`)        |
+| Option              | Type                                                            | Default         | Description                                                              |
+| ------------------- | --------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------ |
+| `lang`              | `"auto" \| "vue" \| "sveltejs"`                            | entry-dependent | Framework selection; the named `Verter` instance defaults to `auto`      |
+| `include`           | `string \| RegExp \| (string \| RegExp)[]`                      | entry-dependent | File patterns to include                                                  |
+| `componentId`       | `(filename: string, source: string, isProd: boolean) => string` | hash-based      | Custom component ID generator                                             |
+| `preCompile`        | `boolean`                                                       | `false`         | Pre-compile selected carrier files during `buildStart()` for cache warming |
+| `crossFileOptimize` | `boolean`                                                       | `false`         | Vue-only prop constness optimization; requires `preCompile: true`         |
+| `template`          | `object`                                                        | --              | Vue template options compatible with `@vitejs/plugin-vue`                 |
 
 An `Options` type alias is also exported for compatibility with code importing `Options` from `@vitejs/plugin-vue`.
 
 ### `include`
 
-Controls which files the plugin processes. Defaults to matching all `.vue` files.
+Controls which files the plugin processes. The legacy/default and `VerterVue` entries match `.vue`; `VerterSvelte` matches `.svelte`; `Verter` in auto mode matches both.
 
 ```ts
 Verter({
@@ -177,7 +215,7 @@ Verter({
 
 ### `preCompile`
 
-When enabled, scans the project root for all `.vue` files during `buildStart()` and compiles them upfront. Subsequent `transform()` calls for the same unchanged content get instant cache hits from the host.
+When enabled, scans the project root for all carrier files selected by the active framework entry during `buildStart()` and compiles them upfront. Subsequent `transform()` calls for the same unchanged content get cache hits from the host.
 
 ```ts
 Verter({
