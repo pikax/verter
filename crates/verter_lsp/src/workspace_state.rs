@@ -279,6 +279,7 @@ mod tests {
 
     fn empty_snapshot(projects: Vec<OwnershipProject>) -> WorkspaceSnapshot {
         WorkspaceSnapshot {
+            owners_memo: Default::default(),
             projects,
             resolver: ProjectResolver::default(),
             generation: SnapshotGeneration(1),

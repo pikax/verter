@@ -4405,6 +4405,7 @@ name = "verter_workspace"
 version = "0.0.1-beta.1"
 dependencies = [
  "arc-swap",
+ "dashmap 6.2.1",
  "glob",
  "hotpath",
  "oxc_allocator",

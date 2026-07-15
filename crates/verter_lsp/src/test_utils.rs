@@ -81,6 +81,7 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
     ]);
 
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
+        owners_memo: Default::default(),
         projects,
         resolver,
         generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
@@ -164,6 +165,7 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
         .collect();
 
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
+        owners_memo: Default::default(),
         projects,
         resolver,
         generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
@@ -246,6 +248,7 @@ pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
         .collect();
 
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
+        owners_memo: Default::default(),
         projects,
         resolver,
         generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),

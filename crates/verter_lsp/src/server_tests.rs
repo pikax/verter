@@ -1054,6 +1054,7 @@ fn install_test_resolver_for_root(
     ]);
 
     let snapshot = std::sync::Arc::new(verter_workspace::WorkspaceSnapshot {
+        owners_memo: Default::default(),
         projects,
         resolver,
         generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
@@ -1110,6 +1111,7 @@ fn configured_owner_vfs(root: &str, tsconfig: &str) -> Arc<verter_workspace::Fil
         ),
     ]);
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
+        owners_memo: Default::default(),
         projects,
         resolver,
         generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),

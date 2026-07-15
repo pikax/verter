@@ -4,6 +4,7 @@ use crate::workspace_snapshot::{SnapshotGeneration, WorkspaceSnapshot};
 
 fn empty_snapshot(gen: u64) -> Arc<WorkspaceSnapshot> {
     Arc::new(WorkspaceSnapshot {
+        owners_memo: Default::default(),
         projects: vec![],
         resolver: ProjectResolver::default(),
         generation: SnapshotGeneration(gen),

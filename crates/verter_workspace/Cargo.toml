@@ -14,6 +14,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath"]
 
 [dependencies]
 arc-swap = "1.9"
+dashmap = "6.2"
 rustc-hash = { workspace = true }
 hotpath = { version = "0.16", optional = true }
 serde = { workspace = true }

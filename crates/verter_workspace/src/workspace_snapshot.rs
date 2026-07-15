@@ -11,7 +11,10 @@
 //! - Configured ownership comes from immutable materialized project file sets
 //! - Overlap ambiguity is preserved — no synthetic primary owner
 //! - `owners_for_file()` ordering is precomputed during snapshot build
+//! - `owners_for_file()` results are memoized per snapshot ([`OwnersMemo`]:
+//!   bounded, negative-caching, owned by — and dying with — the snapshot)
 
+use dashmap::DashMap;
 use smallvec::SmallVec;
 
 use crate::canonical_path::CanonicalPath;
@@ -43,6 +46,72 @@ pub struct WorkspaceSnapshot {
     pub resolver: ProjectResolver,
     /// Monotonic generation counter.
     pub generation: SnapshotGeneration,
+    /// Bounded memo for [`Self::owners_for_file`] — see [`OwnersMemo`].
+    pub owners_memo: OwnersMemo,
+}
+
+/// Maximum number of memoized [`WorkspaceSnapshot::owners_for_file`] entries
+/// per snapshot before an overflowing insert clears the memo.
+pub const OWNERS_MEMO_CAP: usize = 16 * 1024;
+
+/// Bounded, snapshot-owned memo for [`WorkspaceSnapshot::owners_for_file`].
+///
+/// `owners_for_file` is a pure function of immutable snapshot state, so its
+/// results are memoizable for exactly the snapshot's lifetime: the memo lives
+/// ON the snapshot and dies with it — a new published snapshot starts cold,
+/// so no cross-generation invalidation exists, by construction.
+///
+/// Properties:
+/// - **Negative caching**: empty owner sets are cached too — "no owner" costs
+///   the same precedence walk + glob matching as a positive answer.
+/// - **Bounded**: at most `cap` entries; an overflowing insert clears the map
+///   first (approximate under concurrency — this is a memo, not an authority,
+///   so dropping entries is always correct and only costs a recompute).
+/// - **Randomized hashing**: the default `RandomState` (SipHash) `DashMap`
+///   hasher — keys are caller-influenced path strings, so a deterministic
+///   hasher would be a collision hazard.
+pub struct OwnersMemo {
+    map: DashMap<Box<str>, SmallVec<[ProjectId; 2]>>,
+    cap: usize,
+}
+
+impl OwnersMemo {
+    /// Memo bounded at `cap` entries. Production uses [`OWNERS_MEMO_CAP`]
+    /// via [`Default`]; tests use tiny caps to exercise clear-on-overflow.
+    pub fn with_cap(cap: usize) -> Self {
+        Self {
+            map: DashMap::new(),
+            cap,
+        }
+    }
+
+    fn get(&self, canonical_id: &str) -> Option<SmallVec<[ProjectId; 2]>> {
+        self.map
+            .get(canonical_id)
+            .map(|entry| entry.value().clone())
+    }
+
+    fn insert(&self, canonical_id: &str, owners: SmallVec<[ProjectId; 2]>) {
+        if self.map.len() >= self.cap {
+            self.map.clear();
+        }
+        self.map.insert(Box::from(canonical_id), owners);
+    }
+}
+
+impl Default for OwnersMemo {
+    fn default() -> Self {
+        Self::with_cap(OWNERS_MEMO_CAP)
+    }
+}
+
+impl std::fmt::Debug for OwnersMemo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnersMemo")
+            .field("entries", &self.map.len())
+            .field("cap", &self.cap)
+            .finish()
+    }
 }
 
 /// A single project in the workspace snapshot.
@@ -96,8 +165,21 @@ impl WorkspaceSnapshot {
     /// no per-query sorting). Most specific root first, Configured before
     /// Fallback at same root.
     ///
-    /// Pure function — depends only on snapshot state.
+    /// Pure function — depends only on snapshot state. Results (including
+    /// empty owner sets) are served from the snapshot-owned [`OwnersMemo`]
+    /// after first compute, so repeated classification traffic skips the
+    /// per-call path canonicalization and glob matching.
     pub fn owners_for_file(&self, canonical_id: &str) -> SmallVec<[ProjectId; 2]> {
+        if let Some(memoized) = self.owners_memo.get(canonical_id) {
+            return memoized;
+        }
+        let owners = self.compute_owners_for_file(canonical_id);
+        self.owners_memo.insert(canonical_id, owners.clone());
+        owners
+    }
+
+    /// The uncached owner walk backing [`Self::owners_for_file`].
+    fn compute_owners_for_file(&self, canonical_id: &str) -> SmallVec<[ProjectId; 2]> {
         let path = CanonicalPath::new(canonical_id);
         let mut result = SmallVec::new();
         let mut has_configured_owner = false;
