@@ -946,6 +946,7 @@ fn w2_4_slot_binding_preserve_typed_indexed_access_via_imported_root() {
         return_source_scope: None,
         description: None,
         tags: vec![],
+        declared_in_macro_type_arg: true,
     });
 
     let registry = vec![

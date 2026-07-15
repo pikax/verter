@@ -283,6 +283,7 @@ fn slot_meta_to_proto(builder: &mut GraphBuilder, slot: &FfiSlotMeta) -> SlotMet
         is_required: slot.is_required,
         return_type_id: builder.string_id_opt(slot.return_type.as_deref()),
         description_id: builder.string_id_opt(slot.description.as_deref()),
+        declared_in_macro_type_arg: slot.declared_in_macro_type_arg,
         tags: slot
             .tags
             .iter()
@@ -1480,6 +1481,7 @@ fn build_test_meta() -> FfiComponentMeta {
             return_type: Some("VNode[]".to_string()),
             description: None,
             tags: Vec::new(),
+            declared_in_macro_type_arg: true,
         }],
         models: Vec::new(),
         exposed: Vec::new(),

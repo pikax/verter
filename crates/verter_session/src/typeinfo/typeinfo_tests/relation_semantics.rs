@@ -414,7 +414,7 @@ fn relation_empty_tuple_assignable_to_readonly_array() {
 // =====================================================================
 
 #[test]
-#[ignore = "typeinfo currently selects only the False branch (`\"no\"`) for `IsStringDistributive<string | number>` instead of distributing the union across the conditional and emitting `\"yes\" | \"no\"`; keep as the future bare-type-parameter distribution contract"]
+#[ignore = "behavior is GREEN since the carrier-shaped distributive-check fix (build_conditional resolves Alias/DeclRef/InstantiationRef union carriers through the shared structural-fact demand before distributing); the row stays in the §10.4.1 ledger until its U2 oracle-backed lift (ProofRequirement::Ts7Oracle) converts it to an oracle::run_row body"]
 fn relation_distributive_conditional_over_union_emits_branch_union() {
     // TS7 contract: `IsStringDistributive<string | number>` where the
     // helper is `T extends string ? "yes" : "no"` distributes the union

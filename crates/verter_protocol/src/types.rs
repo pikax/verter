@@ -681,6 +681,13 @@ pub struct FfiSlotMeta {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<FfiJsdocTag>,
+    /// Producer fact: does this slot come from the component's own AUTHORED
+    /// slots surface (the resolved `defineSlots<T>()` macro surface or a
+    /// template `<slot>` element)? `false` only for rows arriving purely
+    /// through the evaluated type-expansion channel. Consumed by
+    /// `@verter/component-meta/published-surface`'s `Compat` / `Refined`
+    /// slot blocklist — an author-declared slot is never blocked.
+    pub declared_in_macro_type_arg: bool,
 }
 
 #[derive(Serialize, Clone)]

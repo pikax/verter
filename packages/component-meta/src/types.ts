@@ -187,6 +187,13 @@ export interface SlotMeta {
   description?: string;
   /** JSDoc tags (e.g. `@deprecated`). */
   tags?: JsdocTag[];
+  /**
+   * Producer fact: does this slot come from the component's own AUTHORED
+   * slots surface (the resolved `defineSlots<T>()` macro surface or a
+   * template `<slot>` element)? Consumed by the compat slot blocklist —
+   * an author-declared slot is never blocked, whatever its name.
+   */
+  declaredInMacroTypeArg?: boolean;
 }
 
 /** A single binding exposed by a scoped slot. */

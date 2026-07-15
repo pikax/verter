@@ -314,6 +314,12 @@ message SlotMeta {
   uint32 return_type_id = 5;
   uint32 description_id = 6;
   repeated JsdocTag tags = 7;
+  // Producer fact: does this slot come from the component's own AUTHORED
+  // slots surface (the resolved `defineSlots<T>()` macro surface or a
+  // template `<slot>` element)? Consumed by the
+  // `@verter/component-meta/published-surface` Compat/Refined slot
+  // blocklist — an author-declared slot is never blocked.
+  bool declared_in_macro_type_arg = 8;
 }
 
 message SlotBindingMeta {

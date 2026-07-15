@@ -51,9 +51,12 @@ pub enum PublishedSurfacePolicy {
     Native,
     /// `@verter/component-meta/compat` consumer-facing projection:
     /// native, minus the [`COMPAT_BLOCKED_SLOT_NAMES`] set on the
-    /// `slots` surface only. The blocklist mirrors
-    /// `vue-component-meta`'s slot-name suppression for VNode-only
-    /// transport keys.
+    /// `slots` surface only — and only for slots the author did NOT
+    /// declare (`declared_in_macro_type_arg == false`). The blocklist
+    /// suppresses VNode-only transport keys that leak onto the surface
+    /// without an authored declaration; an author-declared slot named
+    /// `anchor` / `el` / `target` always survives
+    /// (`vue-component-meta` publishes it too).
     Compat,
     /// Benchmark refiner projection: `Compat`, minus props that
     /// structurally shadow a declared emit (`on{Event}` form,
@@ -79,7 +82,9 @@ pub struct AnalyzedSurfaceItem {
     /// the author wanted it" from "this name reaches the surface
     /// through heritage / HTMLAttributes intersection /
     /// utility-type expansion". `Refined` filters Vue intrinsics
-    /// and `onX`-shadows-emit only when this is `false`.
+    /// and `onX`-shadows-emit only when this is `false`; `Compat` /
+    /// `Refined` apply the [`COMPAT_BLOCKED_SLOT_NAMES`] slot block
+    /// only when this is `false`.
     pub declared_in_macro_type_arg: bool,
     /// True if the producer flagged this prop as "global" — i.e.
     /// reaching the surface from a globally-declared
@@ -128,9 +133,11 @@ pub struct PolicyNamesResult {
     pub exposed: Vec<String>,
 }
 
-/// VNode-only transport keys that `vue-component-meta` suppresses
-/// on the slots surface — `@verter/component-meta/compat` mirrors
-/// this contract.
+/// VNode-only transport keys suppressed on the slots surface when
+/// they reach it WITHOUT an authored declaration
+/// (`AnalyzedSurfaceItem::declared_in_macro_type_arg == false`) —
+/// `@verter/component-meta/compat` mirrors this contract. An
+/// author-declared slot is never blocked, whatever its name.
 ///
 /// Used by `PublishedSurfacePolicy::Compat` and
 /// `PublishedSurfacePolicy::Refined`.
@@ -189,7 +196,13 @@ pub fn names_for_policy(
                 slots: surface
                     .slots
                     .iter()
-                    .filter(|s| !blocked.contains(s.name.as_str()))
+                    // Structural block: a VNode-transport NAME is
+                    // suppressed only when the author did NOT declare
+                    // the slot on the component's own macro surface. An
+                    // author-declared `anchor` / `el` / `target` slot
+                    // (Popover.vue's `anchor`) always survives —
+                    // `vue-component-meta` publishes it too.
+                    .filter(|s| s.declared_in_macro_type_arg || !blocked.contains(s.name.as_str()))
                     .map(|s| s.name.clone())
                     .collect(),
                 exposed: surface.exposed.iter().map(|i| i.name.clone()).collect(),
@@ -240,7 +253,9 @@ pub fn names_for_policy(
                 slots: surface
                     .slots
                     .iter()
-                    .filter(|s| !blocked.contains(s.name.as_str()))
+                    // Same declared-slot exemption as `Compat` — the
+                    // blocklist never suppresses an author-declared slot.
+                    .filter(|s| s.declared_in_macro_type_arg || !blocked.contains(s.name.as_str()))
                     .map(|s| s.name.clone())
                     .collect(),
                 exposed: surface.exposed.iter().map(|i| i.name.clone()).collect(),

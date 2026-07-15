@@ -3106,6 +3106,65 @@ fn build_conditional_distributive_false_on_union_check_does_not_distribute() {
     );
 }
 
+/// Distributive distribution operates on the INSTANTIATED check
+/// SURFACE, not the check node's raw shape: a naked-type-param check
+/// substituted with a CARRIER of a union (an `Alias` hop here; the
+/// aliased-default e2e fixture covers the `DeclRef` shape) must
+/// distribute exactly like a raw `Union` check. Without the
+/// structural-fact demand the union gate misses on the carrier, the
+/// tri-state oracle decides the WHOLE union against the extends
+/// target (`(string | number) extends string` ⇒ NotAssignable), and
+/// the conditional collapses to the false branch — dropping the
+/// true-branch arm (the reka-ui `AccordionRootEmits` defaulted-union
+/// wrong answer).
+#[test]
+fn build_conditional_distributive_union_behind_alias_carrier_distributes_per_member() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let true_branch = primitive(&graph, PrimitiveKind::Boolean);
+    let false_branch = primitive(&graph, PrimitiveKind::Symbol);
+
+    let union_node = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![string_node, number_node].into_boxed_slice(),
+    )));
+    // The carrier shell the union hides behind — the deferred-shell
+    // evaluator unwraps it at the union-ness fact demand.
+    let alias_check = graph.intern_node(SemanticNodeData::Alias(union_node));
+
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
+        check: alias_check,
+        extends: string_node,
+        true_branch,
+        false_branch,
+        distributive: true,
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected distributed union value, got {other:?}"),
+    };
+
+    let expected = match dispatch.execute_type_node(SemanticQueryKey::NormalizeUnion {
+        members: Arc::from(vec![true_branch, false_branch].into_boxed_slice()),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected normalised union, got {other:?}"),
+    };
+    assert_eq!(
+        result, expected,
+        "a distributive conditional whose check is an alias CARRIER of a \
+         union must distribute per resolved member, not decide the union \
+         as a whole (which would collapse to the false branch)"
+    );
+    assert_ne!(
+        result, false_branch,
+        "the carrier-shaped union check must not collapse to the sole \
+         false branch"
+    );
+}
+
 /// Single-in-flight-authority invariant: each per-member sub-query
 /// issued by the distributive distribution MUST carry
 /// `distributive: false`. The correctness proof is that issuing the

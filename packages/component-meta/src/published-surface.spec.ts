@@ -112,6 +112,26 @@ describe("PublishedSurfacePolicy — TS port", () => {
       expect(r.slots).toEqual(["default"]);
     });
 
+    it("Compat and Refined never block author-declared slot names", () => {
+      // Mirrors Rust `compat_policy_never_blocks_author_declared_slot_names`.
+      const surface: AnalyzedSurface = {
+        props: [],
+        events: [],
+        slots: [
+          item("default"),
+          itemDeclared("anchor"), // author-declared → survives
+          itemDeclared("el"), // author-declared → survives
+          item("anchor2"), // non-blocked name → survives
+          item("placeholder"), // NOT declared → blocked
+        ],
+        exposed: [],
+      };
+      const compat = namesForPolicy("Compat", surface);
+      expect(compat.slots).toEqual(["default", "anchor", "el", "anchor2"]);
+      const refined = namesForPolicy("Refined", surface);
+      expect(refined.slots).toEqual(compat.slots);
+    });
+
     it("Refined retains declared onSubmit even when submit emit is declared", () => {
       // R19b's key regression case. The Rust counterpart is
       // `refined_policy_strips_on_event_shadow_props_when_not_declared_in_macro_type_arg`.
@@ -193,6 +213,17 @@ describe("PublishedSurfacePolicy — TS port", () => {
     it("returns true for non-blocked slot names", () => {
       expect(compatSlotSurvives("default")).toBe(true);
       expect(compatSlotSurvives("body")).toBe(true);
+    });
+    it("never blocks an author-declared slot, whatever its name", () => {
+      // Mirrors Rust `compat_policy_never_blocks_author_declared_slot_names`:
+      // the block is a structural condition on `declared_in_macro_type_arg`,
+      // not bare name-set membership (Popover.vue's declared `anchor` slot —
+      // vue-component-meta publishes it too).
+      for (const blocked of COMPAT_BLOCKED_SLOT_NAMES) {
+        expect(compatSlotSurvives(blocked, true)).toBe(true);
+      }
+      // Undeclared stays blocked; the explicit-false form matches the default.
+      expect(compatSlotSurvives("anchor", false)).toBe(false);
     });
   });
 });
